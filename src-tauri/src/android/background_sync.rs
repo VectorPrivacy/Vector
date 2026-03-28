@@ -630,7 +630,7 @@ async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey, bool, Op
         MY_SECRET_KEY.store_from_keys(&keys);
 
         let client = Client::builder()
-            .signer(crate::guarded_key::GuardedSigner::new(public_key_for_signer))
+            .signer(vector_core::GuardedSigner::new(public_key_for_signer))
             .build();
 
         bg_connect_single_relay(&client, data_dir).await?;

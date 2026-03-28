@@ -1,0 +1,8 @@
+[workspace]
+members = ["vector-core", "vector-cli"]
+resolver = "2"
+
+[patch.crates-io]
+# nostr SDK's SecretKey Drop uses non_secure_erase which the compiler can optimize away.
+# Patched to use zeroize (volatile writes) so secret key bytes are guaranteed cleared from the stack.
+nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "zeroize-secretkey" }

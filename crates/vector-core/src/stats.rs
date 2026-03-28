@@ -2,14 +2,15 @@
 //!
 //! This module provides tools for measuring memory usage and performance
 //! of the message cache, enabling before/after comparison during optimization.
+//!
+//! Only compiled in debug builds (`#[cfg(debug_assertions)]`).
 
 use std::time::Duration;
 
-use crate::message::{Message, Attachment, Reaction, EditEntry, ImageMetadata};
-use crate::message::compact::{CompactMessage, CompactMessageVec, CompactReaction, CompactAttachment, MessageFlags, NpubInterner};
-use crate::net::SiteMetadata;
-use crate::profile::ProfileFlags;
-use crate::{Chat, Profile};
+use crate::types::{Message, Attachment, Reaction, EditEntry, ImageMetadata, SiteMetadata};
+use crate::compact::{CompactMessage, CompactMessageVec, CompactReaction, CompactAttachment, MessageFlags, NpubInterner};
+use crate::profile::{Profile, ProfileFlags};
+use crate::chat::Chat;
 
 /// Statistics for message cache operations
 #[derive(Debug, Default, Clone)]
@@ -64,7 +65,6 @@ impl CacheStats {
     }
 
     /// Get a summary string
-    #[allow(dead_code)]
     pub fn summary(&self) -> String {
         format!(
             "chats={} msgs={} mem={} avg_insert={}ns",
@@ -77,7 +77,7 @@ impl CacheStats {
 
     /// Check if we should log (every N inserts)
     pub fn should_log(&self, interval: u64) -> bool {
-        self.insert_count > 0 && self.insert_count.is_multiple_of(interval)
+        self.insert_count > 0 && self.insert_count % interval == 0
     }
 }
 
@@ -106,32 +106,19 @@ impl DeepSize for String {
     }
 }
 
-impl DeepSize for str {
-    #[inline]
-    fn deep_size(&self) -> usize {
-        self.len()
-    }
-}
-
 impl DeepSize for u64 {
     #[inline]
-    fn deep_size(&self) -> usize {
-        std::mem::size_of::<u64>()
-    }
+    fn deep_size(&self) -> usize { std::mem::size_of::<u64>() }
 }
 
 impl DeepSize for u32 {
     #[inline]
-    fn deep_size(&self) -> usize {
-        std::mem::size_of::<u32>()
-    }
+    fn deep_size(&self) -> usize { std::mem::size_of::<u32>() }
 }
 
 impl DeepSize for bool {
     #[inline]
-    fn deep_size(&self) -> usize {
-        std::mem::size_of::<bool>()
-    }
+    fn deep_size(&self) -> usize { std::mem::size_of::<bool>() }
 }
 
 // === Generic implementations ===
@@ -140,14 +127,14 @@ impl<T: DeepSize> DeepSize for Vec<T> {
     fn deep_size(&self) -> usize {
         std::mem::size_of::<Vec<T>>()
             + self.capacity() * std::mem::size_of::<T>()
-            + self.iter().map(|item| item.deep_size() - std::mem::size_of::<T>()).sum::<usize>()
+            + self.iter().map(|item| item.deep_size().saturating_sub(std::mem::size_of::<T>())).sum::<usize>()
     }
 }
 
 impl<T: DeepSize> DeepSize for Option<T> {
     fn deep_size(&self) -> usize {
         std::mem::size_of::<Option<T>>()
-            + self.as_ref().map(|v| v.deep_size() - std::mem::size_of::<T>()).unwrap_or(0)
+            + self.as_ref().map(|v| v.deep_size().saturating_sub(std::mem::size_of::<T>())).unwrap_or(0)
     }
 }
 
@@ -162,13 +149,9 @@ impl DeepSize for ImageMetadata {
 impl DeepSize for Attachment {
     fn deep_size(&self) -> usize {
         std::mem::size_of::<Attachment>()
-            + self.id.capacity()
-            + self.key.capacity()
-            + self.nonce.capacity()
-            + self.extension.capacity()
-            + self.name.capacity()
-            + self.url.capacity()
-            + self.path.capacity()
+            + self.id.capacity() + self.key.capacity() + self.nonce.capacity()
+            + self.extension.capacity() + self.name.capacity()
+            + self.url.capacity() + self.path.capacity()
             + self.img_meta.as_ref().map(|m| m.thumbhash.capacity()).unwrap_or(0)
             + self.webxdc_topic.as_ref().map(|s| s.capacity()).unwrap_or(0)
             + self.group_id.as_ref().map(|s| s.capacity()).unwrap_or(0)
@@ -181,10 +164,8 @@ impl DeepSize for Attachment {
 impl DeepSize for Reaction {
     fn deep_size(&self) -> usize {
         std::mem::size_of::<Reaction>()
-            + self.id.capacity()
-            + self.reference_id.capacity()
-            + self.author_id.capacity()
-            + self.emoji.capacity()
+            + self.id.capacity() + self.reference_id.capacity()
+            + self.author_id.capacity() + self.emoji.capacity()
     }
 }
 
@@ -212,9 +193,7 @@ impl DeepSize for SiteMetadata {
 impl DeepSize for Message {
     fn deep_size(&self) -> usize {
         std::mem::size_of::<Message>()
-            + self.id.capacity()
-            + self.content.capacity()
-            + self.replied_to.capacity()
+            + self.id.capacity() + self.content.capacity() + self.replied_to.capacity()
             + self.replied_to_content.as_ref().map(|s| s.capacity()).unwrap_or(0)
             + self.replied_to_npub.as_ref().map(|s| s.capacity()).unwrap_or(0)
             + self.npub.as_ref().map(|s| s.capacity()).unwrap_or(0)
@@ -226,75 +205,39 @@ impl DeepSize for Message {
     }
 }
 
-impl DeepSize for Chat {
-    fn deep_size(&self) -> usize {
-        std::mem::size_of::<Chat>()
-            + self.id.capacity()
-            + 32  // [u8; 32] is inline, no heap
-            + self.participants.capacity() * std::mem::size_of::<u16>()  // Vec<u16> heap buffer
-            + self.messages.deep_size()
-            // metadata.custom_fields HashMap
-            + self.metadata.custom_fields.iter()
-                .map(|(k, v)| k.capacity() + v.capacity())
-                .sum::<usize>()
-            // typing_participants Vec<(u16, u64)> heap buffer
-            + self.typing_participants.capacity() * std::mem::size_of::<(u16, u64)>()
-    }
-}
-
-// === Profile implementation ===
-
 impl DeepSize for ProfileFlags {
     #[inline]
-    fn deep_size(&self) -> usize {
-        std::mem::size_of::<ProfileFlags>()
-    }
+    fn deep_size(&self) -> usize { std::mem::size_of::<ProfileFlags>() }
 }
 
 impl DeepSize for Profile {
     fn deep_size(&self) -> usize {
         std::mem::size_of::<Profile>()
-            + self.name.len()
-            + self.display_name.len()
-            + self.nickname.len()
-            + self.lud06.len()
-            + self.lud16.len()
-            + self.banner.len()
-            + self.avatar.len()
-            + self.about.len()
-            + self.website.len()
-            + self.nip05.len()
-            + self.status_title.len()
-            + self.status_purpose.len()
-            + self.status_url.len()
-            + self.avatar_cached.len()
-            + self.banner_cached.len()
+            + self.name.len() + self.display_name.len() + self.nickname.len()
+            + self.lud06.len() + self.lud16.len()
+            + self.banner.len() + self.avatar.len()
+            + self.about.len() + self.website.len() + self.nip05.len()
+            + self.status_title.len() + self.status_purpose.len() + self.status_url.len()
+            + self.avatar_cached.len() + self.banner_cached.len()
     }
 }
 
-// === Compact message type implementations ===
-
 impl DeepSize for MessageFlags {
     #[inline]
-    fn deep_size(&self) -> usize {
-        std::mem::size_of::<MessageFlags>()
-    }
+    fn deep_size(&self) -> usize { std::mem::size_of::<MessageFlags>() }
 }
 
 impl DeepSize for CompactReaction {
     fn deep_size(&self) -> usize {
-        std::mem::size_of::<CompactReaction>()
-            + self.emoji.len()  // Box<str> heap allocation
+        std::mem::size_of::<CompactReaction>() + self.emoji.len()
     }
 }
 
 impl DeepSize for CompactAttachment {
     fn deep_size(&self) -> usize {
         std::mem::size_of::<CompactAttachment>()
-            + self.extension.len()  // Box<str> heap allocation
-            + self.url.len()
-            + self.path.len()
-            + self.name.capacity()  // String heap allocation
+            + self.extension.len() + self.url.len() + self.path.len()
+            + self.name.capacity()
             + self.img_meta.as_ref().map(|m| m.deep_size()).unwrap_or(0)
             + self.group_id.as_ref().map(|_| 32).unwrap_or(0)
             + self.original_hash.as_ref().map(|_| 32).unwrap_or(0)
@@ -307,7 +250,7 @@ impl DeepSize for CompactAttachment {
 impl DeepSize for CompactMessage {
     fn deep_size(&self) -> usize {
         std::mem::size_of::<CompactMessage>()
-            + self.content.len()  // Box<str> has no over-allocation, len == allocated
+            + self.content.len()
             + self.replied_to_content.as_ref().map(|s| s.len()).unwrap_or(0)
             + self.preview_metadata.as_ref().map(|m| m.deep_size()).unwrap_or(0)
             + self.attachments.iter().map(|a| a.deep_size()).sum::<usize>()
@@ -320,8 +263,7 @@ impl DeepSize for CompactMessageVec {
     fn deep_size(&self) -> usize {
         std::mem::size_of::<CompactMessageVec>()
             + std::mem::size_of_val(self.messages())
-            + self.iter().map(|m| m.deep_size() - std::mem::size_of::<CompactMessage>()).sum::<usize>()
-            // id_index: each entry is ([u8; 32], u32) = 36 bytes
+            + self.iter().map(|m| m.deep_size().saturating_sub(std::mem::size_of::<CompactMessage>())).sum::<usize>()
             + self.len() * std::mem::size_of::<([u8; 32], u32)>()
     }
 }
@@ -332,3 +274,16 @@ impl DeepSize for NpubInterner {
     }
 }
 
+impl DeepSize for Chat {
+    fn deep_size(&self) -> usize {
+        std::mem::size_of::<Chat>()
+            + self.id.capacity()
+            + 32  // last_read [u8; 32] is inline
+            + self.participants.capacity() * std::mem::size_of::<u16>()
+            + self.messages.deep_size()
+            + self.metadata.custom_fields.iter()
+                .map(|(k, v)| k.capacity() + v.capacity())
+                .sum::<usize>()
+            + self.typing_participants.capacity() * std::mem::size_of::<(u16, u64)>()
+    }
+}

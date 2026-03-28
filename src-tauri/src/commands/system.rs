@@ -236,7 +236,7 @@ pub async fn clear_storage<R: Runtime>(handle: AppHandle<R>) -> Result<serde_jso
             // Convert updated messages to Message format for save and emit
             let messages_to_update: Vec<crate::Message> = updated_msg_ids.iter()
                 .filter_map(|msg_id| {
-                    let hex_id = crate::simd::bytes_to_hex_32(msg_id);
+                    let hex_id = crate::util::bytes_to_hex_32(msg_id);
                     state.chats[chat_idx].messages.find_by_hex_id(&hex_id)
                         .map(|m| m.to_message(&state.interner))
                 })

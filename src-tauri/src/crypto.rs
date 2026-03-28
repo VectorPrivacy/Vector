@@ -123,7 +123,7 @@ pub async fn internal_encrypt(mut input: String, password: Option<String>) -> St
 
     // Cache the key in the guarded vault if not already set
     if !crate::ENCRYPTION_KEY.has_key() {
-        crate::ENCRYPTION_KEY.set(key);
+        crate::ENCRYPTION_KEY.set(key, &[&crate::MY_SECRET_KEY]);
     }
 
     // Zeroize the local key copy
@@ -175,7 +175,7 @@ pub async fn internal_decrypt(ciphertext: String, password: Option<String>) -> R
 
     // Cache the key in the guarded vault if needed - only set if we came from password path
     if has_password && !crate::ENCRYPTION_KEY.has_key() {
-        crate::ENCRYPTION_KEY.set(key);
+        crate::ENCRYPTION_KEY.set(key, &[&crate::MY_SECRET_KEY]);
     }
 
     // Zeroize the local key copy

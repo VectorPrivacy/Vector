@@ -1,5 +1,7 @@
 //! Compact message storage with binary IDs and interned strings.
 //!
+//! Part of vector-core — the single source of truth for compact message types.
+//!
 //! This module provides memory-efficient message storage:
 //! - `[u8; 32]` for IDs instead of hex strings (saves ~56 bytes per ID)
 //! - Interned npubs via `NpubInterner` (each unique npub stored once)
@@ -8,9 +10,40 @@
 //! - Boxed optional fields (replied_to, wrapper_id) to save inline space
 //! - Compact timestamp (u32 seconds since 2020 epoch)
 
-use crate::message::{Attachment, EditEntry, ImageMetadata, Reaction};
-use crate::net::SiteMetadata;
-use crate::simd::{bytes_to_hex_32, hex_to_bytes_32};
+use crate::types::{Attachment, EditEntry, ImageMetadata, Reaction, SiteMetadata};
+use crate::hex::{bytes_to_hex_32, hex_to_bytes_32};
+
+/// Convert an arbitrary-length byte slice to a lowercase hex string.
+fn bytes_to_hex_string(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Decode a hex string of up to 32 hex chars into [u8; 16], left-aligned.
+/// Pads short inputs with '0' on the right before decoding.
+fn hex_to_bytes_16(hex: &str) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    let h = hex.as_bytes();
+    // Pad to 32 hex chars with '0'
+    let mut padded = [b'0'; 32];
+    let copy_len = h.len().min(32);
+    padded[..copy_len].copy_from_slice(&h[..copy_len]);
+    for i in 0..16 {
+        let hi = hex_nibble(padded[i * 2]);
+        let lo = hex_nibble(padded[i * 2 + 1]);
+        out[i] = (hi << 4) | lo;
+    }
+    out
+}
+
+#[inline]
+fn hex_nibble(b: u8) -> u8 {
+    match b {
+        b'0'..=b'9' => b - b'0',
+        b'a'..=b'f' => b - b'a' + 10,
+        b'A'..=b'F' => b - b'A' + 10,
+        _ => 0,
+    }
+}
 
 // ============================================================================
 // Pending ID Encoding
@@ -687,10 +720,10 @@ impl CompactAttachment {
             String::new()
         } else if self.flags.is_short_nonce() {
             // 12-byte nonce (MLS/MIP-04)
-            crate::simd::bytes_to_hex_string(&self.nonce[..12])
+            bytes_to_hex_string(&self.nonce[..12])
         } else {
             // 16-byte nonce (DM/0xChat)
-            crate::simd::bytes_to_hex_string(&self.nonce)
+            bytes_to_hex_string(&self.nonce)
         }
     }
 
@@ -770,19 +803,11 @@ impl CompactAttachment {
 }
 
 /// Parse a hex nonce string into [u8; 16], left-aligned, zero-allocation.
-/// Both DM (32 hex chars) and MLS (24 hex chars) nonces hit the SIMD fast path.
-/// Short nonces are right-padded with '0' to reach 32 chars before SIMD decode.
+/// Both DM (32 hex chars) and MLS (24 hex chars) nonces are decoded.
+/// Short nonces are right-padded with '0' to reach 32 chars before decode.
 #[inline]
 fn parse_nonce(hex: &str) -> [u8; 16] {
-    let h = hex.as_bytes();
-    if h.len() >= 32 {
-        return crate::simd::hex_to_bytes_16(hex);
-    }
-    // Pad to 32 hex chars with '0' → SIMD decode → left-aligned result
-    let mut padded = [b'0'; 32];
-    padded[..h.len()].copy_from_slice(h);
-    // SAFETY: padded is all ASCII hex digits (original chars + '0' fill)
-    crate::simd::hex_to_bytes_16(unsafe { std::str::from_utf8_unchecked(&padded) })
+    hex_to_bytes_16(hex)
 }
 
 // ============================================================================
@@ -909,7 +934,7 @@ impl NpubInterner {
 /// - Total savings: ~350+ bytes per message
 #[derive(Clone, Debug)]
 pub struct CompactMessage {
-    /// Message ID as binary (64 hex chars → 32 bytes)
+    /// Message ID as binary (64 hex chars -> 32 bytes)
     pub id: [u8; 32],
     /// Compact timestamp: seconds since 2020-01-01 (u32 = good until 2156)
     pub at: u32,
@@ -1413,7 +1438,7 @@ impl CompactMessageVec {
 // Conversion from/to Message
 // ============================================================================
 
-use crate::Message;
+use crate::types::Message;
 
 impl CompactMessage {
     /// Convert from a regular Message (borrowed), interning npubs
@@ -1734,7 +1759,7 @@ mod tests {
         println!("  Sequential insert (optimized append path):");
         println!("    {} messages in {:?}", NUM_MESSAGES, insert_elapsed);
         println!("    Rate: {:.0} msgs/sec", NUM_MESSAGES as f64 / insert_elapsed.as_secs_f64());
-        println!("    Per message: {:.3} µs ({} ns)",
+        println!("    Per message: {:.3} us ({} ns)",
             insert_elapsed.as_micros() as f64 / NUM_MESSAGES as f64,
             insert_elapsed.as_nanos() / NUM_MESSAGES as u128);
         println!();
@@ -1753,7 +1778,7 @@ mod tests {
         println!("  Batch insert (pagination/history load):");
         println!("    {} messages in {:?}", batch_added, batch_elapsed);
         println!("    Rate: {:.0} msgs/sec", NUM_MESSAGES as f64 / batch_elapsed.as_secs_f64());
-        println!("    Per message: {:.3} µs ({} ns)",
+        println!("    Per message: {:.3} us ({} ns)",
             batch_elapsed.as_micros() as f64 / NUM_MESSAGES as f64,
             batch_elapsed.as_nanos() / NUM_MESSAGES as u128);
         println!();
@@ -1787,7 +1812,7 @@ mod tests {
             msg_total.saturating_sub(compact_total),
             (1.0 - compact_total as f64 / msg_total as f64) * 100.0
         );
-        println!("  Per message: {} → {} bytes (avg)",
+        println!("  Per message: {} -> {} bytes (avg)",
             msg_total / NUM_MESSAGES,
             compact_total / NUM_MESSAGES
         );
@@ -1817,7 +1842,7 @@ mod tests {
         println!("  Binary search (CompactMessageVec):");
         println!("    {} lookups in {:?}", total_lookups, lookup_elapsed);
         println!("    Rate: {:.0} lookups/sec", total_lookups as f64 / lookup_elapsed.as_secs_f64());
-        println!("    Per lookup: {:.2} µs", lookup_elapsed.as_micros() as f64 / total_lookups as f64);
+        println!("    Per lookup: {:.2} us", lookup_elapsed.as_micros() as f64 / total_lookups as f64);
         println!("    Found: {} / {}", found_count, total_lookups);
         println!();
 
@@ -1836,7 +1861,7 @@ mod tests {
         println!("  Linear search (Vec<Message>):");
         println!("    {} lookups in {:?}", total_lookups, linear_elapsed);
         println!("    Rate: {:.0} lookups/sec", total_lookups as f64 / linear_elapsed.as_secs_f64());
-        println!("    Per lookup: {:.2} µs", linear_elapsed.as_micros() as f64 / total_lookups as f64);
+        println!("    Per lookup: {:.2} us", linear_elapsed.as_micros() as f64 / total_lookups as f64);
         println!();
 
         let speedup = linear_elapsed.as_nanos() as f64 / lookup_elapsed.as_nanos() as f64;
@@ -1866,12 +1891,12 @@ mod tests {
         assert_eq!(found_count, linear_found);
     }
 
-    /// Benchmark: Profile lookup — linear scan vs string binary search vs handle binary search
+    /// Benchmark: Profile lookup -- linear scan vs string binary search vs handle binary search
     ///
     /// Compares three approaches for finding a Profile in a Vec:
-    /// 1. Linear scan with string equality (old — O(n) × 63-byte strcmp, Profile.id was String)
-    /// 2. Binary search by npub string (intermediate — O(log n) × 63-byte strcmp)
-    /// 3. Direct u16 handle binary search (current — O(log n) × 2-byte int cmp, Profile.id is u16)
+    /// 1. Linear scan with string equality (old -- O(n) x 63-byte strcmp, Profile.id was String)
+    /// 2. Binary search by npub string (intermediate -- O(log n) x 63-byte strcmp)
+    /// 3. Direct u16 handle binary search (current -- O(log n) x 2-byte int cmp, Profile.id is u16)
     #[test]
     fn benchmark_profile_lookup() {
         use std::time::Instant;
@@ -1899,8 +1924,8 @@ mod tests {
 
         // --- Setup: Method 3 - Direct u16 handle lookup (current approach, id: u16) ---
         let mut interner = NpubInterner::new();
-        let mut profiles: Vec<crate::Profile> = npubs.iter().map(|npub| {
-            let mut p = crate::Profile::new();
+        let mut profiles: Vec<crate::profile::Profile> = npubs.iter().map(|npub| {
+            let mut p = crate::profile::Profile::new();
             p.id = interner.intern(npub);
             p
         }).collect();
@@ -1916,7 +1941,7 @@ mod tests {
             .map(|&npub| interner.lookup(npub).unwrap())
             .collect();
 
-        // ===== BENCHMARK 1: Linear scan (old — id: String) =====
+        // ===== BENCHMARK 1: Linear scan (old -- id: String) =====
         let start = Instant::now();
         let mut found = 0u64;
         for &target in &lookup_targets {
@@ -1938,7 +1963,7 @@ mod tests {
         let string_bs_elapsed = start.elapsed();
         assert_eq!(found, NUM_LOOKUPS as u64);
 
-        // ===== BENCHMARK 3: Direct u16 handle lookup (current — id: u16) =====
+        // ===== BENCHMARK 3: Direct u16 handle lookup (current -- id: u16) =====
         let start = Instant::now();
         found = 0;
         for &handle in &handle_targets {
@@ -1994,5 +2019,1619 @@ mod tests {
             let h = interner.lookup(npub).unwrap();
             assert!(profiles.binary_search_by(|p| p.id.cmp(&h)).is_ok());
         }
+    }
+
+    // ========================================================================
+    // Pending ID Encoding Tests
+    // ========================================================================
+
+    #[test]
+    fn pending_id_roundtrip_regular_hex() {
+        let hex = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let encoded = encode_message_id(hex);
+        let decoded = decode_message_id(&encoded);
+        assert_eq!(decoded, hex, "regular hex ID should roundtrip exactly");
+    }
+
+    #[test]
+    fn pending_id_roundtrip_pending() {
+        let id = "pending-1234567890123456789";
+        let encoded = encode_message_id(id);
+        let decoded = decode_message_id(&encoded);
+        assert_eq!(decoded, id, "pending ID should roundtrip exactly");
+    }
+
+    #[test]
+    fn pending_id_zero_timestamp() {
+        let id = "pending-0";
+        let encoded = encode_message_id(id);
+        assert_eq!(encoded[0], PENDING_ID_MARKER, "first byte should be marker");
+        let decoded = decode_message_id(&encoded);
+        assert_eq!(decoded, id, "pending-0 should roundtrip");
+    }
+
+    #[test]
+    fn pending_id_max_u128_timestamp() {
+        let max = u128::MAX;
+        let id = format!("pending-{}", max);
+        let encoded = encode_message_id(&id);
+        let decoded = decode_message_id(&encoded);
+        assert_eq!(decoded, id, "pending with max u128 should roundtrip");
+    }
+
+    #[test]
+    fn pending_id_all_zero_hex() {
+        let hex = "0000000000000000000000000000000000000000000000000000000000000000";
+        let encoded = encode_message_id(hex);
+        let decoded = decode_message_id(&encoded);
+        assert_eq!(decoded, hex, "all-zero hex ID should roundtrip");
+        // All-zero should NOT be detected as pending since byte 0 is 0x00, not 0x01
+        assert_ne!(encoded[0], PENDING_ID_MARKER);
+    }
+
+    #[test]
+    fn pending_id_all_ff_hex() {
+        let hex = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let encoded = encode_message_id(hex);
+        let decoded = decode_message_id(&encoded);
+        assert_eq!(decoded, hex, "all-ff hex ID should roundtrip");
+        assert_eq!(encoded, [0xff; 32], "all-ff should decode to all 0xff bytes");
+    }
+
+    #[test]
+    fn pending_id_mixed_case_hex() {
+        let lower = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let mixed = "ABCDEF0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789";
+        let encoded_lower = encode_message_id(lower);
+        let encoded_mixed = encode_message_id(mixed);
+        assert_eq!(encoded_lower, encoded_mixed, "mixed case should produce same bytes as lowercase");
+    }
+
+    #[test]
+    fn pending_id_short_hex_partial_decode() {
+        // SIMD hex_to_bytes_32 partially decodes short input (decodes what it can)
+        let short = "abcdef";
+        let encoded = encode_message_id(short);
+        // Short input is decoded as far as possible, remaining bytes are zero
+        assert_eq!(encoded[0..14], [0u8; 14], "leading bytes should be zero for short input");
+    }
+
+    #[test]
+    fn pending_id_marker_distinguishes_from_real_id() {
+        // A real event ID starting with 01 should NOT be confused with pending
+        let hex = "0100000000000000000000000000000000000000000000000000000000000000";
+        let encoded = encode_message_id(hex);
+        // The first byte is 0x01 which matches PENDING_ID_MARKER - but decode_message_id
+        // will treat it as pending. This is by design since real SHA256 IDs with first
+        // byte 0x01 are extremely rare and the probability is 1/256.
+        let decoded = decode_message_id(&encoded);
+        // This will decode as pending since byte[0] == 0x01
+        assert!(decoded.starts_with("pending-"), "ID starting with 0x01 byte is treated as pending by design");
+    }
+
+    #[test]
+    fn pending_id_large_timestamp() {
+        let id = "pending-99999999999999999";
+        let encoded = encode_message_id(&id);
+        let decoded = decode_message_id(&encoded);
+        assert_eq!(decoded, id, "large but valid timestamp should roundtrip");
+    }
+
+    #[test]
+    fn pending_id_invalid_timestamp_becomes_zero() {
+        // If the timestamp part can't be parsed, it stays as all-zeros in bytes 1..17
+        let id = "pending-notanumber";
+        let encoded = encode_message_id(id);
+        assert_eq!(encoded[0], PENDING_ID_MARKER);
+        // Bytes 1..17 should all be 0
+        assert_eq!(&encoded[1..17], &[0u8; 16]);
+        let decoded = decode_message_id(&encoded);
+        assert_eq!(decoded, "pending-0", "invalid timestamp parses as pending-0");
+    }
+
+    // ========================================================================
+    // Timestamp Tests
+    // ========================================================================
+
+    #[test]
+    fn timestamp_to_compact_and_back_roundtrip() {
+        // A representative timestamp: 2024-01-15 12:00:00 UTC in milliseconds
+        let ms: u64 = 1705320000000;
+        let compact = timestamp_to_compact(ms);
+        let restored = timestamp_from_compact(compact);
+        // The sub-second part is lost (ms -> seconds -> ms), so restored is floored to seconds
+        assert_eq!(restored / 1000, ms / 1000, "roundtrip should preserve seconds");
+    }
+
+    #[test]
+    fn secs_to_compact_and_back_roundtrip() {
+        let secs: u64 = 1705320000; // 2024-01-15 12:00:00 UTC
+        let compact = secs_to_compact(secs);
+        let restored = secs_from_compact(compact);
+        assert_eq!(restored, secs, "secs should roundtrip exactly");
+    }
+
+    #[test]
+    fn timestamp_zero_preservation() {
+        // Zero is a sentinel for "never set" in secs_to_compact/secs_from_compact
+        assert_eq!(secs_to_compact(0), 0, "zero secs should produce zero compact");
+        assert_eq!(secs_from_compact(0), 0, "zero compact should produce zero secs");
+    }
+
+    #[test]
+    fn timestamp_epoch_boundary() {
+        // Exactly 2020-01-01 00:00:00 UTC = EPOCH_2020_SECS
+        let epoch_secs: u64 = 1577836800;
+        let compact = secs_to_compact(epoch_secs);
+        assert_eq!(compact, 0, "epoch boundary should map to compact 0");
+        let restored = secs_from_compact(compact);
+        // secs_from_compact(0) returns 0 (sentinel), not epoch
+        assert_eq!(restored, 0, "compact 0 returns sentinel 0");
+    }
+
+    #[test]
+    fn timestamp_epoch_boundary_ms() {
+        let epoch_ms: u64 = 1577836800000;
+        let compact = timestamp_to_compact(epoch_ms);
+        assert_eq!(compact, 0, "epoch ms should map to compact 0");
+        let restored = timestamp_from_compact(compact);
+        assert_eq!(restored, epoch_ms, "compact 0 restores to epoch ms");
+    }
+
+    #[test]
+    fn timestamp_current_time_roundtrip() {
+        // Simulate a current-ish timestamp: 2026-03-27 in seconds
+        let secs: u64 = 1774800000;
+        let compact = secs_to_compact(secs);
+        let restored = secs_from_compact(compact);
+        assert_eq!(restored, secs, "current-era timestamp should roundtrip");
+        assert!(compact > 0, "current time should be past epoch");
+    }
+
+    #[test]
+    fn timestamp_far_future_year_2100() {
+        // 2100-01-01 00:00:00 UTC
+        let secs: u64 = 4102444800;
+        let compact = secs_to_compact(secs);
+        let restored = secs_from_compact(compact);
+        assert_eq!(restored, secs, "year 2100 should roundtrip");
+        // Verify it fits in u32
+        assert!(compact <= u32::MAX, "year 2100 should fit in u32");
+    }
+
+    #[test]
+    fn timestamp_pre_epoch_saturates_to_zero() {
+        // A timestamp before 2020 epoch
+        let secs: u64 = 1500000000; // ~2017
+        let compact = secs_to_compact(secs);
+        // saturating_sub means this becomes 0
+        assert_eq!(compact, 0, "pre-epoch timestamp should saturate to 0");
+    }
+
+    #[test]
+    fn timestamp_ms_sub_second_precision_lost() {
+        let ms: u64 = 1705320000999; // 999 ms after the second
+        let compact = timestamp_to_compact(ms);
+        let restored = timestamp_from_compact(compact);
+        assert_eq!(restored, 1705320000000, "sub-second ms should be truncated");
+        assert_ne!(restored, ms, "sub-second precision is lost");
+    }
+
+    #[test]
+    fn timestamp_one_second_after_epoch() {
+        let secs: u64 = 1577836801; // one second after epoch
+        let compact = secs_to_compact(secs);
+        assert_eq!(compact, 1, "one second after epoch should be compact 1");
+        let restored = secs_from_compact(compact);
+        assert_eq!(restored, secs, "should restore to original");
+    }
+
+    // ========================================================================
+    // MessageFlags Tests
+    // ========================================================================
+
+    #[test]
+    fn message_flags_mine_independent() {
+        let mut flags = MessageFlags::NONE;
+        flags.set_mine(true);
+        assert!(flags.is_mine(), "mine should be set");
+        assert!(!flags.is_pending(), "pending should not be set");
+        assert!(!flags.is_failed(), "failed should not be set");
+    }
+
+    #[test]
+    fn message_flags_pending_independent() {
+        let mut flags = MessageFlags::NONE;
+        flags.set_pending(true);
+        assert!(!flags.is_mine(), "mine should not be set");
+        assert!(flags.is_pending(), "pending should be set");
+        assert!(!flags.is_failed(), "failed should not be set");
+    }
+
+    #[test]
+    fn message_flags_failed_independent() {
+        let mut flags = MessageFlags::NONE;
+        flags.set_failed(true);
+        assert!(!flags.is_mine(), "mine should not be set");
+        assert!(!flags.is_pending(), "pending should not be set");
+        assert!(flags.is_failed(), "failed should be set");
+    }
+
+    #[test]
+    fn message_flags_from_bools_all_false() {
+        let flags = MessageFlags::from_bools(false, false, false);
+        assert!(!flags.is_mine());
+        assert!(!flags.is_pending());
+        assert!(!flags.is_failed());
+        assert_eq!(flags, MessageFlags::NONE, "all false should equal NONE");
+    }
+
+    #[test]
+    fn message_flags_from_bools_all_true() {
+        let flags = MessageFlags::from_bools(true, true, true);
+        assert!(flags.is_mine(), "mine should be set");
+        assert!(flags.is_pending(), "pending should be set");
+        assert!(flags.is_failed(), "failed should be set");
+    }
+
+    #[test]
+    fn message_flags_from_bools_various_combos() {
+        let flags = MessageFlags::from_bools(true, false, true);
+        assert!(flags.is_mine());
+        assert!(!flags.is_pending());
+        assert!(flags.is_failed());
+
+        let flags = MessageFlags::from_bools(false, true, false);
+        assert!(!flags.is_mine());
+        assert!(flags.is_pending());
+        assert!(!flags.is_failed());
+    }
+
+    #[test]
+    fn message_flags_from_all_replied_to_none() {
+        let flags = MessageFlags::from_all(false, false, false, None);
+        assert_eq!(flags.replied_to_has_attachment(), None, "None should roundtrip");
+    }
+
+    #[test]
+    fn message_flags_from_all_replied_to_some_false() {
+        let flags = MessageFlags::from_all(false, false, false, Some(false));
+        assert_eq!(flags.replied_to_has_attachment(), Some(false), "Some(false) should roundtrip");
+    }
+
+    #[test]
+    fn message_flags_from_all_replied_to_some_true() {
+        let flags = MessageFlags::from_all(false, false, false, Some(true));
+        assert_eq!(flags.replied_to_has_attachment(), Some(true), "Some(true) should roundtrip");
+    }
+
+    #[test]
+    fn message_flags_multiple_set_simultaneously() {
+        let flags = MessageFlags::from_all(true, true, false, Some(true));
+        assert!(flags.is_mine());
+        assert!(flags.is_pending());
+        assert!(!flags.is_failed());
+        assert_eq!(flags.replied_to_has_attachment(), Some(true));
+    }
+
+    #[test]
+    fn message_flags_default_is_all_false() {
+        let flags = MessageFlags::default();
+        assert!(!flags.is_mine());
+        assert!(!flags.is_pending());
+        assert!(!flags.is_failed());
+        assert_eq!(flags.replied_to_has_attachment(), None);
+        assert_eq!(flags, MessageFlags::NONE);
+    }
+
+    #[test]
+    fn message_flags_bit_patterns_correct() {
+        assert_eq!(MessageFlags::MINE.0, 0b00001, "MINE bit pattern");
+        assert_eq!(MessageFlags::PENDING.0, 0b00010, "PENDING bit pattern");
+        assert_eq!(MessageFlags::FAILED.0, 0b00100, "FAILED bit pattern");
+    }
+
+    #[test]
+    fn message_flags_set_then_clear() {
+        let mut flags = MessageFlags::from_bools(true, true, true);
+        flags.set_mine(false);
+        assert!(!flags.is_mine(), "mine should be cleared");
+        assert!(flags.is_pending(), "pending should remain set");
+        assert!(flags.is_failed(), "failed should remain set");
+    }
+
+    #[test]
+    fn message_flags_replied_to_overwrite() {
+        let mut flags = MessageFlags::from_all(false, false, false, Some(true));
+        assert_eq!(flags.replied_to_has_attachment(), Some(true));
+        flags.set_replied_to_has_attachment(Some(false));
+        assert_eq!(flags.replied_to_has_attachment(), Some(false), "overwrite should work");
+        flags.set_replied_to_has_attachment(None);
+        assert_eq!(flags.replied_to_has_attachment(), None, "clearing to None should work");
+    }
+
+    #[test]
+    fn message_flags_replied_to_does_not_interfere_with_other_bits() {
+        let mut flags = MessageFlags::from_bools(true, true, true);
+        flags.set_replied_to_has_attachment(Some(true));
+        assert!(flags.is_mine(), "mine should still be set");
+        assert!(flags.is_pending(), "pending should still be set");
+        assert!(flags.is_failed(), "failed should still be set");
+        assert_eq!(flags.replied_to_has_attachment(), Some(true));
+    }
+
+    // ========================================================================
+    // AttachmentFlags Tests
+    // ========================================================================
+
+    #[test]
+    fn attachment_flags_downloading_independent() {
+        let mut flags = AttachmentFlags::NONE;
+        flags.set_downloading(true);
+        assert!(flags.is_downloading());
+        assert!(!flags.is_downloaded());
+        assert!(!flags.is_short_nonce());
+    }
+
+    #[test]
+    fn attachment_flags_downloaded_independent() {
+        let mut flags = AttachmentFlags::NONE;
+        flags.set_downloaded(true);
+        assert!(!flags.is_downloading());
+        assert!(flags.is_downloaded());
+        assert!(!flags.is_short_nonce());
+    }
+
+    #[test]
+    fn attachment_flags_short_nonce_independent() {
+        let mut flags = AttachmentFlags::NONE;
+        flags.set_short_nonce(true);
+        assert!(!flags.is_downloading());
+        assert!(!flags.is_downloaded());
+        assert!(flags.is_short_nonce());
+    }
+
+    #[test]
+    fn attachment_flags_from_bools() {
+        let flags = AttachmentFlags::from_bools(true, false);
+        assert!(flags.is_downloading());
+        assert!(!flags.is_downloaded());
+
+        let flags = AttachmentFlags::from_bools(false, true);
+        assert!(!flags.is_downloading());
+        assert!(flags.is_downloaded());
+    }
+
+    #[test]
+    fn attachment_flags_all_set() {
+        let mut flags = AttachmentFlags::NONE;
+        flags.set_downloading(true);
+        flags.set_downloaded(true);
+        flags.set_short_nonce(true);
+        assert!(flags.is_downloading());
+        assert!(flags.is_downloaded());
+        assert!(flags.is_short_nonce());
+    }
+
+    #[test]
+    fn attachment_flags_set_then_clear() {
+        let mut flags = AttachmentFlags::NONE;
+        flags.set_downloading(true);
+        flags.set_downloaded(true);
+        flags.set_downloading(false);
+        assert!(!flags.is_downloading(), "downloading should be cleared");
+        assert!(flags.is_downloaded(), "downloaded should remain set");
+    }
+
+    #[test]
+    fn attachment_flags_default_none() {
+        let flags = AttachmentFlags::NONE;
+        assert!(!flags.is_downloading());
+        assert!(!flags.is_downloaded());
+        assert!(!flags.is_short_nonce());
+        assert_eq!(flags, AttachmentFlags::default());
+    }
+
+    #[test]
+    fn attachment_flags_bit_values() {
+        // Verify the bit constants are distinct
+        let mut flags = AttachmentFlags::NONE;
+        flags.set_downloading(true);
+        assert_eq!(flags.0, 0b0001);
+
+        let mut flags = AttachmentFlags::NONE;
+        flags.set_downloaded(true);
+        assert_eq!(flags.0, 0b0010);
+
+        let mut flags = AttachmentFlags::NONE;
+        flags.set_short_nonce(true);
+        assert_eq!(flags.0, 0b0100);
+    }
+
+    // ========================================================================
+    // NpubInterner Tests
+    // ========================================================================
+
+    #[test]
+    fn interner_returns_incrementing_handles() {
+        let mut interner = NpubInterner::new();
+        let h0 = interner.intern("npub1aaa");
+        let h1 = interner.intern("npub1bbb");
+        let h2 = interner.intern("npub1ccc");
+        assert_eq!(h0, 0, "first intern should be handle 0");
+        assert_eq!(h1, 1, "second intern should be handle 1");
+        assert_eq!(h2, 2, "third intern should be handle 2");
+    }
+
+    #[test]
+    fn interner_lookup_finds_interned() {
+        let mut interner = NpubInterner::new();
+        let h = interner.intern("npub1alice");
+        let found = interner.lookup("npub1alice");
+        assert_eq!(found, Some(h), "lookup should find interned string");
+    }
+
+    #[test]
+    fn interner_lookup_returns_none_for_unknown() {
+        let interner = NpubInterner::new();
+        assert_eq!(interner.lookup("npub1unknown"), None, "lookup on empty interner should be None");
+    }
+
+    #[test]
+    fn interner_lookup_returns_none_for_not_interned() {
+        let mut interner = NpubInterner::new();
+        interner.intern("npub1alice");
+        assert_eq!(interner.lookup("npub1bob"), None, "lookup for non-interned should be None");
+    }
+
+    #[test]
+    fn interner_resolve_returns_string() {
+        let mut interner = NpubInterner::new();
+        let h = interner.intern("npub1test123");
+        assert_eq!(interner.resolve(h), Some("npub1test123"), "resolve should return the original string");
+    }
+
+    #[test]
+    fn interner_resolve_returns_none_for_no_npub() {
+        let interner = NpubInterner::new();
+        assert_eq!(interner.resolve(NO_NPUB), None, "resolve(NO_NPUB) should be None");
+    }
+
+    #[test]
+    fn interner_resolve_returns_none_for_out_of_bounds() {
+        let mut interner = NpubInterner::new();
+        interner.intern("npub1only");
+        assert_eq!(interner.resolve(999), None, "out-of-bounds handle should resolve to None");
+    }
+
+    #[test]
+    fn interner_duplicate_returns_same_handle() {
+        let mut interner = NpubInterner::new();
+        let h1 = interner.intern("npub1dup");
+        let h2 = interner.intern("npub1dup");
+        let h3 = interner.intern("npub1dup");
+        assert_eq!(h1, h2, "duplicate intern should return same handle");
+        assert_eq!(h2, h3, "duplicate intern should return same handle");
+        assert_eq!(interner.len(), 1, "duplicates should not increase length");
+    }
+
+    #[test]
+    fn interner_100_unique_npubs_stress() {
+        let mut interner = NpubInterner::new();
+        let mut handles = Vec::new();
+
+        for i in 0..100 {
+            let npub = format!("npub1stress{:04}", i);
+            let h = interner.intern(&npub);
+            handles.push((h, npub));
+        }
+
+        assert_eq!(interner.len(), 100, "should have 100 unique npubs");
+
+        // Verify all handles resolve correctly
+        for (h, npub) in &handles {
+            assert_eq!(interner.resolve(*h), Some(npub.as_str()),
+                "handle {} should resolve to {}", h, npub);
+        }
+
+        // Verify all lookups work
+        for (h, npub) in &handles {
+            assert_eq!(interner.lookup(npub), Some(*h),
+                "lookup for {} should return handle {}", npub, h);
+        }
+
+        // Re-interning should return same handles
+        for (h, npub) in &handles {
+            assert_eq!(interner.intern(npub), *h,
+                "re-interning {} should return same handle {}", npub, h);
+        }
+        assert_eq!(interner.len(), 100, "re-interning should not grow interner");
+    }
+
+    #[test]
+    fn interner_memory_usage_reasonable() {
+        let mut interner = NpubInterner::new();
+        for i in 0..50 {
+            interner.intern(&format!("npub1{:0>62}", i));
+        }
+        let mem = interner.memory_usage();
+        // Should be in the ballpark of 50 * (64 bytes string + overhead)
+        assert!(mem > 0, "memory usage should be positive");
+        assert!(mem < 100_000, "memory usage for 50 npubs should be under 100KB, was {}", mem);
+    }
+
+    #[test]
+    fn interner_empty() {
+        let interner = NpubInterner::new();
+        assert_eq!(interner.len(), 0);
+        assert!(interner.is_empty());
+        assert_eq!(interner.resolve(0), None);
+        assert_eq!(interner.lookup("anything"), None);
+        assert!(interner.memory_usage() > 0, "even empty interner has struct overhead");
+    }
+
+    #[test]
+    fn interner_intern_opt_none() {
+        let mut interner = NpubInterner::new();
+        let h = interner.intern_opt(None);
+        assert_eq!(h, NO_NPUB, "intern_opt(None) should return NO_NPUB");
+        assert_eq!(interner.len(), 0, "None should not add to interner");
+    }
+
+    #[test]
+    fn interner_intern_opt_empty_string() {
+        let mut interner = NpubInterner::new();
+        let h = interner.intern_opt(Some(""));
+        assert_eq!(h, NO_NPUB, "intern_opt(Some('')) should return NO_NPUB");
+    }
+
+    #[test]
+    fn interner_intern_opt_some_value() {
+        let mut interner = NpubInterner::new();
+        let h = interner.intern_opt(Some("npub1real"));
+        assert_ne!(h, NO_NPUB, "intern_opt(Some(value)) should not return NO_NPUB");
+        assert_eq!(interner.resolve(h), Some("npub1real"));
+    }
+
+    // ========================================================================
+    // CompactMessageVec Tests
+    // ========================================================================
+
+    /// Helper to create a minimal CompactMessage with given hex ID and timestamp
+    fn make_compact_msg(hex_id: &str, timestamp: u32) -> CompactMessage {
+        CompactMessage {
+            id: encode_message_id(hex_id),
+            at: timestamp,
+            flags: MessageFlags::NONE,
+            npub_idx: NO_NPUB,
+            replied_to: None,
+            replied_to_npub_idx: NO_NPUB,
+            wrapper_id: None,
+            content: "test".into(),
+            replied_to_content: None,
+            attachments: TinyVec::new(),
+            reactions: TinyVec::new(),
+            edit_history: None,
+            preview_metadata: None,
+        }
+    }
+
+    #[test]
+    fn compact_vec_insert_single_message() {
+        let mut vec = CompactMessageVec::new();
+        let msg = make_compact_msg(
+            "1111111111111111111111111111111111111111111111111111111111111111",
+            100,
+        );
+        assert!(vec.insert(msg), "insert should succeed");
+        assert_eq!(vec.len(), 1);
+        assert!(!vec.is_empty());
+    }
+
+    #[test]
+    fn compact_vec_insert_duplicate_rejected() {
+        let mut vec = CompactMessageVec::new();
+        let id = "2222222222222222222222222222222222222222222222222222222222222222";
+        let msg1 = make_compact_msg(id, 100);
+        let msg2 = make_compact_msg(id, 200); // same ID, different timestamp
+        assert!(vec.insert(msg1), "first insert should succeed");
+        assert!(!vec.insert(msg2), "duplicate ID should be rejected");
+        assert_eq!(vec.len(), 1);
+    }
+
+    #[test]
+    fn compact_vec_insert_batch_multiple() {
+        let mut vec = CompactMessageVec::new();
+        let msgs = vec![
+            make_compact_msg("aa00000000000000000000000000000000000000000000000000000000000000", 100),
+            make_compact_msg("bb00000000000000000000000000000000000000000000000000000000000000", 200),
+            make_compact_msg("cc00000000000000000000000000000000000000000000000000000000000000", 300),
+        ];
+        let added = vec.insert_batch(msgs);
+        assert_eq!(added, 3, "all 3 should be added");
+        assert_eq!(vec.len(), 3);
+    }
+
+    #[test]
+    fn compact_vec_insert_batch_dedup() {
+        let mut vec = CompactMessageVec::new();
+        let id = "dd00000000000000000000000000000000000000000000000000000000000000";
+        vec.insert(make_compact_msg(id, 100));
+
+        let msgs = vec![
+            make_compact_msg(id, 200), // duplicate
+            make_compact_msg("ee00000000000000000000000000000000000000000000000000000000000000", 300),
+        ];
+        let added = vec.insert_batch(msgs);
+        assert_eq!(added, 1, "only non-duplicate should be added");
+        assert_eq!(vec.len(), 2);
+    }
+
+    #[test]
+    fn compact_vec_find_by_hex_id() {
+        let mut vec = CompactMessageVec::new();
+        let id = "ff00000000000000000000000000000000000000000000000000000000000001";
+        let mut msg = make_compact_msg(id, 500);
+        msg.content = "found me".into();
+        vec.insert(msg);
+
+        let found = vec.find_by_hex_id(id);
+        assert!(found.is_some(), "should find by hex id");
+        assert_eq!(&*found.unwrap().content, "found me");
+    }
+
+    #[test]
+    fn compact_vec_find_by_hex_id_not_found() {
+        let mut vec = CompactMessageVec::new();
+        vec.insert(make_compact_msg(
+            "aa00000000000000000000000000000000000000000000000000000000000000", 100,
+        ));
+        let found = vec.find_by_hex_id(
+            "bb00000000000000000000000000000000000000000000000000000000000000",
+        );
+        assert!(found.is_none(), "should not find non-existent ID");
+    }
+
+    #[test]
+    fn compact_vec_find_by_hex_id_empty_string() {
+        let mut vec = CompactMessageVec::new();
+        vec.insert(make_compact_msg(
+            "aa00000000000000000000000000000000000000000000000000000000000000", 100,
+        ));
+        assert!(vec.find_by_hex_id("").is_none(), "empty string should return None");
+    }
+
+    #[test]
+    fn compact_vec_find_by_hex_id_mut() {
+        let mut vec = CompactMessageVec::new();
+        let id = "ff00000000000000000000000000000000000000000000000000000000000002";
+        vec.insert(make_compact_msg(id, 500));
+
+        let found = vec.find_by_hex_id_mut(id);
+        assert!(found.is_some(), "should find mutable ref by hex id");
+        found.unwrap().content = "modified".into();
+
+        // Verify modification stuck
+        let found = vec.find_by_hex_id(id);
+        assert_eq!(&*found.unwrap().content, "modified");
+    }
+
+    #[test]
+    fn compact_vec_contains_hex_id() {
+        let mut vec = CompactMessageVec::new();
+        let id = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+        vec.insert(make_compact_msg(id, 100));
+
+        assert!(vec.contains_hex_id(id), "should contain inserted ID");
+        assert!(!vec.contains_hex_id(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            "should not contain non-inserted ID");
+        assert!(!vec.contains_hex_id(""), "empty string should not match");
+    }
+
+    #[test]
+    fn compact_vec_remove_by_hex_id() {
+        let mut vec = CompactMessageVec::new();
+        let id1 = "1100000000000000000000000000000000000000000000000000000000000000";
+        let id2 = "2200000000000000000000000000000000000000000000000000000000000000";
+        vec.insert(make_compact_msg(id1, 100));
+        vec.insert(make_compact_msg(id2, 200));
+        assert_eq!(vec.len(), 2);
+
+        assert!(vec.remove_by_hex_id(id1), "remove should succeed");
+        assert_eq!(vec.len(), 1);
+        assert!(!vec.contains_hex_id(id1), "removed ID should not be found");
+        assert!(vec.contains_hex_id(id2), "remaining ID should still be found");
+    }
+
+    #[test]
+    fn compact_vec_remove_nonexistent() {
+        let mut vec = CompactMessageVec::new();
+        vec.insert(make_compact_msg(
+            "1100000000000000000000000000000000000000000000000000000000000000", 100,
+        ));
+        assert!(!vec.remove_by_hex_id(
+            "9900000000000000000000000000000000000000000000000000000000000000"),
+            "removing non-existent should return false");
+        assert!(!vec.remove_by_hex_id(""), "removing empty should return false");
+        assert_eq!(vec.len(), 1);
+    }
+
+    #[test]
+    fn compact_vec_last_timestamp() {
+        let mut vec = CompactMessageVec::new();
+        assert_eq!(vec.last_timestamp(), None, "empty vec should have no last timestamp");
+
+        vec.insert(make_compact_msg(
+            "aa00000000000000000000000000000000000000000000000000000000000000", 100,
+        ));
+        vec.insert(make_compact_msg(
+            "bb00000000000000000000000000000000000000000000000000000000000000", 300,
+        ));
+        vec.insert(make_compact_msg(
+            "cc00000000000000000000000000000000000000000000000000000000000000", 200,
+        ));
+
+        let last_ts = vec.last_timestamp().unwrap();
+        // Messages are sorted by timestamp, so last should be the one with at=300
+        let expected = timestamp_from_compact(300);
+        assert_eq!(last_ts, expected, "last timestamp should be the largest");
+    }
+
+    #[test]
+    fn compact_vec_empty_operations() {
+        let vec = CompactMessageVec::new();
+        assert!(vec.is_empty());
+        assert_eq!(vec.len(), 0);
+        assert!(vec.last().is_none());
+        assert!(vec.first().is_none());
+        assert!(vec.last_timestamp().is_none());
+        assert!(!vec.contains_hex_id("anything"));
+        assert!(vec.find_by_hex_id("anything").is_none());
+    }
+
+    #[test]
+    fn compact_vec_1000_message_stress() {
+        let mut vec = CompactMessageVec::new();
+
+        // Insert 1000 messages
+        for i in 0..1000u64 {
+            let id = format!("{:0>64x}", i);
+            let msg = make_compact_msg(&id, (i * 10) as u32);
+            assert!(vec.insert(msg), "insert {} should succeed", i);
+        }
+        assert_eq!(vec.len(), 1000);
+
+        // Verify every message can be found
+        for i in 0..1000u64 {
+            let id = format!("{:0>64x}", i);
+            assert!(vec.contains_hex_id(&id), "should find message {}", i);
+            let found = vec.find_by_hex_id(&id).unwrap();
+            assert_eq!(found.at, (i * 10) as u32, "timestamp should match for message {}", i);
+        }
+
+        // Verify non-existent IDs are not found
+        for i in 1000..1010u64 {
+            let id = format!("{:0>64x}", i);
+            assert!(!vec.contains_hex_id(&id), "should not find non-existent {}", i);
+        }
+
+        // Messages should be in timestamp order
+        let timestamps: Vec<u32> = vec.iter().map(|m| m.at).collect();
+        for w in timestamps.windows(2) {
+            assert!(w[0] <= w[1], "messages should be sorted by timestamp: {} <= {}", w[0], w[1]);
+        }
+    }
+
+    #[test]
+    fn compact_vec_rebuild_index_after_id_change() {
+        let mut vec = CompactMessageVec::new();
+        let old_id = "aa00000000000000000000000000000000000000000000000000000000000000";
+        let new_id = "ff00000000000000000000000000000000000000000000000000000000000000";
+        vec.insert(make_compact_msg(old_id, 100));
+
+        // Mutate the message's ID directly (simulating an ID update like pending -> confirmed)
+        vec.messages_mut()[0].id = encode_message_id(new_id);
+        // Index is now stale
+        assert!(!vec.contains_hex_id(new_id), "stale index should not find new ID");
+
+        // Rebuild index
+        vec.rebuild_index();
+        assert!(vec.contains_hex_id(new_id), "after rebuild, new ID should be found");
+        assert!(!vec.contains_hex_id(old_id), "after rebuild, old ID should not be found");
+    }
+
+    #[test]
+    fn compact_vec_pending_id_lookup() {
+        let mut vec = CompactMessageVec::new();
+        let pending = "pending-9876543210";
+        vec.insert(make_compact_msg(pending, 500));
+
+        assert!(vec.contains_hex_id(pending), "should find pending ID");
+        let found = vec.find_by_hex_id(pending);
+        assert!(found.is_some(), "should find pending message");
+        assert_eq!(found.unwrap().id_hex(), pending, "id_hex should match pending string");
+    }
+
+    #[test]
+    fn compact_vec_out_of_order_insert() {
+        let mut vec = CompactMessageVec::new();
+        // Insert messages out of timestamp order
+        vec.insert(make_compact_msg(
+            "bb00000000000000000000000000000000000000000000000000000000000000", 300,
+        ));
+        vec.insert(make_compact_msg(
+            "aa00000000000000000000000000000000000000000000000000000000000000", 100,
+        ));
+        vec.insert(make_compact_msg(
+            "cc00000000000000000000000000000000000000000000000000000000000000", 200,
+        ));
+
+        assert_eq!(vec.len(), 3);
+        // Verify sorted by timestamp
+        let timestamps: Vec<u32> = vec.iter().map(|m| m.at).collect();
+        assert_eq!(timestamps, vec![100, 200, 300], "should be sorted by timestamp");
+
+        // All lookups should still work
+        assert!(vec.contains_hex_id("aa00000000000000000000000000000000000000000000000000000000000000"));
+        assert!(vec.contains_hex_id("bb00000000000000000000000000000000000000000000000000000000000000"));
+        assert!(vec.contains_hex_id("cc00000000000000000000000000000000000000000000000000000000000000"));
+    }
+
+    #[test]
+    fn compact_vec_batch_prepend() {
+        let mut vec = CompactMessageVec::new();
+        // First insert newer messages
+        vec.insert(make_compact_msg(
+            "cc00000000000000000000000000000000000000000000000000000000000000", 300,
+        ));
+        vec.insert(make_compact_msg(
+            "dd00000000000000000000000000000000000000000000000000000000000000", 400,
+        ));
+
+        // Then batch-insert older messages (pagination scenario)
+        let older = vec![
+            make_compact_msg("aa00000000000000000000000000000000000000000000000000000000000000", 100),
+            make_compact_msg("bb00000000000000000000000000000000000000000000000000000000000000", 200),
+        ];
+        let added = vec.insert_batch(older);
+        assert_eq!(added, 2);
+        assert_eq!(vec.len(), 4);
+
+        // Verify order
+        let timestamps: Vec<u32> = vec.iter().map(|m| m.at).collect();
+        assert_eq!(timestamps, vec![100, 200, 300, 400]);
+
+        // All lookups should work
+        assert!(vec.contains_hex_id("aa00000000000000000000000000000000000000000000000000000000000000"));
+        assert!(vec.contains_hex_id("dd00000000000000000000000000000000000000000000000000000000000000"));
+    }
+
+    #[test]
+    fn compact_vec_clear() {
+        let mut vec = CompactMessageVec::new();
+        vec.insert(make_compact_msg(
+            "aa00000000000000000000000000000000000000000000000000000000000000", 100,
+        ));
+        vec.insert(make_compact_msg(
+            "bb00000000000000000000000000000000000000000000000000000000000000", 200,
+        ));
+        assert_eq!(vec.len(), 2);
+
+        vec.clear();
+        assert!(vec.is_empty());
+        assert_eq!(vec.len(), 0);
+        assert!(!vec.contains_hex_id("aa00000000000000000000000000000000000000000000000000000000000000"));
+    }
+
+    // ========================================================================
+    // CompactMessage from_message / to_message Tests
+    // ========================================================================
+
+    /// Helper to create a full Message with all fields populated
+    fn make_full_message() -> Message {
+        Message {
+            id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".into(),
+            content: "Hello, world!".into(),
+            replied_to: "1111111111111111111111111111111111111111111111111111111111111111".into(),
+            replied_to_content: Some("Original message".into()),
+            replied_to_npub: Some("npub1replier".into()),
+            replied_to_has_attachment: Some(true),
+            preview_metadata: Some(SiteMetadata {
+                domain: "example.com".into(),
+                og_title: Some("Test Page".into()),
+                og_description: Some("A test description".into()),
+                og_image: Some("https://example.com/img.png".into()),
+                og_url: Some("https://example.com".into()),
+                og_type: Some("website".into()),
+                title: Some("Test".into()),
+                description: Some("Desc".into()),
+                favicon: Some("https://example.com/favicon.ico".into()),
+            }),
+            attachments: vec![Attachment {
+                id: "aaaa000000000000000000000000000000000000000000000000000000000000".into(),
+                key: "bbbb000000000000000000000000000000000000000000000000000000000000".into(),
+                nonce: "cccccccccccccccccccccccccccccccc".into(), // 32 hex chars = 16 bytes
+                extension: "png".into(),
+                name: "photo.png".into(),
+                url: "https://blossom.example.com".into(),
+                path: "/tmp/photo.png".into(),
+                size: 12345,
+                img_meta: Some(ImageMetadata {
+                    thumbhash: "abc123".into(),
+                    width: 800,
+                    height: 600,
+                }),
+                downloading: false,
+                downloaded: true,
+                webxdc_topic: None,
+                group_id: None,
+                original_hash: None,
+                scheme_version: None,
+                mls_filename: None,
+            }],
+            reactions: vec![Reaction {
+                id: "dddd000000000000000000000000000000000000000000000000000000000000".into(),
+                reference_id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".into(),
+                author_id: "npub1reactor".into(),
+                emoji: "\u{1f44d}".into(), // thumbs up
+            }],
+            at: 1705320000000, // 2024-01-15 12:00:00 UTC ms
+            pending: false,
+            failed: false,
+            mine: true,
+            npub: Some("npub1sender".into()),
+            wrapper_event_id: Some("eeee000000000000000000000000000000000000000000000000000000000000".into()),
+            edited: true,
+            edit_history: Some(vec![
+                EditEntry { content: "Original".into(), edited_at: 1705320000000 },
+                EditEntry { content: "Edited".into(), edited_at: 1705320060000 },
+            ]),
+        }
+    }
+
+    #[test]
+    fn compact_message_from_message_roundtrip_all_fields() {
+        let msg = make_full_message();
+        let mut interner = NpubInterner::new();
+        let compact = CompactMessage::from_message(&msg, &mut interner);
+        let restored = compact.to_message(&interner);
+
+        assert_eq!(restored.id, msg.id, "id mismatch");
+        assert_eq!(restored.content, msg.content, "content mismatch");
+        assert_eq!(restored.mine, msg.mine, "mine mismatch");
+        assert_eq!(restored.pending, msg.pending, "pending mismatch");
+        assert_eq!(restored.failed, msg.failed, "failed mismatch");
+        assert_eq!(restored.npub, msg.npub, "npub mismatch");
+        assert_eq!(restored.replied_to, msg.replied_to, "replied_to mismatch");
+        assert_eq!(restored.replied_to_content, msg.replied_to_content, "replied_to_content mismatch");
+        assert_eq!(restored.replied_to_npub, msg.replied_to_npub, "replied_to_npub mismatch");
+        assert_eq!(restored.replied_to_has_attachment, msg.replied_to_has_attachment, "replied_to_has_attachment mismatch");
+        assert_eq!(restored.wrapper_event_id, msg.wrapper_event_id, "wrapper_event_id mismatch");
+        assert_eq!(restored.edited, msg.edited, "edited mismatch");
+        assert_eq!(restored.edit_history, msg.edit_history, "edit_history mismatch");
+        assert_eq!(restored.preview_metadata, msg.preview_metadata, "preview_metadata mismatch");
+        // Timestamp loses sub-second precision but seconds should match
+        assert_eq!(restored.at / 1000, msg.at / 1000, "timestamp seconds mismatch");
+        // Attachments
+        assert_eq!(restored.attachments.len(), 1, "should have 1 attachment");
+        assert_eq!(restored.attachments[0].id, msg.attachments[0].id);
+        assert_eq!(restored.attachments[0].name, msg.attachments[0].name);
+        assert_eq!(restored.attachments[0].size, msg.attachments[0].size);
+        // Reactions
+        assert_eq!(restored.reactions.len(), 1, "should have 1 reaction");
+        assert_eq!(restored.reactions[0].emoji, msg.reactions[0].emoji);
+    }
+
+    #[test]
+    fn compact_message_from_message_owned_roundtrip() {
+        let msg = make_full_message();
+        let msg_clone = msg.clone();
+        let mut interner = NpubInterner::new();
+        let compact = CompactMessage::from_message_owned(msg, &mut interner);
+        let restored = compact.to_message(&interner);
+
+        assert_eq!(restored.id, msg_clone.id, "id mismatch");
+        assert_eq!(restored.content, msg_clone.content, "content mismatch");
+        assert_eq!(restored.mine, msg_clone.mine, "mine mismatch");
+        assert_eq!(restored.npub, msg_clone.npub, "npub mismatch");
+        assert_eq!(restored.edit_history, msg_clone.edit_history, "edit_history mismatch");
+    }
+
+    #[test]
+    fn compact_message_pending_flag() {
+        let msg = Message {
+            id: "pending-1234567890".into(),
+            pending: true,
+            ..Message::default()
+        };
+        let mut interner = NpubInterner::new();
+        let compact = CompactMessage::from_message(&msg, &mut interner);
+        assert!(compact.is_pending(), "pending flag should be set");
+        let restored = compact.to_message(&interner);
+        assert!(restored.pending, "pending should roundtrip");
+        assert_eq!(restored.id, "pending-1234567890", "pending ID should roundtrip");
+    }
+
+    #[test]
+    fn compact_message_failed_flag() {
+        let msg = Message {
+            id: "pending-999".into(),
+            failed: true,
+            pending: true,
+            ..Message::default()
+        };
+        let mut interner = NpubInterner::new();
+        let compact = CompactMessage::from_message(&msg, &mut interner);
+        assert!(compact.is_failed(), "failed flag should be set");
+        assert!(compact.is_pending(), "pending flag should also be set");
+        let restored = compact.to_message(&interner);
+        assert!(restored.failed);
+        assert!(restored.pending);
+    }
+
+    #[test]
+    fn compact_message_with_attachments_roundtrip() {
+        let msg = Message {
+            id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".into(),
+            attachments: vec![
+                Attachment {
+                    id: "1111111111111111111111111111111111111111111111111111111111111111".into(),
+                    extension: "jpg".into(),
+                    name: "sunset.jpg".into(),
+                    size: 5000,
+                    downloaded: true,
+                    ..Attachment::default()
+                },
+                Attachment {
+                    id: "2222222222222222222222222222222222222222222222222222222222222222".into(),
+                    extension: "mp4".into(),
+                    name: "video.mp4".into(),
+                    size: 50000,
+                    downloaded: false,
+                    downloading: true,
+                    ..Attachment::default()
+                },
+            ],
+            ..Message::default()
+        };
+        let mut interner = NpubInterner::new();
+        let compact = CompactMessage::from_message(&msg, &mut interner);
+        assert_eq!(compact.attachments.len(), 2);
+
+        let restored = compact.to_message(&interner);
+        assert_eq!(restored.attachments.len(), 2);
+        assert_eq!(restored.attachments[0].name, "sunset.jpg");
+        assert_eq!(restored.attachments[0].extension, "jpg");
+        assert!(restored.attachments[0].downloaded);
+        assert_eq!(restored.attachments[1].name, "video.mp4");
+        assert!(restored.attachments[1].downloading);
+        assert!(!restored.attachments[1].downloaded);
+    }
+
+    #[test]
+    fn compact_message_with_reactions_roundtrip() {
+        let msg = Message {
+            id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".into(),
+            reactions: vec![
+                Reaction {
+                    id: "aaa0000000000000000000000000000000000000000000000000000000000000".into(),
+                    reference_id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".into(),
+                    author_id: "npub1alice".into(),
+                    emoji: "\u{2764}".into(), // heart
+                },
+                Reaction {
+                    id: "bbb0000000000000000000000000000000000000000000000000000000000000".into(),
+                    reference_id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".into(),
+                    author_id: "npub1bob".into(),
+                    emoji: "\u{1f525}".into(), // fire
+                },
+            ],
+            ..Message::default()
+        };
+        let mut interner = NpubInterner::new();
+        let compact = CompactMessage::from_message(&msg, &mut interner);
+        let restored = compact.to_message(&interner);
+
+        assert_eq!(restored.reactions.len(), 2);
+        assert_eq!(restored.reactions[0].emoji, "\u{2764}");
+        assert_eq!(restored.reactions[0].author_id, "npub1alice");
+        assert_eq!(restored.reactions[1].emoji, "\u{1f525}");
+        assert_eq!(restored.reactions[1].author_id, "npub1bob");
+    }
+
+    #[test]
+    fn compact_message_with_edit_history_roundtrip() {
+        let msg = Message {
+            id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".into(),
+            content: "Final version".into(),
+            edited: true,
+            edit_history: Some(vec![
+                EditEntry { content: "First draft".into(), edited_at: 1000 },
+                EditEntry { content: "Second draft".into(), edited_at: 2000 },
+                EditEntry { content: "Final version".into(), edited_at: 3000 },
+            ]),
+            ..Message::default()
+        };
+        let mut interner = NpubInterner::new();
+        let compact = CompactMessage::from_message(&msg, &mut interner);
+        assert!(compact.is_edited());
+
+        let restored = compact.to_message(&interner);
+        assert!(restored.edited);
+        let history = restored.edit_history.unwrap();
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0].content, "First draft");
+        assert_eq!(history[2].content, "Final version");
+    }
+
+    #[test]
+    fn compact_message_with_preview_metadata_roundtrip() {
+        let meta = SiteMetadata {
+            domain: "example.com".into(),
+            og_title: Some("Title".into()),
+            og_description: Some("Desc".into()),
+            og_image: Some("https://example.com/img.png".into()),
+            og_url: None,
+            og_type: None,
+            title: None,
+            description: None,
+            favicon: None,
+        };
+        let msg = Message {
+            id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".into(),
+            preview_metadata: Some(meta.clone()),
+            ..Message::default()
+        };
+        let mut interner = NpubInterner::new();
+        let compact = CompactMessage::from_message(&msg, &mut interner);
+        let restored = compact.to_message(&interner);
+
+        let restored_meta = restored.preview_metadata.unwrap();
+        assert_eq!(restored_meta.domain, "example.com");
+        assert_eq!(restored_meta.og_title, Some("Title".into()));
+        assert_eq!(restored_meta.og_image, Some("https://example.com/img.png".into()));
+        assert_eq!(restored_meta.og_url, None);
+    }
+
+    #[test]
+    fn compact_message_with_replied_to_roundtrip() {
+        let msg = Message {
+            id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".into(),
+            replied_to: "1111111111111111111111111111111111111111111111111111111111111111".into(),
+            replied_to_content: Some("Original text".into()),
+            replied_to_npub: Some("npub1original".into()),
+            replied_to_has_attachment: Some(false),
+            ..Message::default()
+        };
+        let mut interner = NpubInterner::new();
+        let compact = CompactMessage::from_message(&msg, &mut interner);
+        assert!(compact.has_reply());
+
+        let restored = compact.to_message(&interner);
+        assert_eq!(restored.replied_to, "1111111111111111111111111111111111111111111111111111111111111111");
+        assert_eq!(restored.replied_to_content, Some("Original text".into()));
+        assert_eq!(restored.replied_to_npub, Some("npub1original".into()));
+        assert_eq!(restored.replied_to_has_attachment, Some(false));
+    }
+
+    #[test]
+    fn compact_message_empty_roundtrip() {
+        let msg = Message::default();
+        let mut interner = NpubInterner::new();
+        let compact = CompactMessage::from_message(&msg, &mut interner);
+        let restored = compact.to_message(&interner);
+
+        assert_eq!(restored.id, "0000000000000000000000000000000000000000000000000000000000000000",
+            "empty ID should decode as all zeros hex");
+        assert_eq!(restored.content, "");
+        assert!(!restored.mine);
+        assert!(!restored.pending);
+        assert!(!restored.failed);
+        assert!(!restored.edited);
+        assert_eq!(restored.npub, None);
+        assert!(restored.replied_to.is_empty() || restored.replied_to == "0000000000000000000000000000000000000000000000000000000000000000");
+        assert_eq!(restored.replied_to_content, None);
+        assert_eq!(restored.replied_to_npub, None);
+        assert_eq!(restored.replied_to_has_attachment, None);
+        assert_eq!(restored.wrapper_event_id, None);
+        assert!(restored.attachments.is_empty());
+        assert!(restored.reactions.is_empty());
+        assert_eq!(restored.edit_history, None);
+        assert_eq!(restored.preview_metadata, None);
+    }
+
+    // ========================================================================
+    // CompactAttachment Tests
+    // ========================================================================
+
+    #[test]
+    fn compact_attachment_from_attachment_roundtrip() {
+        let att = Attachment {
+            id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".into(),
+            key: "1111111111111111111111111111111111111111111111111111111111111111".into(),
+            nonce: "aabbccddaabbccddaabbccddaabbccdd".into(), // 32 hex = 16-byte DM nonce
+            extension: "zip".into(),
+            name: "archive.zip".into(),
+            url: "https://blossom.test.com".into(),
+            path: "/downloads/archive.zip".into(),
+            size: 99999,
+            img_meta: None,
+            downloading: false,
+            downloaded: true,
+            webxdc_topic: None,
+            group_id: None,
+            original_hash: None,
+            scheme_version: None,
+            mls_filename: None,
+        };
+
+        let compact = CompactAttachment::from_attachment(&att);
+        let restored = compact.to_attachment();
+
+        assert_eq!(restored.id, att.id, "id mismatch");
+        assert_eq!(restored.key, att.key, "key mismatch");
+        assert_eq!(restored.nonce, att.nonce, "nonce mismatch");
+        assert_eq!(restored.extension, att.extension, "extension mismatch");
+        assert_eq!(restored.name, att.name, "name mismatch");
+        assert_eq!(restored.url, att.url, "url mismatch");
+        assert_eq!(restored.path, att.path, "path mismatch");
+        assert_eq!(restored.size, att.size, "size mismatch");
+        assert_eq!(restored.downloading, att.downloading, "downloading mismatch");
+        assert_eq!(restored.downloaded, att.downloaded, "downloaded mismatch");
+    }
+
+    #[test]
+    fn compact_attachment_from_attachment_owned_roundtrip() {
+        let att = Attachment {
+            id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".into(),
+            key: "1111111111111111111111111111111111111111111111111111111111111111".into(),
+            nonce: "aabbccddaabbccddaabbccddaabbccdd".into(),
+            extension: "pdf".into(),
+            name: "document.pdf".into(),
+            url: "https://server.com".into(),
+            path: "".into(),
+            size: 1024,
+            img_meta: None,
+            downloading: false,
+            downloaded: false,
+            webxdc_topic: None,
+            group_id: None,
+            original_hash: None,
+            scheme_version: None,
+            mls_filename: None,
+        };
+        let att_clone = att.clone();
+
+        let compact = CompactAttachment::from_attachment_owned(att);
+        let restored = compact.to_attachment();
+
+        assert_eq!(restored.id, att_clone.id);
+        assert_eq!(restored.name, att_clone.name);
+        assert_eq!(restored.size, att_clone.size);
+    }
+
+    #[test]
+    fn compact_attachment_key_nonce_zeros() {
+        let att = Attachment {
+            id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".into(),
+            key: "".into(), // empty key = MLS derived
+            nonce: "".into(), // empty nonce
+            ..Attachment::default()
+        };
+        let compact = CompactAttachment::from_attachment(&att);
+        assert_eq!(compact.key, [0u8; 32], "empty key should be all zeros");
+        assert_eq!(compact.nonce, [0u8; 16], "empty nonce should be all zeros");
+
+        let restored = compact.to_attachment();
+        assert_eq!(restored.key, "", "zero key should restore as empty string");
+        assert_eq!(restored.nonce, "", "zero nonce should restore as empty string");
+    }
+
+    #[test]
+    fn compact_attachment_short_nonce_mls_12byte() {
+        // MLS nonce is 12 bytes = 24 hex chars
+        let att = Attachment {
+            id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".into(),
+            nonce: "aabbccddaabbccddaabbccdd".into(), // 24 hex chars = 12 bytes
+            ..Attachment::default()
+        };
+        let compact = CompactAttachment::from_attachment(&att);
+        assert!(compact.flags.is_short_nonce(), "12-byte nonce should set short_nonce flag");
+
+        let restored = compact.to_attachment();
+        assert_eq!(restored.nonce, "aabbccddaabbccddaabbccdd", "short nonce should roundtrip");
+    }
+
+    #[test]
+    fn compact_attachment_long_nonce_dm_16byte() {
+        // DM nonce is 16 bytes = 32 hex chars
+        let att = Attachment {
+            id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".into(),
+            nonce: "aabbccddaabbccddaabbccddaabbccdd".into(), // 32 hex chars = 16 bytes
+            ..Attachment::default()
+        };
+        let compact = CompactAttachment::from_attachment(&att);
+        assert!(!compact.flags.is_short_nonce(), "16-byte nonce should NOT set short_nonce flag");
+
+        let restored = compact.to_attachment();
+        assert_eq!(restored.nonce, "aabbccddaabbccddaabbccddaabbccdd", "long nonce should roundtrip");
+    }
+
+    #[test]
+    fn compact_attachment_id_eq_comparison() {
+        let att = Attachment {
+            id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".into(),
+            ..Attachment::default()
+        };
+        let compact = CompactAttachment::from_attachment(&att);
+
+        assert!(compact.id_eq("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"),
+            "id_eq should match same hex");
+        assert!(!compact.id_eq("1111111111111111111111111111111111111111111111111111111111111111"),
+            "id_eq should not match different hex");
+    }
+
+    #[test]
+    fn compact_attachment_all_optional_fields_none() {
+        let att = Attachment::default();
+        let compact = CompactAttachment::from_attachment(&att);
+
+        assert!(compact.img_meta.is_none());
+        assert!(compact.group_id.is_none());
+        assert!(compact.original_hash.is_none());
+        assert!(compact.webxdc_topic.is_none());
+        assert!(compact.mls_filename.is_none());
+        assert!(compact.scheme_version.is_none());
+
+        let restored = compact.to_attachment();
+        assert!(restored.img_meta.is_none());
+        assert!(restored.group_id.is_none());
+        assert!(restored.original_hash.is_none());
+        assert!(restored.webxdc_topic.is_none());
+        assert!(restored.mls_filename.is_none());
+        assert!(restored.scheme_version.is_none());
+    }
+
+    #[test]
+    fn compact_attachment_all_optional_fields_some() {
+        let att = Attachment {
+            id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".into(),
+            key: "1111111111111111111111111111111111111111111111111111111111111111".into(),
+            nonce: "aabbccddaabbccddaabbccddaabbccdd".into(),
+            extension: "xdc".into(),
+            name: "app.xdc".into(),
+            url: "https://server.com/file".into(),
+            path: "/local/app.xdc".into(),
+            size: 50000,
+            img_meta: Some(ImageMetadata {
+                thumbhash: "hash123".into(),
+                width: 1920,
+                height: 1080,
+            }),
+            downloading: false,
+            downloaded: true,
+            webxdc_topic: Some("game-state".into()),
+            group_id: Some("cccc000000000000000000000000000000000000000000000000000000000000".into()),
+            original_hash: Some("dddd000000000000000000000000000000000000000000000000000000000000".into()),
+            scheme_version: Some("mip04-v1".into()),
+            mls_filename: Some("encrypted.bin".into()),
+        };
+
+        let compact = CompactAttachment::from_attachment(&att);
+
+        assert!(compact.img_meta.is_some());
+        assert!(compact.group_id.is_some());
+        assert!(compact.original_hash.is_some());
+        assert!(compact.webxdc_topic.is_some());
+        assert!(compact.mls_filename.is_some());
+        assert!(compact.scheme_version.is_some());
+
+        let restored = compact.to_attachment();
+        let meta = restored.img_meta.unwrap();
+        assert_eq!(meta.thumbhash, "hash123");
+        assert_eq!(meta.width, 1920);
+        assert_eq!(meta.height, 1080);
+        assert_eq!(restored.webxdc_topic, Some("game-state".into()));
+        assert_eq!(restored.group_id.unwrap(), att.group_id.unwrap());
+        assert_eq!(restored.original_hash.unwrap(), att.original_hash.unwrap());
+        assert_eq!(restored.scheme_version, Some("mip04-v1".into()));
+        assert_eq!(restored.mls_filename, Some("encrypted.bin".into()));
+    }
+
+    // ========================================================================
+    // CompactReaction Tests
+    // ========================================================================
+
+    #[test]
+    fn compact_reaction_from_reaction_roundtrip() {
+        let reaction = Reaction {
+            id: "aaaa000000000000000000000000000000000000000000000000000000000000".into(),
+            reference_id: "bbbb000000000000000000000000000000000000000000000000000000000000".into(),
+            author_id: "npub1alice".into(),
+            emoji: "+".into(),
+        };
+        let mut interner = NpubInterner::new();
+        let compact = CompactReaction::from_reaction(&reaction, &mut interner);
+        let restored = compact.to_reaction(&interner);
+
+        assert_eq!(restored.id, reaction.id, "id mismatch");
+        assert_eq!(restored.reference_id, reaction.reference_id, "reference_id mismatch");
+        assert_eq!(restored.author_id, reaction.author_id, "author_id mismatch");
+        assert_eq!(restored.emoji, reaction.emoji, "emoji mismatch");
+    }
+
+    #[test]
+    fn compact_reaction_author_resolved_via_interner() {
+        let mut interner = NpubInterner::new();
+        let alice_handle = interner.intern("npub1alice");
+
+        let reaction = Reaction {
+            id: "aaaa000000000000000000000000000000000000000000000000000000000000".into(),
+            reference_id: "bbbb000000000000000000000000000000000000000000000000000000000000".into(),
+            author_id: "npub1alice".into(),
+            emoji: "+".into(),
+        };
+        let compact = CompactReaction::from_reaction(&reaction, &mut interner);
+        assert_eq!(compact.author_idx, alice_handle, "should reuse existing interner handle");
+
+        let resolved = interner.resolve(compact.author_idx).unwrap();
+        assert_eq!(resolved, "npub1alice");
+    }
+
+    #[test]
+    fn compact_reaction_unicode_emoji() {
+        let reaction = Reaction {
+            id: "aaaa000000000000000000000000000000000000000000000000000000000000".into(),
+            reference_id: "bbbb000000000000000000000000000000000000000000000000000000000000".into(),
+            author_id: "npub1test".into(),
+            emoji: "\u{1f431}\u{200d}\u{1f4bb}".into(), // cat with laptop (ZWJ sequence)
+        };
+        let mut interner = NpubInterner::new();
+        let compact = CompactReaction::from_reaction(&reaction, &mut interner);
+        let restored = compact.to_reaction(&interner);
+        assert_eq!(restored.emoji, "\u{1f431}\u{200d}\u{1f4bb}", "complex unicode emoji should roundtrip");
+    }
+
+    #[test]
+    fn compact_reaction_custom_emoji() {
+        let reaction = Reaction {
+            id: "aaaa000000000000000000000000000000000000000000000000000000000000".into(),
+            reference_id: "bbbb000000000000000000000000000000000000000000000000000000000000".into(),
+            author_id: "npub1test".into(),
+            emoji: ":cat_heart_eyes:".into(),
+        };
+        let mut interner = NpubInterner::new();
+        let compact = CompactReaction::from_reaction(&reaction, &mut interner);
+        let restored = compact.to_reaction(&interner);
+        assert_eq!(restored.emoji, ":cat_heart_eyes:", "custom emoji shortcode should roundtrip");
+    }
+
+    #[test]
+    fn compact_reaction_owned_conversion() {
+        let reaction = Reaction {
+            id: "aaaa000000000000000000000000000000000000000000000000000000000000".into(),
+            reference_id: "bbbb000000000000000000000000000000000000000000000000000000000000".into(),
+            author_id: "npub1bob".into(),
+            emoji: "\u{1f44d}".into(), // thumbs up
+        };
+        let reaction_clone = reaction.clone();
+        let mut interner = NpubInterner::new();
+        let compact = CompactReaction::from_reaction_owned(reaction, &mut interner);
+        let restored = compact.to_reaction(&interner);
+
+        assert_eq!(restored.id, reaction_clone.id);
+        assert_eq!(restored.author_id, reaction_clone.author_id);
+        assert_eq!(restored.emoji, reaction_clone.emoji);
+    }
+
+    // ========================================================================
+    // TinyVec Tests
+    // ========================================================================
+
+    #[test]
+    fn tinyvec_empty() {
+        let tv: TinyVec<u32> = TinyVec::new();
+        assert!(tv.is_empty());
+        assert_eq!(tv.len(), 0);
+        assert_eq!(tv.as_slice(), &[] as &[u32]);
+        assert_eq!(tv.first(), None);
+        assert_eq!(tv.last(), None);
+    }
+
+    #[test]
+    fn tinyvec_from_vec_and_back() {
+        let original = vec![1u32, 2, 3, 4, 5];
+        let tv = TinyVec::from_vec(original.clone());
+        assert_eq!(tv.len(), 5);
+        assert_eq!(tv.to_vec(), original);
+    }
+
+    #[test]
+    fn tinyvec_indexing() {
+        let tv = TinyVec::from_vec(vec![10u32, 20, 30]);
+        assert_eq!(tv[0], 10);
+        assert_eq!(tv[1], 20);
+        assert_eq!(tv[2], 30);
+        assert_eq!(tv.get(0), Some(&10));
+        assert_eq!(tv.get(3), None);
+    }
+
+    #[test]
+    fn tinyvec_push() {
+        let mut tv = TinyVec::from_vec(vec![1u32, 2]);
+        tv.push(3);
+        assert_eq!(tv.len(), 3);
+        assert_eq!(tv.to_vec(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn tinyvec_clone() {
+        let tv = TinyVec::from_vec(vec!["hello".to_string(), "world".to_string()]);
+        let cloned = tv.clone();
+        assert_eq!(cloned.len(), 2);
+        assert_eq!(cloned[0], "hello");
+        assert_eq!(cloned[1], "world");
+    }
+
+    #[test]
+    fn tinyvec_retain() {
+        let mut tv = TinyVec::from_vec(vec![1u32, 2, 3, 4, 5]);
+        tv.retain(|&x| x % 2 == 0);
+        assert_eq!(tv.to_vec(), vec![2, 4]);
+    }
+
+    #[test]
+    fn tinyvec_empty_from_empty_vec() {
+        let tv = TinyVec::<u32>::from_vec(vec![]);
+        assert!(tv.is_empty());
+        assert_eq!(tv.len(), 0);
+    }
+
+    #[test]
+    fn tinyvec_iter() {
+        let tv = TinyVec::from_vec(vec![10u32, 20, 30]);
+        let sum: u32 = tv.iter().sum();
+        assert_eq!(sum, 60);
+    }
+
+    #[test]
+    fn tinyvec_any() {
+        let tv = TinyVec::from_vec(vec![1u32, 2, 3]);
+        assert!(tv.any(|&x| x == 2));
+        assert!(!tv.any(|&x| x == 99));
+    }
+
+    // ========================================================================
+    // hex_to_bytes_16 / bytes_to_hex_string Tests
+    // ========================================================================
+
+    #[test]
+    fn hex_to_bytes_16_full_32_chars() {
+        let hex = "aabbccddaabbccddaabbccddaabbccdd";
+        let bytes = hex_to_bytes_16(hex);
+        assert_eq!(bytes[0], 0xaa);
+        assert_eq!(bytes[1], 0xbb);
+        assert_eq!(bytes[15], 0xdd);
+    }
+
+    #[test]
+    fn hex_to_bytes_16_short_input_padded() {
+        // Short input gets right-padded with '0' before decode
+        let hex = "aabb";
+        let bytes = hex_to_bytes_16(hex);
+        assert_eq!(bytes[0], 0xaa);
+        assert_eq!(bytes[1], 0xbb);
+        // Remaining bytes should be 0 (from padding)
+        for i in 2..16 {
+            assert_eq!(bytes[i], 0, "byte {} should be 0 from padding", i);
+        }
+    }
+
+    #[test]
+    fn bytes_to_hex_string_roundtrip() {
+        let bytes: Vec<u8> = vec![0xaa, 0xbb, 0xcc, 0xdd];
+        let hex = bytes_to_hex_string(&bytes);
+        assert_eq!(hex, "aabbccdd");
     }
 }

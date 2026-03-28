@@ -1,11 +1,12 @@
 use std::cmp::min;
-use std::net::IpAddr;
 
 use futures_util::StreamExt;
 use reqwest::{self, Client};
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
 use url::Url;
+
+pub use vector_core::SiteMetadata;
 
 use crate::simd::html_meta;
 
@@ -396,18 +397,6 @@ async fn download_with_streaming(
     Ok(result)
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Debug)]
-pub struct SiteMetadata {
-    pub domain: String,
-    pub og_title: Option<String>,
-    pub og_description: Option<String>,
-    pub og_image: Option<String>,
-    pub og_url: Option<String>,
-    pub og_type: Option<String>,
-    pub title: Option<String>,
-    pub description: Option<String>,
-    pub favicon: Option<String>,
-}
 
 /// Fetch metadata specifically for Twitter/X posts using their oEmbed API
 async fn fetch_twitter_metadata(url: &str) -> Result<SiteMetadata, String> {

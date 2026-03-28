@@ -15,7 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 
-use crate::simd::hex::bytes_to_hex_16;
+use crate::util::bytes_to_hex_16;
 use crate::util::mime_from_extension_static;
 
 /// Max concurrent connections (prevents FD exhaustion from malicious local apps).

@@ -760,7 +760,7 @@ pub async fn load_recent_wrapper_ids(
             let mut wrapper_ids = Vec::with_capacity(hex_ids.len());
             for hex in hex_ids {
                 if hex.len() == 64 {
-                    let bytes = crate::simd::hex::hex_to_bytes_32(&hex);
+                    let bytes = crate::util::hex_to_bytes_32(&hex);
                     wrapper_ids.push(bytes);
                 }
             }

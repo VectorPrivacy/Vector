@@ -154,7 +154,7 @@ fn disable_encryption_work<R: Runtime>(handle: &AppHandle<R>) -> Result<(), Stri
 
     // Clear the guarded vault (only after successful commit)
     if result.is_ok() {
-        crate::ENCRYPTION_KEY.clear();
+        crate::ENCRYPTION_KEY.clear(&[&crate::MY_SECRET_KEY]);
     }
 
     result
@@ -182,7 +182,7 @@ pub async fn enable_encryption<R: Runtime>(
 ) -> Result<(), String> {
     // Derive key from credential (this is the slow Argon2 step)
     let key = crate::crypto::hash_pass(credential).await;
-    crate::ENCRYPTION_KEY.set(key);
+    crate::ENCRYPTION_KEY.set(key, &[&crate::MY_SECRET_KEY]);
 
     // Close the processing gate
     close_processing_gate();
@@ -202,7 +202,7 @@ pub async fn enable_encryption<R: Runtime>(
             // Transaction rolled back — database is still plaintext.
             // Clear key from memory so maybe_encrypt doesn't encrypt new events
             // while old events remain plaintext (would create mixed state).
-            crate::ENCRYPTION_KEY.clear();
+            crate::ENCRYPTION_KEY.clear(&[&crate::MY_SECRET_KEY]);
             Err(e)
         }
     }
@@ -848,7 +848,7 @@ pub async fn rekey_encryption<R: Runtime>(
     // them permanently (the new key couldn't decrypt them, and subsequent rekeys
     // silently skipped them).
     if result.is_ok() {
-        crate::ENCRYPTION_KEY.set(new_key);
+        crate::ENCRYPTION_KEY.set(new_key, &[&crate::MY_SECRET_KEY]);
     }
 
     // 6. ALWAYS reopen gate and drain queued events (audit C2)

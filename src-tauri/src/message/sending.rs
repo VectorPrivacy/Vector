@@ -1206,9 +1206,9 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                                 let real_id_hex = rumor_id.to_hex();
                                 if let Some(msg) = state.chats[idx].messages.find_by_hex_id_mut(&pending_id_for_early_update) {
                                     // Update the message ID and clear pending state
-                                    msg.id = crate::simd::hex_to_bytes_32(&real_id_hex);
+                                    msg.id = crate::util::hex_to_bytes_32(&real_id_hex);
                                     msg.set_pending(false);
-                                    msg.wrapper_id = Some(Box::new(crate::simd::hex_to_bytes_32(&wrapper_id)));
+                                    msg.wrapper_id = Some(Box::new(crate::util::hex_to_bytes_32(&wrapper_id)));
                                 }
                                 // Rebuild index since ID changed
                                 state.chats[idx].messages.rebuild_index();

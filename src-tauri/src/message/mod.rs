@@ -16,7 +16,6 @@ mod types;
 mod compression;
 mod sending;
 mod files;
-pub mod compact;
 
 // Re-exports (use * for Tauri commands to include generated __cmd__ macros)
 pub use sending::*;
@@ -25,8 +24,7 @@ pub use types::{
     Message, ImageMetadata, Attachment,
     AttachmentFile, Reaction, EditEntry,
 };
-#[allow(unused_imports)]
-pub use compact::{
+pub use vector_core::compact::{
     CompactMessage, CompactMessageVec, CompactReaction, CompactAttachment,
     AttachmentFlags, MessageFlags, NpubInterner, NO_NPUB,
     encode_message_id, decode_message_id,

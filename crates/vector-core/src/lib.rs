@@ -1,0 +1,270 @@
+//! Vector Core — the single source of truth for all Vector clients, SDKs, and interfaces.
+//!
+//! This crate contains ALL of Vector's business logic, fully decoupled from Tauri.
+//! It can be used by:
+//! - **src-tauri**: The Tauri desktop/mobile app (thin command shell)
+//! - **vector-cli**: Command-line interface
+//! - **Vector SDK**: Bot and client libraries
+//! - Any future interface (web, embedded, etc.)
+//!
+//! # Architecture
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────┐
+//! │              vector-core                     │
+//! │                                              │
+//! │  types ─ compact ─ state ─ db ─ crypto       │
+//! │  chat ─ profile ─ net ─ hex                  │
+//! │                                              │
+//! │  traits::EventEmitter (UI abstraction)       │
+//! │  VectorCore (high-level API)                 │
+//! └─────────────────────────────────────────────┘
+//!        ▲              ▲              ▲
+//!   src-tauri       vector-cli     Vector SDK
+//! (AppHandle)      (terminal)     (callbacks)
+//! ```
+
+// === Foundation ===
+pub mod error;
+pub mod traits;
+pub mod hex;
+
+// Nostr SDK trait imports needed for bech32 operations
+use nostr_sdk::prelude::ToBech32;
+
+// === Core Types ===
+pub mod types;
+pub mod profile;
+pub mod chat;
+pub mod compact;
+
+// === State ===
+pub mod state;
+
+// === Debug Stats ===
+#[cfg(debug_assertions)]
+pub mod stats;
+
+// === Crypto ===
+pub mod crypto;
+
+// === Database ===
+pub mod db;
+
+// === Network ===
+pub mod net;
+pub mod blossom;
+pub mod inbox_relays;
+
+// === Messaging ===
+pub mod sending;
+
+// === Re-exports for convenience ===
+pub use types::{Message, Attachment, Reaction, EditEntry, ImageMetadata, SiteMetadata, LoginResult, AttachmentFile};
+pub use profile::{Profile, ProfileFlags, SlimProfile, Status};
+pub use chat::{Chat, ChatType, ChatMetadata, SerializableChat};
+pub use compact::{CompactMessage, CompactMessageVec, NpubInterner};
+pub use state::{ChatState, NOSTR_CLIENT, MY_SECRET_KEY, MY_PUBLIC_KEY, STATE, ENCRYPTION_KEY};
+pub use crypto::{GuardedKey, GuardedSigner};
+pub use error::{VectorError, Result};
+pub use traits::{EventEmitter, NoOpEmitter, set_event_emitter, emit_event};
+pub use db::{set_app_data_dir, get_app_data_dir};
+
+use std::path::PathBuf;
+
+// ============================================================================
+// VectorCore — High-level API
+// ============================================================================
+
+/// Configuration for initializing VectorCore.
+pub struct CoreConfig {
+    /// Path to the app data directory (e.g., ~/.local/share/io.vectorapp/data/)
+    pub data_dir: PathBuf,
+    /// Optional event emitter for UI integration
+    pub event_emitter: Option<Box<dyn EventEmitter>>,
+}
+
+/// The main entry point for Vector Core.
+///
+/// Provides a high-level API for all Vector operations. Internally uses
+/// global state (same pattern as the Tauri backend) for compatibility.
+///
+/// ```no_run
+/// use vector_core::{VectorCore, CoreConfig};
+/// use std::path::PathBuf;
+///
+/// # async fn example() -> vector_core::Result<()> {
+/// let core = VectorCore::init(CoreConfig {
+///     data_dir: PathBuf::from("/tmp/vector-data"),
+///     event_emitter: None,
+/// })?;
+///
+/// // Login with nsec
+/// let result = core.login("nsec1...", None).await?;
+/// println!("Logged in as {}", result.npub);
+/// # Ok(())
+/// # }
+/// ```
+pub struct VectorCore;
+
+impl VectorCore {
+    /// Initialize Vector Core with the given configuration.
+    pub fn init(config: CoreConfig) -> Result<Self> {
+        // Set data directory
+        db::set_app_data_dir(config.data_dir);
+
+        // Set event emitter (or no-op)
+        if let Some(emitter) = config.event_emitter {
+            traits::set_event_emitter(emitter);
+        }
+
+        // Install rustls ring provider
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        Ok(VectorCore)
+    }
+
+    /// Get all available accounts.
+    pub fn accounts(&self) -> Result<Vec<String>> {
+        db::get_accounts().map_err(VectorError::from)
+    }
+
+    /// Login with an nsec key or mnemonic seed phrase.
+    pub async fn login(&self, key: &str, password: Option<&str>) -> Result<LoginResult> {
+        use nostr_sdk::prelude::*;
+
+        // Parse the key
+        let keys = if key.starts_with("nsec1") {
+            let secret = SecretKey::from_bech32(key)
+                .map_err(|e| VectorError::Nostr(format!("Invalid nsec: {}", e)))?;
+            Keys::new(secret)
+        } else {
+            // Treat as mnemonic (NIP-06: derive from BIP-39 seed)
+            Keys::from_mnemonic(key, None)
+                .map_err(|e| VectorError::Nostr(format!("Key derivation failed: {}", e)))?
+        };
+
+        let public_key = keys.public_key();
+        let npub = public_key.to_bech32()
+            .map_err(|e| VectorError::Nostr(format!("Failed to encode npub: {}", e)))?;
+
+        // Store in GuardedKey vault (pass other vaults to protect during decoy writes)
+        let secret_bytes = keys.secret_key().to_secret_bytes();
+        state::MY_SECRET_KEY.set(secret_bytes, &[&state::ENCRYPTION_KEY]);
+        let _ = state::MY_PUBLIC_KEY.set(public_key);
+
+        // Initialize database for this account
+        db::set_current_account(npub.clone())?;
+        db::init_database(&npub)?;
+
+        // Store nsec for encryption setup
+        {
+            let nsec = keys.secret_key().to_bech32()
+                .map_err(|e| VectorError::Nostr(format!("Failed to encode nsec: {}", e)))?;
+            *state::PENDING_NSEC.lock().unwrap() = Some(nsec.clone());
+
+            // Store pkey in DB
+            db::set_pkey(&nsec)?;
+        }
+
+        // Check if encryption is set up
+        let has_encryption = db::get_sql_setting("encryption_enabled".to_string())
+            .ok().flatten()
+            .map(|v| v != "false")
+            .unwrap_or(false);
+
+        if has_encryption {
+            if let Some(pwd) = password {
+                let key = crate::crypto::hash_pass(pwd).await;
+                state::ENCRYPTION_KEY.set(key, &[&state::MY_SECRET_KEY]);
+            }
+            state::init_encryption_enabled();
+        }
+
+        // Build Nostr client
+        let client = ClientBuilder::new().signer(keys).build();
+
+        // Add trusted relays
+        for relay in state::TRUSTED_RELAYS {
+            client.add_relay(*relay).await.ok();
+        }
+
+        // Connect
+        client.connect().await;
+
+        let _ = state::NOSTR_CLIENT.set(client);
+
+        Ok(LoginResult { npub, has_encryption })
+    }
+
+    /// Send a NIP-17 gift-wrapped text DM using the full pipeline
+    /// (pending → inbox relay resolution → gift-wrap → send → confirm).
+    pub async fn send_dm(&self, to_npub: &str, content: &str) -> Result<sending::SendResult> {
+        sending::send_dm(to_npub, content, None).await
+            .map_err(|e| VectorError::Other(e))
+    }
+
+    /// Send a NIP-17 gift-wrapped file attachment DM.
+    /// Encrypts with AES-256-GCM, uploads to Blossom, sends Kind 15 event.
+    pub async fn send_file(&self, to_npub: &str, file_path: &str) -> Result<sending::SendResult> {
+        let path = std::path::Path::new(file_path);
+        let bytes = std::fs::read(path)
+            .map_err(|e| VectorError::Io(e))?;
+        let filename = path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file");
+        let extension = path.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("bin");
+
+        sending::send_file_dm(
+            to_npub,
+            std::sync::Arc::new(bytes),
+            filename,
+            extension,
+            None,
+        ).await.map_err(|e| VectorError::Other(e))
+    }
+
+    /// Get chats from the in-memory state.
+    pub async fn get_chats(&self) -> Vec<SerializableChat> {
+        let state = state::STATE.lock().await;
+        state.chats.iter()
+            .map(|c| c.to_serializable_with_last_n(1, &state.interner))
+            .collect()
+    }
+
+    /// Get messages for a chat (paginated).
+    pub async fn get_messages(&self, chat_id: &str, limit: usize, offset: usize) -> Vec<Message> {
+        let state = state::STATE.lock().await;
+        if let Some(chat) = state.get_chat(chat_id) {
+            let msgs = chat.get_all_messages(&state.interner);
+            let start = offset.min(msgs.len());
+            let end = (offset + limit).min(msgs.len());
+            msgs[start..end].to_vec()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Get a profile by npub.
+    pub async fn get_profile(&self, npub: &str) -> Option<SlimProfile> {
+        let state = state::STATE.lock().await;
+        state.get_profile(npub)
+            .map(|p| SlimProfile::from_profile(p, &state.interner))
+    }
+
+    /// Get the current user's npub.
+    pub fn my_npub(&self) -> Option<String> {
+        state::MY_PUBLIC_KEY.get()
+            .and_then(|pk| ToBech32::to_bech32(pk).ok())
+    }
+
+    /// Disconnect and clean up.
+    pub async fn logout(&self) {
+        if let Some(client) = state::NOSTR_CLIENT.get() {
+            let _ = client.disconnect().await;
+        }
+        db::close_database();
+    }
+}

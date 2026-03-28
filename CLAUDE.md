@@ -15,22 +15,43 @@ npm run android:build    # Android release (tauri android build)
 
 Frontend build: `node scripts/build-frontend.mjs` copies `src/` to `dist/` with optional minification (terser + lightningcss in release).
 
-No test suite — testing is manual/integration-based.
+Vector Core test suite: `cd crates && cargo test -p vector-core`.
 
 ## Architecture
 
-### Backend (`src-tauri/src/`)
+### Vector Core (`crates/vector-core/`) — Single Source of Truth
 
-- **`lib.rs`** — App entry, plugin registration, state init, `invoke_handler` with 150+ commands
-- **`commands/`** — Tauri command handlers organized by domain (account, attachments, encryption, invites, media, messaging, mls, realtime, relays, sync, system)
-- **`message/`** — Message models, sending logic, file handling, compact memory format
-- **`db/`** — SQLite via rusqlite (schema, queries, settings, migrations)
-- **`mls/`** — MLS group encryption (OpenMLS)
-- **`miniapps/`** — WebXDC-compatible mini apps (scheme handler, state, commands, Iroh P2P realtime)
-- **`state/`** — Global state via `tokio::sync::OnceCell` and `Arc<Mutex<T>>`
-- **`services/`** — Business logic (notifications, contact management)
+All business logic lives here, fully decoupled from Tauri. Any client (GUI, CLI, SDK, bot) imports this crate.
+
+- **`types.rs`** — Message, Attachment, Reaction, EditEntry, ImageMetadata, SiteMetadata
+- **`profile.rs`** — Profile, ProfileFlags, SlimProfile (Box<str> optimized, u16 interner handles)
+- **`chat.rs`** — Chat, ChatType, ChatMetadata, SerializableChat
+- **`compact.rs`** — CompactMessage, CompactMessageVec, NpubInterner, TinyVec, bitflags
+- **`state.rs`** — ChatState, all globals (NOSTR_CLIENT, MY_SECRET_KEY, STATE, etc.), WrapperIdCache, processing gate
+- **`crypto/`** — GuardedKey 128-array vault, GuardedSigner, Argon2id, AES-256-GCM, ChaCha20-Poly1305
+- **`db/`** — SQLite schema, 20 atomic migrations, connection pools, RAII guards, settings KV
+- **`hex.rs`** — SIMD hex encode/decode (NEON ARM64, SSE2/AVX2 x86_64, scalar fallback)
+- **`sending.rs`** — NIP-17 gift-wrapped DM pipeline (text + encrypted file attachments)
+- **`blossom.rs`** — File upload with progress tracking, retry, server failover
+- **`inbox_relays.rs`** — NIP-17 kind 10050 relay resolution, stampede-protected cache, gift-wrap sending
+- **`net.rs`** — SSRF protection
+- **`stats.rs`** — CacheStats, DeepSize trait for memory benchmarking (debug builds)
+- **`traits.rs`** — EventEmitter trait (abstracts UI notification), ProgressReporter
+
+`src-tauri` consumes vector-core via `path = "../crates/vector-core"`. Types and globals are re-exported — same instances, shared memory.
+
+### Tauri Shell (`src-tauri/src/`)
+
+- **`lib.rs`** — App entry, plugin registration, `invoke_handler` with 150+ commands
+- **`commands/`** — Tauri command handlers (thin wrappers around vector-core logic)
+- **`state/`** — Re-exports vector-core globals + local TAURI_APP
+- **`message/`** — Re-exports vector-core types + Tauri-specific compression cache
+- **`services/`** — Event handler, subscription handler, notifications (not yet in vector-core)
+- **`mls/`** — MLS group encryption via OpenMLS/MDK (not yet in vector-core)
+- **`miniapps/`** — WebXDC-compatible mini apps (Tauri-specific: custom protocol, WebView, Iroh P2P)
 - **`android/`** — JNI bindings, localhost media server, background sync
-- **`rumor.rs`** — Nostr event processing (Kind 4/15 DMs, Kind 9 MLS, Kind 1/7/5 reactions/edits/deletes)
+- **`rumor.rs`** — Nostr event processing (not yet in vector-core)
+- **`simd/`** — SIMD image, audio, URL, HTML operations (hex moved to vector-core)
 
 ### Frontend (`src/`)
 

@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::{STATE, TAURI_APP, ChatType, Attachment};
-use crate::{util, crypto, net, db, mls, simd};
+use crate::{util, crypto, net, db, mls};
 use crate::util::hex_string_to_bytes;
 
 /// Global set of attachment IDs currently being downloaded.
@@ -366,7 +366,7 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
 
                         if let Ok(vector_dir) = handle.path().resolve("vector", base_directory) {
                             // Check both hash-based and human-readable filenames
-                            let hash_path = vector_dir.join(format!("{}.{}", simd::bytes_to_hex_32(&attachment.id), &*attachment.extension));
+                            let hash_path = vector_dir.join(format!("{}.{}", util::bytes_to_hex_32(&attachment.id), &*attachment.extension));
                             let name_path = if !attachment.name.is_empty() {
                                 Some(vector_dir.join(&*attachment.name))
                             } else {
@@ -376,7 +376,7 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                                 Some(hash_path)
                             } else {
                                 // Only reuse a name-based file if its content hash matches
-                                let expected_hash = simd::bytes_to_hex_32(&attachment.id);
+                                let expected_hash = util::bytes_to_hex_32(&attachment.id);
                                 name_path.filter(|p| {
                                     p.exists()
                                         && std::fs::metadata(p).map(|m| m.len() == attachment.size).unwrap_or(false)
@@ -442,7 +442,7 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
     };
 
     // Begin our download progress events
-    let attachment_hex_id = simd::bytes_to_hex_32(&attachment.id);
+    let attachment_hex_id = util::bytes_to_hex_32(&attachment.id);
     handle.emit("attachment_download_progress", serde_json::json!({
         "id": &attachment_hex_id,
         "progress": 0

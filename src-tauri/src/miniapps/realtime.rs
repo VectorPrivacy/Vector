@@ -944,7 +944,7 @@ impl RealtimeManager {
             let mut bytes = [0u8; 16];
             use rand::RngCore;
             rand::rngs::OsRng.fill_bytes(&mut bytes);
-            crate::simd::hex::bytes_to_hex_16(&bytes)
+            crate::util::bytes_to_hex_16(&bytes)
         };
 
         log_info!("[WEBXDC] Realtime WS server listening on 127.0.0.1:{port}");

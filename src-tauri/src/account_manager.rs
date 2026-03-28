@@ -132,165 +132,9 @@ pub fn get_write_connection_guard_static() -> Result<WriteConnectionGuard, Strin
 /// SQL Schema for Vector database
 ///
 /// This schema uses selective encryption:
-/// - Encrypted: message content, private keys, seed phrases, MLS secrets
-/// - Plaintext: timestamps, IDs, metadata, profiles (for indexing and performance)
-pub const SQL_SCHEMA: &str = r#"
--- Profiles table (plaintext - public data)
-CREATE TABLE IF NOT EXISTS profiles (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    npub TEXT UNIQUE NOT NULL,
-    name TEXT NOT NULL DEFAULT '',
-    display_name TEXT NOT NULL DEFAULT '',
-    nickname TEXT NOT NULL DEFAULT '',
-    lud06 TEXT NOT NULL DEFAULT '',
-    lud16 TEXT NOT NULL DEFAULT '',
-    banner TEXT NOT NULL DEFAULT '',
-    avatar TEXT NOT NULL DEFAULT '',
-    about TEXT NOT NULL DEFAULT '',
-    website TEXT NOT NULL DEFAULT '',
-    nip05 TEXT NOT NULL DEFAULT '',
-    status_content TEXT NOT NULL DEFAULT '',
-    status_url TEXT NOT NULL DEFAULT '',
-    muted INTEGER NOT NULL DEFAULT 0,
-    bot INTEGER NOT NULL DEFAULT 0,
-    avatar_cached TEXT NOT NULL DEFAULT '',
-    banner_cached TEXT NOT NULL DEFAULT ''
-);
-CREATE INDEX IF NOT EXISTS idx_profiles_npub ON profiles(npub);
-CREATE INDEX IF NOT EXISTS idx_profiles_name ON profiles(name);
+#[cfg(test)]
+pub const SQL_SCHEMA: &str = vector_core::db::schema::SQL_SCHEMA;
 
--- Chats table (plaintext - metadata)
-CREATE TABLE IF NOT EXISTS chats (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_identifier TEXT UNIQUE NOT NULL,
-    chat_type INTEGER NOT NULL,
-    participants TEXT NOT NULL,
-    last_read TEXT NOT NULL DEFAULT '',
-    created_at INTEGER NOT NULL,
-    metadata TEXT NOT NULL DEFAULT '{}',
-    muted INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_chats_identifier ON chats(chat_identifier);
-CREATE INDEX IF NOT EXISTS idx_chats_created ON chats(created_at DESC);
-
--- Messages table (content encrypted, metadata plaintext)
-CREATE TABLE IF NOT EXISTS messages (
-    id TEXT PRIMARY KEY,
-    chat_id INTEGER NOT NULL,
-    content_encrypted TEXT NOT NULL,
-    replied_to TEXT NOT NULL DEFAULT '',
-    preview_metadata TEXT,
-    attachments TEXT NOT NULL DEFAULT '[]',
-    reactions TEXT NOT NULL DEFAULT '[]',
-    at INTEGER NOT NULL,
-    mine INTEGER NOT NULL,
-    user_id INTEGER,
-    wrapper_event_id TEXT,
-    FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE,
-    FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE SET NULL
-);
-CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, at);
-CREATE INDEX IF NOT EXISTS idx_messages_time ON messages(at DESC);
-CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id);
-CREATE INDEX IF NOT EXISTS idx_messages_wrapper ON messages(wrapper_event_id);
-
--- Settings table (key-value pairs)
-CREATE TABLE IF NOT EXISTS settings (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
-
--- MLS Groups table
-CREATE TABLE IF NOT EXISTS mls_groups (
-    group_id TEXT PRIMARY KEY,
-    engine_group_id TEXT NOT NULL DEFAULT '',
-    creator_pubkey TEXT NOT NULL,
-    name TEXT NOT NULL DEFAULT '',
-    description TEXT,
-    avatar_ref TEXT,
-    avatar_cached TEXT,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    evicted INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_mls_groups_evicted_updated ON mls_groups(evicted, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_mls_groups_creator ON mls_groups(creator_pubkey);
-
--- MLS Key Packages table
-CREATE TABLE IF NOT EXISTS mls_keypackages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    owner_pubkey TEXT NOT NULL,
-    device_id TEXT NOT NULL,
-    keypackage_ref TEXT NOT NULL,
-    created_at INTEGER,
-    fetched_at INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_keypackages_owner ON mls_keypackages(owner_pubkey);
-
--- MLS Event Cursors table
-CREATE TABLE IF NOT EXISTS mls_event_cursors (
-    group_id TEXT PRIMARY KEY,
-    last_seen_event_id TEXT NOT NULL,
-    last_seen_at INTEGER NOT NULL
-);
-
--- Mini Apps history table (tracks recently used Mini Apps)
-CREATE TABLE IF NOT EXISTS miniapps_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    src_url TEXT NOT NULL,
-    attachment_ref TEXT NOT NULL,
-    open_count INTEGER NOT NULL DEFAULT 1,
-    last_opened_at INTEGER NOT NULL,
-    is_favorite INTEGER NOT NULL DEFAULT 0,
-    categories TEXT NOT NULL DEFAULT '',
-    marketplace_id TEXT DEFAULT NULL
-);
-
--- Events table: flat, protocol-aligned storage for all Nostr events
--- Every event (message, reaction, attachment, etc.) is a separate row
--- This is the PRIMARY storage for all message data
-CREATE TABLE IF NOT EXISTS events (
-    id TEXT PRIMARY KEY,
-    kind INTEGER NOT NULL,
-    chat_id INTEGER NOT NULL,
-    user_id INTEGER,
-    content TEXT NOT NULL,
-    tags TEXT NOT NULL DEFAULT '[]',
-    reference_id TEXT,
-    created_at INTEGER NOT NULL,
-    received_at INTEGER NOT NULL,
-    mine INTEGER NOT NULL DEFAULT 0,
-    pending INTEGER NOT NULL DEFAULT 0,
-    failed INTEGER NOT NULL DEFAULT 0,
-    wrapper_event_id TEXT,
-    npub TEXT,
-    preview_metadata TEXT,
-    FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE,
-    FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE SET NULL
-);
-CREATE INDEX IF NOT EXISTS idx_events_chat_time ON events(chat_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_events_kind ON events(kind);
-CREATE INDEX IF NOT EXISTS idx_events_reference ON events(reference_id) WHERE reference_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_events_wrapper ON events(wrapper_event_id) WHERE wrapper_event_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_events_user ON events(user_id);
-
--- PIVX Promos table (for addressless PIVX payments via promo codes)
-CREATE TABLE IF NOT EXISTS pivx_promos (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    gift_code TEXT NOT NULL UNIQUE,
-    address TEXT NOT NULL,
-    privkey_encrypted TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    claimed_at INTEGER,
-    amount_piv REAL,
-    status TEXT NOT NULL DEFAULT 'active'
-);
-CREATE INDEX IF NOT EXISTS idx_pivx_promos_code ON pivx_promos(gift_code);
-CREATE INDEX IF NOT EXISTS idx_pivx_promos_address ON pivx_promos(address);
-CREATE INDEX IF NOT EXISTS idx_pivx_promos_status ON pivx_promos(status);
-"#;
 
 /// Get the profile directory for a given npub (full npub, no truncation)
 ///
@@ -519,9 +363,9 @@ fn ensure_schema_ready<R: Runtime>(handle: &AppHandle<R>, npub: &str) -> Result<
     println!("[Account Manager] Ensuring schema and migrations for {}", npub);
 
     let mut conn = open_db_connection(&db_path)?;
-    conn.execute_batch(SQL_SCHEMA)
+    conn.execute_batch(vector_core::db::schema::SQL_SCHEMA)
         .map_err(|e| format!("Failed to apply schema: {}", e))?;
-    run_migrations(&mut conn)?;
+    vector_core::db::schema::run_migrations(&mut conn)?;
 
     // Pool this connection so subsequent reads reuse it
     DB_READ_POOL.lock().unwrap().push(conn);
@@ -655,9 +499,9 @@ pub fn init_db_pool_static(db_path: &std::path::Path) -> Result<(), String> {
     }
 
     let mut conn = open_db_connection(db_path)?;
-    conn.execute_batch(SQL_SCHEMA)
+    conn.execute_batch(vector_core::db::schema::SQL_SCHEMA)
         .map_err(|e| format!("Failed to apply schema: {}", e))?;
-    run_migrations(&mut conn)?;
+    vector_core::db::schema::run_migrations(&mut conn)?;
 
     // Pre-warm read pool
     {
@@ -729,7 +573,7 @@ pub async fn init_profile_database<R: Runtime>(
     if pool_size > 0 && same_account {
         // Run migrations on existing pooled connection (usually all no-ops)
         let mut conn = get_db_connection(handle)?;
-        run_migrations(&mut conn)?;
+        vector_core::db::schema::run_migrations(&mut conn)?;
         return_db_connection(conn);
 
         // Warm remaining pool connections in background (not on critical path)
@@ -768,11 +612,11 @@ pub async fn init_profile_database<R: Runtime>(
     let mut conn = open_db_connection(&db_path)?;
 
     // Execute the schema to create all tables
-    conn.execute_batch(SQL_SCHEMA)
+    conn.execute_batch(vector_core::db::schema::SQL_SCHEMA)
         .map_err(|e| format!("Failed to create database schema: {}", e))?;
 
     // Run migrations for existing databases (atomic - each migration is all-or-nothing)
-    run_migrations(&mut conn)?;
+    vector_core::db::schema::run_migrations(&mut conn)?;
 
     // Pre-warm read pool for parallel reads during boot
     {
@@ -798,7 +642,7 @@ pub async fn init_profile_database<R: Runtime>(
     Ok(())
 }
 
-/// Check if a specific migration has already been applied
+#[cfg(test)]
 fn migration_applied(conn: &rusqlite::Connection, migration_id: u32) -> bool {
     conn.query_row(
         "SELECT 1 FROM schema_migrations WHERE id = ?1",
@@ -808,6 +652,7 @@ fn migration_applied(conn: &rusqlite::Connection, migration_id: u32) -> bool {
 }
 
 /// Mark a migration as applied (within a transaction)
+#[cfg(test)]
 fn mark_migration_applied(tx: &rusqlite::Transaction, migration_id: u32) -> Result<(), String> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -830,6 +675,7 @@ fn mark_migration_applied(tx: &rusqlite::Transaction, migration_id: u32) -> Resu
 /// - No partial state is ever possible
 ///
 /// This is the ONLY way migrations should be run.
+#[cfg(test)]
 fn run_atomic_migration<F>(
     conn: &mut rusqlite::Connection,
     id: u32,
@@ -877,6 +723,7 @@ where
 /// Ensure a column exists on a table, adding it if missing.
 /// This is a safety net for cases where ALTER TABLE inside a WAL-mode
 /// transaction silently fails (e.g., other connections hold read locks).
+#[cfg(test)]
 fn ensure_column_exists(
     conn: &mut rusqlite::Connection,
     table: &str,
@@ -906,6 +753,7 @@ fn ensure_column_exists(
 /// - If any migration fails, changes are rolled back - no partial state
 /// - Migrations are tracked in schema_migrations table (idempotent - safe to re-run)
 /// - All errors are logged with [DB] prefix and propagated (no silent failures)
+#[cfg(test)]
 fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // Ensure schema_migrations table exists (bootstrap - must succeed before any migrations)
     conn.execute(
@@ -1409,6 +1257,7 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
 /// This checks schema state to determine which old migrations have already run,
 /// and marks them as applied in schema_migrations table.
 /// All tracking records are written in a single transaction.
+#[cfg(test)]
 fn bootstrap_legacy_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // Only bootstrap once - if migration 1 is tracked, we've already bootstrapped
     if migration_applied(conn, 1) {
@@ -1536,6 +1385,7 @@ fn bootstrap_legacy_migrations(conn: &mut rusqlite::Connection) -> Result<(), St
 
 /// Migration 7: Copy attachment metadata from messages table into event tags (ATOMIC)
 /// Runs within a transaction - all changes succeed or all are rolled back.
+#[cfg(test)]
 fn migrate_attachments_to_event_tags_atomic(tx: &rusqlite::Transaction) -> Result<(), String> {
     // Find all kind=15 events that don't have attachment tags yet
     let mut stmt = tx.prepare(r#"
@@ -1599,6 +1449,7 @@ fn migrate_attachments_to_event_tags_atomic(tx: &rusqlite::Transaction) -> Resul
 
 /// Migrate existing messages from the old nested format to the flat events table (ATOMIC)
 /// Runs within a transaction - all changes succeed or all are rolled back.
+#[cfg(test)]
 fn migrate_messages_to_events_atomic(tx: &rusqlite::Transaction) -> Result<(), String> {
     // Count existing messages
     let message_count: i64 = tx.query_row(

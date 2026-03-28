@@ -18,10 +18,12 @@ pub fn data_uri(mime: &str, bytes: &[u8]) -> String {
     result
 }
 
-// Re-export SIMD-accelerated functions for backwards compatibility
-pub use crate::simd::{
-    bytes_to_hex_32, bytes_to_hex_string,
+pub use vector_core::hex::{
+    bytes_to_hex_16, bytes_to_hex_32, bytes_to_hex_string,
     hex_string_to_bytes, hex_to_bytes_16, hex_to_bytes_32,
+};
+
+pub use crate::simd::{
     has_alpha_transparency, set_all_alpha_opaque,
 };
 

@@ -28,6 +28,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.5.5", features = [] }
 
 [dependencies]
+# Vector Core — the single source of truth for all Vector logic
+vector-core = { path = "../crates/vector-core" }
+
 nostr-sdk = { version = "0.44.1", features = ["nip06", "nip44", "nip59"] }
 nostr-blossom = "0.44.0"
 mdk-core = { git = "https://github.com/marmot-protocol/mdk.git", rev = "136a9ee929580206ea0357d48d9766427918186d", features = ["mip04"] }

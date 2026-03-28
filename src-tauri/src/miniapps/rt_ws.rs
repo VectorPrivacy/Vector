@@ -13,7 +13,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
-use super::realtime::{SendHandle, SharedEventTarget};
+use super::realtime::SendHandle;
 
 /// Info returned after starting the WS server.
 pub(crate) struct WsInfo {

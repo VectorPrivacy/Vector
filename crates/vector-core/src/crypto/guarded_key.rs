@@ -215,11 +215,14 @@ impl GuardedKey {
 
     /// Collect protected vault positions from other active GuardedKey instances.
     /// Prevents write_decoys from corrupting another key's share/config data.
-    fn collect_other_protected(&self) -> ([VaultPos; 3 + SHARE_ENTRIES], usize) {
-        let keys: [&GuardedKey; 2] = [&crate::MY_SECRET_KEY, &crate::ENCRYPTION_KEY];
+    ///
+    /// `others` is a slice of references to other GuardedKey instances that share
+    /// the same VAULTS arrays. The caller is responsible for passing all other
+    /// active keys to ensure cross-key protection.
+    fn collect_other_protected(&self, others: &[&GuardedKey]) -> ([VaultPos; 3 + SHARE_ENTRIES], usize) {
         let mut buf = [VaultPos { array: 0, slot: 0 }; 3 + SHARE_ENTRIES];
         let mut n = 0;
-        for &key in &keys {
+        for &key in others {
             if std::ptr::eq(key, self) || !key.has_key() { continue; }
             let addr = key.instance_addr();
             let (s, m1, m2) = config_positions(addr);
@@ -236,23 +239,29 @@ impl GuardedKey {
 
     /// Extract the secret key from a `Keys` struct, store it in the vault,
     /// and zeroize the intermediate bytes. One-liner replacement for the
-    /// repeated extract → set → zeroize pattern across login paths.
+    /// repeated extract -> set -> zeroize pattern across login paths.
+    ///
+    /// `others` is a slice of references to other active GuardedKey instances
+    /// for cross-key protection during decoy writes.
     #[inline]
-    pub fn store_from_keys(&self, keys: &nostr_sdk::Keys) {
+    pub fn store_from_keys(&self, keys: &nostr_sdk::Keys, others: &[&GuardedKey]) {
         let mut sk_bytes = keys.secret_key().secret_bytes();
-        self.set(sk_bytes);
+        self.set(sk_bytes, others);
         sk_bytes.zeroize();
     }
 
     /// Store a key. XOR-split into 4 shares scattered across the 128 arrays,
     /// with decoy writes to ALL arrays so real writes are indistinguishable.
-    pub fn set(&self, mut key: [u8; 32]) {
+    ///
+    /// `others` is a slice of references to other active GuardedKey instances
+    /// for cross-key protection during decoy writes.
+    pub fn set(&self, mut key: [u8; 32], others: &[&GuardedKey]) {
 
         let mut rng = rand::rngs::OsRng;
         ensure_vaults();
 
         // Protect other active key's positions from decoy writes
-        let (protected, pcount) = self.collect_other_protected();
+        let (protected, pcount) = self.collect_other_protected(others);
 
         // Write decoys FIRST — random noise across all 128 arrays.
         // Excludes other keys' positions. Real writes below overwrite any decoy
@@ -328,10 +337,13 @@ impl GuardedKey {
     }
 
     /// Clear the key. Overwrites shares with random values, writes decoys to all arrays.
-    pub fn clear(&self) {
+    ///
+    /// `others` is a slice of references to other active GuardedKey instances
+    /// for cross-key protection during decoy writes.
+    pub fn clear(&self, others: &[&GuardedKey]) {
         // Set inactive FIRST — any concurrent get() will return None
         if self.active.swap(0, Ordering::SeqCst) != 0 {
-    
+
             let mut rng = rand::rngs::OsRng;
             let positions = share_positions(self.instance_addr());
             for pos in &positions {
@@ -339,7 +351,7 @@ impl GuardedKey {
                 if val == 0 { val = 1; }
                 VAULTS[pos.array][pos.slot].store(val, Ordering::Release);
             }
-            let (protected, pcount) = self.collect_other_protected();
+            let (protected, pcount) = self.collect_other_protected(others);
             write_decoys(&protected[..pcount]);
         }
     }
@@ -357,76 +369,6 @@ impl GuardedKey {
 }
 
 // ============================================================================
-// GuardedSigner — NostrSigner backed by a GuardedKey vault
-// ============================================================================
-
-/// A `NostrSigner` that reads the secret key from a `GuardedKey` vault on every
-/// operation. The key exists in plaintext only for microseconds during signing,
-/// then is zeroized on drop. No permanent key copies in process memory.
-#[derive(Debug)]
-pub struct GuardedSigner {
-    public_key: nostr_sdk::PublicKey,
-}
-
-impl GuardedSigner {
-    pub fn new(public_key: nostr_sdk::PublicKey) -> Self {
-        Self { public_key }
-    }
-
-    fn temp_keys(&self) -> Result<nostr_sdk::Keys, nostr_sdk::prelude::SignerError> {
-        crate::MY_SECRET_KEY.to_keys()
-            .ok_or_else(|| nostr_sdk::prelude::SignerError::from("Secret key not available"))
-    }
-}
-
-impl nostr_sdk::prelude::NostrSigner for GuardedSigner {
-    fn backend(&self) -> nostr_sdk::prelude::SignerBackend {
-        nostr_sdk::prelude::SignerBackend::Keys
-    }
-
-    fn get_public_key(&self) -> nostr_sdk::prelude::BoxedFuture<Result<nostr_sdk::PublicKey, nostr_sdk::prelude::SignerError>> {
-        let pk = self.public_key;
-        Box::pin(async move { Ok(pk) })
-    }
-
-    fn sign_event(&self, unsigned: nostr_sdk::UnsignedEvent) -> nostr_sdk::prelude::BoxedFuture<Result<nostr_sdk::Event, nostr_sdk::prelude::SignerError>> {
-        let keys = self.temp_keys();
-        Box::pin(async move {
-            let keys = keys?;
-            unsigned.sign_with_keys(&keys).map_err(nostr_sdk::prelude::SignerError::backend)
-        })
-    }
-
-    fn nip04_encrypt<'a>(
-        &'a self, public_key: &'a nostr_sdk::PublicKey, content: &'a str,
-    ) -> nostr_sdk::prelude::BoxedFuture<'a, Result<String, nostr_sdk::prelude::SignerError>> {
-        let keys = self.temp_keys();
-        Box::pin(async move { let keys = keys?; keys.nip04_encrypt(public_key, content).await })
-    }
-
-    fn nip04_decrypt<'a>(
-        &'a self, public_key: &'a nostr_sdk::PublicKey, encrypted_content: &'a str,
-    ) -> nostr_sdk::prelude::BoxedFuture<'a, Result<String, nostr_sdk::prelude::SignerError>> {
-        let keys = self.temp_keys();
-        Box::pin(async move { let keys = keys?; keys.nip04_decrypt(public_key, encrypted_content).await })
-    }
-
-    fn nip44_encrypt<'a>(
-        &'a self, public_key: &'a nostr_sdk::PublicKey, content: &'a str,
-    ) -> nostr_sdk::prelude::BoxedFuture<'a, Result<String, nostr_sdk::prelude::SignerError>> {
-        let keys = self.temp_keys();
-        Box::pin(async move { let keys = keys?; keys.nip44_encrypt(public_key, content).await })
-    }
-
-    fn nip44_decrypt<'a>(
-        &'a self, public_key: &'a nostr_sdk::PublicKey, payload: &'a str,
-    ) -> nostr_sdk::prelude::BoxedFuture<'a, Result<String, nostr_sdk::prelude::SignerError>> {
-        let keys = self.temp_keys();
-        Box::pin(async move { let keys = keys?; keys.nip44_decrypt(public_key, payload).await })
-    }
-}
-
-// ============================================================================
 // Tests
 // ============================================================================
 
@@ -435,14 +377,28 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// All tests share VAULTS and the two global keys — serialize them.
+    // Test-local key statics (replaces crate::MY_SECRET_KEY / crate::ENCRYPTION_KEY)
+    static TEST_KEY_A: GuardedKey = GuardedKey::empty();
+    static TEST_KEY_B: GuardedKey = GuardedKey::empty();
+
+    /// All tests share VAULTS and the two test keys — serialize them.
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    /// Fast reset: mark both global keys inactive without full clear overhead.
+    /// Fast reset: mark both test keys inactive without full clear overhead.
     fn reset() {
-        crate::MY_SECRET_KEY.active.store(0, Ordering::SeqCst);
-        crate::ENCRYPTION_KEY.active.store(0, Ordering::SeqCst);
+        TEST_KEY_A.active.store(0, Ordering::SeqCst);
+        TEST_KEY_B.active.store(0, Ordering::SeqCst);
         ensure_vaults();
+    }
+
+    /// Helper: the "others" slice for TEST_KEY_A (protects TEST_KEY_B).
+    fn others_for_a() -> [&'static GuardedKey; 1] {
+        [&TEST_KEY_B]
+    }
+
+    /// Helper: the "others" slice for TEST_KEY_B (protects TEST_KEY_A).
+    fn others_for_b() -> [&'static GuardedKey; 1] {
+        [&TEST_KEY_A]
     }
 
     /// Generate a deterministic test key from a seed byte.
@@ -463,8 +419,8 @@ mod tests {
         let _l = TEST_LOCK.lock().unwrap();
         reset();
         let key = test_key(42);
-        crate::MY_SECRET_KEY.set(key);
-        assert_eq!(crate::MY_SECRET_KEY.get(), Some(key));
+        TEST_KEY_A.set(key, &others_for_a());
+        assert_eq!(TEST_KEY_A.get(), Some(key));
     }
 
     #[test]
@@ -473,9 +429,9 @@ mod tests {
         for i in 0..1000u16 {
             reset();
             let key = test_key((i ^ (i >> 3)) as u8);
-            crate::MY_SECRET_KEY.set(key);
+            TEST_KEY_A.set(key, &others_for_a());
             assert_eq!(
-                crate::MY_SECRET_KEY.get(), Some(key),
+                TEST_KEY_A.get(), Some(key),
                 "Roundtrip failed at iteration {i}"
             );
         }
@@ -485,29 +441,29 @@ mod tests {
     fn empty_returns_none() {
         let _l = TEST_LOCK.lock().unwrap();
         reset();
-        assert_eq!(crate::MY_SECRET_KEY.get(), None);
-        assert_eq!(crate::ENCRYPTION_KEY.get(), None);
+        assert_eq!(TEST_KEY_A.get(), None);
+        assert_eq!(TEST_KEY_B.get(), None);
     }
 
     #[test]
     fn has_key_lifecycle() {
         let _l = TEST_LOCK.lock().unwrap();
         reset();
-        assert!(!crate::MY_SECRET_KEY.has_key());
-        crate::MY_SECRET_KEY.set(test_key(1));
-        assert!(crate::MY_SECRET_KEY.has_key());
-        crate::MY_SECRET_KEY.clear();
-        assert!(!crate::MY_SECRET_KEY.has_key());
+        assert!(!TEST_KEY_A.has_key());
+        TEST_KEY_A.set(test_key(1), &others_for_a());
+        assert!(TEST_KEY_A.has_key());
+        TEST_KEY_A.clear(&others_for_a());
+        assert!(!TEST_KEY_A.has_key());
     }
 
     #[test]
     fn clear_returns_none() {
         let _l = TEST_LOCK.lock().unwrap();
         reset();
-        crate::MY_SECRET_KEY.set(test_key(99));
-        assert!(crate::MY_SECRET_KEY.get().is_some());
-        crate::MY_SECRET_KEY.clear();
-        assert_eq!(crate::MY_SECRET_KEY.get(), None);
+        TEST_KEY_A.set(test_key(99), &others_for_a());
+        assert!(TEST_KEY_A.get().is_some());
+        TEST_KEY_A.clear(&others_for_a());
+        assert_eq!(TEST_KEY_A.get(), None);
     }
 
     #[test]
@@ -516,23 +472,23 @@ mod tests {
         reset();
         let a = test_key(10);
         let b = test_key(20);
-        crate::MY_SECRET_KEY.set(a);
-        assert_eq!(crate::MY_SECRET_KEY.get(), Some(a));
-        crate::MY_SECRET_KEY.set(b);
-        assert_eq!(crate::MY_SECRET_KEY.get(), Some(b));
+        TEST_KEY_A.set(a, &others_for_a());
+        assert_eq!(TEST_KEY_A.get(), Some(a));
+        TEST_KEY_A.set(b, &others_for_a());
+        assert_eq!(TEST_KEY_A.get(), Some(b));
     }
 
     #[test]
     fn clear_idempotent() {
         let _l = TEST_LOCK.lock().unwrap();
         reset();
-        crate::MY_SECRET_KEY.clear();
-        crate::MY_SECRET_KEY.clear();
-        assert_eq!(crate::MY_SECRET_KEY.get(), None);
-        crate::MY_SECRET_KEY.set(test_key(5));
-        crate::MY_SECRET_KEY.clear();
-        crate::MY_SECRET_KEY.clear();
-        assert_eq!(crate::MY_SECRET_KEY.get(), None);
+        TEST_KEY_A.clear(&others_for_a());
+        TEST_KEY_A.clear(&others_for_a());
+        assert_eq!(TEST_KEY_A.get(), None);
+        TEST_KEY_A.set(test_key(5), &others_for_a());
+        TEST_KEY_A.clear(&others_for_a());
+        TEST_KEY_A.clear(&others_for_a());
+        assert_eq!(TEST_KEY_A.get(), None);
     }
 
     #[test]
@@ -540,10 +496,10 @@ mod tests {
         let _l = TEST_LOCK.lock().unwrap();
         reset();
         let key = test_key(0xEE);
-        crate::ENCRYPTION_KEY.set(key);
-        assert_eq!(crate::ENCRYPTION_KEY.get(), Some(key));
-        crate::ENCRYPTION_KEY.clear();
-        assert_eq!(crate::ENCRYPTION_KEY.get(), None);
+        TEST_KEY_B.set(key, &others_for_b());
+        assert_eq!(TEST_KEY_B.get(), Some(key));
+        TEST_KEY_B.clear(&others_for_b());
+        assert_eq!(TEST_KEY_B.get(), None);
     }
 
     // ================================================================
@@ -559,15 +515,15 @@ mod tests {
         let key_b = test_key(0xBB);
         for i in 0..500 {
             reset();
-            crate::MY_SECRET_KEY.set(key_a);
-            crate::ENCRYPTION_KEY.set(key_b);
+            TEST_KEY_A.set(key_a, &others_for_a());
+            TEST_KEY_B.set(key_b, &others_for_b());
             assert_eq!(
-                crate::MY_SECRET_KEY.get(), Some(key_a),
-                "MY_SECRET_KEY corrupted at iteration {i}"
+                TEST_KEY_A.get(), Some(key_a),
+                "TEST_KEY_A corrupted at iteration {i}"
             );
             assert_eq!(
-                crate::ENCRYPTION_KEY.get(), Some(key_b),
-                "ENCRYPTION_KEY corrupted at iteration {i}"
+                TEST_KEY_B.get(), Some(key_b),
+                "TEST_KEY_B corrupted at iteration {i}"
             );
         }
     }
@@ -579,15 +535,15 @@ mod tests {
         let key_b = test_key(0xDD);
         for i in 0..500 {
             reset();
-            crate::ENCRYPTION_KEY.set(key_b);
-            crate::MY_SECRET_KEY.set(key_a);
+            TEST_KEY_B.set(key_b, &others_for_b());
+            TEST_KEY_A.set(key_a, &others_for_a());
             assert_eq!(
-                crate::ENCRYPTION_KEY.get(), Some(key_b),
-                "ENCRYPTION_KEY corrupted at iteration {i}"
+                TEST_KEY_B.get(), Some(key_b),
+                "TEST_KEY_B corrupted at iteration {i}"
             );
             assert_eq!(
-                crate::MY_SECRET_KEY.get(), Some(key_a),
-                "MY_SECRET_KEY corrupted at iteration {i}"
+                TEST_KEY_A.get(), Some(key_a),
+                "TEST_KEY_A corrupted at iteration {i}"
             );
         }
     }
@@ -598,23 +554,23 @@ mod tests {
         let key_a = test_key(0x11);
         let key_b = test_key(0x22);
         for i in 0..500 {
-            // Clear MY_SECRET_KEY, verify ENCRYPTION_KEY survives
+            // Clear TEST_KEY_A, verify TEST_KEY_B survives
             reset();
-            crate::MY_SECRET_KEY.set(key_a);
-            crate::ENCRYPTION_KEY.set(key_b);
-            crate::MY_SECRET_KEY.clear();
+            TEST_KEY_A.set(key_a, &others_for_a());
+            TEST_KEY_B.set(key_b, &others_for_b());
+            TEST_KEY_A.clear(&others_for_a());
             assert_eq!(
-                crate::ENCRYPTION_KEY.get(), Some(key_b),
-                "EK corrupted after SK.clear() at iteration {i}"
+                TEST_KEY_B.get(), Some(key_b),
+                "KEY_B corrupted after KEY_A.clear() at iteration {i}"
             );
-            // Clear ENCRYPTION_KEY, verify MY_SECRET_KEY survives
+            // Clear TEST_KEY_B, verify TEST_KEY_A survives
             reset();
-            crate::MY_SECRET_KEY.set(key_a);
-            crate::ENCRYPTION_KEY.set(key_b);
-            crate::ENCRYPTION_KEY.clear();
+            TEST_KEY_A.set(key_a, &others_for_a());
+            TEST_KEY_B.set(key_b, &others_for_b());
+            TEST_KEY_B.clear(&others_for_b());
             assert_eq!(
-                crate::MY_SECRET_KEY.get(), Some(key_a),
-                "SK corrupted after EK.clear() at iteration {i}"
+                TEST_KEY_A.get(), Some(key_a),
+                "KEY_A corrupted after KEY_B.clear() at iteration {i}"
             );
         }
     }
@@ -626,12 +582,12 @@ mod tests {
             reset();
             let ka = test_key(i as u8);
             let kb = test_key(!(i as u8));
-            crate::MY_SECRET_KEY.set(ka);
-            crate::ENCRYPTION_KEY.set(kb);
-            assert_eq!(crate::MY_SECRET_KEY.get(), Some(ka), "SK wrong at iter {i}");
-            assert_eq!(crate::ENCRYPTION_KEY.get(), Some(kb), "EK wrong at iter {i}");
-            crate::MY_SECRET_KEY.clear();
-            assert_eq!(crate::ENCRYPTION_KEY.get(), Some(kb), "EK wrong after SK clear at iter {i}");
+            TEST_KEY_A.set(ka, &others_for_a());
+            TEST_KEY_B.set(kb, &others_for_b());
+            assert_eq!(TEST_KEY_A.get(), Some(ka), "KEY_A wrong at iter {i}");
+            assert_eq!(TEST_KEY_B.get(), Some(kb), "KEY_B wrong at iter {i}");
+            TEST_KEY_A.clear(&others_for_a());
+            assert_eq!(TEST_KEY_B.get(), Some(kb), "KEY_B wrong after KEY_A clear at iter {i}");
         }
     }
 
@@ -644,14 +600,14 @@ mod tests {
             let ka = test_key((i & 0xFF) as u8);
             let kb = test_key(!((i & 0xFF) as u8));
             if i % 2 == 0 {
-                crate::MY_SECRET_KEY.set(ka);
-                crate::ENCRYPTION_KEY.set(kb);
+                TEST_KEY_A.set(ka, &others_for_a());
+                TEST_KEY_B.set(kb, &others_for_b());
             } else {
-                crate::ENCRYPTION_KEY.set(kb);
-                crate::MY_SECRET_KEY.set(ka);
+                TEST_KEY_B.set(kb, &others_for_b());
+                TEST_KEY_A.set(ka, &others_for_a());
             }
-            assert_eq!(crate::MY_SECRET_KEY.get(), Some(ka), "SK wrong at iter {i}");
-            assert_eq!(crate::ENCRYPTION_KEY.get(), Some(kb), "EK wrong at iter {i}");
+            assert_eq!(TEST_KEY_A.get(), Some(ka), "KEY_A wrong at iter {i}");
+            assert_eq!(TEST_KEY_B.get(), Some(kb), "KEY_B wrong at iter {i}");
         }
     }
 
@@ -709,7 +665,7 @@ mod tests {
     fn positions_deterministic() {
         let _l = TEST_LOCK.lock().unwrap();
         ensure_vaults();
-        let addr = crate::MY_SECRET_KEY.instance_addr();
+        let addr = TEST_KEY_A.instance_addr();
         let cfg1 = config_positions(addr);
         let cfg2 = config_positions(addr);
         assert_eq!(cfg1, cfg2);
@@ -799,8 +755,8 @@ mod tests {
     }
 
     /// Run write_decoys 500 times with protected positions — verify they are NEVER overwritten.
-    /// Without exclusion, P(at least one hit) per position ≈ 86%. With 6 positions:
-    /// P(all survive unprotected) ≈ 0.14^6 ≈ 0.00075%. This test catches the bug with certainty.
+    /// Without exclusion, P(at least one hit) per position ~ 86%. With 6 positions:
+    /// P(all survive unprotected) ~ 0.14^6 ~ 0.00075%. This test catches the bug with certainty.
     #[test]
     fn write_decoys_respects_exclusions_500() {
         let _l = TEST_LOCK.lock().unwrap();
@@ -845,8 +801,8 @@ mod tests {
         let _l = TEST_LOCK.lock().unwrap();
         reset();
         let key = [0u8; 32];
-        crate::MY_SECRET_KEY.set(key);
-        assert_eq!(crate::MY_SECRET_KEY.get(), Some(key));
+        TEST_KEY_A.set(key, &others_for_a());
+        assert_eq!(TEST_KEY_A.get(), Some(key));
     }
 
     #[test]
@@ -854,8 +810,8 @@ mod tests {
         let _l = TEST_LOCK.lock().unwrap();
         reset();
         let key = [0xFFu8; 32];
-        crate::MY_SECRET_KEY.set(key);
-        assert_eq!(crate::MY_SECRET_KEY.get(), Some(key));
+        TEST_KEY_A.set(key, &others_for_a());
+        assert_eq!(TEST_KEY_A.get(), Some(key));
     }
 
     #[test]
@@ -864,8 +820,8 @@ mod tests {
         reset();
         let mut sk_bytes = [0u8; 32];
         sk_bytes[31] = 1; // scalar = 1, valid secp256k1 key
-        crate::MY_SECRET_KEY.set(sk_bytes);
-        let keys = crate::MY_SECRET_KEY.to_keys();
+        TEST_KEY_A.set(sk_bytes, &others_for_a());
+        let keys = TEST_KEY_A.to_keys();
         assert!(keys.is_some(), "to_keys returned None for valid key");
         assert_eq!(keys.unwrap().secret_key().secret_bytes(), sk_bytes);
     }
@@ -874,7 +830,7 @@ mod tests {
     fn to_keys_none_when_empty() {
         let _l = TEST_LOCK.lock().unwrap();
         reset();
-        assert!(crate::MY_SECRET_KEY.to_keys().is_none());
+        assert!(TEST_KEY_A.to_keys().is_none());
     }
 
     #[test]
@@ -883,246 +839,25 @@ mod tests {
         reset();
         let keys = nostr_sdk::Keys::generate();
         let expected = keys.secret_key().secret_bytes();
-        crate::MY_SECRET_KEY.store_from_keys(&keys);
-        assert_eq!(crate::MY_SECRET_KEY.get(), Some(expected));
+        TEST_KEY_A.store_from_keys(&keys, &others_for_a());
+        assert_eq!(TEST_KEY_A.get(), Some(expected));
     }
 
     // ================================================================
     // End-to-end encryption pipeline tests
     //
-    // These test the FULL path: GuardedKey vault → ChaCha20-Poly1305
-    // encrypt → hex encode → hex decode → decrypt → verify plaintext.
-    // Argon2 is skipped (too expensive for bulk runs); keys are injected
-    // directly into the vault, which is what happens after Argon2 in
-    // production (hash_pass → ENCRYPTION_KEY.set).
+    // NOTE: These tests need crate::crypto integration (ChaCha20-Poly1305
+    // encrypt/decrypt pipeline). They are not included in this standalone
+    // module because they depend on:
+    //   - crate::crypto::internal_encrypt / internal_decrypt
+    //   - crate::crypto::maybe_encrypt / maybe_decrypt
+    //   - crate::crypto::looks_encrypted
+    //   - crate::state::set_encryption_enabled
+    //
+    // The original tests (e2e_encrypt_decrypt_10k, e2e_cross_key_stress_10k,
+    // e2e_maybe_encrypt_decrypt_10k, e2e_batch_encrypt_then_decrypt,
+    // e2e_key_isolation, e2e_edge_case_content, e2e_login_sequence_stress_5k)
+    // should be placed in the integrating crate that provides both the
+    // GuardedKey vault and the encryption pipeline.
     // ================================================================
-
-    /// Helper: set ENCRYPTION_KEY in vault + enable the encryption flag.
-    fn setup_encryption(key: [u8; 32]) {
-        reset();
-        crate::ENCRYPTION_KEY.set(key);
-        crate::state::set_encryption_enabled(true);
-    }
-
-    /// Helper: tear down encryption state.
-    fn teardown_encryption() {
-        crate::MY_SECRET_KEY.active.store(0, Ordering::SeqCst);
-        crate::ENCRYPTION_KEY.active.store(0, Ordering::SeqCst);
-        crate::state::set_encryption_enabled(false);
-    }
-
-    /// Basic encrypt → decrypt roundtrip, 10 000 iterations.
-    /// Tests: vault key retrieval, ChaCha20 nonce uniqueness, hex encode/decode,
-    /// and the full internal_encrypt → internal_decrypt pipeline.
-    #[tokio::test]
-    async fn e2e_encrypt_decrypt_10k() {
-        let _l = TEST_LOCK.lock().unwrap();
-        let key = test_key(0xAB);
-        setup_encryption(key);
-
-        for i in 0..10_000u32 {
-            let plaintext = format!("Message #{i} — the quick brown fox 🦊");
-            let ciphertext = crate::crypto::internal_encrypt(plaintext.clone(), None).await;
-
-            // Sanity: ciphertext is hex and longer than plaintext
-            assert!(crate::crypto::looks_encrypted(&ciphertext),
-                "Iteration {i}: ciphertext doesn't look encrypted");
-
-            let decrypted = crate::crypto::internal_decrypt(ciphertext, None).await
-                .unwrap_or_else(|_| panic!("Iteration {i}: decrypt returned Err"));
-            assert_eq!(decrypted, plaintext, "Iteration {i}: plaintext mismatch");
-        }
-
-        teardown_encryption();
-    }
-
-    /// Cross-key stress test: encrypt with ENCRYPTION_KEY, then set/clear
-    /// MY_SECRET_KEY (which runs write_decoys with cross-key protection),
-    /// then decrypt. Verifies write_decoys never corrupts ENCRYPTION_KEY's
-    /// vault data. 10 000 iterations.
-    #[tokio::test]
-    async fn e2e_cross_key_stress_10k() {
-        let _l = TEST_LOCK.lock().unwrap();
-        let enc_key = test_key(0xCD);
-        setup_encryption(enc_key);
-
-        for i in 0..10_000u32 {
-            let plaintext = format!("Cross-key test #{i}");
-            let ciphertext = crate::crypto::internal_encrypt(plaintext.clone(), None).await;
-
-            // Inject noise: set MY_SECRET_KEY (runs write_decoys that must avoid ENCRYPTION_KEY)
-            let sk = test_key((i & 0xFF) as u8);
-            crate::MY_SECRET_KEY.set(sk);
-
-            // Decrypt must still work — ENCRYPTION_KEY's vault data must survive
-            let decrypted = crate::crypto::internal_decrypt(ciphertext, None).await
-                .unwrap_or_else(|_| panic!("Iteration {i}: decrypt failed after MY_SECRET_KEY.set"));
-            assert_eq!(decrypted, plaintext, "Iteration {i}: plaintext mismatch after cross-key write");
-
-            // Also verify MY_SECRET_KEY survived ENCRYPTION_KEY being read
-            assert_eq!(crate::MY_SECRET_KEY.get(), Some(sk),
-                "Iteration {i}: MY_SECRET_KEY corrupted");
-
-            // Clear MY_SECRET_KEY (runs write_decoys again)
-            crate::MY_SECRET_KEY.clear();
-        }
-
-        teardown_encryption();
-    }
-
-    /// maybe_encrypt → maybe_decrypt full path, 10 000 iterations.
-    /// Tests the production code path including looks_encrypted() checks
-    /// and the crash-recovery fallback logic.
-    #[tokio::test]
-    async fn e2e_maybe_encrypt_decrypt_10k() {
-        let _l = TEST_LOCK.lock().unwrap();
-        let key = test_key(0xEF);
-        setup_encryption(key);
-
-        for i in 0..10_000u32 {
-            let plaintext = format!("Maybe-path #{i}: こんにちは世界");
-            let ciphertext = crate::crypto::maybe_encrypt(plaintext.clone()).await;
-
-            // maybe_encrypt with encryption enabled should always produce encrypted output
-            assert_ne!(ciphertext, plaintext, "Iteration {i}: content wasn't encrypted");
-
-            let decrypted = crate::crypto::maybe_decrypt(ciphertext).await
-                .unwrap_or_else(|_| panic!("Iteration {i}: maybe_decrypt returned Err"));
-            assert_eq!(decrypted, plaintext, "Iteration {i}: plaintext mismatch");
-        }
-
-        teardown_encryption();
-    }
-
-    /// Batch encrypt, then batch decrypt. Simulates boot-time message loading
-    /// where all messages are decrypted in sequence from SQLite.
-    #[tokio::test]
-    async fn e2e_batch_encrypt_then_decrypt() {
-        let _l = TEST_LOCK.lock().unwrap();
-        let key = test_key(0x77);
-        setup_encryption(key);
-
-        let count = 500;
-        let mut pairs: Vec<(String, String)> = Vec::with_capacity(count);
-
-        // Encrypt all
-        for i in 0..count {
-            let plaintext = format!("Batch msg #{i} — {}", "x".repeat(i % 200));
-            let ciphertext = crate::crypto::internal_encrypt(plaintext.clone(), None).await;
-            pairs.push((plaintext, ciphertext));
-        }
-
-        // Inject cross-key noise mid-batch
-        crate::MY_SECRET_KEY.set(test_key(0x99));
-
-        // Decrypt all — must survive cross-key write
-        for (i, (plaintext, ciphertext)) in pairs.into_iter().enumerate() {
-            let decrypted = crate::crypto::internal_decrypt(ciphertext, None).await
-                .unwrap_or_else(|_| panic!("Batch {i}: decrypt failed"));
-            assert_eq!(decrypted, plaintext, "Batch {i}: mismatch");
-        }
-
-        teardown_encryption();
-    }
-
-    /// Verify that different keys produce different ciphertexts and
-    /// cannot cross-decrypt each other's messages.
-    #[tokio::test]
-    async fn e2e_key_isolation() {
-        let _l = TEST_LOCK.lock().unwrap();
-        let key_a = test_key(0x11);
-        let key_b = test_key(0x22);
-        let message = "Secret message".to_string();
-
-        // Encrypt with key A
-        setup_encryption(key_a);
-        let ciphertext_a = crate::crypto::internal_encrypt(message.clone(), None).await;
-
-        // Switch to key B — decrypt must fail for key A's ciphertext
-        crate::ENCRYPTION_KEY.clear();
-        crate::ENCRYPTION_KEY.set(key_b);
-        let result = crate::crypto::internal_decrypt(ciphertext_a.clone(), None).await;
-        assert!(result.is_err(), "Wrong key should fail to decrypt");
-
-        // Switch back to key A — must succeed
-        crate::ENCRYPTION_KEY.clear();
-        crate::ENCRYPTION_KEY.set(key_a);
-        let decrypted = crate::crypto::internal_decrypt(ciphertext_a, None).await
-            .expect("Original key should decrypt");
-        assert_eq!(decrypted, message);
-
-        teardown_encryption();
-    }
-
-    /// Edge case content: empty-ish strings, pure unicode, JSON, hex-like
-    /// strings that could confuse looks_encrypted().
-    #[tokio::test]
-    async fn e2e_edge_case_content() {
-        let _l = TEST_LOCK.lock().unwrap();
-        let key = test_key(0x33);
-        setup_encryption(key);
-
-        let long_msg = "x".repeat(10_000);
-        let multiline = format!("line1\nline2\nline3\n{}", "data".repeat(100));
-        let cases: Vec<&str> = vec![
-            "a",                                           // minimal
-            " ",                                           // whitespace
-            "Hello, World!",                               // basic ASCII
-            "🦊🔑🔒💬",                                  // emoji-only
-            "日本語テスト",                                 // CJK
-            "{\"type\":\"message\",\"text\":\"hello\"}",   // JSON
-            &long_msg,                                     // 10KB message
-            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234567", // hex-like (64 chars)
-            "\n\r\t\0",                                    // control chars
-            &multiline,                                    // multiline
-        ];
-
-        for (i, plaintext) in cases.iter().enumerate() {
-            let ciphertext = crate::crypto::internal_encrypt(plaintext.to_string(), None).await;
-            let decrypted = crate::crypto::internal_decrypt(ciphertext, None).await
-                .unwrap_or_else(|_| panic!("Edge case {i} failed: {:?}", &plaintext[..plaintext.len().min(50)]));
-            assert_eq!(&decrypted, plaintext, "Edge case {i} mismatch");
-        }
-
-        teardown_encryption();
-    }
-
-    /// Simulates the real login sequence: set ENCRYPTION_KEY first,
-    /// then set MY_SECRET_KEY (which triggers write_decoys), then
-    /// encrypt and decrypt messages. Repeats 5000 times to catch
-    /// any probabilistic cross-key corruption.
-    #[tokio::test]
-    async fn e2e_login_sequence_stress_5k() {
-        let _l = TEST_LOCK.lock().unwrap();
-
-        for i in 0..5_000u32 {
-            reset();
-
-            // Step 1: ENCRYPTION_KEY set (happens during password decrypt in login)
-            let enc_key = test_key((i & 0xFF) as u8);
-            crate::ENCRYPTION_KEY.set(enc_key);
-            crate::state::set_encryption_enabled(true);
-
-            // Step 2: MY_SECRET_KEY set (happens right after in login flow)
-            let sk = test_key(((i >> 8) & 0xFF) as u8 ^ 0xAA);
-            crate::MY_SECRET_KEY.set(sk);
-
-            // Step 3: Encrypt a message (happens when user sends/stores)
-            let plaintext = format!("Login seq #{i}");
-            let ciphertext = crate::crypto::internal_encrypt(plaintext.clone(), None).await;
-
-            // Step 4: Decrypt (happens when loading messages from DB)
-            let decrypted = crate::crypto::internal_decrypt(ciphertext, None).await
-                .unwrap_or_else(|_| panic!("Login sequence {i}: decrypt failed"));
-            assert_eq!(decrypted, plaintext, "Login sequence {i}: mismatch");
-
-            // Verify both keys survived
-            assert_eq!(crate::ENCRYPTION_KEY.get(), Some(enc_key),
-                "Login sequence {i}: ENCRYPTION_KEY corrupted");
-            assert_eq!(crate::MY_SECRET_KEY.get(), Some(sk),
-                "Login sequence {i}: MY_SECRET_KEY corrupted");
-        }
-
-        teardown_encryption();
-    }
 }

@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{Chat, ChatType};
-use crate::message::compact::{encode_message_id, decode_message_id, NpubInterner};
+use vector_core::compact::{encode_message_id, decode_message_id, NpubInterner};
 use super::{CHAT_ID_CACHE, USER_ID_CACHE};
 
 /// Slim version of Chat for database storage

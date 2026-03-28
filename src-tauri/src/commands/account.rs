@@ -137,12 +137,12 @@ pub async fn login(mut import_key: String) -> Result<LoginResult, String> {
 
     // Store secret key in the guarded vault, then construct the client with GuardedSigner
     let public_key = keys.public_key;
-    MY_SECRET_KEY.store_from_keys(&keys);
+    MY_SECRET_KEY.store_from_keys(&keys, &[&crate::ENCRYPTION_KEY]);
     let _ = MY_PUBLIC_KEY.set(public_key);
     drop(keys); // Drop the Keys struct (secp256k1 Drop zeroizes)
 
     let client = Client::builder()
-        .signer(crate::guarded_key::GuardedSigner::new(public_key))
+        .signer(vector_core::GuardedSigner::new(public_key))
         .opts(ClientOptions::new())
         .monitor(Monitor::new(1024))
         .build();
@@ -213,8 +213,8 @@ pub async fn logout<R: Runtime>(handle: AppHandle<R>) {
     }
 
     // Clear all guarded key vaults (zeroizes all shares + decoys)
-    crate::ENCRYPTION_KEY.clear();
-    crate::MY_SECRET_KEY.clear();
+    crate::ENCRYPTION_KEY.clear(&[&crate::MY_SECRET_KEY]);
+    crate::MY_SECRET_KEY.clear(&[&crate::ENCRYPTION_KEY]);
 
     // Zeroize the pending nsec if still held
     {
@@ -263,12 +263,12 @@ pub async fn create_account() -> Result<LoginResult, String> {
 
     // Store secret key in the guarded vault, then construct the client with GuardedSigner
     let public_key = keys.public_key;
-    MY_SECRET_KEY.store_from_keys(&keys);
+    MY_SECRET_KEY.store_from_keys(&keys, &[&crate::ENCRYPTION_KEY]);
     let _ = MY_PUBLIC_KEY.set(public_key);
     drop(keys);
 
     let client = Client::builder()
-        .signer(crate::guarded_key::GuardedSigner::new(public_key))
+        .signer(vector_core::GuardedSigner::new(public_key))
         .opts(ClientOptions::new())
         .monitor(Monitor::new(1024))
         .build();
@@ -492,7 +492,7 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
                 // We don't need the decrypted nsec — MY_SECRET_KEY is already valid from
                 // the background sync or previous foreground session.
                 let key = crypto::hash_pass(pwd).await;
-                crate::ENCRYPTION_KEY.set(key);
+                crate::ENCRYPTION_KEY.set(key, &[&crate::MY_SECRET_KEY]);
             }
         }
 
@@ -519,12 +519,12 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
     nsec.zeroize();
 
     let public_key = keys.public_key;
-    MY_SECRET_KEY.store_from_keys(&keys);
+    MY_SECRET_KEY.store_from_keys(&keys, &[&crate::ENCRYPTION_KEY]);
     let _ = MY_PUBLIC_KEY.set(public_key);
     drop(keys);
 
     let client = Client::builder()
-        .signer(crate::guarded_key::GuardedSigner::new(public_key))
+        .signer(vector_core::GuardedSigner::new(public_key))
         .opts(ClientOptions::new())
         .monitor(Monitor::new(1024))
         .build();

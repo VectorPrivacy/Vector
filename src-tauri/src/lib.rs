@@ -5,7 +5,6 @@ use tauri::Manager;
 mod macros;
 
 mod crypto;
-mod guarded_key;
 
 mod db;
 
@@ -39,15 +38,15 @@ pub struct MediaServerState {
 mod whisper;
 
 mod message;
-pub use message::{Message, Attachment, Reaction};
+pub use vector_core::{Message, Attachment, Reaction};
 
 mod profile;
-pub use profile::{Profile, Status};
+pub use vector_core::{Profile, ProfileFlags, SlimProfile, Status};
 
 mod profile_sync;
 
 mod chat;
-pub use chat::{Chat, ChatType, ChatMetadata};
+pub use vector_core::{Chat, ChatType, ChatMetadata, SerializableChat};
 
 mod rumor;
 pub use rumor::{RumorEvent, RumorContext, RumorProcessingResult, ConversationType, process_rumor};

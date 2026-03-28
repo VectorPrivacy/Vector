@@ -1209,9 +1209,8 @@ pub async fn miniapp_close(
 
             // Remove ourselves from session peers
             if let Some(my_pk) = crate::MY_PUBLIC_KEY.get() {
-                if let Ok(my_npub) = my_pk.to_bech32() {
-                    state.remove_session_peer(&channel.topic, &my_npub).await;
-                }
+                let my_npub = my_pk.to_bech32().unwrap();
+                state.remove_session_peer(&channel.topic, &my_npub).await;
             }
 
             // Send peer-left via Nostr

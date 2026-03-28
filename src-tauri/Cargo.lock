@@ -9253,9 +9253,37 @@ dependencies = [
  "tokio-tungstenite 0.28.0",
  "toml 0.8.23",
  "url",
+ "vector-core",
  "whisper-rs",
  "zeroize",
  "zip 2.4.2",
+]
+
+[[package]]
+name = "vector-core"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "aes-gcm",
+ "argon2",
+ "base64-simd",
+ "bip39",
+ "chacha20poly1305",
+ "futures-util",
+ "image",
+ "libc",
+ "nostr-blossom",
+ "nostr-sdk",
+ "rand 0.8.5",
+ "reqwest 0.12.24",
+ "rusqlite",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "url",
+ "zeroize",
 ]
 
 [[package]]
