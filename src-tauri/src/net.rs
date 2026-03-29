@@ -4,69 +4,11 @@ use futures_util::StreamExt;
 use reqwest::{self, Client};
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
-use url::Url;
 
+pub use vector_core::net::validate_url_not_private;
 pub use vector_core::SiteMetadata;
 
 use crate::simd::html_meta;
-
-/// Reject URLs that resolve to private/loopback/link-local addresses (SSRF protection).
-/// Returns Ok(()) if the URL is safe to fetch, Err with reason otherwise.
-pub fn validate_url_not_private(url_str: &str) -> Result<(), &'static str> {
-    let parsed = Url::parse(url_str).map_err(|_| "Invalid URL")?;
-
-    // Only allow http/https schemes
-    match parsed.scheme() {
-        "http" | "https" => {}
-        _ => return Err("Only HTTP(S) URLs are allowed"),
-    }
-
-    // Check the host — reject IPs directly, resolve hostnames later (reqwest handles DNS)
-    match parsed.host() {
-        Some(url::Host::Ipv4(ip)) => {
-            let o = ip.octets();
-            if ip.is_loopback()
-                || ip.is_private()
-                || ip.is_link_local()
-                || ip.is_broadcast()
-                || ip.is_unspecified()
-                || (o[0] == 100 && o[1] >= 64 && o[1] <= 127) // CGN (100.64.0.0/10)
-            {
-                return Err("Private/internal IP addresses are not allowed");
-            }
-        }
-        Some(url::Host::Ipv6(ip)) => {
-            if ip.is_loopback() || ip.is_unspecified() || is_ipv6_private(&ip) {
-                return Err("Private/internal IP addresses are not allowed");
-            }
-        }
-        Some(url::Host::Domain(domain)) => {
-            // Block localhost variants
-            if domain == "localhost"
-                || domain.ends_with(".local")
-                || domain.ends_with(".internal")
-            {
-                return Err("Local hostnames are not allowed");
-            }
-        }
-        None => return Err("URL has no host"),
-    }
-
-    Ok(())
-}
-
-fn is_ipv6_private(ip: &std::net::Ipv6Addr) -> bool {
-    // Check for IPv4-mapped addresses (::ffff:x.x.x.x)
-    if let Some(ipv4) = ip.to_ipv4_mapped() {
-        return ipv4.is_loopback() || ipv4.is_private() || ipv4.is_link_local();
-    }
-    let segments = ip.segments();
-    // Unique local (fc00::/7)
-    if segments[0] & 0xfe00 == 0xfc00 { return true; }
-    // Link-local (fe80::/10)
-    if segments[0] & 0xffc0 == 0xfe80 { return true; }
-    false
-}
 
 /// Trait for reporting download progress
 pub trait ProgressReporter {
