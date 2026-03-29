@@ -1,42 +1,10 @@
-/// Log macros that replace the `log` crate.
+/// Tauri-specific log macros.
 ///
-/// `log_info!`, `log_debug!`, `log_trace!` compile to no-ops in release builds.
-/// `log_warn!` and `log_error!` always print with UTC timestamps (important for diagnostics).
-/// `log_error!` also emits a toast to the frontend so users know something went wrong.
-
-#[allow(unused_macros)]
-
-
-macro_rules! log_info {
-    ($($arg:tt)*) => {{
-        #[cfg(debug_assertions)]
-        eprintln!("[INFO] {}", format_args!($($arg)*));
-    }};
-}
-
-macro_rules! log_debug {
-    ($($arg:tt)*) => {{
-        #[cfg(debug_assertions)]
-        eprintln!("[DEBUG] {}", format_args!($($arg)*));
-    }};
-}
-
-macro_rules! log_trace {
-    ($($arg:tt)*) => {{
-        #[cfg(debug_assertions)]
-        eprintln!("[TRACE] {}", format_args!($($arg)*));
-    }};
-}
-
-macro_rules! log_warn {
-    ($($arg:tt)*) => {{
-        let _secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        eprintln!("[WARN {:02}:{:02}:{:02}Z] {}", (_secs / 3600) % 24, (_secs / 60) % 60, _secs % 60, format_args!($($arg)*));
-    }};
-}
+/// `log_info!`, `log_debug!`, `log_trace!`, `log_warn!` are defined in vector-core
+/// and imported via `#[macro_use] extern crate vector_core` in lib.rs.
+///
+/// `log_error!` stays here because it writes to the log file and emits a toast
+/// to the frontend via TAURI_APP — both Tauri-specific.
 
 macro_rules! log_error {
     ($($arg:tt)*) => {{

@@ -2,6 +2,9 @@ use nostr_sdk::prelude::*;
 use tauri::Manager;
 
 #[macro_use]
+extern crate vector_core;
+
+#[macro_use]
 mod macros;
 
 mod crypto;
@@ -49,11 +52,12 @@ mod chat;
 pub use vector_core::{Chat, ChatType, ChatMetadata, SerializableChat};
 
 mod rumor;
-pub use rumor::{RumorEvent, RumorContext, RumorProcessingResult, ConversationType, process_rumor};
+pub use vector_core::rumor::{RumorEvent, RumorContext, RumorProcessingResult, ConversationType, process_rumor};
 
-// Flat event storage layer (protocol-aligned)
-mod stored_event;
-pub use stored_event::{StoredEvent, StoredEventBuilder, event_kind};
+pub mod stored_event {
+    pub use vector_core::stored_event::*;
+}
+pub use vector_core::{StoredEvent, StoredEventBuilder};
 
 mod deep_link;
 

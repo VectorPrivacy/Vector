@@ -24,6 +24,10 @@
 //! (AppHandle)      (terminal)     (callbacks)
 //! ```
 
+// === Logging (must be first — #[macro_export] macros used by all modules) ===
+#[macro_use]
+mod macros;
+
 // === Foundation ===
 pub mod error;
 pub mod traits;
@@ -56,6 +60,12 @@ pub mod net;
 pub mod blossom;
 pub mod inbox_relays;
 
+// === Event Storage ===
+pub mod stored_event;
+
+// === Rumor Processing ===
+pub mod rumor;
+
 // === Messaging ===
 pub mod sending;
 
@@ -69,6 +79,8 @@ pub use crypto::{GuardedKey, GuardedSigner};
 pub use error::{VectorError, Result};
 pub use traits::{EventEmitter, NoOpEmitter, set_event_emitter, emit_event};
 pub use db::{set_app_data_dir, get_app_data_dir};
+pub use stored_event::{StoredEvent, StoredEventBuilder};
+pub use rumor::{RumorEvent, RumorContext, ConversationType, RumorProcessingResult, process_rumor};
 
 use std::path::PathBuf;
 

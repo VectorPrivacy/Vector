@@ -140,7 +140,7 @@ pub(crate) async fn handle_mls_group_message(event: Event, my_public_key: Public
                         };
 
                         let processed = rt.block_on(async {
-                            use crate::rumor::{process_rumor, RumorContext, ConversationType, RumorProcessingResult};
+                            use crate::rumor::{process_rumor_with_mls, RumorContext, ConversationType, RumorProcessingResult};
 
                             let rumor_context = RumorContext {
                                 sender: msg.pubkey,
@@ -149,7 +149,8 @@ pub(crate) async fn handle_mls_group_message(event: Event, my_public_key: Public
                                 conversation_type: ConversationType::MlsGroup,
                             };
 
-                            match process_rumor(rumor_event, rumor_context).await {
+                            let download_dir = crate::rumor::resolve_download_dir();
+                            match process_rumor_with_mls(&rumor_event, &rumor_context, &download_dir).await {
                                 Ok(result) => {
                                     match result {
                                         RumorProcessingResult::TextMessage(mut message) => {

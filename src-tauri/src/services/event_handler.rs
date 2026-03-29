@@ -261,7 +261,8 @@ pub(crate) async fn handle_event_with_context(
             };
 
             // Process the rumor using our protocol-agnostic processor
-            match process_rumor(rumor_event, rumor_context).await {
+            let download_dir = crate::rumor::resolve_download_dir();
+            match process_rumor(rumor_event, rumor_context, &download_dir) {
                 Ok(result) => {
                     match result {
                         RumorProcessingResult::TextMessage(mut msg) => {
@@ -787,7 +788,8 @@ pub(crate) async fn prepare_event(
     };
 
     // Process the rumor (pure parsing, no state mutation)
-    match process_rumor(rumor_event, rumor_context).await {
+    let download_dir = crate::rumor::resolve_download_dir();
+    match process_rumor(rumor_event, rumor_context, &download_dir) {
         Ok(result) => {
             let parse_ns = parse_start.elapsed().as_nanos() as u64;
             PreparedEvent::Processed {

@@ -2327,8 +2327,9 @@ impl MlsService {
                     conversation_type: ConversationType::MlsGroup,
                 };
 
-                // Process the rumor using our protocol-agnostic processor
-                match process_rumor(rumor_event.clone(), rumor_context).await {
+                // Process the rumor with MLS imeta support
+                let download_dir = crate::rumor::resolve_download_dir();
+                match crate::rumor::process_rumor_with_mls(rumor_event, &rumor_context, &download_dir).await {
                     Ok(result) => {
                         match result {
                             RumorProcessingResult::TextMessage(msg) | RumorProcessingResult::FileAttachment(msg) => {

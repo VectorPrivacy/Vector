@@ -169,18 +169,229 @@ pub fn mime_from_extension(ext: &str) -> &'static str {
         "gif" => "image/gif",
         "webp" => "image/webp",
         "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        "tiff" | "tif" => "image/tiff",
+        "dng" => "image/x-adobe-dng",
+        "cr2" => "image/x-canon-cr2",
+        "nef" => "image/x-nikon-nef",
+        "arw" => "image/x-sony-arw",
         "mp4" => "video/mp4",
         "webm" => "video/webm",
         "mov" => "video/quicktime",
+        "avi" => "video/x-msvideo",
+        "mkv" => "video/x-matroska",
+        "flv" => "video/x-flv",
+        "wmv" => "video/x-ms-wmv",
+        "mpg" | "mpeg" => "video/mpeg",
+        "3gp" => "video/3gpp",
+        "ogv" => "video/ogg",
+        "ts" => "video/mp2t",
         "mp3" => "audio/mpeg",
         "ogg" => "audio/ogg",
         "wav" => "audio/wav",
         "flac" => "audio/flac",
+        "m4a" => "audio/mp4",
+        "aac" => "audio/aac",
+        "wma" => "audio/x-ms-wma",
+        "opus" => "audio/opus",
         "pdf" => "application/pdf",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "ppt" => "application/vnd.ms-powerpoint",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "odt" => "application/vnd.oasis.opendocument.text",
+        "ods" => "application/vnd.oasis.opendocument.spreadsheet",
+        "odp" => "application/vnd.oasis.opendocument.presentation",
+        "rtf" => "application/rtf",
+        "txt" => "text/plain",
+        "md" => "text/markdown",
+        "csv" => "text/csv",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "yaml" | "yml" => "application/x-yaml",
+        "toml" => "application/toml",
+        "sql" => "application/sql",
         "zip" => "application/zip",
-        "xdc" => "application/xdc+zip",
+        "rar" => "application/vnd.rar",
+        "7z" => "application/x-7z-compressed",
+        "tar" => "application/x-tar",
+        "gz" => "application/gzip",
+        "bz2" => "application/x-bzip2",
+        "xz" => "application/x-xz",
+        "iso" => "application/x-iso9660-image",
+        "dmg" => "application/x-apple-diskimage",
+        "apk" => "application/vnd.android.package-archive",
+        "jar" => "application/java-archive",
+        "xdc" => "application/vnd.webxdc+zip",
+        "obj" => "model/obj",
+        "gltf" => "model/gltf+json",
+        "glb" => "model/gltf-binary",
+        "stl" => "model/stl",
+        "dae" => "model/vnd.collada+xml",
+        "js" => "text/javascript",
+        "py" => "text/x-python",
+        "rs" => "text/x-rust",
+        "go" => "text/x-go",
+        "java" => "text/x-java",
+        "c" => "text/x-c",
+        "cpp" => "text/x-c++",
+        "cs" => "text/x-csharp",
+        "rb" => "text/x-ruby",
+        "php" => "text/x-php",
+        "swift" => "text/x-swift",
+        "html" | "htm" => "text/html",
+        "css" => "text/css",
+        "exe" => "application/x-msdownload",
+        "msi" => "application/x-msi",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
         _ => "application/octet-stream",
     }
+}
+
+/// Convert a MIME type to a file extension.
+/// Falls back to using the MIME subtype when unknown.
+pub fn extension_from_mime(mime: &str) -> String {
+    match mime.trim().to_lowercase().as_str() {
+        // Images
+        "image/png" => "png",
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/svg+xml" => "svg",
+        "image/bmp" | "image/x-ms-bmp" => "bmp",
+        "image/x-icon" | "image/vnd.microsoft.icon" => "ico",
+        "image/tiff" => "tiff",
+        "image/x-adobe-dng" => "dng",
+        "image/x-canon-cr2" => "cr2",
+        "image/x-nikon-nef" => "nef",
+        "image/x-sony-arw" => "arw",
+        // Audio
+        "audio/wav" | "audio/x-wav" | "audio/wave" => "wav",
+        "audio/mp3" | "audio/mpeg" => "mp3",
+        "audio/flac" => "flac",
+        "audio/ogg" => "ogg",
+        "audio/mp4" => "m4a",
+        "audio/aac" | "audio/x-aac" => "aac",
+        "audio/x-ms-wma" => "wma",
+        "audio/opus" => "opus",
+        // Video
+        "video/mp4" => "mp4",
+        "video/webm" => "webm",
+        "video/quicktime" => "mov",
+        "video/x-msvideo" => "avi",
+        "video/x-matroska" => "mkv",
+        "video/x-flv" => "flv",
+        "video/x-ms-wmv" => "wmv",
+        "video/mpeg" => "mpg",
+        "video/3gpp" => "3gp",
+        "video/ogg" => "ogv",
+        "video/mp2t" => "ts",
+        // Documents
+        "application/pdf" => "pdf",
+        "application/msword" => "doc",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+        "application/vnd.ms-excel" => "xls",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
+        "application/vnd.ms-powerpoint" => "ppt",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
+        "application/vnd.oasis.opendocument.text" => "odt",
+        "application/vnd.oasis.opendocument.spreadsheet" => "ods",
+        "application/vnd.oasis.opendocument.presentation" => "odp",
+        "application/rtf" => "rtf",
+        // Text/Data
+        "text/plain" => "txt",
+        "text/markdown" => "md",
+        "text/csv" => "csv",
+        "application/json" => "json",
+        "application/xml" | "text/xml" => "xml",
+        "application/x-yaml" | "text/yaml" => "yaml",
+        "application/toml" => "toml",
+        "application/sql" => "sql",
+        // Archives
+        "application/zip" => "zip",
+        "application/x-rar-compressed" | "application/vnd.rar" => "rar",
+        "application/x-7z-compressed" => "7z",
+        "application/x-tar" => "tar",
+        "application/gzip" => "gz",
+        "application/x-bzip2" => "bz2",
+        "application/x-xz" => "xz",
+        "application/x-iso9660-image" => "iso",
+        "application/x-apple-diskimage" => "dmg",
+        "application/vnd.android.package-archive" => "apk",
+        "application/java-archive" => "jar",
+        "application/vnd.webxdc+zip" => "xdc",
+        // 3D
+        "model/obj" => "obj",
+        "model/gltf+json" => "gltf",
+        "model/gltf-binary" => "glb",
+        "model/stl" | "application/sla" => "stl",
+        "model/vnd.collada+xml" => "dae",
+        // Code
+        "text/javascript" | "application/javascript" => "js",
+        "text/typescript" | "application/typescript" => "ts",
+        "text/x-python" | "application/x-python" => "py",
+        "text/x-rust" => "rs",
+        "text/x-go" => "go",
+        "text/x-java" => "java",
+        "text/x-c" => "c",
+        "text/x-c++" => "cpp",
+        "text/x-csharp" => "cs",
+        "text/x-ruby" => "rb",
+        "text/x-php" => "php",
+        "text/x-swift" => "swift",
+        // Web
+        "text/html" => "html",
+        "text/css" => "css",
+        // Other
+        "application/x-msdownload" | "application/x-dosexec" => "exe",
+        "application/x-msi" => "msi",
+        "application/x-font-ttf" | "font/ttf" => "ttf",
+        "application/x-font-otf" | "font/otf" => "otf",
+        "font/woff" => "woff",
+        "font/woff2" => "woff2",
+        // Fallback: extract subtype
+        _ => {
+            let lower = mime.trim().to_lowercase();
+            return lower.split('/').nth(1).unwrap_or("bin").to_string();
+        }
+    }.to_string()
+}
+
+/// Sanitize a filename for safe filesystem use.
+/// Strips path traversal, dangerous characters, and truncates to 64-char stem.
+pub fn sanitize_filename(name: &str) -> String {
+    let base = name.rsplit('/').next().unwrap_or(name);
+    let base = base.rsplit('\\').next().unwrap_or(base);
+
+    let sanitized: String = base.chars().filter(|c| {
+        !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0')
+    }).collect();
+
+    let sanitized = sanitized.trim_matches(|c: char| c == '.' || c == ' ');
+
+    if sanitized.is_empty() {
+        return String::new();
+    }
+
+    if let Some(dot_pos) = sanitized.rfind('.') {
+        let stem = &sanitized[..dot_pos];
+        let ext = &sanitized[dot_pos..];
+        if stem.len() > 64 {
+            let truncated = &stem[..stem.floor_char_boundary(64)];
+            return format!("{}{}", truncated, ext);
+        }
+    } else if sanitized.len() > 64 {
+        let truncated = &sanitized[..sanitized.floor_char_boundary(64)];
+        return truncated.to_string();
+    }
+
+    sanitized.to_string()
 }
 
 #[cfg(test)]

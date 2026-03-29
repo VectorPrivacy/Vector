@@ -1,320 +1,90 @@
-//! Protocol-Agnostic Rumor Processing Module
+//! Rumor Processing — Tauri-specific extensions
 //!
-//! This module provides unified event processing for all messaging protocols (NIP-17 DMs, MLS Groups, etc.).
-//! The core insight is that "rumors" (the inner decrypted events) are protocol-agnostic - only the
-//! wrapping/unwrapping differs between protocols.
-//!
-//! ## Architecture
-//!
-//! ```text
-//! Event → Protocol Handler (unwrap) → RumorEvent
-//!                                       ↓
-//!                             process_rumor() [SHARED]
-//!                                       ↓
-//!                             RumorProcessingResult
-//!                                       ↓
-//!                     Storage Handler (protocol-specific)
-//!                                       ↓
-//!                             Emit to UI [SHARED]
-//! ```
-//!
-//! ## Supported Rumor Types
-//!
-//! - **Text Messages**: `Kind::PrivateDirectMessage` - Plain text with optional replies
-//! - **File Attachments**: `Kind::from_u16(15)` - Encrypted files with metadata
-//! - **Reactions**: `Kind::Reaction` - Emoji reactions to messages
-//! - **Typing Indicators**: `Kind::ApplicationSpecificData` - Real-time typing status
+//! Core rumor processing lives in `vector_core::rumor`. This module provides
+//! Tauri-specific additions that require TAURI_APP, MlsService, or MDK.
+
+pub use vector_core::rumor::*;
 
 use std::borrow::Cow;
+use std::path::PathBuf;
 use nostr_sdk::prelude::*;
 use tauri::Manager;
-use crate::{Message, Attachment, Reaction, TAURI_APP, StoredEvent, StoredEventBuilder};
+
+/// Resolve the platform-appropriate download directory for file attachments.
+/// Uses TAURI_APP when available, falls back to app data dir.
+pub fn resolve_download_dir() -> PathBuf {
+    if let Some(handle) = TAURI_APP.get() {
+        let base = if cfg!(target_os = "ios") {
+            tauri::path::BaseDirectory::Document
+        } else {
+            tauri::path::BaseDirectory::Download
+        };
+        handle.path().resolve("vector", base).unwrap_or_default()
+    } else if let Ok(data_dir) = crate::account_manager::get_app_data_dir() {
+        data_dir.join("vector_downloads")
+    } else {
+        PathBuf::from("/tmp/vector_downloads")
+    }
+}
+use std::path::Path;
+use crate::{Attachment, TAURI_APP};
 use crate::message::ImageMetadata;
 use crate::util::{bytes_to_hex_string, hex_string_to_bytes};
 use crate::mls::MlsService;
 
-/// Protocol-agnostic rumor event representation
+/// Process a rumor with MLS imeta attachment support.
 ///
-/// This is the unified format for all decrypted events, regardless of whether
-/// they came from NIP-17 giftwraps or MLS encryption.
-#[derive(Debug, Clone)]
-pub struct RumorEvent {
-    pub id: EventId,
-    pub kind: Kind,
-    pub content: String,
-    pub tags: Tags,
-    pub created_at: Timestamp,
-    pub pubkey: PublicKey,
-}
-
-/// Context for processing a rumor
+/// Wraps vector_core's `process_rumor` and adds MLS-specific MIP-04 imeta parsing
+/// that requires TAURI_APP + MlsService (cannot live in vector-core).
 ///
-/// Provides the necessary context to process a rumor correctly,
-/// including who sent it and what conversation it belongs to.
-#[derive(Debug, Clone)]
-pub struct RumorContext {
-    /// The sender's public key
-    pub sender: PublicKey,
-    /// Whether this rumor is from ourselves
-    pub is_mine: bool,
-    /// The conversation ID (npub for DMs, group_id for MLS)
-    pub conversation_id: String,
-    /// The type of conversation
-    pub conversation_type: ConversationType,
-}
-
-/// Type of conversation
-#[derive(Debug, Clone, PartialEq)]
-pub enum ConversationType {
-    /// Direct message (NIP-17)
-    DirectMessage,
-    /// MLS group chat
-    MlsGroup,
-}
-
-/// Result of processing a rumor
-///
-/// Represents the different types of events that can result from
-/// processing a rumor. The caller is responsible for storing these
-/// results appropriately based on the conversation type.
-#[derive(Debug, Clone)]
-pub enum RumorProcessingResult {
-    /// A text message (with optional reply reference)
-    TextMessage(Message),
-    /// A file attachment message
-    FileAttachment(Message),
-    /// An emoji reaction to a message
-    Reaction(Reaction),
-    /// A typing indicator update
-    TypingIndicator {
-        profile_id: String,
-        until: u64,
-    },
-    /// A leave request from a group member (admin should auto-remove them)
-    LeaveRequest {
-        /// The event ID of the leave request (for deduplication)
-        event_id: String,
-        /// The pubkey of the member requesting to leave (npub)
-        member_pubkey: String,
-    },
-    /// A WebXDC peer advertisement for realtime channels
-    WebxdcPeerAdvertisement {
-        event_id: String,
-        topic_id: String,
-        node_addr: String,
-        sender_npub: String,
-        created_at: u64,
-    },
-    /// A WebXDC peer left signal (peer closed their Mini App)
-    WebxdcPeerLeft {
-        event_id: String,
-        topic_id: String,
-        sender_npub: String,
-        created_at: u64,
-    },
-    /// Unknown event type - stored for future compatibility
-    /// The frontend will render this as "Unknown Event" placeholder
-    UnknownEvent(StoredEvent),
-    /// A PIVX payment promo code sent in chat
-    PivxPayment {
-        /// The promo code (5-char Base58)
-        gift_code: String,
-        /// Amount in PIV
-        amount_piv: f64,
-        /// The PIVX address for balance checking (optional for older events)
-        address: Option<String>,
-        /// The message ID for this payment event
-        message_id: String,
-        /// The stored event for persistence
-        event: StoredEvent,
-    },
-    /// Event was ignored (invalid, expired, or should not be stored)
-    Ignored,
-    /// A message edit event
-    Edit {
-        /// The ID of the message being edited
-        message_id: String,
-        /// The new content
-        new_content: String,
-        /// Timestamp of the edit (milliseconds)
-        edited_at: u64,
-        /// The stored event for persistence
-        event: StoredEvent,
-    },
-}
-
-/// Main rumor processor - protocol agnostic
-///
-/// This is the single entry point for processing all rumor types.
-/// It handles text messages, file attachments, reactions, and typing indicators
-/// in a unified way, regardless of the underlying protocol.
-///
-/// # Arguments
-///
-/// * `rumor` - The rumor event to process
-/// * `context` - Context about the rumor (sender, conversation, etc.)
-///
-/// # Returns
-///
-/// A `RumorProcessingResult` indicating what type of event was processed,
-/// or an error if processing failed.
-pub async fn process_rumor(
-    rumor: RumorEvent,
-    context: RumorContext,
+/// For DMs, this is identical to `vector_core::rumor::process_rumor`.
+/// For MLS groups, it additionally parses imeta tags into file attachments.
+pub async fn process_rumor_with_mls(
+    rumor: &RumorEvent,
+    context: &RumorContext,
+    download_dir: &Path,
 ) -> Result<RumorProcessingResult, String> {
-    match rumor.kind {
-        // Text messages - Kind 9 (MLS/White Noise) or Kind 14 (DMs/legacy)
-        Kind::PrivateDirectMessage => {
-            process_text_message(rumor, context).await
-        }
-        k if k.as_u16() == crate::stored_event::event_kind::MLS_CHAT_MESSAGE => {
-            process_text_message(rumor, context).await
-        }
-        // File attachments
-        k if k.as_u16() == 15 => {
-            process_file_attachment(rumor, context).await
-        }
-        // Message edits
-        k if k.as_u16() == crate::stored_event::event_kind::MESSAGE_EDIT => {
-            process_edit_event(rumor, context).await
-        }
-        // Emoji reactions
-        Kind::Reaction => {
-            process_reaction(rumor, context).await
-        }
-        // Application-specific data (typing indicators, etc.)
-        Kind::ApplicationSpecificData => {
-            process_app_specific(rumor, context).await
-        }
-        // Unknown or unsupported kind - store for future compatibility
-        _ => {
-            process_unknown_event(rumor, context).await
-        }
-    }
-}
+    let result = vector_core::rumor::process_rumor(rumor.clone(), context.clone(), download_dir)?;
 
-/// Process an unknown event type
-///
-/// Creates a StoredEvent for unknown kinds so they can be stored
-/// and potentially displayed/processed in future versions.
-async fn process_unknown_event(
-    rumor: RumorEvent,
-    context: RumorContext,
-) -> Result<RumorProcessingResult, String> {
-    // Convert tags to Vec<Vec<String>> format
-    let tags: Vec<Vec<String>> = rumor.tags.iter()
-        .map(|tag| {
-            tag.as_slice().iter().map(|s| s.to_string()).collect()
-        })
-        .collect();
-
-    // Extract reference_id from e-tag if present
-    let reference_id = rumor.tags
-        .find(TagKind::e())
-        .and_then(|tag| tag.content())
-        .map(|s| s.to_string());
-
-    let event = StoredEventBuilder::new()
-        .id(rumor.id.to_hex())
-        .kind(rumor.kind.as_u16())
-        .content(rumor.content)
-        .tags(tags)
-        .reference_id(reference_id)
-        .created_at(rumor.created_at.as_secs())
-        .mine(context.is_mine)
-        .npub(rumor.pubkey.to_bech32().ok())
-        .build();
-
-    Ok(RumorProcessingResult::UnknownEvent(event))
-}
-
-/// Process a text message rumor
-///
-/// Extracts text content, reply references, and millisecond-precision timestamps.
-/// For MLS groups, also checks for imeta tags (MIP-04 file attachments).
-async fn process_text_message(
-    rumor: RumorEvent,
-    context: RumorContext,
-) -> Result<RumorProcessingResult, String> {
-    // Extract reply reference if present
-    let replied_to = extract_reply_reference(&rumor);
-
-    // Extract millisecond-precision timestamp
-    let ms_timestamp = extract_millisecond_timestamp(&rumor);
-
-    // Check for imeta tags (MIP-04 file attachments in MLS groups)
-    let attachments = if context.conversation_type == ConversationType::MlsGroup {
-        parse_mls_imeta_attachments(&rumor, &context).await
-    } else {
-        Vec::new()
-    };
-
-    // Extract filename from the event's name tag (MLS events carry one attachment per message)
-    let file_name = rumor.tags
-        .find(TagKind::Custom(Cow::Borrowed("name")))
-        .and_then(|tag| tag.content())
-        .map(|s| crate::commands::attachments::sanitize_filename(s))
-        .unwrap_or_default();
-
-    // Apply name to first attachment (MLS events have one attachment per message)
-    let mut attachments = attachments;
-    if !file_name.is_empty() {
-        if let Some(att) = attachments.first_mut() {
-            att.name = file_name;
-        }
+    // Only MLS groups need imeta parsing
+    if context.conversation_type != ConversationType::MlsGroup {
+        return Ok(result);
     }
 
-    // Extract webxdc-topic for Mini Apps (realtime channel isolation)
-    let webxdc_topic = rumor.tags
-        .find(TagKind::Custom(Cow::Borrowed("webxdc-topic")))
-        .and_then(|tag| tag.content())
-        .map(|s| s.to_string());
+    // For MLS text messages, check for imeta attachments
+    match result {
+        RumorProcessingResult::TextMessage(mut msg) => {
+            let mut attachments = parse_mls_imeta_attachments(rumor, context).await;
+            if attachments.is_empty() {
+                return Ok(RumorProcessingResult::TextMessage(msg));
+            }
 
-    // If we have attachments, apply webxdc_topic to them
-    let attachments = if let Some(topic) = webxdc_topic {
-        attachments.into_iter().map(|mut att| {
-            att.webxdc_topic = Some(topic.clone());
-            att
-        }).collect()
-    } else {
-        attachments
-    };
+            // Apply name tag to first attachment (MLS events carry one attachment per message)
+            if let Some(name_tag) = rumor.tags.find(TagKind::Custom(Cow::Borrowed("name"))) {
+                if let Some(name) = name_tag.content() {
+                    let file_name = vector_core::crypto::sanitize_filename(name);
+                    if !file_name.is_empty() {
+                        if let Some(att) = attachments.first_mut() {
+                            att.name = file_name;
+                        }
+                    }
+                }
+            }
 
-    // Determine result type based on whether we have attachments
-    let has_attachments = !attachments.is_empty();
+            // Apply webxdc-topic to all attachments
+            if let Some(topic_tag) = rumor.tags.find(TagKind::Custom(Cow::Borrowed("webxdc-topic"))) {
+                if let Some(topic) = topic_tag.content() {
+                    let topic = topic.to_string();
+                    for att in &mut attachments {
+                        att.webxdc_topic = Some(topic.clone());
+                    }
+                }
+            }
 
-    // Create the message
-    let msg = Message {
-        id: rumor.id.to_hex(),
-        content: rumor.content,
-        replied_to,
-        replied_to_content: None, // Populated by get_message_views
-        replied_to_npub: None,
-        replied_to_has_attachment: None,
-        preview_metadata: None,
-        at: ms_timestamp,
-        attachments,
-        reactions: Vec::new(),
-        mine: context.is_mine,
-        pending: false,
-        failed: false,
-        npub: if context.conversation_type == ConversationType::MlsGroup {
-            // For group chats, include sender's npub
-            rumor.pubkey.to_bech32().ok()
-        } else {
-            // For DMs, npub is implicit (the other participant)
-            None
-        },
-        wrapper_event_id: None, // Set by caller after processing
-        edited: false,
-        edit_history: None,
-    };
-
-    // Return as FileAttachment if we have MIP-04 attachments, otherwise TextMessage
-    if has_attachments {
-        Ok(RumorProcessingResult::FileAttachment(msg))
-    } else {
-        Ok(RumorProcessingResult::TextMessage(msg))
+            msg.attachments = attachments;
+            Ok(RumorProcessingResult::FileAttachment(msg))
+        }
+        other => Ok(other),
     }
 }
 
@@ -322,7 +92,9 @@ async fn process_text_message(
 ///
 /// Extracts file attachments from imeta tags using MDK's encrypted media parser.
 /// Returns a list of Attachment objects with group_id set for MLS decryption.
-async fn parse_mls_imeta_attachments(
+///
+/// This function requires TAURI_APP and MlsService — it cannot live in vector-core.
+pub async fn parse_mls_imeta_attachments(
     rumor: &RumorEvent,
     context: &RumorContext,
 ) -> Vec<Attachment> {
@@ -418,17 +190,15 @@ async fn parse_mls_imeta_attachments(
             .to_string();
 
         // Extract hash from URL (Blossom URLs typically have hash as the path)
-        let encrypted_hash = extract_hash_from_blossom_url(&media_ref.url)
+        let encrypted_hash = vector_core::rumor::extract_hash_from_blossom_url(&media_ref.url)
             .unwrap_or_else(|| bytes_to_hex_string(&media_ref.original_hash));
 
         // Build image metadata from dimensions if available
         let img_meta = media_ref.dimensions.and_then(|(width, height)| {
-            // Look for thumbhash in the original tag
             let thumbhash = tag.as_slice().iter()
                 .find(|s| s.starts_with("thumbhash "))
                 .map(|s| s.strip_prefix("thumbhash ").unwrap_or("").to_string());
 
-            // Only create ImageMetadata if we have a non-empty thumbhash
             match thumbhash {
                 Some(th) if !th.is_empty() => Some(ImageMetadata {
                     thumbhash: th,
@@ -436,7 +206,6 @@ async fn parse_mls_imeta_attachments(
                     height,
                 }),
                 _ => {
-                    // Still return dimensions without thumbhash for sizing purposes
                     Some(ImageMetadata {
                         thumbhash: String::new(),
                         width,
@@ -489,569 +258,4 @@ async fn parse_mls_imeta_attachments(
     }
 
     attachments
-}
-
-/// Extract SHA256 hash from a Blossom URL
-///
-/// Blossom URLs typically follow the format: https://server.com/<sha256hash>[.ext]
-fn extract_hash_from_blossom_url(url: &str) -> Option<String> {
-    // Get the path component
-    let path = url.split('/').last()?;
-    // Remove file extension if present
-    let hash_part = path.split('.').next()?;
-    // Validate it looks like a SHA256 hash (64 hex chars)
-    if hash_part.len() == 64 && hash_part.chars().all(|c| c.is_ascii_hexdigit()) {
-        Some(hash_part.to_string())
-    } else {
-        None
-    }
-}
-
-/// Process a file attachment rumor
-///
-/// Handles encrypted file metadata including:
-/// - Decryption keys and nonces
-/// - Original file hashes (for deduplication)
-/// - Image metadata (thumbhash, dimensions)
-/// - File extensions and mime types
-async fn process_file_attachment(
-    rumor: RumorEvent,
-    context: RumorContext,
-) -> Result<RumorProcessingResult, String> {
-    // Extract decryption parameters
-    let decryption_key = rumor.tags
-        .find(TagKind::Custom(Cow::Borrowed("decryption-key")))
-        .and_then(|tag| tag.content())
-        .ok_or("Missing decryption-key tag")?
-        .to_string();
-    
-    let decryption_nonce = rumor.tags
-        .find(TagKind::Custom(Cow::Borrowed("decryption-nonce")))
-        .and_then(|tag| tag.content())
-        .ok_or("Missing decryption-nonce tag")?
-        .to_string();
-    
-    // Extract original file hash (ox tag) if present
-    let original_file_hash = rumor.tags
-        .find(TagKind::Custom(Cow::Borrowed("ox")))
-        .and_then(|tag| tag.content())
-        .map(|s| s.to_string());
-    
-    // Extract content storage URL
-    let content_url = rumor.content.clone();
-    
-    // Skip attachments with empty file hash - these are corrupted uploads
-    const EMPTY_FILE_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-    if content_url.contains(EMPTY_FILE_HASH) {
-        eprintln!("Skipping attachment with empty file hash in URL: {}", content_url);
-        return Err("Attachment contains empty file hash - skipping".to_string());
-    }
-    
-    // Extract image metadata if provided
-    let img_meta: Option<ImageMetadata> = {
-        let thumbhash_opt = rumor.tags
-            .find(TagKind::Custom(Cow::Borrowed("thumbhash")))
-            .and_then(|tag| tag.content())
-            .map(|s| s.to_string());
-
-        let dimensions_opt = rumor.tags
-            .find(TagKind::Custom(Cow::Borrowed("dim")))
-            .and_then(|tag| tag.content())
-            .and_then(|s| {
-                // Parse "widthxheight" format
-                let parts: Vec<&str> = s.split('x').collect();
-                if parts.len() == 2 {
-                    let width = parts[0].parse::<u32>().ok()?;
-                    let height = parts[1].parse::<u32>().ok()?;
-                    Some((width, height))
-                } else {
-                    None
-                }
-            });
-
-        // Only create ImageMetadata if we have all required fields
-        match (thumbhash_opt, dimensions_opt) {
-            (Some(thumbhash), Some((width, height))) => {
-                Some(ImageMetadata {
-                    thumbhash,
-                    width,
-                    height,
-                })
-            },
-            _ => None
-        }
-    };
-    
-    // Figure out the file extension: prefer the name tag's extension, fall back to MIME-derived
-    let mime_type = rumor.tags
-        .find(TagKind::Custom(Cow::Borrowed("file-type")))
-        .and_then(|tag| tag.content())
-        .ok_or("Missing file-type tag")?;
-    let mime_extension = crate::util::extension_from_mime(mime_type);
-
-    // Extract filename from name tag (used for extension override and display name)
-    let file_name = rumor.tags
-        .find(TagKind::Custom(Cow::Borrowed("name")))
-        .and_then(|tag| tag.content())
-        .map(|s| crate::commands::attachments::sanitize_filename(s))
-        .unwrap_or_default();
-
-    // Use the extension from the original filename when available (more accurate than MIME for
-    // uncommon types like .sh, .toml, .rs, etc. which all map to application/octet-stream)
-    let extension = if !file_name.is_empty() {
-        file_name.rsplit('.').next()
-            .filter(|e| !e.is_empty() && *e != file_name)
-            .map(|e| e.to_lowercase())
-            .unwrap_or(mime_extension)
-    } else {
-        mime_extension
-    };
-
-    // Resolve the download directory path.
-    // In full-app mode, use Tauri's path resolver for the platform-appropriate Downloads dir.
-    // In headless mode (background service), use a fallback under APP_DATA_DIR — the file
-    // won't be downloaded in the background, but we need a valid path for the Attachment struct
-    // so the Message can be created and the notification sent.
-    let dir = if let Some(handle) = TAURI_APP.get() {
-        let base_directory = if cfg!(target_os = "ios") {
-            tauri::path::BaseDirectory::Document
-        } else {
-            tauri::path::BaseDirectory::Download
-        };
-        handle.path()
-            .resolve("vector", base_directory)
-            .map_err(|e| format!("Failed to resolve directory: {}", e))?
-    } else if let Ok(data_dir) = crate::account_manager::get_app_data_dir() {
-        data_dir.join("vector_downloads")
-    } else {
-        return Err("No path resolver available (no app handle or data dir)".into());
-    };
-    
-    // Grab the reported file size
-    let reported_size = rumor.tags
-        .find(TagKind::Custom(Cow::Borrowed("size")))
-        .and_then(|tag| tag.content())
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0);
-    
-    // Determine file path and download status
-    let (file_hash, file_path, downloaded) = if let Some(ox_hash) = original_file_hash {
-        // We have an original hash - check if file exists locally
-        let hash_file_path = dir.join(format!("{}.{}", ox_hash, extension));
-        if hash_file_path.exists() {
-            // File already exists locally
-            (ox_hash, hash_file_path.to_string_lossy().to_string(), true)
-        } else {
-            // File doesn't exist yet - will need to be downloaded
-            (ox_hash, hash_file_path.to_string_lossy().to_string(), false)
-        }
-    } else {
-        // No original hash - use nonce as placeholder ID
-        let nonce_file_path = dir.join(format!("{}.{}", decryption_nonce, extension));
-        (decryption_nonce.clone(), nonce_file_path.to_string_lossy().to_string(), false)
-    };
-    
-    // Extract reply reference if present
-    let replied_to = extract_reply_reference(&rumor);
-    
-    // Extract millisecond-precision timestamp
-    let ms_timestamp = extract_millisecond_timestamp(&rumor);
-    
-    // Extract webxdc-topic for Mini Apps (realtime channel isolation)
-    let webxdc_topic = rumor.tags
-        .find(TagKind::Custom(Cow::Borrowed("webxdc-topic")))
-        .and_then(|tag| tag.content())
-        .map(|s| s.to_string());
-
-    // Create the attachment
-    let attachment = Attachment {
-        id: file_hash.clone(),
-        key: decryption_key,
-        nonce: decryption_nonce,
-        extension: extension.to_string(),
-        name: file_name,
-        url: content_url,
-        path: file_path,
-        size: reported_size,
-        img_meta,
-        downloading: false,
-        downloaded,
-        webxdc_topic,
-        group_id: None,       // Kind 15 attachments use explicit key/nonce, not MLS
-        original_hash: Some(file_hash), // ox tag value (original file hash)
-        scheme_version: None, // Kind 15 uses explicit encryption, not MIP-04
-        mls_filename: None,   // Kind 15 uses explicit encryption, not MIP-04
-    };
-    
-    // Create the message with attachment
-    let msg = Message {
-        id: rumor.id.to_hex(),
-        content: String::new(),
-        replied_to,
-        replied_to_content: None, // Populated by get_message_views
-        replied_to_npub: None,
-        replied_to_has_attachment: None,
-        preview_metadata: None,
-        at: ms_timestamp,
-        attachments: vec![attachment],
-        reactions: Vec::new(),
-        mine: context.is_mine,
-        pending: false,
-        failed: false,
-        npub: if context.conversation_type == ConversationType::MlsGroup {
-            // For group chats, include sender's npub
-            rumor.pubkey.to_bech32().ok()
-        } else {
-            // For DMs, npub is implicit (the other participant)
-            None
-        },
-        wrapper_event_id: None, // Set by caller after processing
-        edited: false,
-        edit_history: None,
-    };
-    
-    Ok(RumorProcessingResult::FileAttachment(msg))
-}
-
-/// Process a reaction rumor
-///
-/// Extracts emoji reactions to messages.
-async fn process_reaction(
-    rumor: RumorEvent,
-    _context: RumorContext,
-) -> Result<RumorProcessingResult, String> {
-    // Find the reference event (the message being reacted to)
-    let reference_tag = rumor.tags
-        .find(TagKind::e())
-        .ok_or("Reaction missing reference event tag")?;
-    
-    let reference_id = reference_tag.content()
-        .ok_or("Reaction reference tag has no content")?
-        .to_string();
-    
-    // Create the reaction (bech32 npub to match DB format and frontend strPubkey)
-    let reaction = Reaction {
-        id: rumor.id.to_hex(),
-        reference_id,
-        author_id: rumor.pubkey.to_bech32().unwrap_or_else(|_| rumor.pubkey.to_hex()),
-        emoji: rumor.content,
-    };
-    
-    Ok(RumorProcessingResult::Reaction(reaction))
-}
-
-/// Process a message edit rumor
-///
-/// Extracts the edited content and references the original message.
-async fn process_edit_event(
-    rumor: RumorEvent,
-    context: RumorContext,
-) -> Result<RumorProcessingResult, String> {
-    // Find the reference event (the message being edited)
-    let reference_tag = rumor.tags
-        .find(TagKind::e())
-        .ok_or("Edit event missing reference event tag")?;
-
-    let message_id = reference_tag.content()
-        .ok_or("Edit reference tag has no content")?
-        .to_string();
-
-    // Extract millisecond-precision timestamp
-    let edited_at = extract_millisecond_timestamp(&rumor);
-
-    // Convert tags to Vec<Vec<String>> format for storage
-    let tags: Vec<Vec<String>> = rumor.tags.iter()
-        .map(|tag| {
-            tag.as_slice().iter().map(|s| s.to_string()).collect()
-        })
-        .collect();
-
-    // Create StoredEvent for persistence
-    let event = StoredEventBuilder::new()
-        .id(rumor.id.to_hex())
-        .kind(crate::stored_event::event_kind::MESSAGE_EDIT)
-        .content(rumor.content.clone())
-        .tags(tags)
-        .reference_id(Some(message_id.clone()))
-        .created_at(rumor.created_at.as_secs())
-        .mine(context.is_mine)
-        .npub(rumor.pubkey.to_bech32().ok())
-        .build();
-
-    Ok(RumorProcessingResult::Edit {
-        message_id,
-        new_content: rumor.content,
-        edited_at,
-        event,
-    })
-}
-
-/// Process application-specific data (typing indicators, etc.)
-///
-/// Currently handles typing indicators for real-time status updates.
-async fn process_app_specific(
-    rumor: RumorEvent,
-    context: RumorContext,
-) -> Result<RumorProcessingResult, String> {
-    // Check if this is a typing indicator
-    if is_typing_indicator(&rumor) {
-        // Validate expiration tag (must be within 30 seconds)
-        let expiry_tag = rumor.tags
-            .find(TagKind::Expiration)
-            .ok_or("Typing indicator missing expiration tag")?;
-        
-        let expiry_timestamp: u64 = expiry_tag.content()
-            .ok_or("Expiration tag has no content")?
-            .parse()
-            .map_err(|_| "Invalid expiration timestamp")?;
-        
-        // Check if the expiry timestamp is reasonable (not expired, and not too far in the future)
-        let current_timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| format!("System time error: {}", e))?
-            .as_secs();
-        
-        // Reject expired or future-dated typing indicators (more than 30 sec in the future)
-        if expiry_timestamp <= current_timestamp || expiry_timestamp > current_timestamp + 30 {
-            return Ok(RumorProcessingResult::Ignored);
-        }
-        
-        // Valid typing indicator (not expired and within reasonable time window)
-        let profile_id = rumor.pubkey.to_bech32()
-            .map_err(|e| format!("Failed to convert pubkey to bech32: {}", e))?;
-        
-        return Ok(RumorProcessingResult::TypingIndicator {
-            profile_id,
-            until: expiry_timestamp,
-        });
-    }
-
-    // Check if this is a leave request (member wants to leave the group)
-    if is_leave_request(&rumor) {
-        let member_pubkey = rumor.pubkey.to_bech32()
-            .map_err(|e| format!("Failed to convert pubkey to bech32: {}", e))?;
-
-        return Ok(RumorProcessingResult::LeaveRequest {
-            event_id: rumor.id.to_hex(),
-            member_pubkey,
-        });
-    }
-
-    // Check if this is a PIVX payment
-    if is_pivx_payment(&rumor) {
-        // Extract gift code from tags
-        let gift_code = rumor.tags
-            .find(TagKind::Custom(Cow::Borrowed("gift-code")))
-            .and_then(|tag| tag.content())
-            .ok_or("PIVX payment missing gift-code tag")?
-            .to_string();
-
-        // Extract amount from tags (in satoshis, convert to PIV)
-        let amount_str = rumor.tags
-            .find(TagKind::Custom(Cow::Borrowed("amount")))
-            .and_then(|tag| tag.content())
-            .unwrap_or("0");
-        let amount_piv = amount_str.parse::<u64>().unwrap_or(0) as f64 / 100_000_000.0;
-
-        // Extract address from tags (for balance checking, optional for older events)
-        let address = rumor.tags
-            .find(TagKind::Custom(Cow::Borrowed("address")))
-            .and_then(|tag| tag.content())
-            .map(|s| s.to_string());
-
-        let message_id = rumor.id.to_hex();
-
-        // Convert rumor tags to StoredEvent format
-        let tags: Vec<Vec<String>> = rumor.tags.iter()
-            .map(|tag| tag.as_slice().iter().map(|s| s.to_string()).collect())
-            .collect();
-
-        // Create StoredEvent for persistence (chat_id will be set by caller)
-        let event = StoredEventBuilder::new()
-            .id(&message_id)
-            .kind(crate::stored_event::event_kind::APPLICATION_SPECIFIC)
-            .chat_id(0) // Will be set by caller
-            .content(&rumor.content)
-            .tags(tags)
-            .created_at(rumor.created_at.as_secs())
-            .mine(context.is_mine)
-            .npub(Some(rumor.pubkey.to_bech32().unwrap_or_default()))
-            .build();
-
-        return Ok(RumorProcessingResult::PivxPayment {
-            gift_code,
-            amount_piv,
-            address,
-            message_id,
-            event,
-        });
-    }
-
-    // Check if this is a WebXDC peer advertisement
-    if is_webxdc_peer_advertisement(&rumor) {
-        log_info!("[WEBXDC] Found peer advertisement rumor, is_mine={}, sender={}",
-            context.is_mine,
-            rumor.pubkey.to_bech32().unwrap_or_else(|_| "unknown".to_string()));
-
-        // Skip our own peer advertisements - we don't need to connect to ourselves
-        if context.is_mine {
-            log_info!("[WEBXDC] Ignoring our own peer advertisement");
-            return Ok(RumorProcessingResult::Ignored);
-        }
-
-        log_info!("[WEBXDC] Detected peer advertisement in rumor from another device");
-        
-        // Extract topic ID and node address
-        let topic_id = rumor.tags
-            .find(TagKind::Custom(std::borrow::Cow::Borrowed("webxdc-topic")))
-            .and_then(|tag| tag.content())
-            .ok_or("Peer advertisement missing webxdc-topic tag")?
-            .to_string();
-        
-        let node_addr = rumor.tags
-            .find(TagKind::Custom(std::borrow::Cow::Borrowed("webxdc-node-addr")))
-            .and_then(|tag| tag.content())
-            .ok_or("Peer advertisement missing webxdc-node-addr tag")?
-            .to_string();
-        
-        let sender_npub = rumor.pubkey.to_bech32().unwrap_or_default();
-        return Ok(RumorProcessingResult::WebxdcPeerAdvertisement {
-            event_id: rumor.id.to_hex(),
-            topic_id,
-            node_addr,
-            sender_npub,
-            created_at: rumor.created_at.as_secs(),
-        });
-    }
-    
-    // Check if this is a WebXDC peer-left signal
-    if is_webxdc_peer_left(&rumor) {
-        if context.is_mine {
-            return Ok(RumorProcessingResult::Ignored);
-        }
-
-        log_info!("[WEBXDC] Detected peer-left signal from another device");
-
-        let topic_id = rumor.tags
-            .find(TagKind::Custom(std::borrow::Cow::Borrowed("webxdc-topic")))
-            .and_then(|tag| tag.content())
-            .ok_or("Peer-left missing webxdc-topic tag")?
-            .to_string();
-
-        let sender_npub = rumor.pubkey.to_bech32().unwrap_or_default();
-        return Ok(RumorProcessingResult::WebxdcPeerLeft {
-            event_id: rumor.id.to_hex(),
-            topic_id,
-            sender_npub,
-            created_at: rumor.created_at.as_secs(),
-        });
-    }
-
-    // Unknown application-specific data
-    Ok(RumorProcessingResult::Ignored)
-}
-
-/// Check if a rumor is a WebXDC peer advertisement
-fn is_webxdc_peer_advertisement(rumor: &RumorEvent) -> bool {
-    rumor.content == "peer-advertisement"
-        && rumor.tags.find(TagKind::Custom(std::borrow::Cow::Borrowed("webxdc-topic"))).is_some()
-        && rumor.tags.find(TagKind::Custom(std::borrow::Cow::Borrowed("webxdc-node-addr"))).is_some()
-}
-
-/// Check if a rumor is a WebXDC peer-left signal
-fn is_webxdc_peer_left(rumor: &RumorEvent) -> bool {
-    rumor.content == "peer-left"
-        && rumor.tags.find(TagKind::Custom(std::borrow::Cow::Borrowed("webxdc-topic"))).is_some()
-}
-
-/// Check if a rumor is a PIVX payment
-fn is_pivx_payment(rumor: &RumorEvent) -> bool {
-    rumor.tags
-        .find(TagKind::d())
-        .and_then(|tag| tag.content())
-        .map(|content| content == "pivx-payment")
-        .unwrap_or(false)
-        && rumor.tags.find(TagKind::Custom(Cow::Borrowed("gift-code"))).is_some()
-}
-
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-/// Extract millisecond-precision timestamp from rumor
-///
-/// Combines the rumor's created_at (seconds) with a custom "ms" tag
-/// to provide millisecond precision for accurate message ordering.
-fn extract_millisecond_timestamp(rumor: &RumorEvent) -> u64 {
-    match rumor.tags.find(TagKind::Custom(Cow::Borrowed("ms"))) {
-        Some(ms_tag) => {
-            // Get the ms value and append it to the timestamp
-            if let Some(ms_str) = ms_tag.content() {
-                if let Ok(ms_value) = ms_str.parse::<u64>() {
-                    // Validate that ms is between 0-999
-                    if ms_value <= 999 {
-                        return rumor.created_at.as_secs() * 1000 + ms_value;
-                    }
-                }
-            }
-            // Fallback to seconds if ms tag is invalid
-            rumor.created_at.as_secs() * 1000
-        }
-        None => rumor.created_at.as_secs() * 1000
-    }
-}
-
-/// Extract reply reference from rumor tags
-///
-/// Looks for an "e" tag with the "reply" marker to identify
-/// which message this rumor is replying to.
-fn extract_reply_reference(rumor: &RumorEvent) -> String {
-    match rumor.tags.find(TagKind::e()) {
-        Some(tag) => {
-            if tag.is_reply() {
-                tag.content().unwrap_or("").to_string()
-            } else {
-                String::new()
-            }
-        }
-        None => String::new(),
-    }
-}
-
-/// Check if rumor is a typing indicator
-///
-/// Validates that the rumor has:
-/// - d tag with value "vector"
-/// - content "typing"
-fn is_typing_indicator(rumor: &RumorEvent) -> bool {
-    // Check d tag
-    let has_vector_tag = rumor.tags
-        .find(TagKind::d())
-        .and_then(|tag| tag.content())
-        .map(|content| content == "vector")
-        .unwrap_or(false);
-
-    // Check content
-    let is_typing_content = rumor.content == "typing";
-
-    has_vector_tag && is_typing_content
-}
-
-/// Check if rumor is a leave request
-///
-/// Validates that the rumor has:
-/// - d tag with value "vector"
-/// - content "leave"
-fn is_leave_request(rumor: &RumorEvent) -> bool {
-    // Check d tag
-    let has_vector_tag = rumor.tags
-        .find(TagKind::d())
-        .and_then(|tag| tag.content())
-        .map(|content| content == "vector")
-        .unwrap_or(false);
-
-    // Check content
-    let is_leave_content = rumor.content == "leave";
-
-    has_vector_tag && is_leave_content
 }
