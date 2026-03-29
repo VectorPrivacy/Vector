@@ -427,6 +427,57 @@ pub fn sanitize_filename(name: &str) -> String {
     sanitized.to_string()
 }
 
+/// Format bytes into human-readable format (KB, MB, GB).
+pub fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+
+    if bytes < KB as u64 {
+        format!("{} B", bytes)
+    } else if bytes < MB as u64 {
+        format!("{:.1} KB", bytes as f64 / KB)
+    } else if bytes < GB as u64 {
+        format!("{:.1} MB", bytes as f64 / MB)
+    } else {
+        format!("{:.1} GB", bytes as f64 / GB)
+    }
+}
+
+/// Returns true if the provided MIME type is an image/*.
+pub fn is_image_mime(mime: &str) -> bool {
+    mime.trim().starts_with("image/")
+}
+
+/// Convert a file extension to a MIME type, with an optional restriction to image/* types.
+pub fn mime_from_extension_safe(extension: &str, image_only: bool) -> Result<String, String> {
+    let mime = mime_from_extension(extension).to_string();
+    if image_only && !is_image_mime(&mime) {
+        return Err(mime);
+    }
+    Ok(mime)
+}
+
+/// Detect MIME type from file magic bytes.
+/// Supports PNG, JPEG, GIF, WebP, TIFF, ICO, and SVG.
+/// Returns "application/octet-stream" for unrecognized formats.
+pub fn mime_from_magic_bytes(bytes: &[u8]) -> &'static str {
+    if bytes.len() < 4 {
+        return "application/octet-stream";
+    }
+    match bytes[0] {
+        0x89 if bytes[1..4] == [0x50, 0x4E, 0x47] => "image/png",
+        0xFF if bytes[1..3] == [0xD8, 0xFF] => "image/jpeg",
+        b'G' if bytes.len() >= 6 && (bytes[..6] == *b"GIF87a" || bytes[..6] == *b"GIF89a") => "image/gif",
+        b'R' if bytes.len() > 12 && bytes[..4] == *b"RIFF" && bytes[8..12] == *b"WEBP" => "image/webp",
+        0x49 if bytes[1..4] == [0x49, 0x2A, 0x00] => "image/tiff",
+        0x4D if bytes[1..4] == [0x4D, 0x00, 0x2A] => "image/tiff",
+        0x00 if bytes[1..4] == [0x00, 0x01, 0x00] => "image/x-icon",
+        b'<' if bytes.starts_with(b"<?xml") || bytes.starts_with(b"<svg") => "image/svg+xml",
+        _ => "application/octet-stream",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
