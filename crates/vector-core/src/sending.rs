@@ -625,4 +625,170 @@ mod tests {
         let j = serde_json::to_string(&r).unwrap();
         assert!(j.contains("null"));
     }
+
+    // ========================================================================
+    // File DM callback sequences
+    // ========================================================================
+
+    #[test]
+    fn file_dm_fresh_upload_full_sequence() {
+        let cb = MockCallback::new();
+        let msg = Message::default();
+
+        // 1. Pending message created
+        cb.on_pending("npub1recv", &msg);
+        // 2. Attachment preview added
+        cb.on_attachment_preview("npub1recv", &msg);
+        // 3. Upload progress (0% → 25% → 50% → 75% → 100%)
+        cb.on_upload_progress("pending-42", 0, 0).unwrap();
+        cb.on_upload_progress("pending-42", 25, 2500).unwrap();
+        cb.on_upload_progress("pending-42", 50, 5000).unwrap();
+        cb.on_upload_progress("pending-42", 75, 7500).unwrap();
+        cb.on_upload_progress("pending-42", 100, 10000).unwrap();
+        // 4. Upload complete
+        cb.on_upload_complete("npub1recv", "pending-42", "deadbeef", "https://blossom.example/deadbeef");
+        // 5. Gift-wrap sent successfully
+        cb.on_sent("npub1recv", "pending-42", &msg);
+        // 6. Persisted to DB
+        cb.on_persist("npub1recv", &msg);
+
+        let e = cb.events();
+        assert_eq!(e.len(), 10);
+        assert!(matches!(&e[0], CbEvent::Pending(c) if c == "npub1recv"));
+        assert!(matches!(&e[1], CbEvent::AttachmentPreview(c) if c == "npub1recv"));
+        assert!(matches!(&e[2], CbEvent::UploadProgress(_, 0, 0)));
+        assert!(matches!(&e[6], CbEvent::UploadProgress(_, 100, 10000)));
+        assert!(matches!(&e[7], CbEvent::UploadComplete(_, url) if url.contains("deadbeef")));
+        assert!(matches!(&e[8], CbEvent::Sent(..)));
+        assert!(matches!(&e[9], CbEvent::Persist(..)));
+    }
+
+    #[test]
+    fn file_dm_dedup_reuse_sequence() {
+        let cb = MockCallback::new();
+        let msg = Message::default();
+
+        // Dedup hit: no upload, existing URL reused
+        // 1. Pending message
+        cb.on_pending("npub1recv", &msg);
+        // 2. Attachment preview (with reused URL already set)
+        cb.on_attachment_preview("npub1recv", &msg);
+        // 3. Upload complete (immediate — URL was already known)
+        cb.on_upload_complete("npub1recv", "pending-99", "existinghash", "https://blossom.example/existing");
+        // 4. Gift-wrap sent
+        cb.on_sent("npub1recv", "pending-99", &msg);
+        // 5. Persisted
+        cb.on_persist("npub1recv", &msg);
+
+        let e = cb.events();
+        assert_eq!(e.len(), 5);
+        // No UploadProgress events — upload was skipped
+        assert!(!e.iter().any(|ev| matches!(ev, CbEvent::UploadProgress(..))));
+        assert!(matches!(&e[2], CbEvent::UploadComplete(..)));
+    }
+
+    #[test]
+    fn file_dm_upload_cancelled_at_30pct() {
+        let cb = MockCallback::with_cancel(30);
+        let msg = Message::default();
+
+        cb.on_pending("npub1recv", &msg);
+        cb.on_attachment_preview("npub1recv", &msg);
+        assert!(cb.on_upload_progress("p", 10, 1000).is_ok());
+        assert!(cb.on_upload_progress("p", 20, 2000).is_ok());
+        // Cancel triggers at 30%
+        let err = cb.on_upload_progress("p", 30, 3000);
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("Cancelled"));
+        // Pipeline marks as failed
+        cb.on_failed("npub1recv", "p", &msg);
+
+        let e = cb.events();
+        assert_eq!(e.len(), 6);
+        // No Sent, no Persist after cancel — just Failed
+        assert!(!e.iter().any(|ev| matches!(ev, CbEvent::Sent(..))));
+        assert!(matches!(e.last(), Some(CbEvent::Failed(..))));
+    }
+
+    #[test]
+    fn file_dm_upload_fails_marks_failed() {
+        let cb = MockCallback::new();
+        let msg = Message::default();
+
+        cb.on_pending("npub1recv", &msg);
+        cb.on_attachment_preview("npub1recv", &msg);
+        cb.on_upload_progress("p", 0, 0).ok();
+        cb.on_upload_progress("p", 10, 500).ok();
+        // Upload fails (server error, all retries exhausted)
+        cb.on_failed("npub1recv", "p", &msg);
+        cb.on_persist("npub1recv", &msg);
+
+        let e = cb.events();
+        assert_eq!(e.len(), 6);
+        assert!(matches!(&e[4], CbEvent::Failed(..)));
+        assert!(matches!(&e[5], CbEvent::Persist(..)));
+        // No UploadComplete, no Sent
+        assert!(!e.iter().any(|ev| matches!(ev, CbEvent::UploadComplete(..))));
+        assert!(!e.iter().any(|ev| matches!(ev, CbEvent::Sent(..))));
+    }
+
+    #[test]
+    fn file_dm_gift_wrap_fails_after_upload() {
+        let cb = MockCallback::new();
+        let msg = Message::default();
+
+        // Upload succeeds but gift-wrap fails
+        cb.on_pending("npub1recv", &msg);
+        cb.on_attachment_preview("npub1recv", &msg);
+        cb.on_upload_progress("p", 100, 10000).ok();
+        cb.on_upload_complete("npub1recv", "p", "hash", "https://blossom/hash");
+        // Gift-wrap retry exhausted
+        cb.on_failed("npub1recv", "p", &msg);
+        cb.on_persist("npub1recv", &msg);
+
+        let e = cb.events();
+        assert_eq!(e.len(), 6);
+        // Upload succeeded but send failed
+        assert!(matches!(&e[3], CbEvent::UploadComplete(..)));
+        assert!(matches!(&e[4], CbEvent::Failed(..)));
+    }
+
+    #[test]
+    fn file_dm_with_image_metadata_sequence() {
+        let cb = MockCallback::new();
+        let msg = Message::default();
+
+        // Image with thumbhash + dimensions
+        cb.on_pending("npub1recv", &msg);
+        cb.on_attachment_preview("npub1recv", &msg);
+        cb.on_upload_progress("p", 0, 0).ok();
+        cb.on_upload_progress("p", 50, 50000).ok();
+        cb.on_upload_progress("p", 100, 100000).ok();
+        cb.on_upload_complete("npub1recv", "p", "imghash", "https://blossom/imghash.jpg");
+        cb.on_sent("npub1recv", "p", &msg);
+        cb.on_persist("npub1recv", &msg);
+
+        let e = cb.events();
+        assert_eq!(e.len(), 8);
+        // Verify ordering: pending → preview → progress(3x) → complete → sent → persist
+        assert!(matches!(&e[0], CbEvent::Pending(..)));
+        assert!(matches!(&e[1], CbEvent::AttachmentPreview(..)));
+        assert!(matches!(&e[5], CbEvent::UploadComplete(_, url) if url.ends_with(".jpg")));
+        assert!(matches!(&e[6], CbEvent::Sent(..)));
+    }
+
+    #[test]
+    fn cancel_token_config_with_upload() {
+        let token = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let c = SendConfig {
+            cancel_token: Some(token.clone()),
+            ..SendConfig::gui()
+        };
+        assert!(c.cancel_token.is_some());
+        assert!(!token.load(std::sync::atomic::Ordering::Relaxed));
+
+        // Simulate cancel
+        token.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(c.cancel_token.as_ref().unwrap().load(std::sync::atomic::Ordering::Relaxed));
+    }
 }
