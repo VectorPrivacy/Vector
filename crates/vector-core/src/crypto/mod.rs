@@ -153,6 +153,39 @@ pub fn encrypt_data(data: &[u8], params: &EncryptionParams) -> Result<Vec<u8>, S
     Ok(buffer)
 }
 
+/// Decrypt data with AES-256-GCM using a 16-byte nonce (0xChat-compatible).
+/// Input format: ciphertext || 16-byte auth tag.
+pub fn decrypt_data(encrypted_data: &[u8], key_hex: &str, nonce_hex: &str) -> Result<Vec<u8>, String> {
+    use aes::Aes256;
+    use aes::cipher::typenum::U16;
+    use aes_gcm::{AesGcm, AeadInPlace, KeyInit as AesKeyInit};
+
+    if encrypted_data.len() < 16 {
+        return Err(format!("Invalid Input: encrypted data too small ({} bytes, minimum 16 bytes required for authentication tag)", encrypted_data.len()));
+    }
+
+    let key_bytes = hex::decode(key_hex).map_err(|e| format!("Invalid key: {}", e))?;
+    let nonce_bytes = hex::decode(nonce_hex).map_err(|e| format!("Invalid nonce: {}", e))?;
+
+    let (ciphertext, tag_bytes) = encrypted_data.split_at(encrypted_data.len() - 16);
+
+    let cipher = AesGcm::<Aes256, U16>::new_from_slice(&key_bytes)
+        .map_err(|_| "Invalid decryption key".to_string())?;
+
+    let nonce_arr: [u8; 16] = nonce_bytes.try_into()
+        .map_err(|_| "Invalid nonce length".to_string())?;
+    let nonce = aes_gcm::Nonce::<U16>::from(nonce_arr);
+    let tag_arr: [u8; 16] = tag_bytes.try_into()
+        .map_err(|_| "Invalid tag length".to_string())?;
+    let tag = aes_gcm::Tag::<U16>::from(tag_arr);
+
+    let mut buffer = ciphertext.to_vec();
+    cipher.decrypt_in_place_detached(&nonce, &[], &mut buffer, &tag)
+        .map_err(|e| e.to_string())?;
+
+    Ok(buffer)
+}
+
 /// Calculate SHA-256 hash of data, returned as hex string.
 pub fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Sha256, Digest};
