@@ -848,11 +848,6 @@ pub async fn fetch_messages<R: Runtime>(
                 state.is_syncing = false;
             }
 
-            // Warm the file hash cache in the background (for attachment deduplication)
-            tokio::task::spawn(async move {
-                db::warm_file_hash_cache().await;
-            });
-
             let _ = handle_bg.emit("sync_finished", ());
 
             // Post-sync: MLS groups + weekly vacuum

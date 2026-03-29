@@ -445,21 +445,31 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         }
     };
 
-    // Text-only DM: delegate entirely to vector-core (avoids building local Message)
-    if !is_group_chat && file.is_none() {
+    // DM: delegate entirely to vector-core
+    if !is_group_chat {
         let config = SendConfig::gui();
         let callback = TauriSendCallback;
-        let reply: Option<&str> = if replied_to.is_empty() { None } else { Some(&replied_to) };
-        let result = vector_core::sending::send_dm(
-            &receiver, &content, reply, &config, &callback,
-        ).await?;
-        return Ok(MessageSendResult {
-            pending_id: result.pending_id,
-            event_id: result.event_id,
-        });
+
+        return if let Some(ref attached_file) = file {
+            // File DM: vector-core handles encrypt + upload + send
+            let result = vector_core::sending::send_file_dm(
+                &receiver, Arc::clone(&attached_file.bytes),
+                &attached_file.name, &attached_file.extension,
+                if content.is_empty() { None } else { Some(&content) },
+                &config, &callback,
+            ).await?;
+            Ok(MessageSendResult { pending_id: result.pending_id, event_id: result.event_id })
+        } else {
+            // Text DM
+            let reply: Option<&str> = if replied_to.is_empty() { None } else { Some(&replied_to) };
+            let result = vector_core::sending::send_dm(
+                &receiver, &content, reply, &config, &callback,
+            ).await?;
+            Ok(MessageSendResult { pending_id: result.pending_id, event_id: result.event_id })
+        };
     }
 
-    // === MLS groups + file DMs: existing path below ===
+    // === MLS groups only below this point ===
 
     let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -765,413 +775,17 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             });
         }
 
-        // ============================================================
-        // DM ATTACHMENTS: Continue with existing Kind 15 approach
-        // ============================================================
-
-        // Check for existing attachment with same hash across all profiles BEFORE encrypting
-        // BUT: Never reuse empty file hashes - always force a new upload
-        let existing_attachment: Option<Attachment> = if file_hash == EMPTY_FILE_HASH {
-            None
-        } else {
-            let mut found_attachment: Option<Attachment> = None;
-
-            // First, search through in-memory state (fastest check)
-            {
-                let state = STATE.lock().await;
-                'outer: for chat in &state.chats {
-                    for message in chat.messages.iter() {
-                        for attachment in &message.attachments {
-                            // Skip MLS attachments — they use group-derived keys
-                            // and can't be reused for DM deduplication.
-                            // MLS attachments have an empty key (all zeros).
-                            if attachment.key == [0u8; 32] {
-                                continue;
-                            }
-                            if attachment.id_eq(&file_hash) && !attachment.url.is_empty() {
-                                found_attachment = Some(attachment.to_attachment());
-                                break 'outer;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Fallback: check database if not found in memory (covers all stored attachments)
-            if found_attachment.is_none() {
-                if let Ok(Some(attachment_ref)) = db::lookup_attachment_cached(&file_hash).await {
-                    found_attachment = Some(Attachment {
-                        id: attachment_ref.hash,
-                        url: attachment_ref.url,
-                        key: attachment_ref.key,
-                        nonce: attachment_ref.nonce,
-                        extension: attachment_ref.extension,
-                        name: attached_file.name.clone(),
-                        size: attachment_ref.size,
-                        path: String::new(),
-                        img_meta: None,
-                        downloading: false,
-                        downloaded: false,
-                        webxdc_topic: None,
-                        group_id: None,
-                        original_hash: None,
-                        scheme_version: None,
-                        mls_filename: None,
-                    });
-                }
-            }
-
-            found_attachment
-        };
-
-        // Determine if we need to encrypt based on whether we'll reuse an existing attachment
-        let will_reuse_existing = if let Some(ref existing) = existing_attachment {
-            // Check if URL contains empty hash - never reuse those
-            const EMPTY_FILE_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-            if existing.url.contains(EMPTY_FILE_HASH) {
-                false
-            } else {
-                // Check if URL is live
-                net::check_url_live(&existing.url).await.unwrap_or_default()
-            }
-        } else {
-            false
-        };
-
-        // Only encrypt if we won't reuse an existing attachment
-        let (params, enc_file) = if will_reuse_existing {
-            // Skip encryption for duplicate files - we'll reuse existing encryption params
-            (crypto::EncryptionParams { key: String::new(), nonce: String::new() }, Vec::new())
-        } else {
-            // Encrypt the attachment - either it's new or the existing URL is dead
-            let params = crypto::generate_encryption_params();
-            let enc_file = crypto::encrypt_data(&*attached_file.bytes, &params).unwrap();
-            (params, enc_file)
-        };
-
-        // For WebXDC (.xdc) files, generate topic ID upfront so it's available immediately
-        // This needs to be outside the block so it's available when building the Nostr event
-        let webxdc_topic = if attached_file.extension.to_lowercase() == "xdc" {
-            let topic_id = generate_topic_id();
-            Some(encode_topic_id(&topic_id))
-        } else {
-            None
-        };
-
-        // Update the attachment in-state
-        {
-            // Use a clone of the Arc for this block
-            let pending_id_clone = Arc::clone(&pending_id);
-
-            // Choose the appropriate base directory based on platform
-            let base_directory = if cfg!(target_os = "ios") {
-                tauri::path::BaseDirectory::Document
-            } else {
-                tauri::path::BaseDirectory::Download
-            };
-
-            // Resolve the directory path using the determined base directory
-            let dir = handle.path().resolve("vector", base_directory).unwrap();
-
-            // Use human-readable name on disk if available, otherwise hash-based
-            let on_disk_name = if attached_file.name.is_empty() {
-                format!("{}.{}", &file_hash, &attached_file.extension)
-            } else {
-                attached_file.name.clone()
-            };
-
-            // Create the vector directory if it doesn't exist
-            std::fs::create_dir_all(&dir).unwrap();
-
-            // If file with same name + same size + same hash already exists, reuse it (dedup)
-            let candidate = dir.join(&on_disk_name);
-            let already_exists = candidate.exists()
-                && std::fs::metadata(&candidate).map(|m| m.len() == attached_file.bytes.len() as u64).unwrap_or(false)
-                && std::fs::read(&candidate).map(|b| util::calculate_file_hash(&b) == file_hash).unwrap_or(false);
-            let hash_file_path = if already_exists {
-                candidate
-            } else {
-                let path = crate::commands::attachments::resolve_unique_filename(&dir, &on_disk_name);
-                // Atomic write: write to temp file then rename
-                let tmp_path = dir.join(format!(".{}.{}.tmp", &file_hash, &attached_file.extension));
-                std::fs::write(&tmp_path, &*attached_file.bytes).map_err(|e| {
-                    let _ = std::fs::remove_file(&tmp_path);
-                    format!("Failed to write temp file: {}", e)
-                })?;
-                std::fs::rename(&tmp_path, &path).map_err(|e| {
-                    let _ = std::fs::remove_file(&tmp_path);
-                    format!("Failed to rename temp file: {}", e)
-                })?;
-                path
-            };
-
-            // Determine encryption params and file size based on whether we found an existing attachment
-            let (attachment_key, attachment_nonce, file_size) = if let Some(ref existing) = existing_attachment {
-                // Reuse existing encryption params
-                (existing.key.clone(), existing.nonce.clone(), existing.size)
-            } else {
-                // Use new encryption params and encrypted file size
-                (params.key.clone(), params.nonce.clone(), enc_file.len() as u64)
-            };
-
-            // Add the attachment to the pending message
-            let attachment = Attachment {
-                id: file_hash.clone(),
-                key: attachment_key,
-                nonce: attachment_nonce,
-                extension: attached_file.extension.clone(),
-                name: attached_file.name.clone(),
-                url: String::new(),
-                path: hash_file_path.to_string_lossy().to_string(),
-                size: file_size,
-                img_meta: attached_file.img_meta.clone(),
-                downloading: false,
-                downloaded: true,
-                webxdc_topic: webxdc_topic.clone(),
-                group_id: if is_group_chat { Some(receiver.clone()) } else { None },
-                original_hash: Some(file_hash.clone()),
-                scheme_version: None,
-                mls_filename: None,
-            };
-            let compact_att = crate::message::CompactAttachment::from_attachment_owned(attachment);
-
-            let mut state = STATE.lock().await;
-            state.add_attachment_to_message(&receiver, &pending_id_clone, compact_att);
-
-            // Emit update to frontend
-            if let Some(msg) = state.update_message_in_chat(&receiver, &pending_id_clone, |_| {}) {
-                if is_group_chat {
-                    handle.emit("mls_message_new", serde_json::json!({
-                        "group_id": &receiver,
-                        "message": msg
-                    })).ok();
-                } else {
-                    handle.emit("message_new", serde_json::json!({
-                        "message": msg,
-                        "chat_id": &receiver
-                    })).ok();
-                }
-            }
-        }
-
-        // Format a Mime Type from the file extension
-        let mime_type = util::mime_from_extension(&attached_file.extension);
-
-        // Check if we found an existing attachment with the same hash
-        let mut should_upload = true;
-        let attachment_rumor = if let Some(existing) = existing_attachment {
-            // Never reuse URLs with the empty file hash
-            const EMPTY_FILE_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-            let is_empty_hash = existing.url.contains(EMPTY_FILE_HASH);
-            
-            // Verify the URL is still live before reusing (but skip if it's an empty hash)
-            let url_is_live = if is_empty_hash {
-                false
-            } else {
-                net::check_url_live(&existing.url).await.unwrap_or_default()
-            };
-
-            if url_is_live {
-                should_upload = false;
-
-                // Update our pending message with the existing URL
-                let reused_url = existing.url.clone();
-                {
-                    let url = reused_url.clone();
-                    let mut state = STATE.lock().await;
-                    state.update_message(&pending_id, |msg| {
-                        if let Some(att) = msg.attachments.last_mut() {
-                            att.url = url.into_boxed_str();
-                        }
-                    });
-                }
-
-                // Emit attachment_update so frontend can update the URL immediately
-                handle.emit("attachment_update", serde_json::json!({
-                    "chat_id": &receiver,
-                    "message_id": pending_id.as_ref(),
-                    "attachment_id": &file_hash,
-                    "url": &reused_url,
-                })).ok();
-
-                // Create the attachment rumor with the existing URL
-                let mut attachment_rumor = EventBuilder::new(Kind::from_u16(15), existing.url);
-
-                // Only add p-tag for DMs, not for MLS groups
-                if !is_group_chat {
-                    attachment_rumor = attachment_rumor.tag(Tag::public_key(receiver_pubkey));
-                }
-
-                // Append decryption keys and file metadata (using existing attachment's params)
-                attachment_rumor = attachment_rumor
-                    .tag(Tag::custom(TagKind::custom("file-type"), [mime_type.as_str()]))
-                    .tag(Tag::custom(TagKind::custom("size"), [existing.size.to_string()]))
-                    .tag(Tag::custom(TagKind::custom("encryption-algorithm"), ["aes-gcm"]))
-                    .tag(Tag::custom(TagKind::custom("decryption-key"), [existing.key.as_str()]))
-                    .tag(Tag::custom(TagKind::custom("decryption-nonce"), [existing.nonce.as_str()]))
-                    .tag(Tag::custom(TagKind::custom("ox"), [file_hash.clone()]));
-                
-                // Append image metadata if available
-                if let Some(ref img_meta) = attached_file.img_meta {
-                    attachment_rumor = attachment_rumor
-                        .tag(Tag::custom(TagKind::custom("thumbhash"), [&img_meta.thumbhash]))
-                        .tag(Tag::custom(TagKind::custom("dim"), [format!("{}x{}", img_meta.width, img_meta.height)]));
-                }
-
-                // For WebXDC (.xdc) files, use the topic ID from the attachment (generated earlier)
-                if let Some(ref topic_encoded) = webxdc_topic {
-                    attachment_rumor = attachment_rumor
-                        .tag(Tag::custom(TagKind::custom("webxdc-topic"), [topic_encoded.clone()]));
-                }
-
-                // Add filename tag if available
-                if !attached_file.name.is_empty() {
-                    attachment_rumor = attachment_rumor
-                        .tag(Tag::custom(TagKind::custom("name"), [attached_file.name.as_str()]));
-                }
-
-                attachment_rumor
-            } else {
-                // URL is dead, need to upload
-                should_upload = true;
-                EventBuilder::new(Kind::from_u16(15), String::new()) // Placeholder
-            }
-        } else {
-            // No existing attachment found
-            EventBuilder::new(Kind::from_u16(15), String::new()) // Placeholder
-        };
-        
-        // Final attachment rumor - either reused or newly uploaded
-        let final_attachment_rumor = if should_upload {
-            // Create cancel flag for this upload
-            let cancel_flag = Arc::new(AtomicBool::new(false));
-            {
-                let mut flags = UPLOAD_CANCEL_FLAGS.lock().unwrap();
-                flags.insert(pending_id.to_string(), Arc::clone(&cancel_flag));
-            }
-
-            // Upload the file to the server
-            let signer = crate::MY_SECRET_KEY.to_keys().expect("Keys not initialized");
-            let servers = crate::get_blossom_servers();
-            let file_size = enc_file.len();
-            // Clone the Arc outside the closure for use inside a seperate-threaded progress callback
-            let pending_id_for_callback = Arc::clone(&pending_id);
-            // Create a progress callback for file uploads
-            let progress_callback: crate::blossom::ProgressCallback = std::sync::Arc::new(move |percentage, _bytes| {
-                    if let Some(pct) = percentage {
-                        handle.emit("attachment_upload_progress", serde_json::json!({
-                            "id": pending_id_for_callback.as_ref(),
-                            "progress": pct
-                        })).ok();
-                    }
-                Ok(())
-            });
-
-            // Upload the file with progress, retries, and automatic server failover
-            match crate::blossom::upload_blob_with_progress_and_failover(signer.clone(), servers, Arc::new(enc_file), Some(mime_type.as_str()), progress_callback, Some(3), Some(std::time::Duration::from_secs(2)), Some(Arc::clone(&cancel_flag))).await {
-                Ok(url) => {
-                    // Remove cancel flag on success
-                    UPLOAD_CANCEL_FLAGS.lock().unwrap().remove(pending_id.as_ref());
-                    // Update our pending message with the uploaded URL
-                    {
-                        let url_clone = url.clone();
-                        let mut state = STATE.lock().await;
-                        state.update_message(&pending_id, |msg| {
-                            if let Some(att) = msg.attachments.last_mut() {
-                                att.url = url_clone.into_boxed_str();
-                            }
-                        });
-                    }
-
-                    // Emit attachment_update so frontend can update the URL immediately
-                    handle.emit("attachment_update", serde_json::json!({
-                        "chat_id": &receiver,
-                        "message_id": pending_id.as_ref(),
-                        "attachment_id": &file_hash,
-                        "url": &url,
-                    })).ok();
-
-                    // Create the attachment rumor
-                    let mut attachment_rumor = EventBuilder::new(Kind::from_u16(15), url);
-                    
-                    // Only add p-tag for DMs, not for MLS groups
-                    if !is_group_chat {
-                        attachment_rumor = attachment_rumor.tag(Tag::public_key(receiver_pubkey));
-                    }
-
-                    // Append decryption keys and file metadata
-                    attachment_rumor = attachment_rumor
-                        .tag(Tag::custom(TagKind::custom("file-type"), [mime_type.as_str()]))
-                        .tag(Tag::custom(TagKind::custom("size"), [file_size.to_string()]))
-                        .tag(Tag::custom(TagKind::custom("encryption-algorithm"), ["aes-gcm"]))
-                        .tag(Tag::custom(TagKind::custom("decryption-key"), [params.key.as_str()]))
-                        .tag(Tag::custom(TagKind::custom("decryption-nonce"), [params.nonce.as_str()]))
-                        .tag(Tag::custom(TagKind::custom("ox"), [file_hash.clone()]));
-
-                    // Append image metadata if available
-                    if let Some(ref img_meta) = attached_file.img_meta {
-                        attachment_rumor = attachment_rumor
-                            .tag(Tag::custom(TagKind::custom("thumbhash"), [&img_meta.thumbhash]))
-                            .tag(Tag::custom(TagKind::custom("dim"), [format!("{}x{}", img_meta.width, img_meta.height)]));
-                    }
-
-                    // For WebXDC (.xdc) files, use the topic ID from the attachment (generated earlier)
-                    if let Some(ref topic_encoded) = webxdc_topic {
-                        attachment_rumor = attachment_rumor
-                            .tag(Tag::custom(TagKind::custom("webxdc-topic"), [topic_encoded.clone()]));
-                    }
-
-                    // Add filename tag if available
-                    if !attached_file.name.is_empty() {
-                        attachment_rumor = attachment_rumor
-                            .tag(Tag::custom(TagKind::custom("name"), [attached_file.name.as_str()]));
-                    }
-
-                    attachment_rumor
-                },
-                Err(e) => {
-                    // Remove cancel flag on error
-                    UPLOAD_CANCEL_FLAGS.lock().unwrap().remove(pending_id.as_ref());
-
-                    // If cancelled, the cancel_upload command already cleaned up state
-                    if e.contains("Upload cancelled") {
-                        return Err(e);
-                    }
-
-                    // The file upload failed: so we mark the message as failed and notify of an error
-                    mark_message_failed(Arc::clone(&pending_id), &receiver).await;
-                    // Return the error
-                    eprintln!("[Blossom Error] Upload failed: {}", e);
-                    return Err(format!("Failed to upload file: {}", e));
-                }
-            }
-        } else {
-            // We already have a valid attachment_rumor from the reuse logic
-            attachment_rumor
-        };
-        
-        // Return the final attachment rumor as the main rumor
-        final_attachment_rumor
+        // DM file attachments are now handled by vector-core (short-circuited above).
+        // This code is only reachable for MLS group file attachments.
+        unreachable!("DM file attachments should be handled by vector-core short-circuit")
     } else {
-        // Text message (no attachment)
-        // Send the text message to our frontend with appropriate event
-        if is_group_chat {
-            handle.emit("mls_message_new", serde_json::json!({
-                "group_id": &receiver,
-                "message": &msg
-            })).ok();
-        } else {
-            handle.emit("message_new", serde_json::json!({
-                "message": &msg,
-                "chat_id": &receiver
-            })).ok();
-        }
+        // MLS text message (DM text is short-circuited above)
+        handle.emit("mls_message_new", serde_json::json!({
+            "group_id": &receiver,
+            "message": &msg
+        })).ok();
 
-        if !is_group_chat {
-            EventBuilder::private_msg_rumor(receiver_pubkey, msg.content)
-        } else {
-            EventBuilder::new(Kind::from_u16(crate::stored_event::event_kind::MLS_CHAT_MESSAGE), msg.content)
-        }
+        EventBuilder::new(Kind::from_u16(crate::stored_event::event_kind::MLS_CHAT_MESSAGE), msg.content)
     };
 
     // If a reply reference is included, add the tag

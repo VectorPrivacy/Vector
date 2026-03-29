@@ -33,6 +33,34 @@ pub fn get_app_data_dir() -> Result<&'static PathBuf, String> {
     APP_DATA_DIR.get().ok_or_else(|| "App data directory not initialized".to_string())
 }
 
+/// Get the platform-appropriate download directory for file attachments.
+/// Returns `{Downloads}/vector/` on desktop, `{data_dir}/vector_downloads/` on mobile/fallback.
+pub fn get_download_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join("Downloads/vector");
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join("Downloads/vector");
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            return PathBuf::from(profile).join("Downloads").join("vector");
+        }
+    }
+    // Mobile / fallback: use data dir
+    if let Ok(data_dir) = get_app_data_dir() {
+        return data_dir.join("vector_downloads");
+    }
+    PathBuf::from("/tmp/vector_downloads")
+}
+
 // ============================================================================
 // Current Account
 // ============================================================================

@@ -23,18 +23,21 @@ Vector Core test suite: `cd crates && cargo test -p vector-core`.
 
 All business logic lives here, fully decoupled from Tauri. Any client (GUI, CLI, SDK, bot) imports this crate.
 
+- **`macros.rs`** — log_info!, log_debug!, log_trace!, log_warn! (#[macro_export])
 - **`types.rs`** — Message, Attachment, Reaction, EditEntry, ImageMetadata, SiteMetadata
 - **`profile.rs`** — Profile, ProfileFlags, SlimProfile (Box<str> optimized, u16 interner handles)
 - **`chat.rs`** — Chat, ChatType, ChatMetadata, SerializableChat
-- **`compact.rs`** — CompactMessage, CompactMessageVec, NpubInterner, TinyVec, bitflags
+- **`compact.rs`** — CompactMessage (u64 ms timestamps), CompactMessageVec, NpubInterner, TinyVec, bitflags
 - **`state.rs`** — ChatState, all globals (NOSTR_CLIENT, MY_SECRET_KEY, STATE, etc.), WrapperIdCache, processing gate
-- **`crypto/`** — GuardedKey 128-array vault, GuardedSigner, Argon2id, AES-256-GCM, ChaCha20-Poly1305
+- **`crypto/`** — GuardedKey vault, GuardedSigner, Argon2id, AES-GCM, ChaCha20, decrypt_data, extension_from_mime, sanitize_filename, format_bytes, mime_from_magic_bytes, mime_from_extension (full MIME map)
 - **`db/`** — SQLite schema, 20 atomic migrations, connection pools, RAII guards, settings KV
 - **`hex.rs`** — SIMD hex encode/decode (NEON ARM64, SSE2/AVX2 x86_64, scalar fallback)
-- **`sending.rs`** — NIP-17 gift-wrapped DM pipeline (text + encrypted file attachments)
+- **`rumor.rs`** — process_rumor() inbound message parser, RumorEvent, 11 result variants
+- **`stored_event.rs`** — StoredEvent, StoredEventBuilder, event_kind constants
+- **`sending.rs`** — SendCallback trait, SendConfig, send_dm/send_file_dm/send_rumor_dm, retry_send_gift_wrap
 - **`blossom.rs`** — File upload with progress tracking, retry, server failover
 - **`inbox_relays.rs`** — NIP-17 kind 10050 relay resolution, stampede-protected cache, gift-wrap sending
-- **`net.rs`** — SSRF protection
+- **`net.rs`** — SSRF protection, build_http_client
 - **`stats.rs`** — CacheStats, DeepSize trait for memory benchmarking (debug builds)
 - **`traits.rs`** — EventEmitter trait (abstracts UI notification), ProgressReporter
 
@@ -45,12 +48,13 @@ All business logic lives here, fully decoupled from Tauri. Any client (GUI, CLI,
 - **`lib.rs`** — App entry, plugin registration, `invoke_handler` with 150+ commands
 - **`commands/`** — Tauri command handlers (thin wrappers around vector-core logic)
 - **`state/`** — Re-exports vector-core globals + local TAURI_APP
-- **`message/`** — Re-exports vector-core types + Tauri-specific compression cache
-- **`services/`** — Event handler, subscription handler, notifications (not yet in vector-core)
+- **`macros.rs`** — log_error! only (toast + log file via TAURI_APP; log_info/debug/trace/warn in vector-core)
+- **`rumor.rs`** — Thin wrapper: re-exports vector-core + parse_mls_imeta_attachments + process_rumor_with_mls + resolve_download_dir
+- **`message/`** — Re-exports vector-core types + TauriSendCallback + file dedup logic
+- **`services/`** — Event handler, subscription handler, notifications
 - **`mls/`** — MLS group encryption via OpenMLS/MDK (not yet in vector-core)
 - **`miniapps/`** — WebXDC-compatible mini apps (Tauri-specific: custom protocol, WebView, Iroh P2P)
 - **`android/`** — JNI bindings, localhost media server, background sync
-- **`rumor.rs`** — Nostr event processing (not yet in vector-core)
 - **`simd/`** — SIMD image, audio, URL, HTML operations (hex moved to vector-core)
 
 ### Frontend (`src/`)
@@ -73,6 +77,18 @@ Every new `#[tauri::command]` requires THREE things:
 3. Registration in the `invoke_handler` macro in `lib.rs`
 
 Missing any = `invoke()` silently rejects with "Command X not allowed by ACL".
+
+### SendCallback — Unified DM Send Pipeline
+
+All DM sends (text + file) flow through vector-core's `send_dm`/`send_file_dm`/`send_rumor_dm`:
+
+- **`SendCallback` trait** — 7 lifecycle hooks (on_pending, on_sent, on_failed, on_upload_progress, on_upload_complete, on_attachment_preview, on_persist) with default no-ops
+- **`SendConfig`** — per-call config: max_send_attempts, retry_delay, self_send, cancel_token. Presets: `gui()` (12 retries), `headless()` (3), `default()` (1)
+- **`TauriSendCallback`** — emits to JS frontend + DB persistence
+- **`CliSendCallback`** — terminal output for sent/failed/progress
+- Text DMs: `message()` short-circuits to `vector_core::send_dm` with `TauriSendCallback`
+- File DMs: src-tauri handles dedup + upload, then calls `vector_core::send_rumor_dm` for gift-wrap + retry
+- MLS groups: stay in src-tauri (MDK dependency)
 
 ### State access
 

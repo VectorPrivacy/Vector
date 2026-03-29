@@ -275,13 +275,12 @@ pub async fn send_dm(
 }
 
 // ============================================================================
-// send_rumor_dm — Pre-built rumor (for dedup / custom events)
+// send_rumor_dm — Pre-built rumor (custom events)
 // ============================================================================
 
 /// Send a pre-built rumor via NIP-17 gift-wrap.
 ///
-/// Used when the caller has already built the rumor (e.g., after file
-/// deduplication found an existing upload URL). Skips encryption/upload.
+/// Used when the caller has already built the rumor. Skips encryption/upload.
 pub async fn send_rumor_dm(
     receiver_npub: &str,
     pending_id: &str,
@@ -308,9 +307,7 @@ pub async fn send_rumor_dm(
 
 /// Send a NIP-17 gift-wrapped file attachment DM.
 ///
-/// Flow: pending msg → callback.on_pending → encrypt → preview attachment →
-/// callback.on_attachment_preview → upload with progress → callback.on_upload_complete →
-/// build Kind 15 → gift-wrap with retry → finalize → callback.on_sent.
+/// Flow: hash → save locally → encrypt → upload → build Kind 15 rumor → gift-wrap + send.
 pub async fn send_file_dm(
     receiver_npub: &str,
     file_bytes: Arc<Vec<u8>>,
@@ -327,72 +324,66 @@ pub async fn send_file_dm(
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap();
     let pending_id = format!("pending-{}", now.as_nanos());
+    let milliseconds = now.as_millis() % 1000;
 
     let receiver = PublicKey::from_bech32(receiver_npub)
         .map_err(|e| format!("Invalid npub: {}", e))?;
 
-    // Hash + encrypt
     let file_hash = crypto::sha256_hex(&file_bytes);
+    let mime_type = crypto::mime_from_extension(extension);
+
+    // Save file locally so the attachment is immediately viewable
+    let download_dir = crate::db::get_download_dir();
+    let _ = std::fs::create_dir_all(&download_dir);
+    let local_name = if filename.is_empty() {
+        format!("{}.{}", &file_hash, extension)
+    } else {
+        filename.to_string()
+    };
+    let local_path = download_dir.join(&local_name);
+    if !local_path.exists() {
+        // Atomic write: temp file then rename
+        let tmp = download_dir.join(format!(".{}.tmp", &file_hash));
+        let _ = std::fs::write(&tmp, &*file_bytes);
+        let _ = std::fs::rename(&tmp, &local_path);
+    }
+    let local_path_str = local_path.to_string_lossy().to_string();
+
+    // === Encrypt → upload → build rumor → send ===
     let params = crypto::generate_encryption_params();
     let encrypted = crypto::encrypt_data(&file_bytes, &params)?;
     let encrypted_size = encrypted.len() as u64;
 
-    // Build pending message with attachment preview
     let attachment = Attachment {
-        id: file_hash.clone(),
-        key: params.key.clone(),
-        nonce: params.nonce.clone(),
-        extension: extension.to_string(),
-        name: filename.to_string(),
-        url: String::new(),
-        path: String::new(),
-        size: encrypted_size,
-        img_meta: None,
-        downloading: false,
-        downloaded: true,
+        id: file_hash.clone(), key: params.key.clone(), nonce: params.nonce.clone(),
+        extension: extension.to_string(), name: filename.to_string(),
+        url: String::new(), path: local_path_str.clone(), size: encrypted_size,
+        img_meta: None, downloading: false, downloaded: true,
         ..Default::default()
     };
-
     let msg = Message {
-        id: pending_id.clone(),
-        content: content.unwrap_or("").to_string(),
-        at: now.as_millis() as u64,
-        pending: true,
-        mine: true,
-        npub: my_pk.to_bech32().ok(),
-        attachments: vec![attachment.clone()],
+        id: pending_id.clone(), content: content.unwrap_or("").to_string(),
+        at: now.as_millis() as u64, pending: true, mine: true,
+        npub: my_pk.to_bech32().ok(), attachments: vec![attachment],
         ..Default::default()
     };
-
     {
         let mut state = STATE.lock().await;
         state.add_message_to_participant(receiver_npub, msg.clone());
     }
-
     callback.on_pending(receiver_npub, &msg);
 
-    // Upload to Blossom with progress bridged through callback
-    let mime_type = crypto::mime_from_extension(extension);
+    // Upload to Blossom
     let servers = crate::state::get_blossom_servers();
-
     let progress_cb: crate::blossom::ProgressCallback = Arc::new(|_, _| Ok(()));
 
-    // If caller provided a cancel token, use it; otherwise create a dummy
-    let cancel_token = config.cancel_token.clone();
-
     let upload_url = match crate::blossom::upload_blob_with_progress_and_failover(
-        keys.clone(),
-        servers,
-        Arc::new(encrypted),
-        Some(mime_type),
-        progress_cb,
-        Some(config.upload_retries),
-        Some(config.upload_retry_delay),
-        cancel_token,
+        keys.clone(), servers, Arc::new(encrypted), Some(mime_type),
+        progress_cb, Some(config.upload_retries), Some(config.upload_retry_delay),
+        config.cancel_token.clone(),
     ).await {
         Ok(url) => url,
         Err(e) => {
-            // Mark as failed
             let failed_msg = {
                 let mut state = STATE.lock().await;
                 state.update_message(&pending_id, |msg| {
@@ -408,7 +399,6 @@ pub async fn send_file_dm(
         }
     };
 
-    // Update attachment URL in state
     {
         let mut state = STATE.lock().await;
         state.update_message(&pending_id, |msg| {
@@ -417,10 +407,9 @@ pub async fn send_file_dm(
             }
         });
     }
-
     callback.on_upload_complete(receiver_npub, &pending_id, &file_hash, &upload_url);
 
-    // Build Kind 15 file event
+    // Build Kind 15
     let mut file_rumor = EventBuilder::new(Kind::from_u16(15), &upload_url)
         .tag(Tag::public_key(receiver))
         .tag(Tag::custom(TagKind::custom("file-type"), [mime_type]))
@@ -429,18 +418,14 @@ pub async fn send_file_dm(
         .tag(Tag::custom(TagKind::custom("decryption-key"), [params.key.as_str()]))
         .tag(Tag::custom(TagKind::custom("decryption-nonce"), [params.nonce.as_str()]))
         .tag(Tag::custom(TagKind::custom("ox"), [file_hash.clone()]));
-
     if !filename.is_empty() {
         file_rumor = file_rumor.tag(Tag::custom(TagKind::custom("name"), [filename]));
     }
-
-    let milliseconds = now.as_millis() % 1000;
     file_rumor = file_rumor.tag(Tag::custom(TagKind::custom("ms"), [milliseconds.to_string()]));
 
     let built_rumor = file_rumor.build(my_pk);
     let event_id = built_rumor.id.ok_or("Rumor has no id")?.to_hex();
 
-    // Send via gift-wrap with retry
     retry_send_gift_wrap(
         client, &receiver, receiver_npub, &pending_id,
         built_rumor, &event_id, config, callback,
@@ -664,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    fn file_dm_dedup_reuse_sequence() {
+    fn file_dm_skip_upload_sequence() {
         let cb = MockCallback::new();
         let msg = Message::default();
 
