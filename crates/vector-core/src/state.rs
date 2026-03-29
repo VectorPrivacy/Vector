@@ -456,6 +456,16 @@ impl ChatState {
                 }
                 unread_count += 1;
             }
+            // Debug: log which chat has unread messages
+            #[cfg(debug_assertions)]
+            if unread_count > 0 {
+                let last_read_hex = crate::compact::decode_message_id(&chat.last_read);
+                let last_msg_hex = chat.messages.last().map(|m| crate::compact::decode_message_id(&m.id)).unwrap_or_default();
+                let msg_count = chat.message_count();
+                eprintln!("[Unread] chat={} unread={} msgs_in_memory={} last_read={} last_msg={}",
+                    &chat.id[..20.min(chat.id.len())], unread_count, msg_count,
+                    &last_read_hex[..16.min(last_read_hex.len())], &last_msg_hex[..16.min(last_msg_hex.len())]);
+            }
             total_unread += unread_count;
         }
         total_unread

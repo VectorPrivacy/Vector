@@ -89,20 +89,17 @@ pub fn decode_message_id(bytes: &[u8; 32]) -> String {
 // Compact Timestamp
 // ============================================================================
 
-/// Custom epoch: 2020-01-01 00:00:00 UTC (in milliseconds)
-/// This allows us to use u32 for timestamps until ~2156
-const EPOCH_2020_MS: u64 = 1577836800000;
-
-/// Convert milliseconds timestamp to compact u32 (seconds since 2020)
+/// Convert milliseconds timestamp to compact storage.
+/// Stores full u64 milliseconds — no precision loss.
 #[inline]
-pub fn timestamp_to_compact(ms: u64) -> u32 {
-    ((ms.saturating_sub(EPOCH_2020_MS)) / 1000) as u32
+pub fn timestamp_to_compact(ms: u64) -> u64 {
+    ms
 }
 
-/// Convert compact u32 back to milliseconds timestamp
+/// Convert compact timestamp back to milliseconds.
 #[inline]
-pub fn timestamp_from_compact(compact: u32) -> u64 {
-    EPOCH_2020_MS + (compact as u64 * 1000)
+pub fn timestamp_from_compact(compact: u64) -> u64 {
+    compact
 }
 
 /// Custom epoch in seconds: 2020-01-01 00:00:00 UTC
@@ -936,8 +933,8 @@ impl NpubInterner {
 pub struct CompactMessage {
     /// Message ID as binary (64 hex chars -> 32 bytes)
     pub id: [u8; 32],
-    /// Compact timestamp: seconds since 2020-01-01 (u32 = good until 2156)
-    pub at: u32,
+    /// Timestamp in milliseconds (full precision for sub-second ordering)
+    pub at: u64,
     /// Packed boolean flags (mine, pending, failed, replied_to_has_attachment)
     pub flags: MessageFlags,
     /// Index into NpubInterner for sender's npub (NO_NPUB if none)
@@ -2173,9 +2170,9 @@ mod tests {
     fn timestamp_epoch_boundary_ms() {
         let epoch_ms: u64 = 1577836800000;
         let compact = timestamp_to_compact(epoch_ms);
-        assert_eq!(compact, 0, "epoch ms should map to compact 0");
+        assert_eq!(compact, epoch_ms, "full u64 — identity function");
         let restored = timestamp_from_compact(compact);
-        assert_eq!(restored, epoch_ms, "compact 0 restores to epoch ms");
+        assert_eq!(restored, epoch_ms, "roundtrip preserves value");
     }
 
     #[test]
@@ -2209,12 +2206,11 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_ms_sub_second_precision_lost() {
-        let ms: u64 = 1705320000999; // 999 ms after the second
+    fn timestamp_ms_sub_second_precision_preserved() {
+        let ms: u64 = 1705320000999;
         let compact = timestamp_to_compact(ms);
         let restored = timestamp_from_compact(compact);
-        assert_eq!(restored, 1705320000000, "sub-second ms should be truncated");
-        assert_ne!(restored, ms, "sub-second precision is lost");
+        assert_eq!(restored, ms, "sub-second ms must be preserved");
     }
 
     #[test]
@@ -2598,7 +2594,7 @@ mod tests {
     // ========================================================================
 
     /// Helper to create a minimal CompactMessage with given hex ID and timestamp
-    fn make_compact_msg(hex_id: &str, timestamp: u32) -> CompactMessage {
+    fn make_compact_msg(hex_id: &str, timestamp: u64) -> CompactMessage {
         CompactMessage {
             id: encode_message_id(hex_id),
             at: timestamp,
@@ -2797,7 +2793,7 @@ mod tests {
         // Insert 1000 messages
         for i in 0..1000u64 {
             let id = format!("{:0>64x}", i);
-            let msg = make_compact_msg(&id, (i * 10) as u32);
+            let msg = make_compact_msg(&id, i * 10);
             assert!(vec.insert(msg), "insert {} should succeed", i);
         }
         assert_eq!(vec.len(), 1000);
@@ -2807,7 +2803,7 @@ mod tests {
             let id = format!("{:0>64x}", i);
             assert!(vec.contains_hex_id(&id), "should find message {}", i);
             let found = vec.find_by_hex_id(&id).unwrap();
-            assert_eq!(found.at, (i * 10) as u32, "timestamp should match for message {}", i);
+            assert_eq!(found.at, i * 10, "timestamp should match for message {}", i);
         }
 
         // Verify non-existent IDs are not found
@@ -2817,7 +2813,7 @@ mod tests {
         }
 
         // Messages should be in timestamp order
-        let timestamps: Vec<u32> = vec.iter().map(|m| m.at).collect();
+        let timestamps: Vec<u64> = vec.iter().map(|m| m.at).collect();
         for w in timestamps.windows(2) {
             assert!(w[0] <= w[1], "messages should be sorted by timestamp: {} <= {}", w[0], w[1]);
         }
@@ -2869,7 +2865,7 @@ mod tests {
 
         assert_eq!(vec.len(), 3);
         // Verify sorted by timestamp
-        let timestamps: Vec<u32> = vec.iter().map(|m| m.at).collect();
+        let timestamps: Vec<u64> = vec.iter().map(|m| m.at).collect();
         assert_eq!(timestamps, vec![100, 200, 300], "should be sorted by timestamp");
 
         // All lookups should still work
@@ -2899,7 +2895,7 @@ mod tests {
         assert_eq!(vec.len(), 4);
 
         // Verify order
-        let timestamps: Vec<u32> = vec.iter().map(|m| m.at).collect();
+        let timestamps: Vec<u64> = vec.iter().map(|m| m.at).collect();
         assert_eq!(timestamps, vec![100, 200, 300, 400]);
 
         // All lookups should work

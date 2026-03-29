@@ -181,7 +181,7 @@ pub async fn get_pivx_payments_for_chat(
                    created_at, received_at, mine, pending, failed, wrapper_event_id, npub
             FROM events
             WHERE chat_id = ?1 AND kind = ?2
-            ORDER BY created_at ASC
+            ORDER BY created_at ASC, received_at ASC
             "#
         ).map_err(|e| format!("Failed to prepare statement: {}", e))?;
 
@@ -253,7 +253,7 @@ pub async fn get_system_events_for_chat(
                    created_at, received_at, mine, pending, failed, wrapper_event_id, npub
             FROM events
             WHERE chat_id = ?1 AND kind = ?2
-            ORDER BY created_at ASC
+            ORDER BY created_at ASC, received_at ASC
             "#
         ).map_err(|e| format!("Failed to prepare statement: {}", e))?;
 
@@ -444,7 +444,7 @@ pub async fn get_events(
                        created_at, received_at, mine, pending, failed, wrapper_event_id, npub, preview_metadata
                 FROM events
                 WHERE chat_id = ?1 AND kind IN ({})
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC, received_at DESC
                 LIMIT ?{} OFFSET ?{}
                 "#,
                 kind_placeholders, limit_param, offset_param
@@ -484,7 +484,7 @@ pub async fn get_events(
                        created_at, received_at, mine, pending, failed, wrapper_event_id, npub, preview_metadata
                 FROM events
                 WHERE chat_id = ?1
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC, received_at DESC
                 LIMIT ?2 OFFSET ?3
             "#;
 
@@ -557,7 +557,7 @@ pub async fn get_related_events(
                created_at, received_at, mine, pending, failed, wrapper_event_id, npub, preview_metadata
         FROM events
         WHERE reference_id IN ({})
-        ORDER BY created_at ASC
+        ORDER BY created_at ASC, received_at ASC
         "#,
         placeholders
     );
@@ -660,7 +660,7 @@ async fn get_reply_contexts(
             SELECT reference_id, content
             FROM events
             WHERE kind = {} AND reference_id IN ({})
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, received_at DESC
             "#,
             event_kind::MESSAGE_EDIT,
             placeholders
@@ -1006,7 +1006,7 @@ pub async fn get_all_chats_last_messages(
                 SELECT e2.rowid FROM events e2
                 WHERE e2.chat_id = c.id
                 AND e2.kind IN (?1, ?2, ?3)
-                ORDER BY e2.created_at DESC
+                ORDER BY e2.created_at DESC, e2.received_at DESC
                 LIMIT 1
             )
         "#;
