@@ -20,7 +20,9 @@ mod voice;
 
 mod net;
 
-mod blossom;
+pub(crate) mod blossom {
+    pub use vector_core::blossom::*;
+}
 
 mod util;
 
