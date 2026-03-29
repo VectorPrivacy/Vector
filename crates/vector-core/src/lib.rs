@@ -79,6 +79,7 @@ pub use crypto::{GuardedKey, GuardedSigner};
 pub use error::{VectorError, Result};
 pub use traits::{EventEmitter, NoOpEmitter, set_event_emitter, emit_event};
 pub use db::{set_app_data_dir, get_app_data_dir};
+pub use sending::{SendCallback, NoOpSendCallback, SendConfig, SendResult};
 pub use stored_event::{StoredEvent, StoredEventBuilder};
 pub use rumor::{RumorEvent, RumorContext, ConversationType, RumorProcessingResult, process_rumor};
 
@@ -209,15 +210,13 @@ impl VectorCore {
         Ok(LoginResult { npub, has_encryption })
     }
 
-    /// Send a NIP-17 gift-wrapped text DM using the full pipeline
-    /// (pending → inbox relay resolution → gift-wrap → send → confirm).
+    /// Send a NIP-17 gift-wrapped text DM using the full pipeline.
     pub async fn send_dm(&self, to_npub: &str, content: &str) -> Result<sending::SendResult> {
-        sending::send_dm(to_npub, content, None).await
+        sending::send_dm(to_npub, content, None, &SendConfig::default(), &NoOpSendCallback).await
             .map_err(|e| VectorError::Other(e))
     }
 
     /// Send a NIP-17 gift-wrapped file attachment DM.
-    /// Encrypts with AES-256-GCM, uploads to Blossom, sends Kind 15 event.
     pub async fn send_file(&self, to_npub: &str, file_path: &str) -> Result<sending::SendResult> {
         let path = std::path::Path::new(file_path);
         let bytes = std::fs::read(path)
@@ -235,6 +234,8 @@ impl VectorCore {
             filename,
             extension,
             None,
+            &SendConfig::default(),
+            &NoOpSendCallback,
         ).await.map_err(|e| VectorError::Other(e))
     }
 

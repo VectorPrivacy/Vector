@@ -36,6 +36,8 @@ use crate::miniapps::realtime::{generate_topic_id, encode_topic_id};
 
 use super::types::{AttachmentFile, ImageMetadata, Message, Attachment};
 
+use vector_core::sending::{SendCallback, SendConfig, NoOpSendCallback};
+
 /// Result of sending a message, returned to frontend for state update
 #[derive(serde::Serialize)]
 pub struct MessageSendResult {
@@ -43,6 +45,86 @@ pub struct MessageSendResult {
     pub pending_id: String,
     /// The real event ID after successful send (None if failed)
     pub event_id: Option<String>,
+}
+
+// ============================================================================
+// TauriSendCallback — Bridges vector-core send events to Tauri frontend
+// ============================================================================
+
+pub struct TauriSendCallback;
+
+impl SendCallback for TauriSendCallback {
+    fn on_pending(&self, chat_id: &str, msg: &Message) {
+        if let Some(handle) = TAURI_APP.get() {
+            handle.emit("message_new", serde_json::json!({
+                "message": msg,
+                "chat_id": chat_id
+            })).ok();
+        }
+    }
+
+    fn on_attachment_preview(&self, chat_id: &str, msg: &Message) {
+        if let Some(handle) = TAURI_APP.get() {
+            handle.emit("message_new", serde_json::json!({
+                "message": msg,
+                "chat_id": chat_id
+            })).ok();
+        }
+    }
+
+    fn on_upload_progress(
+        &self,
+        pending_id: &str,
+        percentage: u8,
+        _bytes_sent: u64,
+    ) -> Result<(), String> {
+        if let Some(handle) = TAURI_APP.get() {
+            handle.emit("attachment_upload_progress", serde_json::json!({
+                "id": pending_id,
+                "progress": percentage
+            })).ok();
+        }
+        Ok(())
+    }
+
+    fn on_upload_complete(&self, chat_id: &str, pending_id: &str, attachment_id: &str, url: &str) {
+        if let Some(handle) = TAURI_APP.get() {
+            handle.emit("attachment_update", serde_json::json!({
+                "chat_id": chat_id,
+                "message_id": pending_id,
+                "attachment_id": attachment_id,
+                "url": url,
+            })).ok();
+        }
+    }
+
+    fn on_sent(&self, chat_id: &str, old_id: &str, msg: &Message) {
+        if let Some(handle) = TAURI_APP.get() {
+            handle.emit("message_update", serde_json::json!({
+                "old_id": old_id,
+                "message": msg,
+                "chat_id": chat_id
+            })).ok();
+        }
+    }
+
+    fn on_failed(&self, chat_id: &str, old_id: &str, msg: &Message) {
+        if let Some(handle) = TAURI_APP.get() {
+            handle.emit("message_update", serde_json::json!({
+                "old_id": old_id,
+                "message": msg,
+                "chat_id": chat_id
+            })).ok();
+        }
+    }
+
+    fn on_persist(&self, chat_id: &str, msg: &Message) {
+        let chat_id = chat_id.to_string();
+        let msg = msg.clone();
+        tokio::spawn(async move {
+            let _ = crate::db::save_message(&chat_id, &msg).await;
+        });
+    }
 }
 
 /// Helper function to mark message as failed and update frontend
@@ -287,121 +369,102 @@ async fn encrypt_and_upload_mls_media(
     })
 }
 
-/// Headless text-only reply: sends a DM or MLS message without requiring TAURI_APP.
-/// Used by Android notification inline-reply (JNI). Sends first, then adds to STATE,
-/// persists to DB, emits to frontend (if available), and marks the chat as read.
+/// Headless text-only reply: sends a DM or MLS message.
+/// Used by Android notification inline-reply (JNI).
 #[allow(dead_code)]
 pub async fn send_text_reply_headless(chat_id: &str, content: &str) -> Result<String, String> {
-    let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
-    let my_public_key = *crate::MY_PUBLIC_KEY.get().ok_or("Public key not initialized")?;
-
-    let current_time = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap();
-    let milliseconds = current_time.as_millis() % 1000;
-
-    // Detect chat type
     let is_group = {
         let state = STATE.lock().await;
         state.get_chat(chat_id).map_or(!chat_id.starts_with("npub1"), |c| c.is_mls_group())
     };
 
-    // Parse receiver pubkey once for DMs (used for both rumor build and send)
-    let receiver_pubkey = if !is_group {
-        Some(PublicKey::from_bech32(chat_id)
-            .map_err(|e| format!("Invalid npub: {}", e))?)
-    } else {
-        None
-    };
+    let event_id = if is_group {
+        // MLS path stays local
+        let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
+        let my_public_key = *crate::MY_PUBLIC_KEY.get().ok_or("Public key not initialized")?;
+        let milliseconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap()
+            .as_millis() % 1000;
 
-    // Build rumor
-    let rumor = if is_group {
-        EventBuilder::new(
+        let rumor = EventBuilder::new(
             Kind::from_u16(crate::stored_event::event_kind::MLS_CHAT_MESSAGE),
             content,
         )
-    } else {
-        EventBuilder::private_msg_rumor(receiver_pubkey.unwrap(), content)
-    }
-    .tag(Tag::custom(TagKind::custom("ms"), [milliseconds.to_string()]))
-    .build(my_public_key);
+        .tag(Tag::custom(TagKind::custom("ms"), [milliseconds.to_string()]))
+        .build(my_public_key);
 
-    let rumor_id = rumor.id.ok_or("Rumor has no id")?.to_hex();
-
-    // Send first — only add to STATE after successful delivery
-    if is_group {
+        let rumor_id = rumor.id.ok_or("Rumor has no id")?.to_hex();
         crate::mls::send_mls_message(chat_id, rumor, None).await?;
-    } else {
-        crate::inbox_relays::send_gift_wrap(client, &receiver_pubkey.unwrap(), rumor, [])
-            .await
-            .map_err(|e| format!("Gift wrap failed: {}", e))?;
-    }
 
-    // Build message and add to STATE only after successful send
-    let msg = Message {
-        id: rumor_id.clone(),
-        content: content.to_string(),
-        replied_to: String::new(),
-        replied_to_content: None,
-        replied_to_npub: None,
-        replied_to_has_attachment: None,
-        preview_metadata: None,
-        at: current_time.as_millis() as u64,
-        attachments: Vec::new(),
-        reactions: Vec::new(),
-        pending: false,
-        failed: false,
-        mine: true,
-        npub: my_public_key.to_bech32().ok(),
-        wrapper_event_id: None,
-        edited: false,
-        edit_history: None,
-    };
-
-    {
-        let mut state = STATE.lock().await;
-        if is_group {
+        // Add to STATE after successful MLS send
+        let msg = Message {
+            id: rumor_id.clone(),
+            content: content.to_string(),
+            at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64,
+            mine: true,
+            npub: my_public_key.to_bech32().ok(),
+            ..Default::default()
+        };
+        {
+            let mut state = STATE.lock().await;
             state.create_or_get_mls_group_chat(chat_id, vec![]);
             state.add_message_to_chat(chat_id, msg.clone());
-        } else {
-            state.add_message_to_participant(chat_id, msg.clone());
         }
-    }
-
-    // Emit to frontend if TAURI_APP is available (backgrounded app mode)
-    if let Some(handle) = TAURI_APP.get() {
-        use tauri::Emitter;
-        if is_group {
-            let _ = handle.emit("mls_message_new", serde_json::json!({
+        if let Some(handle) = TAURI_APP.get() {
+            handle.emit("mls_message_new", serde_json::json!({
                 "group_id": chat_id,
                 "message": &msg
-            }));
-        } else {
-            let _ = handle.emit("message_new", serde_json::json!({
-                "message": &msg,
-                "chat_id": chat_id
-            }));
+            })).ok();
         }
-    }
+        let _ = crate::db::save_message(chat_id, &msg).await;
 
-    // Persist message to DB
-    let _ = crate::db::save_message(chat_id, &msg).await;
+        rumor_id
+    } else {
+        // DM path: delegate to vector-core
+        let config = SendConfig::headless();
+        let callback = TauriSendCallback;
+        let result = vector_core::sending::send_dm(
+            chat_id, content, None, &config, &callback,
+        ).await?;
+        result.event_id.unwrap_or(result.pending_id)
+    };
 
-    // Mark chat as read (we just replied, so we've seen everything)
     crate::chat::mark_as_read_headless(chat_id).await;
-
-    Ok(rumor_id)
+    Ok(event_id)
 }
 
 #[tauri::command]
 pub async fn message(receiver: String, content: String, replied_to: String, file: Option<AttachmentFile>) -> Result<MessageSendResult, String> {
-    // Immediately add the message to our state as "Pending" with an ID derived from the current nanosecond, we'll update it as either Sent (non-pending) or Failed in the future
+    // Detect chat type early (needed for short-circuit)
+    let is_group_chat = {
+        let state = STATE.lock().await;
+        if let Some(chat) = state.get_chat(&receiver) {
+            chat.is_mls_group()
+        } else {
+            !receiver.starts_with("npub1")
+        }
+    };
+
+    // Text-only DM: delegate entirely to vector-core (avoids building local Message)
+    if !is_group_chat && file.is_none() {
+        let config = SendConfig::gui();
+        let callback = TauriSendCallback;
+        let reply: Option<&str> = if replied_to.is_empty() { None } else { Some(&replied_to) };
+        let result = vector_core::sending::send_dm(
+            &receiver, &content, reply, &config, &callback,
+        ).await?;
+        return Ok(MessageSendResult {
+            pending_id: result.pending_id,
+            event_id: result.event_id,
+        });
+    }
+
+    // === MLS groups + file DMs: existing path below ===
+
     let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap();
-    // Create persistent pending_id that will live for the entire function
     let pending_id = Arc::new(String::from("pending-") + &current_time.as_nanos().to_string());
-    // Grab our pubkey first (needed for npub in group chats)
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
     let my_public_key = *crate::MY_PUBLIC_KEY.get().expect("Public key not initialized");
 
@@ -409,7 +472,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         id: pending_id.as_ref().clone(),
         content,
         replied_to,
-        replied_to_content: None, // Will be populated when loaded from DB
+        replied_to_content: None,
         replied_to_npub: None,
         replied_to_has_attachment: None,
         preview_metadata: None,
@@ -419,28 +482,12 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         pending: true,
         failed: false,
         mine: true,
-        npub: my_public_key.to_bech32().ok(), // Needed for group chats so replies show correct author
-        wrapper_event_id: None, // Will be set when message is sent
+        npub: my_public_key.to_bech32().ok(),
+        wrapper_event_id: None,
         edited: false,
         edit_history: None,
     };
 
-    // Detect if this is a group chat or DM
-    // First check if a chat already exists and use its type
-    // Otherwise, check if receiver is a valid bech32 npub (DM) or not (group)
-    let is_group_chat = {
-        let state = STATE.lock().await;
-        if let Some(chat) = state.get_chat(&receiver) {
-            // Chat exists, use its type
-            chat.is_mls_group()
-        } else {
-            // Chat doesn't exist, detect by receiver format
-            // If it's a valid npub (starts with "npub1"), it's a DM
-            // Otherwise it's a group_id
-            !receiver.starts_with("npub1")
-        }
-    };
-    
     // Add message to appropriate chat type
     {
         let mut state = STATE.lock().await;
