@@ -465,7 +465,6 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap();
     let pending_id = Arc::new(String::from("pending-") + &current_time.as_nanos().to_string());
-    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
     let my_public_key = *crate::MY_PUBLIC_KEY.get().expect("Public key not initialized");
 
     let msg = Message {
@@ -1221,125 +1220,23 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             }
         };
     } else {
-        // DM - use NIP-17 giftwrap
-        // Send message to the real receiver with retry logic
-        let mut send_attempts = 0;
-        const MAX_ATTEMPTS: u32 = 12;
-        const RETRY_DELAY: u64 = 5; // 5 seconds
+        // DM
+        let config = SendConfig::gui();
+        let callback = TauriSendCallback;
+        let result = vector_core::sending::send_rumor_dm(
+            &receiver, &pending_id, built_rumor, &config, &callback,
+        ).await;
 
-        let mut final_output = None;
-
-        while send_attempts < MAX_ATTEMPTS {
-            send_attempts += 1;
-
-            match crate::inbox_relays::send_gift_wrap(client, &receiver_pubkey, built_rumor.clone(), [])
-                .await
-            {
-                Ok(output) => {
-                    // Check if at least one relay acknowledged the message
-                    if !output.success.is_empty() {
-                        // Success! Message was acknowledged by at least one relay
-                        // Extract wrapper_event_id BEFORE moving output
-                        let wrapper_id = output.id().to_hex();
-                        final_output = Some(output);
-                        
-                        // Immediately update frontend and save to DB
-                        // This provides faster visual feedback without waiting for the self-send
-                        let msg_for_save = {
-                            let pending_id_for_early_update = Arc::clone(&pending_id);
-                            let mut state = STATE.lock().await;
-                            let chat_idx = state.chats.iter().position(|c| c.id() == &receiver || c.has_participant(&receiver, &state.interner));
-                            if let Some(idx) = chat_idx {
-                                let real_id_hex = rumor_id.to_hex();
-                                if let Some(msg) = state.chats[idx].messages.find_by_hex_id_mut(&pending_id_for_early_update) {
-                                    // Update the message ID and clear pending state
-                                    msg.id = crate::util::hex_to_bytes_32(&real_id_hex);
-                                    msg.set_pending(false);
-                                    msg.wrapper_id = Some(Box::new(crate::util::hex_to_bytes_32(&wrapper_id)));
-                                }
-                                // Rebuild index since ID changed
-                                state.chats[idx].messages.rebuild_index();
-                                // Build slim for save (no full chat clone needed)
-                                let slim = crate::db::chats::SlimChatDB::from_chat(&state.chats[idx], &state.interner);
-                                let msg_for_emit = state.chats[idx].messages.find_by_hex_id(&real_id_hex)
-                                    .map(|m| (pending_id_for_early_update.to_string(), m.to_message(&state.interner)));
-                                (Some(slim), msg_for_emit)
-                            } else {
-                                (None, None)
-                            }
-                        };
-
-                        if let (Some(slim), Some((old_id, msg))) = msg_for_save {
-                            let handle = TAURI_APP.get().unwrap();
-                            // Emit full message_update for backwards compatibility
-                            let _ = handle.emit("message_update", serde_json::json!({
-                                "old_id": old_id,
-                                "message": &msg,
-                                "chat_id": &receiver
-                            }));
-                            let _ = crate::db::chats::save_slim_chat(slim).await;
-                            let _ = crate::db::save_message(&receiver, &msg).await;
-                        }
-                        
-                        break;
-                    } else if output.failed.is_empty() {
-                        // No success but also no failures - this might be a temporary network issue
-                        // Continue retrying
-                    } else {
-                        // We have failures but no successes
-                        if send_attempts == MAX_ATTEMPTS {
-                            // Final attempt failed
-                            mark_message_failed(Arc::clone(&pending_id), &receiver).await;
-                            return Ok(MessageSendResult {
-                                pending_id: pending_id.to_string(),
-                                event_id: None,
-                            });
-                        }
-                    }
-                    
-                    // If we're here and haven't reached max attempts, wait before retrying
-                    if send_attempts < MAX_ATTEMPTS {
-                        tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_DELAY)).await;
-                    }
-                }
-                Err(e) => {
-                    // Network or other error - log and retry if we haven't exceeded attempts
-                    eprintln!("Failed to send message (attempt {}/{}): {:?}", send_attempts, MAX_ATTEMPTS, e);
-
-                    if send_attempts == MAX_ATTEMPTS {
-                        // Final attempt failed
-                        mark_message_failed(Arc::clone(&pending_id), &receiver).await;
-                        return Ok(MessageSendResult {
-                            pending_id: pending_id.to_string(),
-                            event_id: None,
-                        });
-                    }
-
-                    // Wait before retrying
-                    tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_DELAY)).await;
-                }
-            }
-        }
-        
-        // If we get here without final_output, all attempts failed
-        if final_output.is_none() {
-            mark_message_failed(Arc::clone(&pending_id), &receiver).await;
-            return Ok(MessageSendResult {
+        match result {
+            Ok(r) => Ok(MessageSendResult {
+                pending_id: r.pending_id,
+                event_id: r.event_id,
+            }),
+            Err(_) => Ok(MessageSendResult {
                 pending_id: pending_id.to_string(),
                 event_id: None,
-            });
+            }),
         }
-
-        // Send message to our own public key for recovery (fire-and-forget)
-        tokio::spawn(async move {
-            let client = crate::NOSTR_CLIENT.get().unwrap();
-            let _ = client.gift_wrap(&my_public_key, built_rumor, []).await;
-        });
-
-        Ok(MessageSendResult {
-            pending_id: pending_id.to_string(),
-            event_id: Some(rumor_id.to_hex()),
-        })
     }
 }
 
