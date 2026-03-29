@@ -68,7 +68,9 @@ mod miniapps;
 mod image_cache;
 
 // NIP-17 Kind 10050 (DM Relay List) support
-mod inbox_relays;
+pub(crate) mod inbox_relays {
+    pub use vector_core::inbox_relays::*;
+}
 
 // PIVX Promos (addressless cryptocurrency payments)
 mod pivx;

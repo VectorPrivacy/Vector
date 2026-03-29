@@ -250,7 +250,6 @@ async fn get_or_fetch_inbox_relays(client: &Client, pubkey: &PublicKey) -> Vec<S
 // ============================================================================
 
 /// Parsed `TRUSTED_RELAYS` URLs — computed once on first access.
-#[allow(dead_code)]
 static TRUSTED_RELAY_URLS: LazyLock<Vec<RelayUrl>> = LazyLock::new(|| {
     crate::state::TRUSTED_RELAYS
         .iter()
@@ -259,14 +258,13 @@ static TRUSTED_RELAY_URLS: LazyLock<Vec<RelayUrl>> = LazyLock::new(|| {
 });
 
 /// Get the cached parsed trusted relay URLs.
-#[allow(dead_code)]
-pub(crate) fn trusted_relay_urls() -> Vec<RelayUrl> {
+pub fn trusted_relay_urls() -> Vec<RelayUrl> {
     TRUSTED_RELAY_URLS.clone()
 }
 
 /// Send an event to specific relays, returning as soon as the **first** relay
 /// acknowledges success. Remaining relays continue sending in the background.
-pub(crate) async fn send_event_first_ok(
+pub async fn send_event_first_ok(
     client: &Client,
     urls: Vec<RelayUrl>,
     event: &Event,
@@ -330,7 +328,7 @@ pub(crate) async fn send_event_first_ok(
 
 /// Send an event to all write-relays in the pool, returning as soon as the
 /// **first** relay acknowledges success.
-pub(crate) async fn send_event_pool_first_ok(
+pub async fn send_event_pool_first_ok(
     client: &Client,
     event: &Event,
 ) -> Result<Output<EventId>, nostr_sdk::client::Error> {
