@@ -93,7 +93,8 @@ mod simd;
 mod state;
 // Re-export commonly used state items at crate root for backwards compatibility
 pub(crate) use state::{
-    TAURI_APP, NOSTR_CLIENT, MY_SECRET_KEY, MY_PUBLIC_KEY, STATE,
+    TAURI_APP, TauriEventEmitter,
+    NOSTR_CLIENT, MY_SECRET_KEY, MY_PUBLIC_KEY, STATE,
     TRUSTED_RELAYS, active_trusted_relays, NOTIFIED_WELCOMES, WRAPPER_ID_CACHE,
     MNEMONIC_SEED, ENCRYPTION_KEY, PENDING_NSEC, PENDING_INVITE,
     get_blossom_servers, PendingInviteAcceptance,
@@ -365,6 +366,9 @@ pub fn run() {
 
             // Set as our accessible static app handle
             TAURI_APP.set(handle.clone()).unwrap();
+
+            // Bridge vector-core's EventEmitter to Tauri's emit system
+            vector_core::set_event_emitter(Box::new(TauriEventEmitter));
 
             // Initialize the unified audio engine (persistent cpal output stream)
             audio_engine::AudioEngine::init();
