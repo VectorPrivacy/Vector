@@ -551,6 +551,103 @@ pub async fn update_status(status: String) -> bool {
 }
 
 // ============================================================================
+// block / unblock / nickname / blocked list
+// ============================================================================
+
+/// Block a user by npub. DM events from blocked users are dropped after decryption.
+/// Group messages are stored but filtered in the UI.
+///
+/// Returns `false` if trying to block yourself or if the profile can't be found.
+pub async fn block_user(npub: String, handler: &dyn ProfileSyncHandler) -> bool {
+    // Prevent blocking yourself
+    if let Some(&my_pk) = MY_PUBLIC_KEY.get() {
+        if my_pk.to_bech32().ok().as_deref() == Some(npub.as_str()) {
+            return false;
+        }
+    }
+
+    let mut state = STATE.lock().await;
+
+    // Create profile if it doesn't exist (can block someone with no prior contact)
+    if state.interner.lookup(&npub).is_none() {
+        state.insert_or_replace_profile(&npub, Profile::new());
+    }
+
+    if let Some(id) = state.interner.lookup(&npub) {
+        {
+            let profile = match state.get_profile_mut_by_id(id) {
+                Some(p) => p,
+                None => return false,
+            };
+            profile.flags.set_blocked(true);
+        }
+        let slim = state.serialize_profile(id).unwrap();
+        drop(state);
+        emit_event("profile_update", &slim);
+        handler.on_profile_fetched(&slim, "", "");
+        true
+    } else {
+        false
+    }
+}
+
+/// Unblock a user by npub.
+pub async fn unblock_user(npub: String, handler: &dyn ProfileSyncHandler) -> bool {
+    let mut state = STATE.lock().await;
+
+    if let Some(id) = state.interner.lookup(&npub) {
+        {
+            let profile = match state.get_profile_mut_by_id(id) {
+                Some(p) => p,
+                None => return false,
+            };
+            profile.flags.set_blocked(false);
+        }
+        let slim = state.serialize_profile(id).unwrap();
+        drop(state);
+        emit_event("profile_update", &slim);
+        handler.on_profile_fetched(&slim, "", "");
+        true
+    } else {
+        false
+    }
+}
+
+/// Get all blocked profiles.
+pub async fn get_blocked_users() -> Vec<crate::SlimProfile> {
+    let state = STATE.lock().await;
+    state.profiles.iter()
+        .filter(|p| p.flags.is_blocked())
+        .filter_map(|p| state.serialize_profile(p.id))
+        .collect()
+}
+
+/// Set a nickname for a profile.
+pub async fn set_nickname(npub: String, nickname: String, handler: &dyn ProfileSyncHandler) -> bool {
+    let mut state = STATE.lock().await;
+
+    if let Some(id) = state.interner.lookup(&npub) {
+        {
+            let profile = match state.get_profile_mut_by_id(id) {
+                Some(p) => p,
+                None => return false,
+            };
+            profile.nickname = nickname.into_boxed_str();
+        }
+        let slim = state.serialize_profile(id).unwrap();
+        drop(state);
+        emit_event("profile_nick_changed", &serde_json::json!({
+            "profile_id": &npub,
+            "value": &slim.nickname
+        }));
+        handler.on_profile_fetched(&slim, "", "");
+        true
+    } else {
+        false
+    }
+}
+
+// ============================================================================
 // Background processor
 // ============================================================================
 
