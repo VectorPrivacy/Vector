@@ -427,6 +427,40 @@ pub fn sanitize_filename(name: &str) -> String {
     sanitized.to_string()
 }
 
+/// Resolve a unique filename in `dir`, appending `-1`, `-2`, etc. on collision.
+///
+/// If `dir/name` doesn't exist, returns it as-is. Otherwise increments a
+/// counter on the stem: `photo.jpg` → `photo-1.jpg` → `photo-2.jpg` ...
+pub fn resolve_unique_filename(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let candidate = dir.join(name);
+    if !candidate.exists() {
+        return candidate;
+    }
+
+    let stem = std::path::Path::new(name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(name);
+    let ext = std::path::Path::new(name)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+
+    let mut counter = 1u32;
+    loop {
+        let suffixed = if ext.is_empty() {
+            format!("{}-{}", stem, counter)
+        } else {
+            format!("{}-{}.{}", stem, counter, ext)
+        };
+        let candidate = dir.join(&suffixed);
+        if !candidate.exists() {
+            return candidate;
+        }
+        counter += 1;
+    }
+}
+
 /// Format bytes into human-readable format (KB, MB, GB).
 pub fn format_bytes(bytes: u64) -> String {
     const KB: f64 = 1024.0;

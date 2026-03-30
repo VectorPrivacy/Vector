@@ -340,13 +340,12 @@ pub async fn send_file_dm(
     } else {
         filename.to_string()
     };
-    let local_path = download_dir.join(&local_name);
-    if !local_path.exists() {
-        // Atomic write: temp file then rename
-        let tmp = download_dir.join(format!(".{}.tmp", &file_hash));
-        let _ = std::fs::write(&tmp, &*file_bytes);
-        let _ = std::fs::rename(&tmp, &local_path);
-    }
+    // Resolve unique path (pasted_image.png → pasted_image-1.png on collision)
+    let local_path = crypto::resolve_unique_filename(&download_dir, &local_name);
+    // Atomic write: temp file then rename
+    let tmp = download_dir.join(format!(".{}.tmp", &file_hash));
+    let _ = std::fs::write(&tmp, &*file_bytes);
+    let _ = std::fs::rename(&tmp, &local_path);
     let local_path_str = local_path.to_string_lossy().to_string();
 
     // === Encrypt → upload → build rumor → send ===

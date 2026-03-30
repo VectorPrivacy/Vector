@@ -98,34 +98,7 @@ pub(crate) fn sanitize_filename(name: &str) -> String {
 
 /// Resolve a unique filename in the directory, appending -1, -2, etc. on collision.
 pub(crate) fn resolve_unique_filename(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-    let candidate = dir.join(name);
-    if !candidate.exists() {
-        return candidate;
-    }
-
-    let stem = std::path::Path::new(name)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(name);
-    let ext = std::path::Path::new(name)
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-
-    // u32 counter — overflow is practically impossible (would require 4B+ same-named files)
-    let mut counter = 1u32;
-    loop {
-        let suffixed = if ext.is_empty() {
-            format!("{}-{}", stem, counter)
-        } else {
-            format!("{}-{}.{}", stem, counter, ext)
-        };
-        let candidate = dir.join(&suffixed);
-        if !candidate.exists() {
-            return candidate;
-        }
-        counter += 1;
-    }
+    vector_core::crypto::resolve_unique_filename(dir, name)
 }
 
 /// Decrypt and save an attachment to disk

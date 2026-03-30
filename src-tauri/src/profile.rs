@@ -1,4 +1,4 @@
-use nostr_sdk::prelude::*;
+use nostr_sdk::prelude::ToBech32;
 use tauri::Emitter;
 
 #[cfg(not(target_os = "android"))]
@@ -6,7 +6,7 @@ use std::sync::Arc;
 #[cfg(not(target_os = "android"))]
 use tauri_plugin_fs::FsExt;
 
-use crate::{NOSTR_CLIENT, STATE, TAURI_APP};
+use crate::{STATE, TAURI_APP};
 use crate::db;
 use crate::image_cache::{self, CacheResult};
 #[cfg(not(target_os = "android"))]
@@ -180,167 +180,21 @@ pub async fn load_profile(npub: String) -> bool {
     ).await
 }
 
+/// Update the current user's profile metadata and broadcast to relays.
+/// Delegates to vector-core with `TauriProfileSyncHandler`.
 #[tauri::command]
 pub async fn update_profile(name: String, avatar: String, banner: String, about: String) -> bool {
-    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-
-    // Grab our pubkey
-    let my_public_key = *crate::MY_PUBLIC_KEY.get().expect("Public key not initialized");
-
-    // Build metadata from current profile, then drop the lock before network I/O
-    let meta = {
-        let state = STATE.lock().await;
-        let profile = state
-            .get_profile(&my_public_key.to_bech32().unwrap())
-            .unwrap();
-
-        // We'll apply the changes to the previous profile and carry-on the rest
-        let mut meta = Metadata::new().name(if name.is_empty() {
-            &*profile.name
-        } else {
-            name.as_str()
-        });
-
-        // Optional avatar
-        let avatar_url_str: &str = if avatar.is_empty() {
-            &profile.avatar
-        } else {
-            avatar.as_str()
-        };
-        if !avatar_url_str.is_empty() {
-            if let Ok(url) = Url::parse(avatar_url_str) {
-                meta = meta.picture(url);
-            }
-        }
-
-        // Optional banner
-        let banner_url_str: &str = if banner.is_empty() {
-            &profile.banner
-        } else {
-            banner.as_str()
-        };
-        if !banner_url_str.is_empty() {
-            if let Ok(url) = Url::parse(banner_url_str) {
-                meta = meta.banner(url);
-            }
-        }
-
-        // Add display_name
-        if !profile.display_name.is_empty() {
-            meta = meta.display_name(&*profile.display_name);
-        }
-
-        // Add about
-        meta = meta.about(if about.is_empty() {
-            &*profile.about
-        } else {
-            about.as_str()
-        });
-
-        // Add website
-        if !profile.website.is_empty() {
-            if let Ok(url) = Url::parse(&*profile.website) {
-                meta = meta.website(url);
-            }
-        }
-
-        // Add nip05
-        if !profile.nip05.is_empty() {
-            meta = meta.nip05(&*profile.nip05);
-        }
-
-        // Add lud06
-        if !profile.lud06.is_empty() {
-            meta = meta.lud06(&*profile.lud06);
-        }
-
-        // Add lud16
-        if !profile.lud16.is_empty() {
-            meta = meta.lud16(&*profile.lud16);
-        }
-
-        meta
-    }; // Drop STATE lock before network I/O
-
-    // Serialize the metadata to JSON for the event content
-    let metadata_json = serde_json::to_string(&meta).unwrap();
-
-    // Create the metadata event
-    let metadata_event = EventBuilder::new(Kind::Metadata, metadata_json)
-        .tag(Tag::custom(TagKind::Custom(String::from("client").into()), vec!["vector"]));
-
-    // Sign and broadcast the profile update (no lock held during network I/O)
-    // Uses first-ACK send so UI updates as soon as the fastest relay responds
-    let Ok(event) = client.sign_event_builder(metadata_event).await else {
-        return false;
-    };
-    match crate::inbox_relays::send_event_pool_first_ok(client, &event).await {
-        Ok(_) => {
-            // Re-acquire lock to apply metadata to our profile
-            let npub = my_public_key.to_bech32().unwrap();
-            let (slim, avatar_url, banner_url) = {
-                let mut state = STATE.lock().await;
-                let id = state.interner.lookup(&npub).unwrap();
-                let (avatar_url, banner_url) = {
-                    let profile_mutable = state.get_profile_mut_by_id(id).unwrap();
-                    profile_mutable.from_metadata(meta);
-                    (profile_mutable.avatar.to_string(), profile_mutable.banner.to_string())
-                };
-
-                let slim = state.serialize_profile(id).unwrap();
-                let handle = TAURI_APP.get().unwrap();
-                handle.emit("profile_update", &slim).unwrap();
-
-                (slim, avatar_url, banner_url)
-            }; // Drop STATE lock before async operations
-
-            db::set_profile(slim).await.ok();
-
-            // Cache avatar/banner images in the background for offline access
-            let npub_clone = npub.clone();
-            tokio::spawn(async move {
-                cache_profile_images(&npub_clone, &avatar_url, &banner_url).await;
-            });
-
-            true
-        }
-        Err(_) => false
-    }
+    vector_core::profile::sync::update_profile(
+        name, avatar, banner, about,
+        &crate::profile_sync::TauriProfileSyncHandler,
+    ).await
 }
 
+/// Update the current user's status and broadcast to relays.
+/// Delegates to vector-core (no handler needed — status is ephemeral).
 #[tauri::command]
 pub async fn update_status(status: String) -> bool {
-    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-
-    // Grab our pubkey
-    let my_public_key = *crate::MY_PUBLIC_KEY.get().expect("Public key not initialized");
-
-    // Build and broadcast the status
-    let status_builder = EventBuilder::new(Kind::from_u16(30315), status.as_str())
-        .tag(Tag::custom(TagKind::d(), vec!["general"]));
-    let Ok(event) = client.sign_event_builder(status_builder).await else {
-        return false;
-    };
-    match crate::inbox_relays::send_event_pool_first_ok(client, &event).await {
-        Ok(_) => {
-            // Add the status to our profile
-            let mut state = STATE.lock().await;
-            let npub = my_public_key.to_bech32().unwrap();
-            let id = state.interner.lookup(&npub).unwrap();
-            {
-                let profile = state.get_profile_mut_by_id(id).unwrap();
-                profile.status_purpose = "general".into();
-                profile.status_title = status.into_boxed_str();
-            }
-
-            // Update the frontend
-            let slim = state.serialize_profile(id).unwrap();
-            let handle = TAURI_APP.get().unwrap();
-            handle.emit("profile_update", &slim).unwrap();
-            true
-        }
-        Err(_) => false,
-    }
+    vector_core::profile::sync::update_status(status).await
 }
 
 /// Uploads an avatar or banner image with progress reporting

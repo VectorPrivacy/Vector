@@ -356,6 +356,201 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
 }
 
 // ============================================================================
+// update_profile — publish metadata to relays
+// ============================================================================
+
+/// Update the current user's profile metadata and broadcast to relays.
+///
+/// Merges the provided fields with the existing profile (empty = keep existing).
+/// After successful broadcast, updates STATE and notifies via EventEmitter + handler.
+pub async fn update_profile(
+    name: String, avatar: String, banner: String, about: String,
+    handler: &dyn ProfileSyncHandler,
+) -> bool {
+    let client = match NOSTR_CLIENT.get() {
+        Some(c) => c,
+        None => return false,
+    };
+
+    let my_public_key = match MY_PUBLIC_KEY.get() {
+        Some(&pk) => pk,
+        None => return false,
+    };
+
+    // Build metadata from current profile, then drop the lock before network I/O
+    let meta = {
+        let state = STATE.lock().await;
+        let npub = match my_public_key.to_bech32() {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        let profile = match state.get_profile(&npub) {
+            Some(p) => p,
+            None => return false,
+        };
+
+        // Merge: use new value if provided, else carry existing
+        let mut meta = Metadata::new().name(if name.is_empty() {
+            &*profile.name
+        } else {
+            name.as_str()
+        });
+
+        // Avatar
+        let avatar_url_str: &str = if avatar.is_empty() {
+            &profile.avatar
+        } else {
+            avatar.as_str()
+        };
+        if !avatar_url_str.is_empty() {
+            if let Ok(url) = Url::parse(avatar_url_str) {
+                meta = meta.picture(url);
+            }
+        }
+
+        // Banner
+        let banner_url_str: &str = if banner.is_empty() {
+            &profile.banner
+        } else {
+            banner.as_str()
+        };
+        if !banner_url_str.is_empty() {
+            if let Ok(url) = Url::parse(banner_url_str) {
+                meta = meta.banner(url);
+            }
+        }
+
+        // Carry forward display_name
+        if !profile.display_name.is_empty() {
+            meta = meta.display_name(&*profile.display_name);
+        }
+
+        // About
+        meta = meta.about(if about.is_empty() {
+            &*profile.about
+        } else {
+            about.as_str()
+        });
+
+        // Carry forward remaining fields
+        if !profile.website.is_empty() {
+            if let Ok(url) = Url::parse(&*profile.website) {
+                meta = meta.website(url);
+            }
+        }
+        if !profile.nip05.is_empty() {
+            meta = meta.nip05(&*profile.nip05);
+        }
+        if !profile.lud06.is_empty() {
+            meta = meta.lud06(&*profile.lud06);
+        }
+        if !profile.lud16.is_empty() {
+            meta = meta.lud16(&*profile.lud16);
+        }
+
+        meta
+    }; // STATE lock dropped before network I/O
+
+    // Build and sign Kind 0 metadata event
+    let metadata_json = serde_json::to_string(&meta).unwrap();
+    let metadata_event = EventBuilder::new(Kind::Metadata, metadata_json)
+        .tag(Tag::custom(TagKind::Custom(String::from("client").into()), vec!["vector"]));
+
+    let Ok(event) = client.sign_event_builder(metadata_event).await else {
+        return false;
+    };
+
+    // Broadcast — first-ACK so UI updates as soon as the fastest relay responds
+    match crate::inbox_relays::send_event_pool_first_ok(client, &event).await {
+        Ok(_) => {
+            let npub = match my_public_key.to_bech32() {
+                Ok(n) => n,
+                Err(_) => return false,
+            };
+            let save_data = {
+                let mut state = STATE.lock().await;
+                let id = match state.interner.lookup(&npub) {
+                    Some(id) => id,
+                    None => return false,
+                };
+                let (avatar_url, banner_url) = {
+                    let profile = match state.get_profile_mut_by_id(id) {
+                        Some(p) => p,
+                        None => return false,
+                    };
+                    profile.from_metadata(meta);
+                    (profile.avatar.to_string(), profile.banner.to_string())
+                };
+
+                let slim = state.serialize_profile(id).unwrap();
+                (slim, avatar_url, banner_url)
+            };
+
+            let (slim, avatar_url, banner_url) = save_data;
+            emit_event("profile_update", &slim);
+            handler.on_profile_fetched(&slim, &avatar_url, &banner_url);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+// ============================================================================
+// update_status — publish status to relays
+// ============================================================================
+
+/// Update the current user's status (kind 30315) and broadcast to relays.
+///
+/// Status is ephemeral — updated in STATE + frontend but not persisted to DB.
+/// (Re-fetched from relays on next `load_profile` call.)
+pub async fn update_status(status: String) -> bool {
+    let client = match NOSTR_CLIENT.get() {
+        Some(c) => c,
+        None => return false,
+    };
+
+    let my_public_key = match MY_PUBLIC_KEY.get() {
+        Some(&pk) => pk,
+        None => return false,
+    };
+
+    // Build and sign kind 30315 status event
+    let status_builder = EventBuilder::new(Kind::from_u16(30315), status.as_str())
+        .tag(Tag::custom(TagKind::d(), vec!["general"]));
+
+    let Ok(event) = client.sign_event_builder(status_builder).await else {
+        return false;
+    };
+
+    match crate::inbox_relays::send_event_pool_first_ok(client, &event).await {
+        Ok(_) => {
+            let mut state = STATE.lock().await;
+            let npub = match my_public_key.to_bech32() {
+                Ok(n) => n,
+                Err(_) => return false,
+            };
+            let id = match state.interner.lookup(&npub) {
+                Some(id) => id,
+                None => return false,
+            };
+            {
+                let profile = match state.get_profile_mut_by_id(id) {
+                    Some(p) => p,
+                    None => return false,
+                };
+                profile.status_purpose = "general".into();
+                profile.status_title = status.into_boxed_str();
+            }
+
+            let slim = state.serialize_profile(id).unwrap();
+            emit_event("profile_update", &slim);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+// ============================================================================
 // Background processor
 // ============================================================================
 
