@@ -268,6 +268,49 @@ impl VectorCore {
             .map(|p| SlimProfile::from_profile(p, &state.interner))
     }
 
+    /// Fetch a profile's metadata and status from relays.
+    pub async fn load_profile(&self, npub: &str) -> bool {
+        profile::sync::load_profile(npub.to_string(), &NoOpProfileSyncHandler).await
+    }
+
+    /// Update the current user's profile metadata and broadcast to relays.
+    pub async fn update_profile(&self, name: &str, avatar: &str, banner: &str, about: &str) -> bool {
+        profile::sync::update_profile(
+            name.to_string(), avatar.to_string(), banner.to_string(), about.to_string(),
+            &NoOpProfileSyncHandler,
+        ).await
+    }
+
+    /// Update the current user's status and broadcast to relays.
+    pub async fn update_status(&self, status: &str) -> bool {
+        profile::sync::update_status(status.to_string()).await
+    }
+
+    /// Block a user by npub.
+    pub async fn block_user(&self, npub: &str) -> bool {
+        profile::sync::block_user(npub.to_string(), &NoOpProfileSyncHandler).await
+    }
+
+    /// Unblock a user by npub.
+    pub async fn unblock_user(&self, npub: &str) -> bool {
+        profile::sync::unblock_user(npub.to_string(), &NoOpProfileSyncHandler).await
+    }
+
+    /// Set a nickname for a profile.
+    pub async fn set_nickname(&self, npub: &str, nickname: &str) -> bool {
+        profile::sync::set_nickname(npub.to_string(), nickname.to_string(), &NoOpProfileSyncHandler).await
+    }
+
+    /// Get all blocked profiles.
+    pub async fn get_blocked_users(&self) -> Vec<SlimProfile> {
+        profile::sync::get_blocked_users().await
+    }
+
+    /// Queue a profile for background sync.
+    pub fn queue_profile_sync(&self, npub: &str, priority: SyncPriority) {
+        profile::sync::queue_profile_sync(npub.to_string(), priority, false);
+    }
+
     /// Get the current user's npub.
     pub fn my_npub(&self) -> Option<String> {
         state::MY_PUBLIC_KEY.get()

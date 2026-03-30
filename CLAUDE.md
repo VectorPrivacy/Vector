@@ -25,11 +25,12 @@ All business logic lives here, fully decoupled from Tauri. Any client (GUI, CLI,
 
 - **`macros.rs`** — log_info!, log_debug!, log_trace!, log_warn! (#[macro_export])
 - **`types.rs`** — Message, Attachment, Reaction, EditEntry, ImageMetadata, SiteMetadata
-- **`profile.rs`** — Profile, ProfileFlags, SlimProfile (Box<str> optimized, u16 interner handles)
+- **`profile/`** — Profile, ProfileFlags, SlimProfile (Box<str> optimized, u16 interner handles)
+  - **`profile/sync.rs`** — ProfileSyncHandler trait, SyncPriority queue, load_profile, update_profile, update_status, block/unblock, nickname, background processor
 - **`chat.rs`** — Chat, ChatType, ChatMetadata, SerializableChat
 - **`compact.rs`** — CompactMessage (u64 ms timestamps), CompactMessageVec, NpubInterner, TinyVec, bitflags
 - **`state.rs`** — ChatState, all globals (NOSTR_CLIENT, MY_SECRET_KEY, STATE, etc.), WrapperIdCache, processing gate
-- **`crypto/`** — GuardedKey vault, GuardedSigner, Argon2id, AES-GCM, ChaCha20, decrypt_data, extension_from_mime, sanitize_filename, format_bytes, mime_from_magic_bytes, mime_from_extension (full MIME map)
+- **`crypto/`** — GuardedKey vault, GuardedSigner, Argon2id, AES-GCM, ChaCha20, decrypt_data, extension_from_mime, sanitize_filename, resolve_unique_filename, format_bytes, mime_from_magic_bytes, mime_from_extension (full MIME map)
 - **`db/`** — SQLite schema, 20 atomic migrations, connection pools, RAII guards, settings KV
 - **`hex.rs`** — SIMD hex encode/decode (NEON ARM64, SSE2/AVX2 x86_64, scalar fallback)
 - **`rumor.rs`** — process_rumor() inbound message parser, RumorEvent, 11 result variants
@@ -47,7 +48,7 @@ All business logic lives here, fully decoupled from Tauri. Any client (GUI, CLI,
 
 - **`lib.rs`** — App entry, plugin registration, `invoke_handler` with 150+ commands
 - **`commands/`** — Tauri command handlers (thin wrappers around vector-core logic)
-- **`state/`** — Re-exports vector-core globals + local TAURI_APP
+- **`state/`** — Re-exports vector-core globals + local TAURI_APP + TauriEventEmitter (bridges emit_event to Tauri)
 - **`macros.rs`** — log_error! only (toast + log file via TAURI_APP; log_info/debug/trace/warn in vector-core)
 - **`rumor.rs`** — Thin wrapper: re-exports vector-core + parse_mls_imeta_attachments + process_rumor_with_mls + resolve_download_dir
 - **`message/`** — Re-exports vector-core types + TauriSendCallback + file dedup logic
@@ -89,6 +90,17 @@ All DM sends (text + file) flow through vector-core's `send_dm`/`send_file_dm`/`
 - Text DMs: `message()` short-circuits to `vector_core::send_dm` with `TauriSendCallback`
 - File DMs: src-tauri handles dedup + upload, then calls `vector_core::send_rumor_dm` for gift-wrap + retry
 - MLS groups: stay in src-tauri (MDK dependency)
+
+### ProfileSyncHandler — Unified Profile Pipeline
+
+All profile operations (fetch, publish, block, nickname) flow through vector-core's `profile::sync` module:
+
+- **`ProfileSyncHandler` trait** — `on_profile_fetched(slim, avatar_url, banner_url)` with default no-op. Covers DB persistence + image caching.
+- **`TauriProfileSyncHandler`** — spawns `db::set_profile` + `cache_profile_images`
+- **`EventEmitter` trait** — abstracts UI notification. `TauriEventEmitter` bridges to `TAURI_APP.emit()`, registered at startup.
+- Profile ops in vector-core: `load_profile`, `update_profile`, `update_status`, `block_user`, `unblock_user`, `set_nickname`, `get_blocked_users`
+- Sync queue: `SyncPriority` (Critical/High/Medium/Low), `ProfileSyncQueue`, `start_profile_sync_processor`
+- src-tauri profile commands are one-line delegates to vector-core
 
 ### State access
 
