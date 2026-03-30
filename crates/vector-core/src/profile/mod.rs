@@ -1,8 +1,15 @@
-//! Profile types — compact internal representation.
+//! Profile types and sync — compact internal representation + relay fetching.
 //!
 //! The `id` field is a u16 interner handle — the canonical npub string lives
 //! in `NpubInterner` (single source of truth). Use `SlimProfile` at
 //! serialization boundaries (frontend, DB).
+//!
+//! The `sync` submodule has the priority queue, background processor,
+//! and `load_profile` relay fetch logic.
+
+pub mod sync;
+
+pub use sync::{SyncPriority, ProfileSyncHandler, NoOpProfileSyncHandler};
 
 use nostr_sdk::prelude::Metadata;
 

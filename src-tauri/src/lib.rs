@@ -397,7 +397,7 @@ pub fn run() {
 
             // Start the profile sync background processor
             tauri::async_runtime::spawn(async {
-                profile_sync::start_profile_sync_processor().await;
+                profile_sync::start_tauri_profile_sync_processor().await;
             });
 
             

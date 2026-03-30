@@ -82,6 +82,7 @@ pub use db::{set_app_data_dir, get_app_data_dir};
 pub use sending::{SendCallback, NoOpSendCallback, SendConfig, SendResult};
 pub use stored_event::{StoredEvent, StoredEventBuilder};
 pub use rumor::{RumorEvent, RumorContext, ConversationType, RumorProcessingResult, process_rumor};
+pub use profile::{SyncPriority, ProfileSyncHandler, NoOpProfileSyncHandler};
 
 use std::path::PathBuf;
 

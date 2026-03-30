@@ -9,7 +9,6 @@ use tauri_plugin_fs::FsExt;
 use crate::{NOSTR_CLIENT, STATE, TAURI_APP};
 use crate::db;
 use crate::image_cache::{self, CacheResult};
-use vector_core::compact::secs_to_compact;
 #[cfg(not(target_os = "android"))]
 use crate::message::AttachmentFile;
 
@@ -171,165 +170,14 @@ pub async fn cache_all_profile_images() {
     }
 }
 
+/// Fetch a profile's metadata and status from relays.
+/// Delegates to vector-core's `load_profile` with `TauriProfileSyncHandler`.
 #[tauri::command]
 pub async fn load_profile(npub: String) -> bool {
-    let client = match NOSTR_CLIENT.get() {
-        Some(c) => c,
-        None => return false,
-    };
-
-    // Convert the Bech32 String in to a PublicKey
-    let profile_pubkey = match PublicKey::from_bech32(npub.as_str()) {
-        Ok(pk) => pk,
-        Err(_) => return false,
-    };
-
-    // Grab our pubkey to check for profiles belonging to us
-    let my_public_key = match crate::MY_PUBLIC_KEY.get() {
-        Some(&pk) => pk,
-        None => return false,
-    };
-
-    // Fetch immutable copies of our updateable profile parts (or, quickly generate a new one to pass to the fetching logic)
-    let (old_status_title, old_status_purpose, old_status_url): (String, String, String);
-    {
-        let mut state = STATE.lock().await;
-        match state.get_profile(&npub) {
-            Some(p) => {
-                old_status_title = p.status_title.to_string();
-                old_status_purpose = p.status_purpose.to_string();
-                old_status_url = p.status_url.to_string();
-            }
-            None => {
-                // Create a new profile
-                let new_profile = Profile::new();
-                state.insert_or_replace_profile(&npub, new_profile);
-                old_status_title = String::new();
-                old_status_purpose = String::new();
-                old_status_url = String::new();
-            }
-        }
-    }
-
-    // Attempt to fetch their status, if one exists
-    let status_filter = Filter::new()
-        .author(profile_pubkey)
-        .kind(Kind::from_u16(30315))
-        .limit(1);
-
-    let (status_title, status_purpose, status_url) = match client
-        .fetch_events(status_filter, std::time::Duration::from_secs(15))
-        .await
-    {
-        Ok(res) => {
-            // Make sure they have a status available
-            if !res.is_empty() {
-                let status_event = res.first().unwrap();
-                // Simple status recognition: last, general-only, no URLs, Metadata or Expiry considered
-                // TODO: comply with expiries, accept more "d" types, allow URLs
-                (
-                    status_event.content.clone(),
-                    status_event
-                        .tags
-                        .first()
-                        .unwrap()
-                        .content()
-                        .unwrap()
-                        .to_string(),
-                    String::new(),
-                )
-            } else {
-                // Relays didn't find anything? We'll ignore this and use our previous status
-                (old_status_title, old_status_purpose, old_status_url)
-            }
-        }
-        Err(_) => (old_status_title, old_status_purpose, old_status_url),
-    };
-
-    // Attempt to fetch their Metadata profile
-    let fetch_result = client
-        .fetch_metadata(profile_pubkey, std::time::Duration::from_secs(15))
-        .await;
-    
-    match fetch_result {
-        Ok(meta) => {
-            if meta.is_some() {
-                // If it's ours, mark it as such
-                let save_data = {
-                    let mut state = STATE.lock().await;
-                    let id = state.interner.lookup(&npub).unwrap();
-                    let (changed, avatar_url, banner_url) = {
-                        let profile_mutable = state.get_profile_mut_by_id(id).unwrap();
-                        profile_mutable.flags.set_mine(my_public_key == profile_pubkey);
-
-                        // Update the Status, and track changes
-                        let status_changed = *profile_mutable.status_title != *status_title
-                            || *profile_mutable.status_purpose != *status_purpose
-                            || *profile_mutable.status_url != *status_url;
-                        profile_mutable.status_title = status_title.into_boxed_str();
-                        profile_mutable.status_purpose = status_purpose.into_boxed_str();
-                        profile_mutable.status_url = status_url.into_boxed_str();
-
-                        // Update the Metadata, and track changes
-                        let metadata_changed = profile_mutable.from_metadata(meta.unwrap());
-
-                        // Apply the current update time
-                        profile_mutable.last_updated = secs_to_compact(
-                            std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs()
-                        );
-
-                        (status_changed || metadata_changed,
-                         profile_mutable.avatar.to_string(),
-                         profile_mutable.banner.to_string())
-                    };
-
-                    // Only serialize when something actually changed (common case: no change)
-                    if changed {
-                        let slim = state.serialize_profile(id).unwrap();
-                        let handle = TAURI_APP.get().unwrap();
-                        handle.emit("profile_update", &slim).unwrap();
-                        Some((slim, avatar_url, banner_url))
-                    } else {
-                        None
-                    }
-                }; // Drop STATE lock before async operations
-
-                if let Some((slim, avatar_url, banner_url)) = save_data {
-                    db::set_profile(slim).await.unwrap();
-
-                    // Cache avatar/banner images in the background for offline access
-                    let npub_clone = npub.clone();
-                    tokio::spawn(async move {
-                        cache_profile_images(&npub_clone, &avatar_url, &banner_url).await;
-                    });
-                }
-                return true;
-            } else {
-                // Profile doesn't exist on relays - check if we have it in STATE already
-                let mut state = STATE.lock().await;
-                if let Some(profile) = state.get_profile_mut(&npub) {
-                    // We have the profile in STATE, just update the timestamp so we don't keep retrying
-                    profile.last_updated = secs_to_compact(
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs()
-                    );
-                    return true;
-                } else {
-                    // Profile truly doesn't exist anywhere
-                    return true;
-                }
-            }
-        }
-        Err(_) => {
-            // Network/relay error - this is a genuine failure
-            return false;
-        }
-    }
+    vector_core::profile::sync::load_profile(
+        npub,
+        &crate::profile_sync::TauriProfileSyncHandler,
+    ).await
 }
 
 #[tauri::command]
