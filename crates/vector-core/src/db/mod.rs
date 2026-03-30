@@ -172,8 +172,8 @@ fn create_connection(path: &PathBuf) -> Result<rusqlite::Connection, String> {
     let conn = rusqlite::Connection::open(path)
         .map_err(|e| format!("Failed to open database: {}", e))?;
 
-    // WAL mode for concurrent reads
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;")
+    // WAL mode for concurrent reads, busy_timeout for lock contention
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA cache_size=-1000;")
         .map_err(|e| format!("Failed to set pragmas: {}", e))?;
 
     Ok(conn)

@@ -1,137 +1,61 @@
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock, Mutex, OnceLock, LazyLock};
-use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, RwLock, LazyLock};
 use tauri::{AppHandle, Runtime, Manager};
 
 // ============================================================================
-// Static App Data Directory (headless-safe — no AppHandle required)
+// Database — delegates to vector-core's single connection pool
 // ============================================================================
 
-/// App data directory, set once at startup (Tauri setup) or by background service.
-/// All DB/MLS path resolution can use this instead of `handle.path().app_data_dir()`.
-static APP_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+/// Type aliases — all 149 call sites use these unchanged.
+pub type ConnectionGuard = vector_core::db::ConnectionGuard;
+pub type WriteConnectionGuard = vector_core::db::WriteConnectionGuard;
 
-/// Set the app data directory (call once at Tauri startup or background service init).
+/// Set the app data directory (delegates to vector-core).
 pub fn set_app_data_dir(path: PathBuf) {
-    let _ = APP_DATA_DIR.set(path);
+    vector_core::db::set_app_data_dir(path);
 }
 
-/// Get the app data directory (headless-safe).
+/// Get the app data directory (delegates to vector-core).
 pub fn get_app_data_dir() -> Result<&'static PathBuf, String> {
-    APP_DATA_DIR.get().ok_or_else(|| "App data directory not initialized".to_string())
+    vector_core::db::get_app_data_dir()
 }
 
-/// Global state tracking the currently active account (npub)
-static CURRENT_ACCOUNT: LazyLock<Arc<RwLock<Option<String>>>> = LazyLock::new(|| Arc::new(RwLock::new(None)));
+/// Get a READ connection guard (delegates to vector-core pool).
+pub fn get_db_connection_guard<R: Runtime>(_handle: &AppHandle<R>) -> Result<ConnectionGuard, String> {
+    vector_core::db::get_db_connection_guard_static()
+}
+
+/// Get the WRITE connection guard (delegates to vector-core pool).
+pub fn get_write_connection_guard<R: Runtime>(_handle: &AppHandle<R>) -> Result<WriteConnectionGuard, String> {
+    vector_core::db::get_write_connection_guard_static()
+}
+
+/// Get a READ connection guard using static path (delegates to vector-core pool).
+pub fn get_db_connection_guard_static() -> Result<ConnectionGuard, String> {
+    vector_core::db::get_db_connection_guard_static()
+}
+
+/// Get the WRITE connection guard using static path (delegates to vector-core pool).
+pub fn get_write_connection_guard_static() -> Result<WriteConnectionGuard, String> {
+    vector_core::db::get_write_connection_guard_static()
+}
+
+/// Close ALL database connections. Used when switching accounts.
+pub fn close_db_connection() {
+    vector_core::db::close_database();
+}
+
+/// Initialize the DB pool using static path (for headless/background service).
+#[allow(dead_code)]
+pub fn init_db_pool_static(_db_path: &std::path::Path) -> Result<(), String> {
+    let npub = get_current_account()?;
+    vector_core::db::init_database(&npub)
+}
 
 /// Pending account waiting for encryption (npub stored before database creation)
 static PENDING_ACCOUNT: LazyLock<Arc<RwLock<Option<String>>>> = LazyLock::new(|| Arc::new(RwLock::new(None)));
 
-/// Read connection pool — multiple connections for parallel reads (WAL mode).
-/// Pre-warmed at login so boot queries get instant connections.
-static DB_READ_POOL: LazyLock<Arc<Mutex<Vec<rusqlite::Connection>>>> =
-    LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
-
-/// Single write connection — all writes go through this to avoid SQLITE_BUSY.
-/// Protected by Mutex so only one write operation runs at a time.
-static DB_WRITE_CONN: LazyLock<Arc<Mutex<Option<rusqlite::Connection>>>> =
-    LazyLock::new(|| Arc::new(Mutex::new(None)));
-
-/// RAII guard for READ connections — auto-returns to the read pool on drop.
-pub struct ConnectionGuard {
-    conn: Option<rusqlite::Connection>,
-}
-
-impl ConnectionGuard {
-    fn new(conn: rusqlite::Connection) -> Self {
-        Self { conn: Some(conn) }
-    }
-}
-
-impl Deref for ConnectionGuard {
-    type Target = rusqlite::Connection;
-    fn deref(&self) -> &Self::Target {
-        self.conn.as_ref().expect("Connection already taken")
-    }
-}
-
-impl DerefMut for ConnectionGuard {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.conn.as_mut().expect("Connection already taken")
-    }
-}
-
-impl Drop for ConnectionGuard {
-    fn drop(&mut self) {
-        if let Some(conn) = self.conn.take() {
-            return_db_connection(conn);
-        }
-    }
-}
-
-/// RAII guard for the WRITE connection — auto-returns to the write slot on drop.
-pub struct WriteConnectionGuard {
-    conn: Option<rusqlite::Connection>,
-}
-
-impl WriteConnectionGuard {
-    fn new(conn: rusqlite::Connection) -> Self {
-        Self { conn: Some(conn) }
-    }
-}
-
-impl Deref for WriteConnectionGuard {
-    type Target = rusqlite::Connection;
-    fn deref(&self) -> &Self::Target {
-        self.conn.as_ref().expect("Write connection already taken")
-    }
-}
-
-impl DerefMut for WriteConnectionGuard {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.conn.as_mut().expect("Write connection already taken")
-    }
-}
-
-impl Drop for WriteConnectionGuard {
-    fn drop(&mut self) {
-        if let Some(conn) = self.conn.take() {
-            return_write_connection(conn);
-        }
-    }
-}
-
-/// Get a READ connection wrapped in an RAII guard (auto-returned to read pool on drop).
-pub fn get_db_connection_guard<R: Runtime>(handle: &AppHandle<R>) -> Result<ConnectionGuard, String> {
-    let conn = get_db_connection(handle)?;
-    Ok(ConnectionGuard::new(conn))
-}
-
-/// Get the WRITE connection wrapped in an RAII guard (auto-returned on drop).
-pub fn get_write_connection_guard<R: Runtime>(handle: &AppHandle<R>) -> Result<WriteConnectionGuard, String> {
-    let conn = get_write_connection(handle)?;
-    Ok(WriteConnectionGuard::new(conn))
-}
-
-// ============================================================================
-// Static Connection Guards (headless-safe — no AppHandle required)
-// ============================================================================
-
-/// Get a READ connection guard using static APP_DATA_DIR (no AppHandle needed).
-pub fn get_db_connection_guard_static() -> Result<ConnectionGuard, String> {
-    let conn = get_db_connection_static()?;
-    Ok(ConnectionGuard::new(conn))
-}
-
-/// Get the WRITE connection guard using static APP_DATA_DIR (no AppHandle needed).
-pub fn get_write_connection_guard_static() -> Result<WriteConnectionGuard, String> {
-    let conn = get_write_connection_static()?;
-    Ok(WriteConnectionGuard::new(conn))
-}
-
 /// SQL Schema for Vector database
-///
-/// This schema uses selective encryption:
 #[cfg(test)]
 pub const SQL_SCHEMA: &str = vector_core::db::schema::SQL_SCHEMA;
 
@@ -217,6 +141,7 @@ pub fn get_profile_directory_static(npub: &str) -> Result<PathBuf, String> {
 }
 
 /// Get the database path using static APP_DATA_DIR (no AppHandle needed).
+#[allow(dead_code)]
 pub fn get_database_path_static(npub: &str) -> Result<PathBuf, String> {
     let profile_dir = get_profile_directory_static(npub)?;
     Ok(profile_dir.join("vector.db"))
@@ -307,10 +232,7 @@ pub fn has_any_account<R: Runtime>(handle: &AppHandle<R>) -> bool {
 /// Get the currently active account
 #[tauri::command]
 pub fn get_current_account() -> Result<String, String> {
-    CURRENT_ACCOUNT.read()
-        .map_err(|e| format!("Failed to read current account: {}", e))?
-        .clone()
-        .ok_or_else(|| "No account selected".to_string())
+    vector_core::db::get_current_account()
 }
 
 /// Auto-select the first available account if none is currently selected.
@@ -343,10 +265,7 @@ pub fn auto_select_account<R: Runtime>(handle: &AppHandle<R>) -> Result<Option<S
 }
 
 /// Ensure the database schema and all migrations are applied for an existing account.
-/// Opens a connection, runs SQL_SCHEMA (CREATE IF NOT EXISTS — safe for existing tables),
-/// then runs all migrations (each is idempotent). The connection is pooled afterwards.
-///
-/// For new accounts (no DB file yet), this is a no-op — init_profile_database handles creation.
+/// Delegates to vector-core's init_database (idempotent — safe to call multiple times).
 fn ensure_schema_ready<R: Runtime>(handle: &AppHandle<R>, npub: &str) -> Result<(), String> {
     let db_path = get_database_path(handle, npub)?;
 
@@ -355,38 +274,19 @@ fn ensure_schema_ready<R: Runtime>(handle: &AppHandle<R>, npub: &str) -> Result<
         return Ok(());
     }
 
-    // If pool already has connections, schema was already ensured (e.g. second call)
-    if DB_READ_POOL.lock().unwrap().len() > 0 {
-        return Ok(());
-    }
-
-    println!("[Account Manager] Ensuring schema and migrations for {}", npub);
-
-    let mut conn = open_db_connection(&db_path)?;
-    conn.execute_batch(vector_core::db::schema::SQL_SCHEMA)
-        .map_err(|e| format!("Failed to apply schema: {}", e))?;
-    vector_core::db::schema::run_migrations(&mut conn)?;
-
-    // Pool this connection so subsequent reads reuse it
-    DB_READ_POOL.lock().unwrap().push(conn);
-
-    println!("[Account Manager] Schema ready");
-    Ok(())
+    vector_core::db::init_database(npub)
 }
 
-/// Set the currently active account
-/// Only clears the connection pool if actually switching to a different account.
+/// Set the currently active account.
+/// Clears the connection pool if switching to a different account.
 pub fn set_current_account(npub: String) -> Result<(), String> {
-    let mut current = CURRENT_ACCOUNT.write()
-        .map_err(|e| format!("Failed to write current account: {}", e))?;
-
-    // Only close pool if switching to a different account
-    if current.as_ref() != Some(&npub) {
-        close_db_connection();
+    // Close pool if switching to a different account
+    if let Ok(current) = vector_core::db::get_current_account() {
+        if current != npub {
+            close_db_connection();
+        }
     }
-
-    *current = Some(npub);
-    Ok(())
+    vector_core::db::set_current_account(npub)
 }
 
 /// Set a pending account (before database creation)
@@ -410,139 +310,6 @@ pub fn clear_pending_account() -> Result<(), String> {
     Ok(())
 }
 
-// ============================================================================
-// Read Connection Pool (multiple connections for parallel reads)
-// ============================================================================
-
-/// Get a READ connection from the pool. Falls back to opening a new one if pool is empty.
-/// This is the standard path for all SELECT queries.
-pub fn get_db_connection<R: Runtime>(handle: &AppHandle<R>) -> Result<rusqlite::Connection, String> {
-    {
-        let mut pool = DB_READ_POOL.lock().unwrap();
-        if let Some(conn) = pool.pop() {
-            return Ok(conn);
-        }
-    }
-    let npub = get_current_account()?;
-    let db_path = get_database_path(handle, &npub)?;
-    open_db_connection(&db_path)
-}
-
-/// Return a READ connection to the pool (capped at 4 — excess connections are closed).
-pub fn return_db_connection(conn: rusqlite::Connection) {
-    let mut pool = DB_READ_POOL.lock().unwrap();
-    if pool.len() < 4 {
-        pool.push(conn);
-    }
-}
-
-// ============================================================================
-// Write Connection (single connection for serialized writes)
-// ============================================================================
-
-/// Get the dedicated WRITE connection. Only one write operation runs at a time.
-/// Use this for INSERT, UPDATE, DELETE operations.
-pub fn get_write_connection<R: Runtime>(handle: &AppHandle<R>) -> Result<rusqlite::Connection, String> {
-    {
-        let mut writer = DB_WRITE_CONN.lock().unwrap();
-        if let Some(conn) = writer.take() {
-            return Ok(conn);
-        }
-    }
-    let npub = get_current_account()?;
-    let db_path = get_database_path(handle, &npub)?;
-    open_db_connection(&db_path)
-}
-
-/// Return the WRITE connection.
-pub fn return_write_connection(conn: rusqlite::Connection) {
-    let mut writer = DB_WRITE_CONN.lock().unwrap();
-    *writer = Some(conn);
-}
-
-// ============================================================================
-// Static Connection Functions (headless-safe — no AppHandle required)
-// ============================================================================
-
-/// Get a READ connection using static APP_DATA_DIR (no AppHandle needed).
-fn get_db_connection_static() -> Result<rusqlite::Connection, String> {
-    {
-        let mut pool = DB_READ_POOL.lock().unwrap();
-        if let Some(conn) = pool.pop() {
-            return Ok(conn);
-        }
-    }
-    let npub = get_current_account()?;
-    let db_path = get_database_path_static(&npub)?;
-    open_db_connection(&db_path)
-}
-
-/// Get the WRITE connection using static APP_DATA_DIR (no AppHandle needed).
-fn get_write_connection_static() -> Result<rusqlite::Connection, String> {
-    {
-        let mut writer = DB_WRITE_CONN.lock().unwrap();
-        if let Some(conn) = writer.take() {
-            return Ok(conn);
-        }
-    }
-    let npub = get_current_account()?;
-    let db_path = get_database_path_static(&npub)?;
-    open_db_connection(&db_path)
-}
-
-/// Initialize the DB pool using static path (for headless/background service).
-#[allow(dead_code)]
-pub fn init_db_pool_static(db_path: &std::path::Path) -> Result<(), String> {
-    // Skip if pool already has connections
-    if DB_READ_POOL.lock().unwrap().len() > 0 {
-        return Ok(());
-    }
-
-    let mut conn = open_db_connection(db_path)?;
-    conn.execute_batch(vector_core::db::schema::SQL_SCHEMA)
-        .map_err(|e| format!("Failed to apply schema: {}", e))?;
-    vector_core::db::schema::run_migrations(&mut conn)?;
-
-    // Pre-warm read pool
-    {
-        let mut pool = DB_READ_POOL.lock().unwrap();
-        for _ in 0..3 {
-            if let Ok(extra) = open_db_connection(db_path) {
-                pool.push(extra);
-            }
-        }
-        pool.push(conn);
-    }
-
-    // Pre-warm write connection
-    {
-        if let Ok(writer) = open_db_connection(db_path) {
-            *DB_WRITE_CONN.lock().unwrap() = Some(writer);
-        }
-    }
-
-    println!("[Account Manager] Static DB pool initialized (4 readers + 1 writer)");
-    Ok(())
-}
-
-// ============================================================================
-// Connection Utilities
-// ============================================================================
-
-/// Open a new SQLite connection with standard pragmas.
-fn open_db_connection(db_path: &std::path::Path) -> Result<rusqlite::Connection, String> {
-    let conn = rusqlite::Connection::open(db_path)
-        .map_err(|e| format!("Failed to open database: {}", e))?;
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA cache_size=-1000; ")
-        .map_err(|e| format!("Failed to set pragmas: {}", e))?;
-    Ok(conn)
-}
-
-/// Close ALL database connections (read pool + writer). Used when switching accounts.
-pub fn close_db_connection() {
-    DB_READ_POOL.lock().unwrap().clear();
-    *DB_WRITE_CONN.lock().unwrap() = None;
-}
 
 /// List all accounts (Tauri command)
 #[tauri::command]
@@ -556,90 +323,13 @@ pub fn check_any_account_exists<R: Runtime>(handle: AppHandle<R>) -> bool {
     has_any_account(&handle)
 }
 
-/// Initialize SQL database for a specific profile
-/// Creates all tables if they don't exist
-/// The connection is pooled after init so subsequent get_db_connection calls reuse it
+/// Initialize SQL database for a specific profile.
+/// Delegates to vector-core's init_database (creates schema, runs migrations, warms pool).
 pub async fn init_profile_database<R: Runtime>(
-    handle: &AppHandle<R>,
+    _handle: &AppHandle<R>,
     npub: &str
 ) -> Result<(), String> {
-    let db_path = get_database_path(handle, npub)?;
-
-    // Fast path: if pool already has connections FOR THIS ACCOUNT, DB exists and schema is valid
-    // (get_encryption_and_key already opened a connection and queried settings)
-    // Guard: only use fast path when pool belongs to the same account (prevents wrong-DB on account switch)
-    let pool_size = DB_READ_POOL.lock().unwrap().len();
-    let same_account = get_current_account().map(|a| a == npub).unwrap_or(false);
-    if pool_size > 0 && same_account {
-        // Run migrations on existing pooled connection (usually all no-ops)
-        let mut conn = get_db_connection(handle)?;
-        vector_core::db::schema::run_migrations(&mut conn)?;
-        return_db_connection(conn);
-
-        // Warm remaining pool connections in background (not on critical path)
-        let db_path_bg = db_path.clone();
-        std::thread::spawn(move || {
-            {
-                let mut pool = DB_READ_POOL.lock().unwrap();
-                let needed = 4usize.saturating_sub(pool.len());
-                for _ in 0..needed {
-                    if let Ok(c) = open_db_connection(&db_path_bg) {
-                        pool.push(c);
-                    }
-                }
-            }
-            let mut writer = DB_WRITE_CONN.lock().unwrap();
-            if writer.is_none() {
-                if let Ok(w) = open_db_connection(&db_path_bg) {
-                    *writer = Some(w);
-                }
-            }
-        });
-
-        return Ok(());
-    }
-
-    // Slow path: first time init (no existing connections)
-    println!("[Account Manager] Initializing database: {}", db_path.display());
-
-    // Create the database directory if it doesn't exist
-    if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create database directory: {}", e))?;
-    }
-
-    // Open connection with standard pragmas (WAL + busy_timeout)
-    let mut conn = open_db_connection(&db_path)?;
-
-    // Execute the schema to create all tables
-    conn.execute_batch(vector_core::db::schema::SQL_SCHEMA)
-        .map_err(|e| format!("Failed to create database schema: {}", e))?;
-
-    // Run migrations for existing databases (atomic - each migration is all-or-nothing)
-    vector_core::db::schema::run_migrations(&mut conn)?;
-
-    // Pre-warm read pool for parallel reads during boot
-    {
-        let mut pool = DB_READ_POOL.lock().unwrap();
-        // 4 read connections for parallel boot queries
-        for _ in 0..3 {
-            if let Ok(extra) = open_db_connection(&db_path) {
-                pool.push(extra);
-            }
-        }
-        pool.push(conn); // Primary connection (used for migrations) joins the read pool
-    }
-
-    // Pre-warm dedicated write connection
-    {
-        if let Ok(writer) = open_db_connection(&db_path) {
-            *DB_WRITE_CONN.lock().unwrap() = Some(writer);
-        }
-    }
-
-    println!("[Account Manager] Database initialized (4 readers + 1 writer)");
-
-    Ok(())
+    vector_core::db::init_database(npub)
 }
 
 #[cfg(test)]

@@ -167,10 +167,6 @@ pub async fn login(mut import_key: String) -> Result<LoginResult, String> {
         }
     }
 
-    // Initialize vector-core's DB pool (used by profile persistence, etc.)
-    let _ = vector_core::db::set_current_account(npub.clone());
-    let _ = vector_core::db::init_database(&npub);
-
     FULL_SESSION_INITIALIZED.store(true, std::sync::atomic::Ordering::Release);
     Ok(LoginResult { public: npub })
 }
@@ -547,10 +543,6 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
         eprintln!("[Login] Failed to set current account: {}", e);
         let _ = handle.emit("loading_error", &e);
     }
-
-    // Initialize vector-core's DB pool (used by profile persistence, etc.)
-    let _ = vector_core::db::set_current_account(npub.clone());
-    let _ = vector_core::db::init_database(&npub);
 
     // MLS keypackage bootstrap (non-blocking, same as decrypt command)
     spawn_mls_bootstrap();
