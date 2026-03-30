@@ -22,12 +22,9 @@ use ::image::{ImageBuffer, Rgba};
 #[cfg(not(target_os = "android"))]
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
-use crate::crypto;
-use crate::db;
 use crate::mls::MlsService;
 use crate::util::{bytes_to_hex_string, hex_string_to_bytes};
 use crate::util::calculate_file_hash;
-use crate::net;
 use crate::STATE;
 use crate::util;
 use crate::TAURI_APP;
@@ -36,7 +33,7 @@ use crate::miniapps::realtime::{generate_topic_id, encode_topic_id};
 
 use super::types::{AttachmentFile, ImageMetadata, Message, Attachment};
 
-use vector_core::sending::{SendCallback, SendConfig, NoOpSendCallback};
+use vector_core::sending::{SendCallback, SendConfig};
 
 /// Result of sending a message, returned to frontend for state update
 #[derive(serde::Serialize)]
@@ -527,9 +524,6 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
         // Calculate the file hash first (before encryption)
         let file_hash = calculate_file_hash(&*attached_file.bytes);
-
-        // The SHA-256 hash of an empty file - we should never reuse this
-        const EMPTY_FILE_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
         // ============================================================
         // MLS GROUP ATTACHMENTS: Use MIP-04 encryption with imeta tags

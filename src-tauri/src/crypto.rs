@@ -17,9 +17,7 @@ use chacha20poly1305::{
 use zeroize::Zeroize;
 
 // Re-export shared crypto from vector-core
-pub use vector_core::crypto::{
-    EncryptionParams, generate_encryption_params, encrypt_data, decrypt_data,
-};
+pub use vector_core::crypto::decrypt_data;
 
 /// Hash a password using Argon2id (with zeroization of the owned password).
 pub async fn hash_pass(mut password: String) -> [u8; 32] {

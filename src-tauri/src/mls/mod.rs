@@ -10,7 +10,7 @@ use mdk_core::prelude::*;
 use mdk_sqlite_storage::MdkSqliteStorage;
 use tauri::{AppHandle, Runtime, Emitter};
 use crate::{TAURI_APP, NOSTR_CLIENT, TRUSTED_RELAYS, active_trusted_relays, STATE, Message};
-use crate::rumor::{RumorEvent, RumorContext, ConversationType, process_rumor, RumorProcessingResult};
+use crate::rumor::{RumorEvent, RumorContext, ConversationType, RumorProcessingResult};
 use crate::db::save_chat_messages;
 use crate::db::chats::{SlimChatDB, save_slim_chat};
 use crate::util::{bytes_to_hex_string, hex_string_to_bytes};

@@ -4,8 +4,7 @@ use fast_thumbhash::{rgba_to_thumb_hash, thumb_hash_to_rgba, base91_encode, base
 
 // Re-export from vector-core (supersedes local MIME HashMaps)
 pub use vector_core::crypto::{
-    extension_from_mime, mime_from_extension_safe, is_image_mime,
-    mime_from_magic_bytes, format_bytes,
+    mime_from_extension_safe, mime_from_magic_bytes, format_bytes,
 };
 
 /// Convert a file extension to a MIME type. Returns owned String for backward compatibility.
@@ -30,7 +29,7 @@ pub fn data_uri(mime: &str, bytes: &[u8]) -> String {
 
 pub use vector_core::hex::{
     bytes_to_hex_16, bytes_to_hex_32, bytes_to_hex_string,
-    hex_string_to_bytes, hex_to_bytes_16, hex_to_bytes_32,
+    hex_string_to_bytes, hex_to_bytes_32,
 };
 
 pub use crate::simd::{

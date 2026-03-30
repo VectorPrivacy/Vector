@@ -21,14 +21,9 @@ mod files;
 pub use sending::*;
 pub use files::*;
 pub use types::{
-    Message, ImageMetadata, Attachment,
-    AttachmentFile, Reaction, EditEntry,
+    ImageMetadata, AttachmentFile, Reaction, EditEntry,
 };
-pub use vector_core::compact::{
-    CompactMessage, CompactMessageVec, CompactReaction, CompactAttachment,
-    AttachmentFlags, MessageFlags, NpubInterner, NO_NPUB,
-    encode_message_id, decode_message_id,
-};
+pub use vector_core::compact::CompactAttachment;
 
 /// Protocol-agnostic reaction function that works for both DMs and Group Chats
 #[tauri::command]

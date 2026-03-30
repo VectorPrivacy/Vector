@@ -14,7 +14,7 @@ use crate::message::AttachmentFile;
 #[cfg(target_os = "android")]
 use crate::android::filesystem;
 
-pub use vector_core::profile::{Profile, ProfileFlags};
+// Profile/ProfileFlags re-exported at crate root from vector_core (lib.rs line 49)
 
 /// Cache profile images (avatar and banner) in the background
 ///
