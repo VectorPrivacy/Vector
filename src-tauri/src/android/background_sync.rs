@@ -648,6 +648,7 @@ fn bootstrap_pipeline(data_dir: &str) -> Result<String, String> {
 
     // Set APP_DATA_DIR so static path helpers work
     crate::account_manager::set_app_data_dir(data_path.clone());
+    vector_core::db::set_app_data_dir(data_path.clone());
 
     // Find the npub directory
     let entries = std::fs::read_dir(&data_path)
@@ -667,6 +668,8 @@ fn bootstrap_pipeline(data_dir: &str) -> Result<String, String> {
 
     // Set CURRENT_ACCOUNT so DB path resolution works
     crate::account_manager::set_current_account(npub.clone())?;
+    let _ = vector_core::db::set_current_account(npub.clone());
+    let _ = vector_core::db::init_database(&npub);
 
     // Initialize the DB pool
     let db_path = crate::account_manager::get_database_path_static(&npub)?;
