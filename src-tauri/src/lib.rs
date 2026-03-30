@@ -346,7 +346,8 @@ pub fn run() {
             // This must happen before auto_select_account so that static DB
             // connection functions can resolve paths correctly.
             if let Ok(data_dir) = handle.path().app_data_dir() {
-                account_manager::set_app_data_dir(data_dir);
+                account_manager::set_app_data_dir(data_dir.clone());
+                vector_core::db::set_app_data_dir(data_dir);
             }
 
             // Auto-select account on startup if one exists but isn't selected

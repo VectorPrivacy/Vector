@@ -6,7 +6,7 @@ use std::sync::LazyLock;
 // Submodules
 mod maintenance;
 pub mod settings;
-mod profiles;
+// profiles: delegates to vector_core::db::profiles (no local file needed)
 mod mls;
 mod miniapps;
 pub mod chats;
@@ -19,7 +19,13 @@ pub use maintenance::check_and_vacuum_if_needed;
 // Settings functions used internally (not just as Tauri commands)
 pub use settings::{get_sql_setting, set_sql_setting, get_seed, set_seed, get_pkey, set_pkey, remove_setting};
 // Profile types and functions
-pub use profiles::{SlimProfile, get_all_profiles, set_profile};
+pub use vector_core::SlimProfile;
+pub async fn get_all_profiles() -> Result<Vec<SlimProfile>, String> {
+    vector_core::db::profiles::get_all_profiles()
+}
+pub async fn set_profile(profile: SlimProfile) -> Result<(), String> {
+    vector_core::db::profiles::set_profile(&profile)
+}
 // MLS database functions
 pub use mls::{
     save_mls_groups, save_mls_group, load_mls_groups, update_mls_group_avatar, clear_all_mls_group_avatar_cache,

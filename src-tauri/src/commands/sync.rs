@@ -201,6 +201,9 @@ pub async fn fetch_messages<R: Runtime>(
                 let profile_db = data_dir.join(&npub).join("vector.db");
                 if profile_db.exists() {
                     let _ = crate::account_manager::set_current_account(npub.clone());
+                    // Initialize vector-core's DB pool so get_all_profiles() works
+                    let _ = vector_core::db::set_current_account(npub.clone());
+                    let _ = vector_core::db::init_database(&npub);
                     println!("[Startup] Set current account for SQL mode: {}", npub);
                 }
             }
