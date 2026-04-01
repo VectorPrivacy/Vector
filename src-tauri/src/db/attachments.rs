@@ -2,7 +2,6 @@
 //!
 //! This module handles:
 //! - Paginated message queries
-//! - Wrapper event ID tracking for deduplication
 //! - Attachment download status updates
 
 use crate::{Message, Attachment};
@@ -29,31 +28,7 @@ pub async fn get_chat_messages_paginated(
     get_message_views(chat_int_id, limit, offset).await
 }
 
-/// Get the total message count for a chat
-/// This is useful for the frontend to know how many messages exist without loading them all
-pub async fn get_chat_message_count(
-    chat_id: &str,
-) -> Result<usize, String> {
-    let conn = crate::account_manager::get_db_connection_guard_static()?;
-
-    // Get integer chat ID from identifier
-    let chat_int_id: i64 = conn.query_row(
-        "SELECT id FROM chats WHERE chat_identifier = ?1",
-        rusqlite::params![chat_id],
-        |row| row.get(0)
-    ).map_err(|e| format!("Chat not found: {}", e))?;
-
-    // Count message events (kind 9 = MLS chat, kind 14 = DM, kind 15 = file) from events table
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM events WHERE chat_id = ?1 AND kind IN (9, 14, 15)",
-        rusqlite::params![chat_int_id],
-        |row| row.get(0)
-    ).map_err(|e| format!("Failed to count messages: {}", e))?;
-
-
-
-    Ok(count as usize)
-}
+// Moved to vector-core: message_exists_in_db, wrapper_event_exists, update_wrapper_event_id, load_recent_wrapper_ids, save/load/update wrappers, load_negentropy_items, get_chat_message_count
 
 /// Get messages around a specific message ID
 /// Returns messages from (target - context_before) to the most recent
@@ -103,7 +78,7 @@ pub async fn get_messages_around_id(
     };
 
     // Get total message count for this chat
-    let total_count = get_chat_message_count(chat_id).await?;
+    let total_count = super::get_chat_message_count(chat_id).await?;
 
     // Calculate the starting position (from oldest = 0)
     // We want messages from (target - context_before) to the newest
@@ -116,220 +91,6 @@ pub async fn get_messages_around_id(
 
     // offset = 0 to start from the newest and get all messages back to start_position
     get_message_views(chat_int_id, limit, 0).await
-}
-
-/// Check if a message/event exists in the database by its ID
-/// This is used to prevent duplicate processing during sync
-pub async fn message_exists_in_db(
-    message_id: &str,
-) -> Result<bool, String> {
-    // Try to get a database connection - if it fails, we're not using DB mode
-    let conn = match crate::account_manager::get_db_connection_guard_static() {
-        Ok(c) => c,
-        Err(_) => return Ok(false), // No DB, let in-memory check handle it
-    };
-
-    // Check in events table (unified storage)
-    let exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM events WHERE id = ?1)",
-        rusqlite::params![message_id],
-        |row| row.get(0)
-    ).map_err(|e| format!("Failed to check event existence: {}", e))?;
-
-
-
-    Ok(exists)
-}
-
-/// Check if a wrapper (giftwrap) event ID exists in the database
-/// This allows skipping the expensive unwrap operation for already-processed events
-pub async fn wrapper_event_exists(
-    wrapper_event_id: &str,
-) -> Result<bool, String> {
-    // Try to get a database connection - if it fails, we're not using DB mode
-    let conn = match crate::account_manager::get_db_connection_guard_static() {
-        Ok(c) => c,
-        Err(_) => return Ok(false), // No DB, can't check
-    };
-
-    // Check in events table (unified storage)
-    let exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM events WHERE wrapper_event_id = ?1)",
-        rusqlite::params![wrapper_event_id],
-        |row| row.get(0)
-    ).map_err(|e| format!("Failed to check wrapper event existence: {}", e))?;
-
-
-
-    Ok(exists)
-}
-
-/// Update the wrapper event ID for an existing event
-/// This is called when we process an event that was previously stored without its wrapper ID
-/// Returns: Ok(true) if updated, Ok(false) if event already had a wrapper_id (duplicate giftwrap)
-pub async fn update_wrapper_event_id(
-    event_id: &str,
-    wrapper_event_id: &str,
-) -> Result<bool, String> {
-    // Try to get the write connection - if it fails, we're not using DB mode
-    let conn = match crate::account_manager::get_write_connection_guard_static() {
-        Ok(c) => c,
-        Err(_) => return Ok(false), // No DB, nothing to update
-    };
-
-    // Update in events table (unified storage)
-    let rows_updated = conn.execute(
-        "UPDATE events SET wrapper_event_id = ?1 WHERE id = ?2 AND (wrapper_event_id IS NULL OR wrapper_event_id = '')",
-        rusqlite::params![wrapper_event_id, event_id],
-    ).map_err(|e| format!("Failed to update wrapper event ID: {}", e))?;
-
-    // Returns true if backfill succeeded, false if event already has a wrapper_id (duplicate giftwrap)
-    Ok(rows_updated > 0)
-}
-
-/// Load recent wrapper_event_ids as raw bytes for the hybrid cache
-/// This preloads wrapper_ids from the last N days to avoid SQL queries during sync
-///
-/// Returns Vec<[u8; 32]> for memory-efficient storage (76% less than HashSet<String>)
-pub async fn load_recent_wrapper_ids(
-    days: u64,
-) -> Result<Vec<[u8; 32]>, String> {
-    // Try to get a database connection - if it fails, we're not using DB mode
-    let conn = match crate::account_manager::get_db_connection_guard_static() {
-        Ok(c) => c,
-        Err(_) => return Ok(Vec::new()), // No DB, return empty vec
-    };
-
-    // Calculate timestamp for N days ago (in seconds, matching events.created_at)
-    let cutoff_secs = (std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs())
-        .saturating_sub(days * 24 * 60 * 60);
-
-    // Query all wrapper_event_ids from recent events
-    let result: Result<Vec<String>, _> = {
-        let mut stmt = conn.prepare(
-            "SELECT wrapper_event_id FROM events
-             WHERE wrapper_event_id IS NOT NULL
-             AND wrapper_event_id != ''
-             AND created_at >= ?1"
-        ).map_err(|e| format!("Failed to prepare wrapper_id query: {}", e))?;
-
-        let rows = stmt.query_map(rusqlite::params![cutoff_secs as i64], |row| {
-            row.get::<_, String>(0)
-        }).map_err(|e| format!("Failed to query wrapper_ids: {}", e))?;
-
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("Failed to collect wrapper_ids: {}", e))
-    };
-
-
-
-    match result {
-        Ok(hex_ids) => {
-            // Convert hex strings to [u8; 32] using SIMD-accelerated decode
-            let mut wrapper_ids = Vec::with_capacity(hex_ids.len());
-            for hex in hex_ids {
-                if hex.len() == 64 {
-                    let bytes = crate::util::hex_to_bytes_32(&hex);
-                    wrapper_ids.push(bytes);
-                }
-            }
-            Ok(wrapper_ids)
-        }
-        Err(_) => {
-            Ok(Vec::new()) // Return empty vec on error, will fall back to DB queries
-        }
-    }
-}
-
-/// Persist a wrapper_event_id in the processed_wrappers table for cross-session dedup.
-/// Uses INSERT OR IGNORE — safe to call multiple times for the same wrapper.
-/// `wrapper_created_at` is the gift wrap's created_at (NIP-59 randomized timestamp),
-/// needed for negentropy (NIP-77) reconciliation fingerprinting.
-pub fn save_processed_wrapper(wrapper_id_bytes: &[u8; 32], wrapper_created_at: u64) -> Result<(), String> {
-    let conn = crate::account_manager::get_write_connection_guard_static()?;
-    conn.execute(
-        "INSERT OR IGNORE INTO processed_wrappers (wrapper_id, wrapper_created_at) VALUES (?1, ?2)",
-        rusqlite::params![&wrapper_id_bytes[..], wrapper_created_at as i64],
-    ).map_err(|e| format!("Failed to save processed wrapper: {}", e))?;
-    Ok(())
-}
-
-/// Upsert a wrapper timestamp in processed_wrappers.
-/// - INSERT if the wrapper isn't in processed_wrappers yet (e.g. only existed in events table)
-/// - UPDATE if it exists but has wrapper_created_at = 0 (pre-migration-17 default)
-/// - No-op if it already has a correct timestamp
-/// This is a one-time backfill: once all timestamps are correct, negentropy finds zero missing.
-pub fn update_wrapper_timestamp(wrapper_id_bytes: &[u8; 32], wrapper_created_at: u64) -> Result<(), String> {
-    let conn = crate::account_manager::get_write_connection_guard_static()?;
-    conn.execute(
-        "INSERT INTO processed_wrappers (wrapper_id, wrapper_created_at) VALUES (?1, ?2) \
-         ON CONFLICT(wrapper_id) DO UPDATE SET wrapper_created_at = ?2 WHERE wrapper_created_at = 0",
-        rusqlite::params![&wrapper_id_bytes[..], wrapper_created_at as i64],
-    ).map_err(|e| format!("Failed to upsert wrapper timestamp: {}", e))?;
-    Ok(())
-}
-
-/// Load all processed wrapper_event_ids as raw bytes for the dedup cache at boot.
-pub fn load_processed_wrappers() -> Result<Vec<[u8; 32]>, String> {
-    let conn = match crate::account_manager::get_db_connection_guard_static() {
-        Ok(c) => c,
-        Err(_) => return Ok(Vec::new()),
-    };
-    let mut stmt = conn.prepare("SELECT wrapper_id FROM processed_wrappers")
-        .map_err(|e| format!("Failed to prepare processed_wrappers query: {}", e))?;
-    let rows = stmt.query_map([], |row| {
-        let blob: Vec<u8> = row.get(0)?;
-        if blob.len() == 32 {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&blob);
-            Ok(arr)
-        } else {
-            Err(rusqlite::Error::InvalidParameterCount(blob.len(), 32))
-        }
-    }).map_err(|e| format!("Failed to query processed_wrappers: {}", e))?;
-
-    let mut result = Vec::new();
-    for row in rows {
-        if let Ok(arr) = row {
-            result.push(arr);
-        }
-    }
-    Ok(result)
-}
-
-/// Load all processed wrappers as (EventId, Timestamp) pairs for negentropy (NIP-77) reconciliation.
-pub fn load_negentropy_items() -> Result<Vec<(nostr_sdk::EventId, nostr_sdk::Timestamp)>, String> {
-    let conn = crate::account_manager::get_db_connection_guard_static()
-        .map_err(|_| "No DB connection".to_string())?;
-
-    let mut stmt = conn.prepare(
-        "SELECT wrapper_id, wrapper_created_at FROM processed_wrappers"
-    ).map_err(|e| format!("Failed to prepare negentropy query: {}", e))?;
-
-    let items: Vec<_> = stmt.query_map([], |row| {
-        let blob: Vec<u8> = row.get(0)?;
-        let created_at: i64 = row.get(1)?;
-        Ok((blob, created_at))
-    }).map_err(|e| format!("Failed to query processed_wrappers: {}", e))?
-    .filter_map(|r| r.ok())
-    .filter_map(|(blob, ts)| {
-        if blob.len() == 32 {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&blob);
-            Some((
-                nostr_sdk::EventId::from_byte_array(arr),
-                nostr_sdk::Timestamp::from_secs(ts as u64),
-            ))
-        } else {
-            None
-        }
-    })
-    .collect();
-
-    Ok(items)
 }
 
 /// Update the downloaded status of an attachment in the database

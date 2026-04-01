@@ -246,6 +246,57 @@ pub async fn delete_event(event_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Check if a message/event exists in the database. Returns false if DB unavailable.
+pub fn message_exists_in_db(message_id: &str) -> Result<bool, String> {
+    let conn = match super::get_db_connection_guard_static() {
+        Ok(c) => c,
+        Err(_) => return Ok(false),
+    };
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM events WHERE id = ?1)",
+        rusqlite::params![message_id],
+        |row| row.get(0),
+    ).map_err(|e| format!("Failed to check event existence: {}", e))
+}
+
+/// Check if a wrapper (giftwrap) event ID exists. Returns false if DB unavailable.
+pub fn wrapper_event_exists(wrapper_event_id: &str) -> Result<bool, String> {
+    let conn = match super::get_db_connection_guard_static() {
+        Ok(c) => c,
+        Err(_) => return Ok(false),
+    };
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM events WHERE wrapper_event_id = ?1)",
+        rusqlite::params![wrapper_event_id],
+        |row| row.get(0),
+    ).map_err(|e| format!("Failed to check wrapper event existence: {}", e))
+}
+
+/// Update the wrapper event ID for an existing event.
+/// Returns true if updated, false if event already had a wrapper_id.
+pub fn update_wrapper_event_id(event_id: &str, wrapper_event_id: &str) -> Result<bool, String> {
+    let conn = match super::get_write_connection_guard_static() {
+        Ok(c) => c,
+        Err(_) => return Ok(false),
+    };
+    let rows = conn.execute(
+        "UPDATE events SET wrapper_event_id = ?1 WHERE id = ?2 AND (wrapper_event_id IS NULL OR wrapper_event_id = '')",
+        rusqlite::params![wrapper_event_id, event_id],
+    ).map_err(|e| format!("Failed to update wrapper event ID: {}", e))?;
+    Ok(rows > 0)
+}
+
+/// Get message count for a chat.
+pub fn get_chat_message_count(chat_id: i64) -> Result<usize, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM events WHERE chat_id = ?1 AND kind IN (14, 15)",
+        rusqlite::params![chat_id],
+        |row| row.get(0),
+    ).map_err(|e| format!("Failed to count messages: {}", e))?;
+    Ok(count as usize)
+}
+
 /// Batch save messages for a chat.
 pub async fn save_chat_messages(chat_id: &str, messages: &[Message]) -> Result<(), String> {
     if messages.is_empty() {

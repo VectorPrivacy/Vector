@@ -29,7 +29,7 @@ pub fn data_uri(mime: &str, bytes: &[u8]) -> String {
 
 pub use vector_core::hex::{
     bytes_to_hex_16, bytes_to_hex_32, bytes_to_hex_string,
-    hex_string_to_bytes, hex_to_bytes_32,
+    hex_string_to_bytes,
 };
 
 pub use crate::simd::{
