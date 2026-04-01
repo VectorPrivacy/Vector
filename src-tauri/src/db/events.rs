@@ -10,70 +10,18 @@ use std::collections::HashMap;
 
 use crate::{Message, Attachment, Reaction};
 use crate::message::EditEntry;
-use crate::crypto::{maybe_encrypt, maybe_decrypt};
+use crate::crypto::maybe_decrypt;
 use crate::stored_event::{StoredEvent, event_kind};
 use super::{get_or_create_chat_id, SystemEventType};
+
+// save_event delegates to vector-core
+pub use vector_core::db::events::save_event;
 
 // ============================================================================
 // Event Storage Functions (Flat Event-Based Architecture)
 // ============================================================================
 
-/// Save a StoredEvent to the events table
-///
-/// This is the primary storage function for the flat event architecture.
-/// All events (messages, reactions, attachments, etc.) are stored as flat rows.
-pub async fn save_event(
-    event: &StoredEvent,
-) -> Result<(), String> {
-    let conn = crate::account_manager::get_write_connection_guard_static()?;
-
-    // Serialize tags to JSON
-    let tags_json = serde_json::to_string(&event.tags)
-        .unwrap_or_else(|_| "[]".to_string());
-
-    // For message and edit events, conditionally encrypt based on user setting
-    let content = if event.kind == event_kind::MLS_CHAT_MESSAGE
-        || event.kind == event_kind::PRIVATE_DIRECT_MESSAGE
-        || event.kind == event_kind::MESSAGE_EDIT
-    {
-        maybe_encrypt(event.content.clone()).await
-    } else {
-        event.content.clone()
-    };
-
-    // Use INSERT OR REPLACE to update if event already exists (allows attachment updates)
-    // COALESCE preserves existing wrapper_event_id when the new value is NULL —
-    // prevents save_message from clobbering a previously backfilled wrapper_event_id
-    conn.execute(
-        r#"
-        INSERT OR REPLACE INTO events (
-            id, kind, chat_id, user_id, content, tags, reference_id,
-            created_at, received_at, mine, pending, failed, wrapper_event_id, npub, preview_metadata
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-            COALESCE(?13, (SELECT wrapper_event_id FROM events WHERE id = ?1)),
-            ?14, ?15)
-        "#,
-        rusqlite::params![
-            event.id,
-            event.kind as i32,
-            event.chat_id,
-            event.user_id,
-            content,
-            tags_json,
-            event.reference_id,
-            event.created_at as i64,
-            event.received_at as i64,
-            event.mine as i32,
-            event.pending as i32,
-            event.failed as i32,
-            event.wrapper_event_id,
-            event.npub,
-            event.preview_metadata,
-        ],
-    ).map_err(|e| format!("Failed to save event: {}", e))?;
-
-    Ok(())
-}
+// save_event: moved to vector-core::db::events (re-exported above)
 
 /// Save a PIVX payment event to the events table
 ///
