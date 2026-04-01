@@ -15,7 +15,10 @@ use crate::stored_event::{StoredEvent, event_kind};
 use super::{get_or_create_chat_id, SystemEventType};
 
 // Delegates to vector-core
-pub use vector_core::db::events::{save_event, event_exists, save_reaction_event};
+pub use vector_core::db::events::{
+    save_event, event_exists, save_reaction_event,
+    save_pivx_payment_event, save_edit_event, delete_event,
+};
 
 // ============================================================================
 // Event Storage Functions (Flat Event-Based Architecture)
@@ -23,20 +26,7 @@ pub use vector_core::db::events::{save_event, event_exists, save_reaction_event}
 
 // save_event: moved to vector-core::db::events (re-exported above)
 
-/// Save a PIVX payment event to the events table
-///
-/// Resolves the chat_id from the conversation identifier and saves the event.
-pub async fn save_pivx_payment_event(
-    conversation_id: &str,
-    mut event: StoredEvent,
-) -> Result<(), String> {
-    // Resolve chat_id from conversation identifier
-    let chat_id = get_or_create_chat_id(conversation_id)?;
-    event.chat_id = chat_id;
-
-    // Save the event
-    save_event(&event).await
-}
+// save_pivx_payment_event: moved to vector-core (re-exported above)
 
 /// Save a system event (member joined/left) to the events table
 ///
@@ -251,60 +241,7 @@ pub async fn get_system_events_for_chat(
 
 // save_reaction_event: moved to vector-core (re-exported above)
 
-/// Save a message edit as a kind=16 event in the events table
-///
-/// Edit events reference the original message and contain the new content.
-/// The content is encrypted just like DM content.
-pub async fn save_edit_event(
-    edit_id: &str,
-    message_id: &str,
-    new_content: &str,
-    chat_id: i64,
-    user_id: Option<i64>,
-    npub: &str,
-) -> Result<(), String> {
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-
-    let event = StoredEvent {
-        id: edit_id.to_string(),
-        kind: event_kind::MESSAGE_EDIT,
-        chat_id,
-        user_id,
-        content: new_content.to_string(),
-        tags: vec![
-            vec!["e".to_string(), message_id.to_string(), "".to_string(), "edit".to_string()],
-        ],
-        reference_id: Some(message_id.to_string()),
-        created_at: now_secs,
-        received_at: now_ms,
-        mine: true,
-        pending: false,
-        failed: false,
-        wrapper_event_id: None,
-        npub: Some(npub.to_string()),
-        preview_metadata: None,
-    };
-
-    save_event(&event).await
-}
-
-/// Delete an event from the events table by ID
-pub async fn delete_event(event_id: &str) -> Result<(), String> {
-    let conn = crate::account_manager::get_write_connection_guard_static()?;
-    conn.execute(
-        "DELETE FROM events WHERE id = ?1",
-        rusqlite::params![event_id],
-    ).map_err(|e| format!("Failed to delete event: {}", e))?;
-    Ok(())
-}
+// save_edit_event, delete_event: moved to vector-core (re-exported above)
 
 // event_exists: moved to vector-core (re-exported above)
 

@@ -192,6 +192,60 @@ fn message_to_stored_event(message: &Message, chat_id: i64, user_id: Option<i64>
     }
 }
 
+/// Save a PIVX payment event, resolving chat_id from conversation identifier.
+pub async fn save_pivx_payment_event(
+    conversation_id: &str,
+    mut event: StoredEvent,
+) -> Result<(), String> {
+    event.chat_id = super::id_cache::get_or_create_chat_id(conversation_id)?;
+    save_event(&event).await
+}
+
+/// Save a message edit as a kind=16 event referencing the original message.
+pub async fn save_edit_event(
+    edit_id: &str,
+    message_id: &str,
+    new_content: &str,
+    chat_id: i64,
+    user_id: Option<i64>,
+    npub: &str,
+) -> Result<(), String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap();
+
+    let event = StoredEvent {
+        id: edit_id.to_string(),
+        kind: event_kind::MESSAGE_EDIT,
+        chat_id,
+        user_id,
+        content: new_content.to_string(),
+        tags: vec![
+            vec!["e".to_string(), message_id.to_string(), "".to_string(), "edit".to_string()],
+        ],
+        reference_id: Some(message_id.to_string()),
+        created_at: now.as_secs(),
+        received_at: now.as_millis() as u64,
+        mine: true,
+        pending: false,
+        failed: false,
+        wrapper_event_id: None,
+        npub: Some(npub.to_string()),
+        preview_metadata: None,
+    };
+
+    save_event(&event).await
+}
+
+/// Delete an event from the events table by ID.
+pub async fn delete_event(event_id: &str) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "DELETE FROM events WHERE id = ?1",
+        rusqlite::params![event_id],
+    ).map_err(|e| format!("Failed to delete event: {}", e))?;
+    Ok(())
+}
+
 /// Batch save messages for a chat.
 pub async fn save_chat_messages(chat_id: &str, messages: &[Message]) -> Result<(), String> {
     if messages.is_empty() {
