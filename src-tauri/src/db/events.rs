@@ -14,8 +14,8 @@ use crate::crypto::maybe_decrypt;
 use crate::stored_event::{StoredEvent, event_kind};
 use super::{get_or_create_chat_id, SystemEventType};
 
-// save_event delegates to vector-core
-pub use vector_core::db::events::save_event;
+// Delegates to vector-core
+pub use vector_core::db::events::{save_event, event_exists, save_reaction_event};
 
 // ============================================================================
 // Event Storage Functions (Flat Event-Based Architecture)
@@ -249,45 +249,7 @@ pub async fn get_system_events_for_chat(
     Ok(events)
 }
 
-/// Save a reaction as a kind=7 event in the events table
-///
-/// Reactions are stored as separate events referencing the message they react to.
-/// This is the Nostr-standard way to store reactions (NIP-25).
-pub async fn save_reaction_event(
-    reaction: &Reaction,
-    chat_id: i64,
-    user_id: Option<i64>,
-    mine: bool,
-    wrapper_event_id: Option<String>,
-) -> Result<(), String> {
-    let event = StoredEvent {
-        id: reaction.id.clone(),
-        kind: event_kind::REACTION,
-        chat_id,
-        user_id,
-        content: reaction.emoji.clone(),
-        tags: vec![
-            vec!["e".to_string(), reaction.reference_id.clone()],
-        ],
-        reference_id: Some(reaction.reference_id.clone()),
-        created_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-        received_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0),
-        mine,
-        pending: false,
-        failed: false,
-        wrapper_event_id,
-        npub: Some(reaction.author_id.clone()),
-        preview_metadata: None,
-    };
-
-    save_event(&event).await
-}
+// save_reaction_event: moved to vector-core (re-exported above)
 
 /// Save a message edit as a kind=16 event in the events table
 ///
@@ -344,21 +306,7 @@ pub async fn delete_event(event_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Check if an event exists in the events table
-pub fn event_exists(
-    event_id: &str,
-) -> Result<bool, String> {
-    let conn = crate::account_manager::get_db_connection_guard_static()?;
-
-    let exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM events WHERE id = ?1)",
-        rusqlite::params![event_id],
-        |row| row.get(0),
-    ).map_err(|e| format!("Failed to check event existence: {}", e))?;
-
-
-    Ok(exists)
-}
+// event_exists: moved to vector-core (re-exported above)
 
 /// Get events for a chat with pagination
 ///

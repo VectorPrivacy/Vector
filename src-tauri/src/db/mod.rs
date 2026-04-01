@@ -7,7 +7,6 @@ pub mod settings;
 mod mls;
 mod miniapps;
 pub mod chats;
-mod messages;
 mod attachments;
 mod events;
 
@@ -46,7 +45,7 @@ pub use miniapps::{
 };
 // ID cache — delegates to vector-core
 pub use vector_core::db::id_cache::{
-    get_chat_id_by_identifier, get_or_create_chat_id, get_or_create_user_id,
+    get_chat_id_by_identifier, get_or_create_chat_id,
     clear_id_caches,
 };
 pub async fn preload_id_caches() -> Result<(), String> {
@@ -54,8 +53,8 @@ pub async fn preload_id_caches() -> Result<(), String> {
 }
 // Chat database functions
 pub use chats::{get_all_chats, delete_chat};
-// Message database functions
-pub use messages::{save_message, save_chat_messages};
+// Message database functions (delegates to vector-core)
+pub use vector_core::db::events::{save_message, save_chat_messages};
 // Attachment database functions
 pub use attachments::{
     get_chat_messages_paginated, get_chat_message_count,
