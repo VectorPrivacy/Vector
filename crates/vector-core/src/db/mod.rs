@@ -19,6 +19,7 @@ pub mod schema;
 pub mod profiles;
 pub mod id_cache;
 pub mod events;
+pub mod chats;
 
 pub use settings::{get_sql_setting, set_sql_setting, get_pkey, set_pkey, get_seed, set_seed, remove_setting};
 
