@@ -80,7 +80,7 @@ pub use error::{VectorError, Result};
 pub use traits::{EventEmitter, NoOpEmitter, set_event_emitter, emit_event};
 pub use db::{set_app_data_dir, get_app_data_dir};
 pub use sending::{SendCallback, NoOpSendCallback, SendConfig, SendResult};
-pub use stored_event::{StoredEvent, StoredEventBuilder};
+pub use stored_event::{StoredEvent, StoredEventBuilder, SystemEventType};
 pub use rumor::{RumorEvent, RumorContext, ConversationType, RumorProcessingResult, process_rumor};
 pub use profile::{SyncPriority, ProfileSyncHandler, NoOpProfileSyncHandler};
 

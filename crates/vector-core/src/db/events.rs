@@ -201,6 +201,50 @@ pub async fn save_pivx_payment_event(
     save_event(&event).await
 }
 
+/// Save a system event (member joined/left/removed) with dedup.
+/// Returns true if inserted, false if duplicate.
+pub async fn save_system_event_by_id(
+    event_id: &str,
+    conversation_id: &str,
+    event_type: crate::stored_event::SystemEventType,
+    member_npub: &str,
+    member_name: Option<&str>,
+) -> Result<bool, String> {
+    let chat_id = super::id_cache::get_or_create_chat_id(conversation_id)?;
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs()).unwrap_or(0);
+
+    let display_name = member_name.unwrap_or(member_npub);
+    let content = event_type.display_message(display_name);
+
+    let tags: Vec<Vec<String>> = vec![
+        vec!["d".to_string(), "system-event".to_string()],
+        vec!["event-type".to_string(), event_type.as_u8().to_string()],
+        vec!["member".to_string(), member_npub.to_string()],
+    ];
+    let tags_json = serde_json::to_string(&tags)
+        .map_err(|e| format!("Failed to serialize tags: {}", e))?;
+
+    let conn = super::get_write_connection_guard_static()?;
+    let rows = conn.execute(
+        r#"INSERT OR IGNORE INTO events (
+            id, kind, chat_id, user_id, content, tags, reference_id,
+            created_at, received_at, mine, pending, failed, wrapper_event_id, npub
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"#,
+        rusqlite::params![
+            event_id,
+            event_kind::APPLICATION_SPECIFIC as i32,
+            chat_id, None::<i64>, content, tags_json, None::<String>,
+            now_secs as i64, now_secs as i64,
+            0, 0, 0, None::<String>, member_npub,
+        ],
+    ).map_err(|e| format!("Failed to save system event: {}", e))?;
+
+    Ok(rows > 0)
+}
+
 /// Save a message edit as a kind=16 event referencing the original message.
 pub async fn save_edit_event(
     edit_id: &str,

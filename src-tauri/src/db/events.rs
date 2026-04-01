@@ -12,12 +12,12 @@ use crate::{Message, Attachment, Reaction};
 use crate::message::EditEntry;
 use crate::crypto::maybe_decrypt;
 use crate::stored_event::{StoredEvent, event_kind};
-use super::{get_or_create_chat_id, SystemEventType};
 
 // Delegates to vector-core
 pub use vector_core::db::events::{
     save_event, event_exists, save_reaction_event,
     save_pivx_payment_event, save_edit_event, delete_event,
+    save_system_event_by_id,
 };
 
 // ============================================================================
@@ -28,73 +28,7 @@ pub use vector_core::db::events::{
 
 // save_pivx_payment_event: moved to vector-core (re-exported above)
 
-/// Save a system event (member joined/left) to the events table
-///
-/// Uses INSERT OR IGNORE for deduplication. Returns `true` if the event was
-/// actually inserted (new), `false` if it already existed (duplicate).
-/// Callers should only emit frontend events if this returns `true`.
-pub async fn save_system_event_by_id(
-    event_id: &str,
-    conversation_id: &str,
-    event_type: SystemEventType,
-    member_npub: &str,
-    member_name: Option<&str>,
-) -> Result<bool, String> {
-    use crate::stored_event::event_kind;
-
-    // Resolve chat_id from conversation identifier
-    let chat_id = get_or_create_chat_id(conversation_id)?;
-
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    // Build the display content
-    let display_name = member_name.unwrap_or(member_npub);
-    let content = event_type.display_message(display_name);
-
-    // Build tags for identification (store event_type as integer)
-    let tags: Vec<Vec<String>> = vec![
-        vec!["d".to_string(), "system-event".to_string()],
-        vec!["event-type".to_string(), event_type.as_u8().to_string()],
-        vec!["member".to_string(), member_npub.to_string()],
-    ];
-
-    let tags_json = serde_json::to_string(&tags)
-        .map_err(|e| format!("Failed to serialize tags: {}", e))?;
-
-    let conn = crate::account_manager::get_write_connection_guard_static()?;
-
-    // Use INSERT OR IGNORE - returns 0 rows affected if duplicate
-    let rows_affected = conn.execute(
-        r#"
-        INSERT OR IGNORE INTO events (
-            id, kind, chat_id, user_id, content, tags, reference_id,
-            created_at, received_at, mine, pending, failed, wrapper_event_id, npub
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
-        "#,
-        rusqlite::params![
-            event_id,
-            event_kind::APPLICATION_SPECIFIC as i32,
-            chat_id,
-            None::<i64>,
-            content,
-            tags_json,
-            None::<String>,
-            now_secs as i64,
-            now_secs as i64,
-            0, // mine = false
-            0, // pending = false
-            0, // failed = false
-            None::<String>,
-            member_npub,
-        ],
-    ).map_err(|e| format!("Failed to save system event: {}", e))?;
-
-    // Return true if we actually inserted (not a duplicate)
-    Ok(rows_affected > 0)
-}
+// save_system_event_by_id: moved to vector-core (re-exported above)
 
 /// Get PIVX payment events for a chat
 ///

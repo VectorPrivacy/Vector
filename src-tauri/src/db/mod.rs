@@ -1,5 +1,3 @@
-use serde::{Deserialize, Serialize};
-
 // Submodules
 mod maintenance;
 pub mod settings;
@@ -92,27 +90,5 @@ pub use events::{
 };
 
 
-/// System event types for MLS groups (stored as integers for efficiency)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[repr(u8)]
-pub enum SystemEventType {
-    MemberLeft = 0,
-    MemberJoined = 1,
-    MemberRemoved = 2,
-}
-
-impl SystemEventType {
-    /// Get the display message for this event type
-    pub fn display_message(&self, display_name: &str) -> String {
-        match self {
-            SystemEventType::MemberLeft => format!("{} has left", display_name),
-            SystemEventType::MemberJoined => format!("{} has joined", display_name),
-            SystemEventType::MemberRemoved => format!("{} was removed", display_name),
-        }
-    }
-
-    /// Convert to integer for storage/serialization
-    pub fn as_u8(&self) -> u8 {
-        *self as u8
-    }
-}
+// SystemEventType moved to vector-core::stored_event
+pub use vector_core::SystemEventType;

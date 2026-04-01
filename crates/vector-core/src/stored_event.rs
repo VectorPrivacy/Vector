@@ -65,6 +65,29 @@ pub mod event_kind {
     pub const MLS_KEY_PACKAGE: u16 = 443;
 }
 
+/// System event types for group member changes (stored as integers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[repr(u8)]
+pub enum SystemEventType {
+    MemberLeft = 0,
+    MemberJoined = 1,
+    MemberRemoved = 2,
+}
+
+impl SystemEventType {
+    pub fn display_message(&self, display_name: &str) -> String {
+        match self {
+            SystemEventType::MemberLeft => format!("{} has left", display_name),
+            SystemEventType::MemberJoined => format!("{} has joined", display_name),
+            SystemEventType::MemberRemoved => format!("{} was removed", display_name),
+        }
+    }
+
+    pub fn as_u8(&self) -> u8 {
+        *self as u8
+    }
+}
+
 /// A stored event - the flat, protocol-aligned storage format
 ///
 /// This struct represents any Nostr event after unwrapping/decryption.
