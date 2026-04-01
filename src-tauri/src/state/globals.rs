@@ -20,7 +20,7 @@ pub use vector_core::state::{
     get_blossom_servers,
     MNEMONIC_SEED, PENDING_NSEC,
     ENCRYPTION_KEY,
-    is_encryption_enabled_fast, set_encryption_enabled, init_encryption_enabled,
+    set_encryption_enabled, init_encryption_enabled,
     PendingInviteAcceptance, PENDING_INVITE,
     NOTIFIED_WELCOMES, WRAPPER_ID_CACHE,
     PENDING_EVENTS,

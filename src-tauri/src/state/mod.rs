@@ -10,7 +10,7 @@ pub use globals::{
     PendingInviteAcceptance,
     PENDING_EVENTS,
     is_processing_allowed, close_processing_gate, open_processing_gate,
-    is_encryption_enabled_fast, set_encryption_enabled, init_encryption_enabled,
+    set_encryption_enabled, init_encryption_enabled,
 };
 
 pub use vector_core::ChatState;
