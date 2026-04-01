@@ -341,6 +341,88 @@ pub fn get_chat_message_count(chat_id: i64) -> Result<usize, String> {
     Ok(count as usize)
 }
 
+/// Get PIVX payment events for a chat.
+pub fn get_pivx_payments_for_chat(conversation_id: &str) -> Result<Vec<StoredEvent>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let chat_id: i64 = conn.query_row(
+        "SELECT id FROM chats WHERE chat_identifier = ?1",
+        rusqlite::params![conversation_id], |row| row.get(0)
+    ).map_err(|_| "Chat not found")?;
+
+    let mut stmt = conn.prepare(
+        "SELECT id, kind, chat_id, user_id, content, tags, reference_id, \
+         created_at, received_at, mine, pending, failed, wrapper_event_id, npub \
+         FROM events WHERE chat_id = ?1 AND kind = ?2 ORDER BY created_at ASC, received_at ASC"
+    ).map_err(|e| format!("Failed to prepare: {}", e))?;
+
+    let rows = stmt.query_map(
+        rusqlite::params![chat_id, event_kind::APPLICATION_SPECIFIC as i32],
+        |row| {
+            let tags_json: String = row.get(5)?;
+            let tags: Vec<Vec<String>> = serde_json::from_str(&tags_json).unwrap_or_default();
+            Ok(StoredEvent {
+                id: row.get(0)?, kind: row.get::<_, i32>(1)? as u16,
+                chat_id: row.get(2)?, user_id: row.get(3)?, content: row.get(4)?,
+                tags, reference_id: row.get(6)?,
+                created_at: row.get::<_, i64>(7)? as u64, received_at: row.get::<_, i64>(8)? as u64,
+                mine: row.get::<_, i32>(9)? != 0, pending: row.get::<_, i32>(10)? != 0,
+                failed: row.get::<_, i32>(11)? != 0, wrapper_event_id: row.get(12)?,
+                npub: row.get(13)?, preview_metadata: None,
+            })
+        }
+    ).map_err(|e| format!("Failed to query: {}", e))?;
+
+    let mut payments = Vec::new();
+    for row in rows {
+        let event = row.map_err(|e| format!("Failed to read event: {}", e))?;
+        if event.tags.iter().any(|t| t.len() >= 2 && t[0] == "d" && t[1] == "pivx-payment") {
+            payments.push(event);
+        }
+    }
+    Ok(payments)
+}
+
+/// Get system events (member joined/left) for a chat.
+pub fn get_system_events_for_chat(conversation_id: &str) -> Result<Vec<StoredEvent>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let chat_id: i64 = conn.query_row(
+        "SELECT id FROM chats WHERE chat_identifier = ?1",
+        rusqlite::params![conversation_id], |row| row.get(0)
+    ).map_err(|_| "Chat not found")?;
+
+    let mut stmt = conn.prepare(
+        "SELECT id, kind, chat_id, user_id, content, tags, reference_id, \
+         created_at, received_at, mine, pending, failed, wrapper_event_id, npub \
+         FROM events WHERE chat_id = ?1 AND kind = ?2 ORDER BY created_at ASC, received_at ASC"
+    ).map_err(|e| format!("Failed to prepare: {}", e))?;
+
+    let rows = stmt.query_map(
+        rusqlite::params![chat_id, event_kind::APPLICATION_SPECIFIC as i32],
+        |row| {
+            let tags_json: String = row.get(5)?;
+            let tags: Vec<Vec<String>> = serde_json::from_str(&tags_json).unwrap_or_default();
+            Ok(StoredEvent {
+                id: row.get(0)?, kind: row.get::<_, i32>(1)? as u16,
+                chat_id: row.get(2)?, user_id: row.get(3)?, content: row.get(4)?,
+                tags, reference_id: row.get(6)?,
+                created_at: row.get::<_, i64>(7)? as u64, received_at: row.get::<_, i64>(8)? as u64,
+                mine: row.get::<_, i32>(9)? != 0, pending: row.get::<_, i32>(10)? != 0,
+                failed: row.get::<_, i32>(11)? != 0, wrapper_event_id: row.get(12)?,
+                npub: row.get(13)?, preview_metadata: None,
+            })
+        }
+    ).map_err(|e| format!("Failed to query: {}", e))?;
+
+    let mut events = Vec::new();
+    for row in rows {
+        let event = row.map_err(|e| format!("Failed to read event: {}", e))?;
+        if event.tags.iter().any(|t| t.len() >= 2 && t[0] == "d" && t[1] == "system-event") {
+            events.push(event);
+        }
+    }
+    Ok(events)
+}
+
 /// Batch save messages for a chat.
 pub async fn save_chat_messages(chat_id: &str, messages: &[Message]) -> Result<(), String> {
     if messages.is_empty() {
