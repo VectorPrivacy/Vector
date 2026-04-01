@@ -1,7 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
-use std::sync::LazyLock;
 
 // Submodules
 mod maintenance;
@@ -47,14 +44,16 @@ pub use miniapps::{
     save_marketplace_cache, load_marketplace_cache,
     get_active_peer_advertisements,
 };
-// Chat database functions
-pub use chats::{
-    get_chat_id_by_identifier,
-    preload_id_caches, clear_id_caches,
-    get_all_chats, delete_chat,
+// ID cache — delegates to vector-core
+pub use vector_core::db::id_cache::{
+    get_chat_id_by_identifier, get_or_create_chat_id, get_or_create_user_id,
+    clear_id_caches,
 };
-// Internal chat helpers used by messages/events
-pub(crate) use chats::{get_or_create_chat_id, get_or_create_user_id};
+pub async fn preload_id_caches() -> Result<(), String> {
+    vector_core::db::id_cache::preload_id_caches()
+}
+// Chat database functions
+pub use chats::{get_all_chats, delete_chat};
 // Message database functions
 pub use messages::{save_message, save_chat_messages};
 // Attachment database functions
@@ -72,15 +71,6 @@ pub use events::{
     populate_reply_context, get_message_views, get_all_chats_last_messages,
 };
 
-/// In-memory cache for chat_identifier → integer ID mappings
-/// This avoids database lookups on every message operation
-static CHAT_ID_CACHE: LazyLock<Arc<RwLock<HashMap<String, i64>>>> =
-    LazyLock::new(|| Arc::new(RwLock::new(HashMap::new())));
-
-/// In-memory cache for npub → integer ID mappings
-/// This avoids database lookups on every message operation
-static USER_ID_CACHE: LazyLock<Arc<RwLock<HashMap<String, i64>>>> =
-    LazyLock::new(|| Arc::new(RwLock::new(HashMap::new())));
 
 /// System event types for MLS groups (stored as integers for efficiency)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
