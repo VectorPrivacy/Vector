@@ -66,15 +66,6 @@ impl SendCallback for TauriSendCallback {
         }
     }
 
-    fn on_attachment_preview(&self, chat_id: &str, msg: &Message) {
-        if let Some(handle) = TAURI_APP.get() {
-            handle.emit("message_new", serde_json::json!({
-                "message": msg,
-                "chat_id": chat_id
-            })).ok();
-        }
-    }
-
     fn on_upload_progress(
         &self,
         pending_id: &str,

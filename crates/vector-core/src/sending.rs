@@ -27,9 +27,6 @@ pub trait SendCallback: Send + Sync {
     /// Message created and added to STATE as pending.
     fn on_pending(&self, _chat_id: &str, _msg: &Message) {}
 
-    /// Attachment preview added to pending message in STATE.
-    fn on_attachment_preview(&self, _chat_id: &str, _msg: &Message) {}
-
     /// File upload progress. Return Err("...") to cancel the upload.
     fn on_upload_progress(
         &self,
