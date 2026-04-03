@@ -52,6 +52,12 @@ pub struct TauriSendCallback;
 
 impl SendCallback for TauriSendCallback {
     fn on_pending(&self, chat_id: &str, msg: &Message) {
+        // Register cancel flag for file uploads (keyed by pending_id)
+        if !msg.attachments.is_empty() {
+            let mut flags = UPLOAD_CANCEL_FLAGS.lock().unwrap();
+            flags.insert(msg.id.clone(), Arc::new(AtomicBool::new(false)));
+        }
+
         if let Some(handle) = TAURI_APP.get() {
             handle.emit("message_new", serde_json::json!({
                 "message": msg,
@@ -75,6 +81,16 @@ impl SendCallback for TauriSendCallback {
         percentage: u8,
         _bytes_sent: u64,
     ) -> Result<(), String> {
+        // Check cancel flag
+        {
+            let flags = UPLOAD_CANCEL_FLAGS.lock().unwrap();
+            if let Some(flag) = flags.get(pending_id) {
+                if flag.load(Ordering::Relaxed) {
+                    return Err("Upload cancelled".to_string());
+                }
+            }
+        }
+
         if let Some(handle) = TAURI_APP.get() {
             handle.emit("attachment_upload_progress", serde_json::json!({
                 "id": pending_id,
@@ -96,6 +112,7 @@ impl SendCallback for TauriSendCallback {
     }
 
     fn on_sent(&self, chat_id: &str, old_id: &str, msg: &Message) {
+        UPLOAD_CANCEL_FLAGS.lock().unwrap().remove(old_id);
         if let Some(handle) = TAURI_APP.get() {
             handle.emit("message_update", serde_json::json!({
                 "old_id": old_id,
@@ -106,6 +123,7 @@ impl SendCallback for TauriSendCallback {
     }
 
     fn on_failed(&self, chat_id: &str, old_id: &str, msg: &Message) {
+        UPLOAD_CANCEL_FLAGS.lock().unwrap().remove(old_id);
         if let Some(handle) = TAURI_APP.get() {
             handle.emit("message_update", serde_json::json!({
                 "old_id": old_id,
