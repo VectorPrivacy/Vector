@@ -419,9 +419,9 @@ pub async fn send_text_reply_headless(chat_id: &str, content: &str) -> Result<St
     } else {
         // DM path: delegate to vector-core
         let config = SendConfig::headless();
-        let callback = TauriSendCallback;
+        let callback: Arc<dyn SendCallback> = Arc::new(TauriSendCallback);
         let result = vector_core::sending::send_dm(
-            chat_id, content, None, &config, &callback,
+            chat_id, content, None, &config, callback,
         ).await?;
         result.event_id.unwrap_or(result.pending_id)
     };
@@ -445,7 +445,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
     // DM: delegate entirely to vector-core
     if !is_group_chat {
         let config = SendConfig::gui();
-        let callback = TauriSendCallback;
+        let callback: Arc<dyn SendCallback> = Arc::new(TauriSendCallback);
 
         return if let Some(ref attached_file) = file {
             // File DM: vector-core handles encrypt + upload + send
@@ -453,14 +453,14 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 &receiver, Arc::clone(&attached_file.bytes),
                 &attached_file.name, &attached_file.extension,
                 if content.is_empty() { None } else { Some(&content) },
-                &config, &callback,
+                &config, callback.clone(),
             ).await?;
             Ok(MessageSendResult { pending_id: result.pending_id, event_id: result.event_id })
         } else {
             // Text DM
             let reply: Option<&str> = if replied_to.is_empty() { None } else { Some(&replied_to) };
             let result = vector_core::sending::send_dm(
-                &receiver, &content, reply, &config, &callback,
+                &receiver, &content, reply, &config, callback,
             ).await?;
             Ok(MessageSendResult { pending_id: result.pending_id, event_id: result.event_id })
         };
@@ -830,9 +830,9 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
     } else {
         // DM
         let config = SendConfig::gui();
-        let callback = TauriSendCallback;
+        let callback: Arc<dyn SendCallback> = Arc::new(TauriSendCallback);
         let result = vector_core::sending::send_rumor_dm(
-            &receiver, &pending_id, built_rumor, &config, &callback,
+            &receiver, &pending_id, built_rumor, &config, callback,
         ).await;
 
         match result {

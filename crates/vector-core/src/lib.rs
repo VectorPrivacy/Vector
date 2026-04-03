@@ -85,6 +85,7 @@ pub use rumor::{RumorEvent, RumorContext, ConversationType, RumorProcessingResul
 pub use profile::{SyncPriority, ProfileSyncHandler, NoOpProfileSyncHandler};
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 // ============================================================================
 // VectorCore — High-level API
@@ -213,7 +214,7 @@ impl VectorCore {
 
     /// Send a NIP-17 gift-wrapped text DM using the full pipeline.
     pub async fn send_dm(&self, to_npub: &str, content: &str) -> Result<sending::SendResult> {
-        sending::send_dm(to_npub, content, None, &SendConfig::default(), &NoOpSendCallback).await
+        sending::send_dm(to_npub, content, None, &SendConfig::default(), Arc::new(NoOpSendCallback)).await
             .map_err(|e| VectorError::Other(e))
     }
 
@@ -236,7 +237,7 @@ impl VectorCore {
             extension,
             None,
             &SendConfig::default(),
-            &NoOpSendCallback,
+            Arc::new(NoOpSendCallback),
         ).await.map_err(|e| VectorError::Other(e))
     }
 

@@ -141,7 +141,7 @@ async fn retry_send_gift_wrap(
     rumor: UnsignedEvent,
     event_id: &str,
     config: &SendConfig,
-    callback: &dyn SendCallback,
+    callback: Arc<dyn SendCallback>,
 ) -> Result<SendResult, String> {
     let my_pk = *MY_PUBLIC_KEY.get().ok_or("Public key not set")?;
 
@@ -219,7 +219,7 @@ pub async fn send_dm(
     content: &str,
     reply_to: Option<&str>,
     config: &SendConfig,
-    callback: &dyn SendCallback,
+    callback: Arc<dyn SendCallback>,
 ) -> Result<SendResult, String> {
     let client = NOSTR_CLIENT.get().ok_or("Not logged in")?;
     let my_pk = *MY_PUBLIC_KEY.get().ok_or("Public key not set")?;
@@ -286,7 +286,7 @@ pub async fn send_rumor_dm(
     pending_id: &str,
     rumor: UnsignedEvent,
     config: &SendConfig,
-    callback: &dyn SendCallback,
+    callback: Arc<dyn SendCallback>,
 ) -> Result<SendResult, String> {
     let client = NOSTR_CLIENT.get().ok_or("Not logged in")?;
 
@@ -315,7 +315,7 @@ pub async fn send_file_dm(
     extension: &str,
     content: Option<&str>,
     config: &SendConfig,
-    callback: &dyn SendCallback,
+    callback: Arc<dyn SendCallback>,
 ) -> Result<SendResult, String> {
     let client = NOSTR_CLIENT.get().ok_or("Not logged in")?;
     let my_pk = *MY_PUBLIC_KEY.get().ok_or("Public key not set")?;
@@ -372,9 +372,17 @@ pub async fn send_file_dm(
     }
     callback.on_pending(receiver_npub, &msg);
 
-    // Upload to Blossom
+    // Upload to Blossom — bridge SendCallback.on_upload_progress to Blossom ProgressCallback
     let servers = crate::state::get_blossom_servers();
-    let progress_cb: crate::blossom::ProgressCallback = Arc::new(|_, _| Ok(()));
+    let cb_for_progress = callback.clone();
+    let pid_for_progress = pending_id.clone();
+    let progress_cb: crate::blossom::ProgressCallback = Arc::new(move |percentage, bytes| {
+        cb_for_progress.on_upload_progress(
+            &pid_for_progress,
+            percentage.unwrap_or(0),
+            bytes.unwrap_or(0),
+        )
+    });
 
     let upload_url = match crate::blossom::upload_blob_with_progress_and_failover(
         keys.clone(), servers, Arc::new(encrypted), Some(mime_type),
