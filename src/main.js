@@ -46,6 +46,12 @@ const domProfileHeaderAvatarContainer = document.getElementById('profile-header-
 const domProfileName = document.getElementById('profile-name');
 const domProfileStatus = document.getElementById('profile-status');
 // Note: these are 'let' due to needing to use `.replaceWith` when hot-swapping profile elements
+let fProfileEditMode = false;
+let objProfileEditSnapshot = {};
+const domProfileEditBtn = document.getElementById('profile-edit-btn');
+const domProfileEditBar = document.getElementById('profile-edit-bar');
+const domProfileEditCancelBtn = document.getElementById('profile-edit-cancel-btn');
+const domProfileEditSaveBtn = document.getElementById('profile-edit-save-btn');
 let domProfileBanner = document.getElementById('profile-banner');
 let domProfileAvatar = document.getElementById('profile-avatar');
 const domProfileNameSecondary = document.getElementById('profile-secondary-name');
@@ -4292,7 +4298,7 @@ async function setupRustListeners() {
     _on('mls_error', (evt) => {
         const { group_id, error } = evt.payload || {};
         console.error('[MLS] Background operation failed:', group_id, error);
-        showToast(error || 'Group operation failed');
+        showToast(error || 'Group Operation Failed');
     });
 
     // Listen for MLS initial sync completion after joining a group
@@ -4457,7 +4463,7 @@ async function setupRustListeners() {
 
     // Listen for backend error toasts
     _on('show_toast', (evt) => {
-        showToast(evt.payload || 'An error occurred');
+        showToast(evt.payload || 'An Error Occurred');
     });
 
     // Listen for Attachment Download Progress events
@@ -5128,7 +5134,7 @@ async function setupRustListeners() {
 
     // Listen for Mini App crashes (Android renderer process crash)
     _on('miniapp_crashed', () => {
-        showToast('Mini App crashed unexpectedly');
+        showToast('Mini App Crashed Unexpectedly');
     });
 
     await Promise.all(_p);
@@ -5996,7 +6002,7 @@ function renderProfileTab(cProfile) {
             placeholder.classList.add('profile-banner');
             if (cProfile.mine) {
                 placeholder.classList.add('btn');
-                placeholder.onclick = askForBanner;
+                placeholder.onclick = null;
             }
             domProfileBanner.replaceWith(placeholder);
             domProfileBanner = placeholder;
@@ -6010,8 +6016,7 @@ function renderProfileTab(cProfile) {
         }
     }
     domProfileBanner.classList.add('profile-banner');
-    domProfileBanner.onclick = cProfile.mine ? askForBanner : null;
-    if (cProfile.mine) domProfileBanner.classList.add('btn');
+    domProfileBanner.onclick = null;
 
     // Avatar - keep original structure but add click handler
     const profileAvatarSrc = getProfileAvatarSrc(cProfile);
@@ -6027,8 +6032,6 @@ function renderProfileTab(cProfile) {
             const placeholder = createPlaceholderAvatar(false, 175);
             placeholder.classList.add('profile-avatar');
             if (cProfile.mine) {
-                placeholder.classList.add('btn');
-                placeholder.onclick = askForAvatar;
             }
             domProfileAvatar.replaceWith(placeholder);
             domProfileAvatar = placeholder;
@@ -6039,8 +6042,7 @@ function renderProfileTab(cProfile) {
         domProfileAvatar = newAvatar;
     }
     domProfileAvatar.classList.add('profile-avatar');
-    domProfileAvatar.onclick = cProfile.mine ? askForAvatar : null;
-    if (cProfile.mine) domProfileAvatar.classList.add('btn');
+    domProfileAvatar.onclick = null;
 
     // Secondary Display Name - use profile's npub as fallback
     const strNamePlaceholder = cProfile.mine ? 'Set a Display Name' : (cProfile?.id ? cProfile.id.substring(0, 10) + '…' : '');
@@ -6094,9 +6096,9 @@ function renderProfileTab(cProfile) {
         if (npub) {
             // Copy the full profile URL for easy sharing
             navigator.clipboard.writeText(npub).then(() => {
-                showToast('Copied!');
+                showToast('Copied Profile Link');
             }).catch(() => {
-                showToast('Failed to copy');
+                showToast('Failed to Copy');
                 const copyBtn = e.target.closest('#profile-npub-copy');
                 if (copyBtn) {
                     copyBtn.innerHTML = '<span class="icon icon-check"></span>';
@@ -6114,11 +6116,11 @@ function renderProfileTab(cProfile) {
         domProfileOptions.style.display = 'none';
 
         // Show edit buttons and set their click handlers
-        document.querySelector('.profile-avatar-edit').style.display = 'flex';
-        document.querySelector('.profile-avatar-edit').onclick = askForAvatar;
         
         document.querySelector('.profile-banner-edit').style.display = 'flex';
-        document.querySelector('.profile-banner-edit').onclick = askForBanner;
+        document.querySelector('.profile-banner-edit').onclick = enterProfileEditMode;
+        domProfileEditCancelBtn.onclick = () => exitProfileEditMode(true);
+        domProfileEditSaveBtn.onclick = () => exitProfileEditMode(false);
 
         // Show Share button on own profile (top-right of banner)
         const ownShareBtn = document.getElementById('profile-share-btn');
@@ -6133,7 +6135,7 @@ function renderProfileTab(cProfile) {
                     icon.classList.replace('icon-share', 'icon-check');
                     setTimeout(() => icon.classList.replace('icon-check', 'icon-share'), 2000);
                 }).catch(() => {
-                    showToast('Failed to copy profile link');
+                    showToast('Failed to Copy Profile Link');
                 });
             }
         };
@@ -6157,11 +6159,11 @@ function renderProfileTab(cProfile) {
         domProfileName.classList.add('btn');
         domProfileStatus.onclick = askForStatus;
         domProfileStatus.classList.add('btn');
-        domProfileNameSecondary.onclick = askForUsername;
-        domProfileNameSecondary.classList.add('btn');
-        domProfileStatusSecondary.onclick = askForStatus;
-        domProfileStatusSecondary.classList.add('btn');
-        domProfileDescription.onclick = editProfileDescription;
+        domProfileName.onclick = () => { if (fProfileEditMode) askForUsername(); };
+        domProfileStatus.onclick = () => { if (fProfileEditMode) askForStatus(); };
+        domProfileNameSecondary.onclick = () => { if (fProfileEditMode) askForUsername(); };
+        domProfileStatusSecondary.onclick = () => { if (fProfileEditMode) askForStatus(); };
+        domProfileDescription.onclick = () => { if (fProfileEditMode) editProfileDescription(); };
         domProfileDescription.classList.add('btn');
     } else {
         // Show Contact Options
@@ -6191,7 +6193,7 @@ function renderProfileTab(cProfile) {
                     icon.classList.replace('icon-share', 'icon-check');
                     setTimeout(() => icon.classList.replace('icon-check', 'icon-share'), 2000);
                     }).catch(() => {
-                    showToast('Failed to copy profile link');
+                    showToast('Failed to Copy Profile Link');
                 });
             }
         };
@@ -6209,13 +6211,13 @@ function renderProfileTab(cProfile) {
             domProfileMoreDropdown.style.display = 'none';
             if (isBlocked) {
                 await invoke('unblock_user', { npub: cProfile.id });
-                showToast('User unblocked');
+                showToast('User Unblocked');
                 renderChatlist();
             } else {
                 const confirmed = await popupConfirm('Block User', 'Are you sure you want to block this user? You will no longer receive DMs from them.');
                 if (!confirmed) return;
                 await invoke('block_user', { npub: cProfile.id });
-                showToast('User blocked');
+                showToast('User Blocked');
                 renderChatlist();
             }
         };
@@ -6239,7 +6241,6 @@ function renderProfileTab(cProfile) {
         };
 
         // Hide edit buttons and own-profile share
-        document.querySelector('.profile-avatar-edit').style.display = 'none';
         document.querySelector('.profile-banner-edit').style.display = 'none';
         document.getElementById('profile-share-btn').style.display = 'none';
         
@@ -9100,6 +9101,7 @@ function hideEditHistory() {
 async function openChat(contact) {
     // Display the Chat UI
     navbarSelect('chat-btn');
+    if (fProfileEditMode) exitProfileEditMode(true);
     domProfile.style.display = 'none';
     domChatNew.style.display = 'none';
     domChats.style.display = 'none';
@@ -9363,6 +9365,7 @@ async function closeChat() {
     }
 
     // Reset the chat UI
+    if (fProfileEditMode) exitProfileEditMode(true);
     domProfile.style.display = 'none';
     domGroupOverview.style.display = 'none';
     domSettingsBtn.style.display = '';
@@ -9417,6 +9420,12 @@ async function openProfile(cProfile) {
     domChat.style.display = 'none'; // Hide the chat view when opening profile
     domSettingsBtn.style.display = ''; // Ensure settings button is visible (may have been hidden by openChat)
 
+    // Scroll profile back to top
+    setTimeout(() => {
+        document.getElementById('profile')?.scrollTo(0, 0);
+        document.querySelector('.profile-content')?.scrollTo(0, 0);
+    }, 50);
+
     // Render our own profile by default, but otherwise; the given one
     if (!cProfile) {
         cProfile = arrProfiles.find(a => a.mine);
@@ -9466,6 +9475,7 @@ async function openGroupOverview(chat) {
     domChats.style.display = 'none';
     domSettings.style.display = 'none';
     domInvites.style.display = 'none';
+    if (fProfileEditMode) exitProfileEditMode(true);
     domProfile.style.display = 'none';
     domChat.style.display = 'none';
 
@@ -10352,6 +10362,7 @@ async function openInviteMemberToGroup(chat) {
 async function openChatlist() {
     navbarSelect('chat-btn');
     domNavbar.style.display = '';
+    if (fProfileEditMode) exitProfileEditMode(true);
     domProfile.style.display = 'none';
     domSettings.style.display = 'none';
     domInvites.style.display = 'none';
@@ -10382,6 +10393,7 @@ function openSettings() {
     domSettings.style.display = '';
 
     // Hide the other tabs
+    if (fProfileEditMode) exitProfileEditMode(true);
     domProfile.style.display = 'none';
     domChats.style.display = 'none';
     domInvites.style.display = 'none';
@@ -10419,6 +10431,7 @@ async function openInvites() {
     domInvites.style.display = '';
 
     // Hide the other tabs
+    if (fProfileEditMode) exitProfileEditMode(true);
     domProfile.style.display = 'none';
     domChats.style.display = 'none';
     domSettings.style.display = 'none';
@@ -10466,6 +10479,148 @@ async function openInvites() {
 /**
  * Edit the profile description inline
  */
+function updateProfileEditLabel() {
+    const cProfile = arrProfiles.find(a => a.mine);
+    if (!cProfile) return;
+    const nameInput = document.querySelector('#profile-edit-name input');
+    const statusInput = document.querySelector('#profile-edit-status input');
+    const bioInput = document.querySelector('#profile-edit-bio textarea');
+    const label = document.getElementById('profile-edit-mode-label');
+    if (!label) return;
+
+    const nameChanged = nameInput?.value.trim() !== (objProfileEditSnapshot.name || '');
+    const statusChanged = statusInput?.value.trim() !== (objProfileEditSnapshot.status?.title ?? objProfileEditSnapshot.status ?? '');
+    const bioChanged = bioInput?.value.trim() !== (objProfileEditSnapshot.about || '');
+
+    if (nameChanged || statusChanged || bioChanged) {
+        label.textContent = 'Unsaved changes made.';
+        label.style.opacity = '1';
+    } else {
+        label.textContent = 'Edit Mode is enabled.';
+        label.style.opacity = '0.6';
+    }
+}
+
+function enterProfileEditMode() {
+    const cProfile = arrProfiles.find(a => a.mine);
+    if (!cProfile) return;
+    objProfileEditSnapshot = {
+        name: cProfile.name || '',
+        status: cProfile.status || '',
+        about: cProfile.about || ''
+    };
+    fProfileEditMode = true;
+    domProfileEditBar.style.opacity = '0';
+    domProfileEditBar.style.display = 'flex';
+    setTimeout(() => domProfileEditBar.style.opacity = '1', 10);
+    domProfileBackBtn.style.display = 'none';
+    document.querySelector('.profile-header-info').style.display = 'none';
+    domProfileBanner.onclick = askForBanner;
+    document.getElementById('profile-edit-btn').style.display = 'none';
+    document.getElementById('profile-share-btn').style.display = 'none';
+    document.getElementById('profile-npub-label').style.display = 'none';
+    document.getElementById('profile-npub-container').style.display = 'none';
+    document.getElementById('profile-badges').style.display = 'none';
+    document.getElementById('profile-secondary-name').style.display = 'none';
+    document.getElementById('profile-secondary-status').style.display = 'none';
+    document.getElementById('profile-description').style.display = 'none';
+    const editName = document.getElementById('profile-edit-name');
+    const editStatus = document.getElementById('profile-edit-status');
+    const editBio = document.getElementById('profile-edit-bio');
+
+    editName.closest('.profile-edit-field-wrapper').style.position = 'relative';
+    editName.innerHTML = `<input type="text" value="${cProfile.name || ''}" maxlength="50" style="background: none; border: none; outline: none; color: inherit; font-size: 16px; width: 100%;">`;
+    editStatus.innerHTML = `<input type="text" value="${cProfile.status?.title || ''}" style="background: none; border: none; outline: none; color: inherit; font-size: 16px; width: 100%;">`;
+    editBio.innerHTML = `<textarea style="background: none; border: none; outline: none; color: inherit; font-size: 16px; width: 100%; resize: none; min-height: 60px;">${typeof cProfile.about === 'string' ? cProfile.about : ''}</textarea>`;
+    const bioTextarea = editBio.querySelector('textarea');
+    setTimeout(() => {
+        bioTextarea.style.height = 'auto';
+        bioTextarea.style.height = bioTextarea.scrollHeight + 'px';
+    }, 10);
+    bioTextarea.addEventListener('input', () => {
+        bioTextarea.style.height = 'auto';
+        bioTextarea.style.height = bioTextarea.scrollHeight + 'px';
+    });
+    const nameInput = document.querySelector('#profile-edit-name input');
+    const statusInput = document.querySelector('#profile-edit-status input');
+
+    nameInput?.addEventListener('input', updateProfileEditLabel);
+
+    statusInput?.addEventListener('input', updateProfileEditLabel);
+    bioTextarea.addEventListener('input', updateProfileEditLabel);
+    document.getElementById('profile-edit-fields').style.display = 'flex';
+    document.getElementById('profile').classList.add('profile-edit-active');
+
+    domProfileAvatar.onclick = async () => {
+        if (!fProfileEditMode) return;
+        const { open } = window.__TAURI__.dialog;
+        const file = await open({
+            title: 'Choose Profile Picture',
+            multiple: false,
+            directory: false,
+            filters: [{ name: 'Image', extensions: ['png', 'jpeg', 'jpg', 'gif', 'webp'] }]
+        });
+        if (!file) return;
+        domProfileAvatar.src = convertFileSrc(file);
+    };
+
+    const bannerContainer = document.getElementById('profile-banner-container');
+    const avatarContainer = document.querySelector('.profile-avatar-container');
+
+    bannerContainer.addEventListener('mousemove', (e) => {
+    const bannerRect = bannerContainer.getBoundingClientRect();
+    const avatarRect = avatarContainer.getBoundingClientRect();
+    
+    const inBanner = e.clientY <= bannerRect.top + 200;
+    const inAvatar = (
+        e.clientX >= avatarRect.left &&
+        e.clientX <= avatarRect.right &&
+        e.clientY >= avatarRect.top &&
+        e.clientY <= avatarRect.bottom
+    );
+
+    if (inAvatar || !inBanner) {
+        bannerContainer.classList.add('avatar-hovered');
+    } else {
+        bannerContainer.classList.remove('avatar-hovered');
+    }
+});
+}
+
+function exitProfileEditMode(fCancel = false) {
+    fProfileEditMode = false;
+    domProfileEditBar.style.opacity = '0';
+    setTimeout(() => domProfileEditBar.style.display = 'none', 250);
+    document.querySelector('.profile-header-info').style.display = '';
+    domProfileBackBtn.style.display = 'none';
+    document.getElementById('profile-npub-label').style.display = '';
+    document.getElementById('profile-npub-container').style.display = '';
+    document.getElementById('profile-badges').style.display = '';
+    document.getElementById('profile-edit-fields').style.display = 'none';
+    document.getElementById('profile-secondary-name').style.display = '';
+    document.getElementById('profile-secondary-status').style.display = '';
+    document.getElementById('profile-description').style.display = '';
+    document.getElementById('profile').classList.remove('profile-edit-active');
+    const cProfile = arrProfiles.find(a => a.mine);
+    if (cProfile) {
+        if (fCancel) {
+            cProfile.name = objProfileEditSnapshot.name;
+            cProfile.status = objProfileEditSnapshot.status;
+            cProfile.about = objProfileEditSnapshot.about;
+        } else {
+            const nameInput = document.querySelector('#profile-edit-name input');
+            const statusInput = document.querySelector('#profile-edit-status input');
+            const bioInput = document.querySelector('#profile-edit-bio textarea');
+            if (nameInput) cProfile.name = nameInput.value.trim();
+            if (statusInput && cProfile.status) cProfile.status.title = statusInput.value.trim();
+            if (bioInput) cProfile.about = bioInput.value.trim();
+            showToast('Profile Saved');
+        }
+        renderProfileTab(cProfile);
+    }
+    domProfileBanner.onclick = null;
+}
+
 function editProfileDescription() {
     // Get the current profile
     const cProfile = arrProfiles.find(a => a.mine);

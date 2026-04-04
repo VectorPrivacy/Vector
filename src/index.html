@@ -546,16 +546,28 @@
     <div class="profile-header-info">
       <div class="profile-header-name-row">
         <div id="profile-header-avatar-container"></div>
-        <h3 id="profile-name" class="cutoff chat-contact-with-status btn"></h3>
+        <h3 id="profile-name" class="cutoff chat-contact-with-status"></h3>
       </div>
-      <span id="profile-status" class="cutoff chat-contact-status btn"></span>
+      <span id="profile-status" class="cutoff chat-contact-status"></span>
+    </div>
+    <div id="profile-edit-bar" style="display: none; position: absolute; top: 0; left: 0; right: 0; bottom: 0; align-items: center; justify-content: space-between; padding: 0 20px; background-color: rgba(22,22,22,0.95);">
+      <div id="profile-edit-cancel-btn">
+        <span class="icon icon-edit-x"></span>
+        <span>Exit</span>
+      </div>
+      <span id="profile-edit-mode-label" style="font-size: 12px; opacity: 0.6; position: absolute; left: 50%; transform: translateX(-50%);">Edit Mode is enabled.</span>
+      <div id="profile-edit-save-btn">
+        <span class="icon icon-save"></span>
+        <span>Save</span>
+      </div>
     </div>
   </div>
   <div class="profile-content">
-  <div style="position: relative;">
+  <div id="profile-banner-container" style="position: relative;">
     <img id="profile-banner" class="profile-banner">
-    <div class="profile-banner-edit btn">
-      <span class="icon icon-edit"></span>
+    <div id="profile-edit-btn" class="profile-banner-edit profile-share-btn profile-option btn">
+      <span class="icon icon-edit navbar-icon"></span>
+      <p class="navbar-text">Edit</p>
     </div>
     <div id="profile-share-btn" class="profile-share-btn profile-option btn">
       <span class="icon icon-share navbar-icon"></span>
@@ -563,43 +575,54 @@
     </div>
     <div class="profile-avatar-container">
       <img id="profile-avatar" class="profile-avatar">
-      <div class="profile-avatar-edit btn">
-        <span class="icon icon-plus-circle"></span>
-      </div>
     </div>
   </div>
   <div>
-    <h3 id="profile-secondary-name" class="chat-contact-with-status btn"></h3>
-    <span id="profile-secondary-status" class="cutoff chat-contact-status btn" style="width: 90%;"></span>
-    <div id="profile-badges" style="margin-top: 5px;"><img id="profile-badge-invites" src="./icons/vector_badge_hex_placeholder.svg" class="btn" style="height: 30px; width: 30px; display: none;"><img id="profile-badge-fawkes" src="./icons/fawkes_mask.svg" class="btn" style="height: 30px; width: 30px; margin-left: 5px; display: none;"></div>
-    <div id="profile-option-list" class="profile-options">
-      <div id="profile-option-message" class="profile-option">
-        <span class="icon icon-message navbar-icon"></span>
-        <p class="navbar-text">Message</p>
-      </div>
-      <div id="profile-option-mute" class="profile-option">
-        <span class="icon icon-volume-mute navbar-icon"></span>
-        <p class="navbar-text">Mute</p>
-      </div>
-      <div id="profile-option-share" class="profile-option">
-        <span class="icon icon-share navbar-icon"></span>
-        <p class="navbar-text">Share</p>
-      </div>
-      <div id="profile-option-more" class="profile-option btn" style="position: relative;">
-        <span class="icon icon-dots-horizontal navbar-icon"></span>
-        <p class="navbar-text">More</p>
-        <div id="profile-more-dropdown" class="profile-more-dropdown" style="display: none;">
-          <div id="profile-option-nickname" class="profile-more-item">
-            <span>Nickname</span>
-            <span class="icon icon-edit" style="width: 18px; height: 18px; background-color: white;"></span>
-          </div>
-          <div id="profile-option-block" class="profile-more-item">
-            <span style="color: #ff4444;">Block</span>
-            <span class="icon icon-x-user" style="width: 18px; height: 18px; background-color: #ff4444;"></span>
-          </div>
+        <h3 id="profile-secondary-name" class="chat-contact-with-status btn"></h3>
+<span id="profile-secondary-status" class="cutoff chat-contact-status btn" style="width: 90%;"></span>
+<div id="profile-edit-fields" style="display: none; flex-direction: column; gap: 12px; width: 90%; margin: 16px auto 0;">
+  <label class="profile-edit-label">Username</label>
+  <div class="profile-edit-field-wrapper">
+    <div id="profile-edit-name" class="profile-edit-field-text"></div>
+  </div>
+  <label class="profile-edit-label">Status</label>
+  <div class="profile-edit-field-wrapper">
+    <div id="profile-edit-status" class="profile-edit-field-text"></div>
+  </div>
+  <label class="profile-edit-label">Bio</label>
+  <div class="profile-edit-field-wrapper profile-edit-field-bio">
+    <div id="profile-edit-bio" class="profile-edit-field-text"></div>
+  </div>
+</div>
+<div id="profile-badges" style="margin-top: 5px;"><img id="profile-badge-invites" src="./icons/vector_badge_hex_placeholder.svg" class="btn" style="height: 30px; width: 30px; display: none;"><img id="profile-badge-fawkes" src="./icons/fawkes_mask.svg" class="btn" style="height: 30px; width: 30px; margin-left: 5px; display: none;"></div>
+  <div id="profile-option-list" class="profile-options">
+    <div id="profile-option-message" class="profile-option">
+      <span class="icon icon-message navbar-icon"></span>
+      <p class="navbar-text">Message</p>
+    </div>
+    <div id="profile-option-mute" class="profile-option">
+      <span class="icon icon-volume-mute navbar-icon"></span>
+      <p class="navbar-text">Mute</p>
+    </div>
+    <div id="profile-option-share" class="profile-option">
+      <span class="icon icon-share navbar-icon"></span>
+      <p class="navbar-text">Share</p>
+    </div>
+    <div id="profile-option-more" class="profile-option btn" style="position: relative;">
+      <span class="icon icon-dots-horizontal navbar-icon"></span>
+      <p class="navbar-text">More</p>
+      <div id="profile-more-dropdown" class="profile-more-dropdown" style="display: none;">
+        <div id="profile-option-nickname" class="profile-more-item">
+          <span>Nickname</span>
+          <span class="icon icon-edit" style="width: 18px; height: 18px; background-color: white;"></span>
+        </div>
+        <div id="profile-option-block" class="profile-more-item">
+          <span style="color: #ff4444;">Block</span>
+          <span class="icon icon-x-user" style="width: 18px; height: 18px; background-color: #ff4444;"></span>
         </div>
       </div>
     </div>
+  </div>
       <span id="profile-description" class="chat-contact-status" style="width: 90%; white-space: pre-line; overflow-wrap: break-word; font-style: normal; margin-top: 10px; text-align: center; display: block;"></span>
       <textarea id="profile-description-editor" class="chat-contact-status profile-description-editor" style="display: none; margin-top: 10px;"></textarea>
       <div style="margin: 40px 0 0 0; width: 90%; padding-left: 5%;">
