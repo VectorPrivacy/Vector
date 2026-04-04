@@ -17,7 +17,7 @@ use zeroize::Zeroize;
 
 // Re-export from vector-core
 pub use vector_core::crypto::{
-    decrypt_data, looks_encrypted, is_encryption_enabled,
+    looks_encrypted, is_encryption_enabled,
     maybe_encrypt, maybe_decrypt,
 };
 

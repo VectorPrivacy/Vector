@@ -461,6 +461,50 @@ pub fn resolve_unique_filename(dir: &std::path::Path, name: &str) -> std::path::
     }
 }
 
+/// Decrypt a DM file attachment and save to the download directory.
+///
+/// Uses AES-GCM decryption with the key/nonce from the attachment metadata.
+/// Saves with atomic write (temp file + rename). Returns (path, content_hash).
+/// If an identical file already exists (same name + size + hash), reuses it.
+pub fn decrypt_and_save_attachment(
+    encrypted_data: &[u8],
+    key: &str,
+    nonce: &str,
+    name: &str,
+    extension: &str,
+) -> Result<(std::path::PathBuf, String), String> {
+    let decrypted = decrypt_data(encrypted_data, key, nonce)?;
+    let file_hash = sha256_hex(&decrypted);
+
+    let dir = crate::db::get_download_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create directory: {}", e))?;
+
+    let target_name = if name.is_empty() {
+        format!("{}.{}", file_hash, extension)
+    } else {
+        name.to_string()
+    };
+
+    // Content dedup: reuse if same name + size + hash
+    let candidate = dir.join(&target_name);
+    let already_exists = candidate.exists()
+        && std::fs::metadata(&candidate).map(|m| m.len() == decrypted.len() as u64).unwrap_or(false)
+        && std::fs::read(&candidate).map(|b| sha256_hex(&b) == file_hash).unwrap_or(false);
+
+    if already_exists {
+        return Ok((candidate, file_hash));
+    }
+
+    let file_path = resolve_unique_filename(&dir, &target_name);
+
+    // Atomic write: temp file then rename
+    let tmp_path = dir.join(format!(".{}.{}.tmp", file_hash, extension));
+    std::fs::write(&tmp_path, &decrypted).map_err(|e| format!("Failed to write file: {}", e))?;
+    std::fs::rename(&tmp_path, &file_path).map_err(|e| format!("Failed to rename file: {}", e))?;
+
+    Ok((file_path, file_hash))
+}
+
 /// Format bytes into human-readable format (KB, MB, GB).
 pub fn format_bytes(bytes: u64) -> String {
     const KB: f64 = 1024.0;
