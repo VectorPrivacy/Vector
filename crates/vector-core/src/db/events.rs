@@ -423,6 +423,119 @@ pub fn get_system_events_for_chat(conversation_id: &str) -> Result<Vec<StoredEve
     Ok(events)
 }
 
+// ============================================================================
+// Event Read Operations
+// ============================================================================
+
+/// Helper to parse a SQLite row into a StoredEvent.
+fn parse_event_row(row: &rusqlite::Row) -> rusqlite::Result<StoredEvent> {
+    let tags_json: String = row.get(5)?;
+    let tags: Vec<Vec<String>> = serde_json::from_str(&tags_json).unwrap_or_default();
+
+    Ok(StoredEvent {
+        id: row.get(0)?,
+        kind: row.get::<_, i32>(1)? as u16,
+        chat_id: row.get(2)?,
+        user_id: row.get(3)?,
+        content: row.get(4)?,
+        tags,
+        reference_id: row.get(6)?,
+        created_at: row.get::<_, i64>(7)? as u64,
+        received_at: row.get::<_, i64>(8)? as u64,
+        mine: row.get::<_, i32>(9)? != 0,
+        pending: row.get::<_, i32>(10)? != 0,
+        failed: row.get::<_, i32>(11)? != 0,
+        wrapper_event_id: row.get(12)?,
+        npub: row.get(13)?,
+        preview_metadata: row.get(14)?,
+    })
+}
+
+/// Get events for a chat with pagination, optionally filtered by kind.
+/// Message/edit content is decrypted via maybe_decrypt.
+pub async fn get_events(
+    chat_id: i64,
+    kinds: Option<&[u16]>,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<StoredEvent>, String> {
+    let events: Vec<StoredEvent> = {
+        let conn = super::get_db_connection_guard_static()?;
+
+        if let Some(k) = kinds {
+            let kind_placeholders: String = (0..k.len())
+                .map(|i| format!("?{}", i + 2))
+                .collect::<Vec<_>>()
+                .join(",");
+            let limit_param = k.len() + 2;
+            let offset_param = k.len() + 3;
+
+            let sql = format!(
+                "SELECT id, kind, chat_id, user_id, content, tags, reference_id, \
+                 created_at, received_at, mine, pending, failed, wrapper_event_id, npub, preview_metadata \
+                 FROM events WHERE chat_id = ?1 AND kind IN ({}) \
+                 ORDER BY created_at DESC, received_at DESC \
+                 LIMIT ?{} OFFSET ?{}",
+                kind_placeholders, limit_param, offset_param
+            );
+
+            let mut stmt = conn.prepare(&sql)
+                .map_err(|e| format!("Failed to prepare events query: {}", e))?;
+
+            match k.len() {
+                1 => {
+                    let rows = stmt.query_map(
+                        rusqlite::params![chat_id, k[0] as i32, limit as i64, offset as i64],
+                        parse_event_row
+                    ).map_err(|e| format!("Failed to query events: {}", e))?;
+                    rows.filter_map(|r| r.ok()).collect()
+                },
+                2 => {
+                    let rows = stmt.query_map(
+                        rusqlite::params![chat_id, k[0] as i32, k[1] as i32, limit as i64, offset as i64],
+                        parse_event_row
+                    ).map_err(|e| format!("Failed to query events: {}", e))?;
+                    rows.filter_map(|r| r.ok()).collect()
+                },
+                3 => {
+                    let rows = stmt.query_map(
+                        rusqlite::params![chat_id, k[0] as i32, k[1] as i32, k[2] as i32, limit as i64, offset as i64],
+                        parse_event_row
+                    ).map_err(|e| format!("Failed to query events: {}", e))?;
+                    rows.filter_map(|r| r.ok()).collect()
+                },
+                _ => return Err("Unsupported number of kinds".to_string()),
+            }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT id, kind, chat_id, user_id, content, tags, reference_id, \
+                 created_at, received_at, mine, pending, failed, wrapper_event_id, npub, preview_metadata \
+                 FROM events WHERE chat_id = ?1 \
+                 ORDER BY created_at DESC, received_at DESC \
+                 LIMIT ?2 OFFSET ?3"
+            ).map_err(|e| format!("Failed to prepare events query: {}", e))?;
+
+            let rows = stmt.query_map(
+                rusqlite::params![chat_id, limit as i64, offset as i64],
+                parse_event_row
+            ).map_err(|e| format!("Failed to query events: {}", e))?;
+            rows.filter_map(|r| r.ok()).collect()
+        }
+    };
+
+    // Decrypt message content
+    let mut decrypted = Vec::with_capacity(events.len());
+    for mut event in events {
+        if event.kind == event_kind::MLS_CHAT_MESSAGE || event.kind == event_kind::PRIVATE_DIRECT_MESSAGE {
+            event.content = crate::crypto::maybe_decrypt(event.content).await
+                .unwrap_or_else(|_| "[Decryption failed]".to_string());
+        }
+        decrypted.push(event);
+    }
+
+    Ok(decrypted)
+}
+
 /// Batch save messages for a chat.
 pub async fn save_chat_messages(chat_id: &str, messages: &[Message]) -> Result<(), String> {
     if messages.is_empty() {
