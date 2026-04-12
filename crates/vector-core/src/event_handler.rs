@@ -48,6 +48,10 @@ pub enum PreparedEvent {
         wrapper_event_id: String,
         wrapper_event_id_bytes: [u8; 32],
         wrapper_created_at: u64,
+        /// Time spent on ECDH + ChaCha20Poly1305 decryption (nanoseconds)
+        unwrap_ns: u64,
+        /// Time spent on rumor parsing (nanoseconds)
+        parse_ns: u64,
     },
     /// MLS Welcome — platform handles group join.
     MlsWelcome {
@@ -59,6 +63,7 @@ pub enum PreparedEvent {
         wrapper_event_id: String,
         wrapper_event_id_bytes: [u8; 32],
         wrapper_created_at: u64,
+        unwrap_ns: u64,
     },
     /// Duplicate event — just persist wrapper for negentropy.
     DedupSkip {
@@ -98,12 +103,15 @@ pub async fn prepare_event(
     }
 
     // Unwrap gift wrap (CPU-bound ECDH + ChaCha20Poly1305)
+    let unwrap_start = std::time::Instant::now();
     let (rumor, sender) = match client.unwrap_gift_wrap(&event).await {
         Ok(UnwrappedGift { rumor, sender }) => (rumor, sender),
         Err(_) => return PreparedEvent::ErrorSkip {
             wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at,
         },
     };
+
+    let unwrap_ns = unwrap_start.elapsed().as_nanos() as u64;
 
     let is_mine = sender == my_public_key;
     let contact = if is_mine {
@@ -125,7 +133,7 @@ pub async fn prepare_event(
     if rumor.kind == Kind::MlsWelcome {
         return PreparedEvent::MlsWelcome {
             event, rumor, contact, sender, is_mine,
-            wrapper_event_id, wrapper_event_id_bytes, wrapper_created_at,
+            wrapper_event_id, wrapper_event_id_bytes, wrapper_created_at, unwrap_ns,
         };
     }
 
@@ -151,12 +159,17 @@ pub async fn prepare_event(
         conversation_type: ConversationType::DirectMessage,
     };
 
+    let parse_start = std::time::Instant::now();
     let download_dir = crate::db::get_download_dir();
     match process_rumor(rumor_event, rumor_context, &download_dir) {
-        Ok(result) => PreparedEvent::Processed {
-            result, contact, sender, is_mine,
-            wrapper_event_id, wrapper_event_id_bytes, wrapper_created_at,
-        },
+        Ok(result) => {
+            let parse_ns = parse_start.elapsed().as_nanos() as u64;
+            PreparedEvent::Processed {
+                result, contact, sender, is_mine,
+                wrapper_event_id, wrapper_event_id_bytes, wrapper_created_at,
+                unwrap_ns, parse_ns,
+            }
+        }
         Err(e) => {
             log_warn!("[EventHandler] Failed to process rumor: {}", e);
             PreparedEvent::ErrorSkip {
