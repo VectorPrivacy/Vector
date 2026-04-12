@@ -536,6 +536,145 @@ pub async fn get_events(
     Ok(decrypted)
 }
 
+/// Get events that reference specific message IDs (reactions, edits).
+pub async fn get_related_events(
+    reference_ids: &[String],
+) -> Result<Vec<StoredEvent>, String> {
+    if reference_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let conn = super::get_db_connection_guard_static()?;
+
+    let placeholders: String = reference_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT id, kind, chat_id, user_id, content, tags, reference_id, \
+         created_at, received_at, mine, pending, failed, wrapper_event_id, npub, preview_metadata \
+         FROM events WHERE reference_id IN ({}) \
+         ORDER BY created_at ASC, received_at ASC",
+        placeholders
+    );
+
+    let mut stmt = conn.prepare(&sql)
+        .map_err(|e| format!("Failed to prepare related events query: {}", e))?;
+
+    let params: Vec<&dyn rusqlite::ToSql> = reference_ids.iter()
+        .map(|s| s as &dyn rusqlite::ToSql)
+        .collect();
+
+    let events: Vec<StoredEvent> = stmt.query_map(params.as_slice(), parse_event_row)
+        .map_err(|e| format!("Failed to query related events: {}", e))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(events)
+}
+
+/// Context data for a replied-to message.
+pub struct ReplyContext {
+    pub content: String,
+    pub npub: Option<String>,
+    pub has_attachment: bool,
+}
+
+/// Fetch reply context for a list of message IDs.
+pub async fn get_reply_contexts(
+    message_ids: &[String],
+) -> Result<std::collections::HashMap<String, ReplyContext>, String> {
+    use std::collections::HashMap;
+
+    if message_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let (events, edits): (Vec<(String, i32, String, Option<String>)>, Vec<(String, String)>) = {
+        let conn = super::get_db_connection_guard_static()?;
+
+        let placeholders: String = (0..message_ids.len())
+            .map(|i| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        // Query original messages
+        let sql = format!(
+            "SELECT id, kind, content, npub FROM events WHERE id IN ({})",
+            placeholders
+        );
+        let mut stmt = conn.prepare(&sql)
+            .map_err(|e| format!("Failed to prepare reply context query: {}", e))?;
+
+        let params: Vec<&str> = message_ids.iter().map(|s| s.as_str()).collect();
+        let params_dyn: Vec<&dyn rusqlite::ToSql> = params.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+
+        let rows = stmt.query_map(params_dyn.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?,
+                row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?))
+        }).map_err(|e| format!("Failed to query reply contexts: {}", e))?;
+        let events_result: Vec<_> = rows.filter_map(|r| r.ok()).collect();
+        drop(stmt);
+
+        // Query latest edits
+        let edit_sql = format!(
+            "SELECT reference_id, content FROM events \
+             WHERE kind = {} AND reference_id IN ({}) \
+             ORDER BY created_at DESC, received_at DESC",
+            event_kind::MESSAGE_EDIT, placeholders
+        );
+        let mut edit_stmt = conn.prepare(&edit_sql)
+            .map_err(|e| format!("Failed to prepare edit query: {}", e))?;
+        let edit_rows = edit_stmt.query_map(params_dyn.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }).map_err(|e| format!("Failed to query edits: {}", e))?;
+        let edits_result: Vec<_> = edit_rows.filter_map(|r| r.ok()).collect();
+
+        (events_result, edits_result)
+    };
+
+    // Build latest edit map (first = most recent since ordered DESC)
+    let mut latest_edits: HashMap<String, String> = HashMap::new();
+    for (ref_id, content) in edits {
+        latest_edits.entry(ref_id).or_insert(content);
+    }
+
+    // Decrypt and build contexts
+    let mut contexts = HashMap::new();
+    for (id, kind, original_content, npub) in events {
+        let has_attachment = kind == event_kind::FILE_ATTACHMENT as i32;
+        let content_to_decrypt = latest_edits.get(&id).cloned().unwrap_or(original_content);
+
+        let decrypted_content = if kind == event_kind::MLS_CHAT_MESSAGE as i32
+            || kind == event_kind::PRIVATE_DIRECT_MESSAGE as i32
+        {
+            crate::crypto::maybe_decrypt(content_to_decrypt).await
+                .unwrap_or_else(|_| "[Decryption failed]".to_string())
+        } else {
+            String::new()
+        };
+
+        contexts.insert(id, ReplyContext { content: decrypted_content, npub, has_attachment });
+    }
+
+    Ok(contexts)
+}
+
+/// Populate reply context for a single message.
+/// Used for real-time messages that don't go through get_message_views.
+pub async fn populate_reply_context(message: &mut Message) -> Result<(), String> {
+    if message.replied_to.is_empty() {
+        return Ok(());
+    }
+
+    let contexts = get_reply_contexts(&[message.replied_to.clone()]).await?;
+
+    if let Some(ctx) = contexts.get(&message.replied_to) {
+        message.replied_to_content = Some(ctx.content.clone());
+        message.replied_to_npub = ctx.npub.clone();
+        message.replied_to_has_attachment = Some(ctx.has_attachment);
+    }
+
+    Ok(())
+}
+
 /// Batch save messages for a chat.
 pub async fn save_chat_messages(chat_id: &str, messages: &[Message]) -> Result<(), String> {
     if messages.is_empty() {
