@@ -2,7 +2,7 @@
 
 use crate::stored_event::{StoredEvent, event_kind};
 use crate::crypto::maybe_encrypt;
-use crate::types::{Message, Reaction};
+use crate::types::{Message, Attachment, Reaction};
 
 /// Save a StoredEvent to the events table.
 ///
@@ -673,6 +673,325 @@ pub async fn populate_reply_context(message: &mut Message) -> Result<(), String>
     }
 
     Ok(())
+}
+
+// ============================================================================
+// Message Views — compose full Messages from events + reactions + edits
+// ============================================================================
+
+/// Extract a single tag value from raw tags JSON without full allocation.
+fn extract_tag_from_json(tags_json: &str, key: &str) -> Option<String> {
+    if tags_json.len() <= 2 { return None; }
+    let pattern = format!("[\"{}\"", key);
+    if !tags_json.contains(&pattern) { return None; }
+    let tags: Vec<Vec<String>> = serde_json::from_str(tags_json).ok()?;
+    tags.into_iter()
+        .find(|tag| tag.first().map(|s| s.as_str()) == Some(key))
+        .and_then(|tag| tag.into_iter().nth(1))
+}
+
+/// Extract a NIP-10 reply reference ("e" tag with "reply" marker at position 3).
+fn extract_reply_tag_from_json(tags_json: &str) -> Option<String> {
+    if tags_json.len() <= 2 { return None; }
+    if !tags_json.contains("[\"e\"") { return None; }
+    let tags: Vec<Vec<String>> = serde_json::from_str(tags_json).ok()?;
+    tags.into_iter()
+        .find(|tag| {
+            tag.first().map(|s| s.as_str()) == Some("e")
+                && tag.get(3).map(|s| s.as_str()) == Some("reply")
+        })
+        .and_then(|tag| tag.into_iter().nth(1))
+}
+
+/// Get message events with reactions, edits, and attachments composed.
+///
+/// This is the main "get messages" function. Queries events, fetches related
+/// reactions/edits, parses attachments, applies edits, resolves reply context.
+pub async fn get_message_views(
+    chat_id: i64,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<Message>, String> {
+    use std::collections::HashMap;
+
+    // Step 1: Get message events (kind 9, 14, 15)
+    let message_kinds = [event_kind::MLS_CHAT_MESSAGE, event_kind::PRIVATE_DIRECT_MESSAGE, event_kind::FILE_ATTACHMENT];
+    let message_events = get_events(chat_id, Some(&message_kinds), limit, offset).await?;
+
+    if message_events.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Step 2: Get related events (reactions, edits)
+    let message_ids: Vec<String> = message_events.iter().map(|e| e.id.clone()).collect();
+    let related_events = get_related_events(&message_ids).await?;
+
+    let mut reactions_by_msg: HashMap<String, Vec<Reaction>> = HashMap::new();
+    let mut edits_by_msg: HashMap<String, Vec<(u64, String)>> = HashMap::new();
+
+    for event in related_events {
+        if let Some(ref_id) = &event.reference_id {
+            match event.kind {
+                k if k == event_kind::REACTION => {
+                    reactions_by_msg.entry(ref_id.clone()).or_default().push(Reaction {
+                        id: event.id.clone(),
+                        reference_id: ref_id.clone(),
+                        author_id: event.npub.clone().unwrap_or_default(),
+                        emoji: event.content.clone(),
+                    });
+                }
+                k if k == event_kind::MESSAGE_EDIT => {
+                    let decrypted = crate::crypto::maybe_decrypt(event.content.clone()).await
+                        .unwrap_or_else(|_| event.content.clone());
+                    edits_by_msg.entry(ref_id.clone()).or_default().push((event.created_at * 1000, decrypted));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    for edits in edits_by_msg.values_mut() {
+        edits.sort_by_key(|(ts, _)| *ts);
+    }
+
+    // Step 3: Parse attachments from event tags (+ legacy messages table fallback)
+    let mut attachments_by_msg: HashMap<String, Vec<Attachment>> = HashMap::new();
+    let mut events_needing_legacy_lookup: Vec<String> = Vec::new();
+
+    for event in &message_events {
+        if event.kind != event_kind::FILE_ATTACHMENT && event.kind != event_kind::MLS_CHAT_MESSAGE {
+            continue;
+        }
+        if let Some(json) = event.get_tag("attachments") {
+            if let Ok(atts) = serde_json::from_str::<Vec<Attachment>>(json) {
+                if !atts.is_empty() {
+                    attachments_by_msg.insert(event.id.clone(), atts);
+                    continue;
+                }
+            }
+        }
+        if event.kind == event_kind::FILE_ATTACHMENT {
+            events_needing_legacy_lookup.push(event.id.clone());
+        }
+    }
+
+    // Legacy fallback: old migrated events without attachments tag
+    if !events_needing_legacy_lookup.is_empty() {
+        if let Ok(conn) = super::get_db_connection_guard_static() {
+            let has_messages: bool = conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='messages'",
+                [], |row| row.get::<_, i32>(0)
+            ).map(|c| c > 0).unwrap_or(false);
+
+            if has_messages {
+                for msg_id in &events_needing_legacy_lookup {
+                    if let Ok(json) = conn.query_row::<String, _, _>(
+                        "SELECT attachments FROM messages WHERE id = ?1",
+                        rusqlite::params![msg_id], |row| row.get(0),
+                    ) {
+                        if let Ok(atts) = serde_json::from_str::<Vec<Attachment>>(&json) {
+                            attachments_by_msg.insert(msg_id.to_string(), atts);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Step 4: Compose Message structs
+    let mut messages = Vec::with_capacity(message_events.len());
+    for event in message_events {
+        let replied_to = event.get_reply_reference().unwrap_or("").to_string();
+        let at = event.timestamp_ms();
+        let reactions = reactions_by_msg.remove(&event.id).unwrap_or_default();
+        let attachments = attachments_by_msg.remove(&event.id).unwrap_or_default();
+
+        let original_content = if event.kind == event_kind::FILE_ATTACHMENT {
+            String::new()
+        } else {
+            event.content.clone()
+        };
+
+        let (content, edited, edit_history) = if let Some(edits) = edits_by_msg.remove(&event.id) {
+            let mut history = Vec::with_capacity(edits.len() + 1);
+            history.push(crate::types::EditEntry { content: original_content.clone(), edited_at: at });
+            for (ts, c) in &edits {
+                history.push(crate::types::EditEntry { content: c.clone(), edited_at: *ts });
+            }
+            let latest = edits.last().map(|(_, c)| c.clone()).unwrap_or(original_content);
+            (latest, true, Some(history))
+        } else {
+            (original_content, false, None)
+        };
+
+        let preview_metadata = event.preview_metadata
+            .and_then(|json| serde_json::from_str(&json).ok());
+
+        messages.push(Message {
+            id: event.id, content, replied_to,
+            replied_to_content: None, replied_to_npub: None, replied_to_has_attachment: None,
+            preview_metadata, attachments, reactions, at,
+            pending: event.pending, failed: event.failed, mine: event.mine,
+            npub: event.npub, wrapper_event_id: event.wrapper_event_id,
+            edited, edit_history,
+        });
+    }
+
+    // Step 5: Reply context
+    let reply_ids: Vec<String> = messages.iter()
+        .filter(|m| !m.replied_to.is_empty())
+        .map(|m| m.replied_to.clone())
+        .collect();
+
+    if !reply_ids.is_empty() {
+        let contexts = get_reply_contexts(&reply_ids).await?;
+        for msg in &mut messages {
+            if let Some(ctx) = contexts.get(&msg.replied_to) {
+                msg.replied_to_content = Some(ctx.content.clone());
+                msg.replied_to_npub = ctx.npub.clone();
+                msg.replied_to_has_attachment = Some(ctx.has_attachment);
+            }
+        }
+    }
+
+    Ok(messages)
+}
+
+/// Get the last message for ALL chats in a single batch query.
+/// Optimized for app startup (chat list sidebar).
+pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<String, Vec<Message>>, String> {
+    use std::collections::HashMap;
+
+    // Step 1: Query last message per chat via correlated subquery
+    let message_events: Vec<(String, StoredEvent, String)> = {
+        let conn = super::get_db_connection_guard_static()?;
+        let mut stmt = conn.prepare(
+            "SELECT c.chat_identifier, \
+             e.id, e.kind, e.chat_id, e.user_id, e.content, e.tags, e.reference_id, \
+             e.created_at, e.received_at, e.mine, e.pending, e.failed, e.wrapper_event_id, e.npub, e.preview_metadata \
+             FROM chats c JOIN events e ON e.rowid = ( \
+                 SELECT e2.rowid FROM events e2 WHERE e2.chat_id = c.id \
+                 AND e2.kind IN (?1, ?2, ?3) \
+                 ORDER BY e2.created_at DESC, e2.received_at DESC LIMIT 1)"
+        ).map_err(|e| format!("Failed to prepare: {}", e))?;
+
+        let rows = stmt.query_map(
+            rusqlite::params![
+                event_kind::MLS_CHAT_MESSAGE as i32,
+                event_kind::PRIVATE_DIRECT_MESSAGE as i32,
+                event_kind::FILE_ATTACHMENT as i32
+            ],
+            |row| {
+                let chat_id: String = row.get(0)?;
+                let tags_json: String = row.get(6)?;
+                let event = StoredEvent {
+                    id: row.get(1)?, kind: row.get::<_, i32>(2)? as u16,
+                    chat_id: row.get(3)?, user_id: row.get(4)?, content: row.get(5)?,
+                    tags: Vec::new(), // Deferred — parsed on-demand
+                    reference_id: row.get(7)?,
+                    created_at: row.get::<_, i64>(8)? as u64, received_at: row.get::<_, i64>(9)? as u64,
+                    mine: row.get::<_, i32>(10)? != 0, pending: row.get::<_, i32>(11)? != 0,
+                    failed: row.get::<_, i32>(12)? != 0, wrapper_event_id: row.get(13)?,
+                    npub: row.get(14)?, preview_metadata: row.get(15)?,
+                };
+                Ok((chat_id, event, tags_json))
+            }
+        ).map_err(|e| format!("Failed to query: {}", e))?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+
+    if message_events.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    // Step 2: Related events (reactions, edits)
+    let message_ids: Vec<String> = message_events.iter().map(|(_, e, _)| e.id.clone()).collect();
+    let related_events = get_related_events(&message_ids).await?;
+
+    let mut reactions_by_msg: HashMap<String, Vec<Reaction>> = HashMap::new();
+    let mut edits_by_msg: HashMap<String, Vec<(u64, String)>> = HashMap::new();
+
+    for event in related_events {
+        if let Some(ref_id) = &event.reference_id {
+            match event.kind {
+                k if k == event_kind::REACTION => {
+                    reactions_by_msg.entry(ref_id.clone()).or_default().push(Reaction {
+                        id: event.id.clone(), reference_id: ref_id.clone(),
+                        author_id: event.npub.clone().unwrap_or_default(),
+                        emoji: event.content.clone(),
+                    });
+                }
+                k if k == event_kind::MESSAGE_EDIT => {
+                    let decrypted = crate::crypto::maybe_decrypt(event.content.clone()).await
+                        .unwrap_or_else(|_| event.content.clone());
+                    edits_by_msg.entry(ref_id.clone()).or_default().push((event.created_at * 1000, decrypted));
+                }
+                _ => {}
+            }
+        }
+    }
+    for edits in edits_by_msg.values_mut() {
+        edits.sort_by_key(|(ts, _)| *ts);
+    }
+
+    // Step 3: Parse attachments
+    let mut attachments_by_msg: HashMap<String, Vec<Attachment>> = HashMap::new();
+    for (_, event, tags_json) in &message_events {
+        if event.kind != event_kind::FILE_ATTACHMENT && event.kind != event_kind::MLS_CHAT_MESSAGE {
+            continue;
+        }
+        if let Some(val) = extract_tag_from_json(tags_json, "attachments") {
+            if let Ok(atts) = serde_json::from_str::<Vec<Attachment>>(&val) {
+                if !atts.is_empty() {
+                    attachments_by_msg.insert(event.id.clone(), atts);
+                }
+            }
+        }
+    }
+
+    // Step 4: Compose Messages grouped by chat_identifier
+    let mut result: HashMap<String, Vec<Message>> = HashMap::new();
+
+    for (chat_identifier, event, tags_json) in message_events {
+        let reactions = reactions_by_msg.remove(&event.id).unwrap_or_default();
+        let attachments = attachments_by_msg.remove(&event.id).unwrap_or_default();
+        let replied_to = extract_reply_tag_from_json(&tags_json).unwrap_or_default();
+
+        // Decrypt content
+        let original_content = if event.kind == event_kind::MLS_CHAT_MESSAGE
+            || event.kind == event_kind::PRIVATE_DIRECT_MESSAGE
+        {
+            crate::crypto::maybe_decrypt(event.content.clone()).await
+                .unwrap_or_else(|_| "[Decryption failed]".to_string())
+        } else {
+            String::new()
+        };
+
+        let (content, edited, edit_history) = if let Some(edits) = edits_by_msg.remove(&event.id) {
+            let latest = edits.last().map(|(_, c)| c.clone()).unwrap_or_else(|| original_content.clone());
+            let history: Vec<crate::types::EditEntry> = std::iter::once(crate::types::EditEntry {
+                content: original_content, edited_at: event.created_at * 1000,
+            }).chain(edits.into_iter().map(|(ts, c)| crate::types::EditEntry { content: c, edited_at: ts }))
+            .collect();
+            (latest, true, Some(history))
+        } else {
+            (original_content, false, None)
+        };
+
+        let preview_metadata = event.preview_metadata
+            .and_then(|json| serde_json::from_str(&json).ok());
+
+        result.entry(chat_identifier).or_default().push(Message {
+            id: event.id, content, replied_to,
+            replied_to_content: None, replied_to_npub: None, replied_to_has_attachment: None,
+            preview_metadata, attachments, reactions, at: event.created_at * 1000,
+            pending: event.pending, failed: event.failed, mine: event.mine,
+            npub: event.npub, wrapper_event_id: event.wrapper_event_id,
+            edited, edit_history,
+        });
+    }
+
+    Ok(result)
 }
 
 /// Batch save messages for a chat.

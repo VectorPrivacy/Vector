@@ -21,7 +21,7 @@ mod files;
 pub use sending::*;
 pub use files::*;
 pub use types::{
-    ImageMetadata, AttachmentFile, Reaction, EditEntry,
+    ImageMetadata, AttachmentFile, Reaction,
 };
 pub use vector_core::compact::CompactAttachment;
 

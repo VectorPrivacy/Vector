@@ -4,7 +4,7 @@ use tokio::sync::Mutex as TokioMutex;
 use std::sync::LazyLock;
 
 pub use vector_core::types::{
-    Message, Attachment, Reaction, EditEntry,
+    Message, Attachment, Reaction,
     ImageMetadata, AttachmentFile,
 };
 
