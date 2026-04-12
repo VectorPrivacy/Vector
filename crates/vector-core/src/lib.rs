@@ -69,6 +69,9 @@ pub mod rumor;
 // === Messaging ===
 pub mod sending;
 
+// === Event Handler ===
+pub mod event_handler;
+
 // === Re-exports for convenience ===
 pub use types::{Message, Attachment, Reaction, EditEntry, ImageMetadata, SiteMetadata, LoginResult, AttachmentFile};
 pub use profile::{Profile, ProfileFlags, SlimProfile, Status};
@@ -83,6 +86,7 @@ pub use sending::{SendCallback, NoOpSendCallback, SendConfig, SendResult};
 pub use stored_event::{StoredEvent, StoredEventBuilder, SystemEventType};
 pub use rumor::{RumorEvent, RumorContext, ConversationType, RumorProcessingResult, process_rumor};
 pub use profile::{SyncPriority, ProfileSyncHandler, NoOpProfileSyncHandler};
+pub use event_handler::{InboundEventHandler, NoOpEventHandler, PreparedEvent};
 
 use std::path::PathBuf;
 use std::sync::Arc;
