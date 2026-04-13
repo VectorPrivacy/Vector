@@ -27,7 +27,7 @@ pub trait InboundEventHandler: Send + Sync {
     fn on_reaction_received(&self, _chat_id: &str, _msg: &Message) {}
 
     /// An MLS Welcome event — platform handles group join flow.
-    fn on_mls_welcome(&self, _event: &Event, _rumor: &UnsignedEvent, _sender: &PublicKey) {}
+    fn on_mls_welcome(&self, _event: &Event, _rumor: &UnsignedEvent, _sender: &PublicKey, _contact: &str, _is_mine: bool, _is_new: bool) {}
 
     /// An MLS group message — platform handles decryption via MDK.
     fn on_mls_group_message(&self, _event: &Event) {}
@@ -202,6 +202,14 @@ pub async fn commit_prepared_event(
             // Persist for cross-session dedup + negentropy
             let _ = crate::db::wrappers::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at);
 
+            // Blocked check — drop content from blocked contacts (wrapper still persisted for negentropy)
+            if !is_mine {
+                let state = crate::state::STATE.lock().await;
+                if state.get_profile(&contact).map_or(false, |p| p.flags.is_blocked()) {
+                    return false;
+                }
+            }
+
             match result {
                 RumorProcessingResult::TextMessage(mut msg) => {
                     msg.wrapper_event_id = Some(wrapper_event_id.clone());
@@ -262,16 +270,25 @@ pub async fn commit_prepared_event(
                 RumorProcessingResult::Ignored => false,
             }
         }
-        PreparedEvent::MlsWelcome { event, rumor, sender, wrapper_event_id_bytes, wrapper_created_at, .. } => {
+        PreparedEvent::MlsWelcome { event, rumor, contact, sender, is_mine, wrapper_event_id_bytes, wrapper_created_at, .. } => {
+            // Dedup: same welcome can arrive from multiple relays simultaneously
+            {
+                let cache = WRAPPER_ID_CACHE.lock().await;
+                if cache.contains(&wrapper_event_id_bytes) {
+                    return false;
+                }
+            }
             // MLS Welcome — delegate to platform handler
-            handler.on_mls_welcome(&event, &rumor, &sender);
+            handler.on_mls_welcome(&event, &rumor, &sender, &contact, is_mine, is_new);
             // Persist wrapper regardless of outcome
             let _ = crate::db::wrappers::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at);
             false
         }
         PreparedEvent::DedupSkip { wrapper_id_bytes, wrapper_created_at } => {
-            // Persist wrapper timestamp for negentropy backfill
-            let _ = crate::db::wrappers::update_wrapper_timestamp(&wrapper_id_bytes, wrapper_created_at);
+            // Persist wrapper timestamp for negentropy backfill (skip no-op writes)
+            if wrapper_created_at > 0 {
+                let _ = crate::db::wrappers::update_wrapper_timestamp(&wrapper_id_bytes, wrapper_created_at);
+            }
             false
         }
         PreparedEvent::ErrorSkip { wrapper_id_bytes, wrapper_created_at } => {
@@ -309,10 +326,14 @@ async fn commit_dm_message(
         let _ = crate::db::events::populate_reply_context(&mut msg).await;
     }
 
-    // Add to STATE
+    // Add to STATE (+ clear typing indicator for file senders)
     let added = {
         let mut state = crate::state::STATE.lock().await;
-        state.add_message_to_participant(contact, msg.clone())
+        let added = state.add_message_to_participant(contact, msg.clone());
+        if is_file && added {
+            state.update_typing_and_get_active(contact, contact, 0);
+        }
+        added
     };
 
     if added {

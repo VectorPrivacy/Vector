@@ -1,49 +1,170 @@
 //! Event handler service for processing incoming Nostr events.
 //!
-//! This module handles:
-//! - Gift-wrapped DM/file message processing
-//! - MLS Welcome processing
-//! - Reactions, typing indicators, edits
-//! - WebXDC peer advertisements
-//! - Unknown event storage for future compatibility
-
+//! Thin Tauri wrapper around vector-core's two-phase event pipeline.
+//! - Processing gate: queues events during encryption migration
+//! - TauriEventHandler: OS notifications, badge updates
+//! - WebXDC/MLS Welcome: intercepted before vector-core (platform-specific)
 
 use nostr_sdk::prelude::*;
 use tauri::{Emitter, Manager};
 
+use vector_core::event_handler as core_handler;
+use vector_core::{Message, RumorProcessingResult};
+
 use crate::{
     db, miniapps, commands,
-    Message, Reaction, StoredEvent,
-    RumorEvent, RumorContext, ConversationType, RumorProcessingResult, process_rumor,
     MlsService, NotificationData, show_notification_generic,
     STATE, TAURI_APP, NOSTR_CLIENT, WRAPPER_ID_CACHE, NOTIFIED_WELCOMES,
     util::get_file_type_description,
     state::{is_processing_allowed, PENDING_EVENTS},
 };
 
-// Internal event handler - called by fetch_messages and real-time event stream
-// Not exposed as a Tauri command to frontend
+// ============================================================================
+// TauriEventHandler — OS notifications + badge updates
+// ============================================================================
+
+/// Platform-specific event handler for the Tauri GUI.
+/// Handles OS notifications, badge counter updates, and other desktop/mobile specifics.
+pub(crate) struct TauriEventHandler;
+
+impl vector_core::InboundEventHandler for TauriEventHandler {
+    fn on_dm_received(&self, chat_id: &str, msg: &Message, is_new: bool) {
+        if msg.mine || !is_new { return; }
+        let chat_id = chat_id.to_string();
+        let content = msg.content.clone();
+        tokio::spawn(async move {
+            // Check muted
+            let is_muted = {
+                let state = STATE.lock().await;
+                state.get_chat(&chat_id).map_or(false, |c| c.muted)
+            };
+            if !is_muted {
+                let display_info = {
+                    let state = STATE.lock().await;
+                    get_dm_notification_info(&state, &chat_id, &content)
+                };
+                if let Some((name, body, avatar)) = display_info {
+                    let notification = NotificationData::direct_message(name, body, avatar, chat_id.clone());
+                    show_notification_generic(notification);
+                }
+            }
+            // Update badge
+            if let Some(handle) = TAURI_APP.get() {
+                let _ = commands::messaging::update_unread_counter(handle.clone()).await;
+            }
+        });
+    }
+
+    fn on_file_received(&self, chat_id: &str, msg: &Message, is_new: bool) {
+        if msg.mine || !is_new { return; }
+        let chat_id = chat_id.to_string();
+        let extension = msg.attachments.first()
+            .map(|att| att.extension.clone())
+            .unwrap_or_else(|| String::from("file"));
+        tokio::spawn(async move {
+            // Check muted
+            let is_muted = {
+                let state = STATE.lock().await;
+                state.get_chat(&chat_id).map_or(false, |c| c.muted)
+            };
+            if !is_muted {
+                let display_info = {
+                    let state = STATE.lock().await;
+                    get_file_notification_info(&state, &chat_id, &extension)
+                };
+                if let Some((name, body, avatar)) = display_info {
+                    let notification = NotificationData::direct_message(name, body, avatar, chat_id.clone());
+                    show_notification_generic(notification);
+                }
+            }
+            // Update badge
+            if let Some(handle) = TAURI_APP.get() {
+                let _ = commands::messaging::update_unread_counter(handle.clone()).await;
+            }
+        });
+    }
+}
+
+/// Extract display info for a DM text notification.
+fn get_dm_notification_info(
+    state: &crate::state::ChatState,
+    contact: &str,
+    content: &str,
+) -> Option<(String, String, Option<String>)> {
+    let (name, avatar) = match state.get_profile(contact) {
+        Some(profile) => {
+            let name = if !profile.nickname.is_empty() {
+                profile.nickname.to_string()
+            } else if !profile.name.is_empty() {
+                profile.name.to_string()
+            } else {
+                String::from("New Message")
+            };
+            let avatar = if !profile.avatar_cached.is_empty() {
+                Some(profile.avatar_cached.to_string())
+            } else {
+                None
+            };
+            (name, avatar)
+        }
+        None => (String::from("New Message"), None),
+    };
+    let resolved = crate::services::strip_content_for_preview(
+        &crate::services::resolve_mention_display_names(content, state),
+    );
+    Some((name, resolved, avatar))
+}
+
+/// Extract display info for a file attachment notification.
+fn get_file_notification_info(
+    state: &crate::state::ChatState,
+    contact: &str,
+    extension: &str,
+) -> Option<(String, String, Option<String>)> {
+    let (name, avatar) = match state.get_profile(contact) {
+        Some(profile) => {
+            let name = if !profile.nickname.is_empty() {
+                profile.nickname.to_string()
+            } else if !profile.name.is_empty() {
+                profile.name.to_string()
+            } else {
+                String::from("New Message")
+            };
+            let avatar = if !profile.avatar_cached.is_empty() {
+                Some(profile.avatar_cached.to_string())
+            } else {
+                None
+            };
+            (name, avatar)
+        }
+        None => (String::from("New Message"), None),
+    };
+    let body = "Sent a ".to_string() + &get_file_type_description(extension);
+    Some((name, body, avatar))
+}
+
+// ============================================================================
+// Event processing entry points
+// ============================================================================
+
+/// Internal event handler — called by subscription handler and encryption drain.
 pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
     let my_public_key = *crate::MY_PUBLIC_KEY.get().expect("Public key not initialized");
     handle_event_with_context(event, is_new, client, my_public_key).await
 }
 
-/// Full event processing implementation — accepts dependencies as parameters.
-/// This enables headless (background service) callers to provide their own client/key
-/// without relying on globals that may not be initialized.
+/// Full event processing — accepts dependencies as parameters.
+/// Enables headless (background service) callers to provide their own client/key.
 pub(crate) async fn handle_event_with_context(
     event: Event,
     is_new: bool,
     client: &Client,
     my_public_key: PublicKey,
 ) -> bool {
-    // Check processing gate - queue events during encryption migration
+    // Processing gate — queue events during encryption migration
     if !is_processing_allowed() {
         let mut queue = PENDING_EVENTS.lock().await;
-        // Re-check after acquiring lock: drain_pending_events opens the gate
-        // INSIDE this same lock, so if the gate is now open, drain already
-        // finished and we should process normally instead of queuing (TOCTOU fix).
         if !is_processing_allowed() {
             queue.push((event, is_new));
             return false;
@@ -51,998 +172,185 @@ pub(crate) async fn handle_event_with_context(
         drop(queue);
     }
 
-    // Get the wrapper (giftwrap) event ID for duplicate detection
-    // Use bytes for cache (memory efficient), hex string for DB operations
-    let wrapper_event_id_bytes: [u8; 32] = event.id.to_bytes();
-    let wrapper_created_at = event.created_at.as_secs();
-    let wrapper_event_id = event.id.to_hex();
+    // Phase 1: parallel-safe prepare (dedup, unwrap, parse)
+    let prepared = core_handler::prepare_event(event, client, my_public_key).await;
 
-    // For historical sync events (is_new = false), use the wrapper_id cache for fast duplicate detection
-    // For real-time new events (is_new = true), skip cache checks - they're guaranteed to be new
-    if !is_new {
-        // Check in-memory cache first (O(1) lookup, no SQL overhead)
-        // This cache is only populated during init and cleared after sync finishes
+    // Phase 2: sequential commit with Tauri-specific handling
+    tauri_commit_prepared_event(prepared, is_new).await
+}
+
+// ============================================================================
+// Tauri commit wrapper — intercepts platform-specific events
+// ============================================================================
+
+/// Commit a prepared event with Tauri-specific handling.
+///
+/// Intercepts WebXDC and MLS Welcome events (deeply platform-specific),
+/// then delegates everything else to vector-core's commit pipeline.
+pub(crate) async fn tauri_commit_prepared_event(
+    prepared: vector_core::PreparedEvent,
+    is_new: bool,
+) -> bool {
+    // Intercept WebXDC events — requires Iroh/MiniApps (Tauri-only)
+    if let vector_core::PreparedEvent::Processed {
+        ref result, ref contact,
+        ref wrapper_event_id_bytes, wrapper_created_at, ..
+    } = prepared {
+        match result {
+            RumorProcessingResult::WebxdcPeerAdvertisement { event_id, topic_id, node_addr, sender_npub, created_at } => {
+                // Cache + persist wrapper (same as commit would do)
+                {
+                    let mut cache = WRAPPER_ID_CACHE.lock().await;
+                    cache.insert(*wrapper_event_id_bytes);
+                }
+                let _ = db::save_processed_wrapper(wrapper_event_id_bytes, wrapper_created_at);
+                return handle_webxdc_peer_advertisement(event_id, topic_id, node_addr, sender_npub, *created_at, contact).await;
+            }
+            RumorProcessingResult::WebxdcPeerLeft { event_id, topic_id, sender_npub, created_at } => {
+                {
+                    let mut cache = WRAPPER_ID_CACHE.lock().await;
+                    cache.insert(*wrapper_event_id_bytes);
+                }
+                let _ = db::save_processed_wrapper(wrapper_event_id_bytes, wrapper_created_at);
+                return handle_webxdc_peer_left(event_id, topic_id, sender_npub, *created_at, contact).await;
+            }
+            _ => {}
+        }
+    }
+
+    // Intercept MLS Welcome — requires MDK (Tauri-only)
+    if let vector_core::PreparedEvent::MlsWelcome {
+        ref wrapper_event_id_bytes, ..
+    } = prepared {
+        // Dedup: same welcome can arrive from multiple relays simultaneously
         {
             let cache = WRAPPER_ID_CACHE.lock().await;
-            if cache.contains(&wrapper_event_id_bytes) {
-                // Already processed this giftwrap, skip (cache hit)
+            if cache.contains(wrapper_event_id_bytes) {
                 return false;
             }
         }
-
-        // Cache miss - check database as fallback (for events older than cache window)
-        if let Ok(exists) = db::wrapper_event_exists(&wrapper_event_id).await {
-            if exists {
-                // Already processed this giftwrap, skip (DB hit)
-                return false;
-            }
-        }
+        return handle_mls_welcome(prepared, is_new).await;
     }
 
-    // Unwrap the gift wrap
-    match client.unwrap_gift_wrap(&event).await {
-        Ok(UnwrappedGift { rumor, sender }) => {
-            // Check if it's mine
-            let is_mine = sender == my_public_key;
-
-            // Attempt to get contact public key (bech32)
-            let contact: String = if is_mine {
-                // Try to get the first public key from tags
-                match rumor.tags.public_keys().next() {
-                    Some(pub_key) => pub_key.to_bech32()
-                        .or_else(|_| sender.to_bech32())
-                        .unwrap_or_default(),
-                    None => sender.to_bech32().unwrap_or_default(),
-                }
-            } else {
-                sender.to_bech32().unwrap_or_default()
-            };
-
-            // Persist wrapper for negentropy reconciliation (so next boot knows we've seen this event)
-            let _ = db::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at);
-
-            // Single lock: check blocked (drop event) + muted (suppress notification later)
-            let is_contact_muted = if !is_mine {
-                let state = STATE.lock().await;
-                if state.get_profile(&contact).map_or(false, |p| p.flags.is_blocked()) {
-                    // Wrapper already persisted above for negentropy. Content never stored.
-                    return false;
-                }
-                state.get_chat(&contact).map_or(false, |c| c.muted)
-            } else {
-                false
-            };
-
-            // Skip NIP-17 group messages (multiple p-tags) — Vector uses MLS for group chats.
-            // Without this, multi-recipient messages appear incorrectly in random DM chats.
-            // The wrapper is already persisted above for negentropy reconciliation.
-            if rumor.tags.public_keys().count() > 1 {
-                return false;
-            }
-
-            // Special handling for MLS Welcomes (not processed by rumor processor)
-            if rumor.kind == Kind::MlsWelcome {
-                // Dedup: the same welcome can arrive from multiple relays simultaneously
-                {
-                    let cache = WRAPPER_ID_CACHE.lock().await;
-                    if cache.contains(&wrapper_event_id_bytes) {
-                        return false;
-                    }
-                }
-
-                // Convert rumor Event -> UnsignedEvent
-                let unsigned_opt = serde_json::to_string(&rumor)
-                    .ok()
-                    .and_then(|s| nostr_sdk::UnsignedEvent::from_json(s.as_bytes()).ok());
-
-                if let Some(unsigned) = unsigned_opt {
-                    // Outer giftwrap id is our wrapper id for dedup/logs
-                    let wrapper_id = event.id;
-
-                    // Use blocking thread for non-Send MLS engine.
-                    // Returns the group name on success (for notification).
-                    let welcome_result: Option<String> = tokio::task::spawn_blocking(move || {
-                        let svc = MlsService::new_persistent_static();
-                        if let Ok(mls) = svc {
-                            if let Ok(engine) = mls.engine() {
-                                match engine.process_welcome(&wrapper_id, &unsigned) {
-                                    Ok(_) => {
-                                        // Read back the welcome to get the group name
-                                        if let Ok(welcomes) = engine.get_pending_welcomes(None) {
-                                            let group_name = welcomes.iter()
-                                                .find(|w| w.wrapper_event_id == wrapper_id)
-                                                .map(|w| w.group_name.clone())
-                                                .unwrap_or_default();
-                                            return Some(group_name);
-                                        }
-                                        return Some(String::new());
-                                    }
-                                    Err(e) => {
-                                        eprintln!("[MLS] Failed to process welcome: {}", e);
-                                    }
-                                }
-                            }
-                        }
-                        None
-                    })
-                    .await
-                    .unwrap_or(None);
-
-                    if let Some(group_name) = welcome_result {
-                        // Mark this wrapper as processed to prevent duplicates from other relays
-                        {
-                            let mut cache = WRAPPER_ID_CACHE.lock().await;
-                            cache.insert(wrapper_event_id_bytes);
-                        }
-                        // Only notify UI after initial sync is complete
-                        // During initial sync, invites are processed but not emitted to avoid UI updates before chats are loaded
-                        let should_emit = {
-                            let state = STATE.lock().await;
-                            !state.is_syncing
-                        };
-
-                        if should_emit {
-                            if let Some(app) = TAURI_APP.get() {
-                                let _ = app.emit("mls_invite_received", serde_json::json!({
-                                    "wrapper_event_id": wrapper_id.to_hex()
-                                }));
-                            }
-
-                            // OS notification for group invites
-                            if !is_mine && is_new {
-                                let display_info = {
-                                    let state = STATE.lock().await;
-                                    match state.get_profile(&contact) {
-                                        Some(profile) => {
-                                            let name = if !profile.nickname.is_empty() {
-                                                profile.nickname.to_string()
-                                            } else if !profile.name.is_empty() {
-                                                profile.name.to_string()
-                                            } else {
-                                                String::from("Someone")
-                                            };
-                                            let avatar = if !profile.avatar_cached.is_empty() {
-                                                Some(profile.avatar_cached.to_string())
-                                            } else {
-                                                None
-                                            };
-                                            (name, avatar)
-                                        }
-                                        None => (String::from("Someone"), None),
-                                    }
-                                };
-                                let notif_group_name = if group_name.is_empty() {
-                                    String::from("Group Chat")
-                                } else {
-                                    group_name.clone()
-                                };
-                                let notification = NotificationData::group_invite(
-                                    notif_group_name,
-                                    display_info.0,
-                                    display_info.1,
-                                );
-                                show_notification_generic(notification);
-
-                                // Mark as notified to prevent list_pending_mls_welcomes from double-notifying
-                                let mut notified = NOTIFIED_WELCOMES.lock().await;
-                                notified.insert(wrapper_event_id.clone());
-                            }
-                        }
-                        return true;
-                    } else {
-                        return false;
-                    }
-                } else {
-                    eprintln!("[MLS] Failed to convert rumor to UnsignedEvent");
-                    return false;
-                }
-            }
-
-            // Convert rumor to RumorEvent for protocol-agnostic processing
-            // Move content and tags instead of cloning (rumor is owned and not used after this)
-            let Some(rumor_id) = rumor.id else {
-                eprintln!("Unwrapped rumor missing event ID, skipping");
-                return false;
-            };
-            let rumor_event = RumorEvent {
-                id: rumor_id,
-                kind: rumor.kind,
-                content: rumor.content,
-                tags: rumor.tags,
-                created_at: rumor.created_at,
-                pubkey: rumor.pubkey,
-            };
-
-            let rumor_context = RumorContext {
-                sender,
-                is_mine,
-                conversation_id: contact.clone(),
-                conversation_type: ConversationType::DirectMessage,
-            };
-
-            // Process the rumor using our protocol-agnostic processor
-            let download_dir = crate::rumor::resolve_download_dir();
-            match process_rumor(rumor_event, rumor_context, &download_dir) {
-                Ok(result) => {
-                    match result {
-                        RumorProcessingResult::TextMessage(mut msg) => {
-                            // Set the wrapper event ID for database storage
-                            msg.wrapper_event_id = Some(wrapper_event_id.clone());
-                            handle_text_message(msg, &contact, is_mine, is_new, is_contact_muted, &wrapper_event_id, wrapper_event_id_bytes).await
-                        }
-                        RumorProcessingResult::FileAttachment(mut msg) => {
-                            // Set the wrapper event ID for database storage
-                            msg.wrapper_event_id = Some(wrapper_event_id.clone());
-                            handle_file_attachment(msg, &contact, is_mine, is_new, is_contact_muted, &wrapper_event_id, wrapper_event_id_bytes).await
-                        }
-                        RumorProcessingResult::Reaction(reaction) => {
-                            let result = handle_reaction(reaction.clone(), &contact).await;
-                            // Always save reaction event with wrapper_event_id for cross-session dedup
-                            if let Ok(chat_id) = db::get_chat_id_by_identifier(&contact) {
-                                let _ = db::save_reaction_event(&reaction, chat_id, None, is_mine, Some(wrapper_event_id.clone())).await;
-                            }
-                            result
-                        }
-                        RumorProcessingResult::TypingIndicator { profile_id, until } => {
-                            // Update the chat's typing participants
-                            let active_typers = {
-                                let mut state = STATE.lock().await;
-                                state.update_typing_and_get_active(&contact, &profile_id, until)
-                            };
-
-                            // Emit typing update event to frontend
-                            if let Some(handle) = TAURI_APP.get() {
-                                let _ = handle.emit("typing-update", serde_json::json!({
-                                    "conversation_id": contact,
-                                    "typers": active_typers,
-                                }));
-                            }
-
-                            false // Ephemeral — not a new message
-                        }
-                        RumorProcessingResult::LeaveRequest { .. } => {
-                            // Leave requests only apply to MLS groups, not DMs
-                            false // Administrative — not a new message
-                        }
-                        RumorProcessingResult::WebxdcPeerAdvertisement { event_id, topic_id, node_addr, sender_npub, created_at } => {
-                            handle_webxdc_peer_advertisement(&event_id, &topic_id, &node_addr, &sender_npub, created_at, &contact).await
-                        }
-                        RumorProcessingResult::WebxdcPeerLeft { event_id, topic_id, sender_npub, created_at } => {
-                            handle_webxdc_peer_left(&event_id, &topic_id, &sender_npub, created_at, &contact).await
-                        }
-                        RumorProcessingResult::UnknownEvent(mut event) => {
-                            // Store unknown events for future compatibility
-                            event.wrapper_event_id = Some(wrapper_event_id.clone());
-                            handle_unknown_event(event, &contact).await
-                        }
-                        RumorProcessingResult::Ignored => false,
-                        RumorProcessingResult::PivxPayment { gift_code, amount_piv, address, message_id, mut event } => {
-                            // Dedup: skip if this payment event was already saved
-                            if db::event_exists(&event.id).unwrap_or(false) {
-                                return false;
-                            }
-                            event.wrapper_event_id = Some(wrapper_event_id.clone());
-                            // Save PIVX payment event to database
-                            let event_timestamp = event.created_at;
-                            let _ = db::save_pivx_payment_event(&contact, event).await;
-
-                            // Emit PIVX payment event to frontend for DMs
-                            if let Some(handle) = TAURI_APP.get() {
-                                let _ = handle.emit("pivx_payment_received", serde_json::json!({
-                                    "conversation_id": contact,
-                                    "gift_code": gift_code,
-                                    "amount_piv": amount_piv,
-                                    "address": address,
-                                    "message_id": message_id,
-                                    "sender": sender,
-                                    "is_mine": is_mine,
-                                    "at": event_timestamp * 1000,
-                                }));
-                            }
-                            true
-                        }
-                        RumorProcessingResult::Edit { message_id, new_content, edited_at, mut event } => {
-                            // Skip if this edit event was already processed (deduplication)
-                            if db::event_exists(&event.id).unwrap_or(false) {
-                                return false; // Already processed, skip
-                            }
-
-                            // Save edit event to database with proper chat_id
-                            if let Ok(chat_id) = db::get_chat_id_by_identifier(&contact) {
-                                event.chat_id = chat_id;
-                            }
-                            event.wrapper_event_id = Some(wrapper_event_id.clone());
-                            let _ = db::save_event(&event).await;
-
-                            // Update message in state and emit to frontend
-                            let msg_for_emit = {
-                                let mut state = STATE.lock().await;
-                                state.update_message_in_chat(&contact, &message_id, |msg| {
-                                    msg.apply_edit(new_content, edited_at);
-                                })
-                            };
-
-                            if let Some(msg) = msg_for_emit {
-                                if let Some(handle) = TAURI_APP.get() {
-                                    let _ = handle.emit("message_update", serde_json::json!({
-                                        "old_id": &message_id,
-                                        "message": msg,
-                                        "chat_id": &contact
-                                    }));
-                                }
-                            }
-                            true
-                        }
-                    }
-                }
-                Err(e) => {
-                    log_warn!("[EventHandler] Failed to process rumor: {}", e);
-                    false
-                }
-            }
-        }
-        Err(e) => {
-            log_warn!("[EventHandler] Failed to unwrap gift wrap: {:?}", e);
-            false
-        }
-    }
+    // Everything else: vector-core handles it (DMs, files, reactions, edits, typing, PIVX, etc.)
+    static HANDLER: TauriEventHandler = TauriEventHandler;
+    core_handler::commit_prepared_event(prepared, is_new, &HANDLER).await
 }
 
-/// Handle a processed text message
-async fn handle_text_message(mut msg: Message, contact: &str, is_mine: bool, is_new: bool, is_contact_muted: bool, wrapper_event_id: &str, wrapper_event_id_bytes: [u8; 32]) -> bool {
-    // Check if message already exists in database (important for sync with partial message loading)
-    if let Ok(exists) = db::message_exists_in_db(&msg.id).await {
-        if exists {
-            // Message already in DB but we got here (wrapper check passed)
-            // Try to backfill the wrapper_event_id for future fast lookups
-            // If backfill fails (message already has a different wrapper), add this wrapper to cache
-            // to prevent repeated processing of duplicate giftwraps
-            if let Ok(updated) = db::update_wrapper_event_id(&msg.id, wrapper_event_id).await {
-                if !updated {
-                    // Message has a different wrapper_id - add this duplicate wrapper to cache
-                    let mut cache = WRAPPER_ID_CACHE.lock().await;
-                    cache.insert(wrapper_event_id_bytes);
-                }
-            }
-            return false;
-        }
-    }
+// ============================================================================
+// MLS Welcome — Tauri-specific MDK processing
+// ============================================================================
 
-    // Populate reply context before emitting (for replies to old messages not in frontend cache)
-    if !msg.replied_to.is_empty() {
-        let _ = db::populate_reply_context(&mut msg).await;
-    }
-
-    // Add the message to the state and handle database save in one operation to avoid multiple locks
-    let was_msg_added_to_state = {
-        let mut state = STATE.lock().await;
-        state.add_message_to_participant(contact, msg.clone())
-    };
-    // If accepted in-state: commit to the DB and emit to the frontend
-    if was_msg_added_to_state {
-        // Send it to the frontend
-        if let Some(handle) = TAURI_APP.get() {
-            handle.emit("message_new", serde_json::json!({
-                "message": &msg,
-                "chat_id": contact
-            })).unwrap();
-        }
-
-        // Send OS notification for incoming messages (only after confirming message is new)
-        // Mute status pre-checked during block check — skip lock entirely when muted
-        if !is_mine && is_new {
-            let display_info = if is_contact_muted {
-                None
-            } else {
-                let state = STATE.lock().await;
-                match state.get_profile(contact) {
-                    Some(profile) => {
-                        let display_name = if !profile.nickname.is_empty() {
-                            profile.nickname.to_string()
-                        } else if !profile.name.is_empty() {
-                            profile.name.to_string()
-                        } else {
-                            String::from("New Message")
-                        };
-                        let avatar = if !profile.avatar_cached.is_empty() {
-                            Some(profile.avatar_cached.to_string())
-                        } else {
-                            None
-                        };
-                        let resolved_content = crate::services::strip_content_for_preview(
-                            &crate::services::resolve_mention_display_names(&msg.content, &state)
-                        );
-                        Some((display_name, resolved_content, avatar))
-                    }
-                    None => {
-                        let resolved_content = crate::services::strip_content_for_preview(
-                            &crate::services::resolve_mention_display_names(&msg.content, &state)
-                        );
-                        Some((String::from("New Message"), resolved_content, None))
-                    },
-                }
-            };
-            if let Some((display_name, content, avatar)) = display_info {
-                let notification = NotificationData::direct_message(display_name, content, avatar, contact.to_string());
-                show_notification_generic(notification);
-            }
-        }
-
-        // Save the new message to DB (chat_id = contact npub for DMs)
-        let _ = db::save_message(contact, &msg).await;
-        // Ensure OS badge is updated immediately after accepting the message
-        if let Some(handle) = TAURI_APP.get() {
-            let _ = commands::messaging::update_unread_counter(handle.clone()).await;
-        }
-    }
-
-    was_msg_added_to_state
-}
-
-/// Handle a processed file attachment
-async fn handle_file_attachment(mut msg: Message, contact: &str, is_mine: bool, is_new: bool, is_contact_muted: bool, wrapper_event_id: &str, wrapper_event_id_bytes: [u8; 32]) -> bool {
-    // Check if message already exists in database (important for sync with partial message loading)
-    if let Ok(exists) = db::message_exists_in_db(&msg.id).await {
-        if exists {
-            // Message already in DB but we got here (wrapper check passed)
-            // Try to backfill the wrapper_event_id for future fast lookups
-            // If backfill fails (message already has a different wrapper), add this wrapper to cache
-            // to prevent repeated processing of duplicate giftwraps
-            if let Ok(updated) = db::update_wrapper_event_id(&msg.id, wrapper_event_id).await {
-                if !updated {
-                    // Message has a different wrapper_id - add this duplicate wrapper to cache
-                    let mut cache = WRAPPER_ID_CACHE.lock().await;
-                    cache.insert(wrapper_event_id_bytes);
-                }
-            }
-            return false;
-        }
-    }
-
-    // Populate reply context before emitting (for replies to old messages not in frontend cache)
-    if !msg.replied_to.is_empty() {
-        let _ = db::populate_reply_context(&mut msg).await;
-    }
-
-    // Resolve missing attachment sizes from server (HEAD probe)
-    for att in &mut msg.attachments {
-        if att.size == 0 && !att.url.is_empty() {
-            if let Some(size) = crate::net::get_remote_file_size(&att.url).await {
-                att.size = size;
-            }
-        }
-    }
-
-    // Get file extension for notification
-    let extension = msg.attachments.first()
-        .map(|att| att.extension.clone())
-        .unwrap_or_else(|| String::from("file"));
-
-    // Add the message to the state and clear typing indicator for sender
-    let (was_msg_added_to_state, _active_typers) = {
-        let mut state = STATE.lock().await;
-        let added = state.add_message_to_participant(contact, msg.clone());
-
-        // Clear typing indicator for the sender (they just sent a message)
-        let typers = state.update_typing_and_get_active(contact, contact, 0);
-
-        (added, typers)
-    };
-
-    // If accepted in-state: commit to the DB and emit to the frontend
-    if was_msg_added_to_state {
-        // Send it to the frontend
-        if let Some(handle) = TAURI_APP.get() {
-            handle.emit("message_new", serde_json::json!({
-                "message": &msg,
-                "chat_id": contact
-            })).unwrap();
-        }
-
-        // Send OS notification for incoming files (only after confirming message is new)
-        if !is_mine && is_new {
-            let display_info = if is_contact_muted {
-                None
-            } else {
-                let state = STATE.lock().await;
-                match state.get_profile(contact) {
-                    Some(profile) => {
-                        let display_name = if !profile.nickname.is_empty() {
-                            profile.nickname.to_string()
-                        } else if !profile.name.is_empty() {
-                            profile.name.to_string()
-                        } else {
-                            String::from("New Message")
-                        };
-                        let avatar = if !profile.avatar_cached.is_empty() {
-                            Some(profile.avatar_cached.to_string())
-                        } else {
-                            None
-                        };
-                        Some((display_name, extension.clone(), avatar))
-                    }
-                    None => Some((String::from("New Message"), extension.clone(), None)),
-                }
-            };
-            if let Some((display_name, file_extension, avatar)) = display_info {
-                let file_description = "Sent a ".to_string() + &get_file_type_description(&file_extension);
-                let notification = NotificationData::direct_message(display_name, file_description, avatar, contact.to_string());
-                show_notification_generic(notification);
-            }
-        }
-
-        // Save the new message to DB (chat_id = contact npub for DMs)
-        let _ = db::save_message(contact, &msg).await;
-        // Ensure OS badge is updated immediately after accepting the attachment
-        if let Some(handle) = TAURI_APP.get() {
-            let _ = commands::messaging::update_unread_counter(handle.clone()).await;
-        }
-    }
-
-    was_msg_added_to_state
-}
-
-/// Handle a processed reaction
-async fn handle_reaction(reaction: Reaction, _contact: &str) -> bool {
-    // Find the chat containing the referenced message and add the reaction
-    // Use a single lock scope to avoid nested locks
-    let (reaction_added, chat_id_for_save) = {
-        let mut state = STATE.lock().await;
-        // Use helper that handles interner access via split borrowing
-        if let Some((chat_id, added)) = state.add_reaction_to_message(&reaction.reference_id, reaction.clone()) {
-            (added, if added { Some(chat_id) } else { None })
-        } else {
-            // Message not found in any chat - this can happen during sync
-            // TODO: track these "ahead" reactions and re-apply them once sync has finished
-            (false, None)
-        }
-    };
-
-    // Save the updated message with the new reaction to our DB (outside of state lock)
-    if let Some(chat_id) = chat_id_for_save {
-        // Get only the message that was updated
-        let updated_message = {
-            let state = STATE.lock().await;
-            state.find_message(&reaction.reference_id)
-                .map(|(_, msg)| msg.clone())
-        };
-
-        if let Some(msg) = updated_message {
-            let _ = db::save_message(&chat_id, &msg).await;
-            if let Some(handle) = TAURI_APP.get() {
-                let _ = handle.emit("message_update", serde_json::json!({
-                    "old_id": &reaction.reference_id,
-                    "message": &msg,
-                    "chat_id": &chat_id
-                }));
-            }
-        }
-    }
-
-    reaction_added
-}
-
-/// Handle an unknown event type - store for future compatibility
-async fn handle_unknown_event(mut event: StoredEvent, contact: &str) -> bool {
-    // Dedup: skip if this event was already saved
-    if db::event_exists(&event.id).unwrap_or(false) {
+/// Handle an MLS Welcome event using the MDK engine.
+async fn handle_mls_welcome(prepared: vector_core::PreparedEvent, is_new: bool) -> bool {
+    let vector_core::PreparedEvent::MlsWelcome {
+        event, rumor, contact, sender: _, is_mine,
+        wrapper_event_id, wrapper_event_id_bytes, wrapper_created_at, ..
+    } = prepared else {
         return false;
-    }
-    // Get the chat_id for this contact
-    match db::get_chat_id_by_identifier(contact) {
-        Ok(chat_id) => {
-            event.chat_id = chat_id;
-            // Save the event to the database
-            if let Err(e) = db::save_event(&event).await {
-                eprintln!("Failed to save unknown event: {}", e);
-                return false;
+    };
+
+    let wrapper_id = event.id;
+
+    // Use blocking thread for non-Send MLS engine
+    let welcome_result: Option<String> = tokio::task::spawn_blocking(move || {
+        let svc = MlsService::new_persistent_static();
+        if let Ok(mls) = svc {
+            if let Ok(engine) = mls.engine() {
+                match engine.process_welcome(&wrapper_id, &rumor) {
+                    Ok(_) => {
+                        if let Ok(welcomes) = engine.get_pending_welcomes(None) {
+                            let group_name = welcomes.iter()
+                                .find(|w| w.wrapper_event_id == wrapper_id)
+                                .map(|w| w.group_name.clone())
+                                .unwrap_or_default();
+                            return Some(group_name);
+                        }
+                        return Some(String::new());
+                    }
+                    Err(e) => {
+                        eprintln!("[MLS] Failed to process welcome: {}", e);
+                    }
+                }
             }
-            // Emit event to frontend (it can render as "Unknown Event" placeholder)
-            if let Some(handle) = TAURI_APP.get() {
-                let _ = handle.emit("event_new", serde_json::json!({
-                    "event": event,
-                    "chat_id": contact
+        }
+        None
+    })
+    .await
+    .unwrap_or(None);
+
+    // Always persist wrapper for negentropy (even on failure)
+    let _ = db::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at);
+
+    if let Some(group_name) = welcome_result {
+        // Cache wrapper for session dedup
+        {
+            let mut cache = WRAPPER_ID_CACHE.lock().await;
+            cache.insert(wrapper_event_id_bytes);
+        }
+
+        // Only emit after initial sync is complete
+        let should_emit = {
+            let state = STATE.lock().await;
+            !state.is_syncing
+        };
+
+        if should_emit {
+            if let Some(app) = TAURI_APP.get() {
+                let _ = app.emit("mls_invite_received", serde_json::json!({
+                    "wrapper_event_id": wrapper_id.to_hex()
                 }));
             }
-            true
-        }
-        Err(_) => {
-            // Chat doesn't exist yet, skip this event
-            eprintln!("Cannot save unknown event: chat not found for {}", contact);
-            false
-        }
-    }
-}
 
-// ============================================================================
-// Parallel Sync Pipeline — prepare/commit split
-// ============================================================================
-
-/// Result of the parallel preparation phase (Phase 1).
-/// Contains everything needed to commit a processed event sequentially.
-pub(crate) enum PreparedEvent {
-    /// Fully processed rumor — ready for sequential state commit
-    Processed {
-        result: RumorProcessingResult,
-        contact: String,
-        sender: PublicKey,
-        is_mine: bool,
-        wrapper_event_id: String,
-        wrapper_event_id_bytes: [u8; 32],
-        /// Gift wrap's created_at (NIP-59 randomized) — stored for negentropy reconciliation
-        wrapper_created_at: u64,
-        /// Time spent on ECDH + ChaCha20Poly1305 decryption (nanoseconds)
-        unwrap_ns: u64,
-        /// Time spent on rumor parsing (nanoseconds)
-        parse_ns: u64,
-    },
-    /// MLS Welcome — needs spawn_blocking in sequential phase
-    MlsWelcome {
-        event: Event,
-        rumor: UnsignedEvent,
-        contact: String,
-        is_mine: bool,
-        wrapper_event_id: String,
-        wrapper_event_id_bytes: [u8; 32],
-        /// Gift wrap's created_at (NIP-59 randomized) — stored for negentropy reconciliation
-        wrapper_created_at: u64,
-        unwrap_ns: u64,
-    },
-    /// Duplicate event (dedup cache or DB hit) — carries wrapper timestamp for backfill
-    DedupSkip {
-        wrapper_id_bytes: [u8; 32],
-        wrapper_created_at: u64,
-    },
-    /// Failed to unwrap or process — still carries wrapper data for negentropy persistence
-    ErrorSkip {
-        wrapper_id_bytes: [u8; 32],
-        wrapper_created_at: u64,
-    },
-}
-
-/// Phase 1: Prepare an event for commit (parallel-safe, no state mutation).
-///
-/// Performs dedup check, gift wrap decryption (CPU-bound ECDH + ChaCha20Poly1305),
-/// and rumor parsing. Safe to call from multiple tokio tasks concurrently.
-pub(crate) async fn prepare_event(
-    event: Event,
-    client: &Client,
-    my_public_key: PublicKey,
-) -> PreparedEvent {
-    // Capture the gift wrap's created_at (NIP-59 randomized timestamp) for negentropy
-    let wrapper_created_at = event.created_at.as_secs();
-
-    // Dedup check — fast in-memory cache + DB fallback
-    let wrapper_event_id_bytes: [u8; 32] = event.id.to_bytes();
-    let wrapper_event_id = event.id.to_hex();
-
-    {
-        let cache = WRAPPER_ID_CACHE.lock().await;
-        if cache.contains(&wrapper_event_id_bytes) {
-            return PreparedEvent::DedupSkip { wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at };
-        }
-    }
-
-    if let Ok(true) = db::wrapper_event_exists(&wrapper_event_id).await {
-        return PreparedEvent::DedupSkip { wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at };
-    }
-
-    // Unwrap the gift wrap (CPU-bound crypto — the expensive step)
-    let unwrap_start = std::time::Instant::now();
-    let (rumor, sender) = match client.unwrap_gift_wrap(&event).await {
-        Ok(UnwrappedGift { rumor, sender }) => (rumor, sender),
-        Err(_) => return PreparedEvent::ErrorSkip {
-            wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at,
-        },
-    };
-    let unwrap_ns = unwrap_start.elapsed().as_nanos() as u64;
-
-    let is_mine = sender == my_public_key;
-    let contact: String = if is_mine {
-        match rumor.tags.public_keys().next() {
-            Some(pub_key) => pub_key.to_bech32()
-                .or_else(|_| sender.to_bech32())
-                .unwrap_or_default(),
-            None => sender.to_bech32().unwrap_or_default(),
-        }
-    } else {
-        sender.to_bech32().unwrap_or_default()
-    };
-
-    // Skip NIP-17 group messages (multiple p-tags) — Vector uses MLS for group chats.
-    // Still save wrapper for negentropy so we don't re-fetch this event.
-    if rumor.tags.public_keys().count() > 1 {
-        return PreparedEvent::ErrorSkip {
-            wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at,
-        };
-    }
-
-    // MLS Welcome — defer full processing to sequential phase
-    if rumor.kind == Kind::MlsWelcome {
-        return PreparedEvent::MlsWelcome {
-            event, rumor, contact, is_mine,
-            wrapper_event_id, wrapper_event_id_bytes, wrapper_created_at, unwrap_ns,
-        };
-    }
-
-    // Build RumorEvent for protocol-agnostic processing
-    let Some(rumor_id) = rumor.id else {
-        return PreparedEvent::ErrorSkip {
-            wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at,
-        };
-    };
-    let parse_start = std::time::Instant::now();
-    let rumor_event = RumorEvent {
-        id: rumor_id,
-        kind: rumor.kind,
-        content: rumor.content,
-        tags: rumor.tags,
-        created_at: rumor.created_at,
-        pubkey: rumor.pubkey,
-    };
-    let rumor_context = RumorContext {
-        sender,
-        is_mine,
-        conversation_id: contact.clone(),
-        conversation_type: ConversationType::DirectMessage,
-    };
-
-    // Process the rumor (pure parsing, no state mutation)
-    let download_dir = crate::rumor::resolve_download_dir();
-    match process_rumor(rumor_event, rumor_context, &download_dir) {
-        Ok(result) => {
-            let parse_ns = parse_start.elapsed().as_nanos() as u64;
-            PreparedEvent::Processed {
-                result, contact, sender, is_mine,
-                wrapper_event_id, wrapper_event_id_bytes, wrapper_created_at,
-                unwrap_ns, parse_ns,
-            }
-        }
-        Err(e) => {
-            log_warn!("[EventHandler] Failed to process rumor: {}", e);
-            PreparedEvent::ErrorSkip {
-                wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at,
-            }
-        }
-    }
-}
-
-/// Phase 2: Commit a prepared event sequentially (state mutation, DB save, frontend emit).
-///
-/// Must be called from a single task — not parallel-safe.
-pub(crate) async fn commit_prepared_event(prepared: PreparedEvent, is_new: bool) -> bool {
-    match prepared {
-        PreparedEvent::Processed { result, contact, sender, is_mine, wrapper_event_id, wrapper_event_id_bytes, wrapper_created_at, .. } => {
-            // Always cache the wrapper_event_id after successful unwrap — prevents
-            // re-unwrapping the same event in later sync windows within this session
-            {
-                let mut cache = WRAPPER_ID_CACHE.lock().await;
-                cache.insert(wrapper_event_id_bytes);
-            }
-            // Persist for cross-session dedup + negentropy reconciliation
-            let _ = db::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at);
-            match result {
-                RumorProcessingResult::TextMessage(mut msg) => {
-                    msg.wrapper_event_id = Some(wrapper_event_id.clone());
-                    handle_text_message(msg, &contact, is_mine, is_new, false, &wrapper_event_id, wrapper_event_id_bytes).await
-                }
-                RumorProcessingResult::FileAttachment(mut msg) => {
-                    msg.wrapper_event_id = Some(wrapper_event_id.clone());
-                    handle_file_attachment(msg, &contact, is_mine, is_new, false, &wrapper_event_id, wrapper_event_id_bytes).await
-                }
-                RumorProcessingResult::Reaction(reaction) => {
-                    let result = handle_reaction(reaction.clone(), &contact).await;
-                    // Always save reaction event with wrapper_event_id for cross-session dedup.
-                    match db::get_chat_id_by_identifier(&contact) {
-                        Ok(chat_id) => {
-                            if let Err(e) = db::save_reaction_event(&reaction, chat_id, None, is_mine, Some(wrapper_event_id.clone())).await {
-                                eprintln!("[Dedup] save_reaction_event failed: {}", e);
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("[Dedup] get_chat_id failed for reaction: {}", e);
-                        }
-                    }
-                    result
-                }
-                RumorProcessingResult::TypingIndicator { profile_id, until } => {
-                    let active_typers = {
-                        let mut state = STATE.lock().await;
-                        state.update_typing_and_get_active(&contact, &profile_id, until)
-                    };
-                    if let Some(handle) = TAURI_APP.get() {
-                        let _ = handle.emit("typing-update", serde_json::json!({
-                            "conversation_id": contact,
-                            "typers": active_typers,
-                        }));
-                    }
-                    false // Ephemeral — not a new message
-                }
-                RumorProcessingResult::LeaveRequest { .. } => false, // Administrative — not a new message
-                RumorProcessingResult::WebxdcPeerAdvertisement { event_id, topic_id, node_addr, sender_npub, created_at } => {
-                    handle_webxdc_peer_advertisement(&event_id, &topic_id, &node_addr, &sender_npub, created_at, &contact).await
-                }
-                RumorProcessingResult::WebxdcPeerLeft { event_id, topic_id, sender_npub, created_at } => {
-                    handle_webxdc_peer_left(&event_id, &topic_id, &sender_npub, created_at, &contact).await
-                }
-                RumorProcessingResult::UnknownEvent(mut event) => {
-                    event.wrapper_event_id = Some(wrapper_event_id.clone());
-                    handle_unknown_event(event, &contact).await
-                }
-                RumorProcessingResult::Ignored => false,
-                RumorProcessingResult::PivxPayment { gift_code, amount_piv, address, message_id, mut event } => {
-                    // Dedup: skip if this payment event was already saved
-                    if db::event_exists(&event.id).unwrap_or(false) {
-                        return false;
-                    }
-                    event.wrapper_event_id = Some(wrapper_event_id.clone());
-                    let event_timestamp = event.created_at;
-                    let _ = db::save_pivx_payment_event(&contact, event).await;
-                    if let Some(handle) = TAURI_APP.get() {
-                        let _ = handle.emit("pivx_payment_received", serde_json::json!({
-                            "conversation_id": contact,
-                            "gift_code": gift_code,
-                            "amount_piv": amount_piv,
-                            "address": address,
-                            "message_id": message_id,
-                            "sender": sender,
-                            "is_mine": is_mine,
-                            "at": event_timestamp * 1000,
-                        }));
-                    }
-                    true
-                }
-                RumorProcessingResult::Edit { message_id, new_content, edited_at, mut event } => {
-                    if db::event_exists(&event.id).unwrap_or(false) {
-                        return false; // Already processed this edit
-                    }
-                    if let Ok(chat_id) = db::get_chat_id_by_identifier(&contact) {
-                        event.chat_id = chat_id;
-                    }
-                    event.wrapper_event_id = Some(wrapper_event_id.clone());
-                    let _ = db::save_event(&event).await;
-                    let msg_for_emit = {
-                        let mut state = STATE.lock().await;
-                        state.update_message_in_chat(&contact, &message_id, |msg| {
-                            msg.apply_edit(new_content, edited_at);
-                        })
-                    };
-                    if let Some(msg) = msg_for_emit {
-                        if let Some(handle) = TAURI_APP.get() {
-                            let _ = handle.emit("message_update", serde_json::json!({
-                                "old_id": &message_id,
-                                "message": msg,
-                                "chat_id": &contact
-                            }));
-                        }
-                    }
-                    true
-                }
-            }
-        }
-        PreparedEvent::MlsWelcome { event, rumor, contact, is_mine, wrapper_event_id, wrapper_event_id_bytes, wrapper_created_at, .. } => {
-            // Dedup: the same welcome can arrive from multiple relays simultaneously
-            {
-                let cache = WRAPPER_ID_CACHE.lock().await;
-                if cache.contains(&wrapper_event_id_bytes) {
-                    return false;
-                }
-            }
-
-            let unsigned_opt = serde_json::to_string(&rumor)
-                .ok()
-                .and_then(|s| nostr_sdk::UnsignedEvent::from_json(s.as_bytes()).ok());
-
-            if let Some(unsigned) = unsigned_opt {
-                let wrapper_id = event.id;
-
-                let welcome_result: Option<String> = tokio::task::spawn_blocking(move || {
-                    let svc = MlsService::new_persistent_static();
-                    if let Ok(mls) = svc {
-                        if let Ok(engine) = mls.engine() {
-                            match engine.process_welcome(&wrapper_id, &unsigned) {
-                                Ok(_) => {
-                                    if let Ok(welcomes) = engine.get_pending_welcomes(None) {
-                                        let group_name = welcomes.iter()
-                                            .find(|w| w.wrapper_event_id == wrapper_id)
-                                            .map(|w| w.group_name.clone())
-                                            .unwrap_or_default();
-                                        return Some(group_name);
-                                    }
-                                    return Some(String::new());
-                                }
-                                Err(e) => {
-                                    eprintln!("[MLS] Failed to process welcome: {}", e);
-                                }
-                            }
-                        }
-                    }
-                    None
-                })
-                .await
-                .unwrap_or(None);
-
-                if let Some(group_name) = welcome_result {
-                    {
-                        let mut cache = WRAPPER_ID_CACHE.lock().await;
-                        cache.insert(wrapper_event_id_bytes);
-                    }
-                    // Persist for cross-session dedup + negentropy reconciliation
-                    let _ = db::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at);
-                    let should_emit = {
-                        let state = STATE.lock().await;
-                        !state.is_syncing
-                    };
-
-                    if should_emit {
-                        if let Some(app) = TAURI_APP.get() {
-                            let _ = app.emit("mls_invite_received", serde_json::json!({
-                                "wrapper_event_id": wrapper_id.to_hex()
-                            }));
-                        }
-
-                        if !is_mine && is_new {
-                            let display_info = {
-                                let state = STATE.lock().await;
-                                match state.get_profile(&contact) {
-                                    Some(profile) => {
-                                        let name = if !profile.nickname.is_empty() {
-                                            profile.nickname.to_string()
-                                        } else if !profile.name.is_empty() {
-                                            profile.name.to_string()
-                                        } else {
-                                            String::from("Someone")
-                                        };
-                                        let avatar = if !profile.avatar_cached.is_empty() {
-                                            Some(profile.avatar_cached.to_string())
-                                        } else {
-                                            None
-                                        };
-                                        (name, avatar)
-                                    }
-                                    None => (String::from("Someone"), None),
-                                }
-                            };
-                            let notif_group_name = if group_name.is_empty() {
-                                String::from("Group Chat")
+            // OS notification for group invites
+            if !is_mine && is_new {
+                let display_info = {
+                    let state = STATE.lock().await;
+                    match state.get_profile(&contact) {
+                        Some(profile) => {
+                            let name = if !profile.nickname.is_empty() {
+                                profile.nickname.to_string()
+                            } else if !profile.name.is_empty() {
+                                profile.name.to_string()
                             } else {
-                                group_name.clone()
+                                String::from("Someone")
                             };
-                            let notification = NotificationData::group_invite(
-                                notif_group_name,
-                                display_info.0,
-                                display_info.1,
-                            );
-                            show_notification_generic(notification);
-
-                            let mut notified = NOTIFIED_WELCOMES.lock().await;
-                            notified.insert(wrapper_event_id.clone());
+                            let avatar = if !profile.avatar_cached.is_empty() {
+                                Some(profile.avatar_cached.to_string())
+                            } else {
+                                None
+                            };
+                            (name, avatar)
                         }
+                        None => (String::from("Someone"), None),
                     }
-                    return true;
+                };
+                let notif_group_name = if group_name.is_empty() {
+                    String::from("Group Chat")
                 } else {
-                    // MLS welcome failed — still save wrapper so negentropy doesn't re-fetch
-                    eprintln!("[Sync] MlsWelcome failed (wrapper {})", &wrapper_event_id[..8]);
-                    let _ = db::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at);
-                    return false;
-                }
-            } else {
-                eprintln!("[MLS] Failed to convert rumor to UnsignedEvent");
-                // Still save wrapper so negentropy doesn't re-fetch
-                let _ = db::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at);
-                return false;
+                    group_name.clone()
+                };
+                let notification = NotificationData::group_invite(
+                    notif_group_name,
+                    display_info.0,
+                    display_info.1,
+                );
+                show_notification_generic(notification);
+
+                // Prevent list_pending_mls_welcomes from double-notifying
+                let mut notified = NOTIFIED_WELCOMES.lock().await;
+                notified.insert(wrapper_event_id.clone());
             }
         }
-        PreparedEvent::DedupSkip { .. } => false,
-        PreparedEvent::ErrorSkip { wrapper_id_bytes, wrapper_created_at } => {
-            // Save wrapper even on error — prevents negentropy from re-fetching permanently broken events
-            println!("[Sync] ErrorSkip (wrapper {:02x}{:02x}{:02x}{:02x})",
-                wrapper_id_bytes[0], wrapper_id_bytes[1], wrapper_id_bytes[2], wrapper_id_bytes[3]);
-            let _ = db::save_processed_wrapper(&wrapper_id_bytes, wrapper_created_at);
-            false
-        }
+        true
+    } else {
+        false
     }
 }
+
+// ============================================================================
+// WebXDC peer management — Tauri + Iroh specific
+// ============================================================================
 
 /// Handle a WebXDC peer advertisement - persist to SQLite and add the peer to our realtime channel
 pub(crate) async fn handle_webxdc_peer_advertisement(
@@ -1057,7 +365,7 @@ pub(crate) async fn handle_webxdc_peer_advertisement(
 
     log_info!("[WEBXDC] Received peer advertisement for topic {}", topic_id);
 
-    // Persist to SQLite for offline→online peer discovery
+    // Persist to SQLite for offline->online peer discovery
     if !db::event_exists(event_id).unwrap_or(true) {
         if let Ok(chat_id) = db::get_or_create_chat_id(conversation_id) {
             let tags = vec![
@@ -1090,7 +398,7 @@ pub(crate) async fn handle_webxdc_peer_advertisement(
             }
         }
     }
-    
+
     // Decode the topic ID
     let topic = match decode_topic_id(topic_id) {
         Ok(t) => t,
@@ -1099,7 +407,7 @@ pub(crate) async fn handle_webxdc_peer_advertisement(
             return false;
         }
     };
-    
+
     // Decode the node address
     let node_addr = match decode_node_addr(node_addr_encoded) {
         Ok(addr) => addr,
@@ -1108,13 +416,12 @@ pub(crate) async fn handle_webxdc_peer_advertisement(
             return false;
         }
     };
-    
+
     // Get the MiniApps state and add the peer
     if let Some(handle) = TAURI_APP.get() {
         let state = handle.state::<miniapps::state::MiniAppsState>();
-        
+
         // Check if we have an active realtime channel for this topic
-        // We need to find any instance that has this topic active
         let has_channel = {
             let channels = state.realtime_channels.read().await;
             log_info!("[WEBXDC] Checking {} active channels for topic match", channels.len());
@@ -1126,9 +433,9 @@ pub(crate) async fn handle_webxdc_peer_advertisement(
             }
             channels.values().any(|ch| ch.topic == topic && ch.active)
         };
-        
+
         log_info!("[WEBXDC] has_channel for topic {}: {}", topic_id, has_channel);
-        
+
         if has_channel {
             log_info!("[WEBXDC] Found active channel for topic {}, adding peer", topic_id);
             state.add_session_peer(topic, sender_npub.to_string()).await;
@@ -1185,7 +492,7 @@ pub(crate) async fn handle_webxdc_peer_advertisement(
                 }));
                 log_info!("[WEBXDC] Emitted miniapp_realtime_status event: topic={}, peer_count={}", topic_id, peer_count);
             }
-            
+
             return true;
         }
     }
@@ -1194,7 +501,6 @@ pub(crate) async fn handle_webxdc_peer_advertisement(
 }
 
 /// Handle a WebXDC peer-left signal — a peer closed their Mini App.
-/// Removes pending peers for the topic and emits a status update.
 pub(crate) async fn handle_webxdc_peer_left(
     event_id: &str,
     topic_id: &str,
@@ -1206,7 +512,7 @@ pub(crate) async fn handle_webxdc_peer_left(
 
     log_info!("[WEBXDC] Received peer-left from {} for topic {}", sender_npub, topic_id);
 
-    // Persist to SQLite — invalidates any older peer-advertisement from this npub
+    // Persist to SQLite
     if !db::event_exists(event_id).unwrap_or(true) {
         if let Ok(chat_id) = db::get_or_create_chat_id(conversation_id) {
             let tags = vec![
@@ -1250,7 +556,7 @@ pub(crate) async fn handle_webxdc_peer_left(
     if let Some(handle) = TAURI_APP.get() {
         let state = handle.state::<miniapps::state::MiniAppsState>();
 
-        // Remove from session peers (lobby state)
+        // Remove from session peers
         state.remove_session_peer(&topic, sender_npub).await;
 
         // Check if we're actively playing
@@ -1259,7 +565,7 @@ pub(crate) async fn handle_webxdc_peer_left(
             channels.values().any(|ch| ch.topic == topic && ch.active)
         };
 
-        // Emit updated status — peer_count = session_peers.len() (single source of truth)
+        // Emit updated status
         let peer_npubs = state.get_session_peers(&topic).await;
         let peer_count = peer_npubs.len();
         if let Some(main_window) = handle.get_webview_window("main") {

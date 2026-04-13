@@ -9,11 +9,12 @@ use futures_util::StreamExt;
 use nostr_sdk::prelude::*;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
+use vector_core::PreparedEvent;
+
 use crate::{
     db, profile, profile_sync,
     ChatType, Profile,
     NOSTR_CLIENT, STATE, WRAPPER_ID_CACHE,
-    services::event_handler::PreparedEvent,
 };
 
 // ============================================================================
@@ -154,14 +155,14 @@ pub async fn fetch_messages<R: Runtime>(
                             .map(move |event| {
                                 let c = client_clone.clone();
                                 tokio::spawn(async move {
-                                    crate::services::prepare_event(event, &c, my_public_key).await
+                                    vector_core::event_handler::prepare_event(event, &c, my_public_key).await
                                 })
                             })
                             .buffer_unordered(8);
                         tokio::pin!(prepared_stream);
                         while let Some(result) = prepared_stream.next().await {
                             if let Ok(prepared) = result {
-                                crate::services::commit_prepared_event(prepared, false).await;
+                                crate::services::tauri_commit_prepared_event(prepared, false).await;
                             }
                         }
                     }
@@ -542,23 +543,11 @@ pub async fn fetch_messages<R: Runtime>(
                             tokio::pin!(stream);
                             let mut count = 0u32;
                             while let Some(event) = stream.next().await {
-                                let prepared = crate::services::prepare_event(
+                                let prepared = vector_core::event_handler::prepare_event(
                                     event, &bg_client, my_public_key,
                                 ).await;
-                                match &prepared {
-                                    PreparedEvent::DedupSkip { wrapper_id_bytes, wrapper_created_at } => {
-                                        if *wrapper_created_at > 0 {
-                                            let _ = db::update_wrapper_timestamp(wrapper_id_bytes, *wrapper_created_at);
-                                        }
-                                    }
-                                    PreparedEvent::ErrorSkip { wrapper_id_bytes, wrapper_created_at } => {
-                                        let _ = db::save_processed_wrapper(wrapper_id_bytes, *wrapper_created_at);
-                                    }
-                                    _ => {
-                                        if crate::services::commit_prepared_event(prepared, false).await {
-                                            count += 1;
-                                        }
-                                    }
+                                if crate::services::tauri_commit_prepared_event(prepared, false).await {
+                                    count += 1;
                                 }
                             }
                             if count > 0 {
@@ -644,7 +633,7 @@ pub async fn fetch_messages<R: Runtime>(
             .map(move |event| {
                 let c = client_clone.clone();
                 tokio::spawn(async move {
-                    crate::services::prepare_event(event, &c, my_public_key).await
+                    vector_core::event_handler::prepare_event(event, &c, my_public_key).await
                 })
             })
             .buffer_unordered(8);
@@ -653,6 +642,7 @@ pub async fn fetch_messages<R: Runtime>(
         while let Some(result) = prepared_stream.next().await {
             total_events += 1;
             if let Ok(prepared) = result {
+                // Extract timing metrics before commit consumes the prepared event
                 match &prepared {
                     PreparedEvent::Processed { unwrap_ns: u, parse_ns: p, .. } => {
                         unwrap_ns += u;
@@ -661,21 +651,15 @@ pub async fn fetch_messages<R: Runtime>(
                     PreparedEvent::MlsWelcome { unwrap_ns: u, .. } => {
                         unwrap_ns += u;
                     }
-                    PreparedEvent::DedupSkip { wrapper_id_bytes, wrapper_created_at } => {
+                    PreparedEvent::DedupSkip { .. } => {
                         dedup_skips += 1;
-                        if *wrapper_created_at > 0 {
-                            let _ = db::update_wrapper_timestamp(wrapper_id_bytes, *wrapper_created_at);
-                        }
-                        continue;
                     }
-                    PreparedEvent::ErrorSkip { wrapper_id_bytes, wrapper_created_at } => {
-                        let _ = db::save_processed_wrapper(wrapper_id_bytes, *wrapper_created_at);
+                    PreparedEvent::ErrorSkip { .. } => {
                         error_skips += 1;
-                        continue;
                     }
                 }
                 let t = std::time::Instant::now();
-                if crate::services::commit_prepared_event(prepared, false).await {
+                if crate::services::tauri_commit_prepared_event(prepared, false).await {
                     new_messages_count += 1;
                 }
                 commit_ns += t.elapsed().as_nanos() as u64;
@@ -791,7 +775,7 @@ pub async fn fetch_messages<R: Runtime>(
                         Ok(stream) => {
                             tokio::pin!(stream);
                             while let Some(event) = stream.next().await {
-                                let prepared = crate::services::prepare_event(
+                                let prepared = vector_core::event_handler::prepare_event(
                                     event, &bg_client, my_public_key,
                                 ).await;
                                 processed += 1;
@@ -803,20 +787,8 @@ pub async fn fetch_messages<R: Runtime>(
                                         "new_messages": archive_new,
                                     }));
                                 }
-                                match &prepared {
-                                    PreparedEvent::DedupSkip { wrapper_id_bytes, wrapper_created_at } => {
-                                        if *wrapper_created_at > 0 {
-                                            let _ = db::update_wrapper_timestamp(wrapper_id_bytes, *wrapper_created_at);
-                                        }
-                                    }
-                                    PreparedEvent::ErrorSkip { wrapper_id_bytes, wrapper_created_at } => {
-                                        let _ = db::save_processed_wrapper(wrapper_id_bytes, *wrapper_created_at);
-                                    }
-                                    _ => {
-                                        if crate::services::commit_prepared_event(prepared, false).await {
-                                            archive_new += 1;
-                                        }
-                                    }
+                                if crate::services::tauri_commit_prepared_event(prepared, false).await {
+                                    archive_new += 1;
                                 }
                             }
                         }

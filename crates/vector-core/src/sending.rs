@@ -448,7 +448,6 @@ mod tests {
     #[derive(Debug, Clone, PartialEq)]
     enum CbEvent {
         Pending(String),
-        AttachmentPreview(String),
         UploadProgress(String, u8, u64),
         UploadComplete(String, String),
         Sent(String, String),
@@ -470,9 +469,6 @@ mod tests {
     impl SendCallback for MockCallback {
         fn on_pending(&self, cid: &str, _: &Message) {
             self.events.lock().unwrap().push(CbEvent::Pending(cid.into()));
-        }
-        fn on_attachment_preview(&self, cid: &str, _: &Message) {
-            self.events.lock().unwrap().push(CbEvent::AttachmentPreview(cid.into()));
         }
         fn on_upload_progress(&self, pid: &str, pct: u8, bytes: u64) -> Result<(), String> {
             self.events.lock().unwrap().push(CbEvent::UploadProgress(pid.into(), pct, bytes));
@@ -528,7 +524,7 @@ mod tests {
         let cb = NoOpSendCallback;
         let msg = Message::default();
         cb.on_pending("c", &msg);
-        cb.on_attachment_preview("c", &msg);
+
         assert!(cb.on_upload_progress("p", 50, 1024).is_ok());
         cb.on_upload_complete("c", "p", "a", "url");
         cb.on_sent("c", "o", &msg);
@@ -555,7 +551,7 @@ mod tests {
         let cb = MockCallback::new();
         let msg = Message::default();
         cb.on_pending("r", &msg);
-        cb.on_attachment_preview("r", &msg);
+
         cb.on_upload_progress("p", 0, 0).ok();
         cb.on_upload_progress("p", 50, 5000).ok();
         cb.on_upload_progress("p", 100, 10000).ok();
@@ -563,8 +559,8 @@ mod tests {
         cb.on_sent("r", "p", &msg);
         cb.on_persist("r", &msg);
         let e = cb.events();
-        assert_eq!(e.len(), 8);
-        assert!(matches!(&e[5], CbEvent::UploadComplete(_, url) if url.contains("blossom")));
+        assert_eq!(e.len(), 7);
+        assert!(matches!(&e[4], CbEvent::UploadComplete(_, url) if url.contains("blossom")));
     }
 
     #[test]
@@ -594,7 +590,7 @@ mod tests {
         let cb = MockCallback::with_cancel(30);
         let msg = Message::default();
         cb.on_pending("r", &msg);
-        cb.on_attachment_preview("r", &msg);
+
         cb.on_upload_progress("p", 10, 1000).ok();
         assert!(cb.on_upload_progress("p", 30, 3000).is_err());
         cb.on_failed("r", "p", &msg);
@@ -627,7 +623,7 @@ mod tests {
         // 1. Pending message created
         cb.on_pending("npub1recv", &msg);
         // 2. Attachment preview added
-        cb.on_attachment_preview("npub1recv", &msg);
+
         // 3. Upload progress (0% → 25% → 50% → 75% → 100%)
         cb.on_upload_progress("pending-42", 0, 0).unwrap();
         cb.on_upload_progress("pending-42", 25, 2500).unwrap();
@@ -642,14 +638,13 @@ mod tests {
         cb.on_persist("npub1recv", &msg);
 
         let e = cb.events();
-        assert_eq!(e.len(), 10);
+        assert_eq!(e.len(), 9);
         assert!(matches!(&e[0], CbEvent::Pending(c) if c == "npub1recv"));
-        assert!(matches!(&e[1], CbEvent::AttachmentPreview(c) if c == "npub1recv"));
-        assert!(matches!(&e[2], CbEvent::UploadProgress(_, 0, 0)));
-        assert!(matches!(&e[6], CbEvent::UploadProgress(_, 100, 10000)));
-        assert!(matches!(&e[7], CbEvent::UploadComplete(_, url) if url.contains("deadbeef")));
-        assert!(matches!(&e[8], CbEvent::Sent(..)));
-        assert!(matches!(&e[9], CbEvent::Persist(..)));
+        assert!(matches!(&e[1], CbEvent::UploadProgress(_, 0, 0)));
+        assert!(matches!(&e[5], CbEvent::UploadProgress(_, 100, 10000)));
+        assert!(matches!(&e[6], CbEvent::UploadComplete(_, url) if url.contains("deadbeef")));
+        assert!(matches!(&e[7], CbEvent::Sent(..)));
+        assert!(matches!(&e[8], CbEvent::Persist(..)));
     }
 
     #[test]
@@ -661,7 +656,7 @@ mod tests {
         // 1. Pending message
         cb.on_pending("npub1recv", &msg);
         // 2. Attachment preview (with reused URL already set)
-        cb.on_attachment_preview("npub1recv", &msg);
+
         // 3. Upload complete (immediate — URL was already known)
         cb.on_upload_complete("npub1recv", "pending-99", "existinghash", "https://blossom.example/existing");
         // 4. Gift-wrap sent
@@ -670,10 +665,10 @@ mod tests {
         cb.on_persist("npub1recv", &msg);
 
         let e = cb.events();
-        assert_eq!(e.len(), 5);
+        assert_eq!(e.len(), 4);
         // No UploadProgress events — upload was skipped
         assert!(!e.iter().any(|ev| matches!(ev, CbEvent::UploadProgress(..))));
-        assert!(matches!(&e[2], CbEvent::UploadComplete(..)));
+        assert!(matches!(&e[1], CbEvent::UploadComplete(..)));
     }
 
     #[test]
@@ -682,7 +677,7 @@ mod tests {
         let msg = Message::default();
 
         cb.on_pending("npub1recv", &msg);
-        cb.on_attachment_preview("npub1recv", &msg);
+
         assert!(cb.on_upload_progress("p", 10, 1000).is_ok());
         assert!(cb.on_upload_progress("p", 20, 2000).is_ok());
         // Cancel triggers at 30%
@@ -693,7 +688,7 @@ mod tests {
         cb.on_failed("npub1recv", "p", &msg);
 
         let e = cb.events();
-        assert_eq!(e.len(), 6);
+        assert_eq!(e.len(), 5);
         // No Sent, no Persist after cancel — just Failed
         assert!(!e.iter().any(|ev| matches!(ev, CbEvent::Sent(..))));
         assert!(matches!(e.last(), Some(CbEvent::Failed(..))));
@@ -705,7 +700,7 @@ mod tests {
         let msg = Message::default();
 
         cb.on_pending("npub1recv", &msg);
-        cb.on_attachment_preview("npub1recv", &msg);
+
         cb.on_upload_progress("p", 0, 0).ok();
         cb.on_upload_progress("p", 10, 500).ok();
         // Upload fails (server error, all retries exhausted)
@@ -713,9 +708,9 @@ mod tests {
         cb.on_persist("npub1recv", &msg);
 
         let e = cb.events();
-        assert_eq!(e.len(), 6);
-        assert!(matches!(&e[4], CbEvent::Failed(..)));
-        assert!(matches!(&e[5], CbEvent::Persist(..)));
+        assert_eq!(e.len(), 5);
+        assert!(matches!(&e[3], CbEvent::Failed(..)));
+        assert!(matches!(&e[4], CbEvent::Persist(..)));
         // No UploadComplete, no Sent
         assert!(!e.iter().any(|ev| matches!(ev, CbEvent::UploadComplete(..))));
         assert!(!e.iter().any(|ev| matches!(ev, CbEvent::Sent(..))));
@@ -728,7 +723,7 @@ mod tests {
 
         // Upload succeeds but gift-wrap fails
         cb.on_pending("npub1recv", &msg);
-        cb.on_attachment_preview("npub1recv", &msg);
+
         cb.on_upload_progress("p", 100, 10000).ok();
         cb.on_upload_complete("npub1recv", "p", "hash", "https://blossom/hash");
         // Gift-wrap retry exhausted
@@ -736,10 +731,10 @@ mod tests {
         cb.on_persist("npub1recv", &msg);
 
         let e = cb.events();
-        assert_eq!(e.len(), 6);
+        assert_eq!(e.len(), 5);
         // Upload succeeded but send failed
-        assert!(matches!(&e[3], CbEvent::UploadComplete(..)));
-        assert!(matches!(&e[4], CbEvent::Failed(..)));
+        assert!(matches!(&e[2], CbEvent::UploadComplete(..)));
+        assert!(matches!(&e[3], CbEvent::Failed(..)));
     }
 
     #[test]
@@ -749,7 +744,7 @@ mod tests {
 
         // Image with thumbhash + dimensions
         cb.on_pending("npub1recv", &msg);
-        cb.on_attachment_preview("npub1recv", &msg);
+
         cb.on_upload_progress("p", 0, 0).ok();
         cb.on_upload_progress("p", 50, 50000).ok();
         cb.on_upload_progress("p", 100, 100000).ok();
@@ -758,12 +753,11 @@ mod tests {
         cb.on_persist("npub1recv", &msg);
 
         let e = cb.events();
-        assert_eq!(e.len(), 8);
-        // Verify ordering: pending → preview → progress(3x) → complete → sent → persist
+        assert_eq!(e.len(), 7);
+        // Verify ordering: pending → progress(3x) → complete → sent → persist
         assert!(matches!(&e[0], CbEvent::Pending(..)));
-        assert!(matches!(&e[1], CbEvent::AttachmentPreview(..)));
-        assert!(matches!(&e[5], CbEvent::UploadComplete(_, url) if url.ends_with(".jpg")));
-        assert!(matches!(&e[6], CbEvent::Sent(..)));
+        assert!(matches!(&e[4], CbEvent::UploadComplete(_, url) if url.ends_with(".jpg")));
+        assert!(matches!(&e[5], CbEvent::Sent(..)));
     }
 
     #[test]
