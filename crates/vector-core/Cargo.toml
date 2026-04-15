@@ -6,12 +6,22 @@ description = "Core library for Vector — the single source of truth for all Ve
 
 [dependencies]
 # Nostr Protocol
+nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "zeroize-secretkey" }
 nostr-sdk = { version = "0.44.1", features = ["nip06", "nip44", "nip59"] }
 nostr-blossom = "0.44.0"
 bip39 = { version = "2.2.2", features = ["rand"] }
 
 # Database
 rusqlite = { version = "0.32", features = ["bundled"] }
+
+# MLS (Marmot/MDK) — exact same rev as src-tauri
+mdk-core = { git = "https://github.com/marmot-protocol/mdk.git", rev = "136a9ee929580206ea0357d48d9766427918186d", features = ["mip04"] }
+mdk-sqlite-storage = { git = "https://github.com/marmot-protocol/mdk.git", rev = "136a9ee929580206ea0357d48d9766427918186d" }
+mdk-storage-traits = { git = "https://github.com/marmot-protocol/mdk.git", rev = "136a9ee929580206ea0357d48d9766427918186d" }
+
+# OpenMLS crypto pins — must match MDK's transitive deps (avoids curve25519-dalek conflict with iroh in src-tauri)
+openmls_rust_crypto = "=0.5.0"
+hpke-rs-rust-crypto = "=0.4.0"
 
 # Async
 tokio = { version = "1.49.0", features = ["sync", "time", "net", "io-util", "rt-multi-thread", "macros"] }

@@ -319,3 +319,51 @@ mod tests {
             "172.32.0.1 is outside private class B range and should be allowed");
     }
 }
+
+// ============================================================================
+// Remote File Size
+// ============================================================================
+
+/// Get the size of a remote file via HEAD request or Range fallback.
+/// Returns None if the URL is private, unreachable, or size can't be determined.
+pub async fn get_remote_file_size(url: &str) -> Option<u64> {
+    validate_url_not_private(url).ok()?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .ok()?;
+
+    // Method 1: HEAD request
+    if let Ok(head_res) = client.head(url).send().await {
+        if let Some(length) = head_res.content_length() {
+            if length > 0 {
+                return Some(length);
+            }
+        }
+    }
+
+    // Method 2: Range request fallback
+    if let Ok(partial_res) = client
+        .get(url)
+        .header("Range", "bytes=0-1")
+        .send()
+        .await
+    {
+        if let Some(content_range) = partial_res.headers().get("content-range") {
+            if let Ok(range_str) = content_range.to_str() {
+                if let Some(size_part) = range_str.split('/').nth(1) {
+                    if let Ok(size) = size_part.parse::<u64>() {
+                        return Some(size);
+                    }
+                }
+            }
+        }
+        if let Some(length) = partial_res.content_length() {
+            if length > 100 {
+                return Some(length);
+            }
+        }
+    }
+
+    None
+}

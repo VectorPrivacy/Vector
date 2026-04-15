@@ -69,6 +69,9 @@ pub mod rumor;
 // === Messaging ===
 pub mod sending;
 
+// === MLS Group Encryption ===
+pub mod mls;
+
 // === Event Handler ===
 pub mod event_handler;
 
