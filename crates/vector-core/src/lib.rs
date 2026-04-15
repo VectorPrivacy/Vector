@@ -86,7 +86,7 @@ pub use sending::{SendCallback, NoOpSendCallback, SendConfig, SendResult};
 pub use stored_event::{StoredEvent, StoredEventBuilder, SystemEventType};
 pub use rumor::{RumorEvent, RumorContext, ConversationType, RumorProcessingResult, process_rumor};
 pub use profile::{SyncPriority, ProfileSyncHandler, NoOpProfileSyncHandler};
-pub use event_handler::{InboundEventHandler, NoOpEventHandler, PreparedEvent};
+pub use event_handler::{InboundEventHandler, NoOpEventHandler, PreparedEvent, process_event};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -320,6 +320,91 @@ impl VectorCore {
     pub fn my_npub(&self) -> Option<String> {
         state::MY_PUBLIC_KEY.get()
             .and_then(|pk| ToBech32::to_bech32(pk).ok())
+    }
+
+    // ========================================================================
+    // Event Subscription
+    // ========================================================================
+
+    /// Subscribe to incoming DM events (NIP-17 GiftWraps).
+    ///
+    /// Returns the subscription ID for use in a custom notification loop.
+    /// For a complete listen-and-process loop, use [`listen()`](Self::listen) instead.
+    pub async fn subscribe_dms(&self) -> Result<nostr_sdk::SubscriptionId> {
+        use nostr_sdk::prelude::*;
+        let client = state::NOSTR_CLIENT.get()
+            .ok_or(VectorError::Other("Not connected".into()))?;
+        let my_pk = state::MY_PUBLIC_KEY.get()
+            .copied()
+            .ok_or(VectorError::Other("Not logged in".into()))?;
+
+        let filter = Filter::new()
+            .pubkey(my_pk)
+            .kind(Kind::GiftWrap)
+            .limit(0);
+
+        let output = client.subscribe(filter, None).await
+            .map_err(|e| VectorError::Nostr(e.to_string()))?;
+        Ok(output.val)
+    }
+
+    /// Start listening for incoming DMs and process them through the event pipeline.
+    ///
+    /// Blocks until the client disconnects. Each event flows through:
+    /// `prepare_event` (dedup, unwrap, parse) → `commit_prepared_event` (STATE, DB, emit, handler hooks)
+    ///
+    /// ```no_run
+    /// use vector_core::*;
+    /// use std::sync::Arc;
+    ///
+    /// struct EchoBot;
+    /// impl InboundEventHandler for EchoBot {
+    ///     fn on_dm_received(&self, chat_id: &str, msg: &Message, _is_new: bool) {
+    ///         if msg.mine { return; }
+    ///         let to = chat_id.to_string();
+    ///         let reply = format!("Echo: {}", msg.content);
+    ///         tokio::spawn(async move {
+    ///             let _ = VectorCore.send_dm(&to, &reply).await;
+    ///         });
+    ///     }
+    /// }
+    ///
+    /// # async fn example() -> vector_core::Result<()> {
+    /// let core = VectorCore::init(CoreConfig {
+    ///     data_dir: "/tmp/bot-data".into(),
+    ///     event_emitter: None,
+    /// })?;
+    /// core.login("nsec1...", None).await?;
+    /// core.listen(Arc::new(EchoBot)).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn listen(&self, handler: Arc<dyn InboundEventHandler>) -> Result<()> {
+        let client = state::NOSTR_CLIENT.get()
+            .ok_or(VectorError::Other("Not connected".into()))?;
+        let my_pk = state::MY_PUBLIC_KEY.get()
+            .copied()
+            .ok_or(VectorError::Other("Not logged in".into()))?;
+
+        let sub_id = self.subscribe_dms().await?;
+        let client_for_closure = client.clone();
+
+        client.handle_notifications(move |notification| {
+            let handler = handler.clone();
+            let c = client_for_closure.clone();
+            let sid = sub_id.clone();
+            async move {
+                if let nostr_sdk::RelayPoolNotification::Event { event, subscription_id, .. } = notification {
+                    if subscription_id == sid {
+                        let prepared = event_handler::prepare_event(*event, &c, my_pk).await;
+                        event_handler::commit_prepared_event(prepared, true, &*handler).await;
+                    }
+                }
+                Ok(false)
+            }
+        }).await.map_err(|e| VectorError::Nostr(e.to_string()))?;
+
+        Ok(())
     }
 
     /// Disconnect and clean up.

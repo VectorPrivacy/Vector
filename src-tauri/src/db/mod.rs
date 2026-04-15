@@ -57,12 +57,6 @@ pub use vector_core::db::events::{save_message, save_chat_messages};
 pub async fn message_exists_in_db(id: &str) -> Result<bool, String> {
     vector_core::db::events::message_exists_in_db(id)
 }
-pub async fn wrapper_event_exists(id: &str) -> Result<bool, String> {
-    vector_core::db::events::wrapper_event_exists(id)
-}
-pub async fn update_wrapper_event_id(event_id: &str, wrapper_id: &str) -> Result<bool, String> {
-    vector_core::db::events::update_wrapper_event_id(event_id, wrapper_id)
-}
 pub async fn get_chat_message_count(chat_id: &str) -> Result<usize, String> {
     let chat_int_id = vector_core::db::id_cache::get_chat_id_by_identifier(chat_id)?;
     vector_core::db::events::get_chat_message_count(chat_int_id)
@@ -70,7 +64,6 @@ pub async fn get_chat_message_count(chat_id: &str) -> Result<usize, String> {
 // Wrapper tracking — sync functions re-exported directly
 pub use vector_core::db::wrappers::{
     save_processed_wrapper, load_processed_wrappers, load_negentropy_items,
-    update_wrapper_timestamp,
 };
 pub async fn load_recent_wrapper_ids(days: u64) -> Result<Vec<[u8; 32]>, String> {
     vector_core::db::wrappers::load_recent_wrapper_ids(days)
@@ -84,7 +77,7 @@ pub use attachments::{
 // Event database functions
 pub use events::{
     save_event, save_pivx_payment_event, save_system_event_by_id,
-    save_reaction_event, save_edit_event, event_exists, delete_event,
+    save_edit_event, event_exists, delete_event,
     populate_reply_context, get_message_views, get_all_chats_last_messages,
 };
 // Async wrappers for sync vector-core read functions

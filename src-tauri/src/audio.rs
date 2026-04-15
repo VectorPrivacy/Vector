@@ -332,6 +332,7 @@ pub fn resample_mono_i16(samples: &[i16], from_rate: u32, to_rate: u32) -> Resul
 /// inline mono mixdown, pre-allocated buffers. ~180ms.
 ///
 /// Both paths use rayon parallel SIMD linear interpolation resampling to 16kHz. ~2ms.
+#[cfg_attr(not(feature = "whisper"), allow(dead_code))]
 pub fn decode_for_whisper(path: &Path) -> Result<Vec<f32>, String> {
     use rayon::prelude::*;
 
@@ -543,6 +544,7 @@ fn wav_fast_decode(bytes: &[u8], target_rate: u32) -> Option<(Vec<f32>, u32)> {
 }
 
 /// Symphonia slow path: decode compressed audio (MP3, OGG, FLAC, etc.) to mono f32.
+#[cfg_attr(not(feature = "whisper"), allow(dead_code))]
 fn symphonia_decode_mono(file_bytes: Vec<u8>, path: &Path) -> Result<(Vec<f32>, u32), String> {
     let cursor = std::io::Cursor::new(file_bytes);
     let media_source = MediaSourceStream::new(Box::new(cursor), Default::default());

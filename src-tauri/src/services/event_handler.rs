@@ -222,12 +222,13 @@ pub(crate) async fn tauri_commit_prepared_event(
     if let vector_core::PreparedEvent::MlsWelcome {
         ref wrapper_event_id_bytes, ..
     } = prepared {
-        // Dedup: same welcome can arrive from multiple relays simultaneously
+        // Atomic check-and-insert to prevent duplicate processing from multiple relays
         {
-            let cache = WRAPPER_ID_CACHE.lock().await;
+            let mut cache = WRAPPER_ID_CACHE.lock().await;
             if cache.contains(wrapper_event_id_bytes) {
                 return false;
             }
+            cache.insert(*wrapper_event_id_bytes);
         }
         return handle_mls_welcome(prepared, is_new).await;
     }
@@ -283,11 +284,7 @@ async fn handle_mls_welcome(prepared: vector_core::PreparedEvent, is_new: bool) 
     let _ = db::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at);
 
     if let Some(group_name) = welcome_result {
-        // Cache wrapper for session dedup
-        {
-            let mut cache = WRAPPER_ID_CACHE.lock().await;
-            cache.insert(wrapper_event_id_bytes);
-        }
+        // Wrapper already cached atomically in tauri_commit_prepared_event
 
         // Only emit after initial sync is complete
         let should_emit = {

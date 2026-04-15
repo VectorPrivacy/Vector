@@ -271,12 +271,14 @@ pub async fn commit_prepared_event(
             }
         }
         PreparedEvent::MlsWelcome { event, rumor, contact, sender, is_mine, wrapper_event_id_bytes, wrapper_created_at, .. } => {
-            // Dedup: same welcome can arrive from multiple relays simultaneously
+            // Dedup: same welcome can arrive from multiple relays simultaneously.
+            // Check-and-insert atomically (single lock scope) to close the race window.
             {
-                let cache = WRAPPER_ID_CACHE.lock().await;
+                let mut cache = WRAPPER_ID_CACHE.lock().await;
                 if cache.contains(&wrapper_event_id_bytes) {
                     return false;
                 }
+                cache.insert(wrapper_event_id_bytes);
             }
             // MLS Welcome — delegate to platform handler
             handler.on_mls_welcome(&event, &rumor, &sender, &contact, is_mine, is_new);
@@ -428,4 +430,26 @@ async fn commit_edit(
         }));
     }
     true
+}
+
+// ============================================================================
+// Convenience: single-call event processing
+// ============================================================================
+
+/// Process a single event through the full pipeline (prepare + commit).
+///
+/// Gets client and public key from globals. For callers that manage their
+/// own notification loop but want the full vector-core processing pipeline.
+pub async fn process_event(
+    event: Event,
+    is_new: bool,
+    handler: &dyn InboundEventHandler,
+) -> std::result::Result<bool, String> {
+    let client = crate::state::NOSTR_CLIENT.get()
+        .ok_or_else(|| "Nostr client not initialized".to_string())?;
+    let my_pk = crate::state::MY_PUBLIC_KEY.get()
+        .copied()
+        .ok_or_else(|| "Public key not initialized".to_string())?;
+    let prepared = prepare_event(event, client, my_pk).await;
+    Ok(commit_prepared_event(prepared, is_new, handler).await)
 }

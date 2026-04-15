@@ -28,7 +28,6 @@ use crate::util::calculate_file_hash;
 use crate::STATE;
 use crate::util;
 use crate::TAURI_APP;
-use crate::NOSTR_CLIENT;
 use crate::miniapps::realtime::{generate_topic_id, encode_topic_id};
 
 use super::types::{AttachmentFile, ImageMetadata, Message, Attachment};
@@ -386,7 +385,6 @@ pub async fn send_text_reply_headless(chat_id: &str, content: &str) -> Result<St
 
     let event_id = if is_group {
         // MLS path stays local
-        let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
         let my_public_key = *crate::MY_PUBLIC_KEY.get().ok_or("Public key not initialized")?;
         let milliseconds = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap()
@@ -518,7 +516,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
     // For DMs, convert the Bech32 String to a PublicKey
     // For groups, we'll handle it differently below
-    let receiver_pubkey = if !is_group_chat {
+    let _receiver_pubkey = if !is_group_chat {
         PublicKey::from_bech32(receiver.clone().as_str())
             .map_err(|e| format!("Invalid npub: {}", e))?
     } else {

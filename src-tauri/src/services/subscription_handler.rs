@@ -719,35 +719,29 @@ pub(crate) async fn refresh_mls_subscription() {
 }
 
 /// Called once after login to begin receiving real-time events.
+///
+/// Uses vector-core's `subscribe_dms()` for the GiftWrap subscription,
+/// then layers on MLS group subscription (Tauri-specific MDK dependency).
 pub(crate) async fn start_subscriptions() -> Result<bool, String> {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
-    // Grab our pubkey
-    let pubkey = *crate::MY_PUBLIC_KEY.get().ok_or("Public key not initialized")?;
+    // GiftWrap subscription via vector-core (DMs, files, MLS welcomes)
+    let core = vector_core::VectorCore;
+    let gift_sub_id = core.subscribe_dms().await.map_err(|e| e.to_string())?;
 
-    // Live GiftWraps to us (DMs, files, MLS welcomes)
-    let giftwrap_filter = Filter::new()
-        .pubkey(pubkey)
-        .kind(Kind::GiftWrap)
-        .limit(0);
-
-    let gift_sub_id = match client.subscribe(giftwrap_filter, None).await {
-        Ok(id) => id.val,
-        Err(e) => return Err(e.to_string()),
-    };
-
-    // Initial MLS subscription (scoped to current groups, or skipped if none)
+    // MLS group subscription (Tauri-specific — scoped to current groups)
     refresh_mls_subscription().await;
 
-    // Begin watching for notifications from our subscriptions
+    // Notification loop: dispatch GiftWraps through Tauri's event handler,
+    // MLS group messages through the MDK handler
     match client
         .handle_notifications(|notification| async {
             if let RelayPoolNotification::Event { event, subscription_id, .. } = notification {
                 if subscription_id == gift_sub_id {
-                    // Handle DMs/files/vector-specific + MLS welcomes inside giftwrap
+                    // DMs/files/reactions/edits + MLS welcomes (via tauri_commit_prepared_event)
                     super::handle_event(*event, true).await;
                 } else if MLS_SUB_ID.lock().await.as_ref() == Some(&subscription_id) {
-                    // Handle live MLS group message via shared handler
+                    // MLS group messages via MDK engine
                     let my_pk = crate::MY_PUBLIC_KEY.get()
                         .copied()
                         .unwrap_or(PublicKey::from_slice(&[0u8; 32]).unwrap());

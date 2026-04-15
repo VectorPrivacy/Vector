@@ -461,6 +461,7 @@ fn encode_rgba_to_png_base64(rgba_data: &[u8], width: u32, height: u32) -> Strin
 
 /// Zero-allocation MIME lookup — wraps vector-core's match-based implementation.
 /// Handles leading dots and whitespace for backward compatibility.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub fn mime_from_extension_static(extension: &str) -> &'static str {
     let ext = extension.trim().trim_start_matches('.');
     vector_core::crypto::mime_from_extension(ext)
