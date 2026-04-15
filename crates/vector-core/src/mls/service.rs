@@ -1268,6 +1268,738 @@ impl MlsService {
         Ok(())
     }
 
+    /// Sync a group from the last cursor position.
+    ///
+    /// 1. Read cursor from mls_event_cursors
+    /// 2. Fetch events from relays since cursor (or use prefetched_events)
+    /// 3. Process each event via engine.process_message
+    /// 4. Process buffered rumors (messages, reactions, typing, leave requests, etc.)
+    /// 5. Update cursor position
+    ///
+    /// Returns (processed_events_count, new_messages_count)
+    pub async fn sync_group_since_cursor(
+        &self,
+        group_id: &str,
+        prefetched_events: Option<Vec<nostr_sdk::Event>>,
+    ) -> Result<(u32, u32), MlsError> {
+        use nostr_sdk::prelude::*;
+        use crate::rumor::{RumorEvent, RumorContext, ConversationType, RumorProcessingResult};
+
+        if group_id.is_empty() {
+            return Err(MlsError::InvalidGroupId);
+        }
+
+        // Acquire per-group lock
+        let group_lock = get_group_sync_lock(group_id);
+        let _guard = group_lock.lock().await;
+
+        // Check eviction
+        let groups = self.read_groups().ok();
+        let group_metadata = groups.as_ref().and_then(|gs| {
+            gs.iter().find(|g| g.group.group_id == group_id || (!g.group.engine_group_id.is_empty() && g.group.engine_group_id == group_id))
+        });
+
+        if let Some(meta) = group_metadata {
+            if meta.group.evicted {
+                return Ok((0, 0));
+            }
+        }
+
+        let group_display = group_metadata
+            .and_then(|m| if m.profile.name.is_empty() { None } else { Some(format!("{} ({})", m.profile.name, &group_id[..8.min(group_id.len())])) })
+            .unwrap_or_else(|| group_id[..16.min(group_id.len())].to_string());
+
+        // Load cursor
+        let mut cursors = self.read_event_cursors().unwrap_or_default();
+        let now = Timestamp::now();
+
+        let since = if let Some(cur) = cursors.get(group_id) {
+            Timestamp::from_secs(cur.last_seen_at)
+        } else {
+            if let Some(meta) = group_metadata {
+                if meta.group.created_at > 0 {
+                    println!("[MLS] First sync for group {}, fetching from invite time {}", group_display, meta.group.created_at);
+                    Timestamp::from_secs(meta.group.created_at)
+                } else {
+                    println!("[MLS] First sync for group {} (no created_at), fetching 1 year history", group_display);
+                    Timestamp::from_secs(now.as_secs().saturating_sub(60 * 60 * 24 * 365))
+                }
+            } else {
+                println!("[MLS] First sync for group {} (no metadata), fetching 1 year history", group_display);
+                Timestamp::from_secs(now.as_secs().saturating_sub(60 * 60 * 24 * 365))
+            }
+        };
+        let until = now;
+
+        let gid_for_fetch = if let Some(meta) = group_metadata {
+            meta.group.group_id.clone()
+        } else {
+            group_id.to_string()
+        };
+
+        let group_id_len = gid_for_fetch.len();
+        if group_id_len != 32 && group_id_len != 64 {
+            eprintln!("[MLS] sync_group_since_cursor: unsupported group_id length {} for id={}; skipping", group_id_len, gid_for_fetch);
+            return Ok((0, 0));
+        }
+
+        const BATCH_SIZE: usize = 1000;
+        const MAX_BATCHES: usize = 100;
+
+        let mut total_processed: u32 = 0;
+        let mut total_new_msgs: u32 = 0;
+        let mut current_since = since;
+        let mut batch_count: usize = 0;
+        let had_prefetched = prefetched_events.is_some();
+        let mut prefetched_remaining = prefetched_events;
+
+        // Pagination loop
+        loop {
+            batch_count += 1;
+            if batch_count > MAX_BATCHES {
+                eprintln!("[MLS] Pagination safety limit reached ({} batches) for group {}", MAX_BATCHES, gid_for_fetch);
+                break;
+            }
+
+        // Fetch or consume prefetched events
+        let mut ordered: Vec<nostr_sdk::Event>;
+        let batch_size: usize;
+
+        if let Some(events) = prefetched_remaining.take() {
+            if events.is_empty() { return Ok((0, 0)); }
+            ordered = events;
+            ordered.sort_by_key(|e| e.created_at.as_secs());
+            batch_size = ordered.len();
+        } else if had_prefetched {
+            break;
+        } else {
+            let client = crate::state::NOSTR_CLIENT.get().ok_or(MlsError::NotInitialized)?;
+
+            let mut filter = Filter::new()
+                .kind(Kind::MlsGroupMessage)
+                .since(current_since)
+                .until(until)
+                .custom_tag(SingleLetterTag::lowercase(Alphabet::H), &gid_for_fetch)
+                .limit(BATCH_SIZE);
+
+            let mut used_fallback = false;
+            let mut events = match client
+                .fetch_events_from(crate::state::active_trusted_relays().await, filter.clone(), std::time::Duration::from_secs(15))
+                .await
+            {
+                Ok(evts) => evts,
+                Err(e) => return Err(MlsError::NetworkError(format!("fetch MLS events (with h tag) failed: {}", e))),
+            };
+
+            if events.is_empty() {
+                used_fallback = true;
+                filter = Filter::new()
+                    .kind(Kind::MlsGroupMessage)
+                    .since(current_since)
+                    .until(until)
+                    .limit(BATCH_SIZE);
+                events = match client
+                    .fetch_events_from(crate::state::active_trusted_relays().await, filter, std::time::Duration::from_secs(15))
+                    .await
+                {
+                    Ok(evts) => evts,
+                    Err(e) => return Err(MlsError::NetworkError(format!("fetch MLS events (fallback) failed: {}", e))),
+                };
+            }
+
+            if events.is_empty() {
+                if batch_count == 1 { return Ok((0, 0)); }
+                break;
+            }
+
+            batch_size = events.len();
+            if batch_count > 1 {
+                println!("[MLS] Pagination batch {} for group {}: {} events", batch_count, gid_for_fetch, batch_size);
+            }
+
+            ordered = events.into_iter().collect();
+            ordered.sort_by_key(|e| e.created_at.as_secs());
+
+            if used_fallback {
+                let saw_any_h = ordered.iter().any(|ev| ev.tags.find(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H))).is_some());
+                if saw_any_h {
+                    let original = ordered.clone();
+                    let filtered: Vec<nostr_sdk::Event> = original.into_iter()
+                        .filter(|ev| {
+                            match ev.tags.find(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H))) {
+                                Some(tag) => tag.content().map(|s| s == gid_for_fetch).unwrap_or(false),
+                                None => false,
+                            }
+                        })
+                        .collect();
+                    if !filtered.is_empty() { ordered = filtered; }
+                }
+            }
+        }
+
+        // Process with engine
+        let mut processed: u32 = 0;
+        let mut new_msgs: u32 = 0;
+        let mut last_seen_id: Option<nostr_sdk::EventId> = None;
+        let mut last_seen_at: u64 = 0;
+        let mut rumors_to_process: Vec<(RumorEvent, String, bool)> = Vec::new();
+        let mut was_evicted = false;
+        let mut pending_retry: Vec<nostr_sdk::Event> = Vec::new();
+        let mut events_to_track: Vec<(String, u64)> = Vec::new();
+
+        let my_pubkey_hex = if let Some(&pk) = crate::state::MY_PUBLIC_KEY.get() {
+            pk.to_hex()
+        } else {
+            String::new()
+        };
+
+        let group_check_id = if let Ok(groups) = self.read_groups() {
+            if let Some(meta) = groups.iter().find(|g| g.group.group_id == gid_for_fetch || g.group.engine_group_id == gid_for_fetch) {
+                if !meta.group.engine_group_id.is_empty() { Some(meta.group.engine_group_id.clone()) }
+                else { Some(meta.group.group_id.clone()) }
+            } else { None }
+        } else { None };
+
+        let mut pending_metadata_update: Option<(String, String)> = None;
+
+        {
+            let engine = self.engine()?;
+
+            if let Some(ref check_id) = group_check_id {
+                let check_gid_bytes = crate::hex::hex_string_to_bytes(check_id);
+                if !check_gid_bytes.is_empty() {
+                    let check_gid = GroupId::from_slice(&check_gid_bytes);
+                    let dummy_rumor = EventBuilder::new(Kind::Custom(9), "engine_check")
+                        .build(nostr_sdk::PublicKey::from_hex("000000000000000000000000000000000000000000000000000000000000dead").unwrap());
+
+                    if let Err(e) = engine.create_message(&check_gid, dummy_rumor) {
+                        eprintln!("[MLS] Engine missing group: {}", e);
+                        crate::traits::emit_event("mls_group_needs_rejoin", &serde_json::json!({
+                            "group_id": gid_for_fetch, "reason": "Group not found in MLS engine state"
+                        }));
+                    }
+
+                    if let Ok(Some(g)) = engine.get_group(&check_gid) {
+                        println!("[MLS] Group {} at epoch {} before processing", group_display, g.epoch);
+                    }
+                }
+            }
+
+            for ev in ordered.iter() {
+                // h-tag guard
+                if let Some(tag) = ev.tags.find(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H))) {
+                    if let Some(h_val) = tag.content() {
+                        if !h_val.eq_ignore_ascii_case(&gid_for_fetch) { continue; }
+                    } else { continue; }
+                } else { continue; }
+
+                if crate::mls::is_mls_event_processed(&ev.id.to_hex()) {
+                    last_seen_id = Some(ev.id);
+                    last_seen_at = ev.created_at.as_secs();
+                    continue;
+                }
+
+                match engine.process_message(ev) {
+                    Ok(res) => {
+                        match res {
+                            MessageProcessingResult::ApplicationMessage(msg) => {
+                                let rumor_event = RumorEvent {
+                                    id: msg.id, kind: msg.kind,
+                                    content: msg.content.clone(), tags: msg.tags.clone(),
+                                    created_at: msg.created_at, pubkey: msg.pubkey,
+                                };
+                                let is_mine = !my_pubkey_hex.is_empty() && msg.pubkey.to_hex() == my_pubkey_hex;
+                                let wrapper_id = msg.wrapper_event_id.to_hex();
+                                rumors_to_process.push((rumor_event, wrapper_id, is_mine));
+                                new_msgs = new_msgs.saturating_add(1);
+                                processed = processed.saturating_add(1);
+                                last_seen_id = Some(ev.id);
+                                last_seen_at = ev.created_at.as_secs();
+                                events_to_track.push((ev.id.to_hex(), ev.created_at.as_secs()));
+                            }
+                            MessageProcessingResult::Commit { mls_group_id: _ } => {
+                                if let Some(ref check_id) = group_check_id {
+                                    let check_gid_bytes = crate::hex::hex_string_to_bytes(check_id);
+                                    if !check_gid_bytes.is_empty() {
+                                        let check_gid = GroupId::from_slice(&check_gid_bytes);
+                                        let my_pk = nostr_sdk::PublicKey::from_hex(&my_pubkey_hex).ok();
+                                        let still_member = if let Some(pk) = my_pk {
+                                            engine.get_members(&check_gid).ok().map(|m| m.contains(&pk)).unwrap_or(false)
+                                        } else { false };
+
+                                        if !still_member {
+                                            crate::traits::emit_event("mls_group_left", &serde_json::json!({ "group_id": gid_for_fetch }));
+                                        } else {
+                                            let _ = engine.sync_group_metadata_from_mls(&check_gid);
+                                            if let Ok(Some(group)) = engine.get_group(&check_gid) {
+                                                pending_metadata_update = Some((group.name.clone(), group.description.clone()));
+                                            }
+                                            crate::traits::emit_event("mls_group_updated", &serde_json::json!({ "group_id": gid_for_fetch }));
+                                        }
+                                    }
+                                }
+                                processed = processed.saturating_add(1);
+                                last_seen_id = Some(ev.id);
+                                last_seen_at = ev.created_at.as_secs();
+                                events_to_track.push((ev.id.to_hex(), ev.created_at.as_secs()));
+                            }
+                            MessageProcessingResult::Proposal(_) => {
+                                crate::traits::emit_event("mls_group_updated", &serde_json::json!({ "group_id": gid_for_fetch }));
+                                processed = processed.saturating_add(1);
+                                last_seen_id = Some(ev.id);
+                                last_seen_at = ev.created_at.as_secs();
+                                events_to_track.push((ev.id.to_hex(), ev.created_at.as_secs()));
+                            }
+                            MessageProcessingResult::ExternalJoinProposal { .. } |
+                            MessageProcessingResult::PendingProposal { .. } |
+                            MessageProcessingResult::IgnoredProposal { .. } |
+                            MessageProcessingResult::PreviouslyFailed => {
+                                processed = processed.saturating_add(1);
+                                last_seen_id = Some(ev.id);
+                                last_seen_at = ev.created_at.as_secs();
+                                events_to_track.push((ev.id.to_hex(), ev.created_at.as_secs()));
+                            }
+                            MessageProcessingResult::Unprocessable { mls_group_id } => {
+                                let current_epoch = group_check_id.as_ref().and_then(|cid| {
+                                    let gid_bytes = crate::hex::hex_string_to_bytes(cid);
+                                    if gid_bytes.is_empty() { return None; }
+                                    engine.get_group(&GroupId::from_slice(&gid_bytes)).ok().flatten().map(|g| g.epoch)
+                                });
+                                println!("[MLS] Unprocessable event: group={}, mls_gid={}, id={}, created_at={}, epoch={:?}",
+                                    group_display, crate::hex::bytes_to_hex_string(mls_group_id.as_slice()),
+                                    ev.id.to_hex(), ev.created_at.as_secs(), current_epoch);
+                                pending_retry.push(ev.clone());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let error_msg = e.to_string();
+                        if error_msg.contains("own leaf not found") || error_msg.contains("after being evicted") || error_msg.contains("evicted from it") {
+                            eprintln!("[MLS] EVICTION DETECTED - removed from group: {}", gid_for_fetch);
+                            was_evicted = true;
+                        } else if !error_msg.contains("group not found") {
+                            eprintln!("[MLS] process_message failed (group={}, id={}, created_at={}): {}",
+                                gid_for_fetch, ev.id, ev.created_at.as_secs(), error_msg);
+                            events_to_track.push((ev.id.to_hex(), ev.created_at.as_secs()));
+                            last_seen_id = Some(ev.id);
+                            last_seen_at = ev.created_at.as_secs();
+                        }
+                    }
+                }
+            }
+        } // engine dropped
+
+        // Track processed events
+        for (event_id, created_at) in events_to_track.iter() {
+            let _ = crate::mls::track_mls_event_processed(event_id, &gid_for_fetch, *created_at);
+        }
+
+        // Retry loop
+        if !pending_retry.is_empty() && !was_evicted {
+            let max_retry_passes: u32 = 50;
+            let mut retry_attempt: u32 = 0;
+
+            while !pending_retry.is_empty() && retry_attempt < max_retry_passes {
+                retry_attempt += 1;
+                pending_retry.sort_by_key(|e| e.created_at.as_secs());
+
+                let engine = match self.engine() {
+                    Ok(e) => e,
+                    Err(e) => { eprintln!("[MLS] Failed to create engine for retry: {}", e); break; }
+                };
+
+                let retry_epoch = group_check_id.as_ref().and_then(|cid| {
+                    let gid_bytes = crate::hex::hex_string_to_bytes(cid);
+                    if gid_bytes.is_empty() { return None; }
+                    engine.get_group(&GroupId::from_slice(&gid_bytes)).ok().flatten().map(|g| g.epoch)
+                });
+                println!("[MLS] Retry pass {}/{} for {} events (epoch={:?})", retry_attempt, max_retry_passes, pending_retry.len(), retry_epoch);
+
+                let mut still_pending: Vec<nostr_sdk::Event> = Vec::new();
+
+                for ev in pending_retry.iter() {
+                    if crate::mls::is_mls_event_processed(&ev.id.to_hex()) {
+                        last_seen_id = Some(ev.id);
+                        last_seen_at = ev.created_at.as_secs();
+                        continue;
+                    }
+
+                    match engine.process_message(ev) {
+                        Ok(res) => {
+                            match res {
+                                MessageProcessingResult::ApplicationMessage(msg) => {
+                                    let rumor_event = RumorEvent {
+                                        id: msg.id, kind: msg.kind,
+                                        content: msg.content.clone(), tags: msg.tags.clone(),
+                                        created_at: msg.created_at, pubkey: msg.pubkey,
+                                    };
+                                    let is_mine = !my_pubkey_hex.is_empty() && msg.pubkey.to_hex() == my_pubkey_hex;
+                                    rumors_to_process.push((rumor_event, msg.wrapper_event_id.to_hex(), is_mine));
+                                    new_msgs = new_msgs.saturating_add(1);
+                                    processed = processed.saturating_add(1);
+                                    last_seen_id = Some(ev.id);
+                                    last_seen_at = ev.created_at.as_secs();
+                                    let _ = crate::mls::track_mls_event_processed(&ev.id.to_hex(), &gid_for_fetch, ev.created_at.as_secs());
+                                }
+                                MessageProcessingResult::Commit { .. } => {
+                                    if let Some(ref check_id) = group_check_id {
+                                        let check_gid_bytes = crate::hex::hex_string_to_bytes(check_id);
+                                        if !check_gid_bytes.is_empty() {
+                                            let check_gid = GroupId::from_slice(&check_gid_bytes);
+                                            let my_pk = nostr_sdk::PublicKey::from_hex(&my_pubkey_hex).ok();
+                                            let still_member = if let Some(pk) = my_pk {
+                                                engine.get_members(&check_gid).ok().map(|m| m.contains(&pk)).unwrap_or(false)
+                                            } else { false };
+                                            if !still_member {
+                                                was_evicted = true;
+                                                crate::traits::emit_event("mls_group_left", &serde_json::json!({ "group_id": gid_for_fetch }));
+                                            } else {
+                                                let _ = engine.sync_group_metadata_from_mls(&check_gid);
+                                                if let Ok(Some(group)) = engine.get_group(&check_gid) {
+                                                    pending_metadata_update = Some((group.name.clone(), group.description.clone()));
+                                                }
+                                                crate::traits::emit_event("mls_group_updated", &serde_json::json!({ "group_id": gid_for_fetch }));
+                                            }
+                                        }
+                                    }
+                                    processed = processed.saturating_add(1);
+                                    last_seen_id = Some(ev.id);
+                                    last_seen_at = ev.created_at.as_secs();
+                                    let _ = crate::mls::track_mls_event_processed(&ev.id.to_hex(), &gid_for_fetch, ev.created_at.as_secs());
+                                }
+                                MessageProcessingResult::Proposal(_) => {
+                                    crate::traits::emit_event("mls_group_updated", &serde_json::json!({ "group_id": gid_for_fetch }));
+                                    let _ = crate::mls::track_mls_event_processed(&ev.id.to_hex(), &gid_for_fetch, ev.created_at.as_secs());
+                                    processed = processed.saturating_add(1);
+                                    last_seen_id = Some(ev.id);
+                                    last_seen_at = ev.created_at.as_secs();
+                                }
+                                MessageProcessingResult::ExternalJoinProposal { .. } |
+                                MessageProcessingResult::PendingProposal { .. } |
+                                MessageProcessingResult::IgnoredProposal { .. } => {
+                                    processed = processed.saturating_add(1);
+                                    last_seen_id = Some(ev.id);
+                                    last_seen_at = ev.created_at.as_secs();
+                                    let _ = crate::mls::track_mls_event_processed(&ev.id.to_hex(), &gid_for_fetch, ev.created_at.as_secs());
+                                }
+                                MessageProcessingResult::Unprocessable { .. } => {
+                                    still_pending.push(ev.clone());
+                                }
+                                MessageProcessingResult::PreviouslyFailed => {}
+                            }
+                        }
+                        Err(e) => {
+                            let error_msg = e.to_string();
+                            if error_msg.contains("own leaf not found") || error_msg.contains("after being evicted") || error_msg.contains("evicted from it") {
+                                was_evicted = true;
+                                break;
+                            }
+                            still_pending.push(ev.clone());
+                        }
+                    }
+                    if was_evicted { break; }
+                }
+
+                let made_progress = still_pending.len() < pending_retry.len();
+                pending_retry = still_pending;
+                if pending_retry.is_empty() || was_evicted { break; }
+                if !made_progress {
+                    eprintln!("[MLS] No progress in retry pass {} — {} events permanently unprocessable", retry_attempt, pending_retry.len());
+                    break;
+                }
+            }
+
+            if !pending_retry.is_empty() {
+                for ev in &pending_retry {
+                    let _ = crate::mls::track_mls_event_processed(&ev.id.to_hex(), &gid_for_fetch, ev.created_at.as_secs());
+                    last_seen_id = Some(ev.id);
+                    last_seen_at = ev.created_at.as_secs();
+                    processed = processed.saturating_add(1);
+                }
+                if crate::mls::record_group_failure(&gid_for_fetch).await {
+                    eprintln!("[MLS] Group {} appears to be desynced (too many consecutive failures)", gid_for_fetch);
+                    crate::traits::emit_event("mls_group_needs_rejoin", &serde_json::json!({
+                        "group_id": gid_for_fetch, "reason": "Too many unprocessable events - group may be desynced"
+                    }));
+                }
+            } else if retry_attempt > 0 {
+                println!("[MLS] All retry events processed successfully after {} passes", retry_attempt);
+                crate::mls::record_group_success(&gid_for_fetch).await;
+            }
+        }
+
+        // Apply metadata changes from commits
+        if let Some((new_name, new_desc)) = pending_metadata_update {
+            if let Ok(mut groups) = self.read_groups() {
+                let mut changed = false;
+                if let Some(meta) = groups.iter_mut().find(|g| g.group.group_id == gid_for_fetch || g.group.engine_group_id == gid_for_fetch) {
+                    if meta.profile.name != new_name { meta.profile.name = new_name; changed = true; }
+                    if meta.profile.description.as_deref().unwrap_or("") != new_desc {
+                        meta.profile.description = if new_desc.is_empty() { None } else { Some(new_desc) };
+                        changed = true;
+                    }
+                    if changed {
+                        meta.group.updated_at = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                    }
+                }
+                if changed {
+                    let updated_meta = groups.iter().find(|g| g.group.group_id == gid_for_fetch || g.group.engine_group_id == gid_for_fetch).cloned();
+                    let _ = self.write_groups(&groups);
+                    if let Some(meta) = updated_meta {
+                        crate::traits::emit_event("mls_group_metadata", &serde_json::json!({
+                            "metadata": crate::mls::metadata_to_frontend(&meta)
+                        }));
+                    }
+                    let mut state = crate::state::STATE.lock().await;
+                    if let Some(chat) = state.get_chat_mut(&gid_for_fetch) {
+                        let name = groups.iter().find(|g| g.group.group_id == gid_for_fetch || g.group.engine_group_id == gid_for_fetch)
+                            .map(|m| m.profile.name.clone()).unwrap_or_default();
+                        if !name.is_empty() { chat.metadata.set_name(name); }
+                    }
+                }
+            }
+        }
+
+        // Process buffered rumors (skip if evicted)
+        if !rumors_to_process.is_empty() && !was_evicted {
+            let group_meta = self.read_groups().ok()
+                .and_then(|groups| groups.into_iter().find(|g| g.group.group_id == gid_for_fetch));
+
+            let (chat_id, slim_to_save) = {
+                let mut state = crate::state::STATE.lock().await;
+                let chat_id = state.create_or_get_mls_group_chat(&gid_for_fetch, vec![]);
+                let mut slim_to_save = None;
+                if let Some(meta) = group_meta {
+                    if let Some(idx) = state.chats.iter().position(|c| c.id == chat_id) {
+                        state.chats[idx].metadata.set_name(meta.profile.name.clone());
+                        slim_to_save = Some(crate::db::chats::SlimChatDB::from_chat(&state.chats[idx], &state.interner));
+                    }
+                }
+                (chat_id, slim_to_save)
+            };
+
+            if let Some(slim) = slim_to_save {
+                let _ = crate::db::chats::save_slim_chat(&slim);
+            }
+
+            let download_dir = crate::db::get_download_dir();
+            for (rumor_event, _wrapper_id, is_mine) in rumors_to_process.iter() {
+                let rumor_context = RumorContext {
+                    sender: rumor_event.pubkey,
+                    is_mine: *is_mine,
+                    conversation_id: gid_for_fetch.clone(),
+                    conversation_type: ConversationType::MlsGroup,
+                };
+
+                match crate::mls::process_rumor_with_mls(rumor_event, &rumor_context, &download_dir).await {
+                    Ok(result) => {
+                        match result {
+                            RumorProcessingResult::TextMessage(msg) | RumorProcessingResult::FileAttachment(msg) => {
+                                if crate::db::events::message_exists_in_db(&msg.id).unwrap_or(false) { continue; }
+
+                                let mut msg = msg;
+                                for att in &mut msg.attachments {
+                                    if att.size == 0 && !att.url.is_empty() {
+                                        if let Some(size) = crate::net::get_remote_file_size(&att.url).await {
+                                            att.size = size;
+                                        }
+                                    }
+                                }
+
+                                let was_added = {
+                                    let mut state = crate::state::STATE.lock().await;
+                                    state.add_message_to_chat(&chat_id, msg.clone())
+                                };
+
+                                if was_added {
+                                    crate::traits::emit_event("mls_message_new", &serde_json::json!({
+                                        "group_id": gid_for_fetch, "message": msg
+                                    }));
+                                    let _ = crate::db::events::save_message(&chat_id, &msg).await;
+                                }
+                            }
+                            RumorProcessingResult::Reaction(reaction) => {
+                                let (was_added, chat_id_for_save) = {
+                                    let mut state = crate::state::STATE.lock().await;
+                                    if let Some((cid, added)) = state.add_reaction_to_message(&reaction.reference_id, reaction.clone()) {
+                                        (added, if added { Some(cid) } else { None })
+                                    } else { (false, None) }
+                                };
+                                if was_added {
+                                    if let Some(cid) = chat_id_for_save {
+                                        let updated = {
+                                            let state = crate::state::STATE.lock().await;
+                                            state.find_message(&reaction.reference_id).map(|(_, msg)| msg.clone())
+                                        };
+                                        if let Some(msg) = updated {
+                                            let _ = crate::db::events::save_message(&cid, &msg).await;
+                                        }
+                                    }
+                                }
+                            }
+                            RumorProcessingResult::TypingIndicator { profile_id, until } => {
+                                let active_typers = {
+                                    let mut state = crate::state::STATE.lock().await;
+                                    state.update_typing_and_get_active(&chat_id, &profile_id, until)
+                                };
+                                crate::traits::emit_event("typing-update", &serde_json::json!({
+                                    "conversation_id": gid_for_fetch, "typers": active_typers,
+                                }));
+                            }
+                            RumorProcessingResult::LeaveRequest { event_id, member_pubkey } => {
+                                if crate::db::events::event_exists(&event_id).unwrap_or(false) { continue; }
+
+                                let member_name = {
+                                    let state = crate::state::STATE.lock().await;
+                                    state.get_profile(&member_pubkey).map(|p| {
+                                        if !p.nickname.is_empty() { p.nickname.to_string() }
+                                        else if !p.name.is_empty() { p.name.to_string() }
+                                        else { member_pubkey.chars().take(12).collect::<String>() + "..." }
+                                    })
+                                };
+
+                                let am_i_admin = if let Some(meta) = &group_metadata {
+                                    if let Some(&my_pk) = crate::state::MY_PUBLIC_KEY.get() {
+                                        let my_npub = my_pk.to_bech32().unwrap_or_default();
+                                        let my_hex = my_pk.to_hex();
+                                        meta.group.creator_pubkey == my_npub || meta.group.creator_pubkey == my_hex
+                                    } else { false }
+                                } else { false };
+
+                                if am_i_admin {
+                                    let was_inserted = crate::db::events::save_system_event_by_id(
+                                        &event_id, &gid_for_fetch,
+                                        crate::stored_event::SystemEventType::MemberLeft,
+                                        &member_pubkey, member_name.as_deref(),
+                                    ).await.unwrap_or(false);
+
+                                    if was_inserted {
+                                        crate::traits::emit_event("system_event", &serde_json::json!({
+                                            "conversation_id": gid_for_fetch,
+                                            "event_id": event_id,
+                                            "event_type": crate::stored_event::SystemEventType::MemberLeft.as_u8(),
+                                            "member_pubkey": member_pubkey,
+                                            "member_name": member_name,
+                                        }));
+
+                                        let mls_service = match MlsService::new_persistent_static() {
+                                            Ok(s) => s,
+                                            Err(e) => { eprintln!("[MLS] Failed to create MLS service for auto-remove: {}", e); continue; }
+                                        };
+                                        if let Err(e) = mls_service.remove_member_device(&gid_for_fetch, &member_pubkey, "").await {
+                                            eprintln!("[MLS] Failed to auto-remove member {}: {}", member_pubkey, e);
+                                        }
+                                    }
+                                }
+                            }
+                            RumorProcessingResult::UnknownEvent(mut event) => {
+                                if let Ok(chat_int_id) = crate::db::id_cache::get_chat_id_by_identifier(&chat_id) {
+                                    event.chat_id = chat_int_id;
+                                    let _ = crate::db::events::save_event(&event).await;
+                                }
+                            }
+                            RumorProcessingResult::PivxPayment { gift_code, amount_piv, address, message_id, event } => {
+                                let event_timestamp = event.created_at;
+                                let _ = crate::db::events::save_pivx_payment_event(&gid_for_fetch, event).await;
+                                crate::traits::emit_event("pivx_payment_received", &serde_json::json!({
+                                    "conversation_id": gid_for_fetch,
+                                    "gift_code": gift_code, "amount_piv": amount_piv,
+                                    "address": address, "message_id": message_id,
+                                    "sender": rumor_event.pubkey.to_hex(),
+                                    "is_mine": *is_mine,
+                                    "at": event_timestamp * 1000,
+                                }));
+                            }
+                            RumorProcessingResult::Edit { message_id, new_content, edited_at, event } => {
+                                if crate::db::events::event_exists(&event.id).unwrap_or(false) { continue; }
+                                if let Ok(chat_int_id) = crate::db::id_cache::get_chat_id_by_identifier(&chat_id) {
+                                    let mut event_with_chat = event;
+                                    event_with_chat.chat_id = chat_int_id;
+                                    let _ = crate::db::events::save_event(&event_with_chat).await;
+                                }
+                                let mut state = crate::state::STATE.lock().await;
+                                let chat_idx = state.chats.iter().position(|c| c.id == chat_id);
+                                if let Some(idx) = chat_idx {
+                                    if let Some(msg) = state.chats[idx].get_message_mut(&message_id) {
+                                        msg.apply_edit(new_content, edited_at);
+                                    }
+                                    if let Some(msg) = state.chats[idx].get_compact_message(&message_id) {
+                                        let msg_for_emit = msg.to_message(&state.interner);
+                                        crate::traits::emit_event("message_update", &serde_json::json!({
+                                            "old_id": &message_id, "message": msg_for_emit, "chat_id": &chat_id
+                                        }));
+                                    }
+                                }
+                            }
+                            RumorProcessingResult::WebxdcPeerAdvertisement { .. } |
+                            RumorProcessingResult::WebxdcPeerLeft { .. } => {
+                                // WebXDC handled by platform layer
+                            }
+                            RumorProcessingResult::Ignored => {}
+                        }
+                    }
+                    Err(e) => eprintln!("[MLS] Failed to process rumor: {}", e),
+                }
+            }
+
+            // Persist chat and messages
+            {
+                let (slim, messages_to_save) = {
+                    let state = crate::state::STATE.lock().await;
+                    if let Some(chat) = state.get_chat(&chat_id) {
+                        let slim = crate::db::chats::SlimChatDB::from_chat(chat, &state.interner);
+                        let messages_to_save: Vec<crate::types::Message> = if new_msgs > 0 {
+                            chat.messages.iter().rev().take(new_msgs as usize)
+                                .map(|m| m.to_message(&state.interner)).collect()
+                        } else { Vec::new() };
+                        (Some(slim), messages_to_save)
+                    } else { (None, Vec::new()) }
+                };
+                if let Some(slim) = slim {
+                    let _ = crate::db::chats::save_slim_chat(&slim);
+                    if !messages_to_save.is_empty() {
+                        let _ = crate::db::events::save_chat_messages(&chat_id, &messages_to_save).await;
+                    }
+                }
+            }
+        }
+
+        // Eviction cleanup or cursor advance
+        if was_evicted {
+            cursors.remove(&gid_for_fetch);
+            if let Err(e) = self.write_event_cursors(&cursors) {
+                eprintln!("[MLS] Failed to remove cursor for evicted group: {}", e);
+            }
+            if let Err(e) = self.cleanup_evicted_group(&gid_for_fetch).await {
+                eprintln!("[MLS] Failed to cleanup evicted group: {}", e);
+            }
+        } else {
+            if let Some(id) = last_seen_id {
+                let current_cursor_at = cursors.get(&gid_for_fetch).map(|c| c.last_seen_at).unwrap_or(0);
+                if last_seen_at > current_cursor_at {
+                    cursors.insert(gid_for_fetch.clone(), crate::mls::EventCursor {
+                        last_seen_event_id: id.to_hex(),
+                        last_seen_at,
+                    });
+                    if let Err(e) = self.write_event_cursors(&cursors) {
+                        eprintln!("[MLS] write_event_cursors failed: {}", e);
+                    }
+                    current_since = Timestamp::from_secs(last_seen_at);
+                }
+            }
+        }
+
+        total_processed += processed;
+        total_new_msgs += new_msgs;
+
+        if batch_size < BATCH_SIZE { break; }
+        if was_evicted { break; }
+        } // End pagination loop
+
+        Ok((total_processed, total_new_msgs))
+    }
+
     /// Leave an MLS group: send leave request, remove cursors, remove metadata, clean up.
     ///
     /// Sends a "leave request" application message so admins auto-remove us,
@@ -1916,6 +2648,122 @@ mod tests {
         assert_eq!(wire_id, "nonexistent-group");
         assert!(members.is_empty());
         assert!(admins.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sync_group_empty_id_returns_error() {
+        let svc = MlsService::new();
+        let result = svc.sync_group_since_cursor("", None).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), MlsError::InvalidGroupId));
+    }
+
+    #[tokio::test]
+    async fn sync_group_evicted_returns_zero() {
+        let (_tmp, _guard) = init_test_db();
+        let svc = MlsService::new();
+
+        // Insert an evicted group
+        let group = MlsGroupFull {
+            group: crate::mls::MlsGroup {
+                group_id: "sync-evict-test".into(),
+                engine_group_id: "eng-sync-evict".into(),
+                creator_pubkey: "pk".into(),
+                created_at: 100,
+                updated_at: 200,
+                evicted: true,
+            },
+            profile: crate::mls::MlsGroupProfile {
+                name: "Evicted Group".into(),
+                description: None,
+                avatar_ref: None,
+                avatar_cached: None,
+            },
+        };
+        crate::db::mls::save_mls_group(&group).unwrap();
+
+        let (processed, new_msgs) = svc.sync_group_since_cursor("sync-evict-test", None).await.unwrap();
+        assert_eq!(processed, 0);
+        assert_eq!(new_msgs, 0);
+    }
+
+    #[tokio::test]
+    async fn sync_group_empty_prefetched_returns_zero() {
+        let (_tmp, _guard) = init_test_db();
+        let svc = MlsService::new();
+
+        // Insert a valid group
+        let group = MlsGroupFull {
+            group: crate::mls::MlsGroup {
+                group_id: "sync-empty-pre".into(),
+                engine_group_id: "eng-sync-empty".into(),
+                creator_pubkey: "pk".into(),
+                created_at: 100,
+                updated_at: 200,
+                evicted: false,
+            },
+            profile: crate::mls::MlsGroupProfile {
+                name: "Empty Pre".into(),
+                description: None,
+                avatar_ref: None,
+                avatar_cached: None,
+            },
+        };
+        crate::db::mls::save_mls_group(&group).unwrap();
+
+        // Empty prefetched events should return (0, 0)
+        let (processed, new_msgs) = svc.sync_group_since_cursor("sync-empty-pre", Some(vec![])).await.unwrap();
+        assert_eq!(processed, 0);
+        assert_eq!(new_msgs, 0);
+    }
+
+    #[tokio::test]
+    async fn sync_group_invalid_length_returns_zero() {
+        let (_tmp, _guard) = init_test_db();
+        let svc = MlsService::new();
+
+        // Insert group with unusual ID length (not 32 or 64)
+        let group = MlsGroupFull {
+            group: crate::mls::MlsGroup {
+                group_id: "shortid".into(), // 7 chars, not 32 or 64
+                engine_group_id: "shortid".into(),
+                creator_pubkey: "pk".into(),
+                created_at: 100,
+                updated_at: 200,
+                evicted: false,
+            },
+            profile: crate::mls::MlsGroupProfile {
+                name: "Short ID".into(),
+                description: None,
+                avatar_ref: None,
+                avatar_cached: None,
+            },
+        };
+        crate::db::mls::save_mls_group(&group).unwrap();
+
+        // Should return (0, 0) for invalid group_id length
+        let (processed, new_msgs) = svc.sync_group_since_cursor("shortid", None).await.unwrap();
+        assert_eq!(processed, 0);
+        assert_eq!(new_msgs, 0);
+    }
+
+    #[tokio::test]
+    async fn sync_group_cursor_persistence() {
+        let (_tmp, _guard) = init_test_db();
+
+        // Verify cursor read/write round-trip
+        let mut cursors = HashMap::new();
+        cursors.insert("cursor-test-group".to_string(), crate::mls::EventCursor {
+            last_seen_event_id: "abc123".into(),
+            last_seen_at: 1700000000,
+        });
+        crate::db::mls::save_mls_event_cursors(&cursors).unwrap();
+
+        let loaded = crate::db::mls::load_mls_event_cursors().unwrap();
+        assert_eq!(loaded.len(), 1);
+        let cursor = loaded.get("cursor-test-group").unwrap();
+        assert_eq!(cursor.last_seen_event_id, "abc123");
+        assert_eq!(cursor.last_seen_at, 1700000000);
     }
 
     #[tokio::test]

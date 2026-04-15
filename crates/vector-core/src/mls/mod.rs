@@ -11,6 +11,7 @@
 pub mod types;
 pub mod tracking;
 pub mod service;
+pub mod messaging;
 pub mod rumor_mls;
 
 pub use types::{
@@ -27,4 +28,5 @@ pub use service::{
     MlsService, get_group_sync_lock, get_mls_directory,
     publish_event_with_retries, publish_and_merge_commit,
 };
+pub use messaging::{send_mls_message, emit_group_metadata_event};
 pub use rumor_mls::{process_rumor_with_mls, parse_mls_imeta_attachments};
