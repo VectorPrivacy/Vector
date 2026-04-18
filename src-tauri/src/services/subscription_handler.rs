@@ -234,10 +234,9 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                     super::handle_event(*event, true).await;
                 } else if MLS_SUB_ID.lock().await.as_ref() == Some(&subscription_id) {
                     // MLS group messages via MDK engine
-                    let my_pk = crate::MY_PUBLIC_KEY.get()
-                        .copied()
-                        .unwrap_or(PublicKey::from_slice(&[0u8; 32]).unwrap());
-                    handle_mls_group_message((*event).clone(), my_pk).await;
+                    if let Some(&my_pk) = crate::MY_PUBLIC_KEY.get() {
+                        handle_mls_group_message((*event).clone(), my_pk).await;
+                    }
                 }
             }
             Ok(false)

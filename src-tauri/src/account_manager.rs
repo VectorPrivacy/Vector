@@ -282,7 +282,24 @@ pub async fn switch_account<R: Runtime>(
 
     println!("[Account Manager] Switching to account: {}", npub);
 
+    // Clear old account's in-memory state to prevent cross-account data leaks
+    {
+        let mut state = crate::STATE.lock().await;
+        state.profiles.clear();
+        state.chats.clear();
+        state.db_loaded = false;
+    }
+    {
+        let mut cache = crate::WRAPPER_ID_CACHE.lock().await;
+        cache.clear();
+    }
+    {
+        let mut notified = crate::NOTIFIED_WELCOMES.lock().await;
+        notified.clear();
+    }
+
     // Initialize database for this profile
+    vector_core::db::close_database();
     init_profile_database(&handle, &npub).await?;
 
     // Update current account

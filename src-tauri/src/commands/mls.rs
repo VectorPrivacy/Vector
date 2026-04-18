@@ -1489,7 +1489,7 @@ pub async fn sync_mls_group_participants(group_id: String) -> Result<(), String>
         if old_count != new_count {
             eprintln!(
                 "[MLS] Synced participants for group {}: {} -> {} members",
-                &group_id[..8],
+                &group_id[..8.min(group_id.len())],
                 old_count,
                 new_count
             );
