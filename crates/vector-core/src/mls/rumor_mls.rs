@@ -111,7 +111,7 @@ pub fn parse_mls_imeta_attachments(
         return Vec::new();
     }
 
-    let engine_gid_bytes = crate::hex::hex_string_to_bytes(&group_meta.group.engine_group_id);
+    let engine_gid_bytes = crate::simd::hex::hex_string_to_bytes(&group_meta.group.engine_group_id);
     let gid = mdk_core::GroupId::from_slice(&engine_gid_bytes);
 
     let mdk = match mls_service.engine() {
@@ -150,7 +150,7 @@ pub fn parse_mls_imeta_attachments(
             .to_string();
 
         let encrypted_hash = crate::rumor::extract_hash_from_blossom_url(&media_ref.url)
-            .unwrap_or_else(|| crate::hex::bytes_to_hex_string(&media_ref.original_hash));
+            .unwrap_or_else(|| crate::simd::hex::bytes_to_hex_string(&media_ref.original_hash));
 
         let img_meta = media_ref.dimensions.and_then(|(width, height)| {
             let thumbhash = tag.as_slice().iter()
@@ -178,7 +178,7 @@ pub fn parse_mls_imeta_attachments(
         attachments.push(Attachment {
             id: encrypted_hash,
             key: String::new(),
-            nonce: crate::hex::bytes_to_hex_string(&media_ref.nonce),
+            nonce: crate::simd::hex::bytes_to_hex_string(&media_ref.nonce),
             extension,
             name: String::new(),
             url: media_ref.url.clone(),
@@ -189,7 +189,7 @@ pub fn parse_mls_imeta_attachments(
             downloaded,
             webxdc_topic: None,
             group_id: Some(context.conversation_id.clone()),
-            original_hash: Some(crate::hex::bytes_to_hex_string(&media_ref.original_hash)),
+            original_hash: Some(crate::simd::hex::bytes_to_hex_string(&media_ref.original_hash)),
             scheme_version: Some(media_ref.scheme_version.clone()),
             mls_filename: Some(media_ref.filename.clone()),
         });

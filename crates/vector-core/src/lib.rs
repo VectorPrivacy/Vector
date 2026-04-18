@@ -31,7 +31,6 @@ mod macros;
 // === Foundation ===
 pub mod error;
 pub mod traits;
-pub mod hex;
 
 // Nostr SDK trait imports needed for bech32 operations
 use nostr_sdk::prelude::ToBech32;

@@ -368,7 +368,7 @@ impl ChatState {
     pub fn finalize_pending_message(&mut self, chat_id: &str, pending_id: &str, real_id: &str) -> Option<(String, Message)> {
         let chat_idx = self.chats.iter().position(|c| c.id == chat_id)?;
         if let Some(msg) = self.chats[chat_idx].get_compact_message_mut(pending_id) {
-            msg.id = crate::hex::hex_to_bytes_32(real_id);
+            msg.id = crate::simd::hex::hex_to_bytes_32(real_id);
             msg.set_pending(false);
         }
         self.chats[chat_idx].messages.rebuild_index();
@@ -495,7 +495,7 @@ mod tests {
     use super::*;
     use crate::types::Message;
     use crate::profile::{Profile, SlimProfile, Status};
-    use crate::hex::bytes_to_hex_32;
+    use crate::simd::hex::bytes_to_hex_32;
 
     // ========================================================================
     // Helpers
@@ -1268,7 +1268,7 @@ mod tests {
 
         // Set last_read to msg2's ID
         let chat = state.get_chat_mut("npub1peer").unwrap();
-        chat.last_read = crate::hex::hex_to_bytes_32(&read_marker_id);
+        chat.last_read = crate::simd::hex::hex_to_bytes_32(&read_marker_id);
 
         assert_eq!(
             state.count_unread_messages(), 2,

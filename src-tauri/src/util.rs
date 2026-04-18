@@ -27,7 +27,7 @@ pub fn data_uri(mime: &str, bytes: &[u8]) -> String {
     result
 }
 
-pub use vector_core::hex::{
+pub use vector_core::simd::hex::{
     bytes_to_hex_16, bytes_to_hex_32, bytes_to_hex_string,
     hex_string_to_bytes,
 };

@@ -348,7 +348,7 @@ impl MlsService {
 
         let mut members: Vec<String> = Vec::new();
         let mut admins: Vec<String> = Vec::new();
-        let gid_bytes = crate::hex::hex_string_to_bytes(&engine_id);
+        let gid_bytes = crate::simd::hex::hex_string_to_bytes(&engine_id);
         if !gid_bytes.is_empty() {
             let gid = GroupId::from_slice(&gid_bytes);
 
@@ -364,7 +364,7 @@ impl MlsService {
             match engine.get_groups() {
                 Ok(groups) => {
                     for g in groups {
-                        let gid_hex = crate::hex::bytes_to_hex_string(g.mls_group_id.as_slice());
+                        let gid_hex = crate::simd::hex::bytes_to_hex_string(g.mls_group_id.as_slice());
                         if gid_hex == engine_id {
                             admins = g.admin_pubkeys.iter()
                                 .filter_map(|pk| pk.to_bech32().ok())
@@ -567,7 +567,7 @@ impl MlsService {
                 .map_err(|e| MlsError::NostrMlsError(format!("merge_pending_commit after create: {}", e)))?;
 
             let gid_bytes = create_out.group.mls_group_id.as_slice();
-            let engine_gid_hex = crate::hex::bytes_to_hex_string(gid_bytes);
+            let engine_gid_hex = crate::simd::hex::bytes_to_hex_string(gid_bytes);
 
             // Derive wire id (wrapper 'h' tag, 64-hex) using a dummy wrapper
             let wire_gid_hex = {
@@ -765,7 +765,7 @@ impl MlsService {
             let group_lock = get_group_sync_lock(&group_id_owned);
             let _guard = group_lock.lock().await;
 
-            let mls_group_id = GroupId::from_slice(&crate::hex::hex_string_to_bytes(&engine_group_id));
+            let mls_group_id = GroupId::from_slice(&crate::simd::hex::hex_string_to_bytes(&engine_group_id));
 
             let (evolution_event, welcome_rumors, group_relays) = {
                 let storage = match MdkSqliteStorage::new_unencrypted(&db_path) {
@@ -921,7 +921,7 @@ impl MlsService {
             let group_lock = get_group_sync_lock(&group_id_owned);
             let _guard = group_lock.lock().await;
 
-            let mls_group_id = GroupId::from_slice(&crate::hex::hex_string_to_bytes(&engine_group_id));
+            let mls_group_id = GroupId::from_slice(&crate::simd::hex::hex_string_to_bytes(&engine_group_id));
 
             let (evolution_event, welcome_rumors, group_relays) = {
                 let storage = match MdkSqliteStorage::new_unencrypted(&db_path) {
@@ -1041,7 +1041,7 @@ impl MlsService {
             let group_lock = get_group_sync_lock(&group_id_owned);
             let _guard = group_lock.lock().await;
 
-            let mls_group_id = GroupId::from_slice(&crate::hex::hex_string_to_bytes(&engine_group_id));
+            let mls_group_id = GroupId::from_slice(&crate::simd::hex::hex_string_to_bytes(&engine_group_id));
 
             let (evolution_event, group_relays) = {
                 let storage = match MdkSqliteStorage::new_unencrypted(&db_path) {
@@ -1154,7 +1154,7 @@ impl MlsService {
             let group_lock = get_group_sync_lock(&group_id_owned);
             let _guard = group_lock.lock().await;
 
-            let mls_group_id = GroupId::from_slice(&crate::hex::hex_string_to_bytes(&engine_group_id));
+            let mls_group_id = GroupId::from_slice(&crate::simd::hex::hex_string_to_bytes(&engine_group_id));
 
             // 1. Build update and create commit under lock
             let (evolution_event, group_relays) = {
@@ -1466,7 +1466,7 @@ impl MlsService {
             let engine = self.engine()?;
 
             if let Some(ref check_id) = group_check_id {
-                let check_gid_bytes = crate::hex::hex_string_to_bytes(check_id);
+                let check_gid_bytes = crate::simd::hex::hex_string_to_bytes(check_id);
                 if !check_gid_bytes.is_empty() {
                     let check_gid = GroupId::from_slice(&check_gid_bytes);
                     let dummy_rumor = EventBuilder::new(Kind::Custom(9), "engine_check")
@@ -1519,7 +1519,7 @@ impl MlsService {
                             }
                             MessageProcessingResult::Commit { mls_group_id: _ } => {
                                 if let Some(ref check_id) = group_check_id {
-                                    let check_gid_bytes = crate::hex::hex_string_to_bytes(check_id);
+                                    let check_gid_bytes = crate::simd::hex::hex_string_to_bytes(check_id);
                                     if !check_gid_bytes.is_empty() {
                                         let check_gid = GroupId::from_slice(&check_gid_bytes);
                                         let my_pk = nostr_sdk::PublicKey::from_hex(&my_pubkey_hex).ok();
@@ -1561,12 +1561,12 @@ impl MlsService {
                             }
                             MessageProcessingResult::Unprocessable { mls_group_id } => {
                                 let current_epoch = group_check_id.as_ref().and_then(|cid| {
-                                    let gid_bytes = crate::hex::hex_string_to_bytes(cid);
+                                    let gid_bytes = crate::simd::hex::hex_string_to_bytes(cid);
                                     if gid_bytes.is_empty() { return None; }
                                     engine.get_group(&GroupId::from_slice(&gid_bytes)).ok().flatten().map(|g| g.epoch)
                                 });
                                 println!("[MLS] Unprocessable event: group={}, mls_gid={}, id={}, created_at={}, epoch={:?}",
-                                    group_display, crate::hex::bytes_to_hex_string(mls_group_id.as_slice()),
+                                    group_display, crate::simd::hex::bytes_to_hex_string(mls_group_id.as_slice()),
                                     ev.id.to_hex(), ev.created_at.as_secs(), current_epoch);
                                 pending_retry.push(ev.clone());
                             }
@@ -1609,7 +1609,7 @@ impl MlsService {
                 };
 
                 let retry_epoch = group_check_id.as_ref().and_then(|cid| {
-                    let gid_bytes = crate::hex::hex_string_to_bytes(cid);
+                    let gid_bytes = crate::simd::hex::hex_string_to_bytes(cid);
                     if gid_bytes.is_empty() { return None; }
                     engine.get_group(&GroupId::from_slice(&gid_bytes)).ok().flatten().map(|g| g.epoch)
                 });
@@ -1643,7 +1643,7 @@ impl MlsService {
                                 }
                                 MessageProcessingResult::Commit { .. } => {
                                     if let Some(ref check_id) = group_check_id {
-                                        let check_gid_bytes = crate::hex::hex_string_to_bytes(check_id);
+                                        let check_gid_bytes = crate::simd::hex::hex_string_to_bytes(check_id);
                                         if !check_gid_bytes.is_empty() {
                                             let check_gid = GroupId::from_slice(&check_gid_bytes);
                                             let my_pk = nostr_sdk::PublicKey::from_hex(&my_pubkey_hex).ok();
@@ -2022,7 +2022,7 @@ impl MlsService {
             &group_meta,
             crate::state::MY_PUBLIC_KEY.get(),
         ) {
-            let mls_group_id = GroupId::from_slice(&crate::hex::hex_string_to_bytes(&meta.group.engine_group_id));
+            let mls_group_id = GroupId::from_slice(&crate::simd::hex::hex_string_to_bytes(&meta.group.engine_group_id));
             let leave_rumor = EventBuilder::new(Kind::ApplicationSpecificData, "leave")
                 .tag(Tag::custom(TagKind::d(), vec!["vector"]))
                 .build(my_pubkey);
@@ -2471,7 +2471,7 @@ mod tests {
         let create_out = engine.create_group(&my_pk, vec![], config).unwrap();
         engine.merge_pending_commit(&create_out.group.mls_group_id).unwrap();
 
-        let engine_gid_hex = crate::hex::bytes_to_hex_string(create_out.group.mls_group_id.as_slice());
+        let engine_gid_hex = crate::simd::hex::bytes_to_hex_string(create_out.group.mls_group_id.as_slice());
 
         // Create a dummy wrapper to extract the wire 'h' tag
         use nostr_sdk::prelude::*;

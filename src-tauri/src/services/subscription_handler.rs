@@ -110,7 +110,7 @@ async fn show_mls_group_notification(group_id: &str, msg: &vector_core::Message)
                     let svc = MlsService::new_persistent_static().ok()?;
                     let engine = svc.engine().ok()?;
                     engine.get_groups().ok()?.into_iter()
-                        .find(|g| vector_core::hex::bytes_to_hex_string(g.mls_group_id.as_slice()) == eid)
+                        .find(|g| vector_core::simd::hex::bytes_to_hex_string(g.mls_group_id.as_slice()) == eid)
                         .map(|g| g.admin_pubkeys.iter().any(|pk| pk.to_bech32().ok().as_deref() == Some(sender_npub)))
                 })
                 .unwrap_or(false);

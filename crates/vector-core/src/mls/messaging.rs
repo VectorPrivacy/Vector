@@ -39,7 +39,7 @@ pub async fn send_mls_message(
             let engine_group_id = if group_meta.group.engine_group_id.is_empty() {
                 return Err("Group has no engine_group_id".to_string());
             } else {
-                GroupId::from_slice(&crate::hex::hex_string_to_bytes(&group_meta.group.engine_group_id))
+                GroupId::from_slice(&crate::simd::hex::hex_string_to_bytes(&group_meta.group.engine_group_id))
             };
 
             // Create MLS message (no await while engine in scope)

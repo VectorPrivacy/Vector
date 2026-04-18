@@ -9269,6 +9269,7 @@ dependencies = [
  "base64-simd",
  "bip39",
  "chacha20poly1305",
+ "fast-thumbhash",
  "futures-util",
  "hpke-rs-rust-crypto",
  "image",

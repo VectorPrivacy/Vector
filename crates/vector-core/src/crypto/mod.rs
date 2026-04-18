@@ -671,7 +671,7 @@ pub async fn maybe_encrypt_inner(mut input: String, password: Option<String>) ->
 
     key.zeroize();
 
-    crate::hex::bytes_to_hex_string(&buffer)
+    crate::simd::hex::bytes_to_hex_string(&buffer)
 }
 
 /// Decrypt a hex-encoded ChaCha20-Poly1305 ciphertext using ENCRYPTION_KEY vault.
@@ -688,7 +688,7 @@ pub async fn maybe_decrypt_inner(ciphertext: String, password: Option<String>) -
         }
     };
 
-    let encrypted_data = crate::hex::hex_string_to_bytes(ciphertext.as_str());
+    let encrypted_data = crate::simd::hex::hex_string_to_bytes(ciphertext.as_str());
     if encrypted_data.len() < 12 {
         key.zeroize();
         return Err(());

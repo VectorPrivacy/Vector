@@ -71,7 +71,7 @@ pub fn load_recent_wrapper_ids(days: u64) -> Result<Vec<[u8; 32]>, String> {
     let mut result = Vec::with_capacity(hex_ids.len());
     for hex in hex_ids {
         if hex.len() == 64 {
-            result.push(crate::hex::hex_to_bytes_32(&hex));
+            result.push(crate::simd::hex::hex_to_bytes_32(&hex));
         }
     }
     Ok(result)

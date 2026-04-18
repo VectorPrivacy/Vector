@@ -293,7 +293,7 @@ mod tests {
     use super::*;
     use crate::types::Message;
     use crate::compact::NpubInterner;
-    use crate::hex::bytes_to_hex_32;
+    use crate::simd::hex::bytes_to_hex_32;
 
     // ========================================================================
     // Helpers

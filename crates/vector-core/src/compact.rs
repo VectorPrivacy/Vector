@@ -11,7 +11,7 @@
 //! - Compact timestamp (u32 seconds since 2020 epoch)
 
 use crate::types::{Attachment, EditEntry, ImageMetadata, Reaction, SiteMetadata};
-use crate::hex::{bytes_to_hex_32, hex_to_bytes_32};
+use crate::simd::hex::{bytes_to_hex_32, hex_to_bytes_32};
 
 /// Convert an arbitrary-length byte slice to a lowercase hex string.
 fn bytes_to_hex_string(bytes: &[u8]) -> String {
