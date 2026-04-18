@@ -9,7 +9,9 @@ pub struct TauriEventEmitter;
 impl vector_core::EventEmitter for TauriEventEmitter {
     fn emit(&self, event: &str, payload: serde_json::Value) {
         if let Some(handle) = TAURI_APP.get() {
-            handle.emit(event, payload).ok();
+            if let Err(e) = handle.emit(event, payload) {
+                log_warn!("[EventEmitter] Failed to emit '{}': {}", event, e);
+            }
         }
     }
 }

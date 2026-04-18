@@ -1740,7 +1740,7 @@ impl MlsService {
                     }
                     if changed {
                         meta.group.updated_at = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
                     }
                 }
                 if changed {

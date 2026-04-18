@@ -30,7 +30,7 @@ pub fn track_mls_event_processed(
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
+        .unwrap()
         .as_secs();
 
     conn.execute(
