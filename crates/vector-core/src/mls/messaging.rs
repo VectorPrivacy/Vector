@@ -144,6 +144,7 @@ pub async fn send_mls_message(
                             state.finalize_pending_message(&group_id, pid, real_id)
                         };
                         if let Some((old_id, msg)) = result {
+                            // Always persist — original gated on TAURI_APP which is a bug
                             crate::traits::emit_event("message_update", &serde_json::json!({
                                 "old_id": &old_id, "message": &msg, "chat_id": &group_id
                             }));

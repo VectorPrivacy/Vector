@@ -2007,6 +2007,9 @@ impl MlsService {
     pub async fn leave_group(&self, group_id: &str) -> Result<(), MlsError> {
         use nostr_sdk::prelude::*;
 
+        // Verify client is initialized (match original contract)
+        let _client = crate::state::NOSTR_CLIENT.get().ok_or(MlsError::NotInitialized)?;
+
         // Find the group metadata (may not exist if already partially cleaned)
         let groups = self.read_groups().unwrap_or_default();
         let group_meta = groups.iter()
@@ -2014,10 +2017,9 @@ impl MlsService {
             .cloned();
 
         // Best-effort: send a "leave request" application message so admins auto-remove us
-        // Skip if client or engine not available (cleanup still happens below)
-        if let (Some(ref meta), Some(_client), Some(&my_pubkey)) = (
+        // Skip if engine not available (cleanup still happens below)
+        if let (Some(ref meta), Some(&my_pubkey)) = (
             &group_meta,
-            crate::state::NOSTR_CLIENT.get(),
             crate::state::MY_PUBLIC_KEY.get(),
         ) {
             let mls_group_id = GroupId::from_slice(&crate::hex::hex_string_to_bytes(&meta.group.engine_group_id));
@@ -2410,58 +2412,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn leave_group_removes_metadata_and_cursors() {
-        let (_tmp, _guard) = init_test_db();
+    async fn leave_group_requires_client() {
+        // leave_group requires NOSTR_CLIENT to be initialized (matches original contract)
         let svc = MlsService::new();
-
-        // Insert a group + cursor
-        let group = MlsGroupFull {
-            group: crate::mls::MlsGroup {
-                group_id: "leave-test".into(),
-                engine_group_id: "eng-leave".into(),
-                creator_pubkey: "pk".into(),
-                created_at: 100,
-                updated_at: 200,
-                evicted: false,
-            },
-            profile: crate::mls::MlsGroupProfile {
-                name: "Leaving Soon".into(),
-                description: None,
-                avatar_ref: None,
-                avatar_cached: None,
-            },
-        };
-        crate::db::mls::save_mls_group(&group).unwrap();
-
-        let mut cursors = HashMap::new();
-        cursors.insert("leave-test".to_string(), crate::mls::EventCursor {
-            last_seen_event_id: "event123".into(),
-            last_seen_at: 500,
-        });
-        crate::db::mls::save_mls_event_cursors(&cursors).unwrap();
-
-        // Add to STATE
-        {
-            let mut state = crate::state::STATE.lock().await;
-            state.create_or_get_mls_group_chat("leave-test", vec![]);
-        }
-
-        // Leave (engine not initialized — leave still cleans up local data)
-        let _ = svc.leave_group("leave-test").await;
-
-        // Verify group is marked evicted (cleanup_evicted_group marks it, leave_group also emits)
-        let groups = crate::db::mls::load_mls_groups().unwrap();
-        // write_groups with empty list doesn't DELETE — cleanup_evicted_group marks it evicted
-        assert!(groups.iter().all(|g| g.group.evicted), "all remaining groups should be evicted");
-
-        // Note: cursor persists in DB (INSERT OR REPLACE doesn't delete removed keys).
-        // This matches src-tauri behavior — orphaned cursors are harmless.
-
-        // Verify removed from STATE
-        {
-            let state = crate::state::STATE.lock().await;
-            assert!(state.get_chat("leave-test").is_none());
-        }
+        let result = svc.leave_group("any-group").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), MlsError::NotInitialized));
     }
 
     #[test]
