@@ -95,7 +95,7 @@ mod state;
 pub(crate) use state::{
     TAURI_APP, TauriEventEmitter,
     NOSTR_CLIENT, MY_SECRET_KEY, MY_PUBLIC_KEY, STATE,
-    TRUSTED_RELAYS, active_trusted_relays, NOTIFIED_WELCOMES, WRAPPER_ID_CACHE,
+    active_trusted_relays, NOTIFIED_WELCOMES, WRAPPER_ID_CACHE,
     MNEMONIC_SEED, ENCRYPTION_KEY, PENDING_NSEC, PENDING_INVITE,
     get_blossom_servers, PendingInviteAcceptance,
 };

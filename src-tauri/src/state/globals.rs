@@ -16,7 +16,7 @@ impl vector_core::EventEmitter for TauriEventEmitter {
 
 pub use vector_core::state::{
     NOSTR_CLIENT, MY_SECRET_KEY, MY_PUBLIC_KEY, STATE,
-    TRUSTED_RELAYS, active_trusted_relays,
+    active_trusted_relays,
     get_blossom_servers,
     MNEMONIC_SEED, PENDING_NSEC,
     ENCRYPTION_KEY,

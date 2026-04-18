@@ -94,67 +94,9 @@ pub fn get_database_path<R: Runtime>(
     Ok(profile_dir.join("vector.db"))
 }
 
-/// Get the MLS directory for a given npub
-///
-/// Returns: AppData/npub1qwerty.../mls/
-pub fn get_mls_directory<R: Runtime>(
-    handle: &AppHandle<R>,
-    npub: &str
-) -> Result<PathBuf, String> {
-    let profile_dir = get_profile_directory(handle, npub)?;
-    let mls_dir = profile_dir.join("mls");
-
-    if !mls_dir.exists() {
-        std::fs::create_dir_all(&mls_dir)
-            .map_err(|e| format!("Failed to create MLS directory: {}", e))?;
-        println!("[Account Manager] Created MLS directory: {}", mls_dir.display());
-    }
-
-    Ok(mls_dir)
-}
-
 // ============================================================================
 // Static Path Helpers (headless-safe — no AppHandle required)
 // ============================================================================
-
-/// Get the profile directory using static APP_DATA_DIR (no AppHandle needed).
-pub fn get_profile_directory_static(npub: &str) -> Result<PathBuf, String> {
-    let app_data = get_app_data_dir()?;
-
-    if !npub.starts_with("npub1") {
-        return Err(format!("Invalid npub format: {}", npub));
-    }
-
-    let profile_dir = app_data.join(npub);
-
-    if !profile_dir.exists() {
-        std::fs::create_dir_all(&profile_dir)
-            .map_err(|e| format!("Failed to create profile directory: {}", e))?;
-    }
-
-    Ok(profile_dir)
-}
-
-/// Get the database path using static APP_DATA_DIR (no AppHandle needed).
-#[allow(dead_code)]
-pub fn get_database_path_static(npub: &str) -> Result<PathBuf, String> {
-    let profile_dir = get_profile_directory_static(npub)?;
-    Ok(profile_dir.join("vector.db"))
-}
-
-/// Get the MLS directory using static APP_DATA_DIR (no AppHandle needed).
-#[allow(dead_code)]
-pub fn get_mls_directory_static(npub: &str) -> Result<PathBuf, String> {
-    let profile_dir = get_profile_directory_static(npub)?;
-    let mls_dir = profile_dir.join("mls");
-
-    if !mls_dir.exists() {
-        std::fs::create_dir_all(&mls_dir)
-            .map_err(|e| format!("Failed to create MLS directory: {}", e))?;
-    }
-
-    Ok(mls_dir)
-}
 
 /// List all existing accounts by scanning directories
 ///
@@ -353,8 +295,9 @@ pub async fn switch_account<R: Runtime>(
     }
 
     // Update MLS directory
-    let mls_dir = get_mls_directory(&handle, &npub)?;
-    println!("[Account Manager] MLS directory: {}", mls_dir.display());
+    if let Ok(mls_dir) = vector_core::mls::get_mls_directory() {
+        println!("[Account Manager] MLS directory: {}", mls_dir.display());
+    }
 
     Ok(())
 }
