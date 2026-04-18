@@ -96,6 +96,10 @@ pub use event_handler::{InboundEventHandler, NoOpEventHandler, PreparedEvent, pr
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Current MLS group message subscription ID. Updated by `refresh_group_subscription()`.
+static MLS_SUB_ID: std::sync::LazyLock<tokio::sync::Mutex<Option<nostr_sdk::SubscriptionId>>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(None));
+
 // ============================================================================
 // VectorCore — High-level API
 // ============================================================================
@@ -358,9 +362,13 @@ impl VectorCore {
         let svc = mls::MlsService::new_persistent_static()
             .map_err(|e| VectorError::Other(e.to_string()))?;
 
-        svc.create_group(name, None, None, &devices, None, None, None, None, &[])
+        let group_id = svc.create_group(name, None, None, &devices, None, None, None, None, &[])
             .await
-            .map_err(|e| VectorError::Other(e.to_string()))
+            .map_err(|e| VectorError::Other(e.to_string()))?;
+
+        // Refresh subscription so listen() picks up the new group
+        let _ = self.refresh_group_subscription().await;
+        Ok(group_id)
     }
 
     /// Send a text message to an MLS group.
@@ -431,7 +439,9 @@ impl VectorCore {
         let svc = mls::MlsService::new_persistent_static()
             .map_err(|e| VectorError::Other(e.to_string()))?;
         svc.leave_group(group_id).await
-            .map_err(|e| VectorError::Other(e.to_string()))
+            .map_err(|e| VectorError::Other(e.to_string()))?;
+        let _ = self.refresh_group_subscription().await;
+        Ok(())
     }
 
     /// Invite a member to an existing MLS group.
@@ -536,14 +546,24 @@ impl VectorCore {
         Ok(output.val)
     }
 
-    /// Subscribe to MLS group message events for all joined groups.
+    /// Refresh the MLS group message subscription to match current group membership.
     ///
-    /// Returns the subscription ID, or None if no groups exist.
-    pub async fn subscribe_groups(&self) -> Result<Option<nostr_sdk::SubscriptionId>> {
+    /// Unsubscribes the old subscription (if any) and creates a new one scoped to
+    /// all non-evicted groups. Called automatically by `create_group`, `leave_group`,
+    /// `invite_member`, and `remove_member`. Can also be called manually.
+    pub async fn refresh_group_subscription(&self) -> Result<()> {
         use nostr_sdk::prelude::*;
         let client = state::NOSTR_CLIENT.get()
             .ok_or(VectorError::Other("Not connected".into()))?;
 
+        let mut sub_guard = MLS_SUB_ID.lock().await;
+
+        // Unsubscribe old
+        if let Some(old_id) = sub_guard.take() {
+            client.unsubscribe(&old_id).await;
+        }
+
+        // Subscribe with current group IDs
         let group_ids: Vec<String> = db::mls::load_mls_groups()
             .unwrap_or_default()
             .into_iter()
@@ -551,18 +571,18 @@ impl VectorCore {
             .map(|g| g.group.group_id)
             .collect();
 
-        if group_ids.is_empty() {
-            return Ok(None);
+        if !group_ids.is_empty() {
+            let filter = Filter::new()
+                .kind(Kind::MlsGroupMessage)
+                .custom_tags(SingleLetterTag::lowercase(Alphabet::H), group_ids)
+                .limit(0);
+            match client.subscribe(filter, None).await {
+                Ok(output) => { *sub_guard = Some(output.val); }
+                Err(e) => eprintln!("[VectorCore] Failed to subscribe to MLS groups: {}", e),
+            }
         }
 
-        let filter = Filter::new()
-            .kind(Kind::MlsGroupMessage)
-            .custom_tags(SingleLetterTag::lowercase(Alphabet::H), group_ids)
-            .limit(0);
-
-        let output = client.subscribe(filter, None).await
-            .map_err(|e| VectorError::Nostr(e.to_string()))?;
-        Ok(Some(output.val))
+        Ok(())
     }
 
     /// Start listening for incoming DMs AND MLS group messages.
@@ -571,9 +591,8 @@ impl VectorCore {
     /// - GiftWraps (DMs, files, MLS welcomes) → prepare_event → commit_prepared_event
     /// - MLS group messages (Kind 445) → handle_mls_group_message
     ///
-    /// **Note:** MLS group subscriptions are captured at call time. Groups joined
-    /// after `listen()` starts will not receive messages until the listener is
-    /// restarted.
+    /// MLS group subscriptions are automatically refreshed when groups change
+    /// (via `create_group`, `leave_group`, etc.).
     ///
     /// ```no_run
     /// use vector_core::*;
@@ -613,8 +632,8 @@ impl VectorCore {
         // Subscribe to DMs (GiftWraps)
         let dm_sub_id = self.subscribe_dms().await?;
 
-        // Subscribe to MLS group messages (Kind 445)
-        let mls_sub_id = self.subscribe_groups().await?;
+        // Initial MLS group subscription (refreshed automatically on group changes)
+        self.refresh_group_subscription().await?;
 
         let client_for_closure = client.clone();
 
@@ -622,14 +641,13 @@ impl VectorCore {
             let handler = handler.clone();
             let c = client_for_closure.clone();
             let dm_sid = dm_sub_id.clone();
-            let mls_sid = mls_sub_id.clone();
             async move {
                 if let RelayPoolNotification::Event { event, subscription_id, .. } = notification {
                     if subscription_id == dm_sid {
                         // DMs, files, reactions, MLS welcomes
                         let prepared = event_handler::prepare_event(*event, &c, my_pk).await;
                         event_handler::commit_prepared_event(prepared, true, &*handler).await;
-                    } else if mls_sid.as_ref() == Some(&subscription_id) {
+                    } else if MLS_SUB_ID.lock().await.as_ref() == Some(&subscription_id) {
                         // MLS group messages — pass handler for on_group_message callback
                         mls::handle_mls_group_message_with_handler(*event, my_pk, Some(&*handler)).await;
                     }
