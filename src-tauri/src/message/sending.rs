@@ -266,7 +266,7 @@ async fn encrypt_and_upload_mls_media(
         .map_err(|e| format!("Failed to create MLS service: {}", e))?;
 
     // Look up the group metadata to get the engine_group_id
-    let groups = mls_service.read_groups().await
+    let groups = mls_service.read_groups()
         .map_err(|e| format!("Failed to read groups: {}", e))?;
     let group_meta = groups.iter()
         .find(|g| g.group_id == group_id)

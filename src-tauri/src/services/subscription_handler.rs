@@ -34,7 +34,6 @@
 //! - Logs are limited to ids, counts, kinds, and outcomes
 
 use nostr_sdk::prelude::*;
-use tauri::Emitter;
 
 use std::sync::LazyLock;
 use tokio::sync::Mutex;
@@ -51,637 +50,130 @@ use crate::{
 static MLS_SUB_ID: LazyLock<Mutex<Option<SubscriptionId>>> = LazyLock::new(|| Mutex::new(None));
 
 /// Process an MLS group message event through the full pipeline.
-/// Shared between live subscriptions (full app) and standalone sync (background service).
-/// Handles: membership check, MDK decryption, rumor processing, DB persistence,
-/// OS notifications, and frontend emissions (guarded by TAURI_APP).
 ///
-/// Returns true if the event was processed, false if skipped.
+/// Delegates business logic to vector-core's handle_mls_group_message,
+/// then adds Tauri-specific notifications and badge updates on top.
 pub(crate) async fn handle_mls_group_message(event: Event, my_public_key: PublicKey) -> bool {
-    // Extract group wire id from 'h' tag
-    let group_wire_id = match event
+    // Extract group_id for notification context (before event is moved into vector-core)
+    let group_id = event
         .tags
         .find(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)))
-        .and_then(|t| t.content().map(|s| s.to_string()))
-    {
-        Some(id) => id,
-        None => return false,
-    };
+        .and_then(|t| t.content().map(|s| s.to_string()));
 
-    // Check membership without constructing MLS engine
-    let is_member = if let Ok(groups) = db::load_mls_groups().await {
-        groups.iter().any(|g| g.group_id == group_wire_id || g.engine_group_id == group_wire_id)
-    } else {
-        false
-    };
-    if !is_member {
-        return false;
-    }
+    // Delegate all business logic to vector-core
+    let message = vector_core::mls::handle_mls_group_message(event, my_public_key).await;
 
-    // Skip own events
-    if event.pubkey == my_public_key {
-        return false;
-    }
+    // Tauri-specific: notifications + badge for new messages
+    if let Some(ref msg) = message {
+        if let Some(group_id) = &group_id {
+            // Check sender blocked status
+            let sender_blocked = {
+                let state = crate::STATE.lock().await;
+                msg.npub.as_ref().and_then(|npub| state.get_profile(npub))
+                    .map_or(false, |p| p.flags.is_blocked())
+            };
 
-    let my_npub = my_public_key.to_bech32().unwrap_or_default();
-    let group_id_for_persist = group_wire_id.clone();
-    let group_id_for_emit = group_wire_id.clone();
-    let ev = event;
-
-    // Process message and persist in one blocking operation (MLS engine is non-Send)
-    let emit_record = tokio::task::spawn_blocking(move || {
-        let rt = tokio::runtime::Handle::current();
-
-        // Per-group lock to coordinate with sync
-        let group_lock = crate::mls::get_group_sync_lock(&group_id_for_persist);
-        let _guard = rt.block_on(group_lock.lock());
-
-        // Skip if already processed
-        if crate::mls::is_mls_event_processed(&ev.id.to_hex()) {
-            return None;
-        }
-
-        let svc = MlsService::new_persistent_static().ok()?;
-        let engine = svc.engine().ok()?;
-
-        match engine.process_message(&ev) {
-            Ok(res) => {
-                match res {
-                    mdk_core::prelude::MessageProcessingResult::ApplicationMessage(msg) => {
-                        let rumor_event = crate::rumor::RumorEvent {
-                            id: msg.id,
-                            kind: msg.kind,
-                            content: msg.content.clone(),
-                            tags: msg.tags.clone(),
-                            created_at: msg.created_at,
-                            pubkey: msg.pubkey,
-                        };
-
-                        let is_mine = !my_npub.is_empty() && msg.pubkey.to_bech32().ok().as_deref() == Some(my_npub.as_str());
-
-                        // Extract admin npubs from engine only when message contains @everyone
-                        let group_admin_npubs: Vec<String> = if msg.content.contains("@everyone") {
-                            let eid = db::get_mls_engine_group_id(&group_id_for_persist)
-                                .ok().flatten();
-                            if let Some(eid) = eid {
-                                engine.get_groups().ok().and_then(|groups| {
-                                    groups.into_iter().find(|g| {
-                                        crate::util::bytes_to_hex_string(g.mls_group_id.as_slice()) == eid
-                                    }).map(|g| {
-                                        g.admin_pubkeys.iter()
-                                            .filter_map(|pk| pk.to_bech32().ok())
-                                            .collect()
-                                    })
-                                }).unwrap_or_default()
-                            } else {
-                                Vec::new()
-                            }
-                        } else {
-                            Vec::new()
-                        };
-
-                        let processed = rt.block_on(async {
-                            use crate::rumor::{process_rumor_with_mls, RumorContext, ConversationType, RumorProcessingResult};
-
-                            let rumor_context = RumorContext {
-                                sender: msg.pubkey,
-                                is_mine,
-                                conversation_id: group_id_for_persist.clone(),
-                                conversation_type: ConversationType::MlsGroup,
-                            };
-
-                            let download_dir = crate::rumor::resolve_download_dir();
-                            match process_rumor_with_mls(&rumor_event, &rumor_context, &download_dir).await {
-                                Ok(result) => {
-                                    match result {
-                                        RumorProcessingResult::TextMessage(mut message) => {
-                                            if !message.replied_to.is_empty() {
-                                                let _ = db::populate_reply_context(&mut message).await;
-                                            }
-
-                                            let sender_npub = msg.pubkey.to_bech32().unwrap_or_default();
-
-                                            let (was_added, _active_typers, should_notify) = {
-                                                let mut state = crate::STATE.lock().await;
-                                                let added = state.add_message_to_chat(&group_id_for_persist, message.clone());
-                                                // Mentions bypass group mute, but sender's DM mute blocks their pings
-                                                let mentions_me = crate::MY_PUBLIC_KEY.get()
-                                                    .and_then(|pk| pk.to_bech32().ok())
-                                                    .map_or(false, |my_npub| message.content.contains(&format!("@{}", my_npub)));
-                                                // @everyone ping: any admin, respects user opt-out
-                                                let everyone_ping = if message.content.contains("@everyone") {
-                                                    group_admin_npubs.contains(&sender_npub)
-                                                        && !db::get_sql_setting("notif_mute_everyone".to_string())
-                                                            .ok().flatten().map_or(false, |v| v == "true")
-                                                } else { false };
-                                                let sender_dm_muted = state.get_chat(&sender_npub)
-                                                    .map_or(false, |c| c.muted);
-                                                let sender_blocked = state.get_profile(&sender_npub)
-                                                    .map_or(false, |p| p.flags.is_blocked());
-                                                let notify = if let Some(chat) = state.get_chat(&group_id_for_persist) {
-                                                    if sender_blocked {
-                                                        false
-                                                    } else if mentions_me || everyone_ping {
-                                                        !message.mine && !sender_dm_muted
-                                                    } else {
-                                                        !message.mine && !chat.muted
-                                                    }
-                                                } else {
-                                                    false
-                                                };
-                                                let typers = state.update_typing_and_get_active(&group_id_for_persist, &sender_npub, 0);
-                                                (added, typers, notify)
-                                            };
-
-                                            if was_added && should_notify {
-                                                let (sender_name, group_name, avatar, group_avatar, resolved_content) = {
-                                                    let state = crate::STATE.lock().await;
-
-                                                    let (sender, av) = if let Some(profile) = state.get_profile(&sender_npub) {
-                                                        let name = if !profile.nickname.is_empty() {
-                                                            profile.nickname.to_string()
-                                                        } else if !profile.name.is_empty() {
-                                                            profile.name.to_string()
-                                                        } else {
-                                                            "Someone".to_string()
-                                                        };
-                                                        let cached = if !profile.avatar_cached.is_empty() {
-                                                            Some(profile.avatar_cached.to_string())
-                                                        } else {
-                                                            None
-                                                        };
-                                                        (name, cached)
-                                                    } else {
-                                                        ("Someone".to_string(), None)
-                                                    };
-
-                                                    let group = if let Some(chat) = state.get_chat(&group_id_for_persist) {
-                                                        chat.metadata.get_name().unwrap_or("Group Chat").to_string()
-                                                    } else {
-                                                        "Group Chat".to_string()
-                                                    };
-
-                                                    let content = crate::services::strip_content_for_preview(
-                                                        &crate::services::resolve_mention_display_names(&message.content, &state)
-                                                    );
-
-                                                    (sender, group, av, None::<String>, content)
-                                                };
-
-                                                // Fetch group avatar from MLS metadata (outside STATE lock)
-                                                let group_avatar = if group_avatar.is_none() {
-                                                    db::load_mls_groups().await.ok().and_then(|groups| {
-                                                        groups.into_iter()
-                                                            .find(|g| g.group_id == group_id_for_persist)
-                                                            .and_then(|g| g.avatar_cached)
-                                                    })
-                                                } else {
-                                                    group_avatar
-                                                };
-
-                                                let notification = NotificationData::group_message(sender_name, group_name, resolved_content, avatar, group_avatar, group_id_for_persist.clone());
-                                                show_notification_generic(notification);
-                                            }
-
-                                            if was_added {
-                                                let slim = {
-                                                    let state = crate::STATE.lock().await;
-                                                    state.get_chat(&group_id_for_persist).map(|c| {
-                                                        crate::db::chats::SlimChatDB::from_chat(c, &state.interner)
-                                                    })
-                                                };
-                                                if let Some(slim) = slim {
-                                                    let _ = crate::db::chats::save_slim_chat(slim).await;
-                                                    let _ = db::save_message(&group_id_for_persist, &message).await;
-                                                }
-                                                Some(message)
-                                            } else {
-                                                None
-                                            }
-                                        }
-                                        RumorProcessingResult::FileAttachment(mut message) => {
-                                            if !message.replied_to.is_empty() {
-                                                let _ = db::populate_reply_context(&mut message).await;
-                                            }
-
-                                            let sender_npub = msg.pubkey.to_bech32().unwrap_or_default();
-
-                                            let (was_added, _active_typers, should_notify) = {
-                                                let mut state = crate::STATE.lock().await;
-                                                let added = state.add_message_to_chat(&group_id_for_persist, message.clone());
-                                                // Mentions bypass group mute, but sender's DM mute blocks their pings
-                                                let mentions_me = crate::MY_PUBLIC_KEY.get()
-                                                    .and_then(|pk| pk.to_bech32().ok())
-                                                    .map_or(false, |my_npub| message.content.contains(&format!("@{}", my_npub)));
-                                                // @everyone ping: any admin, respects user opt-out
-                                                let everyone_ping = if message.content.contains("@everyone") {
-                                                    group_admin_npubs.contains(&sender_npub)
-                                                        && !db::get_sql_setting("notif_mute_everyone".to_string())
-                                                            .ok().flatten().map_or(false, |v| v == "true")
-                                                } else { false };
-                                                let sender_dm_muted = state.get_chat(&sender_npub)
-                                                    .map_or(false, |c| c.muted);
-                                                let sender_blocked = state.get_profile(&sender_npub)
-                                                    .map_or(false, |p| p.flags.is_blocked());
-                                                let notify = if let Some(chat) = state.get_chat(&group_id_for_persist) {
-                                                    if sender_blocked {
-                                                        false
-                                                    } else if mentions_me || everyone_ping {
-                                                        !message.mine && !sender_dm_muted
-                                                    } else {
-                                                        !message.mine && !chat.muted
-                                                    }
-                                                } else {
-                                                    false
-                                                };
-                                                let typers = state.update_typing_and_get_active(&group_id_for_persist, &sender_npub, 0);
-                                                (added, typers, notify)
-                                            };
-
-                                            if was_added && should_notify {
-                                                let (sender_name, group_name, avatar, group_avatar) = {
-                                                    let state = crate::STATE.lock().await;
-
-                                                    let (sender, av) = if let Some(profile) = state.get_profile(&sender_npub) {
-                                                        let name = if !profile.nickname.is_empty() {
-                                                            profile.nickname.to_string()
-                                                        } else if !profile.name.is_empty() {
-                                                            profile.name.to_string()
-                                                        } else {
-                                                            "Someone".to_string()
-                                                        };
-                                                        let cached = if !profile.avatar_cached.is_empty() {
-                                                            Some(profile.avatar_cached.to_string())
-                                                        } else {
-                                                            None
-                                                        };
-                                                        (name, cached)
-                                                    } else {
-                                                        ("Someone".to_string(), None)
-                                                    };
-
-                                                    let group = if let Some(chat) = state.get_chat(&group_id_for_persist) {
-                                                        chat.metadata.get_name().unwrap_or("Group Chat").to_string()
-                                                    } else {
-                                                        "Group Chat".to_string()
-                                                    };
-
-                                                    (sender, group, av, None::<String>)
-                                                };
-
-                                                // Fetch group avatar from MLS metadata (outside STATE lock)
-                                                let group_avatar = if group_avatar.is_none() {
-                                                    db::load_mls_groups().await.ok().and_then(|groups| {
-                                                        groups.into_iter()
-                                                            .find(|g| g.group_id == group_id_for_persist)
-                                                            .and_then(|g| g.avatar_cached)
-                                                    })
-                                                } else {
-                                                    group_avatar
-                                                };
-
-                                                let content = {
-                                                    let extension = message.attachments.first()
-                                                        .map(|att| att.extension.clone())
-                                                        .unwrap_or_else(|| String::from("file"));
-                                                    "Sent a ".to_string() + &get_file_type_description(&extension)
-                                                };
-                                                let notification = NotificationData::group_message(sender_name, group_name, content, avatar, group_avatar, group_id_for_persist.clone());
-                                                show_notification_generic(notification);
-                                            }
-
-                                            if was_added {
-                                                let slim = {
-                                                    let state = crate::STATE.lock().await;
-                                                    state.get_chat(&group_id_for_persist).map(|c| {
-                                                        crate::db::chats::SlimChatDB::from_chat(c, &state.interner)
-                                                    })
-                                                };
-                                                if let Some(slim) = slim {
-                                                    let _ = crate::db::chats::save_slim_chat(slim).await;
-                                                    let _ = db::save_message(&group_id_for_persist, &message).await;
-                                                }
-                                                Some(message)
-                                            } else {
-                                                None
-                                            }
-                                        }
-                                        RumorProcessingResult::Reaction(reaction) => {
-                                            let (was_added, chat_id_for_save) = {
-                                                let mut state = crate::STATE.lock().await;
-                                                if let Some((chat_id, added)) = state.add_reaction_to_message(&reaction.reference_id, reaction.clone()) {
-                                                    (added, if added { Some(chat_id) } else { None })
-                                                } else {
-                                                    (false, None)
-                                                }
-                                            };
-
-                                            if was_added {
-                                                if let Some(chat_id) = chat_id_for_save {
-                                                    let updated_message = {
-                                                        let state = crate::STATE.lock().await;
-                                                        state.find_message(&reaction.reference_id)
-                                                            .map(|(_, msg)| msg.clone())
-                                                    };
-                                                    if let Some(msg) = updated_message {
-                                                        let _ = db::save_message(&chat_id, &msg).await;
-                                                        if let Some(handle) = TAURI_APP.get() {
-                                                            let _ = handle.emit("message_update", serde_json::json!({
-                                                                "old_id": &reaction.reference_id,
-                                                                "message": &msg,
-                                                                "chat_id": &chat_id
-                                                            }));
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            None
-                                        }
-                                        RumorProcessingResult::TypingIndicator { profile_id, until } => {
-                                            let active_typers = {
-                                                let mut state = crate::STATE.lock().await;
-                                                state.update_typing_and_get_active(&group_id_for_persist, &profile_id, until)
-                                            };
-                                            if let Some(handle) = TAURI_APP.get() {
-                                                let _ = handle.emit("typing-update", serde_json::json!({
-                                                    "conversation_id": group_id_for_persist,
-                                                    "typers": active_typers
-                                                }));
-                                            }
-                                            None
-                                        }
-                                        RumorProcessingResult::LeaveRequest { event_id, member_pubkey } => {
-                                            if db::event_exists(&event_id).unwrap_or(false) {
-                                                return None;
-                                            }
-
-                                            let member_name = {
-                                                let state = crate::STATE.lock().await;
-                                                state.get_profile(&member_pubkey)
-                                                    .map(|p| {
-                                                        if !p.nickname.is_empty() { p.nickname.to_string() }
-                                                        else if !p.name.is_empty() { p.name.to_string() }
-                                                        else { member_pubkey.chars().take(12).collect::<String>() + "..." }
-                                                    })
-                                            };
-
-                                            if let Some(handle) = TAURI_APP.get() {
-                                                let mls_svc = match MlsService::new_persistent_static() {
-                                                    Ok(s) => s,
-                                                    Err(_) => return None,
-                                                };
-
-                                                let my_hex = my_public_key.to_hex();
-
-                                                let am_i_admin = if let Ok(groups) = mls_svc.read_groups().await {
-                                                    if let Some(meta) = groups.iter().find(|g| g.group_id == group_id_for_persist) {
-                                                        meta.creator_pubkey == my_npub || meta.creator_pubkey == my_hex
-                                                    } else {
-                                                        false
-                                                    }
-                                                } else {
-                                                    false
-                                                };
-
-                                                if am_i_admin {
-                                                    let was_inserted = db::save_system_event_by_id(
-                                                        &event_id,
-                                                        &group_id_for_persist,
-                                                        crate::db::SystemEventType::MemberLeft,
-                                                        &member_pubkey,
-                                                        member_name.as_deref(),
-                                                    ).await.unwrap_or(false);
-
-                                                    if was_inserted {
-                                                        let _ = handle.emit("system_event", serde_json::json!({
-                                                            "conversation_id": group_id_for_persist,
-                                                            "event_id": event_id,
-                                                            "event_type": crate::db::SystemEventType::MemberLeft.as_u8(),
-                                                            "member_pubkey": member_pubkey,
-                                                            "member_name": member_name,
-                                                        }));
-
-                                                        if let Err(e) = mls_svc.remove_member_device(&group_id_for_persist, &member_pubkey, "").await {
-                                                            eprintln!("[MLS] Live: Failed to auto-remove member {}: {}", member_pubkey, e);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            None
-                                        }
-                                        RumorProcessingResult::WebxdcPeerAdvertisement { event_id, topic_id, node_addr, sender_npub, created_at } => {
-                                            super::handle_webxdc_peer_advertisement(&event_id, &topic_id, &node_addr, &sender_npub, created_at, &group_id_for_persist).await;
-                                            None
-                                        }
-                                        RumorProcessingResult::WebxdcPeerLeft { event_id, topic_id, sender_npub, created_at } => {
-                                            super::handle_webxdc_peer_left(&event_id, &topic_id, &sender_npub, created_at, &group_id_for_persist).await;
-                                            None
-                                        }
-                                        RumorProcessingResult::UnknownEvent(mut event) => {
-                                            if let Ok(chat_id) = db::get_chat_id_by_identifier(&group_id_for_persist) {
-                                                event.chat_id = chat_id;
-                                                let _ = db::save_event(&event).await;
-                                            }
-                                            None
-                                        }
-                                        RumorProcessingResult::Ignored => None,
-                                        RumorProcessingResult::PivxPayment { gift_code, amount_piv, address, message_id, event } => {
-                                            let event_timestamp = event.created_at;
-                                            let _ = db::save_pivx_payment_event(&group_id_for_persist, event).await;
-                                            if let Some(handle) = TAURI_APP.get() {
-                                                let sender_npub = msg.pubkey.to_bech32().unwrap_or_default();
-                                                let _ = handle.emit("pivx_payment_received", serde_json::json!({
-                                                    "conversation_id": group_id_for_persist,
-                                                    "gift_code": gift_code,
-                                                    "amount_piv": amount_piv,
-                                                    "address": address,
-                                                    "message_id": message_id,
-                                                    "sender": sender_npub,
-                                                    "is_mine": is_mine,
-                                                    "at": event_timestamp * 1000,
-                                                }));
-                                            }
-                                            None
-                                        }
-                                        RumorProcessingResult::Edit { message_id, new_content, edited_at, event } => {
-                                            if db::event_exists(&event.id).unwrap_or(false) {
-                                                return None;
-                                            }
-                                            if let Ok(chat_id) = db::get_chat_id_by_identifier(&group_id_for_persist) {
-                                                let mut event_with_chat = event;
-                                                event_with_chat.chat_id = chat_id;
-                                                let _ = db::save_event(&event_with_chat).await;
-                                            }
-                                            let msg_for_emit = {
-                                                let mut state = crate::STATE.lock().await;
-                                                state.update_message_in_chat(&group_id_for_persist, &message_id, |msg| {
-                                                    msg.apply_edit(new_content, edited_at);
-                                                })
-                                            };
-                                            if let Some(msg) = msg_for_emit {
-                                                if let Some(handle) = TAURI_APP.get() {
-                                                    let _ = handle.emit("message_update", serde_json::json!({
-                                                        "old_id": &message_id,
-                                                        "message": &msg,
-                                                        "chat_id": &group_id_for_persist
-                                                    }));
-                                                }
-                                            }
-                                            None
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    eprintln!("[MLS][live] Failed to process rumor: {}", e);
-                                    None
-                                }
-                            }
-                        });
-
-                        let _ = crate::mls::track_mls_event_processed(&ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
-                        processed
-                    }
-                    mdk_core::prelude::MessageProcessingResult::Commit { mls_group_id } => {
-                        let membership_check = engine.get_members(&mls_group_id)
-                            .ok()
-                            .and_then(|members| {
-                                nostr_sdk::PublicKey::from_bech32(&my_npub)
-                                    .ok()
-                                    .map(|pk| members.contains(&pk))
-                            });
-
-                        match membership_check {
-                            Some(false) => {
-                                eprintln!("[MLS] Eviction detected via Commit - group: {}", group_id_for_persist);
-                                rt.block_on(async {
-                                    if let Err(e) = svc.cleanup_evicted_group(&group_id_for_persist).await {
-                                        eprintln!("[MLS] Failed to cleanup evicted group: {}", e);
-                                    }
-                                });
-                            }
-                            Some(true) | None => {
-                                // Sync metadata from MLS group extensions to local storage
-                                // (handles name, description, admin list changes from remote commits)
-                                let _ = engine.sync_group_metadata_from_mls(&mls_group_id);
-                                if let Ok(Some(group)) = engine.get_group(&mls_group_id) {
-                                    let new_name = group.name.clone();
-                                    let new_desc = group.description.clone();
-                                    let gid = group_id_for_persist.clone();
-                                    rt.block_on(async {
-                                        if let Ok(mut groups) = svc.read_groups().await {
-                                            let mut changed = false;
-                                            if let Some(meta) = groups.iter_mut().find(|g| g.group_id == gid || g.engine_group_id == gid) {
-                                                if meta.name != new_name {
-                                                    meta.name = new_name.clone();
-                                                    changed = true;
-                                                }
-                                                if meta.description.as_deref().unwrap_or("") != new_desc {
-                                                    meta.description = if new_desc.is_empty() { None } else { Some(new_desc) };
-                                                    changed = true;
-                                                }
-                                                if changed {
-                                                    meta.updated_at = std::time::SystemTime::now()
-                                                        .duration_since(std::time::UNIX_EPOCH)
-                                                        .unwrap_or_default()
-                                                        .as_secs();
-                                                }
-                                            }
-                                            if changed {
-                                                let updated_meta = groups.iter().find(|g| g.group_id == gid || g.engine_group_id == gid).cloned();
-                                                let _ = svc.write_groups(&groups).await;
-                                                if let Some(meta) = updated_meta {
-                                                    crate::mls::emit_group_metadata_event(&meta);
-                                                }
-                                                // Update STATE chat name
-                                                let mut state = crate::STATE.lock().await;
-                                                if let Some(chat) = state.get_chat_mut(&gid) {
-                                                    if !new_name.is_empty() {
-                                                        chat.metadata.set_name(new_name);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    });
-                                }
-                                // Sync participants (handles admin list changes)
-                                rt.block_on(async {
-                                    if let Err(e) = crate::commands::mls::sync_mls_group_participants(group_id_for_persist.clone()).await {
-                                        eprintln!("[MLS] Live: Failed to sync participants after commit: {}", e);
-                                    }
-                                });
-                                if let Some(handle) = TAURI_APP.get() {
-                                    handle.emit("mls_group_updated", serde_json::json!({
-                                        "group_id": group_id_for_persist
-                                    })).ok();
-                                }
-                            }
-                        }
-                        let _ = crate::mls::track_mls_event_processed(&ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
-                        None
-                    }
-                    mdk_core::prelude::MessageProcessingResult::Proposal(_) => {
-                        if let Some(handle) = TAURI_APP.get() {
-                            handle.emit("mls_group_updated", serde_json::json!({
-                                "group_id": group_id_for_persist
-                            })).ok();
-                        }
-                        let _ = crate::mls::track_mls_event_processed(&ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
-                        None
-                    }
-                    mdk_core::prelude::MessageProcessingResult::PendingProposal { .. } |
-                    mdk_core::prelude::MessageProcessingResult::IgnoredProposal { .. } => {
-                        let _ = crate::mls::track_mls_event_processed(&ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
-                        None
-                    }
-                    mdk_core::prelude::MessageProcessingResult::Unprocessable { .. } => {
-                        None // Don't track — may succeed on retry
-                    }
-                    _ => {
-                        let _ = crate::mls::track_mls_event_processed(&ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
-                        None
-                    }
-                }
+            // Show OS notification (unless blocked/muted/mine)
+            if !msg.mine && !sender_blocked {
+                show_mls_group_notification(group_id, msg).await;
             }
-            Err(e) => {
-                let error_msg = e.to_string();
-                if error_msg.contains("evicted from it") ||
-                   error_msg.contains("after being evicted") ||
-                   error_msg.contains("own leaf not found") {
-                    eprintln!("[MLS] Eviction detected in live subscription - group: {}", group_id_for_persist);
-                    rt.block_on(async {
-                        if let Err(e) = svc.cleanup_evicted_group(&group_id_for_persist).await {
-                            eprintln!("[MLS] Failed to cleanup evicted group: {}", e);
-                        }
-                    });
-                } else if !error_msg.contains("group not found") {
-                    eprintln!("[MLS] live process_message failed (id={}): {}", ev.id, error_msg);
-                }
-                None
-            }
-        }
-    })
-    .await
-    .unwrap_or(None);
 
-    if let Some(record) = emit_record {
-        let sender_blocked = {
-            let state = crate::STATE.lock().await;
-            record.npub.as_ref().and_then(|npub| state.get_profile(npub))
-                .map_or(false, |p| p.flags.is_blocked())
-        };
-        if let Some(handle) = TAURI_APP.get() {
-            // Always emit so the message renders in the group chat
-            let _ = handle.emit("mls_message_new", serde_json::json!({
-                "group_id": group_id_for_emit,
-                "message": record
-            }));
-            // Only update unread badge for non-blocked senders
+            // Update badge (unless sender is blocked)
             if !sender_blocked {
-                let _ = commands::messaging::update_unread_counter(handle.clone()).await;
+                if let Some(handle) = TAURI_APP.get() {
+                    let _ = commands::messaging::update_unread_counter(handle.clone()).await;
+                }
             }
         }
     }
 
-    true
+    message.is_some()
+}
+
+/// Show an OS notification for an MLS group message.
+/// Handles mention detection, @everyone admin validation, and mute checks.
+async fn show_mls_group_notification(group_id: &str, msg: &vector_core::Message) {
+    let sender_npub = msg.npub.as_deref().unwrap_or_default();
+
+    // Determine if we should notify (mentions bypass group mute, blocked senders never notify)
+    let should_notify = {
+        let state = crate::STATE.lock().await;
+
+        let mentions_me = crate::MY_PUBLIC_KEY.get()
+            .and_then(|pk| pk.to_bech32().ok())
+            .map_or(false, |my_npub| msg.content.contains(&format!("@{}", my_npub)));
+
+        let everyone_ping = if msg.content.contains("@everyone") {
+            // Only admin @everyone pings count, and user can opt out
+            let is_admin_sender = db::get_mls_engine_group_id(group_id).ok().flatten()
+                .and_then(|eid| {
+                    let svc = MlsService::new_persistent_static().ok()?;
+                    let engine = svc.engine().ok()?;
+                    engine.get_groups().ok()?.into_iter()
+                        .find(|g| vector_core::hex::bytes_to_hex_string(g.mls_group_id.as_slice()) == eid)
+                        .map(|g| g.admin_pubkeys.iter().any(|pk| pk.to_bech32().ok().as_deref() == Some(sender_npub)))
+                })
+                .unwrap_or(false);
+            is_admin_sender && !vector_core::db::settings::get_sql_setting("notif_mute_everyone".to_string())
+                .ok().flatten().map_or(false, |v| v == "true")
+        } else {
+            false
+        };
+
+        let sender_dm_muted = state.get_chat(sender_npub).map_or(false, |c| c.muted);
+        let sender_blocked = state.get_profile(sender_npub).map_or(false, |p| p.flags.is_blocked());
+
+        if sender_blocked {
+            false
+        } else if mentions_me || everyone_ping {
+            !sender_dm_muted
+        } else {
+            state.get_chat(group_id).map_or(false, |c| !c.muted)
+        }
+    };
+
+    if !should_notify { return; }
+
+    // Build notification display info
+    let is_file = !msg.attachments.is_empty();
+    let (sender_name, group_name, avatar, content) = {
+        let state = crate::STATE.lock().await;
+
+        let (sender, av) = if let Some(profile) = state.get_profile(sender_npub) {
+            let name = if !profile.nickname.is_empty() { profile.nickname.to_string() }
+                else if !profile.name.is_empty() { profile.name.to_string() }
+                else { "Someone".to_string() };
+            let cached = if !profile.avatar_cached.is_empty() { Some(profile.avatar_cached.to_string()) } else { None };
+            (name, cached)
+        } else {
+            ("Someone".to_string(), None)
+        };
+
+        let group = state.get_chat(group_id)
+            .and_then(|c| c.metadata.get_name().map(|n| n.to_string()))
+            .unwrap_or_else(|| "Group Chat".to_string());
+
+        let content = if is_file {
+            let ext = msg.attachments.first().map(|a| a.extension.clone()).unwrap_or_else(|| "file".into());
+            "Sent a ".to_string() + &get_file_type_description(&ext)
+        } else {
+            crate::services::strip_content_for_preview(
+                &crate::services::resolve_mention_display_names(&msg.content, &state)
+            )
+        };
+
+        (sender, group, av, content)
+    };
+
+    // Fetch group avatar from MLS metadata (outside STATE lock)
+    let group_avatar = db::load_mls_groups().await.ok().and_then(|groups| {
+        groups.into_iter()
+            .find(|g| g.group_id == group_id)
+            .and_then(|g| g.profile.avatar_cached)
+    });
+
+    let notification = NotificationData::group_message(sender_name, group_name, content, avatar, group_avatar, group_id.to_string());
+    show_notification_generic(notification);
 }
 
 /// Start live subscriptions for GiftWraps and MLS group messages.
@@ -695,7 +187,7 @@ pub(crate) async fn refresh_mls_subscription() {
         .unwrap_or_default()
         .into_iter()
         .filter(|g| !g.evicted)
-        .map(|g| g.group_id)
+        .map(|g| g.group_id.clone())
         .collect();
 
     let mut sub_guard = MLS_SUB_ID.lock().await;

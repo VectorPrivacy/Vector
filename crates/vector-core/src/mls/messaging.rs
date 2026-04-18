@@ -108,7 +108,8 @@ pub async fn send_mls_message(
                 }
                 wrapper_builder = wrapper_builder.tag(Tag::expiration(expiry_time));
 
-                let signer = crate::state::MY_SECRET_KEY.to_keys().expect("Keys not initialized");
+                let signer = crate::state::MY_SECRET_KEY.to_keys()
+                    .ok_or_else(|| "Keys not initialized for typing indicator signing".to_string())?;
                 let wrapper_with_expiry = wrapper_builder.sign(&signer).await
                     .map_err(|e| format!("Failed to sign wrapper with expiration: {}", e))?;
 

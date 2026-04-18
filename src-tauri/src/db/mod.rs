@@ -22,9 +22,8 @@ pub async fn set_profile(profile: SlimProfile) -> Result<(), String> {
 }
 // MLS database functions
 pub use mls::{
-    save_mls_groups, save_mls_group, load_mls_groups, update_mls_group_avatar, clear_all_mls_group_avatar_cache,
+    save_mls_group, load_mls_groups, update_mls_group_avatar, clear_all_mls_group_avatar_cache,
     save_mls_keypackages, load_mls_keypackages,
-    save_mls_event_cursors, load_mls_event_cursors,
     save_mls_device_id, load_mls_device_id,
     load_mls_negentropy_items,
     get_mls_engine_group_id,
@@ -50,13 +49,10 @@ pub async fn preload_id_caches() -> Result<(), String> {
     vector_core::db::id_cache::preload_id_caches()
 }
 // Chat database functions
-pub use chats::{get_all_chats, delete_chat};
+pub use chats::get_all_chats;
 // Message database functions (delegates to vector-core)
 pub use vector_core::db::events::{save_message, save_chat_messages};
-// Event queries — async wrappers around sync vector-core functions
-pub async fn message_exists_in_db(id: &str) -> Result<bool, String> {
-    vector_core::db::events::message_exists_in_db(id)
-}
+// Event queries (vector-core re-exports)
 pub async fn get_chat_message_count(chat_id: &str) -> Result<usize, String> {
     let chat_int_id = vector_core::db::id_cache::get_chat_id_by_identifier(chat_id)?;
     vector_core::db::events::get_chat_message_count(chat_int_id)
@@ -76,9 +72,9 @@ pub use attachments::{
 };
 // Event database functions
 pub use events::{
-    save_event, save_pivx_payment_event, save_system_event_by_id,
+    save_event, save_pivx_payment_event,
     save_edit_event, event_exists, delete_event,
-    populate_reply_context, get_message_views, get_all_chats_last_messages,
+    get_message_views, get_all_chats_last_messages,
 };
 // Async wrappers for sync vector-core read functions
 pub async fn get_pivx_payments_for_chat(id: &str) -> Result<Vec<vector_core::StoredEvent>, String> {
@@ -87,7 +83,3 @@ pub async fn get_pivx_payments_for_chat(id: &str) -> Result<Vec<vector_core::Sto
 pub async fn get_system_events_for_chat(id: &str) -> Result<Vec<vector_core::StoredEvent>, String> {
     vector_core::db::events::get_system_events_for_chat(id)
 }
-
-
-// SystemEventType moved to vector-core::stored_event
-pub use vector_core::SystemEventType;

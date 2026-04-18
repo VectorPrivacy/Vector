@@ -760,7 +760,7 @@ impl MlsService {
         let engine_group_id = group_meta.group.engine_group_id.clone();
 
         tokio::spawn(async move {
-            let client = crate::state::NOSTR_CLIENT.get().unwrap();
+            let Some(client) = crate::state::NOSTR_CLIENT.get() else { return; };
 
             let group_lock = get_group_sync_lock(&group_id_owned);
             let _guard = group_lock.lock().await;
@@ -916,7 +916,7 @@ impl MlsService {
         let engine_group_id = group_meta.group.engine_group_id.clone();
 
         tokio::spawn(async move {
-            let client = crate::state::NOSTR_CLIENT.get().unwrap();
+            let Some(client) = crate::state::NOSTR_CLIENT.get() else { return; };
 
             let group_lock = get_group_sync_lock(&group_id_owned);
             let _guard = group_lock.lock().await;
@@ -1036,7 +1036,7 @@ impl MlsService {
         let member_pubkey_owned = member_pubkey.to_string();
 
         tokio::spawn(async move {
-            let client = crate::state::NOSTR_CLIENT.get().unwrap();
+            let Some(client) = crate::state::NOSTR_CLIENT.get() else { return; };
 
             let group_lock = get_group_sync_lock(&group_id_owned);
             let _guard = group_lock.lock().await;
@@ -1149,7 +1149,7 @@ impl MlsService {
         let description_clone = description.clone();
 
         tokio::spawn(async move {
-            let client = crate::state::NOSTR_CLIENT.get().unwrap();
+            let Some(client) = crate::state::NOSTR_CLIENT.get() else { return; };
 
             let group_lock = get_group_sync_lock(&group_id_owned);
             let _guard = group_lock.lock().await;
@@ -2033,7 +2033,7 @@ impl MlsService {
                         Ok(mls_event) => {
                             let gid = group_id.to_string();
                             tokio::spawn(async move {
-                                let client = crate::state::NOSTR_CLIENT.get().unwrap();
+                                let Some(client) = crate::state::NOSTR_CLIENT.get() else { return; };
                                 if let Err(e) = client.send_event(&mls_event).await {
                                     eprintln!("[MLS] Failed to send leave request message: {}", e);
                                 } else {

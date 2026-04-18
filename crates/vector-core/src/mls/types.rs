@@ -47,13 +47,13 @@ pub struct MlsGroupFull {
     pub profile: MlsGroupProfile,
 }
 
-impl MlsGroupFull {
-    /// Convenience: access group_id without going through .group
-    #[inline] pub fn group_id(&self) -> &str { &self.group.group_id }
-    #[inline] pub fn engine_group_id(&self) -> &str { &self.group.engine_group_id }
-    #[inline] pub fn creator_pubkey(&self) -> &str { &self.group.creator_pubkey }
-    #[inline] pub fn name(&self) -> &str { &self.profile.name }
-    #[inline] pub fn evicted(&self) -> bool { self.group.evicted }
+impl std::ops::Deref for MlsGroupFull {
+    type Target = MlsGroup;
+    fn deref(&self) -> &MlsGroup { &self.group }
+}
+
+impl std::ops::DerefMut for MlsGroupFull {
+    fn deref_mut(&mut self) -> &mut MlsGroup { &mut self.group }
 }
 
 /// Convert group metadata to frontend-friendly JSON (seconds → milliseconds).
@@ -141,8 +141,8 @@ impl std::error::Error for MlsError {}
 /// Check if a keypackage event has the required encoding tag (MIP-00/MIP-02).
 pub fn has_encoding_tag(event: &nostr_sdk::Event) -> bool {
     event.tags.iter().any(|tag| {
-        let tag_vec: Vec<String> = tag.clone().to_vec();
-        tag_vec.len() >= 2 && tag_vec[0] == "encoding" && tag_vec[1] == "base64"
+        let slice = tag.as_slice();
+        slice.len() >= 2 && slice[0] == "encoding" && slice[1] == "base64"
     })
 }
 
@@ -169,7 +169,7 @@ pub async fn record_group_failure(group_id: &str) -> bool {
 /// Record a successful processing for a group (resets failure count).
 pub async fn record_group_success(group_id: &str) {
     let mut counts = GROUP_FAILURE_COUNTS.lock().await;
-    counts.insert(group_id.to_string(), 0);
+    counts.remove(group_id);
 }
 
 // ============================================================================
@@ -287,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn mls_group_full_accessors() {
+    fn mls_group_full_deref() {
         let full = MlsGroupFull {
             group: MlsGroup {
                 group_id: "gid".into(),
@@ -305,11 +305,13 @@ mod tests {
             },
         };
 
-        assert_eq!(full.group_id(), "gid");
-        assert_eq!(full.engine_group_id(), "eid");
-        assert_eq!(full.creator_pubkey(), "cpk");
-        assert_eq!(full.name(), "My Group");
-        assert!(full.evicted());
+        // Deref to MlsGroup — identity fields accessible directly
+        assert_eq!(full.group_id, "gid");
+        assert_eq!(full.engine_group_id, "eid");
+        assert_eq!(full.creator_pubkey, "cpk");
+        assert!(full.evicted);
+        // Profile fields via .profile
+        assert_eq!(full.profile.name, "My Group");
     }
 
     #[test]

@@ -1,0 +1,10 @@
+[package]
+name = "vector-cli"
+version = "0.1.0"
+edition = "2021"
+description = "CLI client for Vector built on vector-core."
+
+[dependencies]
+vector-core = { path = "../vector-core" }
+tokio = { version = "1.49.0", features = ["full"] }
+serde_json = "1.0"

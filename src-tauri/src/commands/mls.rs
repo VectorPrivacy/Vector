@@ -240,7 +240,7 @@ pub async fn list_mls_groups() -> Result<Vec<String>, String> {
     match db::load_mls_groups().await {
         Ok(groups) => {
             let ids = groups.into_iter()
-                .map(|g| g.group_id)
+                .map(|g| g.group.group_id)
                 .collect();
             Ok(ids)
         }
@@ -269,7 +269,7 @@ pub async fn list_group_cursors() -> Result<serde_json::Value, String> {
         let rt = tokio::runtime::Handle::current();
         rt.block_on(async move {
             let mls = MlsService::new_persistent_static().map_err(|e| e.to_string())?;
-            let cursors = mls.read_event_cursors().await.map_err(|e| e.to_string())?;
+            let cursors = mls.read_event_cursors().map_err(|e| e.to_string())?;
             serde_json::to_value(&cursors).map_err(|e| e.to_string())
         })
     })
@@ -323,7 +323,7 @@ pub async fn get_mls_group_members(group_id: String) -> Result<GroupMembers, Str
             // Initialise persistent MLS
             let mls = MlsService::new_persistent_static().map_err(|e| e.to_string())?;
             // Map wire-id/engine-id using encrypted metadata
-            let meta_groups = mls.read_groups().await.unwrap_or_default();
+            let meta_groups = mls.read_groups().unwrap_or_default();
             let (wire_id, engine_id) = if let Some(m) = meta_groups
                 .iter()
                 .find(|g| g.group_id == group_id || (!g.engine_group_id.is_empty() && g.engine_group_id == group_id))
@@ -657,14 +657,14 @@ pub async fn cache_group_avatar(
 
     // Only use cached path if we're NOT doing a direct update (no direct params)
     if direct_params.is_none() {
-        if let Some(ref cached) = meta.avatar_cached {
+        if let Some(ref cached) = meta.profile.avatar_cached {
             if !cached.is_empty() {
                 return Ok(Some(cached.clone()));
             }
         }
     }
 
-    let avatar_ref = meta.avatar_ref.clone();
+    let avatar_ref = meta.profile.avatar_ref.clone();
     let engine_group_id = meta.engine_group_id.clone();
 
     let (image_hash_bytes, image_key_bytes, image_nonce_bytes) = if let Some(params) = direct_params {
@@ -793,9 +793,9 @@ pub async fn cache_group_avatar(
 
     // Emit metadata event from the already-loaded metadata (mutated in place)
     let mut updated_meta = meta.clone();
-    updated_meta.avatar_cached = Some(cached_path.clone());
+    updated_meta.profile.avatar_cached = Some(cached_path.clone());
     if let Some(url) = ref_to_set {
-        updated_meta.avatar_ref = Some(url.to_string());
+        updated_meta.profile.avatar_ref = Some(url.to_string());
     }
     mls::emit_group_metadata_event(&updated_meta);
 
@@ -1159,8 +1159,8 @@ pub async fn sync_mls_groups_now(
                 let group_ids: Vec<String> = match db::load_mls_groups().await {
                     Ok(groups) => {
                         groups.into_iter()
-                            .filter(|g| !g.evicted) // Skip evicted groups
-                            .map(|g| g.group_id)
+                            .filter(|g| !g.evicted)
+                            .map(|g| g.group.group_id)
                             .collect()
                     }
                     Err(e) => {
@@ -1220,7 +1220,7 @@ pub async fn sync_mls_groups_quick() -> Result<(u32, u32), String> {
             }
 
             // Load cursors to determine which groups are recently active
-            let cursors = mls.read_event_cursors().await.unwrap_or_default();
+            let cursors = mls.read_event_cursors().unwrap_or_default();
             let now_secs = Timestamp::now().as_secs();
             let seven_days_ago = now_secs.saturating_sub(7 * 24 * 3600);
 
@@ -1728,7 +1728,7 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
             }; // engine dropped here
 
             // Now persist the group metadata (awaitable section)
-            let mut groups = mls.read_groups().await.map_err(|e| e.to_string())?;
+            let mut groups = mls.read_groups().map_err(|e| e.to_string())?;
 
             // Check if group already exists or was previously evicted
             let existing_index = groups.iter().position(|g| g.group_id == nostr_group_id);
@@ -1739,20 +1739,15 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
                     println!("[MLS] Re-invited to previously evicted group: {} (epoch={})", nostr_group_id, welcome_epoch);
                     // Clear the evicted flag and update metadata from the fresh welcome
                     groups[idx].evicted = false;
-                    groups[idx].name = group_name;
-                    groups[idx].description = group_description;
+                    groups[idx].profile.name = group_name;
+                    groups[idx].profile.description = group_description;
                     groups[idx].engine_group_id = engine_group_id.clone();
-                    // CRITICAL: Update created_at to the NEW invite time, not the old one.
-                    // The cursor was removed on eviction, so sync_group_since_cursor will use
-                    // created_at as the starting point. If we don't update it, sync will try
-                    // to process old events from before the kick that can't be decrypted.
                     groups[idx].created_at = invite_sent_at;
                     groups[idx].updated_at = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map_err(|e| e.to_string())?
                         .as_secs();
-                    // Reuse invite avatar cache if available, otherwise clear for re-download
-                    groups[idx].avatar_cached = image_hash_hex.as_deref().and_then(|hash| {
+                    groups[idx].profile.avatar_cached = image_hash_hex.as_deref().and_then(|hash| {
                         crate::image_cache::get_cached_path(&handle, hash, crate::image_cache::ImageType::Avatar)
                     });
                     // Update only the specific group instead of all groups
@@ -1774,17 +1769,21 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
                     crate::image_cache::get_cached_path(&handle, hash, crate::image_cache::ImageType::Avatar)
                 });
 
-                let metadata = mls::MlsGroupMetadata {
-                    group_id: nostr_group_id.clone(),         // Wire ID for relay filtering (h tag)
-                    engine_group_id: engine_group_id.clone(), // Internal engine ID for local operations
-                    creator_pubkey: welcomer_hex,             // The welcomer becomes the creator from our perspective
-                    name: group_name,
-                    description: group_description,
-                    avatar_ref: None,
-                    avatar_cached,
-                    created_at: invite_sent_at,               // Use invite-sent time, NOT acceptance time!
-                    updated_at: now_secs,
-                    evicted: false,                           // Accepting a welcome means we're joining, not evicted
+                let metadata = mls::MlsGroupFull {
+                    group: mls::MlsGroup {
+                        group_id: nostr_group_id.clone(),
+                        engine_group_id: engine_group_id.clone(),
+                        creator_pubkey: welcomer_hex,
+                        created_at: invite_sent_at,
+                        updated_at: now_secs,
+                        evicted: false,
+                    },
+                    profile: mls::MlsGroupProfile {
+                        name: group_name,
+                        description: group_description,
+                        avatar_ref: None,
+                        avatar_cached,
+                    },
                 };
 
                 db::save_mls_group(&metadata).await.map_err(|e| e.to_string())?;
@@ -1797,7 +1796,7 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
 
                     // Set metadata from MlsGroupMetadata
                     if let Some(chat) = state.get_chat_mut(&chat_id) {
-                        chat.metadata.set_name(metadata.name.clone());
+                        chat.metadata.set_name(metadata.profile.name.clone());
                         // Member count will be updated during sync when we process messages
                     }
 

@@ -143,6 +143,7 @@ pub fn get_database_path_static(npub: &str) -> Result<PathBuf, String> {
 }
 
 /// Get the MLS directory using static APP_DATA_DIR (no AppHandle needed).
+#[allow(dead_code)]
 pub fn get_mls_directory_static(npub: &str) -> Result<PathBuf, String> {
     let profile_dir = get_profile_directory_static(npub)?;
     let mls_dir = profile_dir.join("mls");

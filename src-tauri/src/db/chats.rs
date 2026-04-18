@@ -12,6 +12,7 @@ pub async fn save_slim_chat(slim_chat: SlimChatDB) -> Result<(), String> {
     vector_core::db::chats::save_slim_chat(&slim_chat)
 }
 
+#[allow(dead_code)]
 pub async fn delete_chat(chat_id: &str) -> Result<(), String> {
     vector_core::db::chats::delete_chat(chat_id)
 }
