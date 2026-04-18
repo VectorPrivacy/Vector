@@ -392,6 +392,7 @@ impl VectorCore {
             at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH).unwrap()
                 .as_millis() as u64,
+            pending: true,
             mine: true,
             npub: my_pk.to_bech32().ok(),
             ..Default::default()
@@ -569,6 +570,10 @@ impl VectorCore {
     /// Blocks until the client disconnects. Processes both event types:
     /// - GiftWraps (DMs, files, MLS welcomes) → prepare_event → commit_prepared_event
     /// - MLS group messages (Kind 445) → handle_mls_group_message
+    ///
+    /// **Note:** MLS group subscriptions are captured at call time. Groups joined
+    /// after `listen()` starts will not receive messages until the listener is
+    /// restarted.
     ///
     /// ```no_run
     /// use vector_core::*;

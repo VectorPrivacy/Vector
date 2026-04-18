@@ -311,7 +311,7 @@ pub async fn handle_mls_group_message_with_handler(
                                                 if changed {
                                                     meta.group.updated_at = std::time::SystemTime::now()
                                                         .duration_since(std::time::UNIX_EPOCH)
-                                                        .unwrap_or_default()
+                                                        .unwrap()
                                                         .as_secs();
                                                 }
                                             }

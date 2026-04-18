@@ -86,10 +86,10 @@ fn downsample_neon(
 
             for cx in 0..chunks {
                 let base = cx * 4;
-                let p0 = *(row.add(x_map[base]) as *const u32);
-                let p1 = *(row.add(x_map[base + 1]) as *const u32);
-                let p2 = *(row.add(x_map[base + 2]) as *const u32);
-                let p3 = *(row.add(x_map[base + 3]) as *const u32);
+                let p0 = std::ptr::read_unaligned(row.add(x_map[base]) as *const u32);
+                let p1 = std::ptr::read_unaligned(row.add(x_map[base + 1]) as *const u32);
+                let p2 = std::ptr::read_unaligned(row.add(x_map[base + 2]) as *const u32);
+                let p3 = std::ptr::read_unaligned(row.add(x_map[base + 3]) as *const u32);
 
                 let mut v = vdupq_n_u32(p0);
                 v = vsetq_lane_u32(p1, v, 1);
@@ -100,7 +100,10 @@ fn downsample_neon(
             }
 
             for rx in 0..remainder {
-                *dst_ptr.add(dst_idx) = *(row.add(x_map[chunks * 4 + rx]) as *const u32);
+                std::ptr::write_unaligned(
+                    dst_ptr.add(dst_idx),
+                    std::ptr::read_unaligned(row.add(x_map[chunks * 4 + rx]) as *const u32),
+                );
                 dst_idx += 1;
             }
         }
@@ -130,10 +133,10 @@ fn downsample_sse2(
 
             for cx in 0..chunks {
                 let base = cx * 4;
-                let p0 = *(row.add(x_map[base]) as *const i32);
-                let p1 = *(row.add(x_map[base + 1]) as *const i32);
-                let p2 = *(row.add(x_map[base + 2]) as *const i32);
-                let p3 = *(row.add(x_map[base + 3]) as *const i32);
+                let p0 = std::ptr::read_unaligned(row.add(x_map[base]) as *const i32);
+                let p1 = std::ptr::read_unaligned(row.add(x_map[base + 1]) as *const i32);
+                let p2 = std::ptr::read_unaligned(row.add(x_map[base + 2]) as *const i32);
+                let p3 = std::ptr::read_unaligned(row.add(x_map[base + 3]) as *const i32);
 
                 let v = _mm_set_epi32(p3, p2, p1, p0);
                 _mm_storeu_si128(dst_ptr.add(dst_idx * 4) as *mut __m128i, v);
@@ -142,7 +145,10 @@ fn downsample_sse2(
 
             for rx in 0..remainder {
                 let sx = x_map[chunks * 4 + rx];
-                *(dst_ptr.add(dst_idx * 4) as *mut u32) = *(row.add(sx) as *const u32);
+                std::ptr::write_unaligned(
+                    dst_ptr.add(dst_idx * 4) as *mut u32,
+                    std::ptr::read_unaligned(row.add(sx) as *const u32),
+                );
                 dst_idx += 1;
             }
         }
@@ -169,7 +175,10 @@ fn downsample_scalar(
             let row = src_ptr.add(sy * src_stride);
 
             for tx in 0..dst_width as usize {
-                *dst_ptr.add(dst_idx) = *(row.add(x_map[tx]) as *const u32);
+                std::ptr::write_unaligned(
+                    dst_ptr.add(dst_idx),
+                    std::ptr::read_unaligned(row.add(x_map[tx]) as *const u32),
+                );
                 dst_idx += 1;
             }
         }
