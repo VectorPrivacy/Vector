@@ -328,6 +328,139 @@ impl VectorCore {
     }
 
     // ========================================================================
+    // MLS Groups
+    // ========================================================================
+
+    /// Create a new MLS group and invite members.
+    ///
+    /// Returns the wire group_id (64-hex, used for relay filtering and UI).
+    ///
+    /// ```no_run
+    /// # async fn example() -> vector_core::Result<()> {
+    /// let core = vector_core::VectorCore;
+    /// let group_id = core.create_group(
+    ///     "My Group",
+    ///     &[("npub1alice...", "device1"), ("npub1bob...", "device2")],
+    /// ).await?;
+    /// core.send_group_message(&group_id, "Hello group!").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn create_group(
+        &self,
+        name: &str,
+        member_devices: &[(&str, &str)], // (npub, device_id) pairs
+    ) -> Result<String> {
+        let devices: Vec<(String, String)> = member_devices.iter()
+            .map(|(npub, did)| (npub.to_string(), did.to_string()))
+            .collect();
+
+        let svc = mls::MlsService::new_persistent_static()
+            .map_err(|e| VectorError::Other(e.to_string()))?;
+
+        svc.create_group(name, None, None, &devices, None, None, None, None, &[])
+            .await
+            .map_err(|e| VectorError::Other(e.to_string()))
+    }
+
+    /// Send a text message to an MLS group.
+    pub async fn send_group_message(&self, group_id: &str, content: &str) -> Result<()> {
+        use nostr_sdk::prelude::*;
+
+        let my_pk = state::MY_PUBLIC_KEY.get()
+            .copied()
+            .ok_or(VectorError::Other("Not logged in".into()))?;
+
+        let milliseconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap()
+            .as_millis() % 1000;
+
+        let rumor = EventBuilder::new(
+            Kind::from_u16(crate::stored_event::event_kind::MLS_CHAT_MESSAGE),
+            content,
+        )
+        .tag(Tag::custom(TagKind::custom("ms"), [milliseconds.to_string()]))
+        .build(my_pk);
+
+        let pending_id = format!("pending-{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+
+        // Add to STATE as pending
+        let msg = Message {
+            id: pending_id.clone(),
+            content: content.to_string(),
+            at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap()
+                .as_millis() as u64,
+            mine: true,
+            npub: my_pk.to_bech32().ok(),
+            ..Default::default()
+        };
+        {
+            let mut state_guard = state::STATE.lock().await;
+            state_guard.create_or_get_mls_group_chat(group_id, vec![]);
+            state_guard.add_message_to_chat(group_id, msg);
+        }
+
+        mls::send_mls_message(group_id, rumor, Some(pending_id))
+            .await
+            .map_err(|e| VectorError::Other(e))
+    }
+
+    /// List all MLS groups.
+    pub async fn list_groups(&self) -> Result<Vec<mls::MlsGroupFull>> {
+        let svc = mls::MlsService::new_persistent_static()
+            .map_err(|e| VectorError::Other(e.to_string()))?;
+        svc.read_groups()
+            .map_err(|e| VectorError::Other(e.to_string()))
+    }
+
+    /// Get members of an MLS group.
+    ///
+    /// Returns (wire_group_id, member_npubs, admin_npubs).
+    pub fn get_group_members(&self, group_id: &str) -> Result<(String, Vec<String>, Vec<String>)> {
+        let svc = mls::MlsService::new_persistent_static()
+            .map_err(|e| VectorError::Other(e.to_string()))?;
+        svc.get_group_members(group_id)
+            .map_err(|e| VectorError::Other(e.to_string()))
+    }
+
+    /// Leave an MLS group.
+    pub async fn leave_group(&self, group_id: &str) -> Result<()> {
+        let svc = mls::MlsService::new_persistent_static()
+            .map_err(|e| VectorError::Other(e.to_string()))?;
+        svc.leave_group(group_id).await
+            .map_err(|e| VectorError::Other(e.to_string()))
+    }
+
+    /// Sync all MLS groups from relays.
+    ///
+    /// Returns total (processed_events, new_messages) across all groups.
+    pub async fn sync_groups(&self) -> Result<(u32, u32)> {
+        let svc = mls::MlsService::new_persistent_static()
+            .map_err(|e| VectorError::Other(e.to_string()))?;
+
+        let groups = svc.read_groups()
+            .map_err(|e| VectorError::Other(e.to_string()))?;
+
+        let mut total_processed = 0u32;
+        let mut total_new = 0u32;
+
+        for group in &groups {
+            if group.evicted { continue; }
+            match svc.sync_group_since_cursor(&group.group_id, None).await {
+                Ok((p, n)) => {
+                    total_processed += p;
+                    total_new += n;
+                }
+                Err(e) => eprintln!("[VectorCore] sync_group {} failed: {}", &group.group_id[..8.min(group.group_id.len())], e),
+            }
+        }
+
+        Ok((total_processed, total_new))
+    }
+
+    // ========================================================================
     // Event Subscription
     // ========================================================================
 
@@ -353,17 +486,47 @@ impl VectorCore {
         Ok(output.val)
     }
 
-    /// Start listening for incoming DMs and process them through the event pipeline.
+    /// Subscribe to MLS group message events for all joined groups.
     ///
-    /// Blocks until the client disconnects. Each event flows through:
-    /// `prepare_event` (dedup, unwrap, parse) → `commit_prepared_event` (STATE, DB, emit, handler hooks)
+    /// Returns the subscription ID, or None if no groups exist.
+    pub async fn subscribe_groups(&self) -> Result<Option<nostr_sdk::SubscriptionId>> {
+        use nostr_sdk::prelude::*;
+        let client = state::NOSTR_CLIENT.get()
+            .ok_or(VectorError::Other("Not connected".into()))?;
+
+        let group_ids: Vec<String> = db::mls::load_mls_groups()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|g| !g.evicted)
+            .map(|g| g.group.group_id)
+            .collect();
+
+        if group_ids.is_empty() {
+            return Ok(None);
+        }
+
+        let filter = Filter::new()
+            .kind(Kind::MlsGroupMessage)
+            .custom_tags(SingleLetterTag::lowercase(Alphabet::H), group_ids)
+            .limit(0);
+
+        let output = client.subscribe(filter, None).await
+            .map_err(|e| VectorError::Nostr(e.to_string()))?;
+        Ok(Some(output.val))
+    }
+
+    /// Start listening for incoming DMs AND MLS group messages.
+    ///
+    /// Blocks until the client disconnects. Processes both event types:
+    /// - GiftWraps (DMs, files, MLS welcomes) → prepare_event → commit_prepared_event
+    /// - MLS group messages (Kind 445) → handle_mls_group_message
     ///
     /// ```no_run
     /// use vector_core::*;
     /// use std::sync::Arc;
     ///
-    /// struct EchoBot;
-    /// impl InboundEventHandler for EchoBot {
+    /// struct MyBot;
+    /// impl InboundEventHandler for MyBot {
     ///     fn on_dm_received(&self, chat_id: &str, msg: &Message, _is_new: bool) {
     ///         if msg.mine { return; }
     ///         let to = chat_id.to_string();
@@ -380,29 +543,41 @@ impl VectorCore {
     ///     event_emitter: None,
     /// })?;
     /// core.login("nsec1...", None).await?;
-    /// core.listen(Arc::new(EchoBot)).await?;
+    /// core.listen(Arc::new(MyBot)).await?;
     /// # Ok(())
     /// # }
     /// ```
     pub async fn listen(&self, handler: Arc<dyn InboundEventHandler>) -> Result<()> {
+        use nostr_sdk::prelude::*;
+
         let client = state::NOSTR_CLIENT.get()
             .ok_or(VectorError::Other("Not connected".into()))?;
         let my_pk = state::MY_PUBLIC_KEY.get()
             .copied()
             .ok_or(VectorError::Other("Not logged in".into()))?;
 
-        let sub_id = self.subscribe_dms().await?;
+        // Subscribe to DMs (GiftWraps)
+        let dm_sub_id = self.subscribe_dms().await?;
+
+        // Subscribe to MLS group messages (Kind 445)
+        let mls_sub_id = self.subscribe_groups().await?;
+
         let client_for_closure = client.clone();
 
         client.handle_notifications(move |notification| {
             let handler = handler.clone();
             let c = client_for_closure.clone();
-            let sid = sub_id.clone();
+            let dm_sid = dm_sub_id.clone();
+            let mls_sid = mls_sub_id.clone();
             async move {
-                if let nostr_sdk::RelayPoolNotification::Event { event, subscription_id, .. } = notification {
-                    if subscription_id == sid {
+                if let RelayPoolNotification::Event { event, subscription_id, .. } = notification {
+                    if subscription_id == dm_sid {
+                        // DMs, files, reactions, MLS welcomes
                         let prepared = event_handler::prepare_event(*event, &c, my_pk).await;
                         event_handler::commit_prepared_event(prepared, true, &*handler).await;
+                    } else if mls_sid.as_ref() == Some(&subscription_id) {
+                        // MLS group messages
+                        mls::handle_mls_group_message(*event, my_pk).await;
                     }
                 }
                 Ok(false)
