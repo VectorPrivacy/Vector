@@ -31,4 +31,4 @@ pub use service::{
 };
 pub use messaging::{send_mls_message, emit_group_metadata_event};
 pub use rumor_mls::{process_rumor_with_mls, parse_mls_imeta_attachments};
-pub use group_handler::handle_mls_group_message;
+pub use group_handler::{handle_mls_group_message, handle_mls_group_message_with_handler};

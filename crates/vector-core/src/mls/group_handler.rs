@@ -19,6 +19,18 @@ use crate::types::Message;
 /// `None` if the event was a commit/proposal/skipped/error.
 /// The caller is responsible for notifications and badge updates.
 pub async fn handle_mls_group_message(event: Event, my_public_key: PublicKey) -> Option<Message> {
+    handle_mls_group_message_with_handler(event, my_public_key, None).await
+}
+
+/// Process an MLS group message with an optional handler callback.
+///
+/// When a handler is provided, calls `handler.on_group_message(group_id, &msg)`
+/// for each new displayable message received.
+pub async fn handle_mls_group_message_with_handler(
+    event: Event,
+    my_public_key: PublicKey,
+    handler: Option<&dyn crate::event_handler::InboundEventHandler>,
+) -> Option<Message> {
     // Extract group wire id from 'h' tag
     let group_wire_id = event
         .tags
@@ -38,7 +50,7 @@ pub async fn handle_mls_group_message(event: Event, my_public_key: PublicKey) ->
 
     let my_npub = my_public_key.to_bech32().unwrap_or_default();
     let group_id_for_persist = group_wire_id.clone();
-    let group_id_for_emit = group_wire_id.clone();
+    let group_id_for_handler = group_wire_id.clone();
     let ev = event;
 
     // Process message and persist in one blocking operation (MLS engine is non-Send)
@@ -375,12 +387,16 @@ pub async fn handle_mls_group_message(event: Event, my_public_key: PublicKey) ->
     .await
     .unwrap_or(None);
 
-    // Emit the processed message for frontend rendering
+    // Emit the processed message for frontend rendering + notify handler
     if let Some(ref record) = emit_record {
         crate::traits::emit_event("mls_message_new", &serde_json::json!({
-            "group_id": group_id_for_emit,
+            "group_id": group_id_for_handler,
             "message": record
         }));
+
+        if let Some(h) = handler {
+            h.on_group_message(&group_id_for_handler, record);
+        }
     }
 
     emit_record

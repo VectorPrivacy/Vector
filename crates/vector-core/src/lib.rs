@@ -433,6 +433,55 @@ impl VectorCore {
             .map_err(|e| VectorError::Other(e.to_string()))
     }
 
+    /// Invite a member to an existing MLS group.
+    ///
+    /// Fetches the member's keypackage, creates a commit, publishes to relays,
+    /// and sends a welcome message. Runs in a background task.
+    pub async fn invite_member(&self, group_id: &str, member_npub: &str, device_id: &str) -> Result<()> {
+        let svc = mls::MlsService::new_persistent_static()
+            .map_err(|e| VectorError::Other(e.to_string()))?;
+        svc.add_member_device(group_id, member_npub, device_id).await
+            .map_err(|e| VectorError::Other(e.to_string()))
+    }
+
+    /// Invite multiple members to an existing MLS group in a single commit.
+    pub async fn invite_members(&self, group_id: &str, members: &[(&str, &str)]) -> Result<()> {
+        let devices: Vec<(String, String)> = members.iter()
+            .map(|(npub, did)| (npub.to_string(), did.to_string()))
+            .collect();
+        let svc = mls::MlsService::new_persistent_static()
+            .map_err(|e| VectorError::Other(e.to_string()))?;
+        svc.add_member_devices(group_id, &devices).await
+            .map_err(|e| VectorError::Other(e.to_string()))
+    }
+
+    /// Remove a member from an MLS group (admin only).
+    pub async fn remove_member(&self, group_id: &str, member_npub: &str) -> Result<()> {
+        let svc = mls::MlsService::new_persistent_static()
+            .map_err(|e| VectorError::Other(e.to_string()))?;
+        svc.remove_member_device(group_id, member_npub, "").await
+            .map_err(|e| VectorError::Other(e.to_string()))
+    }
+
+    /// Update MLS group metadata (name, description, admins).
+    pub async fn update_group(
+        &self,
+        group_id: &str,
+        name: Option<&str>,
+        description: Option<&str>,
+        admin_npubs: Option<&[&str]>,
+    ) -> Result<()> {
+        let svc = mls::MlsService::new_persistent_static()
+            .map_err(|e| VectorError::Other(e.to_string()))?;
+        svc.update_group_data(
+            group_id,
+            name.map(|s| s.to_string()),
+            description.map(|s| s.to_string()),
+            admin_npubs.map(|npubs| npubs.iter().map(|s| s.to_string()).collect()),
+            None, None, None,
+        ).await.map_err(|e| VectorError::Other(e.to_string()))
+    }
+
     /// Sync all MLS groups from relays.
     ///
     /// Returns total (processed_events, new_messages) across all groups.
@@ -576,8 +625,8 @@ impl VectorCore {
                         let prepared = event_handler::prepare_event(*event, &c, my_pk).await;
                         event_handler::commit_prepared_event(prepared, true, &*handler).await;
                     } else if mls_sid.as_ref() == Some(&subscription_id) {
-                        // MLS group messages
-                        mls::handle_mls_group_message(*event, my_pk).await;
+                        // MLS group messages — pass handler for on_group_message callback
+                        mls::handle_mls_group_message_with_handler(*event, my_pk, Some(&*handler)).await;
                     }
                 }
                 Ok(false)

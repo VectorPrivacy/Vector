@@ -29,8 +29,9 @@ pub trait InboundEventHandler: Send + Sync {
     /// An MLS Welcome event — platform handles group join flow.
     fn on_mls_welcome(&self, _event: &Event, _rumor: &UnsignedEvent, _sender: &PublicKey, _contact: &str, _is_mine: bool, _is_new: bool) {}
 
-    /// An MLS group message — platform handles decryption via MDK.
-    fn on_mls_group_message(&self, _event: &Event) {}
+    /// An MLS group message was received and committed to STATE + DB.
+    /// Called after MDK decryption + rumor processing. The message is ready for display.
+    fn on_group_message(&self, _group_id: &str, _msg: &Message) {}
 }
 
 /// No-op handler for CLI/tests.
