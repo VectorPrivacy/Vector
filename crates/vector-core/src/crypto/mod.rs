@@ -752,6 +752,59 @@ pub async fn maybe_decrypt(input: String) -> Result<String, ()> {
     }
 }
 
+// ============================================================================
+// Image Metadata — thumbhash + dimensions for file attachments
+// ============================================================================
+
+/// Re-export SIMD nearest-neighbor downsample from simd::image.
+pub use crate::simd::image::nearest_neighbor_downsample_rgba;
+
+/// Generate a thumbhash from RGBA8 pixel data.
+///
+/// Downscales to fit within 100x100 (ThumbHash's max) using fast nearest-neighbor,
+/// then hashes. Returns the base91-encoded thumbhash string.
+pub fn generate_thumbhash_from_rgba(pixels: &[u8], width: u32, height: u32) -> Option<String> {
+    use fast_thumbhash::{rgba_to_thumb_hash, base91_encode};
+
+    const MAX_DIM: u32 = 100;
+
+    let (thumb_w, thumb_h) = if width <= MAX_DIM && height <= MAX_DIM {
+        (width, height)
+    } else if width > height {
+        (MAX_DIM, (MAX_DIM * height / width).max(1))
+    } else {
+        ((MAX_DIM * width / height).max(1), MAX_DIM)
+    };
+
+    let thumbnail = if thumb_w == width && thumb_h == height {
+        pixels.to_vec()
+    } else {
+        nearest_neighbor_downsample_rgba(pixels, width, height, thumb_w, thumb_h)
+    };
+
+    let hash = rgba_to_thumb_hash(thumb_w as usize, thumb_h as usize, &thumbnail);
+    Some(base91_encode(&hash))
+}
+
+/// Generate image metadata (thumbhash + dimensions) from raw file bytes.
+///
+/// Returns None if the bytes can't be decoded as an image.
+/// Used by `send_file_dm` to automatically include preview metadata for images.
+pub fn generate_image_metadata(file_bytes: &[u8]) -> Option<crate::types::ImageMetadata> {
+    let img = image::load_from_memory(file_bytes).ok()?;
+    let width = img.width();
+    let height = img.height();
+
+    let rgba = img.to_rgba8();
+    let thumbhash = generate_thumbhash_from_rgba(rgba.as_raw(), width, height)?;
+
+    Some(crate::types::ImageMetadata {
+        thumbhash,
+        width,
+        height,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -991,5 +1044,40 @@ mod tests {
         assert_eq!(key.len(), 32, "hash_pass should produce exactly 32 bytes");
         // Ensure it is not all zeros (i.e. hashing actually happened)
         assert!(key.iter().any(|&b| b != 0), "hash output should not be all zeros");
+    }
+
+    #[test]
+    fn generate_thumbhash_from_bytes_basic() {
+        // 2x2 red pixel image in RGBA
+        let pixels: Vec<u8> = vec![
+            255, 0, 0, 255,  255, 0, 0, 255,
+            255, 0, 0, 255,  255, 0, 0, 255,
+        ];
+        let result = super::generate_thumbhash_from_rgba(&pixels, 2, 2);
+        assert!(result.is_some());
+        assert!(!result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn generate_image_metadata_from_bytes() {
+        // Create a 4x4 blue PNG in memory
+        let img = image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 255, 255]));
+        let mut buf = Vec::new();
+        let mut cursor = std::io::Cursor::new(&mut buf);
+        img.write_to(&mut cursor, image::ImageFormat::Png).unwrap();
+
+        let meta = super::generate_image_metadata(&buf);
+        assert!(meta.is_some());
+        let meta = meta.unwrap();
+        assert_eq!(meta.width, 4);
+        assert_eq!(meta.height, 4);
+        assert!(!meta.thumbhash.is_empty());
+    }
+
+    #[test]
+    fn generate_image_metadata_non_image() {
+        let text_bytes = b"this is not an image";
+        let meta = super::generate_image_metadata(text_bytes);
+        assert!(meta.is_none());
     }
 }

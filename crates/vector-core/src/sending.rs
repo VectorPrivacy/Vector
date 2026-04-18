@@ -345,6 +345,9 @@ pub async fn send_file_dm(
     let _ = std::fs::rename(&tmp, &local_path);
     let local_path_str = local_path.to_string_lossy().to_string();
 
+    // === Generate image metadata (thumbhash + dimensions) for image files ===
+    let img_meta = crypto::generate_image_metadata(&file_bytes);
+
     // === Encrypt → upload → build rumor → send ===
     let params = crypto::generate_encryption_params();
     let encrypted = crypto::encrypt_data(&file_bytes, &params)?;
@@ -354,7 +357,7 @@ pub async fn send_file_dm(
         id: file_hash.clone(), key: params.key.clone(), nonce: params.nonce.clone(),
         extension: extension.to_string(), name: filename.to_string(),
         url: String::new(), path: local_path_str.clone(), size: encrypted_size,
-        img_meta: None, downloading: false, downloaded: true,
+        img_meta: img_meta.clone(), downloading: false, downloaded: true,
         ..Default::default()
     };
     let msg = Message {
@@ -424,6 +427,13 @@ pub async fn send_file_dm(
         .tag(Tag::custom(TagKind::custom("ox"), [file_hash.clone()]));
     if !filename.is_empty() {
         file_rumor = file_rumor.tag(Tag::custom(TagKind::custom("name"), [filename]));
+    }
+    // Include image preview metadata for compatible rendering across all clients
+    if let Some(ref meta) = img_meta {
+        if !meta.thumbhash.is_empty() {
+            file_rumor = file_rumor.tag(Tag::custom(TagKind::custom("thumb"), [meta.thumbhash.as_str()]));
+        }
+        file_rumor = file_rumor.tag(Tag::custom(TagKind::custom("dim"), [format!("{}x{}", meta.width, meta.height)]));
     }
     file_rumor = file_rumor.tag(Tag::custom(TagKind::custom("ms"), [milliseconds.to_string()]));
 

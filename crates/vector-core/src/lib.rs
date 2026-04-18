@@ -69,6 +69,9 @@ pub mod rumor;
 // === Messaging ===
 pub mod sending;
 
+// === SIMD Operations ===
+pub mod simd;
+
 // === MLS Group Encryption ===
 pub mod mls;
 
