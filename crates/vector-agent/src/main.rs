@@ -56,6 +56,19 @@ async fn main() {
     // Wait for relay connections
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
+    // Publish keypackage so others can invite us to MLS groups.
+    // `use_cache=true` reuses an existing valid keypackage if present.
+    match core.publish_keypackage(true).await {
+        Ok(kp) => {
+            if kp.cached {
+                eprintln!("[vector-agent] KeyPackage ready (cached): device={}", kp.device_id);
+            } else {
+                eprintln!("[vector-agent] KeyPackage published: device={}", kp.device_id);
+            }
+        }
+        Err(e) => eprintln!("[vector-agent] KeyPackage publish failed (invites won't work): {}", e),
+    }
+
     // Start background listener with event handler
     let (event_handler, message_buffer) = AgentEventHandler::new();
     let listen_core = VectorCore;

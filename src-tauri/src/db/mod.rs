@@ -22,9 +22,9 @@ pub async fn set_profile(profile: SlimProfile) -> Result<(), String> {
 }
 // MLS database functions
 pub use mls::{
-    save_mls_group, load_mls_groups, update_mls_group_avatar, clear_all_mls_group_avatar_cache,
-    save_mls_keypackages, load_mls_keypackages,
-    save_mls_device_id, load_mls_device_id,
+    load_mls_groups, update_mls_group_avatar, clear_all_mls_group_avatar_cache,
+    load_mls_keypackages,
+    load_mls_device_id,
     load_mls_negentropy_items,
     get_mls_engine_group_id,
 };

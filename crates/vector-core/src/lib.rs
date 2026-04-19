@@ -369,6 +369,16 @@ impl VectorCore {
 
         // Refresh subscription so listen() picks up the new group
         let _ = self.refresh_group_subscription().await;
+
+        // MLS security: rotate keypackage so the next join uses a fresh one.
+        // Reusing a KeyPackage across multiple group joins breaks forward secrecy.
+        // Fire-and-forget — group creation already succeeded.
+        tokio::spawn(async move {
+            if let Err(e) = mls::publish_keypackage(false).await {
+                log_warn!("[MLS] KeyPackage rotation after create_group failed: {}", e);
+            }
+        });
+
         Ok(group_id)
     }
 
@@ -445,6 +455,95 @@ impl VectorCore {
         Ok(())
     }
 
+    /// Fetch a user's published MLS keypackages from relays.
+    ///
+    /// Returns a list of (device_id, created_at) pairs, newest first.
+    /// Device IDs are the keypackage event IDs (hex). Also persists results
+    /// to the local keypackage index (deduplicated, merged with any local entries).
+    pub async fn fetch_keypackages(&self, npub: &str) -> Result<Vec<(String, u64)>> {
+        use futures_util::StreamExt;
+        use nostr_sdk::prelude::*;
+
+        let client = state::NOSTR_CLIENT.get()
+            .ok_or(VectorError::Other("Not connected".into()))?;
+        let contact_pubkey = PublicKey::from_bech32(npub)
+            .map_err(|e| VectorError::Nostr(format!("Invalid npub: {}", e)))?;
+
+        let filter = Filter::new()
+            .author(contact_pubkey)
+            .kind(Kind::MlsKeyPackage)
+            .limit(10);
+
+        let mut events = client
+            .stream_events_from(
+                state::active_trusted_relays().await,
+                filter,
+                std::time::Duration::from_secs(10),
+            )
+            .await
+            .map_err(|e| VectorError::Nostr(e.to_string()))?;
+
+        let owner_pubkey_b32 = contact_pubkey.to_bech32()
+            .map_err(|e| VectorError::Nostr(e.to_string()))?;
+        let mut results: Vec<(String, u64)> = Vec::new();
+        let mut new_entries: Vec<serde_json::Value> = Vec::new();
+
+        while let Some(e) = events.next().await {
+            let device_id = e.id.to_hex();
+            let keypackage_ref = e.id.to_hex();
+            let created_at = e.created_at.as_secs();
+            results.push((device_id.clone(), created_at));
+            new_entries.push(serde_json::json!({
+                "owner_pubkey": owner_pubkey_b32,
+                "device_id": device_id,
+                "keypackage_ref": keypackage_ref,
+                "created_at": created_at,
+                "fetched_at": Timestamp::now().as_secs(),
+                "expires_at": 0u64
+            }));
+        }
+
+        // Update local plaintext index (dedup + merge)
+        let mut index = db::mls::load_mls_keypackages().unwrap_or_default();
+
+        // Dedup existing entries by keypackage_ref
+        {
+            let mut seen_refs = std::collections::HashSet::new();
+            index.retain(|entry| {
+                let r = entry.get("keypackage_ref").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                seen_refs.insert(r)
+            });
+        }
+
+        // Merge new entries, preserving local entries with matching keypackage_ref
+        let mut index_changed = false;
+        for new_entry in new_entries {
+            let new_ref = new_entry.get("keypackage_ref").and_then(|v| v.as_str()).unwrap_or_default();
+            let new_owner = new_entry.get("owner_pubkey").and_then(|v| v.as_str()).unwrap_or_default();
+            let new_device = new_entry.get("device_id").and_then(|v| v.as_str()).unwrap_or_default();
+
+            if index.iter().any(|entry| entry.get("keypackage_ref").and_then(|v| v.as_str()) == Some(new_ref)) {
+                continue;
+            }
+
+            index.retain(|entry| {
+                let same_owner = entry.get("owner_pubkey").and_then(|v| v.as_str()) == Some(new_owner);
+                let same_device = entry.get("device_id").and_then(|v| v.as_str()) == Some(new_device);
+                !(same_owner && same_device)
+            });
+            index.push(new_entry);
+            index_changed = true;
+        }
+
+        if index_changed {
+            let _ = db::mls::save_mls_keypackages(&index);
+        }
+
+        // Newest first
+        results.sort_by(|a, b| b.1.cmp(&a.1));
+        Ok(results)
+    }
+
     /// Invite a member to an existing MLS group.
     ///
     /// Fetches the member's keypackage, creates a commit, publishes to relays,
@@ -454,6 +553,17 @@ impl VectorCore {
             .map_err(|e| VectorError::Other(e.to_string()))?;
         svc.add_member_device(group_id, member_npub, device_id).await
             .map_err(|e| VectorError::Other(e.to_string()))
+    }
+
+    /// Invite a member to a group by npub only — fetches their latest keypackage automatically.
+    ///
+    /// Abstracts away keypackage discovery. Returns the device_id that was used.
+    pub async fn invite(&self, group_id: &str, member_npub: &str) -> Result<String> {
+        let keypackages = self.fetch_keypackages(member_npub).await?;
+        let (device_id, _) = keypackages.into_iter().next()
+            .ok_or(VectorError::Other(format!("No keypackages found for {}", member_npub)))?;
+        self.invite_member(group_id, member_npub, &device_id).await?;
+        Ok(device_id)
     }
 
     /// Invite multiple members to an existing MLS group in a single commit.
@@ -494,6 +604,51 @@ impl VectorCore {
         ).await.map_err(|e| VectorError::Other(e.to_string()))
     }
 
+    /// Publish this device's MLS KeyPackage to relays.
+    ///
+    /// Required before anyone can invite you to MLS groups. If `use_cache` is true,
+    /// reuses an existing valid keypackage if one exists on relay. Otherwise generates
+    /// and publishes a fresh one.
+    pub async fn publish_keypackage(&self, use_cache: bool) -> Result<mls::PublishedKeyPackage> {
+        mls::publish_keypackage(use_cache).await
+            .map_err(|e| VectorError::Other(e.to_string()))
+    }
+
+    /// List all pending MLS group invites (unaccepted welcomes).
+    pub async fn list_invites(&self) -> Result<Vec<mls::PendingInvite>> {
+        mls::list_invites().await
+            .map_err(|e| VectorError::Other(e.to_string()))
+    }
+
+    /// Accept a pending MLS group invite by welcome event ID.
+    ///
+    /// Joins the group, persists metadata, creates chat, syncs participants,
+    /// and does an initial message sync. Returns the wire group_id.
+    pub async fn accept_invite(&self, welcome_event_id: &str) -> Result<String> {
+        let group_id = mls::accept_invite(welcome_event_id).await
+            .map_err(|e| VectorError::Other(e.to_string()))?;
+        // Refresh subscription so listen() picks up the new group
+        let _ = self.refresh_group_subscription().await;
+
+        // MLS security: rotate keypackage so our NEXT invite uses a fresh one.
+        // The keypackage we just consumed is now burnt — reusing it would break
+        // forward secrecy and can corrupt MDK's internal state.
+        // Fire-and-forget — we're already in the group.
+        tokio::spawn(async move {
+            if let Err(e) = mls::publish_keypackage(false).await {
+                log_warn!("[MLS] KeyPackage rotation after accept_invite failed: {}", e);
+            }
+        });
+
+        Ok(group_id)
+    }
+
+    /// Decline a pending MLS group invite (removes it without joining).
+    pub async fn decline_invite(&self, welcome_event_id: &str) -> Result<()> {
+        mls::decline_invite(welcome_event_id).await
+            .map_err(|e| VectorError::Other(e.to_string()))
+    }
+
     /// Sync all MLS groups from relays.
     ///
     /// Returns total (processed_events, new_messages) across all groups.
@@ -519,6 +674,153 @@ impl VectorCore {
         }
 
         Ok((total_processed, total_new))
+    }
+
+    /// Sync DM history from relays using NIP-77 negentropy set reconciliation.
+    ///
+    /// Reconciles local wrapper history with relay state, fetches missing events,
+    /// and processes them through the standard prepare → commit pipeline.
+    ///
+    /// Returns (total_events, new_messages).
+    ///
+    /// ```no_run
+    /// # async fn example() -> vector_core::Result<()> {
+    /// let core = vector_core::VectorCore;
+    /// // Sync last 7 days of DMs
+    /// let (events, new) = core.sync_dms(Some(7), &vector_core::NoOpEventHandler).await?;
+    /// println!("Processed {} events, {} new messages", events, new);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn sync_dms(
+        &self,
+        since_days: Option<u64>,
+        handler: &dyn InboundEventHandler,
+    ) -> Result<(u32, u32)> {
+        use futures_util::StreamExt;
+        use nostr_sdk::prelude::*;
+
+        let client = state::NOSTR_CLIENT.get()
+            .ok_or(VectorError::Other("Not connected".into()))?;
+        let my_pk = state::MY_PUBLIC_KEY.get()
+            .copied()
+            .ok_or(VectorError::Other("Not logged in".into()))?;
+
+        // Load known wrapper IDs + timestamps for negentropy fingerprinting
+        let all_items = db::wrappers::load_negentropy_items().unwrap_or_default();
+
+        // Filter items to time window (or use all for full sync)
+        let (items, filter) = if let Some(days) = since_days {
+            let since_ts = Timestamp::now().as_secs().saturating_sub(days * 24 * 3600);
+            let items: Vec<(EventId, Timestamp)> = all_items.iter()
+                .filter(|(_, ts)| ts.as_secs() >= since_ts)
+                .cloned()
+                .collect();
+            let filter = Filter::new()
+                .pubkey(my_pk)
+                .kind(Kind::GiftWrap)
+                .since(Timestamp::from_secs(since_ts));
+            (items, filter)
+        } else {
+            let filter = Filter::new()
+                .pubkey(my_pk)
+                .kind(Kind::GiftWrap);
+            (all_items, filter)
+        };
+
+        log_info!("[SyncDMs] {} negentropy items, since_days={:?}", items.len(), since_days);
+
+        // Dry-run negentropy: exchange fingerprints to identify missing events
+        let sync_opts = nostr_sdk::SyncOptions::new()
+            .direction(nostr_sdk::SyncDirection::Down)
+            .initial_timeout(std::time::Duration::from_secs(10))
+            .dry_run();
+
+        // Race all relays — first to reconcile drives the fetch
+        let relay_map = client.relays().await;
+        let all_relays: Vec<(RelayUrl, Relay)> = relay_map.iter()
+            .map(|(url, relay)| (url.clone(), relay.clone()))
+            .collect();
+        drop(relay_map);
+
+        let mut relay_futs = futures_util::stream::FuturesUnordered::new();
+        for (url, relay) in &all_relays {
+            let url = url.clone();
+            let relay = relay.clone();
+            let f = filter.clone();
+            let i = items.clone();
+            let o = sync_opts.clone();
+            relay_futs.push(async move {
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    relay.sync_with_items(f, i, &o),
+                ).await;
+                (url, result)
+            });
+        }
+
+        // Collect missing IDs from all relays
+        let mut all_missing: std::collections::HashSet<EventId> = std::collections::HashSet::new();
+        while let Some((url, result)) = relay_futs.next().await {
+            match result {
+                Ok(Ok(recon)) => {
+                    let count = recon.remote.len();
+                    all_missing.extend(recon.remote);
+                    log_info!("[SyncDMs] {} reconciled: {} missing", url, count);
+                }
+                Ok(Err(e)) => log_warn!("[SyncDMs] {} failed: {}", url, e),
+                Err(_) => log_warn!("[SyncDMs] {} timed out (10s)", url),
+            }
+        }
+
+        if all_missing.is_empty() {
+            log_info!("[SyncDMs] No missing events");
+            return Ok((0, 0));
+        }
+
+        // Fetch missing events in batches
+        log_info!("[SyncDMs] Fetching {} missing events", all_missing.len());
+        let ids: Vec<EventId> = all_missing.into_iter().collect();
+        let relay_strs: Vec<String> = client.relays().await.keys()
+            .map(|u| u.to_string()).collect();
+
+        let mut total_events = 0u32;
+        let mut new_messages = 0u32;
+        const BATCH_SIZE: usize = 500;
+
+        for batch in ids.chunks(BATCH_SIZE) {
+            let f = Filter::new().ids(batch.to_vec()).kind(Kind::GiftWrap);
+            match client.stream_events_from(
+                relay_strs.clone(), f,
+                std::time::Duration::from_secs(30),
+            ).await {
+                Ok(stream) => {
+                    let client_clone = client.clone();
+                    let prepared_stream = stream
+                        .map(move |event| {
+                            let c = client_clone.clone();
+                            tokio::spawn(async move {
+                                event_handler::prepare_event(event, &c, my_pk).await
+                            })
+                        })
+                        .buffer_unordered(8);
+                    tokio::pin!(prepared_stream);
+
+                    while let Some(result) = prepared_stream.next().await {
+                        total_events += 1;
+                        if let Ok(prepared) = result {
+                            if event_handler::commit_prepared_event(prepared, false, handler).await {
+                                new_messages += 1;
+                            }
+                        }
+                    }
+                }
+                Err(e) => log_warn!("[SyncDMs] Batch fetch error: {}", e),
+            }
+        }
+
+        log_info!("[SyncDMs] Complete: {} events processed, {} new messages", total_events, new_messages);
+        Ok((total_events, new_messages))
     }
 
     // ========================================================================

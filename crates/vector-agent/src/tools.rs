@@ -78,6 +78,20 @@ pub struct GroupIdRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct WelcomeIdRequest {
+    #[schemars(description = "Welcome event ID (from list_invites)")]
+    pub welcome_event_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct NpubGroupRequest {
+    #[schemars(description = "Group ID (64-char hex)")]
+    pub group_id: String,
+    #[schemars(description = "Member's npub")]
+    pub npub: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct InviteMemberRequest {
     #[schemars(description = "Group ID")]
     pub group_id: String,
@@ -127,6 +141,12 @@ pub struct SetNicknameRequest {
     pub npub: String,
     #[schemars(description = "Nickname to set")]
     pub nickname: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SyncDmsRequest {
+    #[schemars(description = "Number of days to sync (e.g. 7 for last week). Omit for full history sync.")]
+    pub since_days: Option<u64>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -276,7 +296,31 @@ impl VectorAgent {
         }
     }
 
-    #[tool(description = "Invite a single member to an MLS group")]
+    #[tool(description = "Invite a single member to an MLS group by npub (auto-fetches their latest keypackage). Prefer this over invite_member_with_device.")]
+    async fn invite(&self, Parameters(req): Parameters<NpubGroupRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.invite(&req.group_id, &req.npub).await {
+            Ok(device_id) => Ok(CallToolResult::success(vec![Content::text(
+                format!("Invited {} (device {})", &req.npub[..20.min(req.npub.len())], &device_id[..8.min(device_id.len())])
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Fetch a user's published MLS keypackages from relays. Returns list of (device_id, created_at). Advanced — prefer `invite` which handles this automatically.")]
+    async fn fetch_keypackages(&self, Parameters(req): Parameters<NpubRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.fetch_keypackages(&req.npub).await {
+            Ok(packages) => {
+                let json = serde_json::to_string_pretty(&packages.iter()
+                    .map(|(id, ts)| serde_json::json!({"device_id": id, "created_at": ts}))
+                    .collect::<Vec<_>>()
+                ).unwrap_or_else(|_| "[]".into());
+                Ok(CallToolResult::success(vec![Content::text(json)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Invite a single member to an MLS group with explicit device_id. Advanced — prefer `invite` which auto-selects latest keypackage.")]
     async fn invite_member(&self, Parameters(req): Parameters<InviteMemberRequest>) -> Result<CallToolResult, McpError> {
         match self.core.invite_member(&req.group_id, &req.npub, &req.device_id).await {
             Ok(()) => Ok(CallToolResult::success(vec![Content::text(
@@ -332,11 +376,60 @@ impl VectorAgent {
         }
     }
 
+    #[tool(description = "Publish this device's MLS KeyPackage to relays. Required before anyone can invite you to MLS groups. Called automatically on agent startup — only use manually if you suspect your keypackage is missing or corrupted.")]
+    async fn publish_keypackage(&self) -> Result<CallToolResult, McpError> {
+        match self.core.publish_keypackage(false).await {
+            Ok(kp) => Ok(CallToolResult::success(vec![Content::text(
+                format!("KeyPackage published: device={}, ref={}", kp.device_id, kp.keypackage_ref)
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "List pending MLS group invites that you've received but not yet accepted. Each invite has a welcome_event_id used for accept/decline.")]
+    async fn list_invites(&self) -> Result<CallToolResult, McpError> {
+        match self.core.list_invites().await {
+            Ok(invites) => {
+                let json = serde_json::to_string_pretty(&invites).unwrap_or_else(|_| "[]".into());
+                Ok(CallToolResult::success(vec![Content::text(json)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Accept a pending MLS group invite by its welcome_event_id. Joins the group, syncs participants, and fetches recent messages.")]
+    async fn accept_invite(&self, Parameters(req): Parameters<WelcomeIdRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.accept_invite(&req.welcome_event_id).await {
+            Ok(group_id) => Ok(CallToolResult::success(vec![Content::text(
+                format!("Joined group: {}", group_id)
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Decline a pending MLS group invite by its welcome_event_id. Removes it without joining.")]
+    async fn decline_invite(&self, Parameters(req): Parameters<WelcomeIdRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.decline_invite(&req.welcome_event_id).await {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text("Invite declined")])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
     #[tool(description = "Sync all MLS groups from relays. Returns count of processed events and new messages.")]
     async fn sync_groups(&self) -> Result<CallToolResult, McpError> {
         match self.core.sync_groups().await {
             Ok((processed, new)) => Ok(CallToolResult::success(vec![Content::text(
                 format!("Synced: {} events processed, {} new messages", processed, new)
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Sync DM history from relays using NIP-77 negentropy reconciliation. Fetches missed messages and populates chat history. Use since_days to limit scope (e.g. 7 for last week) or omit for full sync.")]
+    async fn sync_dms(&self, Parameters(req): Parameters<SyncDmsRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.sync_dms(req.since_days, &vector_core::NoOpEventHandler).await {
+            Ok((events, new)) => Ok(CallToolResult::success(vec![Content::text(
+                format!("DM sync complete: {} events processed, {} new messages", events, new)
             )])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
         }

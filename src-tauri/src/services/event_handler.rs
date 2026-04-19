@@ -83,6 +83,85 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
             }
         });
     }
+
+    fn on_mls_welcome(
+        &self,
+        event: &Event,
+        _rumor: &UnsignedEvent,
+        _sender: &PublicKey,
+        contact: &str,
+        is_mine: bool,
+        is_new: bool,
+    ) {
+        let wrapper_id = event.id;
+        let contact = contact.to_string();
+
+        tokio::spawn(async move {
+            // Only emit/notify after initial sync completes
+            let should_emit = {
+                let state = STATE.lock().await;
+                !state.is_syncing
+            };
+            if !should_emit { return; }
+
+            // UI event refreshes the invite list
+            if let Some(app) = TAURI_APP.get() {
+                let _ = app.emit("mls_invite_received", serde_json::json!({
+                    "wrapper_event_id": wrapper_id.to_hex(),
+                }));
+            }
+
+            // OS notification for new inbound invites
+            if !is_mine && is_new {
+                // Read the freshly-processed welcome from MDK to get the group name
+                let group_name = tokio::task::spawn_blocking(move || {
+                    let mls = MlsService::new_persistent_static().ok()?;
+                    let engine = mls.engine().ok()?;
+                    let welcomes = engine.get_pending_welcomes(None).ok()?;
+                    welcomes.iter()
+                        .find(|w| w.wrapper_event_id == wrapper_id)
+                        .map(|w| w.group_name.clone())
+                }).await.ok().flatten().unwrap_or_default();
+
+                let display_info = {
+                    let state = STATE.lock().await;
+                    match state.get_profile(&contact) {
+                        Some(profile) => {
+                            let name = if !profile.nickname.is_empty() {
+                                profile.nickname.to_string()
+                            } else if !profile.name.is_empty() {
+                                profile.name.to_string()
+                            } else {
+                                String::from("Someone")
+                            };
+                            let avatar = if !profile.avatar_cached.is_empty() {
+                                Some(profile.avatar_cached.to_string())
+                            } else {
+                                None
+                            };
+                            (name, avatar)
+                        }
+                        None => (String::from("Someone"), None),
+                    }
+                };
+                let notif_group_name = if group_name.is_empty() {
+                    String::from("Group Chat")
+                } else {
+                    group_name
+                };
+                let notification = NotificationData::group_invite(
+                    notif_group_name,
+                    display_info.0,
+                    display_info.1,
+                );
+                show_notification_generic(notification);
+
+                // Suppress double-notification from list_pending_mls_welcomes
+                let mut notified = NOTIFIED_WELCOMES.lock().await;
+                notified.insert(wrapper_id.to_hex());
+            }
+        });
+    }
 }
 
 /// Extract display info for a DM text notification.
@@ -218,131 +297,10 @@ pub(crate) async fn tauri_commit_prepared_event(
         }
     }
 
-    // Intercept MLS Welcome — requires MDK (Tauri-only)
-    if let vector_core::PreparedEvent::MlsWelcome {
-        ref wrapper_event_id_bytes, ..
-    } = prepared {
-        // Atomic check-and-insert to prevent duplicate processing from multiple relays
-        {
-            let mut cache = WRAPPER_ID_CACHE.lock().await;
-            if cache.contains(wrapper_event_id_bytes) {
-                return false;
-            }
-            cache.insert(*wrapper_event_id_bytes);
-        }
-        return handle_mls_welcome(prepared, is_new).await;
-    }
-
-    // Everything else: vector-core handles it (DMs, files, reactions, edits, typing, PIVX, etc.)
+    // MLS Welcomes + everything else: vector-core handles processing.
+    // TauriEventHandler hooks fire callbacks for notifications/badges.
     static HANDLER: TauriEventHandler = TauriEventHandler;
     core_handler::commit_prepared_event(prepared, is_new, &HANDLER).await
-}
-
-// ============================================================================
-// MLS Welcome — Tauri-specific MDK processing
-// ============================================================================
-
-/// Handle an MLS Welcome event using the MDK engine.
-async fn handle_mls_welcome(prepared: vector_core::PreparedEvent, is_new: bool) -> bool {
-    let vector_core::PreparedEvent::MlsWelcome {
-        event, rumor, contact, sender: _, is_mine,
-        wrapper_event_id, wrapper_event_id_bytes, wrapper_created_at, ..
-    } = prepared else {
-        return false;
-    };
-
-    let wrapper_id = event.id;
-
-    // Use blocking thread for non-Send MLS engine
-    let welcome_result: Option<String> = tokio::task::spawn_blocking(move || {
-        let svc = MlsService::new_persistent_static();
-        if let Ok(mls) = svc {
-            if let Ok(engine) = mls.engine() {
-                match engine.process_welcome(&wrapper_id, &rumor) {
-                    Ok(_) => {
-                        if let Ok(welcomes) = engine.get_pending_welcomes(None) {
-                            let group_name = welcomes.iter()
-                                .find(|w| w.wrapper_event_id == wrapper_id)
-                                .map(|w| w.group_name.clone())
-                                .unwrap_or_default();
-                            return Some(group_name);
-                        }
-                        return Some(String::new());
-                    }
-                    Err(e) => {
-                        eprintln!("[MLS] Failed to process welcome: {}", e);
-                    }
-                }
-            }
-        }
-        None
-    })
-    .await
-    .unwrap_or(None);
-
-    // Always persist wrapper for negentropy (even on failure)
-    let _ = db::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at);
-
-    if let Some(group_name) = welcome_result {
-        // Wrapper already cached atomically in tauri_commit_prepared_event
-
-        // Only emit after initial sync is complete
-        let should_emit = {
-            let state = STATE.lock().await;
-            !state.is_syncing
-        };
-
-        if should_emit {
-            if let Some(app) = TAURI_APP.get() {
-                let _ = app.emit("mls_invite_received", serde_json::json!({
-                    "wrapper_event_id": wrapper_id.to_hex()
-                }));
-            }
-
-            // OS notification for group invites
-            if !is_mine && is_new {
-                let display_info = {
-                    let state = STATE.lock().await;
-                    match state.get_profile(&contact) {
-                        Some(profile) => {
-                            let name = if !profile.nickname.is_empty() {
-                                profile.nickname.to_string()
-                            } else if !profile.name.is_empty() {
-                                profile.name.to_string()
-                            } else {
-                                String::from("Someone")
-                            };
-                            let avatar = if !profile.avatar_cached.is_empty() {
-                                Some(profile.avatar_cached.to_string())
-                            } else {
-                                None
-                            };
-                            (name, avatar)
-                        }
-                        None => (String::from("Someone"), None),
-                    }
-                };
-                let notif_group_name = if group_name.is_empty() {
-                    String::from("Group Chat")
-                } else {
-                    group_name.clone()
-                };
-                let notification = NotificationData::group_invite(
-                    notif_group_name,
-                    display_info.0,
-                    display_info.1,
-                );
-                show_notification_generic(notification);
-
-                // Prevent list_pending_mls_welcomes from double-notifying
-                let mut notified = NOTIFIED_WELCOMES.lock().await;
-                notified.insert(wrapper_event_id.clone());
-            }
-        }
-        true
-    } else {
-        false
-    }
 }
 
 // ============================================================================

@@ -281,10 +281,51 @@ pub async fn commit_prepared_event(
                 }
                 cache.insert(wrapper_event_id_bytes);
             }
-            // MLS Welcome — delegate to platform handler
+
+            // Process welcome through MDK so it lands in the pending_welcomes list.
+            // Without this step, `list_invites()` would return empty even after the
+            // GiftWrap arrives. Runs on a blocking thread (MDK engine is non-Send).
+            //
+            // IMPORTANT: Only persist the wrapper to negentropy if MDK accepted the
+            // welcome (successful process_welcome OR MDK self-recorded Failed via its
+            // own return path). If the MLS service/engine failed to initialize, the
+            // welcome wasn't seen by MDK at all — leaving the wrapper unpersisted
+            // allows negentropy to re-fetch and re-process it next sync.
+            let wrapper_id = event.id;
+            let rumor_for_mdk = rumor.clone();
+            let mdk_saw_welcome = tokio::task::spawn_blocking(move || {
+                let mls = match crate::mls::MlsService::new_persistent_static() {
+                    Ok(m) => m,
+                    Err(e) => {
+                        log_warn!("[MLS] Welcome deferred: MlsService init failed: {}", e);
+                        return false;
+                    }
+                };
+                let engine = match mls.engine() {
+                    Ok(e) => e,
+                    Err(e) => {
+                        log_warn!("[MLS] Welcome deferred: engine() failed: {}", e);
+                        return false;
+                    }
+                };
+                // process_welcome handles its own dedup; errors are recorded as
+                // Failed state in MDK so retries are no-ops (safe to persist wrapper).
+                if let Err(e) = engine.process_welcome(&wrapper_id, &rumor_for_mdk) {
+                    log_warn!("[MLS] process_welcome error (recorded in MDK): {}", e);
+                }
+                true
+            })
+            .await
+            .unwrap_or(false);
+
+            // Platform-specific hook (notifications, badge updates, etc.)
             handler.on_mls_welcome(&event, &rumor, &sender, &contact, is_mine, is_new);
-            // Persist wrapper regardless of outcome
-            let _ = crate::db::wrappers::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at);
+
+            // Only persist wrapper if MDK has a record of this welcome (success or
+            // recorded-as-failed). Otherwise leave it for retry via next sync.
+            if mdk_saw_welcome {
+                let _ = crate::db::wrappers::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at);
+            }
             false
         }
         PreparedEvent::DedupSkip { wrapper_id_bytes, wrapper_created_at } => {

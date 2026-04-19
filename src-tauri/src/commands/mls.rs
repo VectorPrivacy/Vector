@@ -7,8 +7,6 @@
 //! - Group metadata and member queries
 
 use nostr_sdk::prelude::*;
-use rand::{thread_rng, Rng};
-use rand::distributions::Alphanumeric;
 use tauri::Emitter;
 use std::sync::Arc;
 #[cfg(not(target_os = "android"))]
@@ -37,196 +35,21 @@ pub async fn load_mls_keypackages() -> Result<Vec<serde_json::Value>, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Regenerate this device's MLS KeyPackage. If `cache` is true, attempt to reuse an existing
-/// cached KeyPackage if it exists on the relay; otherwise always generate a fresh one.
+/// Regenerate this device's MLS KeyPackage. Delegates to vector-core.
+///
+/// If `cache` is true, attempts to reuse an existing cached KeyPackage from relay.
+/// Otherwise always generates a fresh one.
 #[tauri::command]
 pub async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Value, String> {
-    let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
-
-    // Ensure a persistent device_id exists
-    let device_id: String = match db::load_mls_device_id().await {
-        Ok(Some(id)) => id,
-        _ => {
-            let id: String = thread_rng()
-                .sample_iter(&Alphanumeric)
-                .take(12)
-                .map(char::from)
-                .collect::<String>()
-                .to_lowercase();
-            let _ = db::save_mls_device_id(&id).await;
-            id
-        }
-    };
-
-    // Resolve my pubkey
-    let my_pubkey = *crate::MY_PUBLIC_KEY.get().ok_or("Public key not initialized")?;
-    let owner_pubkey_b32 = my_pubkey.to_bech32().map_err(|e| e.to_string())?;
-
-    // If caching is requested, attempt to load and verify an existing KeyPackage
-    if cache {
-        // Load existing keypackage index and verify it exists on relay before returning cached
-        let cached_kp_ref: Option<String> = {
-            let index = db::load_mls_keypackages().await.unwrap_or_default();
-
-            index.iter().find(|entry| {
-                entry.get("owner_pubkey").and_then(|v| v.as_str()) == Some(owner_pubkey_b32.as_str())
-                    && entry.get("device_id").and_then(|v| v.as_str()) == Some(device_id.as_str())
-            })
-            .and_then(|existing| existing.get("keypackage_ref").and_then(|v| v.as_str()).map(|s| s.to_string()))
-        };
-
-        // If we have a cached reference, verify it exists on the relay
-        if let Some(ref_id) = cached_kp_ref {
-            println!("[MLS][KeyPackage] Found cached reference {}, verifying on relay...", ref_id);
-
-            // Try to fetch the event from the relay to verify it exists
-            if let Ok(event_id) = nostr_sdk::EventId::from_hex(&ref_id) {
-                let filter = Filter::new()
-                    .id(event_id)
-                    .kind(Kind::MlsKeyPackage)
-                    .limit(1);
-
-                match client.stream_events_from(
-                    active_trusted_relays().await,
-                    filter,
-                    std::time::Duration::from_secs(5)
-                ).await {
-                    Ok(mut events) => {
-                        // Check if we got any events - if so, verify it has the encoding tag
-                        if let Some(event) = events.next().await {
-                            // Check for encoding tag (MIP-00/MIP-02 requirement)
-                            let has_encoding = event.tags.iter().any(|tag| {
-                                let slice = tag.as_slice();
-                                slice.len() >= 2 && slice[0] == "encoding" && slice[1] == "base64"
-                            });
-
-                            if has_encoding {
-                                println!("[MLS][KeyPackage] Cached keypackage has encoding tag, using cached");
-                                return Ok(serde_json::json!({
-                                    "device_id": device_id,
-                                    "owner_pubkey": owner_pubkey_b32,
-                                    "keypackage_ref": ref_id,
-                                    "cached": true
-                                }));
-                            } else {
-                                println!("[MLS][KeyPackage] Cached keypackage missing encoding tag, will regenerate");
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    // Resolve active relays before entering the no-await engine scope
-    let relay_urls: Vec<nostr_sdk::RelayUrl> = active_trusted_relays().await
-        .into_iter()
-        .filter_map(|r| nostr_sdk::RelayUrl::parse(r).ok())
-        .collect();
-
-    // Create device KeyPackage using persistent MLS engine inside a no-await scope
-    let (kp_encoded, kp_tags, _hash_ref_bytes) = {
-        let mls_service = MlsService::new_persistent_static().map_err(|e| e.to_string())?;
-        let engine = mls_service.engine().map_err(|e| e.to_string())?;
-        engine
-            .create_key_package_for_event(&my_pubkey, relay_urls)
-            .map_err(|e| e.to_string())?
-    }; // engine and mls_service dropped here before any await
-
-    // Filter out the protected tag ("-") which causes many relays to reject the event.
-    // MDK adds this tag but it breaks compatibility with relays enforcing NIP-70.
-    let filtered_tags: Vec<_> = kp_tags
-        .into_iter()
-        .filter(|t| t.as_slice().first().map(|s| s.as_str()) != Some("-"))
-        .collect();
-
-    // Build and sign event with nostr client
-    let kp_event = EventBuilder::new(Kind::MlsKeyPackage, kp_encoded)
-        .tags(filtered_tags)
-        .sign_with_keys(&crate::MY_SECRET_KEY.to_keys().expect("Keys not initialized"))
+    let core = vector_core::VectorCore;
+    let kp = core.publish_keypackage(cache).await
         .map_err(|e| e.to_string())?;
 
-    // Debug: Print event details before publishing
-    println!("[MLS KeyPackage] Event ID: {}", kp_event.id.to_hex());
-    println!("[MLS KeyPackage] Kind: {}", kp_event.kind.as_u16());
-    println!("[MLS KeyPackage] Tags count: {}", kp_event.tags.len());
-    for (i, tag) in kp_event.tags.iter().enumerate() {
-        println!("[MLS KeyPackage] Tag {}: {:?}", i, tag.as_slice());
-    }
-
-    // Publish to TRUSTED_RELAYS with retry logic for slow connections
-    let mut send_result = None;
-    let mut last_error = String::new();
-    for attempt in 1..=3 {
-        match client.send_event_to(active_trusted_relays().await.into_iter(), &kp_event).await {
-            Ok(result) => {
-                // Check if at least one relay succeeded
-                if !result.success.is_empty() {
-                    println!("[MLS KeyPackage] Publish succeeded on attempt {}: {:?}", attempt, result);
-                    send_result = Some(result);
-                    break;
-                } else {
-                    // All relays failed, retry
-                    println!("[MLS KeyPackage] Attempt {}/3: all relays failed, retrying in {}s...",
-                        attempt, attempt * 5);
-                    last_error = format!("All relays failed: {:?}", result.failed);
-                    if attempt < 3 {
-                        tokio::time::sleep(std::time::Duration::from_secs((attempt * 5) as u64)).await;
-                    }
-                }
-            }
-            Err(e) => {
-                println!("[MLS KeyPackage] Attempt {}/3 error: {}", attempt, e);
-                last_error = e.to_string();
-                if attempt < 3 {
-                    tokio::time::sleep(std::time::Duration::from_secs((attempt * 5) as u64)).await;
-                }
-            }
-        }
-    }
-
-    // If no successful publish after retries, return error
-    let send_result = send_result.ok_or_else(|| {
-        format!("Failed to publish keypackage after 3 attempts: {}", last_error)
-    })?;
-
-    println!("[MLS KeyPackage] Publish result: {:?}", send_result);
-
-    // Upsert into mls_keypackage_index
-    {
-        let mut index = db::load_mls_keypackages().await.unwrap_or_default();
-        let now = Timestamp::now().as_secs();
-        let new_kp_ref = kp_event.id.to_hex();
-
-        // Remove any existing entries that match either:
-        // 1. Same owner+device (old keypackage from this device)
-        // 2. Same keypackage_ref (stale network entry with wrong device_id)
-        index.retain(|entry| {
-            let same_owner = entry.get("owner_pubkey").and_then(|v| v.as_str()) == Some(&owner_pubkey_b32);
-            let same_device = entry.get("device_id").and_then(|v| v.as_str()) == Some(&device_id);
-            let same_ref = entry.get("keypackage_ref").and_then(|v| v.as_str()) == Some(&new_kp_ref);
-            // Keep entries that don't match either condition
-            !((same_owner && same_device) || same_ref)
-        });
-
-        index.push(serde_json::json!({
-            "owner_pubkey": owner_pubkey_b32,
-            "device_id": device_id,
-            "keypackage_ref": new_kp_ref,
-            "created_at": kp_event.created_at.as_secs(),
-            "fetched_at": now,
-            "expires_at": 0u64
-        }));
-
-        let _ = db::save_mls_keypackages(&index).await;
-    }
-
     Ok(serde_json::json!({
-        "device_id": device_id,
-        "owner_pubkey": owner_pubkey_b32,
-        "keypackage_ref": kp_event.id.to_hex(),
-        "cached": false
+        "device_id": kp.device_id,
+        "owner_pubkey": kp.owner_pubkey,
+        "keypackage_ref": kp.keypackage_ref,
+        "cached": kp.cached,
     }))
 }
 
@@ -404,102 +227,20 @@ pub async fn get_mls_group_members(group_id: String) -> Result<GroupMembers, Str
 // KeyPackage Refresh Commands
 // ============================================================================
 
-/// Refresh keypackages for a contact from TRUSTED_RELAY
-/// Fetches Kind::MlsKeyPackage from the contact, updates local index, and returns (device_id, keypackage_ref)
+/// Refresh keypackages for a contact from TRUSTED_RELAY.
+///
+/// Delegates to vector-core's `fetch_keypackages` which handles relay fetch,
+/// dedup, and index persistence. Returns (device_id, keypackage_ref) pairs —
+/// duplicated because they're the same value in this design.
 #[tauri::command]
 pub async fn refresh_keypackages_for_contact(
     npub: String,
 ) -> Result<Vec<(String, String)>, String> {
-    // Resolve contact pubkey
-    let contact_pubkey = PublicKey::from_bech32(&npub).map_err(|e| e.to_string())?;
-
-    // Access client
-    let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
-
-    // Build filter: author(contact) + MlsKeyPackage
-    let filter = Filter::new()
-        .author(contact_pubkey)
-        .kind(Kind::MlsKeyPackage)
-        // Only need the newest KeyPackage
-        .limit(1);
-
-    // Fetch from TRUSTED_RELAYS with short timeout
-    let mut events = client
-        .stream_events_from(active_trusted_relays().await, filter, std::time::Duration::from_secs(10))
-        .await
+    let core = vector_core::VectorCore;
+    let packages = core.fetch_keypackages(&npub).await
         .map_err(|e| e.to_string())?;
-
-    // Prepare results and index entries
-    let owner_pubkey_b32 = contact_pubkey.to_bech32().map_err(|e| e.to_string())?;
-    let mut results: Vec<(String, String)> = Vec::new();
-    let mut new_entries: Vec<serde_json::Value> = Vec::new();
-
-    while let Some(e) = events.next().await {
-        // Use event id as synthetic device_id when not explicitly provided by remote
-        let device_id = e.id.to_hex();
-        let keypackage_ref = e.id.to_hex();
-
-        results.push((device_id.clone(), keypackage_ref.clone()));
-
-        new_entries.push(serde_json::json!({
-            "owner_pubkey": owner_pubkey_b32,
-            "device_id": device_id,
-            "keypackage_ref": keypackage_ref,
-            "created_at": e.created_at.as_secs(),
-            "fetched_at": Timestamp::now().as_secs(),
-            "expires_at": 0u64
-        }));
-    }
-
-    // Update local plaintext index after network await
-
-    // Load existing index
-    let mut index = db::load_mls_keypackages().await.unwrap_or_default();
-
-    // Dedup existing entries by keypackage_ref — keep first occurrence per ref.
-    // This cleans up stale duplicates where the same keypackage was stored twice
-    // (once with the real device_id from local generation, once with event_id from network).
-    {
-        let mut seen_refs = std::collections::HashSet::new();
-        index.retain(|entry| {
-            let r = entry.get("keypackage_ref").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-            seen_refs.insert(r)
-        });
-    }
-
-    // Merge new entries into the index, preserving local entries that share the same
-    // keypackage_ref (they have the correct device_id, whereas network entries use event_id).
-    let mut index_changed = false;
-    for new_entry in new_entries {
-        let new_ref = new_entry.get("keypackage_ref").and_then(|v| v.as_str()).unwrap_or_default();
-        let new_owner = new_entry.get("owner_pubkey").and_then(|v| v.as_str()).unwrap_or_default();
-        let new_device = new_entry.get("device_id").and_then(|v| v.as_str()).unwrap_or_default();
-
-        // Skip if a local entry already has this keypackage_ref (preserves correct device_id)
-        let ref_exists = index.iter().any(|entry| {
-            entry.get("keypackage_ref").and_then(|v| v.as_str()) == Some(new_ref)
-        });
-        if ref_exists {
-            continue;
-        }
-
-        // Remove any existing entry for the same owner+device_id, then add the new one
-        index.retain(|entry| {
-            let same_owner = entry.get("owner_pubkey").and_then(|v| v.as_str()) == Some(new_owner);
-            let same_device = entry.get("device_id").and_then(|v| v.as_str()) == Some(new_device);
-            !(same_owner && same_device)
-        });
-        index.push(new_entry);
-        index_changed = true;
-    }
-
-    // Only persist if the index was actually modified — avoids overwriting
-    // concurrent writes from regenerate_device_keypackage with stale data
-    if index_changed {
-        let _ = db::save_mls_keypackages(&index).await;
-    }
-
-    Ok(results)
+    // device_id and keypackage_ref are the same value (the event ID hex)
+    Ok(packages.into_iter().map(|(id, _)| (id.clone(), id)).collect())
 }
 
 // ============================================================================
@@ -1009,15 +750,7 @@ pub async fn create_group_chat(
         image_nonce,
     ).await;
 
-    if result.is_ok() {
-        tokio::spawn(async {
-            // regenerate_device_keypackage remains in lib.rs for now
-            if let Err(err) = regenerate_device_keypackage(false).await {
-                eprintln!("[MLS] Failed to regenerate device KeyPackage after group creation: {}", err);
-            }
-        });
-    }
-
+    // Note: vector-core's create_group() auto-rotates the keypackage after success.
     result
 }
 
@@ -1544,78 +1277,42 @@ pub struct SimpleWelcome {
     pub created_at: u64,
 }
 
-/// List pending MLS welcomes (invites)
+/// List pending MLS welcomes (invites).
+///
+/// Delegates the fetch to vector-core, then layers Tauri-specific
+/// OS notifications + NOTIFIED_WELCOMES tracking on top.
 #[tauri::command]
 pub async fn list_pending_mls_welcomes() -> Result<Vec<SimpleWelcome>, String> {
-    // Run non-Send MLS engine work on blocking thread; drive async via current runtime
-    let welcomes: Vec<SimpleWelcome> = tokio::task::spawn_blocking(move || {
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async move {
-            let mls = MlsService::new_persistent_static().map_err(|e| e.to_string())?;
-            let engine = mls.engine().map_err(|e| e.to_string())?;
+    let core = vector_core::VectorCore;
+    let invites = core.list_invites().await.map_err(|e| e.to_string())?;
 
-            let pending = engine.get_pending_welcomes(None).map_err(|e| e.to_string())?;
+    // Convert to Tauri's SimpleWelcome shape for frontend compatibility
+    let welcomes: Vec<SimpleWelcome> = invites.into_iter().map(|i| SimpleWelcome {
+        id: i.welcome_event_id,
+        wrapper_event_id: i.wrapper_event_id,
+        nostr_group_id: i.group_id,
+        group_name: i.group_name,
+        group_description: i.group_description,
+        group_image_url: None,
+        avatar_cached: None, // Filled by cache_invite_avatar
+        image_hash: i.image_hash,
+        image_key: i.image_key,
+        image_nonce: i.image_nonce,
+        group_admin_pubkeys: i.admin_npubs,
+        group_relays: i.relays,
+        welcomer: i.welcomer_npub,
+        member_count: i.member_count,
+        created_at: i.created_at,
+    }).collect();
 
-            let mut out: Vec<SimpleWelcome> = Vec::with_capacity(pending.len());
-            for w in pending {
-                let img_hash_hex = w.group_image_hash.map(|h| bytes_to_hex_string(&h));
-                let img_key_hex = w.group_image_key.as_ref().map(|k| bytes_to_hex_string(k.as_ref()));
-                let img_nonce_hex = w.group_image_nonce.as_ref().map(|n| bytes_to_hex_string(n.as_ref()));
-                out.push(SimpleWelcome {
-                    id: w.id.to_hex(),
-                    wrapper_event_id: w.wrapper_event_id.to_hex(),
-                    nostr_group_id: bytes_to_hex_string(&w.nostr_group_id),
-                    group_name: w.group_name.clone(),
-                    group_description: Some(w.group_description.clone()),
-                    group_image_url: None,
-                    avatar_cached: None, // Will be filled by cache_invite_avatar
-                    image_hash: img_hash_hex,
-                    image_key: img_key_hex,
-                    image_nonce: img_nonce_hex,
-                    group_admin_pubkeys: w.group_admin_pubkeys.iter()
-                        .filter_map(|pk| pk.to_bech32().ok())
-                        .collect(),
-                    group_relays: w.group_relays.iter().map(|r| r.to_string()).collect(),
-                    welcomer: w.welcomer.to_bech32().map_err(|e| e.to_string())?,
-                    member_count: w.member_count,
-                    created_at: w.event.created_at.as_secs(),
-                });
-            }
-
-            // Deduplicate welcomes by nostr_group_id, keeping only the most recent one
-            // (based on event timestamp, not member count which can decrease with kicks)
-            let mut deduped: std::collections::HashMap<String, SimpleWelcome> = std::collections::HashMap::new();
-            for welcome in out {
-                let group_id = welcome.nostr_group_id.clone();
-                if let Some(existing) = deduped.get(&group_id) {
-                    // Keep the one with the later timestamp (most recent invite)
-                    if welcome.created_at > existing.created_at {
-                        deduped.insert(group_id, welcome);
-                    }
-                } else {
-                    deduped.insert(group_id, welcome);
-                }
-            }
-            let out: Vec<SimpleWelcome> = deduped.into_values().collect();
-
-            Ok::<Vec<SimpleWelcome>, String>(out)
-        })
-    })
-    .await
-    .map_err(|e| format!("Task join error: {}", e))??;
-
-    // Send notifications for new welcomes (outside blocking task)
-    // Only notify for welcomes we haven't notified about before
+    // Tauri-specific: OS notifications for new invites
     {
         let mut notified = NOTIFIED_WELCOMES.lock().await;
-
         for welcome in &welcomes {
-            // Skip if we've already notified about this welcome
             if notified.contains(&welcome.wrapper_event_id) {
                 continue;
             }
 
-            // Get inviter's display name and avatar
             let (inviter_name, avatar) = {
                 let state = STATE.lock().await;
                 if let Some(profile) = state.get_profile(&welcome.welcomer) {
@@ -1639,8 +1336,6 @@ pub async fn list_pending_mls_welcomes() -> Result<Vec<SimpleWelcome>, String> {
 
             let notification = NotificationData::group_invite(welcome.group_name.clone(), inviter_name, avatar);
             show_notification_generic(notification);
-
-            // Mark this welcome as notified
             notified.insert(welcome.wrapper_event_id.clone());
         }
     }
@@ -1648,240 +1343,68 @@ pub async fn list_pending_mls_welcomes() -> Result<Vec<SimpleWelcome>, String> {
     Ok(welcomes)
 }
 
-/// Accept an MLS welcome by its welcome (rumor) event id hex
+/// Accept an MLS welcome by its welcome (rumor) event id hex.
+///
+/// Delegates core MLS join logic (accept, persist, sync) to vector-core.
+/// Adds Tauri-specific concerns: avatar caching, keypackage regeneration,
+/// UI event emit, and notification cleanup.
 #[tauri::command]
 pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String> {
-    // Run non-Send MLS engine work on blocking thread; drive async via current runtime
-    let (accepted, nostr_group_id) = tokio::task::spawn_blocking(move || {
-        let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async move {
-            let mls = MlsService::new_persistent_static().map_err(|e| e.to_string())?;
+    let core = vector_core::VectorCore;
 
-            // Get welcome details and accept it (engine work in no-await scope)
-            let (nostr_group_id, engine_group_id, welcome_epoch, group_name, group_description, welcomer_hex, wrapper_event_id_hex, invite_sent_at, image_hash_hex) = {
-                let engine = mls.engine().map_err(|e| e.to_string())?;
-
-                let id = nostr_sdk::EventId::from_hex(&welcome_event_id_hex).map_err(|e| e.to_string())?;
-                let welcome_opt = engine.get_welcome(&id).map_err(|e| e.to_string())?;
-                let welcome = welcome_opt.ok_or_else(|| "Welcome not found".to_string())?;
-
-                // Extract metadata before accepting
-                let nostr_group_id_bytes = welcome.nostr_group_id.clone();
-                let group_name = welcome.group_name.clone();
-                let group_description = if welcome.group_description.is_empty() { None } else { Some(welcome.group_description.clone()) };
-                let welcomer_hex = welcome.welcomer.to_hex();
-                let wrapper_event_id_hex = welcome.wrapper_event_id.to_hex();
-                let image_hash_hex = welcome.group_image_hash.map(|h| bytes_to_hex_string(&h));
-                // Get the invite-sent timestamp from the welcome event (not acceptance time!)
-                // This is critical for accurate sync windows
-                let invite_sent_at = welcome.event.created_at.as_secs();
-
-                // Accept the welcome - this updates engine state internally
-                engine.accept_welcome(&welcome).map_err(|e| e.to_string())?;
-
-                // The nostr_group_id is used for wire protocol (h tag on relays)
-                let nostr_group_id = bytes_to_hex_string(&nostr_group_id_bytes);
-
-                // After accepting the welcome, get the actual group from the engine to find its internal ID
-                // This follows the pattern from the SDK example
-                let (engine_group_id, welcome_epoch) = {
-                    // Get all groups from the engine (should include the one we just joined)
-                    let groups = engine.get_groups()
-                        .map_err(|e| format!("Failed to get groups after accepting welcome: {}", e))?;
-
-                    // Find the group that matches our nostr_group_id
-                    let matching_group = groups.iter()
-                        .find(|g| bytes_to_hex_string(&g.nostr_group_id) == nostr_group_id);
-
-                    if let Some(group) = matching_group {
-                        // Found the group - use its internal MLS group ID
-                        let engine_id = bytes_to_hex_string(group.mls_group_id.as_slice());
-                        println!("[MLS] Found group in engine after accept:");
-                        println!("[MLS]   - nostr_group_id matches: {}", nostr_group_id);
-                        println!("[MLS]   - engine mls_group_id: {}", engine_id);
-                        println!("[MLS]   - epoch: {}", group.epoch);
-                        (engine_id, group.epoch)
-                    } else {
-                        // This shouldn't happen, but fallback to nostr_group_id
-                        eprintln!("[MLS] Warning: Could not find group in engine after accepting welcome");
-                        eprintln!("[MLS] Groups in engine: {}", groups.len());
-                        for g in groups.iter() {
-                            eprintln!("[MLS]   - Group: nostr_id={}, mls_id={}",
-                                     bytes_to_hex_string(&g.nostr_group_id),
-                                     bytes_to_hex_string(g.mls_group_id.as_slice()));
-                        }
-                        // Use the nostr_group_id as fallback
-                        (nostr_group_id.clone(), 0u64)
-                    }
-                };
-
-                // Log for debugging
-                println!("[MLS] Welcome accepted:");
-                println!("[MLS]   - wire_id (h tag): {}", nostr_group_id);
-                println!("[MLS]   - engine_group_id: {}", engine_group_id);
-                println!("[MLS]   - epoch: {}", welcome_epoch);
-                println!("[MLS]   - group_name: {}", group_name);
-                println!("[MLS]   - invite_sent_at: {}", invite_sent_at);
-
-                (nostr_group_id, engine_group_id, welcome_epoch, group_name, group_description, welcomer_hex, wrapper_event_id_hex, invite_sent_at, image_hash_hex)
-            }; // engine dropped here
-
-            // Now persist the group metadata (awaitable section)
-            let mut groups = mls.read_groups().map_err(|e| e.to_string())?;
-
-            // Check if group already exists or was previously evicted
-            let existing_index = groups.iter().position(|g| g.group_id == nostr_group_id);
-
-            if let Some(idx) = existing_index {
-                // Group exists - check if it was evicted and we're being re-invited
-                if groups[idx].evicted {
-                    println!("[MLS] Re-invited to previously evicted group: {} (epoch={})", nostr_group_id, welcome_epoch);
-                    // Clear the evicted flag and update metadata from the fresh welcome
-                    groups[idx].evicted = false;
-                    groups[idx].profile.name = group_name;
-                    groups[idx].profile.description = group_description;
-                    groups[idx].engine_group_id = engine_group_id.clone();
-                    groups[idx].created_at = invite_sent_at;
-                    groups[idx].updated_at = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_err(|e| e.to_string())?
-                        .as_secs();
-                    groups[idx].profile.avatar_cached = image_hash_hex.as_deref().and_then(|hash| {
-                        crate::image_cache::get_cached_path(&handle, hash, crate::image_cache::ImageType::Avatar)
-                    });
-                    // Update only the specific group instead of all groups
-                    db::save_mls_group(&groups[idx]).await.map_err(|e| e.to_string())?;
-                    mls::emit_group_metadata_event(&groups[idx]);
-                } else {
-                    println!("[MLS] Group already exists in metadata: group_id={} (epoch={})", nostr_group_id, welcome_epoch);
-                }
-            } else {
-                // Build metadata for the accepted group
-                // Use invite_sent_at (from welcome event) for created_at so sync fetches from the right time
-                let now_secs = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|e| e.to_string())?
-                    .as_secs();
-
-                // Check if the invite avatar was already cached (from renderInviteItem)
-                let avatar_cached = image_hash_hex.as_deref().and_then(|hash| {
-                    crate::image_cache::get_cached_path(&handle, hash, crate::image_cache::ImageType::Avatar)
-                });
-
-                let metadata = mls::MlsGroupFull {
-                    group: mls::MlsGroup {
-                        group_id: nostr_group_id.clone(),
-                        engine_group_id: engine_group_id.clone(),
-                        creator_pubkey: welcomer_hex,
-                        created_at: invite_sent_at,
-                        updated_at: now_secs,
-                        evicted: false,
-                    },
-                    profile: mls::MlsGroupProfile {
-                        name: group_name,
-                        description: group_description,
-                        avatar_ref: None,
-                        avatar_cached,
-                    },
-                };
-
-                db::save_mls_group(&metadata).await.map_err(|e| e.to_string())?;
-                mls::emit_group_metadata_event(&metadata);
-
-                // Create the Chat in STATE with metadata and save to disk
-                {
-                    let mut state = STATE.lock().await;
-                    let chat_id = state.create_or_get_mls_group_chat(&nostr_group_id, vec![]);
-
-                    // Set metadata from MlsGroupMetadata
-                    if let Some(chat) = state.get_chat_mut(&chat_id) {
-                        chat.metadata.set_name(metadata.profile.name.clone());
-                        // Member count will be updated during sync when we process messages
-                    }
-
-                    // Build slim while locked, save after drop
-                    let slim = state.get_chat(&chat_id).map(|chat| {
-                        db::chats::SlimChatDB::from_chat(chat, &state.interner)
-                    });
-                    drop(state);
-
-                    if let Some(slim) = slim {
-                        if let Err(e) = db::chats::save_slim_chat(slim).await {
-                            eprintln!("[MLS] Failed to save chat after welcome acceptance: {}", e);
-                        }
-                    }
-                }
-
-                println!("[MLS] Persisted group metadata after accept: group_id={} (epoch={})", nostr_group_id, welcome_epoch);
-            }
-
-            // Remove this welcome from the notified set since it's been accepted
-            {
-                let mut notified = NOTIFIED_WELCOMES.lock().await;
-                notified.remove(&wrapper_event_id_hex);
-            }
-
-            // Emit event so the UI can refresh welcome lists and group lists
-            if let Some(app) = TAURI_APP.get() {
-                let _ = app.emit("mls_welcome_accepted", serde_json::json!({
-                    "welcome_event_id": welcome_event_id_hex,
-                    "group_id": nostr_group_id
-                }));
-            }
-
-            // Sync the participants array with actual group members from the engine
-            if let Err(e) = sync_mls_group_participants(nostr_group_id.clone()).await {
-                eprintln!("[MLS] Failed to sync participants after welcome accept: {}", e);
-            }
-
-            // Immediately prefetch recent MLS messages for this group so the chat list shows previews
-            // and ordering without requiring the user to open the chat. This loads a recent slice
-            // (48h window by default in sync_group_since_cursor) rather than full history.
-            match mls.sync_group_since_cursor(&nostr_group_id, None).await {
-                Ok((processed, new_msgs)) => {
-                    println!("[MLS] Post-accept initial sync (epoch={}): processed={}, new={}", welcome_epoch, processed, new_msgs);
-                    // Optional: let UI know initial sync finished for this group
-                    if let Some(app) = TAURI_APP.get() {
-                        let _ = app.emit("mls_group_initial_sync", serde_json::json!({
-                            "group_id": nostr_group_id,
-                            "processed": processed,
-                            "new": new_msgs
-                        }));
-                    }
-                }
-                Err(e) => {
-                    eprintln!("[MLS] Post-accept initial sync failed for group {} (epoch={}): {}", nostr_group_id, welcome_epoch, e);
-                }
-            }
-
-            Ok::<(bool, String), String>((true, nostr_group_id))
-        })
+    // Capture wrapper_event_id + welcomer for notification cleanup (before welcome is consumed)
+    let wrapper_event_id_hex: Option<String> = tokio::task::spawn_blocking({
+        let id = welcome_event_id_hex.clone();
+        move || {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async move {
+                let mls = MlsService::new_persistent_static().ok()?;
+                let engine = mls.engine().ok()?;
+                let ev_id = nostr_sdk::EventId::from_hex(&id).ok()?;
+                let welcome = engine.get_welcome(&ev_id).ok()??;
+                Some(welcome.wrapper_event_id.to_hex())
+            })
+        }
     })
     .await
-    .map_err(|e| format!("Task join error: {}", e))??;
+    .unwrap_or(None);
 
-    if accepted {
-        // Refresh the live MLS subscription to include the new group
-        crate::services::subscription_handler::refresh_mls_subscription().await;
+    // Core accept flow — delegates to vector-core
+    let nostr_group_id = core.accept_invite(&welcome_event_id_hex).await
+        .map_err(|e| e.to_string())?;
 
-        let gid_for_avatar = nostr_group_id.clone();
-        tokio::spawn(async {
-            if let Err(err) = regenerate_device_keypackage(false).await {
-                eprintln!("[MLS] Failed to regenerate device KeyPackage after accepting welcome: {}", err);
-            }
-        });
-        // Spawn background avatar caching (fire-and-forget)
-        tokio::spawn(async move {
-            match cache_group_avatar(gid_for_avatar.clone(), None, None, None, None).await {
-                Ok(Some(path)) => println!("[MLS] Cached group avatar after welcome: {}", path),
-                Ok(None) => {} // No avatar data in this group
-                Err(e) => eprintln!("[MLS] Failed to cache group avatar after welcome for {}: {}", &gid_for_avatar[..8.min(gid_for_avatar.len())], e),
-            }
-        });
+    // Tauri-specific: remove from notified set
+    if let Some(wid) = wrapper_event_id_hex {
+        let mut notified = NOTIFIED_WELCOMES.lock().await;
+        notified.remove(&wid);
     }
 
-    Ok(accepted)
+    // Tauri-specific: emit UI event
+    if let Some(app) = TAURI_APP.get() {
+        let _ = app.emit("mls_welcome_accepted", serde_json::json!({
+            "welcome_event_id": welcome_event_id_hex,
+            "group_id": nostr_group_id
+        }));
+    }
+
+    // Tauri-specific: emit initial sync event (core already did the sync)
+    if let Some(app) = TAURI_APP.get() {
+        let _ = app.emit("mls_group_initial_sync", serde_json::json!({
+            "group_id": nostr_group_id,
+        }));
+    }
+
+    // Note: vector-core's accept_invite() auto-rotates the keypackage after success.
+    let gid_for_avatar = nostr_group_id.clone();
+    tokio::spawn(async move {
+        match cache_group_avatar(gid_for_avatar.clone(), None, None, None, None).await {
+            Ok(Some(path)) => println!("[MLS] Cached group avatar after welcome: {}", path),
+            Ok(None) => {}
+            Err(e) => eprintln!("[MLS] Failed to cache group avatar after welcome for {}: {}", &gid_for_avatar[..8.min(gid_for_avatar.len())], e),
+        }
+    });
+
+    Ok(true)
 }
 
 // Handler list for this module (18 commands):
