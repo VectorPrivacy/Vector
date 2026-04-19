@@ -99,11 +99,9 @@ async fn show_mls_group_notification(group_id: &str, msg: &vector_core::Message)
     let should_notify = {
         let state = crate::STATE.lock().await;
 
-        let mentions_me = crate::MY_PUBLIC_KEY.get()
-            .and_then(|pk| pk.to_bech32().ok())
-            .map_or(false, |my_npub| msg.content.contains(&format!("@{}", my_npub)));
+        let mentions_me = msg.mentions_me();
 
-        let everyone_ping = if msg.content.contains("@everyone") {
+        let everyone_ping = if msg.mentions_everyone() {
             // Only admin @everyone pings count, and user can opt out
             let is_admin_sender = db::get_mls_engine_group_id(group_id).ok().flatten()
                 .and_then(|eid| {

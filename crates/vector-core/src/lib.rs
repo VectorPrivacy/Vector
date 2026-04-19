@@ -78,7 +78,7 @@ pub mod mls;
 pub mod event_handler;
 
 // === Re-exports for convenience ===
-pub use types::{Message, Attachment, Reaction, EditEntry, ImageMetadata, SiteMetadata, LoginResult, AttachmentFile};
+pub use types::{Message, Attachment, Reaction, EditEntry, ImageMetadata, SiteMetadata, LoginResult, AttachmentFile, mention, extract_mentions};
 pub use profile::{Profile, ProfileFlags, SlimProfile, Status};
 pub use chat::{Chat, ChatType, ChatMetadata, SerializableChat};
 pub use compact::{CompactMessage, CompactMessageVec, NpubInterner};

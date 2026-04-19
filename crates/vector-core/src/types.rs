@@ -101,6 +101,77 @@ impl Message {
             false
         }
     }
+
+    // ========================================================================
+    // Mention / Tag API
+    // ========================================================================
+
+    /// Check if this message mentions a specific npub (e.g. `@npub1abc...`).
+    pub fn mentions(&self, npub: &str) -> bool {
+        self.content.contains(&format!("@{}", npub))
+    }
+
+    /// Check if this message mentions the current user.
+    pub fn mentions_me(&self) -> bool {
+        crate::state::MY_PUBLIC_KEY.get()
+            .and_then(|pk| nostr_sdk::prelude::ToBech32::to_bech32(pk).ok())
+            .map_or(false, |my_npub| self.content.contains(&format!("@{}", my_npub)))
+    }
+
+    /// Check if this message contains an `@everyone` ping.
+    pub fn mentions_everyone(&self) -> bool {
+        self.content.contains("@everyone")
+    }
+
+    /// Extract all mentioned npubs from the message content.
+    ///
+    /// Returns a list of npub strings (without the `@` prefix) found in the message.
+    pub fn mentioned_npubs(&self) -> Vec<&str> {
+        extract_mentions(&self.content)
+    }
+}
+
+// ============================================================================
+// Mention Utilities
+// ============================================================================
+
+const BECH32_CHARS: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+
+/// Format an npub as a mention tag for embedding in message content.
+///
+/// ```
+/// assert_eq!(vector_core::types::mention("npub1abc"), "@npub1abc");
+/// ```
+pub fn mention(npub: &str) -> String {
+    format!("@{}", npub)
+}
+
+/// Extract all `@npub1...` mentions from a string.
+///
+/// Returns npub strings without the `@` prefix. Validates bech32 characters.
+pub fn extract_mentions(content: &str) -> Vec<&str> {
+    let bytes = content.as_bytes();
+    let len = bytes.len();
+    let mut mentions = Vec::new();
+    let mut i = 0;
+
+    // npub = "npub1" (5) + 58 bech32 chars = 63 bytes; with '@' = 64
+    while i + 64 <= len {
+        if bytes[i] == b'@' && &bytes[i + 1..i + 6] == b"npub1" {
+            let npub_end = i + 1 + 63;
+            let valid = bytes[i + 6..npub_end]
+                .iter()
+                .all(|b| BECH32_CHARS.contains(&b.to_ascii_lowercase()));
+            if valid {
+                mentions.push(&content[i + 1..npub_end]);
+                i = npub_end;
+                continue;
+            }
+        }
+        i += 1;
+    }
+
+    mentions
 }
 
 // ============================================================================
@@ -226,6 +297,7 @@ pub struct LoginResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nostr_sdk::prelude::ToBech32;
 
     // ========================================================================
     // Message default tests
@@ -579,5 +651,69 @@ mod tests {
         let json = serde_json::to_string(&entry).expect("serialize should succeed");
         let deserialized: EditEntry = serde_json::from_str(&json).expect("deserialize should succeed");
         assert_eq!(deserialized, entry, "EditEntry should survive serde roundtrip");
+    }
+
+    // ========================================================================
+    // Mention / Tag API tests
+    // ========================================================================
+
+    #[test]
+    fn mentions_specific_npub() {
+        // Generate a real npub for testing
+        let keys = nostr_sdk::Keys::generate();
+        let npub = keys.public_key().to_bech32().unwrap();
+        let msg = Message {
+            content: format!("hey @{} check this", npub),
+            ..Default::default()
+        };
+        assert!(msg.mentions(&npub));
+        assert!(!msg.mentions("npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqdmf9lg"));
+    }
+
+    #[test]
+    fn mentions_everyone_detected() {
+        let msg = Message { content: "hey @everyone look at this".into(), ..Default::default() };
+        assert!(msg.mentions_everyone());
+
+        let msg2 = Message { content: "hey everyone".into(), ..Default::default() };
+        assert!(!msg2.mentions_everyone());
+    }
+
+    #[test]
+    fn extract_mentions_multiple() {
+        let keys1 = nostr_sdk::Keys::generate();
+        let keys2 = nostr_sdk::Keys::generate();
+        let npub1 = keys1.public_key().to_bech32().unwrap();
+        let npub2 = keys2.public_key().to_bech32().unwrap();
+        let content = format!("cc @{} and @{} for review", npub1, npub2);
+        let mentions = super::extract_mentions(&content);
+        assert_eq!(mentions.len(), 2);
+        assert!(mentions.contains(&npub1.as_str()));
+        assert!(mentions.contains(&npub2.as_str()));
+    }
+
+    #[test]
+    fn extract_mentions_none() {
+        let mentions = super::extract_mentions("no mentions here");
+        assert!(mentions.is_empty());
+    }
+
+    #[test]
+    fn extract_mentions_invalid_bech32() {
+        // 'b', 'i', 'o' are NOT valid bech32 characters
+        let content = "@npub1bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let mentions = super::extract_mentions(content);
+        assert!(mentions.is_empty());
+    }
+
+    #[test]
+    fn mention_format() {
+        assert_eq!(super::mention("npub1abc"), "@npub1abc");
+    }
+
+    #[test]
+    fn extract_mentions_at_everyone_not_npub() {
+        let mentions = super::extract_mentions("hey @everyone");
+        assert!(mentions.is_empty());
     }
 }
