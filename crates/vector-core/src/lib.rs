@@ -133,6 +133,7 @@ pub struct CoreConfig {
 /// # Ok(())
 /// # }
 /// ```
+#[derive(Clone, Copy)]
 pub struct VectorCore;
 
 impl VectorCore {

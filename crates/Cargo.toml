@@ -1,5 +1,5 @@
 [workspace]
-members = ["vector-core", "vector-cli"]
+members = ["vector-core", "vector-cli", "vector-agent"]
 resolver = "2"
 
 [patch.crates-io]
