@@ -1527,6 +1527,35 @@ function truncateGraphemes(text, maxLength) {
     return segments.slice(0, maxLength).map(s => s.segment).join('') + '…';
 }
 
+/**
+ * Close inline-markdown delimiters that lost their pair after truncation, so
+ * the renderer applies the original styling to the truncated tail and a half-
+ * spoiler stays blurred instead of leaking its content. The closing delimiter
+ * is appended after the ellipsis so the `…` lives inside the wrapped span.
+ */
+function balanceInlineMarkdown(text) {
+    if (((text.match(/\*\*/g) || []).length) % 2 === 1) text += '**';
+    const singleStars = [...text.matchAll(/(?<!\*)\*(?!\*)/g)];
+    if (singleStars.length % 2 === 1) text += '*';
+    if (((text.match(/~~/g) || []).length) % 2 === 1) text += '~~';
+    if (((text.match(/\|\|/g) || []).length) % 2 === 1) text += '||';
+    return text;
+}
+
+/**
+ * Build the small HTML preview used inside reply-context bubbles. Resolves
+ * @npub mentions to display names, strips/normalises the content, truncates
+ * by graphemes, auto-closes any orphaned inline-markdown delimiters, then
+ * renders inline markdown to safe HTML.
+ */
+function buildReplyPreviewHtml(content, maxLength = 50) {
+    const resolved = resolveMentionText(content);
+    const plain = contentToPreviewText(resolved);
+    const truncated = truncateGraphemes(plain, maxLength);
+    const balanced = balanceInlineMarkdown(truncated);
+    return contentToPreviewHtml(balanced);
+}
+
 let emojiLazyLoadObserver = null;
 const EMOJI_CHUNK_SIZE = 36; // 6 columns x 6 rows
 
@@ -4971,8 +5000,7 @@ async function setupRustListeners() {
             for (const replyEl of replyElements) {
                 const replyTextSpan = replyEl.querySelector('.msg-reply-text');
                 if (replyTextSpan && newContent) {
-                    // Truncate plaintext first, then convert to HTML (truncating after would break tags)
-                    replyTextSpan.innerHTML = contentToPreviewHtml(truncateGraphemes(contentToPreviewText(newContent), 50));
+                    replyTextSpan.innerHTML = buildReplyPreviewHtml(newContent);
                     twemojify(replyTextSpan);
                 }
             }
@@ -7822,8 +7850,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 spanRef = document.createElement('span');
                 spanRef.classList.add('msg-reply-text');
                 spanRef.style.color = `rgba(255, 255, 255, 0.45)`;
-                // Truncate plaintext first, then convert to HTML (truncating after would break tags)
-                spanRef.innerHTML = contentToPreviewHtml(truncateGraphemes(contentToPreviewText(replyContent), 50));
+                spanRef.innerHTML = buildReplyPreviewHtml(replyContent);
                 twemojify(spanRef);
             } else if (hasAttachment) {
                 // For Attachments, we display an additional icon for quickly inferring the replied-to content
