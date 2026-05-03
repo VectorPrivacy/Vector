@@ -4077,6 +4077,21 @@ async function sendFile(pubkey, replied_to, filepath) {
 }
 
 /**
+ * Latest upload progress per pending message id. Buffers values that arrive before
+ * the spinner DOM is rendered (updateChat awaits an IPC call before rendering, so the
+ * first progress events can race ahead of message_new). renderMessage reads this when
+ * creating an upload spinner so the initial paint matches the latest known progress.
+ */
+const pendingUploadProgress = new Map();
+
+function applyPendingUploadProgress(spinner, pendingId) {
+    const progress = pendingUploadProgress.get(pendingId);
+    if (progress !== undefined) {
+        spinner.style.setProperty('--progress', `${progress}%`);
+    }
+}
+
+/**
  * Setup our Rust Event listeners, used for relaying the majority of backend changes
  */
 async function setupRustListeners() {
@@ -4419,13 +4434,14 @@ async function setupRustListeners() {
     });
 
     // Listen for Attachment Upload Progress events
+    // The spinner DOM is created asynchronously after message_new (updateChat awaits an IPC
+    // call before rendering), so early progress events can arrive before the element exists.
+    // Record the latest progress per pending_id so renderMessage can pick it up on creation.
     _on('attachment_upload_progress', async (evt) => {
-        if (strOpenChat) {
-            const divUpload = document.getElementById(evt.payload.id + '_file');
-            if (divUpload) {
-                // Update the conical progress spinner
-                divUpload.style.setProperty('--progress', `${evt.payload.progress}%`);
-            }
+        pendingUploadProgress.set(evt.payload.id, evt.payload.progress);
+        const divUpload = document.getElementById(evt.payload.id + '_file');
+        if (divUpload) {
+            divUpload.style.setProperty('--progress', `${evt.payload.progress}%`);
         }
     });
 
@@ -4906,6 +4922,9 @@ async function setupRustListeners() {
 
     // Listen for existing message updates (works for both DMs and MLS groups)
     _on('message_update', (evt) => {
+        // Drop any buffered upload progress for this pending id (spinner is gone after re-render)
+        pendingUploadProgress.delete(evt.payload.old_id);
+
         // Find the message we're updating
         const cChat = getChat(evt.payload.chat_id);
         if (!cChat) return;
@@ -4977,6 +4996,8 @@ async function setupRustListeners() {
     // Listen for message removal (e.g., cancelled upload, deleted failed message)
     _on('message_removed', (evt) => {
         const { id, chat_id, reason } = evt.payload;
+        // Drop any buffered upload progress (e.g. on cancel)
+        pendingUploadProgress.delete(id);
         const cChat = getChat(chat_id);
         if (!cChat) return;
 
@@ -6707,9 +6728,12 @@ let strCurrentEditOriginalContent = "";
  * @param {boolean} fClicked - Whether the chat was opened manually or not
  */
 async function updateChat(chat, arrMessages = [], profile = null, fClicked = false) {
-    // Queue profiles for this chat
+    // Queue profiles for this chat — fire-and-forget so rendering is not delayed
+    // by an IPC roundtrip. Awaiting this here used to race the very first
+    // attachment_upload_progress events ahead of the spinner DOM, leaving the
+    // upload ring frozen.
     if (chat) {
-        await invoke("queue_chat_profiles_sync", {
+        invoke("queue_chat_profiles_sync", {
             chatId: chat.id,
             isOpening: true
         });
@@ -6782,14 +6806,16 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
         // Display either their Status or Typing Indicator
         updateChatHeaderSubtext(chat);
 
-        // Auto-mark messages as read when chat is opened AND window is focused
+        // Auto-mark messages as read when chat is opened AND window is focused.
+        // Resolved without awaiting so the message render is not blocked by an
+        // IPC roundtrip — the same race that used to swallow the first
+        // attachment_upload_progress events.
         if (chat?.messages?.length) {
-            // Check window focus before auto-marking
-            const isWindowFocused = (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios')
-                ? await getCurrentWindow().isFocused()
-                : true;
-            
-            if (isWindowFocused) {
+            const focusPromise = (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios')
+                ? getCurrentWindow().isFocused()
+                : Promise.resolve(true);
+            focusPromise.then(isWindowFocused => {
+                if (!isWindowFocused) return;
                 // Find the latest message from the other person (not from current user)
                 let lastContactMsg = null;
                 for (let i = chat.messages.length - 1; i >= 0; i--) {
@@ -6798,13 +6824,10 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
                         break;
                     }
                 }
-                
-                // If we found a message and it's not already marked as read, update the read status
                 if (lastContactMsg && chat.last_read !== lastContactMsg.id) {
-                    // Update the chat's last_read
                     markAsRead(chat, lastContactMsg);
                 }
-            }
+            });
         }
 
         if (!arrMessages.length) return;
@@ -7107,6 +7130,8 @@ function createFileBoxSpinner(target, opts = {}) {
     spinner.className = 'miniapp-downloading-spinner';
     if (opts.id) spinner.id = opts.id;
     if (opts.attachmentId) spinner.setAttribute('data-attachment-id', opts.attachmentId);
+    // Pick up any progress that was emitted before this DOM was attached
+    if (opts.id) applyPendingUploadProgress(spinner, opts.id.replace(/_file$/, ''));
     // Match the Mini App icon position (marginLeft:5px + padding:10px = 15px from edge)
     spinner.style.position = 'absolute';
     spinner.style.left = '15px';
@@ -7970,6 +7995,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                                 spinner.id = msg.id + '_file';
                                 spinner.style.width = '48px';
                                 spinner.style.height = '48px';
+                                applyPendingUploadProgress(spinner, msg.id);
                                 uploadOverlay.appendChild(spinner);
                                 const cancelBtn = document.createElement('div');
                                 cancelBtn.className = 'upload-cancel-btn';
@@ -8174,6 +8200,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                     spinner.id = msg.id + '_file';
                     spinner.style.width = '40px';
                     spinner.style.height = '40px';
+                    applyPendingUploadProgress(spinner, msg.id);
                     wrapper.appendChild(spinner);
                     const cancelBtn = document.createElement('div');
                     cancelBtn.className = 'upload-cancel-btn audio-upload-cancel';
@@ -8210,6 +8237,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                     spinner.id = msg.id + '_file';
                     spinner.style.width = '48px';
                     spinner.style.height = '48px';
+                    applyPendingUploadProgress(spinner, msg.id);
                     overlay.appendChild(spinner);
                     // Add cancel button as sibling of spinner (not child — mask clips children)
                     const cancelBtn = document.createElement('div');

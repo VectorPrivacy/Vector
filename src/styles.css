@@ -9462,8 +9462,8 @@ hr {
   height: 32px;
   border-radius: 50%;
   background: conic-gradient(
-    var(--icon-color-primary) 0% max(2.5%, var(--progress)),
-    rgba(255, 255, 255, 0.2) max(2.5%, var(--progress)) 100%
+    var(--icon-color-primary) 0% var(--progress),
+    rgba(255, 255, 255, 0.2) var(--progress) 100%
   );
   -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #fff calc(100% - 3px));
   mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #fff calc(100% - 3px));
