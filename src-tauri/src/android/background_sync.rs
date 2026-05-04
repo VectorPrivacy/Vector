@@ -602,7 +602,9 @@ async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey, bool, Op
         logcat(&format!("Encrypted account — read-only mode for {}...",
             &npub_name[..20.min(npub_name.len())]));
 
-        let client = Client::builder().build();
+        let client = Client::builder()
+            .opts(vector_core::nostr_client_options())
+            .build();
         bg_connect_single_relay(&client, data_dir).await?;
 
         Ok((client, my_public_key, false, None))
@@ -631,6 +633,7 @@ async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey, bool, Op
 
         let client = Client::builder()
             .signer(vector_core::GuardedSigner::new(public_key_for_signer))
+            .opts(vector_core::nostr_client_options())
             .build();
 
         bg_connect_single_relay(&client, data_dir).await?;

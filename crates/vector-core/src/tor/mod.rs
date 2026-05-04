@@ -143,11 +143,16 @@ impl TorService {
         log_info!("[Tor] stopped");
     }
 
-    /// SOCKS5 proxy URL suitable for `reqwest::Proxy::all` and
-    /// `nostr_sdk::ClientOptions::proxy`. `socks5h` so DNS resolution
-    /// happens at the proxy (i.e. through Tor), not locally.
+    /// SOCKS5 proxy URL suitable for `reqwest::Proxy::all`. `socks5h` so DNS
+    /// resolution happens at the proxy (i.e. through Tor), not locally.
     pub fn proxy_url(&self) -> String {
         format!("socks5h://{}", self.socks_addr)
+    }
+
+    /// Raw SOCKS5 listener address — used by clients that take a `SocketAddr`
+    /// directly instead of a URL (e.g. `nostr_sdk::ClientOptions::proxy`).
+    pub fn socks_addr(&self) -> SocketAddr {
+        self.socks_addr
     }
 
     /// Latest bootstrap / running state.
@@ -162,9 +167,16 @@ pub fn current() -> Option<Arc<TorService>> {
 }
 
 /// Convenience: SOCKS5 proxy URL when Tor is on, `None` when off. This is the
-/// hook every HTTP / Nostr client builder should use.
+/// hook every HTTP client builder consults.
 pub fn proxy_url() -> Option<String> {
     current().map(|s| s.proxy_url())
+}
+
+/// Convenience: SOCKS5 listener address when Tor is on, `None` when off.
+/// Used by code paths that take a `SocketAddr` directly (nostr-sdk's
+/// `ClientOptions::proxy`).
+pub fn socks_addr() -> Option<SocketAddr> {
+    current().map(|s| s.socks_addr())
 }
 
 /// Convenience: is the embedded Tor service currently running?

@@ -61,6 +61,29 @@ pub mod inbox_relays;
 #[cfg(feature = "tor")]
 pub mod tor;
 
+/// Build a `nostr_sdk::ClientOptions` with the embedded-Tor SOCKS proxy
+/// applied if (and only if) the `tor` feature is on AND `tor::TorService` is
+/// currently active. When Tor is off, returns the default options unchanged.
+///
+/// Note: nostr-sdk's `proxy()` lives on `Connection`, not `ClientOptions`
+/// directly — we build a `Connection` with the proxy mode and pass it via
+/// `ClientOptions::connection(...)`. The `connection()` method itself is
+/// `#[cfg(not(target_arch = "wasm32"))]`, but Vector targets are all native.
+///
+/// Callers should use this rather than `ClientOptions::new()` directly so the
+/// Tor toggle automatically covers their relay traffic.
+pub fn nostr_client_options() -> nostr_sdk::ClientOptions {
+    let opts = nostr_sdk::ClientOptions::new();
+    #[cfg(all(feature = "tor", not(target_arch = "wasm32")))]
+    {
+        if let Some(addr) = tor::socks_addr() {
+            let conn = nostr_sdk::client::Connection::new().proxy(addr);
+            return opts.connection(conn);
+        }
+    }
+    opts
+}
+
 // === Event Storage ===
 pub mod stored_event;
 

@@ -143,7 +143,7 @@ pub async fn login(mut import_key: String) -> Result<LoginResult, String> {
 
     let client = Client::builder()
         .signer(vector_core::GuardedSigner::new(public_key))
-        .opts(ClientOptions::new())
+        .opts(vector_core::nostr_client_options())
         .monitor(Monitor::new(1024))
         .build();
     // OnceLock can race with the standalone background-sync path on Android,
@@ -276,7 +276,7 @@ pub async fn create_account() -> Result<LoginResult, String> {
 
     let client = Client::builder()
         .signer(vector_core::GuardedSigner::new(public_key))
-        .opts(ClientOptions::new())
+        .opts(vector_core::nostr_client_options())
         .monitor(Monitor::new(1024))
         .build();
     // OnceLock can race with the standalone background-sync path on Android,
@@ -539,7 +539,7 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
 
     let client = Client::builder()
         .signer(vector_core::GuardedSigner::new(public_key))
-        .opts(ClientOptions::new())
+        .opts(vector_core::nostr_client_options())
         .monitor(Monitor::new(1024))
         .build();
     // OnceLock can race with the standalone background-sync path on Android,
