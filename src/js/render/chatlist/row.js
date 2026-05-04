@@ -1,0 +1,279 @@
+/**
+ * Chat list row constructors.
+ *
+ * - `renderChat` — builds a `.chatlist-contact` row for a DM or MLS group chat.
+ * - `renderInviteItem` — builds a `.chatlist-contact.chatlist-invite` row for a
+ *   pending MLS welcome (group invite) with accept / decline action buttons.
+ *
+ * Both return a detached DocumentFragment-attachable `<div>` element. List
+ * orchestration in list.js handles iteration, ordering, and DOM swap.
+ */
+
+/**
+ * Render a Chat Preview for the Chat List
+ * @param {Chat} chat - The profile we're rendering
+ */
+function renderChat(chat, primaryColor) {
+    // For groups, we don't have a profile, for DMs we do
+    const isGroup = chat.chat_type === 'MlsGroup';
+    const profile = !isGroup && chat.participants.length === 1 ? getProfile(chat.id) : null;
+
+    // Collect the Unread Message count for 'Unread' emphasis and badging
+    // Ensure muted chats do not show unread glow
+    const nUnread = chat.muted ? 0 : countUnreadMessages(chat);
+
+    // The Chat container (The ID is the Contact's npub)
+    const divContact = document.createElement('div');
+    if (nUnread) divContact.style.borderColor = primaryColor;
+    divContact.classList.add('chatlist-contact');
+    divContact.id = `chatlist-${chat.id}`;
+
+    // The Username + Message Preview container
+    const divPreviewContainer = document.createElement('div');
+    divPreviewContainer.classList.add('chatlist-contact-preview');
+
+    // The avatar, if one exists
+    const divAvatarContainer = document.createElement('div');
+    divAvatarContainer.style.position = `relative`;
+
+    if (isGroup) {
+        const groupAvatarCached = chat.metadata?.avatar_cached;
+        if (groupAvatarCached) {
+            const imgAvatar = document.createElement('img');
+            imgAvatar.src = convertFileSrc(groupAvatarCached);
+            imgAvatar.style.width = '50px';
+            imgAvatar.style.height = '50px';
+            imgAvatar.style.objectFit = 'cover';
+            imgAvatar.style.borderRadius = '50%';
+            imgAvatar.onerror = () => imgAvatar.replaceWith(createPlaceholderAvatar(true, 50));
+            divAvatarContainer.appendChild(imgAvatar);
+        } else {
+            divAvatarContainer.appendChild(createPlaceholderAvatar(true, 50));
+        }
+    } else {
+        const avatarSrc = getProfileAvatarSrc(profile);
+        if (avatarSrc) {
+            const imgAvatar = document.createElement('img');
+            imgAvatar.src = avatarSrc;
+            // Fallback to placeholder if image fails to load
+            imgAvatar.onerror = () => {
+                imgAvatar.replaceWith(createPlaceholderAvatar(false, 50));
+            };
+            divAvatarContainer.appendChild(imgAvatar);
+        } else {
+            // Otherwise, generate a placeholder avatar
+            divAvatarContainer.appendChild(createPlaceholderAvatar(false, 50));
+        }
+    }
+
+    // Add the "Status Icon" to the avatar, then plug-in the avatar container
+    // TODO: currently, we "emulate" the status; messages in the last 5m are "online", messages in the last 30m are "away", otherwise; offline.
+    if (!isGroup) {
+        const divStatusIcon = document.createElement('div');
+        divStatusIcon.classList.add('avatar-status-icon');
+
+        // Find the last message from the contact (not from the user)
+        let cLastContactMsg = null;
+        for (let i = chat.messages.length - 1; i >= 0; i--) {
+            if (!chat.messages[i].mine) {
+                cLastContactMsg = chat.messages[i];
+                break;
+            }
+        }
+
+        if (cLastContactMsg && cLastContactMsg.at > Date.now() - 60000 * 5) {
+            // set the divStatusIcon .backgroundColor to green (online)
+            divStatusIcon.style.backgroundColor = '#59fcb3';
+            divAvatarContainer.appendChild(divStatusIcon);
+        }
+        else if (cLastContactMsg && cLastContactMsg.at > Date.now() - 60000 * 30) {
+            // set to orange (away)
+            divStatusIcon.style.backgroundColor = '#fce459';
+            divAvatarContainer.appendChild(divStatusIcon);
+        }
+        // offline... don't show status icon at all (no need to append the divStatusIcon)
+    }
+
+    divContact.appendChild(divAvatarContainer);
+
+    // Add the name to the chat preview
+    const h4ContactName = document.createElement('h4');
+    if (isGroup) {
+        // For groups, extract name from metadata or use a default
+        h4ContactName.textContent = chat.metadata?.custom_fields?.name || `Group ${chat.id.substring(0, 8)}...`;
+    } else {
+        h4ContactName.textContent = profile?.nickname || profile?.name || chat.id;
+        if (profile?.nickname || profile?.name) twemojify(h4ContactName);
+
+        // Add bot icon if this is a bot profile
+        if (profile?.bot) {
+            const botIconContainer = document.createElement('span');
+            botIconContainer.className = 'icon icon-bot';
+            botIconContainer.style.width = '14px';
+            botIconContainer.style.height = '14px';
+            botIconContainer.style.marginLeft = '6px';
+            botIconContainer.style.display = 'inline-block';
+            botIconContainer.style.verticalAlign = 'initial';
+            botIconContainer.style.position = 'relative';
+            botIconContainer.style.backgroundColor = '#59fcb3';
+            h4ContactName.appendChild(botIconContainer);
+        }
+    }
+    h4ContactName.classList.add('cutoff')
+    divPreviewContainer.appendChild(h4ContactName);
+
+    // Display either their Last Message or Typing Indicator
+    const cLastMsg = chat.messages[chat.messages.length - 1];
+    const pChatPreview = document.createElement('p');
+    pChatPreview.classList.add('cutoff');
+
+    const preview = generateChatPreviewText(chat);
+    pChatPreview.classList.toggle('typing-indicator-text', preview.isTyping);
+    if (preview.isHtml) {
+        pChatPreview.innerHTML = preview.text;
+    } else {
+        pChatPreview.textContent = preview.text;
+    }
+    if (preview.needsTwemoji) twemojify(pChatPreview);
+
+    divPreviewContainer.appendChild(pChatPreview);
+
+    // Add the Chat Preview to the contact UI
+    divContact.appendChild(divPreviewContainer);
+
+    // Display the "last message" time
+    const pTimeAgo = document.createElement('p');
+    pTimeAgo.classList.add('chatlist-contact-timestamp');
+    if (cLastMsg) {
+        pTimeAgo.textContent = timeAgo(cLastMsg.at);
+    }
+    // Apply 'Unread' final styling
+    if (nUnread) {
+        pTimeAgo.style.color = primaryColor;
+    } else {
+        // Add 'read' class for smaller font size when no unread messages
+        pTimeAgo.classList.add('read');
+    }
+    divContact.appendChild(pTimeAgo);
+
+    return divContact;
+}
+
+/**
+ * Render an MLS invite as a chat-like item
+ * @param {MLSWelcome} invite - The invite we're rendering
+ */
+function renderInviteItem(invite, primaryColor) {
+    const groupId = invite.group_id || invite.id || '';
+    const groupName =
+        invite.group_name ||
+        invite.name ||
+        (groupId ? `Group ${String(groupId).substring(0, 8)}...` : 'Unnamed Group');
+
+    const memberCount =
+        (invite.member_count ??
+            (Array.isArray(invite.members) ? invite.members.length : invite.memberCount)) || 0;
+
+    // Create the invite container styled like a chat item
+    const divInvite = document.createElement('div');
+    divInvite.classList.add('chatlist-contact', 'chatlist-invite');
+    divInvite.id = `invite-${invite.id || invite.welcome_event_id || groupId}`;
+    divInvite.style.borderColor = primaryColor;
+
+    // Avatar container — show cached avatar if available, otherwise placeholder
+    const divAvatarContainer = document.createElement('div');
+    divAvatarContainer.style.position = 'relative';
+    if (invite.avatar_cached) {
+        const imgAvatar = document.createElement('img');
+        imgAvatar.src = convertFileSrc(invite.avatar_cached);
+        imgAvatar.style.width = '50px';
+        imgAvatar.style.height = '50px';
+        imgAvatar.style.objectFit = 'cover';
+        imgAvatar.style.borderRadius = '50%';
+        imgAvatar.onerror = () => imgAvatar.replaceWith(createPlaceholderAvatar(true, 50));
+        divAvatarContainer.appendChild(imgAvatar);
+    } else {
+        divAvatarContainer.appendChild(createPlaceholderAvatar(true, 50));
+        // Fire-and-forget: cache the invite avatar if encryption data is available
+        if (invite.image_hash && invite.image_key && invite.image_nonce) {
+            invoke('cache_invite_avatar', {
+                imageHash: invite.image_hash,
+                imageKey: invite.image_key,
+                imageNonce: invite.image_nonce,
+            }).then(cachedPath => {
+                if (cachedPath) {
+                    invite.avatar_cached = cachedPath;
+                    // Direct DOM update + state hash change triggers re-render
+                    const img = document.createElement('img');
+                    img.src = convertFileSrc(cachedPath);
+                    img.style.width = '50px';
+                    img.style.height = '50px';
+                    img.style.objectFit = 'cover';
+                    img.style.borderRadius = '50%';
+                    img.onerror = () => img.replaceWith(createPlaceholderAvatar(true, 50));
+                    divAvatarContainer.innerHTML = '';
+                    divAvatarContainer.appendChild(img);
+                }
+            }).catch(() => {});
+        }
+    }
+    divInvite.appendChild(divAvatarContainer);
+
+    // Preview container with group name and member count
+    const divPreviewContainer = document.createElement('div');
+    divPreviewContainer.classList.add('chatlist-contact-preview');
+
+    // Group name
+    const h4Name = document.createElement('h4');
+    h4Name.textContent = groupName;
+    h4Name.classList.add('cutoff');
+    divPreviewContainer.appendChild(h4Name);
+
+    // Member count as subtext
+    const pMemberCount = document.createElement('p');
+    pMemberCount.classList.add('cutoff');
+    pMemberCount.textContent = `${memberCount} ${memberCount === 1 ? 'member' : 'members'}`;
+    divPreviewContainer.appendChild(pMemberCount);
+
+    divInvite.appendChild(divPreviewContainer);
+
+    // Action buttons container (replaces timestamp area)
+    const divActions = document.createElement('div');
+    divActions.classList.add('invite-action-buttons');
+
+    // Accept button (green check)
+    const btnAccept = document.createElement('button');
+    btnAccept.classList.add('invite-action-btn', 'invite-accept-btn');
+    btnAccept.title = 'Accept Invite';
+    btnAccept.onclick = (e) => {
+        e.stopPropagation();
+        acceptMLSInvite(invite.id || invite.welcome_event_id || groupId);
+    };
+    const acceptIcon = document.createElement('span');
+    acceptIcon.classList.add('icon', 'icon-check');
+    acceptIcon.style.width = '16px';
+    acceptIcon.style.height = '16px';
+    acceptIcon.style.backgroundColor = '#59fcb3';
+    btnAccept.appendChild(acceptIcon);
+
+    // Decline button (danger color X)
+    const btnDecline = document.createElement('button');
+    btnDecline.classList.add('invite-action-btn', 'invite-decline-btn');
+    btnDecline.title = 'Decline Invite';
+    btnDecline.onclick = (e) => {
+        e.stopPropagation();
+        declineMLSInvite(invite.id || invite.welcome_event_id || groupId);
+    };
+    const declineIcon = document.createElement('span');
+    declineIcon.classList.add('icon', 'icon-x');
+    declineIcon.style.width = '16px';
+    declineIcon.style.height = '16px';
+    declineIcon.style.backgroundColor = '#ff2ea9';
+    btnDecline.appendChild(declineIcon);
+
+    divActions.appendChild(btnAccept);
+    divActions.appendChild(btnDecline);
+    divInvite.appendChild(divActions);
+
+    return divInvite;
+}

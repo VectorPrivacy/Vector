@@ -1,0 +1,135 @@
+/**
+ * Chat list preview-text helpers.
+ *
+ * - `generateTypingText` — produces "Typing..." / "X is typing..." for active typers.
+ * - `generateChatPreviewText` — last-message preview (text, attachment, payment,
+ *   system event, etc.) with sender prefix in groups and mention resolution.
+ *
+ * Both consumed by row.js (full render) and list.js (partial preview update).
+ */
+
+/**
+ * Generate typing indicator text for a chat
+ * @param {Chat} chat - The chat object
+ * @returns {string|null} - The typing text, or null if no one is typing
+ */
+function generateTypingText(chat) {
+    let activeTypers = chat.active_typers || [];
+    if (activeTypers.length === 0) return null;
+
+    const isGroup = chat.chat_type === 'MlsGroup';
+
+    // Filter out blocked users from typing indicators in group chats
+    if (isGroup) {
+        activeTypers = activeTypers.filter(npub => !getProfile(npub)?.is_blocked);
+        if (activeTypers.length === 0) return null;
+    }
+
+    // DMs just show "Typing..." since we already know who it is
+    if (!isGroup) return 'Typing...';
+
+    // Groups show names
+    if (activeTypers.length === 1) {
+        const typer = getProfile(activeTypers[0]);
+        const name = typer?.nickname || typer?.name || 'Someone';
+        return `${name} is typing...`;
+    } else if (activeTypers.length === 2) {
+        const typer1 = getProfile(activeTypers[0]);
+        const typer2 = getProfile(activeTypers[1]);
+        const name1 = typer1?.nickname || typer1?.name || 'Someone';
+        const name2 = typer2?.nickname || typer2?.name || 'Someone';
+        return `${name1} and ${name2} are typing...`;
+    } else if (activeTypers.length === 3) {
+        const typer1 = getProfile(activeTypers[0]);
+        const typer2 = getProfile(activeTypers[1]);
+        const typer3 = getProfile(activeTypers[2]);
+        const name1 = typer1?.nickname || typer1?.name || 'Someone';
+        const name2 = typer2?.nickname || typer2?.name || 'Someone';
+        const name3 = typer3?.nickname || typer3?.name || 'Someone';
+        return `${name1}, ${name2}, and ${name3} are typing...`;
+    } else {
+        return 'Several people are typing...';
+    }
+}
+
+/**
+ * Generate chat preview text for the chatlist
+ * @param {Chat} chat - The chat object
+ * @returns {{ text: string, isTyping: boolean, needsTwemoji: boolean }}
+ */
+function generateChatPreviewText(chat) {
+    const isGroup = chat.chat_type === 'MlsGroup';
+
+    // In group chats, skip messages from blocked users for the preview
+    let cLastMsg = null;
+    if (isGroup) {
+        for (let i = chat.messages.length - 1; i >= 0; i--) {
+            const m = chat.messages[i];
+            if (m.npub && !m.mine) {
+                const authorProfile = getProfile(m.npub);
+                if (authorProfile?.is_blocked) continue;
+            }
+            cLastMsg = m;
+            break;
+        }
+    } else {
+        cLastMsg = chat.messages[chat.messages.length - 1];
+    }
+
+    // Handle typing indicators
+    const typingText = generateTypingText(chat);
+    if (typingText) {
+        return { text: typingText, isTyping: true, needsTwemoji: false };
+    }
+
+    // No messages
+    if (!cLastMsg) {
+        if (isGroup) {
+            const memberCount = chat.metadata?.custom_fields?.member_count ? parseInt(chat.metadata.custom_fields.member_count) : null;
+            return {
+                text: (memberCount != null) ? `${memberCount} ${memberCount === 1 ? 'member' : 'members'}` : 'No messages yet',
+                isTyping: false,
+                needsTwemoji: false
+            };
+        } else {
+            return { text: 'Start a conversation', isTyping: false, needsTwemoji: false };
+        }
+    }
+
+    // Pending message
+    if (cLastMsg.pending) {
+        return { text: 'Sending...', isTyping: false, needsTwemoji: false };
+    }
+
+    // Build sender prefix for groups
+    let senderPrefix = '';
+    if (cLastMsg.mine) {
+        senderPrefix = 'You: ';
+    } else if (isGroup && cLastMsg.npub) {
+        const senderProfile = getProfile(cLastMsg.npub);
+        const senderName = senderProfile?.nickname || senderProfile?.name || cLastMsg.npub.substring(0, 16);
+        senderPrefix = `${senderName}: `;
+    }
+
+    // Attachment message
+    if (!cLastMsg.content && cLastMsg.attachments?.length) {
+        return {
+            text: senderPrefix + 'Sent a ' + getFileTypeInfo(cLastMsg.attachments[0].extension).description,
+            isTyping: false,
+            needsTwemoji: false
+        };
+    }
+
+    // PIVX payment message
+    if (cLastMsg.pivx_payment) {
+        return { text: senderPrefix + 'Sent a PIVX Payment', isTyping: false, needsTwemoji: false };
+    }
+
+    // System event (member joined/left, etc.)
+    if (cLastMsg.system_event) {
+        return { text: cLastMsg.content, isTyping: false, needsTwemoji: false };
+    }
+
+    // Regular text message — strip HTML/markdown, render inline formatting, resolve @npub mentions
+    return { text: escapeHtml(senderPrefix) + contentToPreviewHtml(resolveMentionText(cLastMsg.content)), isTyping: false, needsTwemoji: true, isHtml: true };
+}
