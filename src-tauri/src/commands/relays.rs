@@ -157,14 +157,17 @@ pub fn update_relay_metrics(url: &str, update_fn: impl FnOnce(&mut RelayMetrics)
     }
 }
 
-/// Helper to build RelayOptions based on mode
+/// Helper to build RelayOptions based on mode. Tor-aware: when the embedded
+/// Tor service is active, the returned options carry `ConnectionMode::proxy`
+/// so the new relay socket comes up through Tor immediately.
 pub fn relay_options_for_mode(mode: &str) -> RelayOptions {
     let opts = RelayOptions::new().reconnect(false);
-    match mode {
+    let opts = match mode {
         "read" => opts.write(false),
         "write" => opts.read(false),
         _ => opts,
-    }
+    };
+    vector_core::tor_aware_relay_options(opts)
 }
 
 // ============================================================================
@@ -804,7 +807,7 @@ pub async fn connect<R: Runtime>(handle: AppHandle<R>) -> bool {
         if !is_disabled {
             relays_to_add.push((
                 default_url.to_string(),
-                RelayOptions::new().reconnect(false),
+                vector_core::tor_aware_relay_options(RelayOptions::new().reconnect(false)),
                 true,
                 "both".to_string(),
             ));

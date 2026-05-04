@@ -84,6 +84,25 @@ pub fn nostr_client_options() -> nostr_sdk::ClientOptions {
     opts
 }
 
+/// Augment a `RelayOptions` with the Tor connection mode when active. Used
+/// by every site that adds a relay to the pool — default relays at boot,
+/// custom user relays, MLS group relays, NIP-17 inbox relays — so they all
+/// come up through Tor when the toggle is on.
+///
+/// Without this, `RelayOptions::new()` (or the per-mode helper) defaults to
+/// `ConnectionMode::Direct`, and relays added at boot would stay direct even
+/// after Tor is bootstrapped — `switch_relay_transport()` covers existing
+/// relays on toggle, but not freshly-added ones.
+pub fn tor_aware_relay_options(opts: nostr_sdk::RelayOptions) -> nostr_sdk::RelayOptions {
+    #[cfg(all(feature = "tor", not(target_arch = "wasm32")))]
+    {
+        if let Some(addr) = tor::socks_addr() {
+            return opts.connection_mode(nostr_sdk::pool::ConnectionMode::proxy(addr));
+        }
+    }
+    opts
+}
+
 // === Event Storage ===
 pub mod stored_event;
 
