@@ -24,8 +24,9 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::net::SocketAddr;
+use futures_util::StreamExt;
 
 use arti_client::{TorClient, TorClientConfig};
 use arti_client::config::CfgPath;
@@ -46,11 +47,22 @@ fn tor_slot() -> &'static Mutex<Option<Arc<TorService>>> {
 /// into the slot yet but isn't disabled either) from "off".
 static TOR_BOOTSTRAPPING: AtomicBool = AtomicBool::new(false);
 
+/// Latest bootstrap percentage (0..=100), updated live from Arti's
+/// `bootstrap_events()` stream while `TOR_BOOTSTRAPPING` is true.
+static TOR_BOOTSTRAP_PROGRESS: AtomicU8 = AtomicU8::new(0);
+
 /// Returns true while `TorService::start()` is mid-execution. Useful for
 /// status surfaces that would otherwise see `is_active() == false` and
 /// mistakenly report "off" during the 5–15s bootstrap window.
 pub fn is_bootstrapping() -> bool {
     TOR_BOOTSTRAPPING.load(Ordering::Acquire)
+}
+
+/// Latest bootstrap progress percentage (0..=100). Only meaningful while
+/// `is_bootstrapping()` is true; held at 100 (or whatever the last reading
+/// was) after `start()` returns.
+pub fn bootstrap_progress() -> u8 {
+    TOR_BOOTSTRAP_PROGRESS.load(Ordering::Acquire)
 }
 
 /// Bootstrap status surfaced to the UI for progress display.
@@ -87,6 +99,7 @@ impl TorService {
     pub async fn start(state_dir: PathBuf, cache_dir: PathBuf) -> Result<Arc<Self>, String> {
         log_info!("[Tor] starting; state={} cache={}", state_dir.display(), cache_dir.display());
         TOR_BOOTSTRAPPING.store(true, Ordering::Release);
+        TOR_BOOTSTRAP_PROGRESS.store(0, Ordering::Release);
         // RAII guard so the flag clears even if any of the `?` paths below errors.
         struct BootstrapGuard;
         impl Drop for BootstrapGuard {
@@ -114,14 +127,29 @@ impl TorService {
 
         let status = Mutex::new(TorStatus::Bootstrapping(0));
 
-        // TODO: subscribe to bootstrap_events() in a background task so the UI
-        // can show real progress. For now we just block on the bootstrap call
-        // and report 0 → 100 in two states.
+        // Subscribe to Arti's bootstrap event stream BEFORE calling bootstrap()
+        // so we don't miss early progress. Each `BootstrapStatus` carries an
+        // `as_frac()` 0.0..=1.0 — we map to a percent and stash in the global
+        // atomic that `bootstrap_progress()` reads. UI polls and reflects
+        // the value as a radial progress bar via the comet dasharray.
+        let bootstrap_events = client.bootstrap_events();
+        tokio::spawn(async move {
+            let mut events = bootstrap_events;
+            while let Some(status) = events.next().await {
+                let pct = (status.as_frac() * 100.0).clamp(0.0, 100.0) as u8;
+                TOR_BOOTSTRAP_PROGRESS.store(pct, Ordering::Release);
+                if status.ready_for_traffic() {
+                    break;
+                }
+            }
+        });
+
         log_info!("[Tor] bootstrapping...");
         client
             .bootstrap()
             .await
             .map_err(|e| format!("Tor bootstrap: {e}"))?;
+        TOR_BOOTSTRAP_PROGRESS.store(100, Ordering::Release);
         log_info!("[Tor] bootstrap complete");
 
         // Bind the SOCKS listener on localhost only — port 0 lets the kernel pick.

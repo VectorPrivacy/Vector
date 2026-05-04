@@ -36,7 +36,10 @@ function formatTorStatus(state) {
     if (!state) return '';
     if (!state.supported) return 'Not in this build.';
     if (state.running) return 'Connected.';
-    if (state.status && state.status.startsWith('bootstrapping')) return 'Bootstrapping…';
+    if (state.status && state.status.startsWith('bootstrapping')) {
+        const pct = Number.isFinite(state.bootstrap_progress) ? state.bootstrap_progress : null;
+        return pct != null ? `Bootstrapping ${pct}%…` : 'Bootstrapping…';
+    }
     if (state.status && state.status.startsWith('failed')) return 'Failed to start.';
     if (state.enabled) return 'Starting…';
     return 'Disabled.';
@@ -107,6 +110,22 @@ function applyTorCardState(state) {
     setTimeout(() => {
         card.classList.remove('tor-no-transition');
     }, 500);
+}
+
+/**
+ * Drive the comet-trail dasharray off the live bootstrap percentage so the
+ * three rings act as a radial progress bar that fills as Arti completes
+ * its directory consensus / circuit build / handshake. Called every poll
+ * from `ensureTorStatePolling` and from the toggle handlers.
+ */
+function applyTorBootstrapProgress(progress) {
+    const card = document.getElementById('settings-tor-card');
+    if (!card) return;
+    if (typeof progress === 'number' && progress >= 0 && progress <= 100) {
+        card.style.setProperty('--tor-bootstrap-progress', String(progress));
+    } else {
+        card.style.removeProperty('--tor-bootstrap-progress');
+    }
 }
 
 let _torPollHandle = null;
@@ -1841,6 +1860,7 @@ async function initSettings() {
             const state = await invoke('tor_get_state');
             torToggle.checked = !!state.running || !!state.enabled;
             applyTorCardState(state);
+            applyTorBootstrapProgress(state.bootstrap_progress);
             if (!state.supported) {
                 torToggle.disabled = true;
             }
@@ -1860,11 +1880,13 @@ async function initSettings() {
             // Optimistically reflect the bootstrapping animation immediately
             // — user clicked, awaitable is in flight.
             applyTorCardState({ supported: true, enabled: desired, running: false, status: desired ? 'bootstrapping' : 'disabled' });
+            applyTorBootstrapProgress(desired ? 0 : null);
             torStatus.textContent = desired ? 'Bootstrapping…' : 'Disabling…';
             try {
                 const state = await invoke('tor_set_enabled', { enabled: desired });
                 torToggle.checked = !!state.running || !!state.enabled;
                 applyTorCardState(state);
+                applyTorBootstrapProgress(state.bootstrap_progress);
                 torStatus.textContent = formatTorStatus(state);
                 // tor_set_enabled awaits bootstrap before returning, so this
                 // path is normally already stable — but leave the poll in
@@ -1879,6 +1901,7 @@ async function initSettings() {
                     const state = await invoke('tor_get_state');
                     torToggle.checked = !!state.running || !!state.enabled;
                     applyTorCardState({ ...state, status: 'failed: ' + err });
+                    applyTorBootstrapProgress(state.bootstrap_progress);
                     torStatus.textContent = `Failed: ${err}`;
                 } catch (_) { /* nothing else we can do */ }
             } finally {

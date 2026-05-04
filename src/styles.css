@@ -4397,9 +4397,37 @@ select {
 }
 .tor-state-bootstrapping .tor-comet { stroke: #c285ff; }
 
+/* Radial progress bar: comet "lit" length is driven by Arti's live bootstrap
+   percentage. JS sets `--tor-bootstrap-progress` (0..=100) on the card from
+   `tor_get_state.bootstrap_progress`. The dasharray's lit segment grows as
+   bootstrap completes — so each ring acts as its own progress arc that fills
+   to a full circle just before the transition to "connected". A min lit
+   length of 8 path-units keeps something visible at 0–7%. The spin
+   animation continues throughout, so until ~50% the comets read as moving
+   trails; past that they read as stable fill arcs. */
+.tor-state-bootstrapping .tor-comet {
+  --p: max(8, var(--tor-bootstrap-progress, 8));
+  stroke-dasharray: var(--p) calc(100 - var(--p));
+}
+
 .tor-state-bootstrapping .tor-comet-1 { animation: torCometSpin 1.4s linear infinite; }
 .tor-state-bootstrapping .tor-comet-2 { animation: torCometSpin 2.1s linear infinite reverse; }
 .tor-state-bootstrapping .tor-comet-3 { animation: torCometSpin 3.0s linear infinite; }
+
+/* Register --tor-bootstrap-progress as a typed CSS custom property so it
+   can be CSS-transitioned. Without @property, var() values are strings
+   and don't tween — progress would jump in chunks at each poll (every
+   1.5s) rather than smoothly filling. */
+@property --tor-bootstrap-progress {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 0;
+}
+.tor-card {
+  transition: background 0.4s ease,
+              border-color 0.4s ease,
+              --tor-bootstrap-progress 1.2s ease-out;
+}
 
 .tor-state-bootstrapping .tor-core {
   fill: #c285ff;
@@ -4454,39 +4482,6 @@ select {
 .tor-state-failed .tor-core { fill: #ff7860; }
 .tor-state-failed .tor-dot  { fill: #ff7860; opacity: 0.7; }
 
-/* ---- DEV: state preview row ----------------------------------------------
-   A side-by-side render of every Tor state. For design iteration only —
-   remove this row + the cells in index.html when finalised. */
-.tor-glyph-preview-row {
-  display: flex;
-  gap: 8px;
-  margin-top: 12px;
-  padding: 12px;
-  background: rgba(255,255,255,0.02);
-  border: 1px dashed rgba(255,255,255,0.08);
-  border-radius: 12px;
-}
-.tor-glyph-preview-cell {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-}
-.tor-glyph-preview-cell svg {
-  width: 56px;
-  height: 56px;
-  overflow: visible;
-}
-.tor-glyph-preview-label {
-  font-size: 10px;
-  color: rgba(255,255,255,0.45);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-.tor-glyph-preview-cell.tor-state-connected .tor-glyph-preview-label { color: #d9b3ff; }
-.tor-glyph-preview-cell.tor-state-failed    .tor-glyph-preview-label { color: #ff8c75; }
-.tor-glyph-preview-cell.tor-state-bootstrapping .tor-glyph-preview-label { color: #c285ff; }
 
 /* ---- Body text + toggle column ---- */
 .tor-card-body {

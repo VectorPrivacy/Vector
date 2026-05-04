@@ -24,6 +24,10 @@ pub struct TorState {
     /// Human-readable status. "disabled" / "bootstrapping NN%" / "connected" /
     /// "failed: <error>". Empty string when nothing meaningful to show.
     pub status: String,
+    /// Bootstrap progress 0..=100. Live values from Arti's bootstrap_events()
+    /// stream while bootstrap is running. 100 once running. The frontend
+    /// drives the comet-trail radial progress bar from this.
+    pub bootstrap_progress: u8,
 }
 
 const SETTING_KEY: &str = "tor_enabled";
@@ -64,7 +68,7 @@ fn current_status_string() -> String {
     // mid-flight, current() returns None — the bootstrap flag covers that gap
     // so the UI can render "bootstrapping" instead of falling back to "disabled".
     if vector_core::tor::is_bootstrapping() {
-        return "bootstrapping".to_string();
+        return format!("bootstrapping {}%", vector_core::tor::bootstrap_progress());
     }
     match vector_core::tor::current().map(|s| s.status()) {
         None => "disabled".to_string(),
@@ -91,11 +95,18 @@ pub fn tor_get_state() -> TorState {
         { false }
     };
     let supported = cfg!(feature = "tor");
+    let bootstrap_progress = {
+        #[cfg(feature = "tor")]
+        { if running { 100 } else { vector_core::tor::bootstrap_progress() } }
+        #[cfg(not(feature = "tor"))]
+        { 0u8 }
+    };
     TorState {
         enabled,
         running,
         supported,
         status: current_status_string(),
+        bootstrap_progress,
     }
 }
 
