@@ -35,8 +35,15 @@ function formatTorStatus(state) {
     if (!state) return '';
     if (!state.supported) return 'Tor support not compiled into this build.';
     if (state.running) return 'Connected — your TCP traffic is routing through Tor.';
-    if (state.enabled) return 'Tor preference saved, but the service is not running.';
-    if (state.status && state.status !== 'disabled') return state.status;
+    // running=false: lean on the backend's status string, which already
+    // distinguishes "bootstrapping NN%" from "failed: …" from plain "disabled".
+    if (state.status && state.status.startsWith('bootstrapping')) {
+        return `Bootstrapping Tor… (${state.status.replace('bootstrapping ', '')})`;
+    }
+    if (state.status && state.status.startsWith('failed')) {
+        return `Tor failed to start — ${state.status.replace('failed: ', '')}`;
+    }
+    if (state.enabled) return 'Starting Tor…';
     return 'Disabled.';
 }
 
