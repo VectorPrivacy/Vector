@@ -4334,6 +4334,18 @@ select {
   transition: stroke 0.5s ease, fill 0.5s ease, opacity 0.5s ease;
 }
 
+/* Used by JS during the cross-dissolve swap (see settings.js
+   applyTorCardState): kills inner transitions for one frame so the new
+   state's stroke/fill values snap instantly behind the invisible glyph,
+   instead of being mid-tween when the glyph fades back in. */
+.tor-no-transition .tor-ring,
+.tor-no-transition .tor-comet,
+.tor-no-transition .tor-dot,
+.tor-no-transition .tor-core,
+.tor-no-transition .tor-halo {
+  transition: none !important;
+}
+
 /* ---- Default (Disabled) ----------------------------------------------------
    Rings dim, no comets, no orbital dots, dim core, no halo. Reads as a
    deliberate-but-inactive piece of UI rather than missing/broken art. */

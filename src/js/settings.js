@@ -90,8 +90,15 @@ function applyTorCardState(state) {
     }
     glyph.style.opacity = '0';
     setTimeout(() => {
+        // While the glyph is invisible: snap inner state to its final
+        // values rather than letting the 0.5s stroke/fill transitions
+        // crossfade. Otherwise the fade-in (0.22s) outpaces the inner
+        // transitions and you briefly see the old colors mid-tween.
+        card.classList.add('tor-no-transition');
         card.classList.remove(..._TOR_STATE_CLASSES);
         card.classList.add(next);
+        void glyph.offsetWidth; // force reflow so the no-transition swap commits
+        card.classList.remove('tor-no-transition');
         glyph.style.opacity = '';
     }, 220);
 }
