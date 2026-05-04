@@ -302,15 +302,8 @@ function _dmsgBuildGutter(authorFullId, authorProfile, msg) {
 
     const avatarSrc = getProfileAvatarSrc(authorProfile);
     const avatar = createAvatarImg(avatarSrc, 40, false);
-    avatar.classList.add('dmsg-avatar');
-    // Own avatar isn't clickable — there's no "view your own profile" affordance
-    // here; it's only useful for visiting others. Skip the .btn class so cursor/
-    // hover don't suggest interactivity, and skip the data-npub the click
-    // delegate reads.
-    if (!msg.mine && authorFullId) {
-        avatar.classList.add('btn');
-        avatar.dataset.npub = authorFullId;
-    }
+    avatar.classList.add('dmsg-avatar', 'btn');
+    if (authorFullId) avatar.dataset.npub = authorFullId;
     avatar.style.margin = '0';
     gutter.appendChild(avatar);
 
@@ -328,12 +321,8 @@ function _dmsgBuildHeader(authorFullId, authorProfile, msg, isGroupChat, current
     header.classList.add('dmsg-header');
 
     const author = document.createElement('span');
-    author.classList.add('dmsg-author');
-    // Own author label isn't clickable — see _dmsgBuildGutter for rationale.
-    if (!msg.mine && authorFullId) {
-        author.classList.add('btn');
-        author.dataset.npub = authorFullId;
-    }
+    author.classList.add('dmsg-author', 'btn');
+    if (authorFullId) author.dataset.npub = authorFullId;
 
     const displayName = authorProfile?.nickname
         || authorProfile?.name
@@ -1194,13 +1183,12 @@ function _dmsgInjectReaction(rowEl, spanReaction) {
             return;
         }
 
-        // Avatar / author → open the mini profile popup. Skip our own — there's
-        // no "view your own profile" affordance from a chat row. The popup itself
+        // Avatar / author → open the mini profile popup. The popup itself
         // surfaces "View Profile" → openProfile() if the user wants the full screen.
         const profileBtn = target.closest('.dmsg-avatar, .dmsg-author');
         if (profileBtn) {
             const npub = profileBtn.dataset.npub;
-            if (!npub || npub === strPubkey) return;
+            if (!npub) return;
             showMiniProfile(npub, profileBtn);
             return;
         }

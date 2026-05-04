@@ -2203,7 +2203,7 @@ body.chat-bg-disabled .chat-messages::before {
   /* avatar is at left:12 + width 64 + 3px border = ends at ~82px */
   left: 84px;
   right: 10px;
-  top: 32px;
+  top: 50px;
   z-index: 3;
   display: flex;
   align-items: center;
