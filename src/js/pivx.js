@@ -1045,6 +1045,129 @@ function getChatDisplayName(chatId) {
 
 // ========== End PIVX Wallet Functions ==========
 
+// ========== Chat Integration ==========
+// PIVX-specific chat-side helpers: handles inbound payment events from the
+// backend and merges historical payments into chat messages on chat-open.
+// Both depend on globals defined elsewhere in classic-script scope: arrChats,
+// strOpenChat, eventCache, getProfile, renderMessage, domChatMessages,
+// softChatScroll, renderChatlist, invoke.
+
+/**
+ * Tauri event handler for inbound `pivx_payment_received`. Builds a synthetic
+ * message object, inserts it into the target chat in timestamp order, and
+ * re-renders the chatlist + the open chat (if applicable).
+ */
+function handlePivxPaymentReceived(evt) {
+    const { conversation_id, gift_code, amount_piv, address, message_id, sender, is_mine } = evt.payload;
+
+    // Find the chat
+    const chat = arrChats.find(c => c.id === conversation_id);
+    if (!chat) {
+        console.warn('PIVX payment: chat not found for', conversation_id);
+        return;
+    }
+
+    // Check if this payment message already exists in chat
+    const existingMsg = chat.messages?.find(m => m.id === message_id);
+    if (existingMsg) {
+        return;
+    }
+
+    // Create a synthetic message object for the PIVX payment
+    const pivxMsg = {
+        id: message_id,
+        at: evt.payload.at || Date.now(),
+        content: '',
+        mine: is_mine,
+        attachments: [],
+        npub: sender,
+        pivx_payment: {
+            gift_code,
+            amount_piv,
+            address
+        }
+    };
+
+    // Add to chat messages in sorted order by timestamp
+    if (!chat.messages) chat.messages = [];
+
+    // Add to event cache so procedural scroll includes it
+    eventCache.addEvent(conversation_id, pivxMsg);
+
+    // Check if this is the newest message (should be appended at end)
+    const isNewest = chat.messages.length === 0 || pivxMsg.at >= chat.messages[chat.messages.length - 1].at;
+
+    if (isNewest) {
+        // Newest message - append to end
+        chat.messages.push(pivxMsg);
+
+        // If this chat is currently open, append to DOM and scroll
+        if (strOpenChat === conversation_id) {
+            const profile = chat.chat_type === 'MlsGroup' ? null : getProfile(conversation_id);
+            const msgEl = renderMessage(pivxMsg, profile);
+            domChatMessages.appendChild(msgEl);
+            softChatScroll();
+        }
+    } else {
+        // Historical message during resync - insert at correct position in array
+        // but don't manipulate DOM (user will see it on scroll/reopen)
+        let insertIdx = 0;
+        for (let i = chat.messages.length - 1; i >= 0; i--) {
+            if (chat.messages[i].at <= pivxMsg.at) {
+                insertIdx = i + 1;
+                break;
+            }
+        }
+        chat.messages.splice(insertIdx, 0, pivxMsg);
+    }
+
+    // Update chatlist
+    renderChatlist();
+}
+
+/**
+ * Fetch this chat's PIVX payment history from the backend and merge into the
+ * existing message array (mutates `initialMessages` in place via eventCache).
+ * Re-sorts by timestamp after the merge. Failures are logged and swallowed —
+ * a missing PIVX payment must not block chat-open.
+ */
+async function mergePivxPaymentsIntoChat(contact, initialMessages) {
+    try {
+        const pivxPayments = await invoke('pivx_get_chat_payments', { conversationId: contact });
+        if (pivxPayments && pivxPayments.length > 0) {
+            // Convert PIVX payments to message format with pivx_payment property
+            for (const payment of pivxPayments) {
+                // Check if this payment already exists in messages
+                const existing = initialMessages.find(m => m.id === payment.message_id);
+                if (!existing) {
+                    const paymentMsg = {
+                        id: payment.message_id,
+                        at: payment.at,
+                        content: '',
+                        mine: payment.is_mine,
+                        attachments: [],
+                        npub: payment.sender,
+                        pivx_payment: {
+                            gift_code: payment.gift_code,
+                            amount_piv: payment.amount_piv,
+                            address: payment.address,
+                            message: payment.message
+                        }
+                    };
+                    // Add to cache (which also adds to initialMessages since they share the same array reference)
+                    eventCache.addEvent(contact, paymentMsg);
+                }
+            }
+            // Re-sort by timestamp after adding PIVX payments
+            initialMessages.sort((a, b) => a.at - b.at);
+        }
+    } catch (e) {
+        console.warn('Failed to load PIVX payments:', e);
+    }
+}
+
+// ========== End Chat Integration ==========
+
 // Resolve DOM refs and wire up PIVX event listeners once DOM is parsed
 document.addEventListener('DOMContentLoaded', function initPivxListeners() {
     // Resolve DOM references
