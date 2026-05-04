@@ -2076,6 +2076,167 @@ body.chat-bg-disabled .chat-messages::before {
   flex-shrink: 0;
 }
 
+/* Mini profile popup — Discord-style preview when an avatar/name is clicked */
+.mini-profile-backdrop {
+  /* Created only on mobile — see mini-profile.js. Desktop keeps surrounding UI
+     clickable; outside-click dismiss is handled at the document level. */
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  background: rgba(0,0,0,0.55);
+  animation: popupFadeIn 0.18s ease-out;
+}
+
+.mini-profile-popup {
+  position: fixed;
+  z-index: 1000;
+  width: 300px;
+  max-height: calc(100vh - 32px);
+  background: #1a1a1a;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 12px;
+  box-shadow: 0 10px 36px rgba(0,0,0,0.55);
+  overflow: hidden;
+  animation: popupFadeIn 0.18s ease-out;
+  display: flex;
+  flex-direction: column;
+}
+
+.mini-profile-banner {
+  height: 70px;
+  background: linear-gradient(135deg, #2a2440 0%, #1a1a1a 100%);
+  flex-shrink: 0;
+  position: relative;
+  overflow: hidden;
+}
+.mini-profile-banner img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.mini-profile-avatar {
+  position: absolute;
+  top: 36px; /* banner=70px, avatar=72px → centerline overlaps bottom of banner */
+  left: 16px;
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  border: 4px solid #1a1a1a;
+  background: #1a1a1a;
+  overflow: hidden;
+  z-index: 2;
+}
+.mini-profile-avatar img,
+.mini-profile-avatar .placeholder-avatar {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 50%;
+  display: block;
+}
+
+.mini-profile-body {
+  padding: 44px 16px 16px; /* top=44 leaves room for the overlapping avatar */
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+}
+
+.mini-profile-name {
+  font-size: 17px;
+  font-weight: 700;
+  color: #fff;
+  word-break: break-word;
+}
+.mini-profile-name-loading {
+  color: rgba(255,255,255,0.4);
+  font-weight: 500;
+}
+
+.mini-profile-sub {
+  font-size: 12px;
+  color: rgba(255,255,255,0.45);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+.mini-profile-about {
+  font-size: 13px;
+  color: rgba(255,255,255,0.78);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  /* Clamp long bios so the popup never grows unbounded. */
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-top: 2px;
+}
+
+.mini-profile-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: rgba(255,255,255,0.65);
+}
+.mini-profile-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #59fcb3;
+  flex-shrink: 0;
+}
+.mini-profile-status-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mini-profile-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+.mini-profile-action {
+  flex: 1;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.04);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.05s ease;
+}
+.mini-profile-action:hover {
+  background: rgba(255,255,255,0.10);
+}
+.mini-profile-action:active {
+  transform: scale(0.98);
+}
+.mini-profile-action-primary {
+  background: var(--icon-color-primary);
+  border-color: transparent;
+  color: #000;
+}
+.mini-profile-action-primary:hover {
+  background: var(--icon-color-primary);
+  filter: brightness(1.08);
+}
+
+/* Mobile / no-anchor fallback: centered modal */
+.mini-profile-popup.mini-profile-centered {
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(340px, calc(100vw - 32px));
+}
+
 /* Reaction Details Popup (long-press on reaction badge) */
 .reaction-details-popup {
   position: fixed;

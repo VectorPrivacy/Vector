@@ -1781,6 +1781,11 @@ async function setupRustListeners() {
             renderProfileTab(evt.payload);
         }
 
+        // Refresh the mini profile popup if it's open for this npub.
+        if (typeof refreshMiniProfileIfMatches === 'function') {
+            refreshMiniProfileIfMatches(evt.payload.id);
+        }
+
         // Re-render create group or invite modal if a stranger npub's profile resolved
         if (arrSelectedGroupMembers.includes(evt.payload.id) && domCreateGroup?.style.display !== 'none') {
             renderCreateGroupList(domCreateGroupFilter?.value || '');

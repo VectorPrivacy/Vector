@@ -1194,15 +1194,14 @@ function _dmsgInjectReaction(rowEl, spanReaction) {
             return;
         }
 
-        // Avatar / author → open profile. Skip our own — there's no "view your
-        // own profile" affordance from a chat row.
+        // Avatar / author → open the mini profile popup. Skip our own — there's
+        // no "view your own profile" affordance from a chat row. The popup itself
+        // surfaces "View Profile" → openProfile() if the user wants the full screen.
         const profileBtn = target.closest('.dmsg-avatar, .dmsg-author');
         if (profileBtn) {
             const npub = profileBtn.dataset.npub;
             if (!npub || npub === strPubkey) return;
-            const prof = getProfile(npub);
-            previousChatBeforeProfile = strOpenChat;
-            openProfile(prof || { id: npub });
+            showMiniProfile(npub, profileBtn);
             return;
         }
     });
