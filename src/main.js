@@ -6422,11 +6422,15 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
  * @param {HTMLElement} parent - Optional parent to append to
  * @returns {HTMLElement} - The created timestamp element
  */
+// Cached formatters — Intl.DateTimeFormat construction is expensive vs. .format()
+const _insertTimestampTimeFmt = new Intl.DateTimeFormat([], { hour: 'numeric', minute: '2-digit', hour12: true });
+const _insertTimestampDateFmt = new Intl.DateTimeFormat();
+
 function insertTimestamp(timestamp, parent = null) {
     const pTimestamp = document.createElement('p');
     pTimestamp.classList.add('msg-inline-timestamp');
     const messageDate = new Date(timestamp);
-    const timeStr = messageDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true });
+    const timeStr = _insertTimestampTimeFmt.format(messageDate);
 
     // Render the time contextually (day/date in bold)
     if (isToday(messageDate)) {
@@ -6434,7 +6438,7 @@ function insertTimestamp(timestamp, parent = null) {
     } else if (isYesterday(messageDate)) {
         pTimestamp.innerHTML = `<strong>Yesterday</strong>, ${timeStr}`;
     } else {
-        const dateStr = messageDate.toLocaleDateString();
+        const dateStr = _insertTimestampDateFmt.format(messageDate);
         pTimestamp.innerHTML = `<strong>${dateStr}</strong>, ${timeStr}`;
     }
 

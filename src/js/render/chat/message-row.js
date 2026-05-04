@@ -305,13 +305,8 @@ function _dmsgBuildGutter(authorFullId, authorProfile, msg) {
     avatar.classList.add('dmsg-avatar', 'btn');
     if (authorFullId) avatar.dataset.npub = authorFullId;
     avatar.style.margin = '0';
-    if (authorFullId) {
-        avatar.onclick = () => {
-            const prof = getProfile(authorFullId) || authorProfile;
-            previousChatBeforeProfile = strOpenChat;
-            openProfile(prof || { id: authorFullId });
-        };
-    }
+    // onclick handled by the delegated listener at the bottom of this file.
+    // The avatar already carries data-npub above, which the delegate reads.
     gutter.appendChild(avatar);
 
     // Hover-only time pill shown on streak-continuation rows; CSS toggles its visibility on row hover.
@@ -337,13 +332,7 @@ function _dmsgBuildHeader(authorFullId, authorProfile, msg, isGroupChat, current
     author.textContent = displayName;
     twemojify(author);
 
-    if (authorFullId) {
-        author.onclick = () => {
-            const prof = getProfile(authorFullId) || authorProfile;
-            previousChatBeforeProfile = strOpenChat;
-            openProfile(prof || { id: authorFullId });
-        };
-    }
+    // onclick handled by the delegated listener at the bottom of this file.
     header.appendChild(author);
 
     const senderIsAdmin = isGroupChat && currentChat?.metadata?.admins?.includes(authorFullId);
@@ -1018,14 +1007,14 @@ function _dmsgBuildStatus(msg) {
         statusEl.textContent = 'Failed · ';
         const retryBtn = document.createElement('span');
         retryBtn.className = 'dmsg-failed-action';
+        retryBtn.dataset.action = 'retry';
         retryBtn.textContent = 'Retry';
-        retryBtn.onclick = (e) => { e.stopPropagation(); retryFailedMessage(msg); };
         statusEl.appendChild(retryBtn);
         statusEl.appendChild(document.createTextNode(' · '));
         const deleteBtn = document.createElement('span');
         deleteBtn.className = 'dmsg-failed-action';
+        deleteBtn.dataset.action = 'delete';
         deleteBtn.textContent = 'Delete';
-        deleteBtn.onclick = (e) => { e.stopPropagation(); deleteFailedMessage(msg.id); };
         statusEl.appendChild(deleteBtn);
     } else if (msg.pending) {
         statusEl.textContent = 'Sending...';
@@ -1073,10 +1062,7 @@ function _dmsgBuildReactions(msg) {
         addBtn.setAttribute('aria-label', 'Add reaction');
         addBtn.title = 'Add reaction';
         addBtn.innerHTML = '<span class="icon icon-smile-face"></span>';
-        addBtn.onclick = (e) => {
-            e.stopPropagation();
-            _dmsgOpenReactionPicker(msg.id);
-        };
+        // onclick handled by the delegated listener at the bottom of this file.
         reactionsRow.appendChild(addBtn);
     }
 
@@ -1095,9 +1081,13 @@ function _dmsgUpdateLastSentVisibility() {
     });
 }
 
+// Cached formatter — `Intl.DateTimeFormat` construction is expensive vs. .format().
+// `.format()` accepts a ms timestamp directly (ES2018+), so we skip `new Date(at)`.
+const _dmsgTimeFormatter = new Intl.DateTimeFormat([], { hour: 'numeric', minute: '2-digit', hour12: true });
+
 function _dmsgFormatHourMinute(at) {
     if (!at) return '';
-    return new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true });
+    return _dmsgTimeFormatter.format(at);
 }
 
 /**
@@ -1155,3 +1145,56 @@ function _dmsgInjectReaction(rowEl, spanReaction) {
         }
     }
 }
+
+// Delegated click handler — replaces per-row inline onclick closures for
+// avatar / author / retry / delete / add-reaction. One listener instead of
+// 4-5 closures per message row, which matters on chats with hundreds of
+// rows. Routing keys: data-npub (avatar/author), data-action (retry/delete),
+// data-msg-id (add-reaction). The row's cached `_dmsgMsg` is consulted via
+// `_dmsgLookupMessage` for actions that need the full Message object.
+//
+// Reactions themselves keep their existing document-level long-press / right-
+// click delegation in reaction.js — that's intentional and not touched here.
+(function _dmsgInstallClickDelegate() {
+    if (!domChatMessages || domChatMessages._dmsgClickInstalled) return;
+    domChatMessages._dmsgClickInstalled = true;
+    domChatMessages.addEventListener('click', (e) => {
+        const target = e.target;
+        if (!(target instanceof Element)) return;
+
+        // Failed-message actions (retry / delete) come first — the spans live
+        // inside .dmsg-status which is inside .dmsg, so we'd otherwise hit the
+        // profile branch on the row's author.
+        const failedAction = target.closest('.dmsg-failed-action');
+        if (failedAction) {
+            e.stopPropagation();
+            const row = failedAction.closest('.dmsg');
+            const msg = row ? _dmsgLookupMessage(row) : null;
+            if (!msg) return;
+            const action = failedAction.dataset.action;
+            if (action === 'retry') retryFailedMessage(msg);
+            else if (action === 'delete') deleteFailedMessage(msg.id);
+            return;
+        }
+
+        // Add-reaction "+" button
+        const addReact = target.closest('.dmsg-reactions-add');
+        if (addReact) {
+            e.stopPropagation();
+            const msgId = addReact.getAttribute('data-msg-id');
+            if (msgId) _dmsgOpenReactionPicker(msgId);
+            return;
+        }
+
+        // Avatar / author → open profile
+        const profileBtn = target.closest('.dmsg-avatar, .dmsg-author');
+        if (profileBtn) {
+            const npub = profileBtn.dataset.npub;
+            if (!npub) return;
+            const prof = getProfile(npub);
+            previousChatBeforeProfile = strOpenChat;
+            openProfile(prof || { id: npub });
+            return;
+        }
+    });
+})();
