@@ -1760,9 +1760,6 @@ async function initSettings() {
                 const state = await invoke('tor_set_enabled', { enabled: desired });
                 torToggle.checked = !!state.running || !!state.enabled;
                 torStatus.textContent = formatTorStatus(state);
-                if (state.running) {
-                    torStatus.textContent += ' · Restart Vector to migrate existing relay connections.';
-                }
             } catch (err) {
                 console.error('[Tor] tor_set_enabled failed:', err);
                 // Roll the toggle back to actual state.
