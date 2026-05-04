@@ -26,6 +26,20 @@ let platformFeatures = null;
  * @param {string} filePath - Absolute file path on disk
  * @returns {string} URL for use in media element src
  */
+/**
+ * Format a TorState object (from the `tor_get_state` Tauri command) as a short
+ * human-readable status line. Used by the Privacy → "Route traffic through Tor"
+ * toggle to show bootstrap progress / connection state.
+ */
+function formatTorStatus(state) {
+    if (!state) return '';
+    if (!state.supported) return 'Tor support not compiled into this build.';
+    if (state.running) return 'Connected — your TCP traffic is routing through Tor.';
+    if (state.enabled) return 'Tor preference saved, but the service is not running.';
+    if (state.status && state.status !== 'disabled') return state.status;
+    return 'Disabled.';
+}
+
 function mediaUrl(filePath) {
     if (platformFeatures && platformFeatures.media_url) {
         return `${platformFeatures.media_url}/${encodeURIComponent(filePath)}`;
@@ -1714,6 +1728,55 @@ async function initSettings() {
         fSendTypingIndicators = e.target.checked;
         await saveSendTypingIndicators(e.target.checked);
     });
+
+    // Tor toggle — reads current state from the backend (which knows whether
+    // the build was compiled with `--features tor`), then attaches a change
+    // handler that persists the preference and starts/stops the embedded Tor
+    // service. While the toggle awaits bootstrap, we show progress text.
+    const torToggle = document.getElementById('privacy-tor-toggle');
+    const torStatus = document.getElementById('privacy-tor-status');
+    if (torToggle && torStatus) {
+        try {
+            const state = await invoke('tor_get_state');
+            torToggle.checked = !!state.running || !!state.enabled;
+            if (!state.supported) {
+                torToggle.disabled = true;
+                torStatus.textContent = 'This build was compiled without Tor support.';
+                torStatus.style.color = 'rgba(255,255,255,0.4)';
+            } else {
+                torStatus.textContent = formatTorStatus(state);
+            }
+        } catch (e) {
+            console.warn('[Tor] tor_get_state failed:', e);
+        }
+
+        torToggle.addEventListener('change', async (e) => {
+            const desired = e.target.checked;
+            torToggle.disabled = true;
+            torStatus.textContent = desired
+                ? 'Bootstrapping Tor… this can take 5–15s on first connect.'
+                : 'Disabling Tor…';
+            try {
+                const state = await invoke('tor_set_enabled', { enabled: desired });
+                torToggle.checked = !!state.running || !!state.enabled;
+                torStatus.textContent = formatTorStatus(state);
+                if (state.running) {
+                    torStatus.textContent += ' · Restart Vector to migrate existing relay connections.';
+                }
+            } catch (err) {
+                console.error('[Tor] tor_set_enabled failed:', err);
+                // Roll the toggle back to actual state.
+                try {
+                    const state = await invoke('tor_get_state');
+                    torToggle.checked = !!state.running || !!state.enabled;
+                    torStatus.textContent = `Failed: ${err}`;
+                    torStatus.style.color = '#ff6b6b';
+                } catch (_) { /* nothing else we can do */ }
+            } finally {
+                torToggle.disabled = false;
+            }
+        });
+    }
 
     // Load blocked users list + toggle
     await loadBlockedUsersList();
