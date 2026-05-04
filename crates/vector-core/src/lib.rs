@@ -58,6 +58,8 @@ pub mod db;
 pub mod net;
 pub mod blossom;
 pub mod inbox_relays;
+#[cfg(feature = "tor")]
+pub mod tor;
 
 // === Event Storage ===
 pub mod stored_event;

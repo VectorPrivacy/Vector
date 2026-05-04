@@ -67,14 +67,19 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "logg
 # split that breaks the build with 150+ trait-mismatch errors.
 arti-client = { git = "https://github.com/VectorPrivacy/arti.git", branch = "vector/rusqlite-0.32", default-features = false, features = ["tokio", "rustls"], optional = true }
 tor-rtcompat = { git = "https://github.com/VectorPrivacy/arti.git", branch = "vector/rusqlite-0.32", default-features = false, features = ["tokio", "rustls"], optional = true }
+# tokio_util::compat bridges arti's futures::io::AsyncRead to tokio::io::AsyncRead so
+# we can splice Arti's DataStream into a tokio TcpStream for the SOCKS5 bridge.
+tokio-util = { version = "0.7", features = ["compat"], optional = true }
 
 # Platform
 libc = "0.2"
 
 [features]
 default = []
-# Enables embedded Tor (Arti). No consumers yet — this just compiles the dep.
-tor = ["dep:arti-client", "dep:tor-rtcompat"]
+# Enables embedded Tor (Arti) — bootstraps Arti, runs a localhost SOCKS5 listener
+# bridging into the Tor network. Consumers (HTTP / Nostr) opt into the proxy via
+# `tor::proxy_url()` returning `Some(socks5://127.0.0.1:<port>)` when active.
+tor = ["dep:arti-client", "dep:tor-rtcompat", "dep:tokio-util"]
 
 [dev-dependencies]
 tempfile = "3"
