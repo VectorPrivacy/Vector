@@ -69,6 +69,18 @@ function showMiniProfile(npub, anchorEl) {
     }
 }
 
+/**
+ * Drill into the full profile screen for `npub`. Shared by the avatar click
+ * shortcut and the "View Profile" button.
+ */
+function _miniProfileOpenFull(npub) {
+    hideMiniProfile();
+    if (typeof openProfile !== 'function') return;
+    previousChatBeforeProfile = (typeof strOpenChat !== 'undefined') ? strOpenChat : '';
+    const prof = (typeof getProfile === 'function') ? getProfile(npub) : null;
+    openProfile(prof || { id: npub });
+}
+
 function hideMiniProfile() {
     if (miniProfileEl) { miniProfileEl.remove(); miniProfileEl = null; }
     if (miniProfileBackdrop) { miniProfileBackdrop.remove(); miniProfileBackdrop = null; }
@@ -103,19 +115,27 @@ function _populateMiniProfile(popup, npub, profile) {
         const img = document.createElement('img');
         img.src = bannerSrc;
         img.alt = '';
+        img.draggable = false;
         img.onerror = () => img.remove();
         banner.appendChild(img);
     }
     popup.appendChild(banner);
 
-    // Avatar (overlapping the banner's bottom edge)
+    // Avatar (overlapping the banner's bottom edge). Clicking it is a shortcut
+    // to "View Profile" — same effect as the body button.
     const avatarWrap = document.createElement('div');
     avatarWrap.className = 'mini-profile-avatar';
+    avatarWrap.title = 'View Profile';
+    avatarWrap.onclick = (e) => {
+        e.stopPropagation();
+        _miniProfileOpenFull(npub);
+    };
     const avatarSrc = (typeof getProfileAvatarSrc === 'function') ? getProfileAvatarSrc(profile) : null;
     if (avatarSrc) {
         const img = document.createElement('img');
         img.src = avatarSrc;
         img.alt = '';
+        img.draggable = false;
         img.onerror = () => {
             img.replaceWith(createPlaceholderAvatar(false, 72));
         };
@@ -198,12 +218,7 @@ function _populateMiniProfile(popup, npub, profile) {
     btnView.textContent = 'View Profile';
     btnView.onclick = (e) => {
         e.stopPropagation();
-        hideMiniProfile();
-        if (typeof openProfile === 'function') {
-            previousChatBeforeProfile = (typeof strOpenChat !== 'undefined') ? strOpenChat : '';
-            const prof = (typeof getProfile === 'function') ? getProfile(npub) : null;
-            openProfile(prof || { id: npub });
-        }
+        _miniProfileOpenFull(npub);
     };
     actions.appendChild(btnView);
 

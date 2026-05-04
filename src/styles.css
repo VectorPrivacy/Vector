@@ -2108,12 +2108,18 @@ body.chat-bg-disabled .chat-messages::before {
   flex-shrink: 0;
   position: relative;
   overflow: hidden;
+  /* Banner is decoration — text-select / drag would lift the image off the popup. */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
 }
 .mini-profile-banner img {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
+  -webkit-user-drag: none;
+  pointer-events: none;
 }
 
 .mini-profile-avatar {
@@ -2127,6 +2133,17 @@ body.chat-bg-disabled .chat-messages::before {
   background: #1a1a1a;
   overflow: hidden;
   z-index: 2;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
+  transition: transform 0.1s ease;
+}
+.mini-profile-avatar:hover {
+  transform: scale(1.04);
+}
+.mini-profile-avatar:active {
+  transform: scale(0.98);
 }
 .mini-profile-avatar img,
 .mini-profile-avatar .placeholder-avatar {
@@ -2135,6 +2152,8 @@ body.chat-bg-disabled .chat-messages::before {
   object-fit: cover;
   border-radius: 50%;
   display: block;
+  -webkit-user-drag: none;
+  pointer-events: none;
 }
 
 .mini-profile-body {
