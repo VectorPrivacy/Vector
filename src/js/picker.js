@@ -26,7 +26,6 @@
 const picker = document.querySelector('.emoji-picker');
 /** @type {HTMLInputElement} */
 const emojiSearch = document.getElementById('emoji-search-input');
-const emojiSearchIcon = document.querySelector('.emoji-search-icon');
 /**
  * The current reaction reference - i.e: a message being reacted to.
  *
@@ -270,9 +269,6 @@ function resetEmojiPicker() {
     // Clear search input
     emojiSearch.value = '';
 
-    // Restore search icon opacity
-    if (emojiSearchIcon) emojiSearchIcon.style.opacity = '';
-
     // Show all sections
     document.querySelectorAll('.emoji-section').forEach(section => {
         section.style.display = 'block';
@@ -293,7 +289,6 @@ emojiSearch.addEventListener('input', (e) => {
     const search = e.target.value.toLowerCase();
 
     if (search) {
-         if (emojiSearchIcon) emojiSearchIcon.style.opacity = '0';
         // Hide all sections and show search results
         document.querySelectorAll('.emoji-section').forEach(section => {
             section.style.display = 'none';
@@ -334,7 +329,6 @@ emojiSearch.addEventListener('input', (e) => {
 
         twemojify(resultsGrid);
     } else {
-        if (emojiSearchIcon) emojiSearchIcon.style.opacity = ''; // Restore opacity when cleared
         resetEmojiPicker();
     }
 });

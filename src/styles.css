@@ -2532,7 +2532,7 @@ body.chat-bg-disabled .chat-messages::before {
 
 .emoji-search-wrapper input {
   width: 100%;
-  padding: 10px 32px 10px 12px;
+  padding: 10px 12px 10px 44px;
   border-radius: 8px;
   background-color: #202020;
   border: none;
@@ -2547,13 +2547,17 @@ body.chat-bg-disabled .chat-messages::before {
 .emoji-search-icon {
   /* Override .icon base class positioning */
   position: absolute !important;
-  right: 10px !important;
-  left: auto !important;
+  left: 12px !important;
+  right: auto !important;
   top: 50% !important;
   bottom: auto !important;
   transform: translateY(-50%);
-  width: 14px !important;
-  height: 14px !important;
+  width: 24px !important;
+  height: 24px !important;
+  /* Kill inherited 6px padding from `.emoji-picker span` (which styles the
+     emoji grid cells). With content-box sizing that padding inflates the
+     icon's box and crowds the text. */
+  padding: 0 !important;
   background-color: rgba(255, 255, 255, 0.4);
   mask-image: url("./icons/search.svg");
   -webkit-mask-image: url("./icons/search.svg");
