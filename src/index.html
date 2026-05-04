@@ -36,6 +36,7 @@
     <script src="/js/render/chat/message-toolbar.js" defer></script>
     <script src="/js/render/chat/message-row.js" defer></script>
     <script src="/js/render/mini-profile.js" defer></script>
+    <script src="/js/tor-glyph.js" defer></script>
     <script src="/js/picker.js" defer></script>
     <!-- Soft-dependents (not required at app boot, thus can load beyond initial DOMContentLoaded) -->
     <script src="/js/mentions.js"></script>
@@ -949,48 +950,15 @@
             </label>
           </div>
 
-          <!-- Reusable Tor glyph definition. Placed in a hidden SVG so the
-               production card AND the dev preview row below can `<use>` it
-               from a single source of truth. State animations live on the
-               wrapping element via .tor-state-* classes. -->
-          <svg class="tor-glyph-defs" aria-hidden="true" focusable="false" width="0" height="0" style="position: absolute;">
-            <defs>
-              <symbol id="tor-glyph-symbol" viewBox="0 0 120 120">
-                <!-- Halo (only visible in connected state — soft outer breath) -->
-                <circle class="tor-halo" cx="60" cy="60" r="55"/>
-                <!-- Three nested rings, dim by default. Become visible / vibrant
-                     under state classes. Stroked with `pathLength=100` so
-                     stroke-dasharray values in CSS work uniformly across
-                     different radii. -->
-                <circle class="tor-ring tor-ring-3" cx="60" cy="60" r="48" pathLength="100"/>
-                <circle class="tor-ring tor-ring-2" cx="60" cy="60" r="34" pathLength="100"/>
-                <circle class="tor-ring tor-ring-1" cx="60" cy="60" r="20" pathLength="100"/>
-                <!-- Comet trails: only visible while bootstrapping. Each is a
-                     full-circle stroke with a short dasharray, animated via
-                     stroke-dashoffset to sweep around. Each ring gets its own
-                     direction + speed. -->
-                <circle class="tor-comet tor-comet-3" cx="60" cy="60" r="48" pathLength="100"/>
-                <circle class="tor-comet tor-comet-2" cx="60" cy="60" r="34" pathLength="100"/>
-                <circle class="tor-comet tor-comet-1" cx="60" cy="60" r="20" pathLength="100"/>
-                <!-- Orbital dots: only visible while connected. One dot per
-                     ring, sitting precisely on the ring's circumference (cy
-                     = 60 - r). Each dot's wrapping <g> rotates around the
-                     glyph center at its own speed for the subtle stable orbit. -->
-                <g class="tor-dot-orbit tor-dot-orbit-3"><circle class="tor-dot tor-dot-3" cx="60" cy="12" r="3.5"/></g>
-                <g class="tor-dot-orbit tor-dot-orbit-2"><circle class="tor-dot tor-dot-2" cx="60" cy="26" r="3"/></g>
-                <g class="tor-dot-orbit tor-dot-orbit-1"><circle class="tor-dot tor-dot-1" cx="60" cy="40" r="2.5"/></g>
-                <!-- Core (you). Always visible. Pulses while bootstrapping,
-                     steady while connected. -->
-                <circle class="tor-core" cx="60" cy="60" r="6"/>
-              </symbol>
-            </defs>
-          </svg>
-
           <div class="form-group tor-card" id="settings-tor-card">
+            <!-- Tor glyph SVG. Each <svg class="tor-glyph"> on the page gets
+                 the same content injected at boot by chatlist-tor-glyph.js
+                 (single source of truth, but inlined per-element so CSS
+                 animations / opacity / transform reach inside — `<use>`'s
+                 shadow tree blocks those). State classes (.tor-state-*) on
+                 the wrapping element drive animations via CSS. -->
             <div class="tor-glyph-wrap">
-              <svg class="tor-glyph" viewBox="0 0 120 120" aria-hidden="true">
-                <use href="#tor-glyph-symbol"></use>
-              </svg>
+              <svg class="tor-glyph" viewBox="0 0 120 120" aria-hidden="true"></svg>
             </div>
 
             <div class="tor-card-body">
@@ -1019,19 +987,19 @@
                dialled in. -->
           <div class="tor-glyph-preview-row" aria-hidden="true">
             <div class="tor-glyph-preview-cell tor-state-disabled">
-              <svg viewBox="0 0 120 120"><use href="#tor-glyph-symbol"/></svg>
+              <svg class="tor-glyph" viewBox="0 0 120 120"></svg>
               <span class="tor-glyph-preview-label">disabled</span>
             </div>
             <div class="tor-glyph-preview-cell tor-state-bootstrapping">
-              <svg viewBox="0 0 120 120"><use href="#tor-glyph-symbol"/></svg>
+              <svg class="tor-glyph" viewBox="0 0 120 120"></svg>
               <span class="tor-glyph-preview-label">bootstrapping</span>
             </div>
             <div class="tor-glyph-preview-cell tor-state-connected">
-              <svg viewBox="0 0 120 120"><use href="#tor-glyph-symbol"/></svg>
+              <svg class="tor-glyph" viewBox="0 0 120 120"></svg>
               <span class="tor-glyph-preview-label">connected</span>
             </div>
             <div class="tor-glyph-preview-cell tor-state-failed">
-              <svg viewBox="0 0 120 120"><use href="#tor-glyph-symbol"/></svg>
+              <svg class="tor-glyph" viewBox="0 0 120 120"></svg>
               <span class="tor-glyph-preview-label">failed</span>
             </div>
           </div>
