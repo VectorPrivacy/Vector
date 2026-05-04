@@ -88,19 +88,25 @@ function applyTorCardState(state) {
         card.classList.add(next);
         return;
     }
+    // Hold no-transition through the *entire* fade cycle. Inner element
+    // CSS transitions on stroke/fill/opacity are 0.5s — slower than the
+    // 0.22s fade-in — so if they're allowed to engage at all they crossfade
+    // the OLD state's colors visibly *during* the fade-in. With no-transition
+    // active end-to-end, inner state snaps invisibly while opacity is 0 and
+    // stays snapped until the fade-in completes. Cleanup is on its own
+    // timer past the fade-in's end so the next state change still benefits
+    // from smooth tweens.
+    card.classList.add('tor-no-transition');
     glyph.style.opacity = '0';
     setTimeout(() => {
-        // While the glyph is invisible: snap inner state to its final
-        // values rather than letting the 0.5s stroke/fill transitions
-        // crossfade. Otherwise the fade-in (0.22s) outpaces the inner
-        // transitions and you briefly see the old colors mid-tween.
-        card.classList.add('tor-no-transition');
         card.classList.remove(..._TOR_STATE_CLASSES);
         card.classList.add(next);
-        void glyph.offsetWidth; // force reflow so the no-transition swap commits
-        card.classList.remove('tor-no-transition');
+        void glyph.offsetWidth; // commit the new state while invisible
         glyph.style.opacity = '';
     }, 220);
+    setTimeout(() => {
+        card.classList.remove('tor-no-transition');
+    }, 500);
 }
 
 let _torPollHandle = null;
