@@ -42,7 +42,11 @@ futures-util = "0.3.31"
 tauri = { version = "2.10.2", features = ["macos-private-api", "protocol-asset", "image-png"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
-reqwest = { version = "0.12", features = ["rustls-tls", "json", "stream"] }
+# default-features=false drops `http2`, `default-tls`, and `macos-system-configuration` —
+# none of which Vector actually uses (rustls-tls is explicit; HTTP/1.1 is fine for
+# all relay/Blossom traffic). `charset` is kept for text-response decoding (link
+# previews fetching HTML).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "charset"] }
 aes = "0.8.4"
 aes-gcm = "0.10.3"
 sha2 = "0.10.9"

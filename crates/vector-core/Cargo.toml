@@ -40,7 +40,7 @@ sha2 = "0.10.9"
 zeroize = "1.8"
 
 # HTTP
-reqwest = { version = "0.12", features = ["rustls-tls", "json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "charset"] }
 url = "2.5.7"
 
 # Image metadata
