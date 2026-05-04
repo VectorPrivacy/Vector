@@ -4344,9 +4344,11 @@ select {
   stroke-width: 2.6;
   stroke-linecap: round;
   /* Comet dasharray uses the SVG's pathLength=100 normalization so the same
-     numbers apply across all three radii. ~22 of the 100 path-units are
-     "lit" — gives a clean ~80° arc that reads as a comet head + body. */
-  stroke-dasharray: 22 100;
+     numbers apply across all three radii. The two values must SUM TO 100
+     (the full path length) so the dashoffset cycle 0 → -100 returns to the
+     same visual position; otherwise the arc snaps when the loop wraps.
+     22 lit + 78 gap → ~80° lit arc, perfect seamless loop. */
+  stroke-dasharray: 22 78;
   stroke-dashoffset: 0;
   transform-origin: 60px 60px;
 }
