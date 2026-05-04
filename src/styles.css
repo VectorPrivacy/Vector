@@ -1479,6 +1479,22 @@ html, body {
   height: 50px;
   padding: 5px;
   margin-bottom: 4px;
+  /* Skip layout/paint/decode for off-screen rows. The intrinsic size keeps
+     scrollbar geometry stable: 50px row + 12px chrome (border + padding +
+     margin-bottom) = 62px stride. */
+  content-visibility: auto;
+  contain-intrinsic-size: 62px;
+}
+
+/* Fade-in when a row transitions from content-visibility:auto skipped → visible.
+   Toggled by the listener in chatlist-reveal.js. Opacity-only so it stays on
+   the compositor and doesn't retrigger layout/paint. */
+@keyframes chatlist-row-reveal {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.chatlist-contact.cv-revealed {
+  animation: chatlist-row-reveal 0.18s ease-out both;
 }
 
 .chatlist-contact p {
