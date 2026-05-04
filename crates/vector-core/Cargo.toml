@@ -54,8 +54,27 @@ image = { version = "0.25.9", default-features = false, features = ["png", "jpeg
 # TLS
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 
+# Tor (Arti) — VectorPrivacy fork with a single one-line patch on tor-dirmgr's
+# Cargo.toml relaxing its rusqlite constraint from `>=0.36` to `>=0.32` so we
+# can share libsqlite3-sys with Vector's MDK-pinned rusqlite 0.32. The actual
+# rusqlite API surface tor-dirmgr uses hasn't changed, so no source edits are
+# needed. When MDK 0.7.1 lands and Vector can move to rusqlite 0.37, drop this
+# fork and use stock arti-client.
+#
+# Direct path-equivalent git deps (not [patch.crates-io]) so the entire arti
+# workspace resolves through one consistent source — patching only tor-dirmgr
+# while siblings come from crates.io creates a tor_protover type-identity
+# split that breaks the build with 150+ trait-mismatch errors.
+arti-client = { git = "https://github.com/VectorPrivacy/arti.git", branch = "vector/rusqlite-0.32", default-features = false, features = ["tokio", "rustls"], optional = true }
+tor-rtcompat = { git = "https://github.com/VectorPrivacy/arti.git", branch = "vector/rusqlite-0.32", default-features = false, features = ["tokio", "rustls"], optional = true }
+
 # Platform
 libc = "0.2"
+
+[features]
+default = []
+# Enables embedded Tor (Arti). No consumers yet — this just compiles the dep.
+tor = ["dep:arti-client", "dep:tor-rtcompat"]
 
 [dev-dependencies]
 tempfile = "3"
