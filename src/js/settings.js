@@ -28,22 +28,17 @@ let platformFeatures = null;
  */
 /**
  * Format a TorState object (from the `tor_get_state` Tauri command) as a short
- * human-readable status line. Used by the Privacy → "Route traffic through Tor"
- * toggle to show bootstrap progress / connection state.
+ * human-readable status line. Kept to a single line, even at the narrower
+ * widths Vector uses on mobile; full detail (error messages etc.) lands in
+ * console + the (i) popup.
  */
 function formatTorStatus(state) {
     if (!state) return '';
-    if (!state.supported) return 'Tor support not compiled into this build.';
-    if (state.running) return 'Connected — your TCP traffic is routing through Tor.';
-    // running=false: lean on the backend's status string, which already
-    // distinguishes "bootstrapping NN%" from "failed: …" from plain "disabled".
-    if (state.status && state.status.startsWith('bootstrapping')) {
-        return `Bootstrapping Tor… (${state.status.replace('bootstrapping ', '')})`;
-    }
-    if (state.status && state.status.startsWith('failed')) {
-        return `Tor failed to start — ${state.status.replace('failed: ', '')}`;
-    }
-    if (state.enabled) return 'Starting Tor…';
+    if (!state.supported) return 'Not in this build.';
+    if (state.running) return 'Connected.';
+    if (state.status && state.status.startsWith('bootstrapping')) return 'Bootstrapping…';
+    if (state.status && state.status.startsWith('failed')) return 'Failed to start.';
+    if (state.enabled) return 'Starting…';
     return 'Disabled.';
 }
 
@@ -65,12 +60,40 @@ function torStateClass(state) {
     return 'tor-state-disabled';
 }
 
-/** Flip the state class on the card without disturbing siblings. */
+/**
+ * Flip the state class on the card. CSS transitions the colors/opacities
+ * smoothly, but the keyframe animations (comet sweep, orbital dots) start
+ * and stop abruptly at state changes — they snap because their `transform`
+ * is keyframe-driven and can't tween into "no animation". Cheat: fade the
+ * glyph to invisible, swap the state class, fade back in. The user sees a
+ * clean cross-dissolve instead of the keyframe boundary jump.
+ *
+ * First-time apply (no prior state class) skips the fade — the glyph just
+ * pops in with its initial state.
+ */
+const _TOR_STATE_CLASSES = ['tor-state-disabled', 'tor-state-bootstrapping', 'tor-state-connected', 'tor-state-failed'];
 function applyTorCardState(state) {
     const card = document.getElementById('settings-tor-card');
     if (!card) return;
-    card.classList.remove('tor-state-disabled', 'tor-state-bootstrapping', 'tor-state-connected', 'tor-state-failed');
-    card.classList.add(torStateClass(state));
+    const next = torStateClass(state);
+    const current = _TOR_STATE_CLASSES.find(c => card.classList.contains(c));
+    if (current === next) return;
+    if (!current) {
+        card.classList.add(next);
+        return;
+    }
+    const glyph = card.querySelector('.tor-glyph');
+    if (!glyph) {
+        card.classList.remove(..._TOR_STATE_CLASSES);
+        card.classList.add(next);
+        return;
+    }
+    glyph.style.opacity = '0';
+    setTimeout(() => {
+        card.classList.remove(..._TOR_STATE_CLASSES);
+        card.classList.add(next);
+        glyph.style.opacity = '';
+    }, 220);
 }
 
 let _torPollHandle = null;
@@ -1824,9 +1847,7 @@ async function initSettings() {
             // Optimistically reflect the bootstrapping animation immediately
             // — user clicked, awaitable is in flight.
             applyTorCardState({ supported: true, enabled: desired, running: false, status: desired ? 'bootstrapping' : 'disabled' });
-            torStatus.textContent = desired
-                ? 'Bootstrapping Tor… this can take 5–15s on first connect.'
-                : 'Disabling Tor…';
+            torStatus.textContent = desired ? 'Bootstrapping…' : 'Disabling…';
             try {
                 const state = await invoke('tor_set_enabled', { enabled: desired });
                 torToggle.checked = !!state.running || !!state.enabled;

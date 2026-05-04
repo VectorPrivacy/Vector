@@ -4314,6 +4314,10 @@ select {
   width: 100%;
   height: 100%;
   overflow: visible;
+  /* JS toggles inline opacity to 0 during state changes so the keyframe
+     animation snap (comets stopping, orbits starting) is hidden behind a
+     fade. The transition handles the cross-dissolve. */
+  transition: opacity 0.22s ease;
 }
 
 /* Hidden symbol-defs SVG. We use it to share one glyph definition between
