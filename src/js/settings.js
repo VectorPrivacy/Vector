@@ -47,6 +47,32 @@ function formatTorStatus(state) {
     return 'Disabled.';
 }
 
+/**
+ * Pick the right state class for the Tor card glyph based on a TorState.
+ *   tor-state-connected     → fully bootstrapped, SOCKS listener accepting
+ *   tor-state-bootstrapping → service starting (or user just toggled on,
+ *                             waiting for await tor_set_enabled to return)
+ *   tor-state-failed        → bootstrap returned an error
+ *   tor-state-disabled      → service off / not requested
+ */
+function torStateClass(state) {
+    if (!state || !state.supported) return 'tor-state-disabled';
+    if (state.running) return 'tor-state-connected';
+    if (state.status && state.status.startsWith('failed')) return 'tor-state-failed';
+    if (state.enabled || (state.status && state.status.startsWith('bootstrapping'))) {
+        return 'tor-state-bootstrapping';
+    }
+    return 'tor-state-disabled';
+}
+
+/** Flip the state class on the card without disturbing siblings. */
+function applyTorCardState(state) {
+    const card = document.getElementById('settings-tor-card');
+    if (!card) return;
+    card.classList.remove('tor-state-disabled', 'tor-state-bootstrapping', 'tor-state-connected', 'tor-state-failed');
+    card.classList.add(torStateClass(state));
+}
+
 function mediaUrl(filePath) {
     if (platformFeatures && platformFeatures.media_url) {
         return `${platformFeatures.media_url}/${encodeURIComponent(filePath)}`;
@@ -1746,13 +1772,11 @@ async function initSettings() {
         try {
             const state = await invoke('tor_get_state');
             torToggle.checked = !!state.running || !!state.enabled;
+            applyTorCardState(state);
             if (!state.supported) {
                 torToggle.disabled = true;
-                torStatus.textContent = 'This build was compiled without Tor support.';
-                torStatus.style.color = 'rgba(255,255,255,0.4)';
-            } else {
-                torStatus.textContent = formatTorStatus(state);
             }
+            torStatus.textContent = formatTorStatus(state);
         } catch (e) {
             console.warn('[Tor] tor_get_state failed:', e);
         }
@@ -1760,12 +1784,16 @@ async function initSettings() {
         torToggle.addEventListener('change', async (e) => {
             const desired = e.target.checked;
             torToggle.disabled = true;
+            // Optimistically reflect the bootstrapping animation immediately
+            // — user clicked, awaitable is in flight.
+            applyTorCardState({ supported: true, enabled: desired, running: false, status: desired ? 'bootstrapping' : 'disabled' });
             torStatus.textContent = desired
                 ? 'Bootstrapping Tor… this can take 5–15s on first connect.'
                 : 'Disabling Tor…';
             try {
                 const state = await invoke('tor_set_enabled', { enabled: desired });
                 torToggle.checked = !!state.running || !!state.enabled;
+                applyTorCardState(state);
                 torStatus.textContent = formatTorStatus(state);
             } catch (err) {
                 console.error('[Tor] tor_set_enabled failed:', err);
@@ -1773,8 +1801,8 @@ async function initSettings() {
                 try {
                     const state = await invoke('tor_get_state');
                     torToggle.checked = !!state.running || !!state.enabled;
+                    applyTorCardState({ ...state, status: 'failed: ' + err });
                     torStatus.textContent = `Failed: ${err}`;
-                    torStatus.style.color = '#ff6b6b';
                 } catch (_) { /* nothing else we can do */ }
             } finally {
                 torToggle.disabled = false;

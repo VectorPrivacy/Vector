@@ -949,13 +949,43 @@
             </label>
           </div>
 
-          <div class="form-group">
-            <label class="toggle-container">
-              <span><span id="privacy-tor-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Route traffic through Tor</span>
+          <div class="form-group tor-card" id="settings-tor-card">
+            <!-- Large animated visualization. State classes (.tor-state-*) on
+                 #settings-tor-card drive the glyph + animations via CSS. -->
+            <div class="tor-glyph-wrap">
+              <svg class="tor-glyph" viewBox="0 0 120 120" aria-hidden="true">
+                <!-- Outer halo (connected state pulse) -->
+                <circle class="tor-halo" cx="60" cy="60" r="55"></circle>
+                <!-- Three onion shells, drawn as broken-stroke arcs that
+                     animate via stroke-dashoffset for the bootstrap "build" -->
+                <circle class="tor-shell tor-shell-3" cx="60" cy="60" r="48"></circle>
+                <circle class="tor-shell tor-shell-2" cx="60" cy="60" r="34"></circle>
+                <circle class="tor-shell tor-shell-1" cx="60" cy="60" r="20"></circle>
+                <!-- Three relay hop nodes — represent entry / middle / exit
+                     guards on a Tor circuit. CSS rotates the group in the
+                     bootstrap state. -->
+                <g class="tor-hops">
+                  <circle class="tor-hop tor-hop-1" cx="60" cy="14" r="4"></circle>
+                  <circle class="tor-hop tor-hop-2" cx="100" cy="76" r="4"></circle>
+                  <circle class="tor-hop tor-hop-3" cx="20" cy="76" r="4"></circle>
+                </g>
+                <!-- Core (you) -->
+                <circle class="tor-core" cx="60" cy="60" r="6"></circle>
+              </svg>
+            </div>
+
+            <div class="tor-card-body">
+              <div class="tor-card-title">
+                <span id="privacy-tor-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-right: 6px;"></span>
+                Route traffic through Tor
+              </div>
+              <div id="privacy-tor-status" class="tor-card-status"></div>
+            </div>
+
+            <label class="toggle-container tor-card-toggle">
               <input type="checkbox" id="privacy-tor-toggle">
               <span class="neon-toggle"></span>
             </label>
-            <div id="privacy-tor-status" style="font-size: 12px; color: rgba(255,255,255,0.55); margin-top: 6px; min-height: 16px;"></div>
           </div>
 
           <div id="settings-blocked-users" style="margin-top: 25px;">
