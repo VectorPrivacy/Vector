@@ -4316,96 +4316,97 @@ select {
   overflow: visible;
 }
 
-/* Disabled (default) palette: dim, monochrome */
-.tor-glyph .tor-shell,
-.tor-glyph .tor-hop,
-.tor-glyph .tor-core,
-.tor-glyph .tor-halo {
-  transition: stroke 0.5s ease, fill 0.5s ease, opacity 0.5s ease, transform 0.6s ease;
-}
-.tor-shell {
-  fill: none;
-  stroke: rgba(255,255,255,0.22);
-  stroke-width: 2;
-  /* Each shell carries its own dasharray so it can animate as a "drawing"
-     during bootstrap. r=20→circumference≈126; r=34→≈214; r=48→≈302. */
-}
-.tor-shell-1 { stroke-dasharray: 126; stroke-dashoffset: 0; }
-.tor-shell-2 { stroke-dasharray: 214; stroke-dashoffset: 0; }
-.tor-shell-3 { stroke-dasharray: 302; stroke-dashoffset: 0; }
+/* Hidden symbol-defs SVG. We use it to share one glyph definition between
+   the production card and the dev preview row. Visually invisible. */
+.tor-glyph-defs { width: 0; height: 0; overflow: hidden; }
 
-.tor-hop {
-  fill: rgba(255,255,255,0.22);
+/* Smooth state→state transitions on every animated property. The keyframe
+   animations below re-target these as needed. */
+.tor-ring,
+.tor-comet,
+.tor-dot,
+.tor-core,
+.tor-halo {
+  transition: stroke 0.5s ease, fill 0.5s ease, opacity 0.5s ease;
 }
-.tor-hops {
+
+/* ---- Default (Disabled) ----------------------------------------------------
+   Rings dim, no comets, no orbital dots, dim core, no halo. Reads as a
+   deliberate-but-inactive piece of UI rather than missing/broken art. */
+.tor-ring {
+  fill: none;
+  stroke: rgba(255,255,255,0.18);
+  stroke-width: 1.6;
+}
+.tor-comet {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 2.6;
+  stroke-linecap: round;
+  /* Comet dasharray uses the SVG's pathLength=100 normalization so the same
+     numbers apply across all three radii. ~22 of the 100 path-units are
+     "lit" — gives a clean ~80° arc that reads as a comet head + body. */
+  stroke-dasharray: 22 100;
+  stroke-dashoffset: 0;
+  transform-origin: 60px 60px;
+}
+.tor-dot {
+  fill: rgba(255,255,255,0.22);
+  opacity: 0;
+}
+.tor-dot-orbit {
   transform-origin: 60px 60px;
 }
 .tor-core {
   fill: rgba(255,255,255,0.4);
+  transform-origin: 60px 60px;
 }
 .tor-halo {
   fill: none;
   stroke: rgba(149,48,244,0);
   stroke-width: 2;
   opacity: 0;
+  transform-origin: 60px 60px;
 }
 
-/* ---- Bootstrapping ---- */
-.tor-state-bootstrapping .tor-shell {
-  stroke: #c285ff;
+/* ---- Bootstrapping ---------------------------------------------------------
+   Rings tint to a dim purple "track" so the comets have visible lanes. Each
+   ring's comet sweeps around at its own speed, alternating direction for
+   visual harmony. Core pulses in time with the inner ring. No orbital dots
+   yet — they appear only when truly connected. */
+.tor-state-bootstrapping .tor-ring {
+  stroke: rgba(194,133,255,0.18);
 }
-.tor-state-bootstrapping .tor-hop {
-  fill: #c285ff;
-}
+.tor-state-bootstrapping .tor-comet { stroke: #c285ff; }
+
+.tor-state-bootstrapping .tor-comet-1 { animation: torCometSpin 1.4s linear infinite; }
+.tor-state-bootstrapping .tor-comet-2 { animation: torCometSpin 2.1s linear infinite reverse; }
+.tor-state-bootstrapping .tor-comet-3 { animation: torCometSpin 3.0s linear infinite; }
+
 .tor-state-bootstrapping .tor-core {
   fill: #c285ff;
-}
-.tor-state-bootstrapping .tor-shell-1 {
-  animation: torShellDraw 1.6s ease-in-out infinite;
-}
-.tor-state-bootstrapping .tor-shell-2 {
-  animation: torShellDraw 1.6s ease-in-out infinite 0.2s;
-}
-.tor-state-bootstrapping .tor-shell-3 {
-  animation: torShellDraw 1.6s ease-in-out infinite 0.4s;
-}
-.tor-state-bootstrapping .tor-hops {
-  animation: torHopsRotate 4s linear infinite;
-}
-.tor-state-bootstrapping .tor-core {
-  animation: torCorePulse 1.2s ease-in-out infinite;
+  animation: torCorePulse 1.4s ease-in-out infinite;
 }
 
-@keyframes torShellDraw {
-  0%   { stroke-dashoffset: var(--circ, 200); opacity: 0.2; }
-  50%  { stroke-dashoffset: 0; opacity: 1; }
-  100% { stroke-dashoffset: calc(-1 * var(--circ, 200)); opacity: 0.2; }
-}
-.tor-state-bootstrapping .tor-shell-1 { --circ: 126; }
-.tor-state-bootstrapping .tor-shell-2 { --circ: 214; }
-.tor-state-bootstrapping .tor-shell-3 { --circ: 302; }
-
-@keyframes torHopsRotate {
-  from { transform: rotate(0deg); }
-  to   { transform: rotate(360deg); }
+/* The comet animation drives the dasharray "lit" segment around the path
+   via dashoffset. pathLength=100 means a full revolution = 100 units. */
+@keyframes torCometSpin {
+  from { stroke-dashoffset: 0; }
+  to   { stroke-dashoffset: -100; }
 }
 @keyframes torCorePulse {
   0%, 100% { transform: scale(1); }
   50%      { transform: scale(1.25); }
 }
-.tor-glyph .tor-core { transform-origin: 60px 60px; }
 
-/* ---- Connected ---- */
-.tor-state-connected .tor-shell {
-  stroke: #b266ff;
-}
-.tor-state-connected .tor-hop {
-  fill: #d9b3ff;
-}
-.tor-state-connected .tor-core {
-  fill: #d9b3ff;
-}
-.tor-state-connected .tor-halo {
+/* ---- Connected ------------------------------------------------------------
+   Rings vibrant, all three orbital dots present and orbiting their OWN ring
+   at distinct speeds (inner fastest, outer slowest — feels like a real
+   orbital system). Halo breathes softly. Drop-shadow glow. */
+.tor-state-connected .tor-ring  { stroke: rgba(178,102,255,0.55); }
+.tor-state-connected .tor-dot   { fill: #d9b3ff; opacity: 1; }
+.tor-state-connected .tor-core  { fill: #d9b3ff; }
+.tor-state-connected .tor-halo  {
   stroke: rgba(149,48,244,0.45);
   opacity: 1;
   animation: torHaloBreathe 3.2s ease-in-out infinite;
@@ -4414,16 +4415,60 @@ select {
   filter: drop-shadow(0 0 8px rgba(149,48,244,0.45));
 }
 
+/* Subtle, stable per-ring orbits. Inner orbits fastest, outer slowest —
+   like orbital mechanics. Counter-rotate the middle ring for visual
+   liveliness without making the eye hunt. */
+.tor-state-connected .tor-dot-orbit-1 { animation: torOrbit  7s linear infinite; }
+.tor-state-connected .tor-dot-orbit-2 { animation: torOrbit 11s linear infinite reverse; }
+.tor-state-connected .tor-dot-orbit-3 { animation: torOrbit 18s linear infinite; }
+
+@keyframes torOrbit {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
 @keyframes torHaloBreathe {
   0%, 100% { transform: scale(1);    opacity: 0.55; }
   50%      { transform: scale(1.06); opacity: 0.95; }
 }
-.tor-glyph .tor-halo { transform-origin: 60px 60px; }
 
-/* ---- Failed ---- */
-.tor-state-failed .tor-shell  { stroke: #ff7860; }
-.tor-state-failed .tor-hop    { fill: #ff7860; }
-.tor-state-failed .tor-core   { fill: #ff7860; }
+/* ---- Failed --------------------------------------------------------------- */
+.tor-state-failed .tor-ring { stroke: rgba(255,120,96,0.45); }
+.tor-state-failed .tor-core { fill: #ff7860; }
+.tor-state-failed .tor-dot  { fill: #ff7860; opacity: 0.7; }
+
+/* ---- DEV: state preview row ----------------------------------------------
+   A side-by-side render of every Tor state. For design iteration only —
+   remove this row + the cells in index.html when finalised. */
+.tor-glyph-preview-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 12px;
+  background: rgba(255,255,255,0.02);
+  border: 1px dashed rgba(255,255,255,0.08);
+  border-radius: 12px;
+}
+.tor-glyph-preview-cell {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.tor-glyph-preview-cell svg {
+  width: 56px;
+  height: 56px;
+  overflow: visible;
+}
+.tor-glyph-preview-label {
+  font-size: 10px;
+  color: rgba(255,255,255,0.45);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.tor-glyph-preview-cell.tor-state-connected .tor-glyph-preview-label { color: #d9b3ff; }
+.tor-glyph-preview-cell.tor-state-failed    .tor-glyph-preview-label { color: #ff8c75; }
+.tor-glyph-preview-cell.tor-state-bootstrapping .tor-glyph-preview-label { color: #c285ff; }
 
 /* ---- Body text + toggle column ---- */
 .tor-card-body {

@@ -7307,7 +7307,6 @@ domChatMessageInput.oninput = async () => {
                 'Route traffic through Tor',
                 'When enabled, Vector routes <b>all TCP traffic — Nostr relays, Blossom uploads, link previews, image fetches</b> — through the Tor network using an embedded Arti client.<br><br>'
                 + 'This hides your IP address from relays and remote servers, at the cost of slower connections (Tor circuits add latency).<br><br>'
-                + 'First-time bootstrap takes 5–15 seconds; subsequent boots are ~2 seconds from the cached consensus directory.<br><br>'
                 + '<small style="opacity: 0.6;">Tor and the Tor logo are trademarks of The Tor Project; all rights reserved. More information at <b>torproject.org</b>. Vector is not endorsed or sponsored by, or affiliated with, The Tor Project.</small>',
                 true
             );
