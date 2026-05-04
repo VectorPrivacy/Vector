@@ -537,6 +537,25 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
     let _ = MY_PUBLIC_KEY.set(public_key);
     drop(keys);
 
+    // If the user previously enabled Tor, bootstrap it BEFORE building the
+    // Nostr client so the client picks up the SOCKS proxy from the start.
+    // First boot takes 5–15s for the consensus fetch; subsequent ~2s from
+    // the cached directory under <account>/tor/. Failures fall through to
+    // a direct connection so the app still boots.
+    #[cfg(feature = "tor")]
+    {
+        let tor_enabled = matches!(
+            vector_core::db::settings::get_sql_setting("tor_enabled".to_string()),
+            Ok(Some(ref v)) if v == "1" || v == "true"
+        );
+        if tor_enabled && !vector_core::tor::is_active() {
+            match crate::commands::tor::tor_set_enabled(true).await {
+                Ok(_) => println!("[Login] Tor service started from saved preference."),
+                Err(e) => eprintln!("[Login] Tor auto-start failed: {} — proceeding direct.", e),
+            }
+        }
+    }
+
     let client = Client::builder()
         .signer(vector_core::GuardedSigner::new(public_key))
         .opts(vector_core::nostr_client_options())
