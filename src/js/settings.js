@@ -144,6 +144,7 @@ function ensureTorStatePolling(toggleEl, statusEl) {
             const state = await invoke('tor_get_state');
             toggleEl.checked = !!state.running || !!state.enabled;
             applyTorCardState(state);
+            applyTorBootstrapProgress(state.bootstrap_progress);
             statusEl.textContent = formatTorStatus(state);
             const stable = state.running
                 || (!state.enabled && !(state.status || '').startsWith('bootstrapping'))
@@ -1882,6 +1883,11 @@ async function initSettings() {
             applyTorCardState({ supported: true, enabled: desired, running: false, status: desired ? 'bootstrapping' : 'disabled' });
             applyTorBootstrapProgress(desired ? 0 : null);
             torStatus.textContent = desired ? 'Bootstrapping…' : 'Disabling…';
+            // Start polling immediately — `tor_set_enabled` doesn't return
+            // until bootstrap is fully complete (20–30s on a fresh cache),
+            // so without an in-flight poll the UI sees zero updates during
+            // that window and jumps straight from 0% → connected.
+            if (desired) ensureTorStatePolling(torToggle, torStatus);
             try {
                 const state = await invoke('tor_set_enabled', { enabled: desired });
                 torToggle.checked = !!state.running || !!state.enabled;
