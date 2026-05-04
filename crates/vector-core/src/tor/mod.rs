@@ -24,6 +24,7 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::net::SocketAddr;
 
 use arti_client::{TorClient, TorClientConfig};
@@ -38,6 +39,18 @@ static TOR_SERVICE: OnceLock<Mutex<Option<Arc<TorService>>>> = OnceLock::new();
 
 fn tor_slot() -> &'static Mutex<Option<Arc<TorService>>> {
     TOR_SERVICE.get_or_init(|| Mutex::new(None))
+}
+
+/// Set true for the duration of a `TorService::start()` call. Lets `is_active`
+/// callers distinguish "bootstrap in progress" (the service hasn't been put
+/// into the slot yet but isn't disabled either) from "off".
+static TOR_BOOTSTRAPPING: AtomicBool = AtomicBool::new(false);
+
+/// Returns true while `TorService::start()` is mid-execution. Useful for
+/// status surfaces that would otherwise see `is_active() == false` and
+/// mistakenly report "off" during the 5–15s bootstrap window.
+pub fn is_bootstrapping() -> bool {
+    TOR_BOOTSTRAPPING.load(Ordering::Acquire)
 }
 
 /// Bootstrap status surfaced to the UI for progress display.
@@ -73,6 +86,13 @@ impl TorService {
     /// boots (~2s vs the 10–15s first-boot consensus fetch).
     pub async fn start(state_dir: PathBuf, cache_dir: PathBuf) -> Result<Arc<Self>, String> {
         log_info!("[Tor] starting; state={} cache={}", state_dir.display(), cache_dir.display());
+        TOR_BOOTSTRAPPING.store(true, Ordering::Release);
+        // RAII guard so the flag clears even if any of the `?` paths below errors.
+        struct BootstrapGuard;
+        impl Drop for BootstrapGuard {
+            fn drop(&mut self) { TOR_BOOTSTRAPPING.store(false, Ordering::Release); }
+        }
+        let _guard = BootstrapGuard;
 
         let mut config_builder = TorClientConfig::builder();
         // Arti's config paths support shell-expansion templates (${HOME} etc).

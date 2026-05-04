@@ -73,6 +73,38 @@ function applyTorCardState(state) {
     card.classList.add(torStateClass(state));
 }
 
+let _torPollHandle = null;
+
+/**
+ * Poll `tor_get_state` every 1.5s and refresh the card until we hit a stable
+ * state (running OR disabled-and-not-bootstrapping OR failed). Avoids the
+ * "stuck on Starting Tor…" UX where the panel rendered before the
+ * auto-start at login finished and never re-fetched. Idempotent — calling
+ * twice keeps a single timer alive.
+ */
+function ensureTorStatePolling(toggleEl, statusEl) {
+    if (_torPollHandle) return;
+    _torPollHandle = setInterval(async () => {
+        try {
+            const state = await invoke('tor_get_state');
+            toggleEl.checked = !!state.running || !!state.enabled;
+            applyTorCardState(state);
+            statusEl.textContent = formatTorStatus(state);
+            const stable = state.running
+                || (!state.enabled && !(state.status || '').startsWith('bootstrapping'))
+                || (state.status || '').startsWith('failed');
+            if (stable) {
+                clearInterval(_torPollHandle);
+                _torPollHandle = null;
+            }
+        } catch (e) {
+            console.warn('[Tor] poll failed:', e);
+            clearInterval(_torPollHandle);
+            _torPollHandle = null;
+        }
+    }, 1500);
+}
+
 function mediaUrl(filePath) {
     if (platformFeatures && platformFeatures.media_url) {
         return `${platformFeatures.media_url}/${encodeURIComponent(filePath)}`;
@@ -1777,6 +1809,11 @@ async function initSettings() {
                 torToggle.disabled = true;
             }
             torStatus.textContent = formatTorStatus(state);
+            // If we landed in a transient state (bootstrap still mid-flight
+            // when Settings opened), poll until it settles.
+            if (state.enabled && !state.running) {
+                ensureTorStatePolling(torToggle, torStatus);
+            }
         } catch (e) {
             console.warn('[Tor] tor_get_state failed:', e);
         }
@@ -1795,6 +1832,12 @@ async function initSettings() {
                 torToggle.checked = !!state.running || !!state.enabled;
                 applyTorCardState(state);
                 torStatus.textContent = formatTorStatus(state);
+                // tor_set_enabled awaits bootstrap before returning, so this
+                // path is normally already stable — but leave the poll in
+                // place to catch the rare slow-bootstrap edge case.
+                if (state.enabled && !state.running) {
+                    ensureTorStatePolling(torToggle, torStatus);
+                }
             } catch (err) {
                 console.error('[Tor] tor_set_enabled failed:', err);
                 // Roll the toggle back to actual state.

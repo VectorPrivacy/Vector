@@ -60,6 +60,12 @@ fn tor_data_dirs() -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
 #[cfg(feature = "tor")]
 fn current_status_string() -> String {
     use vector_core::tor::TorStatus;
+    // The slot is only populated after bootstrap finishes. While start() is
+    // mid-flight, current() returns None — the bootstrap flag covers that gap
+    // so the UI can render "bootstrapping" instead of falling back to "disabled".
+    if vector_core::tor::is_bootstrapping() {
+        return "bootstrapping".to_string();
+    }
     match vector_core::tor::current().map(|s| s.status()) {
         None => "disabled".to_string(),
         Some(TorStatus::Disabled) => "disabled".to_string(),
