@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-tor-set-enabled"
+description = "Enables the tor_set_enabled command without any pre-configured scope."
+commands.allow = ["tor_set_enabled"]
+
+[[permission]]
+identifier = "deny-tor-set-enabled"
+description = "Denies the tor_set_enabled command without any pre-configured scope."
+commands.deny = ["tor_set_enabled"]

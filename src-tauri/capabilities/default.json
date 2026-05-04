@@ -234,6 +234,8 @@
     "allow-audio-set-volume",
     "allow-send-recording",
     "allow-get-audio-metadata",
-    "allow-get-logs"
+    "allow-get-logs",
+    "allow-tor-get-state",
+    "allow-tor-set-enabled"
   ]
 }

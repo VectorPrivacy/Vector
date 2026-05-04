@@ -27,3 +27,4 @@ pub mod mls;
 pub mod realtime;
 pub mod encryption;
 pub mod audio;
+pub mod tor;

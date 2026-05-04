@@ -619,6 +619,9 @@ pub fn run() {
             commands::audio::audio_stop_all,
             commands::audio::audio_set_volume,
             commands::audio::send_recording,
+            // Tor (Arti) commands
+            commands::tor::tor_get_state,
+            commands::tor::tor_set_enabled,
             // Notification sound commands (desktop only)
             #[cfg(desktop)]
             audio::get_notification_settings,
