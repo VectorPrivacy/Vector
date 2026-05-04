@@ -158,8 +158,11 @@ function _populateMiniProfile(popup, npub, profile) {
         body.appendChild(aboutEl);
     }
 
-    // Status — a Nostr kind 30315 user-status event if we have one
-    const statusText = (profile?.status?.title || profile?.status || '').toString().trim();
+    // Status — a Nostr kind 30315 user-status event if we have one. The status
+    // field is an object `{ title, purpose, url }`; only `.title` is the
+    // user-visible text. Stringifying the bare object would produce
+    // "[object Object]", so fall through cleanly when there's no title.
+    const statusText = (profile?.status?.title || '').toString().trim();
     if (statusText) {
         const status = document.createElement('div');
         status.className = 'mini-profile-status';

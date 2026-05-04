@@ -2090,7 +2090,7 @@ body.chat-bg-disabled .chat-messages::before {
 .mini-profile-popup {
   position: fixed;
   z-index: 1000;
-  width: 300px;
+  width: 280px;
   max-height: calc(100vh - 32px);
   background: #1a1a1a;
   border: 1px solid rgba(255,255,255,0.08);
@@ -2103,7 +2103,7 @@ body.chat-bg-disabled .chat-messages::before {
 }
 
 .mini-profile-banner {
-  height: 70px;
+  height: 60px;
   background: linear-gradient(135deg, #2a2440 0%, #1a1a1a 100%);
   flex-shrink: 0;
   position: relative;
@@ -2118,12 +2118,12 @@ body.chat-bg-disabled .chat-messages::before {
 
 .mini-profile-avatar {
   position: absolute;
-  top: 36px; /* banner=70px, avatar=72px → centerline overlaps bottom of banner */
-  left: 16px;
-  width: 72px;
-  height: 72px;
+  top: 28px; /* banner=60px, avatar=64px → bottom of avatar 28+64=92 sits 32px below banner */
+  left: 12px;
+  width: 64px;
+  height: 64px;
   border-radius: 50%;
-  border: 4px solid #1a1a1a;
+  border: 3px solid #1a1a1a;
   background: #1a1a1a;
   overflow: hidden;
   z-index: 2;
@@ -2138,18 +2138,36 @@ body.chat-bg-disabled .chat-messages::before {
 }
 
 .mini-profile-body {
-  padding: 44px 16px 16px; /* top=44 leaves room for the overlapping avatar */
+  padding: 38px 12px 12px; /* top leaves room for the overlapping avatar */
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 5px;
   overflow-y: auto;
 }
 
 .mini-profile-name {
-  font-size: 17px;
+  font-size: 16px;
   font-weight: 700;
   color: #fff;
   word-break: break-word;
+  line-height: 1.2;
+}
+/* Twemoji-injected emoji images render at natural size by default — constrain
+   them to the local font-size so a palm-tree username doesn't blow up the box. */
+.mini-profile-name img.emoji {
+  width: 18px;
+  height: 18px;
+  vertical-align: -3px;
+}
+.mini-profile-about img.emoji {
+  width: 14px;
+  height: 14px;
+  vertical-align: -2px;
+}
+.mini-profile-status-text img.emoji {
+  width: 13px;
+  height: 13px;
+  vertical-align: -2px;
 }
 .mini-profile-name-loading {
   color: rgba(255,255,255,0.4);
@@ -2157,15 +2175,16 @@ body.chat-bg-disabled .chat-messages::before {
 }
 
 .mini-profile-sub {
-  font-size: 12px;
+  font-size: 11px;
   color: rgba(255,255,255,0.45);
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  margin-top: -2px; /* tuck it close under the name */
 }
 
 .mini-profile-about {
-  font-size: 13px;
+  font-size: 12.5px;
   color: rgba(255,255,255,0.78);
-  line-height: 1.45;
+  line-height: 1.4;
   white-space: pre-wrap;
   word-break: break-word;
   /* Clamp long bios so the popup never grows unbounded. */
@@ -2173,7 +2192,7 @@ body.chat-bg-disabled .chat-messages::before {
   -webkit-line-clamp: 4;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  margin-top: 2px;
+  margin-top: 3px;
 }
 
 .mini-profile-status {
@@ -2182,10 +2201,11 @@ body.chat-bg-disabled .chat-messages::before {
   gap: 6px;
   font-size: 12px;
   color: rgba(255,255,255,0.65);
+  margin-top: 2px;
 }
 .mini-profile-status-dot {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: #59fcb3;
   flex-shrink: 0;
@@ -2198,17 +2218,17 @@ body.chat-bg-disabled .chat-messages::before {
 
 .mini-profile-actions {
   display: flex;
-  gap: 8px;
-  margin-top: 6px;
+  gap: 6px;
+  margin-top: 4px;
 }
 .mini-profile-action {
   flex: 1;
-  padding: 8px 12px;
-  border-radius: 8px;
+  padding: 6px 10px;
+  border-radius: 7px;
   border: 1px solid rgba(255,255,255,0.08);
   background: rgba(255,255,255,0.04);
   color: #fff;
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 500;
   cursor: pointer;
   transition: background 0.15s ease, transform 0.05s ease;
