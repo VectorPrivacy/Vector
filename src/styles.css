@@ -2030,6 +2030,52 @@ body.chat-bg-disabled .chat-messages::before {
   top: 1px;
 }
 
+/* Reaction hover summary (desktop, ~250ms). Right-click expands into the full
+   .reaction-details-popup below. */
+.reaction-hover-tip {
+  position: fixed;
+  z-index: 1001;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: #1a1a1a;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  font-size: 13px;
+  color: rgba(255,255,255,0.92);
+  max-width: 320px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  animation: popupFadeIn 0.15s ease-out;
+}
+
+.reaction-hover-tip-emoji {
+  display: inline-flex;
+  align-items: center;
+}
+.reaction-hover-tip-emoji img.emoji {
+  width: 16px;
+  height: 16px;
+}
+
+.reaction-hover-tip-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.reaction-hover-tip-hint {
+  color: rgba(255,255,255,0.4);
+  font-size: 11px;
+  margin-left: 4px;
+  border-left: 1px solid rgba(255,255,255,0.1);
+  padding-left: 8px;
+  flex-shrink: 0;
+}
+
 /* Reaction Details Popup (long-press on reaction badge) */
 .reaction-details-popup {
   position: fixed;
