@@ -648,6 +648,15 @@ let gifCurrentMode = 'trending'; // 'trending' or 'search'
 let gifCurrentQuery = '';
 
 /**
+ * AbortController for the in-flight GIF request (trending / search / load-more).
+ * Each new request aborts the previous so a slow trending response can't
+ * overwrite a faster search response, and a slow search response for an old
+ * query can't overwrite the current one. Severs the underlying HTTP request,
+ * which also frees bandwidth on slow connections.
+ */
+let gifFetchController = null;
+
+/**
  * Shows skeleton/ghost placeholders in the GIF grid while loading
  * @param {number} count - Number of skeleton items to show
  */
@@ -808,6 +817,12 @@ function setPickerMode(mode) {
  * Uses cached data if available and fresh
  */
 async function loadTrendingGifs() {
+    // Cancel any in-flight GIF request — a stale response must not overwrite
+    // whatever we're about to show.
+    if (gifFetchController) gifFetchController.abort();
+    gifFetchController = new AbortController();
+    const signal = gifFetchController.signal;
+
     // Reset pagination state
     gifCurrentOffset = 0;
     gifHasMore = true;
@@ -820,6 +835,7 @@ async function loadTrendingGifs() {
         gifGrid.innerHTML = '';
         // Thumbhashes should already be cached, but ensure they are
         await predecodeThumbhashes(cachedTrendingGifs);
+        if (signal.aborted) return;
         renderGifs(cachedTrendingGifs, false);
         gifCurrentOffset = cachedTrendingGifs.length;
         gifHasMore = cachedTrendingGifs.length >= gifPageSize;
@@ -832,8 +848,9 @@ async function loadTrendingGifs() {
     showGifSkeletons(gifPageSize);
 
     try {
-        const response = await fetch(`${GIF_API_BASE}/api/v1/trending?limit=${gifPageSize}&offset=0&sort=popular`);
+        const response = await fetch(`${GIF_API_BASE}/api/v1/trending?limit=${gifPageSize}&offset=0&sort=popular`, { signal });
         const data = await response.json();
+        if (signal.aborted) return;
 
         if (data.results && data.results.length > 0) {
             // Cache the results
@@ -841,6 +858,7 @@ async function loadTrendingGifs() {
             cachedTrendingTimestamp = Date.now();
             // Pre-decode thumbhashes before rendering
             await predecodeThumbhashes(data.results);
+            if (signal.aborted) return;
             renderGifs(data.results, false);
             gifCurrentOffset = data.results.length;
             gifHasMore = data.results.length >= gifPageSize;
@@ -850,11 +868,13 @@ async function loadTrendingGifs() {
             gifHasMore = false;
         }
     } catch (error) {
+        if (error.name === 'AbortError' || signal.aborted) return;
         console.error('[GIF] Failed to load trending:', error);
         showGifEmptyState('Failed to load GIFs');
         gifHasMore = false;
     } finally {
-        gifLoading.style.display = 'none';
+        // Don't hide loading if a newer request has taken over — it owns the UI.
+        if (!signal.aborted) gifLoading.style.display = 'none';
     }
 }
 
@@ -868,6 +888,11 @@ async function searchGifs(query) {
         trendingGifsLoaded = false;
         return loadTrendingGifs();
     }
+
+    // Cancel any in-flight GIF request (e.g. trending or a previous search).
+    if (gifFetchController) gifFetchController.abort();
+    gifFetchController = new AbortController();
+    const signal = gifFetchController.signal;
 
     // Reset pagination state for new search
     gifCurrentOffset = 0;
@@ -887,6 +912,7 @@ async function searchGifs(query) {
         gifGrid.innerHTML = '';
         // Thumbhashes should already be cached, but ensure they are
         await predecodeThumbhashes(cached);
+        if (signal.aborted) return;
         renderGifs(cached, false);
         gifCurrentOffset = cached.length;
         gifHasMore = cached.length >= gifPageSize;
@@ -898,8 +924,9 @@ async function searchGifs(query) {
 
     try {
         const encodedQuery = encodeURIComponent(gifCurrentQuery);
-        const response = await fetch(`${GIF_API_BASE}/api/v1/search?q=${encodedQuery}&limit=${gifPageSize}&offset=0&sort=relevant`);
+        const response = await fetch(`${GIF_API_BASE}/api/v1/search?q=${encodedQuery}&limit=${gifPageSize}&offset=0&sort=relevant`, { signal });
         const data = await response.json();
+        if (signal.aborted) return;
 
         if (data.results && data.results.length > 0) {
             // Cache the results (LRU eviction if > 10 entries)
@@ -912,6 +939,7 @@ async function searchGifs(query) {
 
             // Pre-decode thumbhashes before rendering
             await predecodeThumbhashes(data.results);
+            if (signal.aborted) return;
             renderGifs(data.results, false);
             gifCurrentOffset = data.results.length;
             gifHasMore = data.results.length >= gifPageSize;
@@ -921,11 +949,12 @@ async function searchGifs(query) {
             gifHasMore = false;
         }
     } catch (error) {
+        if (error.name === 'AbortError' || signal.aborted) return;
         console.error('[GIF] Search failed:', error);
         showGifEmptyState('Search failed');
         gifHasMore = false;
     } finally {
-        gifLoading.style.display = 'none';
+        if (!signal.aborted) gifLoading.style.display = 'none';
     }
 }
 
@@ -936,6 +965,12 @@ async function searchGifs(query) {
 async function loadMoreGifs() {
     if (gifIsLoadingMore || !gifHasMore) return;
     gifIsLoadingMore = true;
+
+    // Inherit the current request controller so a fresh search/trending request
+    // (which calls .abort()) cancels this load-more too. If no controller exists
+    // yet (shouldn't happen in normal flow, but be safe), make one.
+    if (!gifFetchController) gifFetchController = new AbortController();
+    const signal = gifFetchController.signal;
 
     // Show skeleton placeholders for the new batch
     const fragment = document.createDocumentFragment();
@@ -955,8 +990,9 @@ async function loadMoreGifs() {
             url = `${GIF_API_BASE}/api/v1/search?q=${encodedQuery}&limit=${gifPageSize}&offset=${gifCurrentOffset}&sort=relevant`;
         }
 
-        const response = await fetch(url);
+        const response = await fetch(url, { signal });
         const data = await response.json();
+        if (signal.aborted) return;
 
         // Remove skeleton placeholders
         gifGrid.querySelectorAll('.gif-loading-more').forEach(el => el.remove());
@@ -964,6 +1000,7 @@ async function loadMoreGifs() {
         if (data.results && data.results.length > 0) {
             // Pre-decode thumbhashes before rendering
             await predecodeThumbhashes(data.results);
+            if (signal.aborted) return;
             renderGifs(data.results, true); // Append mode
             gifCurrentOffset += data.results.length;
             gifHasMore = data.results.length >= gifPageSize;
@@ -971,6 +1008,7 @@ async function loadMoreGifs() {
             gifHasMore = false;
         }
     } catch (error) {
+        if (error.name === 'AbortError' || signal.aborted) return;
         console.error('[GIF] Failed to load more:', error);
         // Remove skeleton placeholders on error
         gifGrid.querySelectorAll('.gif-loading-more').forEach(el => el.remove());
