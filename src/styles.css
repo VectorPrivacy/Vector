@@ -2178,7 +2178,7 @@ body.chat-bg-disabled .chat-messages::before {
   font-size: 11px;
   color: rgba(255,255,255,0.45);
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  margin-top: -2px; /* tuck it close under the name */
+  margin-top: -10px; /* tuck it close under the name */
 }
 
 .mini-profile-about {
@@ -2187,6 +2187,8 @@ body.chat-bg-disabled .chat-messages::before {
   line-height: 1.4;
   white-space: pre-wrap;
   word-break: break-word;
+  /* Match the full profile screen — bio is centered. */
+  text-align: center;
   /* Clamp long bios so the popup never grows unbounded. */
   display: -webkit-box;
   -webkit-line-clamp: 4;
