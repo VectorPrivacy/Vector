@@ -38,15 +38,13 @@ static DOWNLOADS_IN_PROGRESS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|
 /// Maximum entries in DOWNLOADS_IN_PROGRESS before forced cleanup
 const MAX_IN_PROGRESS_ENTRIES: usize = 100;
 
-/// HTTP client for downloading images
-static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .connect_timeout(Duration::from_secs(10))
-        .user_agent("Vector/1.0")
-        .build()
-        .expect("Failed to create HTTP client")
-});
+/// HTTP client accessor — proxy-aware (Tor) and rebuildable on toggle.
+/// `vector_core::net::shared_http_client` returns an `Arc<Client>` that's
+/// cheap to clone; the underlying client is swapped wholesale when Tor
+/// flips so the next call goes through the freshly-configured proxy.
+fn http_client() -> std::sync::Arc<reqwest::Client> {
+    vector_core::net::shared_http_client()
+}
 
 /// Supported image types for validation
 const VALID_IMAGE_SIGNATURES: &[(&[u8], &str)] = &[
@@ -322,7 +320,7 @@ pub async fn cache_image<R: Runtime>(
     // Download the image
     log_debug!("[ImageCache] Downloading {} for {:?}", url, image_type);
 
-    let response = match HTTP_CLIENT.get(url).send().await {
+    let response = match http_client().get(url).send().await {
         Ok(resp) => resp,
         Err(e) => {
             log_warn!("[ImageCache] Failed to download {}: {}", url, e);

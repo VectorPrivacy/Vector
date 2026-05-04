@@ -47,12 +47,71 @@ fn is_ipv6_private(ip: &std::net::Ipv6Addr) -> bool {
     false
 }
 
-/// Build an HTTP client with optional timeout.
+/// Build an HTTP client with the given timeout.
+///
+/// When the `tor` feature is enabled and `tor::TorService` is currently active,
+/// the returned client routes all requests through Tor's local SOCKS5 proxy.
+/// When Tor is disabled or the feature is off, this is the identity client.
+///
+/// Callers should use this rather than `reqwest::Client::builder()` directly
+/// so the Tor toggle automatically covers their traffic.
 pub fn build_http_client(timeout: std::time::Duration) -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .timeout(timeout)
+    let mut builder = reqwest::Client::builder().timeout(timeout);
+
+    #[cfg(feature = "tor")]
+    {
+        if let Some(url) = crate::tor::proxy_url() {
+            let proxy = reqwest::Proxy::all(&url)
+                .map_err(|e| format!("Tor proxy URL ({url}) invalid: {e}"))?;
+            builder = builder.proxy(proxy);
+        }
+    }
+
+    builder
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {}", e))
+}
+
+// ============================================================================
+// Shared HTTP client — proxy-aware + rebuildable on Tor toggle
+// ============================================================================
+//
+// Some call sites (image-cache fetches, PIVX wallet polling) make frequent
+// requests and benefit from a shared `reqwest::Client` to reuse connection
+// pools / TLS sessions. A bare `LazyLock<Client>` doesn't work for us because
+// a Tor toggle should affect future requests immediately — but the static is
+// frozen at first init. Instead, we hold an `Arc<Client>` behind a `RwLock`
+// and rebuild it via `rebuild_shared_http_client()` whenever the Tor state
+// changes. In-flight requests finish on the old Arc; new requests pick up
+// the new one.
+
+use std::sync::{Arc, OnceLock, RwLock};
+
+static SHARED_HTTP_CLIENT: OnceLock<RwLock<Arc<reqwest::Client>>> = OnceLock::new();
+
+const DEFAULT_SHARED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn shared_cell() -> &'static RwLock<Arc<reqwest::Client>> {
+    SHARED_HTTP_CLIENT.get_or_init(|| {
+        let client = build_http_client(DEFAULT_SHARED_TIMEOUT)
+            .expect("initial shared HTTP client build cannot fail");
+        RwLock::new(Arc::new(client))
+    })
+}
+
+/// Get a shared HTTP client. Cheap clone (Arc), proxy-aware, picks up Tor
+/// toggles on the next call after `rebuild_shared_http_client()` runs.
+pub fn shared_http_client() -> Arc<reqwest::Client> {
+    shared_cell().read().unwrap().clone()
+}
+
+/// Rebuild the shared client. Call this when Tor state flips so the next
+/// request goes through the freshly-configured proxy. In-flight requests on
+/// the old client continue to completion on the previous Arc.
+pub fn rebuild_shared_http_client() -> Result<(), String> {
+    let new = Arc::new(build_http_client(DEFAULT_SHARED_TIMEOUT)?);
+    *shared_cell().write().unwrap() = new;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -328,10 +387,7 @@ mod tests {
 /// Returns None if the URL is private, unreachable, or size can't be determined.
 pub async fn get_remote_file_size(url: &str) -> Option<u64> {
     validate_url_not_private(url).ok()?;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
-        .build()
-        .ok()?;
+    let client = build_http_client(std::time::Duration::from_secs(8)).ok()?;
 
     // Method 1: HEAD request
     if let Ok(head_res) = client.head(url).send().await {

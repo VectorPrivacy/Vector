@@ -207,11 +207,8 @@ where
         );
     }
 
-    // Create HTTP client
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300)) // 5 minute timeout
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    // Create HTTP client (proxy-aware — see crate::net::build_http_client).
+    let client = crate::net::build_http_client(std::time::Duration::from_secs(300))?;
 
     // Start the upload request
     let mut request_future = Box::pin(client
@@ -306,11 +303,8 @@ where
         );
     }
 
-    // Create HTTP client
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300))
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    // Create HTTP client (proxy-aware — see crate::net::build_http_client).
+    let client = crate::net::build_http_client(std::time::Duration::from_secs(300))?;
 
     // Perform the upload - extract or copy bytes for body
     let body_data: Vec<u8> = Arc::try_unwrap(file_data)

@@ -536,11 +536,9 @@ pub async fn download_whisper_model<R: Runtime>(handle: &AppHandle<R>, model_nam
     let model_size = model_def.size;
     println!("Downloading {} model ({}, ~{}MB), please wait...", model_name, model_filename, model_size);
     
-    // Create client with longer timeout
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3600)) // 60 minute timeout
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-        .build()?;
+    // Tor-aware build — model download routes through Tor when enabled.
+    let client = vector_core::net::build_http_client(std::time::Duration::from_secs(3600))
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
     
     // Use the model's configured URL (FUTO CDN for ACFT models, HuggingFace for stock models)
     let urls = [

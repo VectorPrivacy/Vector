@@ -347,11 +347,8 @@ async fn fetch_twitter_metadata(url: &str) -> Result<SiteMetadata, String> {
     let encoded_url = url.replace("&", "%26").replace("?", "%3F").replace("=", "%3D");
     let oembed_url = format!("https://publish.twitter.com/oembed?url={}", encoded_url);
     
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
-    
+    let client = vector_core::net::build_http_client(std::time::Duration::from_secs(10))?;
+
     let response = client
         .get(&oembed_url)
         .send()
@@ -433,7 +430,8 @@ pub async fn fetch_site_metadata(url: &str) -> Result<SiteMetadata, String> {
 
     let mut html_chunk = Vec::new();
 
-    let client = reqwest::Client::new();
+    // Tor-aware: when Tor is on, this routes through the SOCKS proxy.
+    let client = vector_core::net::build_http_client(std::time::Duration::from_secs(15))?;
     let mut response = client
         .get(url)
         .header("Range", "bytes=0-32768")
