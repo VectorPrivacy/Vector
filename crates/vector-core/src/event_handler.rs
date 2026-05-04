@@ -218,6 +218,34 @@ pub async fn commit_prepared_event(
                 }
                 RumorProcessingResult::FileAttachment(mut msg) => {
                     msg.wrapper_event_id = Some(wrapper_event_id.clone());
+                    // If the sender's client (e.g. 0xChat) didn't ship `size` in
+                    // the imeta tag, probe the URL via Content-Length so the
+                    // frontend's auto-download gate has accurate metadata to
+                    // decide on. Mirrors the MLS path in mls/service.rs.
+                    //
+                    // Skip for self-echoes (is_mine): we just uploaded these
+                    // files, the local Attachment.size is authoritative, and
+                    // probing our own blossom URL right after upload is a
+                    // correlation-fingerprint privacy regression.
+                    //
+                    // Each probe is bounded by a 3s outer timeout so a slow or
+                    // dead server can't stall the inbound rumor pipeline. If
+                    // the probe times out, we ship size=0 and the frontend
+                    // falls back to a manual "Click to Download" affordance.
+                    if !is_mine {
+                        for att in &mut msg.attachments {
+                            if att.size == 0
+                                && (att.url.starts_with("https://") || att.url.starts_with("http://"))
+                            {
+                                if let Ok(Some(size)) = tokio::time::timeout(
+                                    std::time::Duration::from_secs(3),
+                                    crate::net::get_remote_file_size(&att.url),
+                                ).await {
+                                    att.size = size;
+                                }
+                            }
+                        }
+                    }
                     commit_dm_message(msg, &contact, is_mine, is_new, &wrapper_event_id, wrapper_event_id_bytes, handler, true).await
                 }
                 RumorProcessingResult::Reaction(reaction) => {

@@ -46,39 +46,13 @@
   border-top-width: 1px;
 }
 
-.msg-me p {
-  color: #ffffff;
-  background-color: #161616;
-  border-color: #161616;
-}
-
-.msg-them p {
-  background: linear-gradient(90deg, #b188e260, #b188e200);
-  border-color: #b188e2;
-}
-
-.msg-reply {
-  border-left: solid rgba(255, 255, 255, 0.45) 2px !important;
-}
-
-/* Purple border when quoting the other person's message */
-.msg-reply-them {
+.dmsg-reply-them {
   border-left-color: #b188e2 !important;
 }
 
 @keyframes highlightMessage {
-  0% {
-      box-shadow: 0 0 0 0 rgba(66, 29, 95, 0);
-  }
-  20% {
-      box-shadow: 0 0 8px 3px rgba(161, 40, 253, 0.4);
-  }
-  80% {
-      box-shadow: 0 0 8px 3px rgba(161, 40, 253, 0.4);
-  }
-  100% {
-      box-shadow: 0 0 0 0 rgba(66, 29, 95, 0);
-  }
+  0%, 100% { background-color: rgba(205, 61, 211, 0); }
+  20%, 80% { background-color: rgba(205, 61, 211, 0.18); }
 }
 
 .emoji-picker {
@@ -142,11 +116,6 @@ button {
 
 .new-chat-btn .icon {
   background-color: var(--primary-color);
-}
-
-.msg-preview-container {
-  border-color: rgba(161, 40, 253, 0.43) !important;
-  background-color: rgba(161, 40, 253, 0.12) !important;
 }
 
 .progress-bar {
@@ -246,30 +215,6 @@ select:disabled {
 .custom-audio-player:hover {
   background: rgba(37, 17, 52, 0.6);
   border-color: rgba(177, 136, 226, 0.5);
-}
-
-/* msg-me style (purple gradient to match text bubbles) */
-.msg-me .custom-audio-player {
-  background: #161616;
-  border-color: #161616;
-}
-
-.msg-me .custom-audio-player:hover {
-  background: #1a1a1a;
-  border-color: #2a2a2a;
-  box-shadow: none;
-}
-
-/* msg-them style (dark gray to match text bubbles) */
-.msg-them .custom-audio-player {
-  background: linear-gradient(90deg, #b188e240, #5749E440);
-  border-color: #b188e275;
-}
-
-.msg-them .custom-audio-player:hover {
-  background: linear-gradient(90deg, #b188e260, #5749E460);
-  border-color: #b188e2;
-  box-shadow: none;
 }
 
 .audio-play-btn {

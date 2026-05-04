@@ -218,7 +218,10 @@ function openEmojiPanel(e) {
     if (picker.contains(e.target)) return;
 
     // Open or Close the panel depending on it's state
-    const strReaction = e.target.classList.contains('add-reaction') ? e.target.parentElement.parentElement.id : '';
+    // `dmsg-react-trigger` is the synthetic class added by the floating
+    // toolbar's _dmsgOpenReactionPicker — see message-toolbar.js. The class
+    // exists solely as a routing token between the toolbar and this handler.
+    const strReaction = e.target.classList.contains('dmsg-react-trigger') ? e.target.parentElement.parentElement.id : '';
     const fClickedInputOrReaction = isDefaultPanel || strReaction;
     if (fClickedInputOrReaction && !picker.classList.contains('visible')) {
         // Close attachment panel if open
@@ -1852,11 +1855,14 @@ picker.addEventListener('click', (e) => {
                     const strReceiverPubkey = cChat.id;
                     const spanReaction = document.createElement('span');
                     spanReaction.classList.add('reaction');
+                    spanReaction.dataset.emoji = cEmoji.emoji;
+                    spanReaction.dataset.msgId = strCurrentReactionReference;
+                    spanReaction.dataset.reacted = 'true';
                     spanReaction.textContent = `${cEmoji.emoji} 1`;
                     twemojify(spanReaction);
 
                     const divMessage = document.getElementById(cMsg.id);
-                    divMessage.querySelector(`.msg-extras span`).replaceWith(spanReaction);
+                    _dmsgInjectReaction(divMessage, spanReaction);
                     invoke('react_to_message', { referenceId: strCurrentReactionReference, chatId: strReceiverPubkey, emoji: cEmoji.emoji });
                 }
             } else {
@@ -1918,13 +1924,16 @@ emojiSearch.onkeydown = async (e) => {
                 // Add a 'decoy' reaction for good UX (no waiting for the network to register the reaction)
                 const spanReaction = document.createElement('span');
                 spanReaction.classList.add('reaction');
+                spanReaction.dataset.emoji = cEmoji.emoji;
+                spanReaction.dataset.msgId = strCurrentReactionReference;
+                spanReaction.dataset.reacted = 'true';
                 spanReaction.textContent = `${cEmoji.emoji} 1`;
                 twemojify(spanReaction);
 
-                // Replace the Reaction button
-                // DOM Tree: msg-(them/me) -> msg-extras -> add-reaction
+                // Inject the decoy chip into .dmsg-reactions, bumping count if the emoji
+                // already exists or appending a new chip otherwise.
                 const divMessage = document.getElementById(cMsg.id);
-                divMessage.querySelector(`.msg-extras span`).replaceWith(spanReaction);
+                _dmsgInjectReaction(divMessage, spanReaction);
 
                 // Send the Reaction to the network (protocol-agnostic)
                 invoke('react_to_message', { referenceId: strCurrentReactionReference, chatId: strReceiverPubkey, emoji: cEmoji.emoji });
@@ -2015,13 +2024,16 @@ picker.addEventListener('click', (e) => {
                 // Add a 'decoy' reaction for good UX (no waiting for the network to register the reaction)
                 const spanReaction = document.createElement('span');
                 spanReaction.classList.add('reaction');
+                spanReaction.dataset.emoji = cEmoji.emoji;
+                spanReaction.dataset.msgId = strCurrentReactionReference;
+                spanReaction.dataset.reacted = 'true';
                 spanReaction.textContent = `${cEmoji.emoji} 1`;
                 twemojify(spanReaction);
 
-                // Replace the Reaction button
-                // DOM Tree: msg-(them/me) -> msg-extras -> add-reaction
+                // Inject the decoy chip into .dmsg-reactions, bumping count if the emoji
+                // already exists or appending a new chip otherwise.
                 const divMessage = document.getElementById(cMsg.id);
-                divMessage.querySelector(`.msg-extras span`).replaceWith(spanReaction);
+                _dmsgInjectReaction(divMessage, spanReaction);
 
                 // Send the Reaction to the network (protocol-agnostic)
                 invoke('react_to_message', { referenceId: strCurrentReactionReference, chatId: strReceiverPubkey, emoji: cEmoji.emoji });
@@ -4978,7 +4990,10 @@ async function setupRustListeners() {
 
         // If this chat is open, then update the rendered message
         if (strOpenChat === evt.payload.chat_id) {
-            // TODO: is there a slight possibility of a race condition here? i.e: `message_update` calls before `message_new` and thus domMsg isn't found?
+            // If `message_update` arrives before `message_new` has rendered the row,
+            // `domMsg` is null and the `?.replaceWith` below is a no-op. The next
+            // `message_new` will render the up-to-date message from chat.messages,
+            // so missing the surgical update here is safe.
             const domMsg = document.getElementById(evt.payload.old_id);
 
             // For DMs, get the profile; for groups, profile will be null
@@ -4998,7 +5013,7 @@ async function setupRustListeners() {
             // Find all messages that reply to this edited message and update their reply preview
             const replyElements = document.querySelectorAll(`[id="r-${editedMsgId}"]`);
             for (const replyEl of replyElements) {
-                const replyTextSpan = replyEl.querySelector('.msg-reply-text');
+                const replyTextSpan = replyEl.querySelector('.dmsg-reply-text');
                 if (replyTextSpan && newContent) {
                     replyTextSpan.innerHTML = buildReplyPreviewHtml(newContent);
                     twemojify(replyTextSpan);
@@ -5046,6 +5061,17 @@ async function setupRustListeners() {
         if (strOpenChat === chat_id) {
             const domMsg = document.getElementById(id);
             if (domMsg) {
+                // If the floating toolbar was anchored to this row, hide it —
+                // the row is about to vanish and the toolbar would otherwise
+                // stay at its last position pointing at nothing.
+                if (_dmsgToolbarTarget === domMsg) hideMessageToolbar();
+
+                // Remember the row that follows ours so we can re-evaluate its
+                // streak attribute after removal (it may flip first ↔ continuation).
+                const followingRow = domMsg.classList.contains('dmsg')
+                    ? _dmsgWalkForwardToRow(domMsg.nextElementSibling)
+                    : null;
+
                 domMsg.style.transition = 'opacity 0.2s ease, max-height 0.3s ease';
                 domMsg.style.opacity = '0';
                 domMsg.style.maxHeight = domMsg.offsetHeight + 'px';
@@ -5062,6 +5088,11 @@ async function setupRustListeners() {
                     const lastChild = domChatMessages.lastElementChild;
                     if (lastChild && lastChild.classList.contains('msg-inline-timestamp')) {
                         lastChild.remove();
+                    }
+                    // Re-evaluate streak on the row that now succeeds the gap.
+                    if (followingRow) {
+                        const msg = _dmsgLookupMessage(followingRow);
+                        if (msg) followingRow.dataset.streak = _dmsgComputeStreakAttr(msg, followingRow.previousElementSibling);
                     }
                 }, 100);
             }
@@ -6755,6 +6786,73 @@ let strCurrentEditOriginalContent = "";
  * @param {Profile} profile - Optional profile for display info
  * @param {boolean} fClicked - Whether the chat was opened manually or not
  */
+/**
+ * Synchronously set the chat header (avatar + name + subtext + click handlers).
+ * Called both from openChat (immediately, so the header is visible the instant
+ * the chat panel reveals) and from updateChat (in case profile data changed
+ * while the chat was open).
+ *
+ * @param {Object} chat - The chat object (may be null while loading)
+ * @param {Profile} profile - DM profile (null for groups)
+ * @param {boolean} isGroup
+ * @param {boolean} fNotes - Self-DM "Notes" mode
+ */
+function setChatHeader(chat, profile, isGroup, fNotes) {
+    domChatHeaderAvatarContainer.innerHTML = '';
+    let domChatAvatar;
+    if (fNotes) {
+        domChatAvatar = null;
+    } else if (isGroup) {
+        const groupAvatarSrc = chat?.metadata?.avatar_cached ? convertFileSrc(chat.metadata.avatar_cached) : null;
+        domChatAvatar = createAvatarImg(groupAvatarSrc, 22, true);
+        domChatAvatar.classList.add('btn');
+        domChatAvatar.onclick = () => {
+            closeChat();
+            openGroupOverview(chat);
+        };
+    } else {
+        const chatAvatarSrc = getProfileAvatarSrc(profile);
+        domChatAvatar = createAvatarImg(chatAvatarSrc, 22, false);
+        domChatAvatar.classList.add('btn');
+        domChatAvatar.onclick = () => {
+            previousChatBeforeProfile = strOpenChat;
+            openProfile(profile);
+        };
+    }
+    if (domChatAvatar) domChatHeaderAvatarContainer.appendChild(domChatAvatar);
+
+    if (fNotes) {
+        domChatContact.textContent = 'Notes';
+        domChatContact.classList.remove('btn');
+        domChatContact.onclick = null;
+    } else if (isGroup) {
+        domChatContact.textContent = chat?.metadata?.custom_fields?.name || `Group ${strOpenChat.substring(0, 10)}...`;
+        domChatContact.onclick = () => {
+            closeChat();
+            openGroupOverview(chat);
+        };
+        domChatContact.classList.add('btn');
+    } else {
+        domChatContact.textContent = profile?.nickname || profile?.name || strOpenChat.substring(0, 10) + '…';
+        if (profile?.nickname || profile?.name) twemojify(domChatContact);
+        domChatContact.onclick = () => {
+            previousChatBeforeProfile = strOpenChat;
+            openProfile(profile);
+        };
+        domChatContact.classList.add('btn');
+    }
+
+    if (chat) {
+        updateChatHeaderSubtext(chat);
+    } else {
+        // Clear stale subtext from a previously-open chat when switching to a
+        // contact that hasn't been synced yet (no entry in arrChats).
+        domChatContactStatus.textContent = '';
+        domChatContactStatus.classList.remove('typing-indicator-text');
+        domChatContactStatus.classList.add('status-hidden');
+    }
+}
+
 async function updateChat(chat, arrMessages = [], profile = null, fClicked = false) {
     // Queue profiles for this chat — fire-and-forget so rendering is not delayed
     // by an IPC roundtrip. Awaiting this here used to race the very first
@@ -6778,61 +6876,11 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
     // If this chat is our own npub: then we consider this our Bookmarks/Notes section
     const fNotes = strOpenChat === strPubkey;
 
+    // Header is set synchronously by openChat before this runs, but call it
+    // again here in case profile data has changed while the chat was open.
+    setChatHeader(chat, profile, isGroup, fNotes);
+
     if (chat?.messages.length || arrMessages.length) {
-        // Render chat header avatar
-        domChatHeaderAvatarContainer.innerHTML = '';
-        let domChatAvatar;
-        if (fNotes) {
-            // Notes: no avatar, just show the title "Notes"
-            domChatAvatar = null;
-        } else if (isGroup) {
-            const groupAvatarSrc = chat.metadata?.avatar_cached ? convertFileSrc(chat.metadata.avatar_cached) : null;
-            domChatAvatar = createAvatarImg(groupAvatarSrc, 22, true);
-            domChatAvatar.classList.add('btn');
-            domChatAvatar.onclick = () => {
-                closeChat();
-                openGroupOverview(chat);
-            };
-        } else {
-            // DM: use profile avatar or placeholder
-            const chatAvatarSrc = getProfileAvatarSrc(profile);
-            domChatAvatar = createAvatarImg(chatAvatarSrc, 22, false);
-            domChatAvatar.classList.add('btn');
-            domChatAvatar.onclick = () => {
-                previousChatBeforeProfile = strOpenChat;
-                openProfile(profile);
-            };
-        }
-        if (domChatAvatar) {
-            domChatHeaderAvatarContainer.appendChild(domChatAvatar);
-        }
-
-        // Prefer displaying their name, otherwise, npub/group name
-        if (fNotes) {
-            domChatContact.textContent = 'Notes';
-            domChatContact.classList.remove('btn');
-        } else if (isGroup) {
-            domChatContact.textContent = chat.metadata?.custom_fields?.name || `Group ${strOpenChat.substring(0, 10)}...`;
-            // When the group name is clicked, expand the Group Overview
-            domChatContact.onclick = () => {
-                closeChat();
-                openGroupOverview(chat);
-            };
-            domChatContact.classList.add('btn');
-        } else {
-            domChatContact.textContent = profile?.nickname || profile?.name || strOpenChat.substring(0, 10) + '…';
-            if (profile?.nickname || profile?.name) twemojify(domChatContact);
-            // When the name or status is clicked, expand their Profile
-            domChatContact.onclick = () => {
-                // Store the current chat so we can return to it
-                previousChatBeforeProfile = strOpenChat;
-                openProfile(profile);
-            };
-            domChatContact.classList.add('btn');
-        }
-
-        // Display either their Status or Typing Indicator
-        updateChatHeaderSubtext(chat);
 
         // Auto-mark messages as read when chat is opened AND window is focused.
         // Resolved without awaiting so the message render is not blocked by an
@@ -6876,8 +6924,10 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             if (document.getElementById(msg.id)) {
                 continue;
             }
-            // Quick check for empty chat - simple append
+            // Quick check for empty chat - simple append (with leading day separator).
             if (domChatMessages.children.length === 0) {
+                insertTimestamp(msg.at, domChatMessages);
+                nLastMsgTime = msg.at;
                 domChatMessages.appendChild(renderMessage(msg, profile));
                 continue;
             }
@@ -6893,12 +6943,12 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             if (newestMsg && msg.at > newestMsg.at) {
                 // It's the newest message, append it
 
-                // Add timestamp if needed
+                // Day-boundary separator (e.g. crossing midnight while chat is open).
                 if (nLastMsgTime === null) {
                     nLastMsgTime = newestMsg.at;
                 }
 
-                if (msg.at - nLastMsgTime > 600 * 1000) {
+                if (_dmsgIsDifferentDay(nLastMsgTime, msg.at)) {
                     insertTimestamp(msg.at, domChatMessages);
                     nLastMsgTime = msg.at;
                 }
@@ -6924,7 +6974,7 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             let oldestMsgElement = null;
             for (let i = 0; i < domChatMessages.children.length; i++) {
                 const child = domChatMessages.children[i];
-                if (child.getAttribute('sender')) {
+                if (child.classList && child.classList.contains('dmsg')) {
                     oldestMsgElement = child;
                     break;
                 }
@@ -6933,21 +6983,17 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             if (oldestMsgElement) {
                 const oldestMsg = chat.messages.find(m => m.id === oldestMsgElement.id);
                 if (oldestMsg && msg.at < oldestMsg.at) {
-                    // It's the oldest message, prepend it
-                    // Pass oldestMsgElement as context so renderMessage knows what comes after
+                    // It's the oldest message, prepend it.
+                    // Pass oldestMsgElement as context so renderMessage knows what comes after.
                     const domMsg = renderMessage(msg, profile, '', oldestMsgElement);
-                    domChatMessages.insertBefore(domMsg, oldestMsgElement);
 
-                    // Update the next message's top corner if same sender (since new message is now before it)
-                    if (oldestMsgElement.getAttribute('sender') === domMsg.getAttribute('sender')) {
-                        const nextP = oldestMsgElement.querySelector('p');
-                        if (nextP) {
-                            const cornerProp = msg.mine ? 'borderTopRightRadius' : 'borderTopLeftRadius';
-                            nextP.style[cornerProp] = '0px';
-                            const audioPlayer = nextP.querySelector('.custom-audio-player');
-                            if (audioPlayer) audioPlayer.style[cornerProp] = '0px';
-                        }
+                    // If the prepended message is on a different day than the next-oldest,
+                    // it needs its own day separator above it.
+                    if (_dmsgIsDifferentDay(msg.at, oldestMsg.at)) {
+                        const sep = insertTimestamp(msg.at);
+                        domChatMessages.insertBefore(sep, oldestMsgElement);
                     }
+                    domChatMessages.insertBefore(domMsg, oldestMsgElement);
                     continue;
                 }
             }
@@ -6957,11 +7003,10 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             let inserted = false;
 
             // Get the message elements sorted by time (oldest to newest)
-            // We'll do a linear scan since we expect this to be rare and the chat isn't likely huge
             let messageNodes = [];
             for (let i = 0; i < domChatMessages.children.length; i++) {
                 const child = domChatMessages.children[i];
-                if (child.id && child.getAttribute('sender')) {
+                if (child.id && child.classList && child.classList.contains('dmsg')) {
                     const childMsg = chat.messages.find(m => m.id === child.id);
                     if (childMsg) {
                         messageNodes.push({ element: child, message: childMsg });
@@ -6978,27 +7023,15 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
                 const nextNode = messageNodes[i + 1];
 
                 if (currentNode.message.at <= msg.at && msg.at <= nextNode.message.at) {
-                    // Add timestamp if needed
-                    if (msg.at - currentNode.message.at > 600 * 1000) {
+                    // Day-boundary separator if the inserted message is on a new day vs. the previous one.
+                    if (_dmsgIsDifferentDay(currentNode.message.at, msg.at)) {
                         const timestamp = insertTimestamp(msg.at);
                         domChatMessages.insertBefore(timestamp, nextNode.element);
                     }
 
                     // Insert between these two messages
-                    // Pass nextNode.element as context so renderMessage knows what comes after
                     const domMsg = renderMessage(msg, profile, '', nextNode.element);
                     domChatMessages.insertBefore(domMsg, nextNode.element);
-
-                    // Update the next message's top corner if same sender (since new message is now before it)
-                    if (nextNode.element.getAttribute('sender') === domMsg.getAttribute('sender')) {
-                        const nextP = nextNode.element.querySelector('p');
-                        if (nextP) {
-                            const cornerProp = msg.mine ? 'borderTopRightRadius' : 'borderTopLeftRadius';
-                            nextP.style[cornerProp] = '0px';
-                            const audioPlayer = nextP.querySelector('.custom-audio-player');
-                            if (audioPlayer) audioPlayer.style[cornerProp] = '0px';
-                        }
-                    }
                     inserted = true;
                     break;
                 }
@@ -7006,9 +7039,9 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
 
             // If somehow not inserted by the above logic, append as fallback
             if (!inserted) {
-                // Check if we need a timestamp
+                // Day-boundary separator vs. the last existing message.
                 const lastMsg = messageNodes[messageNodes.length - 1]?.message;
-                if (lastMsg && msg.at - lastMsg.at > 600 * 1000) {
+                if (lastMsg && _dmsgIsDifferentDay(lastMsg.at, msg.at)) {
                     insertTimestamp(msg.at, domChatMessages);
                 }
 
@@ -7543,1347 +7576,6 @@ async function deleteFailedMessage(msgId) {
     }
 }
 
-/**
- * Convert a Message in to a rendered HTML Element
- * @param {Message} msg - the Message to be converted
- * @param {Profile} sender - the Profile of the message sender
- * @param {string?} editID - the ID of the message being edited, used for improved renderer context
- * @param {HTMLElement?} contextElement - the DOM element to use for context (for prepending)
- */
-function renderMessage(msg, sender, editID = '', contextElement = null) {
-    // Helper to apply border radius to both p element and any custom-audio-player inside
-    const applyBorderRadius = (pEl, property, value) => {
-        if (!pEl) return;
-        pEl.style[property] = value;
-        const audioPlayer = pEl.querySelector('.custom-audio-player');
-        if (audioPlayer) audioPlayer.style[property] = value;
-    };
-
-    // Construct the message container (the DOM ID is the HEX Nostr Event ID)
-    const divMessage = document.createElement('div');
-    divMessage.id = msg.id;
-
-    // Add a subset of the sender's ID so we have context of WHO sent it, even in group contexts
-    // For group chats, use msg.npub; for DMs, use sender.id
-    const otherId = sender?.id || msg.npub || '';
-    const strShortSenderID = (msg.mine ? strPubkey : otherId).substring(0, 8);
-    divMessage.setAttribute('sender', strShortSenderID);
-
-    // Check for PIVX payment - render special bubble
-    if (msg.pivx_payment) {
-        divMessage.classList.add('msg-' + (msg.mine ? 'me' : 'them'));
-        const pivxBubble = renderPivxPaymentBubble(
-            msg.pivx_payment.gift_code,
-            msg.pivx_payment.amount_piv,
-            msg.mine,
-            msg.pivx_payment.address
-        );
-        divMessage.appendChild(pivxBubble);
-        return divMessage;
-    }
-
-    // Check for system event - render like a timestamp (centered, lower opacity)
-    if (msg.system_event) {
-        return insertSystemEvent(msg.content);
-    }
-
-    // Check if we're in a group chat
-    const currentChat = arrChats.find(c => c.id === strOpenChat);
-    const isGroupChat = currentChat?.chat_type === 'MlsGroup';
-
-    // Render it appropriately depending on who sent it
-    divMessage.classList.add('msg-' + (msg.mine ? 'me' : 'them'));
-
-    // Prepare the message container
-    const pMessage = document.createElement('p');
-
-    // Prepare our message container - including avatars and contextual bubble rendering
-    // If contextElement is provided (prepending), use it; otherwise use lastElementChild (appending)
-    const domPrevMsg = editID ? document.getElementById(editID).previousElementSibling :
-                       (contextElement ? contextElement.previousElementSibling : domChatMessages.lastElementChild);
-    const fIsMsg = !!domPrevMsg?.getAttribute('sender');
-    
-    // Find the last actual message (skip timestamps and other non-message elements)
-    let lastActualMessage = domPrevMsg;
-    while (lastActualMessage && !lastActualMessage.getAttribute('sender')) {
-        lastActualMessage = lastActualMessage.previousElementSibling;
-    }
-    
-    // Check if this is truly a new streak (different sender from last actual message)
-    // Also treat as new streak if there's a timestamp between (fIsMsg is false when immediate previous element isn't a message)
-    const isNewStreak = !lastActualMessage || lastActualMessage.getAttribute('sender') != strShortSenderID || !fIsMsg;
-    
-    if (isNewStreak) {
-        // Add an avatar if this is not OUR message
-        if (!msg.mine) {
-            let avatarEl = null;
-            // Resolve sender profile for group chats
-            // For group chats, use msg.npub; for DMs, use sender
-            const otherFullId = msg.npub || sender?.id || '';
-            const authorProfile = sender || (otherFullId ? getProfile(otherFullId) : null);
-            
-            // If no profile exists, queue for immediate fetch
-            if (!authorProfile && otherFullId) {
-                invoke("queue_profile_sync", {
-                    npub: otherFullId,
-                    priority: "critical",
-                    forceRefresh: false
-                });
-            }
-            
-            const msgAvatarSrc = getProfileAvatarSrc(authorProfile);
-            avatarEl = createAvatarImg(msgAvatarSrc, 35, false);
-            avatarEl.classList.add('avatar', 'btn');
-            // Wire profile click if we have an identifiable user
-            if (otherFullId) {
-                avatarEl.onclick = () => {
-                    const prof = getProfile(otherFullId) || authorProfile;
-                    previousChatBeforeProfile = strOpenChat;
-                    openProfile(prof || { id: otherFullId });
-                };
-            }
-            
-            // Create a container for avatar and username
-            if (avatarEl) {
-                const avatarContainer = document.createElement('div');
-                avatarContainer.style.position = 'relative';
-                avatarContainer.style.marginRight = '10px';
-                
-                // Only add username label in group chats
-                if (isGroupChat) {
-                    const usernameLabel = document.createElement('span');
-                    usernameLabel.classList.add('msg-username-label', 'btn');
-                    const displayName = authorProfile?.nickname || authorProfile?.name || '';
-                    usernameLabel.textContent = displayName || otherFullId.substring(0, 8);
-                    if (displayName) twemojify(usernameLabel);
-                    
-                    // Make username clickable to open profile
-                    if (otherFullId) {
-                        usernameLabel.onclick = () => {
-                            const prof = getProfile(otherFullId) || authorProfile;
-                            // Store the current chat so we can return to it
-                            previousChatBeforeProfile = strOpenChat;
-                            openProfile(prof || { id: otherFullId });
-                        };
-                    }
-                    
-                    avatarContainer.appendChild(usernameLabel);
-                }
-                
-                avatarContainer.appendChild(avatarEl);
-                
-                // Remove the margin from the avatar since container handles it
-                avatarEl.style.marginRight = '0';
-                divMessage.appendChild(avatarContainer);
-            }
-        }
-
-        // If there is an actual message before this one (not just any element), apply additional edits
-        if (lastActualMessage) {
-            // Check if the previous message was from the contact (!mine)
-            const prevSenderID = lastActualMessage.getAttribute('sender');
-            const wasPrevMsgFromContact = prevSenderID !== strPubkey.substring(0, 8);
-
-            // Curve the previous message's bottom border since a new sender is starting
-            // For "mine" messages: bottom-RIGHT corner; for "them" messages: bottom-LEFT corner
-            if (!wasPrevMsgFromContact) {
-                // Previous was from "me" - check if it needs rounding as last in streak
-                // Look back to see if it had previous messages from same sender (with no timestamp between)
-                const prevPrevElement = lastActualMessage.previousElementSibling;
-                const hasTimestampBefore = prevPrevElement && !prevPrevElement.getAttribute('sender');
-
-                let prevPrevMsg = prevPrevElement;
-                while (prevPrevMsg && !prevPrevMsg.getAttribute('sender')) {
-                    prevPrevMsg = prevPrevMsg.previousElementSibling;
-                }
-                // Only round if it's part of a multi-message streak (no timestamp before)
-                const hadPreviousFromSameSender = !hasTimestampBefore && prevPrevMsg && prevPrevMsg.getAttribute('sender') === prevSenderID;
-
-                if (hadPreviousFromSameSender) {
-                    const pMsg = lastActualMessage.querySelector('p');
-                    if (pMsg) {
-                        applyBorderRadius(pMsg, 'borderBottomRightRadius', '15px');
-                    }
-                }
-            } else {
-                // The previous message was from the contact - check if it needs rounding as last in streak
-                // Look back to see if it had previous messages from same sender (with no timestamp between)
-                const prevPrevElement = lastActualMessage.previousElementSibling;
-                // Check if there's a timestamp immediately before (which would break the streak visually)
-                const hasTimestampBefore = prevPrevElement && !prevPrevElement.getAttribute('sender');
-
-                let prevPrevMsg = prevPrevElement;
-                // Skip non-messages to find actual previous message
-                while (prevPrevMsg && !prevPrevMsg.getAttribute('sender')) {
-                    prevPrevMsg = prevPrevMsg.previousElementSibling;
-                }
-                // Only consider it part of same streak if NO timestamp between them
-                const hadPreviousFromSameSender = !hasTimestampBefore && prevPrevMsg && prevPrevMsg.getAttribute('sender') === prevSenderID;
-
-                // Look forward to see if there are more messages from same sender after this one
-                // (which would make this a middle message, not the last)
-                let prevNextMsg = lastActualMessage.nextElementSibling;
-                // Skip non-messages
-                while (prevNextMsg && !prevNextMsg.getAttribute('sender')) {
-                    prevNextMsg = prevNextMsg.nextElementSibling;
-                }
-                const hasNextFromSameSender = prevNextMsg && prevNextMsg.getAttribute('sender') === prevSenderID;
-
-                // Only round if it had previous messages AND no next messages from same sender (making it the last)
-                if (hadPreviousFromSameSender && !hasNextFromSameSender) {
-                    const pMsg = lastActualMessage.querySelector('p');
-                    if (pMsg && !pMsg.classList.contains('no-background')) {
-                        applyBorderRadius(pMsg, 'borderBottomLeftRadius', '15px');
-                    }
-                }
-            }
-
-            // Add some additional margin to separate the senders visually (extra space for username in groups)
-            if (!msg.mine) divMessage.style.marginTop = isGroupChat ? `20px` : `15px`;
-        }
-        
-        // For group chats, add margin-top to the <p> element for the first message in a streak
-        if (isGroupChat) {
-            pMessage.style.marginTop = !msg.mine ? `25px` : `10px`;
-        } else if (msg.mine) pMessage.style.marginTop = `10px`;
-
-        // Flatten bottom corner like a "new first message" (anticipating more messages may follow)
-        if (msg.mine) {
-            pMessage.style.borderBottomRightRadius = `0`;
-        } else {
-            pMessage.style.borderBottomLeftRadius = `0`;
-        }
-
-        // Check if this is a singular message (no next message from same sender)
-        // This check happens after the message is rendered (at the end of the function)
-    } else {
-        // Add additional margin to simulate avatar space
-        // We always reserve space for non-mine messages since we render an avatar or placeholder for the first in a streak
-        if (!msg.mine) {
-            pMessage.style.marginLeft = `44px`;
-        }
-
-        // Flatten the top border to act as a visual continuation
-        const pMsg = domPrevMsg.querySelector('p');
-        if (pMsg) {
-            if (msg.mine) {
-                pMessage.style.borderTopRightRadius = `0`;
-            } else {
-                pMessage.style.borderTopLeftRadius = `0`;
-            }
-        }
-    }
-
-    // If we're replying to this, give it a glowing border
-    const fReplying = strCurrentReplyReference === msg.id;
-    const strEmojiCleaned = msg.content.replace(/\s/g, '');
-    const fEmojiOnly = isEmojiOnly(strEmojiCleaned) && strEmojiCleaned.length <= 6;
-    if (fReplying) {
-        // Only display if replying
-        pMessage.style.borderColor = getComputedStyle(document.documentElement).getPropertyValue('--reply-highlight-border').trim();
-    }
-
-    // If it's a reply: inject a preview of the replied-to message
-    // Uses backend-provided reply context (works for old messages not in cache)
-    // Falls back to in-memory search for pending messages or backwards compatibility
-    if (msg.replied_to) {
-        // Check if we have reply context from the backend (preferred - always available)
-        const hasBackendContext = msg.replied_to_content !== undefined || msg.replied_to_has_attachment;
-
-        // Try to find the referenced message in the current chat (fallback for pending messages)
-        const chat = sender ? getDMChat(sender.id) : arrChats.find(c => c.id === strOpenChat);
-        const cMsg = chat?.messages.find(m => m.id === msg.replied_to);
-
-        // Use backend context if available, otherwise fall back to in-memory message
-        if (hasBackendContext || cMsg) {
-            // Render the reply in a quote-like fashion
-            const divRef = document.createElement('div');
-            divRef.classList.add('msg-reply', 'btn');
-
-            // Add theme-based styling when replying to the other person's message
-            // Use cMsg.mine if available, otherwise check backend-provided npub
-            const repliedToMine = cMsg?.mine ?? (msg.replied_to_npub === strPubkey);
-            if (!repliedToMine) {
-                divRef.classList.add('msg-reply-them');
-            }
-            divRef.id = `r-${msg.replied_to}`;
-
-            // Name + Message
-            const spanName = document.createElement('span');
-            spanName.style.color = `rgba(255, 255, 255, 0.7)`;
-
-            // Determine the sender of the replied-to message
-            let cSenderProfile;
-            if (hasBackendContext) {
-                // Use backend-provided npub
-                if (msg.replied_to_npub) {
-                    cSenderProfile = getProfile(msg.replied_to_npub);
-                    // Check if it's our own message
-                    if (msg.replied_to_npub === strPubkey) {
-                        cSenderProfile = getProfile(strPubkey);
-                    }
-                } else {
-                    // DM without npub - it's from the other participant
-                    cSenderProfile = sender;
-                }
-            } else if (cMsg) {
-                // Fallback to in-memory message data
-                cSenderProfile = !cMsg.mine
-                    ? (cMsg.npub ? getProfile(cMsg.npub) : sender)
-                    : getProfile(strPubkey);
-            }
-
-            if (cSenderProfile?.nickname || cSenderProfile?.name) {
-                spanName.textContent = cSenderProfile.nickname || cSenderProfile.name;
-                twemojify(spanName);
-            } else {
-                const fallbackId = (hasBackendContext ? msg.replied_to_npub : cMsg?.npub) || cSenderProfile?.id || '';
-                spanName.textContent = fallbackId ? fallbackId.substring(0, 10) + '…' : 'Unknown';
-            }
-
-            // Replied-to content (Text or Attachment)
-            let spanRef;
-            const replyContent = hasBackendContext ? msg.replied_to_content : cMsg?.content;
-            const hasAttachment = hasBackendContext ? msg.replied_to_has_attachment : cMsg?.attachments?.length > 0;
-
-            if (replyContent) {
-                spanRef = document.createElement('span');
-                spanRef.classList.add('msg-reply-text');
-                spanRef.style.color = `rgba(255, 255, 255, 0.45)`;
-                spanRef.innerHTML = buildReplyPreviewHtml(replyContent);
-                twemojify(spanRef);
-            } else if (hasAttachment) {
-                // For Attachments, we display an additional icon for quickly inferring the replied-to content
-                spanRef = document.createElement('div');
-                spanRef.style.display = `flex`;
-
-                // Use in-memory message for detailed attachment info if available, otherwise show generic
-                const attachmentExt = cMsg?.attachments?.[0]?.extension;
-                const cFileType = attachmentExt ? getFileTypeInfo(attachmentExt) : { icon: 'attachment', description: 'Attachment' };
-
-                // Icon
-                const spanIcon = document.createElement('span');
-                spanIcon.classList.add('icon', 'icon-' + cFileType.icon);
-                spanIcon.style.position = `relative`;
-                spanIcon.style.backgroundColor = `rgba(255, 255, 255, 0.45)`;
-                spanIcon.style.width = `18px`;
-                spanIcon.style.height = `18px`;
-                spanIcon.style.margin = `0px`;
-
-                // Description
-                const spanDesc = document.createElement('span');
-                spanDesc.style.color = `rgba(255, 255, 255, 0.45)`;
-                spanDesc.style.marginLeft = `5px`;
-                spanDesc.textContent = cFileType.description;
-
-                // Combine
-                spanRef.append(spanIcon, spanDesc);
-            }
-
-            divRef.appendChild(spanName);
-            divRef.appendChild(document.createElement('br'));
-            if (spanRef) {
-                divRef.appendChild(spanRef);
-            }
-            pMessage.appendChild(divRef);
-        }
-    }
-
-    // In group chats, filter messages from blocked users with a click-to-reveal placeholder
-    const blockedAuthorNpub = isGroupChat && !msg.mine ? (msg.npub || sender?.id || '') : '';
-    const blockedAuthorProfile = blockedAuthorNpub ? getProfile(blockedAuthorNpub) : null;
-    const isRevealedBlockedMsg = blockedAuthorProfile?.is_blocked && revealedBlockedMessages.has(msg.id);
-    if (blockedAuthorProfile?.is_blocked && !revealedBlockedMessages.has(msg.id)) {
-            // Placeholder
-            const blockedSpan = document.createElement('span');
-            blockedSpan.style.cssText = 'color: rgba(255, 255, 255, 0.3); font-style: italic; cursor: pointer; display: flex; align-items: center; gap: 5px;';
-            const blockedIcon = document.createElement('span');
-            blockedIcon.classList.add('icon', 'icon-cancel');
-            blockedIcon.style.cssText = 'width: 14px; height: 14px; position: relative; margin: 0; flex-shrink: 0; background-color: rgba(255, 255, 255, 0.3);';
-            blockedSpan.appendChild(blockedIcon);
-            blockedSpan.appendChild(document.createTextNode('Blocked message'));
-
-            blockedSpan.onclick = (e) => {
-                e.stopPropagation();
-                revealedBlockedMessages.add(msg.id);
-                // Re-open the chat so the message renders through the full pipeline
-                openChat(strOpenChat);
-            };
-
-            pMessage.append(blockedSpan);
-            pMessage.classList.add('no-background');
-            pMessage.style.borderRadius = '0';
-            pMessage.style.overflow = 'visible';
-            divMessage.appendChild(pMessage);
-            return divMessage;
-    }
-
-    // Pre-detect npub to potentially modify displayed content
-    // If npub is at the end of the message, we'll strip it from the text display
-    const npubInfoEarly = detectNostrProfile(msg.content);
-    let displayContent = msg.content;
-    if (npubInfoEarly && npubInfoEarly.isAtEnd && npubInfoEarly.textWithoutNpub) {
-        displayContent = npubInfoEarly.textWithoutNpub;
-    }
-    
-    // Render the text - if it's emoji-only and/or file-only, and less than four emojis, format them nicely
-    const spanMessage = document.createElement('span');
-    if (fEmojiOnly) {
-        // Preserve linebreaks for creative emoji rendering (tophats on wolves)
-        spanMessage.textContent = displayContent;
-        spanMessage.style.whiteSpace = `pre-wrap`;
-        // Add an emoji-only CSS format
-        pMessage.classList.add('emoji-only');
-        spanMessage.classList.add('emoji-only-content');
-        // Align the emoji depending on who sent it
-        spanMessage.style.textAlign = msg.mine ? 'right' : 'left';
-    } else {
-        // Render their text content (using our custom Markdown renderer)
-        spanMessage.innerHTML = parseMarkdown(displayContent.trim());
-
-        // Make URLs clickable (after markdown parsing, before twemojify)
-        linkifyUrls(spanMessage);
-
-        // Process inline image URLs (async - will load images in background)
-        // Skip for revealed blocked messages to prevent IP leaks via rogue image URLs
-        if (!isRevealedBlockedMsg) processInlineImages(spanMessage);
-
-        // Render @npub1... mentions as highlighted display names
-        const senderNpub = msg.mine ? strPubkey : (msg.npub || '');
-        const senderIsAdmin = isGroupChat && currentChat?.metadata?.admins?.includes(senderNpub);
-        renderMentions(spanMessage, senderIsAdmin);
-    }
-
-    // Only process Text Content if any exists
-    if (spanMessage.textContent) {
-        // Twemojify!
-        twemojify(spanMessage);
-
-        // Append the message contents
-        pMessage.appendChild(spanMessage);
-    }
-
-    // Append attachments
-    let strRevealAttachmentPath = '';
-    if (msg.attachments.length) {
-        // Float the content depending on who's it is
-        pMessage.style.float = msg.mine ? 'right' : 'left';
-        // Remove any message bubbles
-        pMessage.classList.add('no-background');
-        pMessage.style.overflow = 'visible';
-    }
-    for (const cAttachment of msg.attachments) {
-        if (cAttachment.downloaded) {
-            // Save the path for our File Explorer shortcut
-            strRevealAttachmentPath = cAttachment.path;
-
-            // Convert the absolute file path to a Tauri asset
-            const assetUrl = convertFileSrc(cAttachment.path);
-
-            // Render the attachment appropriately for it's type
-            if (['png', 'jpeg', 'jpg', 'gif', 'webp', 'svg', 'bmp', 'tiff', 'tif', 'ico'].includes(cAttachment.extension)) {
-                // Images
-                const imgContainer = document.createElement('div');
-                imgContainer.style.position = 'relative';
-                imgContainer.style.display = 'inline-block';
-
-                if (isSpoilerAttachment(cAttachment)) {
-                    // Spoiler image: show thumbhash with overlay, click to reveal
-                    const spoilerNpub = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
-                    invoke('generate_thumbhash_preview', { npub: spoilerNpub, msgId: msg.id })
-                        .then(base64Image => {
-                            const imgPreview = document.createElement('img');
-                            imgPreview.className = 'spoiler-img';
-                            if (cAttachment.img_meta) {
-                                imgPreview.width = cAttachment.img_meta.width;
-                                imgPreview.height = cAttachment.img_meta.height;
-                                imgPreview.style.aspectRatio = `${cAttachment.img_meta.width} / ${cAttachment.img_meta.height}`;
-                            }
-                            imgPreview.style.maxWidth = `100%`;
-                            imgPreview.style.height = `auto`;
-                            imgPreview.style.borderRadius = `8px`;
-                            imgPreview.src = base64Image;
-                            imgPreview.addEventListener('load', () => {
-                                if (proceduralScrollState.isLoadingOlderMessages) {
-                                    correctScrollForMediaLoad();
-                                } else {
-                                    softChatScroll();
-                                }
-                            }, { once: true });
-                            imgContainer.appendChild(imgPreview);
-
-                            if (msg.mine && msg.pending) {
-                                // Uploading: just show spinner, no spoiler label
-                                imgPreview.style.opacity = '0.25';
-                                const uploadOverlay = document.createElement('div');
-                                uploadOverlay.className = 'attachment-progress-overlay';
-                                const spinner = document.createElement('div');
-                                spinner.className = 'miniapp-downloading-spinner';
-                                spinner.id = msg.id + '_file';
-                                spinner.style.width = '48px';
-                                spinner.style.height = '48px';
-                                applyPendingUploadProgress(spinner, msg.id);
-                                uploadOverlay.appendChild(spinner);
-                                const cancelBtn = document.createElement('div');
-                                cancelBtn.className = 'upload-cancel-btn';
-                                cancelBtn.addEventListener('click', (e) => {
-                                    e.stopPropagation();
-                                    invoke('cancel_upload', { pendingId: msg.id });
-                                });
-                                uploadOverlay.appendChild(cancelBtn);
-                                imgContainer.appendChild(uploadOverlay);
-                            } else {
-                                // Not uploading: show spoiler overlay with click to reveal
-                                const overlay = document.createElement('div');
-                                overlay.className = 'spoiler-overlay';
-                                overlay.innerHTML = '<span class="icon icon-eye-off"></span><span class="spoiler-label">Spoiler</span>';
-                                imgContainer.appendChild(overlay);
-                                overlay.addEventListener('click', () => {
-                                    const realUrl = convertFileSrc(cAttachment.path);
-                                    imgPreview.src = realUrl;
-                                    imgPreview.classList.remove('spoiler-img');
-                                    imgPreview.style.aspectRatio = '';
-                                    overlay.remove();
-                                    attachImagePreview(imgPreview);
-                                }, { once: true });
-                            }
-                        })
-                        .catch(() => {
-                            // Thumbhash failed — show revealed image directly
-                            const imgPreview = document.createElement('img');
-                            imgPreview.style.maxWidth = `100%`;
-                            imgPreview.style.height = `auto`;
-                            imgPreview.style.borderRadius = `8px`;
-                            imgPreview.src = assetUrl;
-                            attachImagePreview(imgPreview);
-                            imgContainer.appendChild(imgPreview);
-                        });
-
-                    attachFileExtBadge(null, imgContainer, cAttachment.extension);
-                    // Mark so the post-loop upload spinner code knows an async spinner is coming
-                    if (msg.mine && msg.pending) imgContainer.dataset.spoilerUpload = '1';
-                    pMessage.appendChild(imgContainer);
-                } else {
-                    // Normal (non-spoiler) image
-                    const imgPreview = document.createElement('img');
-                    // SVGs need a specific width to scale properly
-                    if (cAttachment.extension === 'svg') {
-                        imgPreview.style.width = `25vw`;
-                    } else {
-                        imgPreview.style.maxWidth = `100%`;
-                    }
-                    imgPreview.style.height = `auto`;
-                    imgPreview.style.borderRadius = `8px`;
-                    imgPreview.src = assetUrl;
-
-                    // Add event listener for auto-scrolling
-                    imgPreview.addEventListener('load', () => {
-                        // Auto-scroll if within 100ms of chat opening
-                        if (chatOpenTimestamp && Date.now() - chatOpenTimestamp < 100) {
-                            scrollToBottom(domChatMessages, false);
-                        } else if (proceduralScrollState.isLoadingOlderMessages) {
-                            // Correct scroll position for media loading during procedural scroll
-                            correctScrollForMediaLoad();
-                        } else {
-                            // Normal soft scroll for layout adjustments
-                            softChatScroll();
-                        }
-                    }, { once: true });
-
-                    // Attach image preview handler
-                    attachImagePreview(imgPreview);
-
-                    imgContainer.appendChild(imgPreview);
-
-                    // Add file extension badge (handles size checking automatically)
-                    attachFileExtBadge(imgPreview, imgContainer, cAttachment.extension);
-
-                    pMessage.appendChild(imgContainer);
-                }
-                } else if (['wav', 'mp3', 'flac', 'aac', 'm4a', 'ogg'].includes(cAttachment.extension)) {
-                // Audio
-                handleAudioAttachment(cAttachment, pMessage, msg);
-                } else if (platformFeatures.os !== 'linux' && ['mp4', 'webm', 'mov'].includes(cAttachment.extension)) {
-                // Videos
-                const handleMetadataLoaded = (video) => {
-                    // Seek a tiny amount to force the frame 'poster' to load
-                    video.currentTime = 0.1;
-                    
-                    // Auto-scroll if within 100ms of chat opening
-                    if (chatOpenTimestamp && Date.now() - chatOpenTimestamp < 100) {
-                        scrollToBottom(domChatMessages, false);
-                    } else if (proceduralScrollState.isLoadingOlderMessages) {
-                        // Correct scroll position for media loading during procedural scroll
-                        correctScrollForMediaLoad();
-                    } else {
-                        // Normal soft scroll for layout adjustments
-                        softChatScroll();
-                    }
-                };
-                
-                const vidPreview = document.createElement('video');
-                vidPreview.setAttribute('controlsList', 'nodownload');
-                vidPreview.controls = true;
-                vidPreview.style.width = `100%`;
-                vidPreview.style.height = `auto`;
-                vidPreview.style.borderRadius = `8px`;
-                vidPreview.style.cursor = `pointer`;
-                vidPreview.preload = "metadata";
-                vidPreview.playsInline = true;
-                vidPreview.src = mediaUrl(cAttachment.path);
-
-                vidPreview.addEventListener('loadedmetadata', () => {
-                    handleMetadataLoaded(vidPreview);
-                }, { once: true });
-
-                pMessage.appendChild(vidPreview);
-            } else {
-                // File Attachment — use shared createFileBox helper
-                const { fileDiv, isMiniApp } = createFileBox(cAttachment, 'downloaded');
-
-                // Click handler
-                fileDiv.addEventListener('click', async (e) => {
-                    const path = e.currentTarget.getAttribute('filepath');
-                    if (!path) return;
-
-                    if (isMiniApp) {
-                        // Open Mini App in a new window (or focus existing)
-                        try {
-                            const attachment = msg.attachments.find(a => a.path === path);
-                            const topicId = attachment?.webxdc_topic || null;
-
-                            const shouldOpen = await checkChatMiniAppPermissions(path);
-                            if (!shouldOpen) return;
-
-                            await openMiniApp(path, strOpenChat, msg.id, null, topicId);
-
-                            if (fileDiv._updateMiniAppStatus) {
-                                if (topicId) {
-                                    invoke('miniapp_get_realtime_status', { topicId })
-                                        .then(status => {
-                                            fileDiv._updateMiniAppStatus(true, status?.peer_count || 0, status?.peers);
-                                        })
-                                        .catch(() => {
-                                            fileDiv._updateMiniAppStatus(true, 0, []);
-                                        });
-                                } else {
-                                    fileDiv._updateMiniAppStatus(true, 0);
-                                }
-                            }
-                        } catch (err) {
-                            console.error('Failed to open Mini App:', err);
-                        }
-                    } else {
-                        // Regular file: reveal in explorer
-                        revealItemInDir(path);
-                    }
-                });
-
-                pMessage.appendChild(fileDiv);
-            }
-
-            // If the message is mine, and pending: show upload progress
-            if (msg.mine && msg.pending) {
-                let hasSpinner = false;
-                const uploadMsgId = msg.id;
-
-                // For file boxes: swap the icon for a conical progress spinner
-                const fileBoxIcon = pMessage.querySelector('.custom-audio-player > span[class*="icon-"], .custom-audio-player > img');
-                if (fileBoxIcon) {
-                    hasSpinner = true;
-                    // If icon is an <img> (Mini Apps), the spinner is absolute-positioned
-                    // so bump the text container margin to clear it
-                    if (fileBoxIcon.tagName === 'IMG') {
-                        const textSpan = fileBoxIcon.parentElement?.querySelector('span');
-                        if (textSpan) textSpan.style.marginLeft = '55px';
-                    }
-                    const spinnerEl = createFileBoxSpinner(fileBoxIcon, { id: msg.id + '_file' });
-                    // Add cancel button as sibling (not child — spinner mask clips children)
-                    const cancelBtn = document.createElement('div');
-                    cancelBtn.className = 'upload-cancel-btn';
-                    cancelBtn.addEventListener('click', (e) => {
-                        e.stopPropagation();
-                        invoke('cancel_upload', { pendingId: uploadMsgId });
-                    });
-                    // Insert after spinner is placed (it replaces the icon after 200ms)
-                    setTimeout(() => {
-                        const player = pMessage.querySelector('.custom-audio-player');
-                        if (player) player.appendChild(cancelBtn);
-                    }, 210);
-                }
-
-                // For audio players: replace the play button with a spinner (stays in flex flow)
-                const audioPlayBtn = pMessage.querySelector('.audio-play-btn');
-                if (audioPlayBtn) {
-                    hasSpinner = true;
-                    const wrapper = document.createElement('div');
-                    wrapper.style.position = 'relative';
-                    wrapper.style.width = '40px';
-                    wrapper.style.height = '40px';
-                    wrapper.style.minWidth = '40px';
-                    wrapper.style.flexShrink = '0';
-                    const spinner = document.createElement('div');
-                    spinner.className = 'miniapp-downloading-spinner';
-                    spinner.id = msg.id + '_file';
-                    spinner.style.width = '40px';
-                    spinner.style.height = '40px';
-                    applyPendingUploadProgress(spinner, msg.id);
-                    wrapper.appendChild(spinner);
-                    const cancelBtn = document.createElement('div');
-                    cancelBtn.className = 'upload-cancel-btn audio-upload-cancel';
-                    cancelBtn.addEventListener('click', (e) => {
-                        e.stopPropagation();
-                        invoke('cancel_upload', { pendingId: uploadMsgId });
-                    });
-                    wrapper.appendChild(cancelBtn);
-                    audioPlayBtn.replaceWith(wrapper);
-                }
-
-                // For image/video previews: add centered upload progress spinner
-                const mediaEl = pMessage.querySelector('img:not(.emoji), video');
-                if (!hasSpinner && mediaEl) {
-                    hasSpinner = true;
-                    let container = mediaEl.parentElement;
-                    // Videos are appended directly to pMessage — wrap in positioned div
-                    if (container === pMessage) {
-                        const wrapper = document.createElement('div');
-                        wrapper.style.position = 'relative';
-                        pMessage.replaceChild(wrapper, mediaEl);
-                        wrapper.appendChild(mediaEl);
-                        container = wrapper;
-                    }
-                    // Move opacity to media element only so the spinner stays full opacity
-                    container.style.opacity = '';
-                    mediaEl.style.opacity = '0.25';
-                    // Hide native video controls so the play button doesn't clash with the spinner
-                    if (mediaEl.tagName === 'VIDEO') mediaEl.removeAttribute('controls');
-                    const overlay = document.createElement('div');
-                    overlay.className = 'attachment-progress-overlay';
-                    const spinner = document.createElement('div');
-                    spinner.className = 'miniapp-downloading-spinner';
-                    spinner.id = msg.id + '_file';
-                    spinner.style.width = '48px';
-                    spinner.style.height = '48px';
-                    applyPendingUploadProgress(spinner, msg.id);
-                    overlay.appendChild(spinner);
-                    // Add cancel button as sibling of spinner (not child — mask clips children)
-                    const cancelBtn = document.createElement('div');
-                    cancelBtn.className = 'upload-cancel-btn';
-                    cancelBtn.addEventListener('click', (e) => {
-                        e.stopPropagation();
-                        invoke('cancel_upload', { pendingId: uploadMsgId });
-                    });
-                    overlay.appendChild(cancelBtn);
-                    container.appendChild(overlay);
-                }
-
-                // Fallback: dim the whole attachment if no spinner was added
-                // Skip if a spoiler upload is handling its own spinner asynchronously
-                const hasSpoilerUpload = pMessage.querySelector('[data-spoiler-upload]');
-                if (!hasSpinner && !hasSpoilerUpload && pMessage.lastElementChild) {
-                    pMessage.lastElementChild.style.opacity = 0.25;
-                }
-            }
-        } else if (cAttachment.downloading || downloadingAttachmentIds.has(cAttachment.id)) {
-            // For images, show thumbhash preview while downloading (only for formats that support thumbhash)
-            if (['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif', 'ico'].includes(cAttachment.extension)) {
-                // Generate thumbhash preview for downloading image
-                // For group chats, use chat ID; for DMs, use sender.id
-                const thumbhashNpub2 = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
-                invoke('generate_thumbhash_preview', { npub: thumbhashNpub2, msgId: msg.id })
-                    .then(base64Image => {
-                        const imgPreview = document.createElement('img');
-                        if (cAttachment.img_meta) {
-                            imgPreview.width = cAttachment.img_meta.width;
-                            imgPreview.height = cAttachment.img_meta.height;
-                        }
-                        imgPreview.style.maxWidth = `100%`;
-                        imgPreview.style.height = `auto`;
-                        imgPreview.style.borderRadius = `8px`;
-                        imgPreview.style.opacity = `0.7`;
-                        imgPreview.src = base64Image;
-                        // Add scroll correction on thumbhash load
-                        imgPreview.addEventListener('load', () => {
-                            if (proceduralScrollState.isLoadingOlderMessages) {
-                                correctScrollForMediaLoad();
-                            } else {
-                                softChatScroll();
-                            }
-                        }, { once: true });
-                        
-                        // Create container for relative positioning
-                        const container = document.createElement('div');
-                        container.style.position = `relative`;
-                        container.appendChild(imgPreview);
-                        
-                        // Add downloading progress spinner overlay
-                        const dlOverlay = document.createElement('div');
-                        dlOverlay.className = 'attachment-progress-overlay';
-                        const dlSpinner = document.createElement('div');
-                        dlSpinner.className = 'miniapp-downloading-spinner';
-                        dlSpinner.setAttribute('data-attachment-id', cAttachment.id);
-                        dlSpinner.style.width = '48px';
-                        dlSpinner.style.height = '48px';
-                        dlOverlay.appendChild(dlSpinner);
-                        container.appendChild(dlOverlay);
-
-                        pMessage.appendChild(container);
-                    })
-                    .catch(() => {
-                        // Fallback: file box with "Downloading" if thumbhash fails
-                        const { fileDiv } = createFileBox(cAttachment, 'downloading');
-                        pMessage.appendChild(fileDiv);
-                    });
-            } else {
-                // Non-image downloading: file box with "Downloading" text
-                const { fileDiv } = createFileBox(cAttachment, 'downloading');
-                pMessage.appendChild(fileDiv);
-            }
-            } else {
-                // Check if this attachment will auto-download (skip if previously failed or from a revealed blocked user)
-                const willAutoDownload = !isRevealedBlockedMsg && cAttachment.size > 0 && cAttachment.size <= MAX_AUTO_DOWNLOAD_BYTES && !cAttachment.download_failed;
-
-                // For images, show thumbhash preview with download button (unless auto-downloading)
-                if (['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif', 'ico'].includes(cAttachment.extension)) {
-                    // Generate thumbhash preview for undownloaded image
-                    // For group chats, use chat ID; for DMs, use sender.id
-                    const thumbhashNpub = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
-                    invoke('generate_thumbhash_preview', { npub: thumbhashNpub, msgId: msg.id })
-                        .then(base64Image => {
-                            const imgPreview = document.createElement('img');
-                            if (cAttachment.img_meta) {
-                                imgPreview.width = cAttachment.img_meta.width;
-                                imgPreview.height = cAttachment.img_meta.height;
-                            }
-                            imgPreview.style.maxWidth = `100%`;
-                            imgPreview.style.height = `auto`;
-                            imgPreview.style.borderRadius = `8px`;
-                            imgPreview.style.opacity = willAutoDownload ? `0.8` : `0.6`;
-                            imgPreview.src = base64Image;
-                            // Add scroll correction on thumbhash load
-                            imgPreview.addEventListener('load', () => {
-                                if (proceduralScrollState.isLoadingOlderMessages) {
-                                    correctScrollForMediaLoad();
-                                } else {
-                                    softChatScroll();
-                                }
-                            }, { once: true });
-                            
-                            // Create container for relative positioning
-                            const container = document.createElement('div');
-                            container.style.position = `relative`;
-                            container.appendChild(imgPreview);
-
-                            // Only show download button if NOT auto-downloading
-                            if (!willAutoDownload) {
-                                // Determine and display file size
-                                let strSize = 'Unknown Size';
-                                if (cAttachment.size > 0) strSize = formatBytes(cAttachment.size);
-
-                                // Create download button overlay
-                                const iDownload = document.createElement('i');
-                                iDownload.setAttribute('data-attachment-id', cAttachment.id);
-                                iDownload.toggleAttribute('download', true);
-                                // For group chats, use chat ID; for DMs, use sender.id
-                                const downloadNpub2 = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
-                                iDownload.setAttribute('npub', downloadNpub2);
-                                iDownload.setAttribute('msg', msg.id);
-                                iDownload.classList.add('btn');
-                                iDownload.textContent = cAttachment.download_failed
-                                    ? `Download Failed · Tap to Retry`
-                                    : `Download ${cAttachment.extension.toUpperCase()} (${strSize})`;
-                                iDownload.style.position = `absolute`;
-                                iDownload.style.top = `50%`;
-                                iDownload.style.left = `50%`;
-                                iDownload.style.transform = `translate(-50%, -50%)`;
-                                iDownload.style.backgroundColor = `rgba(0, 0, 0, 0.8)`;
-                                iDownload.style.padding = `8px 15px`;
-                                iDownload.style.borderRadius = `6px`;
-                                iDownload.style.color = `white`;
-                                iDownload.style.cursor = `pointer`;
-                                iDownload.style.fontSize = `12px`;
-                                iDownload.style.whiteSpace = `nowrap`;
-                                iDownload.style.textAlign = `center`;
-                                iDownload.style.maxWidth = `90%`;
-                                iDownload.style.overflow = `hidden`;
-                                iDownload.style.textOverflow = `ellipsis`;
-                                container.appendChild(iDownload);
-                            } else {
-                                // Auto-downloading: show progress spinner overlay
-                                const adOverlay = document.createElement('div');
-                                adOverlay.className = 'attachment-progress-overlay';
-                                const adSpinner = document.createElement('div');
-                                adSpinner.className = 'miniapp-downloading-spinner';
-                                adSpinner.setAttribute('data-attachment-id', cAttachment.id);
-                                adSpinner.style.width = '48px';
-                                adSpinner.style.height = '48px';
-                                adOverlay.appendChild(adSpinner);
-                                container.appendChild(adOverlay);
-                            }
-
-                            pMessage.appendChild(container);
-                        })
-                        .catch(() => {
-                            // Fallback when thumbhash fails — render as file box
-                            const fallbackState = willAutoDownload ? 'downloading' : 'download';
-                            const { fileDiv: fallbackDiv, statusSpan: fallbackStatus } = createFileBox(cAttachment, fallbackState);
-                            if (cAttachment.download_failed && fallbackStatus) {
-                                fallbackStatus.innerText = 'Download Failed · Tap to Retry';
-                            }
-                            if (!willAutoDownload) {
-                                fallbackDiv.addEventListener('click', () => {
-                                    startAttachmentDownload(cAttachment, msg, isGroupChat, strOpenChat, sender);
-                                }, { once: true });
-                            }
-                            pMessage.appendChild(fallbackDiv);
-                        });
-                } else if (!willAutoDownload) {
-                    // Non-image, manual download: file box with "Click to Download"
-                    const { fileDiv: dlFileDiv, statusSpan: dlStatus } = createFileBox(cAttachment, 'download');
-                    if (cAttachment.download_failed && dlStatus) {
-                        dlStatus.innerText = 'Download Failed · Tap to Retry';
-                    }
-                    dlFileDiv.addEventListener('click', () => {
-                        startAttachmentDownload(cAttachment, msg, isGroupChat, strOpenChat, sender);
-                    }, { once: true });
-                    pMessage.appendChild(dlFileDiv);
-                }
-
-                // If the size is known and within auto-download range; immediately begin downloading
-                if (willAutoDownload) {
-                    // For non-images (which don't have thumbhash previews), file box with "Downloading" text
-                    if (!['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif', 'ico'].includes(cAttachment.extension)) {
-                        const { fileDiv: autoFileDiv } = createFileBox(cAttachment, 'downloading');
-                        pMessage.appendChild(autoFileDiv);
-                    }
-                    
-                    // For group chats, use chat ID; for DMs, use sender.id
-                    const downloadNpub4 = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
-                    invoke('download_attachment', { npub: downloadNpub4, msgId: msg.id, attachmentId: cAttachment.id });
-                }
-            }
-    }
-
-    // Sync border radius from pMessage to any custom-audio-player inside (for streak continuation)
-    const audioPlayer = pMessage.querySelector('.custom-audio-player');
-    if (audioPlayer) {
-        if (pMessage.style.borderTopLeftRadius) {
-            audioPlayer.style.borderTopLeftRadius = pMessage.style.borderTopLeftRadius;
-        }
-        if (pMessage.style.borderTopRightRadius) {
-            audioPlayer.style.borderTopRightRadius = pMessage.style.borderTopRightRadius;
-        }
-        if (pMessage.style.borderBottomLeftRadius) {
-            audioPlayer.style.borderBottomLeftRadius = pMessage.style.borderBottomLeftRadius;
-        }
-        if (pMessage.style.borderBottomRightRadius) {
-            audioPlayer.style.borderBottomRightRadius = pMessage.style.borderBottomRightRadius;
-        }
-    }
-
-    // Append Payment Shortcuts (i.e: Bitcoin Payment URIs, etc)
-    const cAddress = detectCryptoAddress(msg.content);
-    if (cAddress) {
-        // Render the Payment UI
-        pMessage.appendChild(renderCryptoAddress(cAddress));
-    }
-
-    // Append Nostr Profile Previews (for shared npubs and vectorapp.io profile links)
-    // Reuse the early detection result if available
-    const npubInfo = npubInfoEarly;
-    if (npubInfo) {
-        // Check if the message is ONLY an npub (with optional whitespace)
-        // If so, hide the text span since the preview shows all the info
-        const isOnlyNpub = msg.content.trim() === npubInfo.originalMatch;
-        if (isOnlyNpub) {
-            const msgSpan = pMessage.querySelector('span');
-            if (msgSpan) {
-                msgSpan.style.display = 'none';
-            }
-            // Remove padding from the message bubble when it's only an npub
-            pMessage.style.padding = '0';
-        }
-        
-        // Check if we already have the profile cached
-        const cachedProfile = getProfile(npubInfo.npub);
-        const profilePreview = renderNostrProfilePreview(npubInfo, cachedProfile, isOnlyNpub);
-        
-        // Add click handler for the "View Profile" button
-        const btnViewProfile = profilePreview.querySelector('.msg-profile-btn');
-        if (btnViewProfile) {
-            btnViewProfile.addEventListener('click', (e) => {
-                e.stopPropagation();
-                const npub = btnViewProfile.getAttribute('data-npub');
-                // openProfile accepts a profile object with at least an 'id' field
-                // If we have a cached profile, use it; otherwise create a minimal one
-                openProfile(getProfile(npub) || { id: npub });
-            });
-        }
-        
-        // Add click handler for the copy button
-        const btnCopy = profilePreview.querySelector('.msg-profile-copy-btn');
-        if (btnCopy) {
-            btnCopy.addEventListener('click', async (e) => {
-                e.stopPropagation();
-                const npub = btnCopy.getAttribute('data-npub');
-                // Always copy the full profile URL for easy sharing
-                const profileUrl = `https://vectorapp.io/profile/${npub}`;
-                await navigator.clipboard.writeText(profileUrl);
-                // Show checkmark feedback
-                btnCopy.innerHTML = '<span class="icon icon-check"></span>';
-                setTimeout(() => {
-                    btnCopy.innerHTML = '<span class="icon icon-copy"></span>';
-                }, 2000);
-            });
-        }
-        
-        // If we don't have the profile yet, queue a high-priority fetch
-        if (!cachedProfile) {
-            invoke('queue_profile_sync', {
-                npub: npubInfo.npub,
-                priority: 'high',
-                forceRefresh: false
-            }).catch(err => console.warn('Failed to queue profile sync for npub preview:', err));
-        }
-        
-        pMessage.appendChild(profilePreview);
-    }
-
-    // Append Metadata Previews (i.e: OpenGraph data from URLs, etc) - only if enabled
-    // Skip web preview if we already rendered a profile preview (e.g., vectorapp.io/profile links)
-    const skipWebPreview = npubInfoEarly && npubInfoEarly.type === 'link';
-    if (!msg.pending && !msg.failed && fWebPreviewsEnabled && !skipWebPreview && !isRevealedBlockedMsg) {
-        // Check if we have metadata with either an image OR a title/description
-        const hasMetadata = msg.preview_metadata && (
-            msg.preview_metadata.og_image ||
-            msg.preview_metadata.og_title ||
-            msg.preview_metadata.title ||
-            msg.preview_metadata.og_description ||
-            msg.preview_metadata.description
-        );
-        
-        if (hasMetadata) {
-            // Setup the Preview container
-            const divPrevContainer = document.createElement('div');
-            divPrevContainer.classList.add('msg-preview-container', 'btn');
-            divPrevContainer.setAttribute('url', msg.preview_metadata.og_url || msg.preview_metadata.domain);
-
-            // Check if we have both description and image
-            const description = msg.preview_metadata.og_description || msg.preview_metadata.description;
-            const hasImage = !!msg.preview_metadata.og_image;
-            
-            // If we have both description and image, set bottom padding to 0
-            if (description && hasImage) {
-                divPrevContainer.style.paddingBottom = '0';
-            }
-
-            // Setup the Favicon
-            const imgFavicon = document.createElement('img');
-            imgFavicon.classList.add('favicon');
-            imgFavicon.src = msg.preview_metadata.favicon;
-            imgFavicon.addEventListener('load', () => {
-                if (proceduralScrollState.isLoadingOlderMessages) {
-                    correctScrollForMediaLoad();
-                } else {
-                    softChatScroll();
-                }
-            }, { once: true });
-            imgFavicon.addEventListener('error', () => {
-                imgFavicon.style.display = 'none';
-            }, { once: true });
-
-            // Add the title (prefixed with the Favicon)
-            const spanPreviewTitle = document.createElement('span');
-            spanPreviewTitle.appendChild(imgFavicon);
-            const spanText = document.createTextNode(msg.preview_metadata.title || msg.preview_metadata.og_title || 'Link Preview');
-            spanPreviewTitle.appendChild(spanText);
-            divPrevContainer.appendChild(spanPreviewTitle);
-
-            // Add description if available (especially useful for Twitter/X posts)
-            if (description) {
-                const spanDescription = document.createElement('span');
-                spanDescription.classList.add('msg-preview-description');
-                
-                // Safely render text with line breaks by manually creating text nodes and <br> elements
-                // Split by <br> tags first (from Twitter HTML), then by \n (from other sources)
-                const parts = description.split(/<br\s*\/?>/i);
-                parts.forEach((part, index) => {
-                    // For each part, split by \n and add text nodes with <br> between them
-                    const subParts = part.split('\n');
-                    subParts.forEach((subPart, subIndex) => {
-                        if (subPart) {
-                            spanDescription.appendChild(document.createTextNode(subPart));
-                        }
-                        if (subIndex < subParts.length - 1) {
-                            spanDescription.appendChild(document.createElement('br'));
-                        }
-                    });
-                    if (index < parts.length - 1) {
-                        spanDescription.appendChild(document.createElement('br'));
-                    }
-                });
-                
-                // If there's an image, remove border radius so description sits flush
-                if (hasImage) {
-                    spanDescription.style.borderRadius = '0';
-                }
-                divPrevContainer.appendChild(spanDescription);
-            }
-
-            // Load the Preview image if available
-            if (hasImage) {
-                const imgPreview = document.createElement('img');
-                imgPreview.classList.add('msg-preview-img');
-                imgPreview.src = msg.preview_metadata.og_image;
-                imgPreview.onerror = () => imgPreview.remove();
-                // Auto-scroll the chat to correct against container resizes
-                imgPreview.addEventListener('load', () => {
-                    if (proceduralScrollState.isLoadingOlderMessages) {
-                        correctScrollForMediaLoad();
-                    } else {
-                        softChatScroll();
-                    }
-                }, { once: true });
-                divPrevContainer.appendChild(imgPreview);
-            }
-
-            // Render the Preview
-            pMessage.appendChild(divPrevContainer);
-        } else if (!msg.preview_metadata && msg.content) {
-            // Grab the message's metadata (currently, only URLs can have extracted metadata)
-            // Skip fetching metadata for direct image URLs (they render inline instead)
-            // Strip <url> no-preview syntax before checking — only bare URLs trigger previews
-            const contentForPreview = msg.content.replace(/<https?:\/\/[^\s>]+>/g, '');
-            if (contentForPreview.includes('https') && !isImageUrl(msg.content)) {
-                // Pass the chat ID so backend can find both DMs and group chats
-                invoke("fetch_msg_metadata", { chatId: strOpenChat, msgId: msg.id });
-            }
-        }
-    }
-
-    // If the message is pending or failed, let's adjust it
-    if (msg.pending && !msg.attachments.length) {
-        divMessage.style.opacity = 0.75;
-    }
-    if (msg.failed) {
-        pMessage.style.color = 'red';
-    }
-
-    // If the message has been edited, show an indicator
-    if (msg.edited) {
-        const spanEdited = document.createElement('span');
-        spanEdited.classList.add('msg-edited-indicator');
-        spanEdited.textContent = '(edited)';
-        // If there's edit history, make it clickable to show history
-        if (msg.edit_history && msg.edit_history.length > 0) {
-            spanEdited.classList.add('btn');
-            spanEdited.setAttribute('data-msg-id', msg.id);
-            spanEdited.title = 'Click to view edit history';
-        }
-        pMessage.appendChild(spanEdited);
-    }
-
-    // Add message reactions
-    // TODO: while currently limited to one; add support for multi-reactions with a nice UX
-    const cReaction = msg.reactions[0];
-    let spanReaction;
-    if (cReaction) {
-        // Aggregate the 'reactions' of this reaction's type
-        const nReacts = msg.reactions.reduce((a, b) => b.emoji === cReaction.emoji ? a + 1 : a, 0);
-        spanReaction = document.createElement('span');
-        spanReaction.classList.add('reaction');
-        spanReaction.setAttribute('data-emoji', cReaction.emoji);
-        spanReaction.setAttribute('data-msg-id', msg.id);
-        // Mark if we already reacted with this emoji (prevents duplicate reactions on click)
-        if (msg.reactions.some(r => r.emoji === cReaction.emoji && r.author_id === strPubkey)) {
-            spanReaction.setAttribute('data-reacted', 'true');
-        }
-        spanReaction.textContent = `${cReaction.emoji} ${nReacts}`;
-        twemojify(spanReaction);
-    } else if (!msg.mine) {
-        // No reaction on the contact's message, so let's display the 'Add Reaction' UI
-        spanReaction = document.createElement('span');
-        spanReaction.classList.add('add-reaction', 'hideable', 'icon', 'icon-smile-face');
-    }
-
-    // Construct our "extras" (reactions, reply button, etc)
-    // TODO: placeholder style, looks awful, but works!
-    const divExtras = document.createElement('div');
-    divExtras.classList.add('msg-extras');
-    if (msg.mine) divExtras.style.marginRight = `5px`;
-    else divExtras.style.marginLeft = `5px`;
-    
-    // Apply the same top margin to divExtras if this is the first message in a streak (group chats only)
-    if (isNewStreak && isGroupChat && !msg.mine) {
-        // Match the pMessage top margin for proper alignment with username labels
-        divExtras.style.marginTop = `25px`;
-    }
-
-    // These can ONLY be shown on fully sent messages, and not in blocked DM chats
-    const isBlockedDM = !isGroupChat && sender?.is_blocked;
-    if (!msg.pending && !msg.failed && !isBlockedDM) {
-        // Reactions
-        if (spanReaction) {
-            if (msg.mine) {
-                // My message: reactions on the left
-                spanReaction.style.marginLeft = '-10px';
-            }
-            divExtras.append(spanReaction);
-        } else {
-            // No reactions: just render the message
-            divMessage.appendChild(pMessage);
-        }
-
-        // Reply Icon (if we're not already replying!)
-        if (!fReplying) {
-            const spanReply = document.createElement('span');
-            spanReply.classList.add('reply-btn', 'hideable', 'icon', 'icon-reply');
-            divExtras.append(spanReply);
-        }
-
-        // Edit Icon (only for my own text messages)
-        if (msg.mine && msg.content && !msg.attachments.length) {
-            const spanEdit = document.createElement('span');
-            spanEdit.classList.add('edit-btn', 'hideable', 'icon', 'icon-edit');
-            spanEdit.setAttribute('data-msg-id', msg.id);
-            spanEdit.setAttribute('data-msg-content', msg.content);
-            divExtras.append(spanEdit);
-        }
-
-        // File Reveal Icon (if a file was attached)
-        if (strRevealAttachmentPath) {
-            const spanReveal = document.createElement('span');
-            spanReveal.setAttribute('filepath', strRevealAttachmentPath);
-            spanReveal.classList.add('hideable', 'icon', 'icon-file-search');
-            divExtras.append(spanReveal);
-        }
-    }
-
-    // Depending on who it is: render the extras appropriately
-    if (msg.mine) {
-        // Wrap message and status in a container for proper stacking
-        const msgWrapper = document.createElement('div');
-        msgWrapper.classList.add('msg-wrapper');
-        msgWrapper.appendChild(pMessage);
-
-        // Add status indicator for outgoing messages
-        const statusEl = document.createElement('span');
-        statusEl.classList.add('msg-status');
-        if (msg.failed) {
-            statusEl.classList.add('msg-status-failed');
-            statusEl.textContent = 'Failed · ';
-            const retryBtn = document.createElement('span');
-            retryBtn.className = 'msg-failed-action';
-            retryBtn.textContent = 'Retry';
-            retryBtn.onclick = (e) => { e.stopPropagation(); retryFailedMessage(msg); };
-            statusEl.appendChild(retryBtn);
-            statusEl.appendChild(document.createTextNode(' · '));
-            const deleteBtn = document.createElement('span');
-            deleteBtn.className = 'msg-failed-action';
-            deleteBtn.textContent = 'Delete';
-            deleteBtn.onclick = (e) => { e.stopPropagation(); deleteFailedMessage(msg.id); };
-            statusEl.appendChild(deleteBtn);
-        } else if (msg.pending) {
-            statusEl.textContent = 'Sending...';
-        } else {
-            // Show "Sent" status - will be hidden on previous messages in setTimeout
-            statusEl.innerHTML = 'Sent <span class="icon icon-check-circle"></span>';
-        }
-        msgWrapper.appendChild(statusEl);
-
-        divMessage.append(divExtras, msgWrapper);
-    } else {
-        divMessage.append(pMessage, divExtras);
-    }
-
-    // After rendering, check message corner styling
-    // This needs to be done post-render when the message is in the DOM
-    setTimeout(() => {
-        if (domChatMessages.contains(divMessage)) {
-            const nextMsg = divMessage.nextElementSibling;
-            const prevMsg = divMessage.previousElementSibling;
-
-            // Check if previous message exists and is from a different sender
-            const isFirstFromSender = !prevMsg || prevMsg.getAttribute('sender') !== strShortSenderID;
-
-            // Check if next message exists and is from the same sender
-            const hasNextFromSameSender = nextMsg && nextMsg.getAttribute('sender') === strShortSenderID;
-
-            // Determine which corner to use based on sender (mine = right, them = left)
-            const cornerProperty = msg.mine ? 'borderBottomRightRadius' : 'borderBottomLeftRadius';
-
-            // If we're continuing a message streak (not first from sender), we need to update the previous message
-            if (!isFirstFromSender && prevMsg) {
-                // The previous message is no longer the last in the streak, so flatten its bottom corner
-                const prevPMsg = prevMsg.querySelector('p');
-                if (prevPMsg) {
-                    // Flatten the corner (0px) - this handles both CSS defaults and explicitly rounded corners
-                    applyBorderRadius(prevPMsg, cornerProperty, '0px');
-                }
-            }
-
-            // Now style the current message appropriately
-            // Singular messages (first AND last) keep CSS default corners - no modification needed
-            // Only modify corners for multi-message streaks
-            if (!isFirstFromSender && !hasNextFromSameSender) {
-                // This is the last message in a multi-message streak - apply rounded corner to close the bubble group
-                const pMsg = divMessage.querySelector('p');
-                if (pMsg) {
-                    applyBorderRadius(pMsg, cornerProperty, '15px');
-                }
-            }
-
-            // Update message status visibility for outgoing messages
-            // Only the last msg-me should show "Sent" status
-            if (msg.mine) {
-                // Hide status on all other msg-me messages (keep only last visible)
-                const allMsgMe = domChatMessages.querySelectorAll('.msg-me');
-                allMsgMe.forEach((msgEl, index) => {
-                    const isLast = index === allMsgMe.length - 1;
-                    const statusEl = msgEl.querySelector('.msg-status:not(.msg-status-failed)');
-                    if (statusEl && !statusEl.textContent.includes('Sending')) {
-                        if (isLast) {
-                            statusEl.classList.remove('msg-status-hidden');
-                        } else {
-                            statusEl.classList.add('msg-status-hidden');
-                        }
-                    }
-                });
-            }
-        }
-    }, 0);
-
-    // Revealed blocked messages render normally but at reduced opacity
-    if (isRevealedBlockedMsg) {
-        divMessage.style.opacity = '0.4';
-    }
-
-    return divMessage;
-}
-
-/**
- * Select a message to begin replying to
- * @param {MouseEvent} e 
- */
-function selectReplyingMessage(e) {
-    // Cancel any existing reply-focus
-    if (strCurrentReplyReference) {
-        document.getElementById(strCurrentReplyReference).querySelector('p').style.borderColor = ``;
-    }
-    // Get the reply ID
-    strCurrentReplyReference = e.target.parentElement.parentElement.id;
-    // Hide the File UI and Display the cancel UI
-    domChatMessageInputFile.style.display = 'none';
-    domChatMessageInputCancel.style.display = '';
-    // Display a replying placeholder
-    domChatMessageInput.setAttribute('placeholder', 'Enter reply...');
-    // Focus the message input (desktop only - mobile keyboards are disruptive)
-    if (!platformFeatures.is_mobile) {
-        domChatMessageInput.focus();
-    }
-    // Add a reply-focus
-    e.target.parentElement.parentElement.querySelector('p').style.borderColor = getComputedStyle(document.documentElement).getPropertyValue('--reply-highlight-border').trim();
-}
 
 /**
  * Cancel any ongoing replies and reset the messaging interface
@@ -8899,10 +7591,10 @@ function cancelReply() {
         domChatMessageInput.focus();
     }
 
-    // Cancel any existing reply-focus
+    // Clear the replying-to highlight on the previously-selected row.
     if (strCurrentReplyReference) {
-        let domMsg = document.getElementById(strCurrentReplyReference);
-        if (domMsg) domMsg.querySelector('p').style.borderColor = ``;
+        const domMsg = document.getElementById(strCurrentReplyReference);
+        if (domMsg) clearHighlight(domMsg, 'replying');
     }
 
     // Remove the reply ID
@@ -8951,15 +7643,6 @@ function startEditMessage(messageId, content) {
     // Update placeholder
     domChatMessageInput.setAttribute('placeholder', 'Editing message...');
 
-    // Highlight the message being edited
-    const msgElement = document.getElementById(messageId);
-    if (msgElement) {
-        const pElement = msgElement.querySelector('p');
-        if (pElement) {
-            pElement.style.borderColor = '#ffa500'; // Orange border for editing
-        }
-    }
-
     // Show the send button (since we have text)
     domChatMessageInputSend.classList.add('active');
     domChatMessageInputSend.style.display = '';
@@ -8977,17 +7660,6 @@ function startEditMessage(messageId, content) {
  * Cancel editing and restore the input to normal state
  */
 function cancelEdit() {
-    // Remove the highlight from the message being edited
-    if (strCurrentEditMessageId) {
-        const msgElement = document.getElementById(strCurrentEditMessageId);
-        if (msgElement) {
-            const pElement = msgElement.querySelector('p');
-            if (pElement) {
-                pElement.style.borderColor = '';
-            }
-        }
-    }
-
     // Clear the edit state
     strCurrentEditMessageId = '';
     strCurrentEditOriginalContent = '';
@@ -9098,7 +7770,7 @@ function showEditHistory(messageId, targetElement) {
     });
 
     // Find the message bubble (p element) for positioning
-    const msgBubble = targetElement.closest('p');
+    const msgBubble = targetElement.closest('.dmsg');
     const rect = msgBubble ? msgBubble.getBoundingClientRect() : targetElement.getBoundingClientRect();
 
     // Reset position and show popup to measure its actual dimensions
@@ -9162,6 +7834,9 @@ async function openChat(contact) {
     domChats.style.display = 'none';
     domGroupOverview.style.display = 'none';
     domChat.style.display = '';
+    // Match the fade transition the navbar/account tabs use for visual cohesion.
+    domChat.classList.add('fadein-anim');
+    domChat.addEventListener('animationend', () => domChat.classList.remove('fadein-anim'), { once: true });
     domSettingsBtn.style.display = 'none';
 
     // Hide the Navbar
@@ -9180,7 +7855,23 @@ async function openChat(contact) {
     const isGroup = chat?.chat_type === 'MlsGroup';
     const profile = !isGroup ? getProfile(contact) : null;
     strOpenChat = contact;
-    
+
+    // Render the header SYNCHRONOUSLY using whatever in-memory data we have,
+    // so the user sees the contact name + avatar the instant the chat panel
+    // appears — no more black flash while async cache/DB loads run.
+    setChatHeader(chat, profile, isGroup, contact === strPubkey);
+
+    // Pre-paint: synchronously render in-memory messages so the chat has
+    // content the moment the panel reveals. The subsequent eventCache load
+    // layers any newer/older messages on top via updateChat's dedup guard
+    // (each msg id is checked against the existing DOM before re-rendering).
+    if (chat?.messages?.length) {
+        const preBatch = chat.messages.slice(-proceduralScrollState.messagesPerBatch);
+        // Fire-and-forget — updateChat's DOM building is synchronous; only
+        // its mark-as-read tail is async, which we don't need to wait on.
+        updateChat(chat, preBatch, profile, false);
+    }
+
     // Queue profile sync for DMs (on-demand refresh when opening)
     if (!isGroup && contact) {
         invoke('queue_profile_sync', {
@@ -11281,7 +9972,7 @@ async function sendMessage(messageText) {
             // Instantly update the message in the DOM for responsive UX
             const msgElement = document.getElementById(editMsgId);
             if (msgElement) {
-                const spanMessage = msgElement.querySelector('p > span:not(.msg-edited-indicator):not(.msg-reply)');
+                const spanMessage = msgElement.querySelector('.dmsg-text');
                 if (spanMessage) {
                     spanMessage.innerHTML = parseMarkdown(cleanedText.trim());
                     linkifyUrls(spanMessage);
@@ -11292,14 +9983,14 @@ async function sendMessage(messageText) {
                     twemojify(spanMessage);
                 }
                 // Add edited indicator if not already present
-                const pMessage = msgElement.querySelector('p');
-                if (pMessage && !pMessage.querySelector('.msg-edited-indicator')) {
+                const dmsgContent = msgElement.querySelector('.dmsg-content');
+                if (dmsgContent && !dmsgContent.querySelector('.dmsg-edited')) {
                     const spanEdited = document.createElement('span');
-                    spanEdited.classList.add('msg-edited-indicator', 'btn');
+                    spanEdited.classList.add('dmsg-edited', 'btn');
                     spanEdited.textContent = '(edited)';
                     spanEdited.setAttribute('data-msg-id', editMsgId);
                     spanEdited.title = 'Click to view edit history';
-                    pMessage.appendChild(spanEdited);
+                    dmsgContent.appendChild(spanEdited);
                 }
             }
 
@@ -11807,20 +10498,8 @@ document.addEventListener('click', (e) => {
         }
     }
 
-    // If we're clicking a Reply button, begin a reply
-    if (e.target.classList.contains("reply-btn")) return selectReplyingMessage(e);
-
-    // If we're clicking an Edit button, begin editing the message
-    if (e.target.classList.contains("edit-btn")) {
-        const msgId = e.target.getAttribute('data-msg-id');
-        const msgContent = e.target.getAttribute('data-msg-content');
-        if (msgId && msgContent) {
-            return startEditMessage(msgId, msgContent);
-        }
-    }
-
     // If we're clicking an edited indicator, show the edit history
-    if (e.target.classList.contains("msg-edited-indicator")) {
+    if (e.target.classList.contains("dmsg-edited")) {
         const msgId = e.target.getAttribute('data-msg-id');
         if (msgId) {
             showEditHistory(msgId, e.target);
@@ -11833,34 +10512,31 @@ document.addEventListener('click', (e) => {
     }
 
     // If we're clicking a Reply context, center the referenced message in view
-    if (e.target.classList.contains('msg-reply') || e.target.parentElement?.classList.contains('msg-reply')  || e.target.parentElement?.parentElement?.classList.contains('msg-reply')) {
-        // Note: The `substring(2)` removes the `r-` prefix
-        const strID = e.target.id || e.target.parentElement?.id || e.target.parentElement.parentElement.id;
-        const targetMsgId = strID.substring(2);
-        const domMsg = document.getElementById(targetMsgId);
-        
-        if (domMsg) {
-            // Message is already rendered, just scroll to it
-            centerInView(domMsg);
-
-            // Run an animation to bring the user's eye to the message
-            const pContainer = domMsg.querySelector('p');
-            if (!pContainer.classList.contains('no-background')) {
-                domMsg.classList.add('highlight-animation');
-                setTimeout(() => domMsg.classList.remove('highlight-animation'), 1500);
+    {
+        const replyEl = e.target.closest('.dmsg-reply');
+        if (replyEl) {
+            // The `substring(2)` removes the `r-` prefix
+            const targetMsgId = replyEl.id.substring(2);
+            const domMsg = document.getElementById(targetMsgId);
+            if (domMsg) {
+                centerInView(domMsg);
+                applyHighlight(domMsg, 'jumped');
+            } else {
+                // Message not rendered yet, load it and surrounding messages
+                loadAndScrollToMessage(targetMsgId);
             }
-        } else {
-            // Message not rendered yet, load it and surrounding messages
-            loadAndScrollToMessage(targetMsgId);
+            return;
         }
-        return;
     }
 
     // If we're clicking a Metadata Preview, open it's URL, if one is attached
-    if (e.target.classList.contains("msg-preview-container") || e.target.parentElement?.classList.contains("msg-preview-container")) {
-        const strURL = e.target.getAttribute('url') || e.target.parentElement.getAttribute('url');
-        if (strURL) openUrl(strURL);
-        return;
+    {
+        const previewEl = e.target.closest('.dmsg-preview');
+        if (previewEl) {
+            const strURL = previewEl.getAttribute('url');
+            if (strURL) openUrl(strURL);
+            return;
+        }
     }
 
     // If we're clicking a Payment URI, open it's URL
@@ -11947,7 +10623,7 @@ document.addEventListener('click', (e) => {
     // Close edit history popup when clicking outside of it
     const editHistoryPopup = document.getElementById('edit-history-popup');
     if (editHistoryPopup && editHistoryPopup.style.display !== 'none') {
-        if (!editHistoryPopup.contains(e.target) && !e.target.classList.contains('msg-edited-indicator')) {
+        if (!editHistoryPopup.contains(e.target) && !e.target.classList.contains('dmsg-edited')) {
             hideEditHistory();
         }
     }

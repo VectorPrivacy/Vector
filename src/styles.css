@@ -1731,7 +1731,7 @@ html, body {
 
 .chat-messages > div:last-child {
   /* The last message should have extra margin from the bottom */
-  margin-bottom: 10px;
+  margin-bottom: 20px;
 }
 
 /* Chat background toggle */
@@ -1741,64 +1741,22 @@ body.chat-bg-disabled .chat-messages::before {
 
 .msg-inline-timestamp {
   width: 100%;
-  text-align: center;
   font-size: 12px;
   opacity: 0.7;
   margin: 5px 0 0px 0;
-}
-
-.msg-me {
   display: flex;
-  align-self: flex-end;
-  max-width: 100%;
+  align-items: center;
+  justify-content: center;
 }
-
-.avatar {
-  object-fit: cover;
-  object-position: center;
-  height: 50px;
-  width: 50px;
-  min-width: 50px;
-  min-height: 50px;
-  max-width: 50px;
-  max-height: 50px;
-  border-radius: 100%;
-  margin-top: 15px;
-  margin-right: 10px;
-  -webkit-user-select: none;
-  user-select: none;
-  -webkit-user-drag: none;
+.msg-inline-timestamp::before,
+.msg-inline-timestamp::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.1);
 }
-
-.msg-me p {
-  text-align: left;
-  max-width: 500px;
-  border-radius: 15px;
-  border-style: solid;
-  border-width: 1px;
-  padding: 12px 15px;
-  margin-top: 0;
-  margin-bottom: 0;
-  border-bottom-right-radius: 0px;
-  word-break: break-word;
-  font-weight: 100;
-  overflow: hidden;
-}
-
-.msg-them p {
-  text-align: left;
-  max-width: 500px;
-  border-radius: 15px;
-  border-style: solid;
-  border-width: 1px;
-  padding: 12px 15px;
-  margin-top: 0;
-  margin-bottom: 6px;
-  border-bottom-left-radius: 0px;
-  word-break: break-word;
-  font-weight: 100;
-  overflow: hidden;
-}
+.msg-inline-timestamp::before { margin-right: 12px; }
+.msg-inline-timestamp::after  { margin-left: 12px; }
 
 .file-ext-badge {
   position: absolute;
@@ -1888,47 +1846,7 @@ body.chat-bg-disabled .chat-messages::before {
   animation: inline-image-spin 2s linear infinite;
 }
 
-.msg-them .avatar {
-  margin-top: 0;
-  height: 35px;
-  width: 35px;
-  min-height: 35px;
-  min-width: 35px;
-  max-height: 35px;
-  max-width: 35px;
-}
 
-.msg-username-label {
-  position: absolute;
-  top: -5px;
-  font-size: 15px;
-  color: rgba(255, 255, 255, 1);
-  text-align: center;
-  max-width: 200px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-weight: 600;
-  cursor: pointer;
-  left: 45px;
-}
-
-.msg-username-label:hover {
-  color: rgba(255, 255, 255, 0.9);
-}
-
-.msg-username-label .emoji {
-  width: 14px;
-  height: 14px;
-  vertical-align: -2px;
-}
-
-.msg-reply {
-  display: block;
-  padding-left: 10px;
-  margin-bottom: 5px;
-  line-height: 20px;
-}
 
 .msg-payment {
   display: flex;
@@ -1951,19 +1869,10 @@ body.chat-bg-disabled .chat-messages::before {
   background-color: rgba(0, 0, 0, 0.4);
 }
 
-.msg-me p .msg-payment h2,
-.msg-them p .msg-payment h2 {
-  margin: 0;
-  margin-top: auto;
-  margin-bottom: auto;
-  line-height: normal;
-}
 
-/* Nostr Profile Preview (for shared npubs and profile links) */
-/* Browsers hoist this block element out of the parent <p> tag, so it sits
-   directly inside .msg-me/.msg-them with no inherited width constraints from the bubble.
-   We must cap width explicitly using viewport units to prevent overflow.
-   The 160px accounts for chat padding, scrollbar, and message alignment margins. */
+/* Nostr Profile Preview (for shared npubs and profile links).
+   Width is explicitly capped using viewport units to prevent overflow on
+   narrow chat widths. The 160px reserves space for chat padding + scrollbar. */
 .msg-profile-preview {
   display: flex;
   align-items: center;
@@ -2063,9 +1972,6 @@ body.chat-bg-disabled .chat-messages::before {
 }
 
 /* The `highlightMessage` animation is defined in `/themes/*` */
-.highlight-animation p {
-  animation: highlightMessage 1.5s ease-out forwards;
-}
 
 /* Used for "New" elements, like new incoming messages, or other new elements added to a list */
 .new-anim {
@@ -2100,240 +2006,12 @@ body.chat-bg-disabled .chat-messages::before {
   }
 }
 
-.emoji-only {
-  /* Typically I recommend against !important, but this is the only style in `msg-*` we're force-overriding */
-  background: none !important;
-  border-color: transparent !important;
-  padding-left: 0;
-  margin-top: 25px;
-  margin-bottom: 25px;
-}
-
-.emoji-only-content .emoji {
-  width: 75px !important;
-  height: 75px !important;
-}
-
-.msg-me .emoji {
-  width: 17px;
-  height: 17px;
-  vertical-align: -3px;
-}
-
-.msg-me .reaction .emoji {
-  margin-left: 15px;
-}
-
-.msg-them .emoji {
-  width: 17px;
-  height: 17px;
-  vertical-align: -3px;
-}
-
-/* In-message markdown headers (exclude payment bubbles) */
-.msg-me p h1,
-.msg-me p h2,
-.msg-me p h3,
-.msg-me p h4,
-.msg-me p h5,
-.msg-me p h6,
-.msg-them p h1,
-.msg-them p h2,
-.msg-them p h3,
-.msg-them p h4,
-.msg-them p h5,
-.msg-them p h6 {
-  margin: 0;
-  line-height: 1;
-}
-
-/* Header emojis - scale with header text size using em units */
-.msg-me p h1 .emoji,
-.msg-me p h2 .emoji,
-.msg-me p h3 .emoji,
-.msg-me p h4 .emoji,
-.msg-me p h5 .emoji,
-.msg-me p h6 .emoji,
-.msg-them p h1 .emoji,
-.msg-them p h2 .emoji,
-.msg-them p h3 .emoji,
-.msg-them p h4 .emoji,
-.msg-them p h5 .emoji,
-.msg-them p h6 .emoji {
-  width: 1em;
-  height: 1em;
-  vertical-align: -0.15em;
-}
-
-.no-background {
-  background: none !important;
-  border-color: transparent !important;
-  padding-left: 0 !important;
-  padding-right: 0 !important;
-  padding-top: 0 !important;
-  padding-bottom: 0 !important;
-}
-
-.msg-them {
-  align-self: flex-start;
-  display: flex;
-  max-width: 100%;
-}
-
-.msg-preview-container {
-  border-top: solid;
-  border-width: 1px;
-  margin-top: 10px;
-  border-radius: 14px;
-  border-top-left-radius: 0;
-  border-top-right-radius: 0;
-  padding: 5px;
-}
-
-.msg-preview-container span {
-  padding: 5px;
-  font-weight: 400;
-  display: block;
-}
-
-.msg-preview-description {
-  opacity: 0.8;
-  line-height: 1.4;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  background-color: rgba(0, 0, 0, 0.65);
-  padding: 7px 10px !important;
-  border-radius: 0 0 14px 14px;
-}
-
-.msg-preview-img {
-  width: 100%;
-  height: auto;
-  border-radius: 15px;
-  margin: 0;
-  border-top-left-radius: 0;
-  border-top-right-radius: 0;
-}
-
 .favicon {
   height: 15px;
   width: auto;
   margin-right: 8px;
   position: relative;
   top: 1px;
-}
-
-.msg-extras {
-  display: flex;
-  flex-direction: column;
-}
-
-.msg-extras span {
-  position: relative;
-  cursor: pointer;
-  height: 20px;
-  width: 20px;
-  margin: 3px;
-}
-
-.msg-extras .hideable {
-  opacity: 0;
-  transition: opacity 0.1s;
-}
-
-.add-reaction {
-  font-size: 25px;
-}
-
-.reaction {
-  cursor: pointer;
-  position: relative;
-  height: 18px !important;
-  width: max-content !important;
-  display: flex;
-  line-height: normal;
-}
-
-.reaction[data-reacted] {
-  cursor: default;
-}
-
-.reaction .emoji {
-  margin-right: 5px;
-  width: 20px !important;
-  height: 20px !important;
-}
-
-.reply-btn {
-  font-size: 25px;
-}
-
-.edit-btn {
-  font-size: 18px;
-  margin-left: 2px;
-}
-
-/* Edited message indicator */
-.msg-edited-indicator {
-  display: inline;
-  font-size: 10px;
-  color: rgba(255, 255, 255, 0.35);
-  font-style: italic;
-  margin-left: 6px;
-}
-
-.msg-edited-indicator.btn:hover {
-  color: rgba(255, 255, 255, 0.7);
-  cursor: pointer;
-}
-
-/* Message Wrapper (for outgoing messages with status) */
-.msg-wrapper {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  margin-bottom: 6px;
-}
-
-/* Message Status Indicator (outgoing messages) */
-.msg-status {
-  font-size: 11px;
-  color: #474747;
-  margin-top: 2px;
-  margin-right: 2px;
-  -webkit-user-select: none;
-  user-select: none;
-  cursor: default;
-  pointer-events: none;
-}
-
-.msg-status .icon {
-  display: inline-block;
-  position: static;
-  width: 12px;
-  height: 12px;
-  background-color: #474747;
-  vertical-align: -2px;
-  margin-left: 2px;
-}
-
-.msg-status-failed {
-  color: #ff6464;
-}
-
-.msg-failed-action {
-  cursor: pointer;
-  text-decoration: underline;
-  opacity: 0.85;
-  pointer-events: auto;
-}
-
-.msg-failed-action:hover {
-  opacity: 1;
-}
-
-.msg-status-hidden {
-  display: none;
 }
 
 /* Reaction Details Popup (long-press on reaction badge) */
@@ -2485,19 +2163,13 @@ body.chat-bg-disabled .chat-messages::before {
   margin-top: 2px;
 }
 
-.msg-them:hover .msg-extras .hideable {
-  opacity: 0.75;
-}
-
-.msg-me:hover .msg-extras .hideable {
-  opacity: 0.75;
-}
 
 #chat-box {
   width: 100%;
   flex-shrink: 0;
   padding-top: 5px;
   padding-bottom: 5px;
+  position: relative;  /* anchor for #msg-bottom-fade hanging above */
 }
 
 .chat-input-container {
@@ -2635,6 +2307,20 @@ body.chat-bg-disabled .chat-messages::before {
   transform: translateX(-50%) translateY(0);
   pointer-events: auto;
   opacity: 1;
+}
+
+/* Wide screens: anchor the picker to the right edge of the viewport, Discord-style.
+ * Narrow screens stay centered (the centered position above) so the panel still
+ * fits comfortably without crowding the input. */
+@media (min-width: 700px) {
+  .emoji-picker {
+    left: auto;
+    right: 16px;
+    transform: translateY(100%);
+  }
+  .emoji-picker.visible {
+    transform: translateY(0);
+  }
 }
 
 .emoji-picker-message-type {
@@ -3593,6 +3279,21 @@ audio {
   right: 0;
   height: 40px;
   background: linear-gradient(#03030380, #03030300 20%);
+  pointer-events: none;
+}
+
+/* Mirror of .fadeout-top-msgs for the bottom of the chat — same softness,
+ * gradient direction reversed (clear at top, fades into bg at bottom).
+ * Anchored to its parent's TOP edge via `bottom: 100%`, hanging upward over
+ * the last messages — so it tracks chat-box height even when the input grows. */
+.fadeout-bottom-msgs {
+  position: absolute;
+  z-index: 100;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  height: 40px;
+  background: linear-gradient(#03030300 80%, #03030380);
   pointer-events: none;
 }
 
@@ -8686,7 +8387,7 @@ hr {
   transform: scale(1.02);
 }
 
-/* PIVX Payment Message Bubble - matches .msg-payment style */
+/* PIVX Payment Message Card - matches .msg-payment style */
 .msg-pivx-payment {
   display: flex;
   align-items: center;
@@ -9402,13 +9103,15 @@ hr {
   border-radius: 50%;
   z-index: 3;
 }
-/* Cancel button for image/video uploads — centered over the spinner in the overlay */
+/* Cancel button for image/video uploads — sized to fill the spinner's donut
+ * hole exactly. Spinner is 48x48 with a ~4px ring (mask leaves an inner 40px
+ * hole), so a 40x40 inner button kisses the ring without covering it. */
 .attachment-progress-overlay > .upload-cancel-btn {
   position: absolute;
   inset: 0;
   margin: auto;
-  width: 48px;
-  height: 48px;
+  width: 40px;
+  height: 40px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -10755,3 +10458,466 @@ hr {
   white-space: nowrap;
   flex: 1;
 }
+
+/* ============================================================================
+ * Discord-style message rows (.dmsg-*)
+ *
+ * Row skeleton: avatar gutter, author/time header, content slot, reactions row.
+ * Streak collapse (data-streak="continuation"), floating hover toolbar, and
+ * attribute-driven highlight states (data-pinged / data-replying-to / data-jumped).
+ *
+ * Plan: ~/.claude/plans/discord-style-message-redesign.md (§5)
+ * ============================================================================ */
+
+.chat-messages {
+  /* Scoped tokens — override via theme to retune. */
+  --dmsg-row-padding-y: 0px;
+  --dmsg-row-padding-x: 2px;
+  --dmsg-streak-gap: 14px;
+  --dmsg-continuation-gap: 0px;
+  --dmsg-gutter-width: 56px;
+  --dmsg-avatar-size: 40px;
+  --dmsg-author-color: #ffffff;
+  --dmsg-text-color: rgba(255, 255, 255, 0.92);
+  --dmsg-time-color: rgba(255, 255, 255, 0.4);
+  --dmsg-pending-opacity: 0.6;
+  --dmsg-hover-bg: rgba(255, 255, 255, 0.05);
+  --dmsg-pinged-bg: color-mix(in srgb, var(--icon-color-primary, #59fcb3) 13%, transparent);
+  --dmsg-pinged-border: var(--icon-color-primary, #59fcb3);
+  --dmsg-replying-bg: rgba(255, 255, 255, 0.09);
+  --dmsg-replying-border: rgba(255, 255, 255, 0.65);
+}
+
+.dmsg {
+  display: grid;
+  grid-template-columns: var(--dmsg-gutter-width) 1fr;
+  align-items: start;
+  /* Extend the row's BOX past the .chat-messages 10px padding on each side so
+   * the hover/pinged/replying/jumped highlight fills the chat panel wall-to-wall.
+   * Padding compensates so the content lands at the original comfortable inset. */
+  width: calc(100% + 20px);
+  max-width: calc(100% + 20px);
+  margin-left: -10px;
+  margin-right: -10px;
+  padding-top: var(--dmsg-row-padding-y);
+  padding-bottom: var(--dmsg-row-padding-y);
+  padding-left: calc(10px + var(--dmsg-row-padding-x));
+  padding-right: calc(10px + var(--dmsg-row-padding-x));
+  border-left: 3px solid transparent;
+  background: transparent;
+  transition: background-color 0.08s ease, border-left-color 0.08s ease;
+  box-sizing: border-box;
+  text-align: left;
+  font-family: Rubik, sans-serif;
+}
+
+.dmsg[data-streak="first"]        { margin-top: var(--dmsg-streak-gap); }
+.dmsg[data-streak="continuation"] { margin-top: var(--dmsg-continuation-gap); }
+.dmsg:first-child                 { margin-top: 75px; }
+.dmsg:last-child                  { margin-bottom: 10px; }
+/* Day separators (<p>) can also occupy the first-child slot post-M6. Without
+ * this, the chat header would overlap the first message because nothing in
+ * the legacy `.chat-messages > div:first-child` rule matches a <p>. */
+.chat-messages > .msg-inline-timestamp:first-child { margin-top: 75px; }
+
+.dmsg:hover                            { background: var(--dmsg-hover-bg); }
+.dmsg[data-pinged="true"]              { background: var(--dmsg-pinged-bg); border-left-color: var(--dmsg-pinged-border); }
+.dmsg[data-replying-to="true"]         { background: var(--dmsg-replying-bg); border-left-color: var(--dmsg-replying-border); }
+.dmsg[data-status="pending"] .dmsg-content { opacity: var(--dmsg-pending-opacity); }
+/* Ephemeral flash when scrolling to a message (e.g., clicking a reply context).
+ * Reuses the per-theme `highlightMessage` keyframes (themes/<name>/dark.css).
+ * No `forwards` fill mode — without it, animation reverts to base CSS at end,
+ * letting `[data-pinged="true"]` etc. backgrounds reassert immediately after
+ * the flash instead of being stuck transparent until the data-jumped attribute
+ * is removed. */
+.dmsg[data-jumped="true"] {
+  animation: highlightMessage 1.5s ease-out;
+}
+
+/* Gutter: avatar (first) + hover-time (continuation, absolutely positioned). */
+.dmsg-gutter {
+  position: relative;       /* anchor for .dmsg-time-hover */
+  width: var(--dmsg-gutter-width);
+  padding-right: 16px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: flex-start;
+}
+
+.dmsg-avatar {
+  width: var(--dmsg-avatar-size) !important;
+  height: var(--dmsg-avatar-size) !important;
+  min-width: var(--dmsg-avatar-size) !important;
+  min-height: var(--dmsg-avatar-size) !important;
+  border-radius: 50%;
+  margin-top: 2px !important;
+  cursor: pointer;
+  object-fit: cover;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
+}
+
+/* Absolute so showing/hiding it does NOT push the row's height.
+ * Line-height matches the body content's first line (15px × 1.4 = 21px) so
+ * the time vertically aligns with the message text. Right edge stops at the
+ * gutter's padding-right (16px), so the centered text sits directly under
+ * the avatar column. */
+.dmsg-time-hover {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 16px;
+  font-size: 10px;
+  line-height: 21px;
+  color: var(--dmsg-time-color);
+  text-align: center;
+  white-space: nowrap;
+  user-select: none;
+  -webkit-user-select: none;
+  pointer-events: none;
+  visibility: hidden;
+}
+
+/* Streak continuation: hide avatar+header; reveal hover-time only on row hover */
+.dmsg[data-streak="continuation"] .dmsg-avatar,
+.dmsg[data-streak="continuation"] .dmsg-header { display: none; }
+.dmsg[data-streak="continuation"]:hover .dmsg-time-hover { visibility: visible; }
+
+/* Body: header + content + reactions */
+.dmsg-body {
+  min-width: 0;
+  max-width: 100%;
+  padding-right: 12px;  /* breathing room between content and the row's right edge / highlight bg */
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+}
+
+.dmsg-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: -2px;
+  flex-wrap: wrap;
+}
+
+.dmsg-author {
+  font-weight: 700;
+  font-size: 15px;
+  color: var(--dmsg-author-color);
+  cursor: pointer;
+  line-height: 1.3;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.dmsg-author:hover { text-decoration: underline; }
+
+.dmsg-author-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 5px;
+  border-radius: 3px;
+  line-height: 1;
+  vertical-align: middle;
+}
+.dmsg-author-badge.admin {
+  background: var(--icon-color-primary, #59fcb3);
+  color: #000;
+}
+
+.dmsg-time {
+  font-size: 12px;
+  color: var(--dmsg-time-color);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Content slot */
+.dmsg-content {
+  color: var(--dmsg-text-color);
+  line-height: 1.4;
+  font-size: 15px;
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+}
+
+.dmsg-text {
+  display: inline;
+}
+.dmsg-text p:first-child { margin-top: 0; }
+.dmsg-text p:last-child  { margin-bottom: 0; }
+.dmsg-text a             { color: var(--icon-color-primary, #59fcb3); }
+
+/* Inline emoji baseline (header authors, message text, reply previews, etc.).
+ * Without this, twemoji SVGs render at their natural intrinsic size — which is
+ * many hundreds of pixels by default — the .dmsg shell needs an explicit cap. */
+.dmsg .emoji {
+  width: 17px;
+  height: 17px;
+  vertical-align: -3px;
+  display: inline-block;
+}
+
+/* Emoji-only: keep larger glyphs but smaller than legacy 75px (locked at 50px).
+ * inline-block (rather than block) so the inline `Sent ✓` indicator can sit
+ * immediately to the right of the emoji rather than stretching far across to
+ * the body edge. Higher specificity + !important on .emoji wins over baseline. */
+.dmsg-text.dmsg-emoji-only          { display: inline-block; padding: 4px 0; vertical-align: bottom; }
+.dmsg-text.dmsg-emoji-only .emoji   { width: 50px !important; height: 50px !important; vertical-align: middle; }
+/* Sent indicator next to an emoji-only message — anchor to the emoji's floor
+ * (line box bottom) rather than text baseline so it visually rests at the
+ * bottom of the big glyph instead of floating up near its middle. */
+.dmsg-text.dmsg-emoji-only + .dmsg-status { vertical-align: bottom; padding-bottom: 4px; }
+
+/* Attachments — wrapper just provides vertical rhythm. Inner elements style themselves. */
+.dmsg-attachments {
+  display: block;
+  margin-top: 4px;
+}
+.dmsg-attachments > * { margin-top: 4px; max-width: 100%; }
+.dmsg-attachments > *:first-child { margin-top: 0; }
+.dmsg-attachments img,
+.dmsg-attachments video {
+  /* min() caps at whichever is smaller — the parent width OR 450px — so wide
+   * images shrink on narrow viewports AND get capped at 450px on wide ones.
+   * !important overrides the legacy inline `style.maxWidth='100%'` /
+   * `style.width='100%'` set in message-row.js (which alone leaves images
+   * stuck at the natural width, blowing past parent on intrinsic-sized imgs). */
+  max-width: min(100%, 450px) !important;
+  max-height: 350px !important;
+  height: auto;
+}
+
+/* Reply context inside a row — left-bordered quote block.
+ * user-select: none — the quote is a UI affordance, not real content; users
+ * shouldn't accidentally select the truncated preview when trying to copy
+ * the actual message body. */
+.dmsg-reply {
+  display: block;
+  padding: 4px 0 4px 10px;
+  margin-bottom: 6px;
+  margin-top: 0;
+  border-left: 2px solid rgba(255, 255, 255, 0.25);
+  line-height: 1.3;
+  font-size: 13px;
+  background: transparent;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.dmsg-reply:hover { border-left-color: rgba(255, 255, 255, 0.5); }
+
+/* Link preview card. */
+.dmsg-preview {
+  display: block;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-left-color: var(--icon-color-primary, #59fcb3);  /* uniform 1px, themed left only */
+  background: rgba(0, 0, 0, 0.3);
+  max-width: 480px;
+}
+.dmsg-preview:hover { opacity: 1; }              /* override global .btn:hover dim */
+.dmsg-attachments video:hover { opacity: 1; }    /* videos shouldn't dim on hover either */
+.dmsg-preview span {
+  padding: 0;
+  font-weight: 400;
+  display: block;
+}
+.dmsg-preview .favicon {
+  height: 15px;
+  width: auto;
+  margin-right: 8px;
+  position: relative;
+  top: 1px;
+}
+.dmsg-preview-img,
+.dmsg-preview img:not(.favicon):not(.emoji) {
+  width: 100%;
+  height: auto;
+  border-radius: 4px;
+  margin-top: 6px;
+}
+.dmsg-preview-description {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-top: 4px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.7);
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  line-height: 1.4;
+}
+
+/* Edited indicator */
+.dmsg-edited {
+  font-size: 10px;
+  color: var(--dmsg-time-color);
+  margin-left: 6px;
+  vertical-align: baseline;
+  user-select: none;
+}
+.dmsg-edited.btn:hover { color: rgba(255, 255, 255, 0.7); cursor: pointer; }
+
+/* Status indicator (own messages only).
+ * Default: inline next to the message text (Telegram-style). For messages with
+ * a block-level antecedent (attachment, link preview, npub preview, payment),
+ * the status flips to its own line below them, right-aligned. */
+.dmsg-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  font-size: 11px;
+  color: #6a6a6a;
+  user-select: none;
+  -webkit-user-select: none;
+  vertical-align: baseline;
+}
+.dmsg-attachments ~ .dmsg-status,
+.dmsg-preview ~ .dmsg-status,
+.msg-profile-preview ~ .dmsg-status,
+.msg-pivx-payment ~ .dmsg-status {
+  display: block;
+  text-align: right;
+  margin-left: 0;
+  margin-top: 2px;
+}
+.dmsg-status .icon {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  background-color: #6a6a6a;
+  vertical-align: middle;
+  position: static;
+}
+.dmsg-status-failed { color: #ff6464; }
+.dmsg-status-failed .icon { background-color: #ff6464; }
+.dmsg-status-hidden { display: none !important; }  /* beat the block-right sibling rules above */
+.dmsg-failed-action {
+  cursor: pointer;
+  text-decoration: underline;
+  opacity: 0.85;
+  pointer-events: auto;
+}
+.dmsg-failed-action:hover { opacity: 1; }
+
+/* Reactions row */
+.dmsg-reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+  margin-bottom: 4px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.dmsg-reactions .reaction {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 12px;
+  line-height: 1;
+}
+.dmsg-reactions .reaction[data-reacted="true"] {
+  background: color-mix(in srgb, var(--icon-color-primary, #59fcb3) 18%, transparent);
+  border-color: var(--icon-color-primary, #59fcb3);
+  cursor: default;
+}
+.dmsg-reactions .reaction .emoji {
+  width: 16px !important;
+  height: 16px !important;
+  margin: 0 !important;
+  vertical-align: middle;
+}
+/* Inline "add reaction" shortcut chip (Discord-style + at end of reactions row). */
+.dmsg-reactions-add {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background-color: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+  line-height: 1;
+}
+.dmsg-reactions-add:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+.dmsg-reactions-add .icon {
+  width: 14px;
+  height: 14px;
+  display: inline-block;
+  position: static;
+  background-color: rgba(255, 255, 255, 0.55);
+  transition: background-color 0.12s ease;
+}
+.dmsg-reactions-add:hover .icon {
+  background-color: rgba(255, 255, 255, 0.9);
+}
+
+/* Mention pills inside a dmsg — preserve existing mention chip styling. */
+.dmsg-text .mention { background: rgba(255, 255, 255, 0.08); }
+
+/* Anchor for #dmsg-toolbar absolute positioning so it scrolls with content. */
+.chat-messages { position: relative; }
+
+/* Floating hover toolbar (singleton inside .chat-messages, position: absolute
+ * so it scrolls naturally with the messages — no per-frame JS reposition). */
+#dmsg-toolbar {
+  position: absolute;
+  z-index: 50;
+  display: flex;
+  gap: 2px;
+  padding: 4px;
+  background: var(--dmsg-toolbar-bg, #1a1a1a);
+  border: 1px solid var(--dmsg-toolbar-border, rgba(255, 255, 255, 0.08));
+  border-radius: 8px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+  user-select: none;
+}
+#dmsg-toolbar[hidden] { display: none; }
+.dmsg-toolbar-btn {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 0;
+  transition: background-color 0.1s ease;
+}
+.dmsg-toolbar-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+.dmsg-toolbar-btn[hidden] { display: none; }
+.dmsg-toolbar-btn .icon {
+  width: 20px;
+  height: 20px;
+  display: inline-block;
+  position: static;
+  background-color: rgba(255, 255, 255, 0.7);
+}
+.dmsg-toolbar-btn:hover .icon {
+  background-color: #fff;
+}
+

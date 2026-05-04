@@ -1252,18 +1252,6 @@ function replaceInlineImageIndicator(indicator, cachedPath) {
     link.replaceWith(imgContainer);
     indicator.remove();
 
-    // Check if message is now image-only (no other text)
-    const element = imgContainer.closest('.message-content, span');
-    if (element) {
-        const textContent = getTextContentWithoutImages(element);
-        if (!textContent.trim()) {
-            const pMessage = element.closest('p');
-            if (pMessage) {
-                pMessage.classList.add('no-background');
-                pMessage.style.overflow = 'visible';
-            }
-        }
-    }
 }
 
 /**
@@ -1343,7 +1331,6 @@ async function processInlineImages(element) {
 
     // Find all linkified URLs that point to images
     const links = element.querySelectorAll('a.linkified-url');
-    let processedImages = 0;
 
     for (const link of links) {
         const url = link.href;
@@ -1369,7 +1356,6 @@ async function processInlineImages(element) {
                 // Image was cached immediately (already in cache or just downloaded)
                 // Use the shared helper to replace indicator with image
                 replaceInlineImageIndicator(loadingIndicator, cachedPath);
-                processedImages++;
             }
             // If cachedPath is null, another download is in progress.
             // The inline_image_cached event will update ALL indicators when complete.
@@ -1377,27 +1363,6 @@ async function processInlineImages(element) {
             // If caching fails, remove indicator and leave the link as-is
             loadingIndicator.remove();
             console.warn('[InlineImages] Failed to cache image:', url, e);
-        }
-    }
-
-    // If we processed images, check if the message is image-only (no other text)
-    if (processedImages > 0) {
-        // Get the text content excluding the image containers
-        const textContent = getTextContentWithoutImages(element);
-
-        if (!textContent.trim()) {
-            // Message is image-only - remove bubble styling like attachments
-            const pMessage = element.closest('p');
-            if (pMessage) {
-                pMessage.classList.add('no-background');
-                pMessage.style.overflow = 'visible';
-
-                // Float based on whether it's our message or theirs
-                const msgContainer = pMessage.closest('.msg-mine, .msg-them');
-                if (msgContainer) {
-                    pMessage.style.float = msgContainer.classList.contains('msg-mine') ? 'right' : 'left';
-                }
-            }
         }
     }
 }

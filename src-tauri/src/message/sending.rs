@@ -217,14 +217,74 @@ pub async fn cancel_upload(pending_id: String) -> Result<(), String> {
         state.remove_message(&pending_id)
     };
 
-    // Emit message_removed event so frontend removes the DOM element
-    if let Some((chat_id, _msg)) = removed {
+    // Emit message_removed event so frontend removes the DOM element first.
+    // Frontend image elements with `src=convertFileSrc(path)` hold a WebView
+    // handle to the on-disk file — on Windows that's exclusive, so deleting
+    // before DOM teardown completes raises ERROR_SHARING_VIOLATION. We emit
+    // the event NOW (frontend starts its 300ms fade + remove) and defer the
+    // file deletion below.
+    if let Some((chat_id, msg)) = removed {
         if let Some(handle) = TAURI_APP.get() {
             handle.emit("message_removed", serde_json::json!({
                 "id": &pending_id,
                 "chat_id": &chat_id,
                 "reason": "cancelled"
             })).ok();
+        }
+
+        // Deferred file cleanup: the upload thread doesn't keep the file open
+        // (it uploads from in-memory bytes), but the WebView DOES via image
+        // src. Spawn a task that:
+        //   1. Sleeps 500ms — the frontend's message_removed handler does a
+        //      ~300ms fade-out + DOM remove, which releases the WebView's
+        //      file handle.
+        //   2. Tries to remove the file. On Windows, retries with backoff for
+        //      ERROR_SHARING_VIOLATION in case the WebView is slow to release.
+        //   3. Scopes deletion to the in-app download dir so user-picked files
+        //      elsewhere on disk are never touched.
+        let attachments_to_delete: Vec<String> = msg.attachments
+            .iter()
+            .map(|a| a.path.clone())
+            .filter(|p| !p.is_empty())
+            .collect();
+
+        if !attachments_to_delete.is_empty() {
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+                let download_dir = vector_core::db::get_download_dir();
+                let _ = std::fs::create_dir_all(&download_dir);
+                let canonical_dl_dir = match std::fs::canonicalize(&download_dir) {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+
+                for path in attachments_to_delete {
+                    let canonical_path = match std::fs::canonicalize(std::path::Path::new(&path)) {
+                        Ok(p) => p,
+                        Err(_) => continue, // already gone, unreachable, or symlink-resolved out of bounds
+                    };
+                    if !canonical_path.starts_with(&canonical_dl_dir) {
+                        continue; // out of scope: user-picked file from outside our dir
+                    }
+
+                    #[cfg(windows)]
+                    {
+                        // Retry on ERROR_SHARING_VIOLATION in case the WebView
+                        // hasn't released the handle yet. Total budget ~2.25s.
+                        if std::fs::remove_file(&canonical_path).is_err() {
+                            for delay_ms in [50u64, 200, 500, 1500] {
+                                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                                if std::fs::remove_file(&canonical_path).is_ok() { break; }
+                            }
+                        }
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        let _ = std::fs::remove_file(&canonical_path);
+                    }
+                }
+            });
         }
     }
 

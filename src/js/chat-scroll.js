@@ -407,16 +407,10 @@ async function loadAndScrollToMessage(targetMsgId) {
     // Wait for all media (images, videos) to load before scrolling
     await waitForMediaToLoad();
 
-    // Now scroll to the target message
+    // Now scroll to the target message and flash to bring the user's eye to it.
     const domMsg = document.getElementById(targetMsgId);
     if (domMsg) {
         centerInView(domMsg);
-
-        // Run an animation to bring the user's eye to the message
-        const pContainer = domMsg.querySelector('p');
-        if (pContainer && !pContainer.classList.contains('no-background')) {
-            domMsg.classList.add('highlight-animation');
-            setTimeout(() => domMsg.classList.remove('highlight-animation'), 1500);
-        }
+        applyHighlight(domMsg, 'jumped');
     }
 }

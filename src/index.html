@@ -24,6 +24,11 @@
     <script src="/js/file-preview.js" defer></script>
     <script src="/js/miniapps.js" defer></script>
     <script src="/js/marketplace.js" defer></script>
+    <!-- Discord-style chat message renderer -->
+    <script src="/js/render/chat/message-streak.js" defer></script>
+    <script src="/js/render/chat/message-states.js" defer></script>
+    <script src="/js/render/chat/message-toolbar.js" defer></script>
+    <script src="/js/render/chat/message-row.js" defer></script>
     <!-- Soft-dependents (not required at app boot, thus can load beyond initial DOMContentLoaded) -->
     <script src="/js/mentions.js"></script>
     <script src="/js/emoji-shortcodes.js"></script>
@@ -742,6 +747,7 @@
         <button id="chat-scroll-return" class="corner-float scroll-return-btn"><span class="icon icon-chevron-down"></span></button>
 
         <div class="row input-box" id="chat-box">
+          <div id="msg-bottom-fade" class="fadeout-bottom-msgs"></div>
           <div class="row chat-input-container">
             <button id="chat-input-file"><span class="icon icon-plus"></span></button>
             <input type="file" id="chat-input-file-hidden" style="display: none;" accept="*/*">

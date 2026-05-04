@@ -146,7 +146,14 @@ pub async fn login(mut import_key: String) -> Result<LoginResult, String> {
         .opts(ClientOptions::new())
         .monitor(Monitor::new(1024))
         .build();
-    NOSTR_CLIENT.set(client).unwrap();
+    // OnceLock can race with the standalone background-sync path on Android,
+    // which sets NOSTR_CLIENT during boot before the Activity calls a login
+    // command. The early-return guard above catches the common case, but a
+    // concurrent set between guard and here is possible. Drop our just-built
+    // client and use whichever instance won — they all share the same signer.
+    if NOSTR_CLIENT.set(client).is_err() {
+        eprintln!("[Login] NOSTR_CLIENT was set concurrently; reusing existing instance.");
+    }
 
     // Add our profile (at least, the npub of it) to our state
     let npub = public_key.to_bech32().unwrap();
@@ -272,7 +279,14 @@ pub async fn create_account() -> Result<LoginResult, String> {
         .opts(ClientOptions::new())
         .monitor(Monitor::new(1024))
         .build();
-    NOSTR_CLIENT.set(client).unwrap();
+    // OnceLock can race with the standalone background-sync path on Android,
+    // which sets NOSTR_CLIENT during boot before the Activity calls a login
+    // command. The early-return guard above catches the common case, but a
+    // concurrent set between guard and here is possible. Drop our just-built
+    // client and use whichever instance won — they all share the same signer.
+    if NOSTR_CLIENT.set(client).is_err() {
+        eprintln!("[Login] NOSTR_CLIENT was set concurrently; reusing existing instance.");
+    }
 
     // Add our profile (at least, the npub of it) to our state
     let npub = public_key.to_bech32().map_err(|e| e.to_string())?;
@@ -528,7 +542,14 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
         .opts(ClientOptions::new())
         .monitor(Monitor::new(1024))
         .build();
-    NOSTR_CLIENT.set(client).unwrap();
+    // OnceLock can race with the standalone background-sync path on Android,
+    // which sets NOSTR_CLIENT during boot before the Activity calls a login
+    // command. The early-return guard above catches the common case, but a
+    // concurrent set between guard and here is possible. Drop our just-built
+    // client and use whichever instance won — they all share the same signer.
+    if NOSTR_CLIENT.set(client).is_err() {
+        eprintln!("[Login] NOSTR_CLIENT was set concurrently; reusing existing instance.");
+    }
 
     let npub = public_key.to_bech32().map_err(|e| e.to_string())?;
     let mut profile = Profile::new();
