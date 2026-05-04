@@ -125,6 +125,25 @@ function _populateMiniProfile(popup, npub, profile) {
     }
     popup.appendChild(avatarWrap);
 
+    // Status pill — Nostr kind 30315 user-status event. Positioned absolutely in
+    // the banner area, to the right of the avatar (CSS handles placement). The
+    // `.title` is the user-visible text — bare profile.status is the {title,
+    // purpose, url} object and would stringify to "[object Object]".
+    const statusText = (profile?.status?.title || '').toString().trim();
+    if (statusText) {
+        const status = document.createElement('div');
+        status.className = 'mini-profile-status';
+        const dot = document.createElement('span');
+        dot.className = 'mini-profile-status-dot';
+        status.appendChild(dot);
+        const txt = document.createElement('span');
+        txt.className = 'mini-profile-status-text';
+        txt.textContent = statusText;
+        twemojify(txt);
+        status.appendChild(txt);
+        popup.appendChild(status);
+    }
+
     // Body
     const body = document.createElement('div');
     body.className = 'mini-profile-body';
@@ -156,25 +175,6 @@ function _populateMiniProfile(popup, npub, profile) {
         aboutEl.textContent = about;
         twemojify(aboutEl);
         body.appendChild(aboutEl);
-    }
-
-    // Status — a Nostr kind 30315 user-status event if we have one. The status
-    // field is an object `{ title, purpose, url }`; only `.title` is the
-    // user-visible text. Stringifying the bare object would produce
-    // "[object Object]", so fall through cleanly when there's no title.
-    const statusText = (profile?.status?.title || '').toString().trim();
-    if (statusText) {
-        const status = document.createElement('div');
-        status.className = 'mini-profile-status';
-        const dot = document.createElement('span');
-        dot.className = 'mini-profile-status-dot';
-        status.appendChild(dot);
-        const txt = document.createElement('span');
-        txt.className = 'mini-profile-status-text';
-        txt.textContent = statusText;
-        twemojify(txt);
-        status.appendChild(txt);
-        body.appendChild(status);
     }
 
     // Actions
