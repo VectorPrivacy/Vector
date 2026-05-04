@@ -7301,7 +7301,25 @@ domChatMessageInput.oninput = async () => {
         domSettingsPrivacyTorInfo.onclick = (e) => {
             e.preventDefault();
             e.stopPropagation();
-            popupConfirm('Route traffic through Tor', 'When enabled, Vector routes <b>all TCP traffic — Nostr relays, Blossom uploads, link previews, image fetches</b> — through the Tor network using an embedded Arti client.<br><br>This hides your IP address from relays and remote servers, at the cost of slower connections (Tor circuits add latency).<br><br>First-time bootstrap takes 5–15 seconds; subsequent boots are ~2 seconds from the cached consensus directory.', true);
+            // Trademark notice + non-endorsement disclaimer included per the
+            // Tor Project's trademark policy (https://www.torproject.org/about/trademark/).
+            popupConfirm(
+                'Route traffic through Tor',
+                'When enabled, Vector routes <b>all TCP traffic — Nostr relays, Blossom uploads, link previews, image fetches</b> — through the Tor network using an embedded Arti client.<br><br>'
+                + 'This hides your IP address from relays and remote servers, at the cost of slower connections (Tor circuits add latency).<br><br>'
+                + 'First-time bootstrap takes 5–15 seconds; subsequent boots are ~2 seconds from the cached consensus directory.<br><br>'
+                + '<small style="opacity: 0.6;">Tor and the Tor logo are trademarks of The Tor Project; all rights reserved. More information at <b>torproject.org</b>. Vector is not endorsed or sponsored by, or affiliated with, The Tor Project.</small>',
+                true
+            );
+        };
+    }
+    // Open torproject.org when the small attribution logo is clicked.
+    const torAttributionLink = document.getElementById('tor-attribution-link');
+    if (torAttributionLink) {
+        torAttributionLink.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            openUrl('https://torproject.org');
         };
     }
     domSettingsDisplayImageTypesInfo.onclick = (e) => {

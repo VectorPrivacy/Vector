@@ -4458,6 +4458,35 @@ select {
   margin: 0;
 }
 
+/* Trademark superscript on "Tor" — small, slightly raised, dimmed. */
+.tor-tm {
+  font-size: 0.55em;
+  vertical-align: super;
+  opacity: 0.6;
+  margin-left: 1px;
+}
+
+/* Attribution row: small unaltered Tor logo, links to torproject.org.
+   Per Tor Project trademark policy: logo is unmodified, displayed as
+   attribution, with ™ at first mention (in title) and full notice in
+   the (i) info popup. */
+.tor-attribution {
+  display: inline-block;
+  margin-top: 6px;
+  opacity: 0.85;
+  transition: opacity 0.2s ease;
+}
+.tor-attribution:hover {
+  opacity: 1;
+}
+.tor-attribution-logo {
+  height: 16px;
+  width: auto;
+  display: block;
+  -webkit-user-drag: none;
+  pointer-events: none;
+}
+
 /* Neon Green Gradient 3D Toggle */
 .toggle-container {
   display: flex;
