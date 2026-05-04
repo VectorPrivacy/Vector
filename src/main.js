@@ -170,6 +170,7 @@ const domSettingsWhisperAutoTranscribeInfo = document.getElementById('whisper-au
 const domSettingsPrivacyWebPreviewsInfo = document.getElementById('privacy-web-previews-info');
 const domSettingsPrivacyStripTrackingInfo = document.getElementById('privacy-strip-tracking-info');
 const domSettingsPrivacySendTypingInfo = document.getElementById('privacy-send-typing-info');
+const domSettingsPrivacyTorInfo = document.getElementById('privacy-tor-info');
 const domSettingsDisplayImageTypesInfo = document.getElementById('display-image-types-info');
 const domSettingsChatBgInfo = document.getElementById('chat-bg-info');
 const domSettingsNotifMuteInfo = document.getElementById('notif-mute-info');
@@ -7296,6 +7297,13 @@ domChatMessageInput.oninput = async () => {
         e.stopPropagation();
         popupConfirm('Send Typing Indicators', 'When enabled, Vector will <b>notify your contacts when you are typing</b> a message to them.<br><br>Disable this if you prefer to type without others knowing you are composing a message.', true);
     };
+    if (domSettingsPrivacyTorInfo) {
+        domSettingsPrivacyTorInfo.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            popupConfirm('Route traffic through Tor', 'When enabled, Vector routes <b>all TCP traffic — Nostr relays, Blossom uploads, link previews, image fetches</b> — through the Tor network using an embedded Arti client.<br><br>This hides your IP address from relays and remote servers, at the cost of slower connections (Tor circuits add latency).<br><br>First-time bootstrap takes 5–15 seconds; subsequent boots are ~2 seconds from the cached consensus directory.', true);
+        };
+    }
     domSettingsDisplayImageTypesInfo.onclick = (e) => {
         e.preventDefault();
         e.stopPropagation();

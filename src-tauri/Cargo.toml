@@ -10,10 +10,6 @@ edition = "2021"
 [features]
 default = ["whisper", "tor"]
 whisper = ["dep:whisper-rs"]
-# Embedded Tor (Arti). On by default — Vector ships with Tor support so users
-# can flip it on from Settings without a custom build. Forwards to vector-core's
-# tor feature which carries the actual TorService implementation. Use
-# `--no-default-features --features whisper` to build without Tor.
 tor = ["vector-core/tor"]
 
 [profile.release]
