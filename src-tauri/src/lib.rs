@@ -622,6 +622,10 @@ pub fn run() {
             // Tor (Arti) commands
             commands::tor::tor_get_state,
             commands::tor::tor_set_enabled,
+            commands::tor::tor_get_circuits,
+            commands::tor::tor_get_bridges,
+            commands::tor::tor_set_bridges,
+            commands::tor::tor_check_obfs4_proxy,
             // Notification sound commands (desktop only)
             #[cfg(desktop)]
             audio::get_notification_settings,

@@ -188,6 +188,7 @@ dependencies = [
  "tor-persist",
  "tor-proto",
  "tor-protover",
+ "tor-ptmgr",
  "tor-rtcompat",
  "tracing",
  "void",
@@ -5432,6 +5433,7 @@ dependencies = [
  "tor-netdoc",
  "tor-persist",
  "tor-proto",
+ "tor-protover",
  "tor-relay-selection",
  "tor-rtcompat",
  "tor-units",
@@ -5826,6 +5828,35 @@ dependencies = [
  "thiserror 2.0.18",
  "tor-basic-utils",
  "tor-bytes",
+]
+
+[[package]]
+name = "tor-ptmgr"
+version = "0.41.0"
+source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+dependencies = [
+ "async-trait",
+ "cfg-if",
+ "derive-deftly",
+ "derive_builder_fork_arti",
+ "fs-mistrust",
+ "futures",
+ "itertools",
+ "oneshot-fused-workaround",
+ "serde",
+ "thiserror 2.0.18",
+ "tor-async-utils",
+ "tor-basic-utils",
+ "tor-chanmgr",
+ "tor-config",
+ "tor-config-path",
+ "tor-error",
+ "tor-linkspec",
+ "tor-proto",
+ "tor-rtcompat",
+ "tor-socksproto",
+ "tracing",
+ "web-time-compat",
 ]
 
 [[package]]
@@ -6279,6 +6310,10 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "tor-circmgr",
+ "tor-dirmgr",
+ "tor-guardmgr",
+ "tor-linkspec",
  "tor-rtcompat",
  "url",
  "zeroize",

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-tor-get-bridges"
+description = "Enables the tor_get_bridges command without any pre-configured scope."
+commands.allow = ["tor_get_bridges"]
+
+[[permission]]
+identifier = "deny-tor-get-bridges"
+description = "Denies the tor_get_bridges command without any pre-configured scope."
+commands.deny = ["tor_get_bridges"]

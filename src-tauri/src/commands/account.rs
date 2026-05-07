@@ -184,6 +184,13 @@ pub async fn logout<R: Runtime>(handle: AppHandle<R>) {
     // Lock the state to ensure nothing is added to the DB before restart
     let _guard = STATE.lock().await;
 
+    // Stop the Tor service so its file handles to <account>/tor/state and
+    // tor/cache release before we try to wipe the profile dir below. On
+    // Windows, lingering handles would prevent rm_dir_all from succeeding.
+    // Awaitable variant so the SOCKS accept loop has fully exited (and
+    // per-stream tasks have a 100ms settle window) before deletion.
+    crate::commands::tor::stop_and_join_if_running().await;
+
     // Close the database connection pool BEFORE attempting to delete files
     // This is critical on Windows where open file handles prevent deletion
     account_manager::close_db_connection();

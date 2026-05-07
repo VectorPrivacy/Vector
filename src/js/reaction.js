@@ -140,9 +140,11 @@ function showReactionDetails(reactionEl) {
     // Header: count + emoji + first keyword
     const header = document.createElement('div');
     header.className = 'reaction-details-header';
-    // Look up the emoji's name from the dataset
+    // Use the dataset's canonical `display` field (CLDR tts, e.g.
+    // "thumbs up", "rolling on the floor laughing"). Falls back to the
+    // search-keyword `name` for ancient entries that pre-date `display`.
     const emojiEntry = typeof arrEmojis !== 'undefined' && arrEmojis.find(e => e.emoji === emoji);
-    const emojiName = emojiEntry ? emojiEntry.name.split(' ')[0] : '';
+    const emojiName = emojiEntry ? (emojiEntry.display || emojiEntry.name) : '';
     const countSpan = document.createElement('span');
     countSpan.className = 'reaction-details-count';
     countSpan.textContent = matchingReactions.length;

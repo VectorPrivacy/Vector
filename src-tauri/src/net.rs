@@ -109,10 +109,9 @@ pub async fn download<R: tauri::Runtime>(
 /// Returns None if size cannot be determined.
 pub async fn get_remote_file_size(url: &str) -> Option<u64> {
     validate_url_not_private(url).ok()?;
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
-        .build()
-        .ok()?;
+    // Route through vector-core so the Tor failsafe applies — blackhole when
+    // Tor is enabled-but-inactive, proxy when Tor is up.
+    let client = vector_core::net::build_http_client(std::time::Duration::from_secs(8)).ok()?;
 
     // Method 1: HEAD request
     if let Ok(head_res) = client.head(url).send().await {
@@ -157,15 +156,13 @@ pub async fn download_with_reporter(
 ) -> Result<Vec<u8>, &'static str> {
     validate_url_not_private(content_url)?;
 
-    // Create a client with the specified timeout
-    let client = if let Some(duration) = timeout {
-        Client::builder()
-            .timeout(duration)
-            .build()
-            .map_err(|_| "Failed to create HTTP client")?
-    } else {
-        Client::new()
-    };
+    // Route through vector-core so the Tor failsafe applies — blackhole when
+    // Tor is enabled-but-inactive, proxy when Tor is up. Default to a long
+    // timeout for downloads since we don't know the file size up front.
+    let client = vector_core::net::build_http_client(
+        timeout.unwrap_or_else(|| std::time::Duration::from_secs(300)),
+    )
+    .map_err(|_| "Failed to create HTTP client")?;
 
     // Determine file size using reusable probe
     let total_size = get_remote_file_size(content_url).await;

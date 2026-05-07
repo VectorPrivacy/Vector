@@ -199,6 +199,58 @@ const domPopupInput = document.getElementById('popupInput');
  *
  * The panel slides up from behind the chat box, similar to the emoji panel.
  */
+/**
+ * Run an async function (typically `invoke('login_from_stored_key', ...)`)
+ * while polling Tor's bootstrap state. If Tor is mid-bootstrap during the
+ * call, the lockscreen title is overridden with "Bootstrapping Tor… NN%"
+ * so the user isn't told the app is "decrypting" while it's actually
+ * waiting on Arti's consensus fetch. Title is restored on completion.
+ */
+async function runWithTorBootstrapStatus(fn) {
+    const titleEl = domLoginEncryptTitle;
+    const original = titleEl ? titleEl.textContent : '';
+    let pollHandle = null;
+    let didOverride = false;
+
+    if (titleEl) {
+        const tick = async () => {
+            try {
+                const state = await invoke('tor_get_state');
+                if (!state || !state.enabled) return;
+                const status = state.status || '';
+                if (state.running) {
+                    // Bootstrap finished mid-call; restore the original title
+                    // unless we're about to be replaced by the next phase anyway.
+                    if (didOverride) {
+                        titleEl.textContent = original;
+                        didOverride = false;
+                    }
+                } else if (status.startsWith('bootstrapping')) {
+                    const pct = Number.isFinite(state.bootstrap_progress)
+                        ? state.bootstrap_progress
+                        : null;
+                    titleEl.textContent = pct != null
+                        ? `Bootstrapping Tor… ${pct}%`
+                        : 'Bootstrapping Tor…';
+                    didOverride = true;
+                }
+            } catch (_) { /* swallow — failsafe */ }
+        };
+        // First sample now so the title flips immediately when bootstrap is
+        // already in flight, then keep up at 1Hz which matches Arti's event
+        // cadence well enough.
+        tick();
+        pollHandle = setInterval(tick, 1000);
+    }
+
+    try {
+        return await fn();
+    } finally {
+        if (pollHandle) clearInterval(pollHandle);
+        if (didOverride && titleEl) titleEl.textContent = original;
+    }
+}
+
 function toggleAttachmentPanel() {
     if (!domAttachmentPanel.classList.contains('visible')) {
         // Close emoji panel if open
@@ -2813,6 +2865,7 @@ async function login(skipAnimations = false) {
 
 
         // Setup a Rust Listener for the backend's init finish
+        // (helper hoisted above this block — see runWithTorBootstrapStatus)
         const _initFinishedP = listen('init_finished', async (evt) => {
             console.timeEnd('[Boot] login() total');
             console.time('[Boot] init_finished handler');
@@ -3565,8 +3618,13 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                 if (fUnlock) {
                     updateStatusMessage(DECRYPTING_MSG, true);
                     try {
-                        // Decrypt and login entirely in backend (key never crosses IPC)
-                        const npub = await invoke("login_from_stored_key", { password: currentPinString });
+                        // Decrypt and login entirely in backend (key never crosses IPC).
+                        // The wrapper polls Tor's bootstrap state so the title flips
+                        // to "Bootstrapping Tor…" while Arti is fetching consensus,
+                        // instead of leaving "Decrypting…" up for 5-15s.
+                        const npub = await runWithTorBootstrapStatus(() =>
+                            invoke("login_from_stored_key", { password: currentPinString })
+                        );
                         strPubkey = npub;
                         login();
                     } catch (e) {
@@ -3691,8 +3749,12 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                 passwordProcessing = true;
                 updateStatusMessage(DECRYPTING_MSG, true);
                 try {
-                    // Decrypt and login entirely in backend (key never crosses IPC)
-                    const npub = await invoke("login_from_stored_key", { password });
+                    // Decrypt and login entirely in backend (key never crosses IPC).
+                    // Wrapper flips the title to "Bootstrapping Tor…" if Arti is
+                    // mid-bootstrap during the call.
+                    const npub = await runWithTorBootstrapStatus(() =>
+                        invoke("login_from_stored_key", { password })
+                    );
                     strPubkey = npub;
                     login();
                 } catch (e) {
@@ -6582,12 +6644,18 @@ window.addEventListener("DOMContentLoaded", async () => {
                 // Encryption enabled - show PIN or password screen for decryption
                 openEncryptionFlow(true, security_type || 'pin');
             } else {
-                // Encryption disabled - login directly from stored key (key never crosses IPC)
-                domLogin.style.display = 'none';
+                // Encryption disabled - login directly from stored key (key never crosses IPC).
+                // Keep the lockscreen visible during the call so the
+                // "Bootstrapping Tor…" status from runWithTorBootstrapStatus is
+                // actually on screen. Hide it once we're past Tor and into
+                // the proper login flow.
                 try {
                     console.time('[Boot] login_from_stored_key');
-                    const npub = await invoke("login_from_stored_key", { password: null });
+                    const npub = await runWithTorBootstrapStatus(() =>
+                        invoke("login_from_stored_key", { password: null })
+                    );
                     console.timeEnd('[Boot] login_from_stored_key');
+                    domLogin.style.display = 'none';
 
                     strPubkey = npub;
                     console.time('[Boot] login() total');
@@ -7282,10 +7350,21 @@ domChatMessageInput.oninput = async () => {
         e.stopPropagation();
         popupConfirm('Vector Voice Transcriptions', 'Vector Voice AI can <b>automatically transcribe incoming Voice Messages</b> for immediate reading, without needing to listen.<br><br>You can decide whether Vector Voice transcribes automatically, or if you prefer to transcribe each message explicitly.', true);
     };
-    domSettingsPrivacyWebPreviewsInfo.onclick = (e) => {
+    domSettingsPrivacyWebPreviewsInfo.onclick = async (e) => {
         e.preventDefault();
         e.stopPropagation();
-        popupConfirm('Web Previews', 'When enabled, Vector will <b>automatically fetch and display previews</b> for links shared in messages.<br><br>This may expose your IP address if you do not use a VPN.', true);
+        // Render contextually based on Tor preference. When Tor is enabled,
+        // every preview fetch is forced through Tor (or blackholes during
+        // bootstrap) by the network failsafe — no clearnet leak path.
+        let torEnabled = false;
+        try {
+            const torState = await invoke('tor_get_state');
+            torEnabled = !!(torState && torState.enabled);
+        } catch (_) { /* fall through to default warning */ }
+        const message = torEnabled
+            ? 'When enabled, Vector will <b>automatically fetch and display previews</b> for links shared in messages.<br><br>You have <b>Tor enabled</b>, so preview fetches route through the Tor network. Your IP address stays hidden from the linked sites.'
+            : 'When enabled, Vector will <b>automatically fetch and display previews</b> for links shared in messages.<br><br>This may expose your IP address to the linked sites. <b>Use Tor</b> (Privacy, Route traffic through Tor) <b>or a VPN</b> if that\'s a concern.';
+        popupConfirm('Web Previews', message, true);
     };
     domSettingsPrivacyStripTrackingInfo.onclick = (e) => {
         e.preventDefault();
@@ -7305,7 +7384,7 @@ domChatMessageInput.oninput = async () => {
             // Tor Project's trademark policy (https://www.torproject.org/about/trademark/).
             popupConfirm(
                 'Route traffic through Tor',
-                'When enabled, Vector routes <b>all TCP traffic — Nostr relays, Blossom uploads, link previews, image fetches</b> — through the Tor network using an embedded Arti client.<br><br>'
+                'When enabled, Vector routes <b>all TCP traffic</b> (Nostr relays, Blossom uploads, link previews, image fetches) through the Tor network using an embedded Arti client.<br><br>'
                 + 'This hides your IP address from relays and remote servers, at the cost of slower connections (Tor circuits add latency).<br><br>'
                 + '<small style="opacity: 0.6;">Tor and the Tor logo are trademarks of The Tor Project; all rights reserved. More information at <b>torproject.org</b>. Vector is not endorsed or sponsored by, or affiliated with, The Tor Project.</small>',
                 true

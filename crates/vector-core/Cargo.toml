@@ -65,8 +65,15 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "logg
 # workspace resolves through one consistent source — patching only tor-dirmgr
 # while siblings come from crates.io creates a tor_protover type-identity
 # split that breaks the build with 150+ trait-mismatch errors.
-arti-client = { git = "https://github.com/VectorPrivacy/arti.git", branch = "vector/rusqlite-0.32", default-features = false, features = ["tokio", "rustls"], optional = true }
+arti-client = { git = "https://github.com/VectorPrivacy/arti.git", branch = "vector/rusqlite-0.32", default-features = false, features = ["tokio", "rustls", "experimental-api", "bridge-client", "pt-client"], optional = true }
 tor-rtcompat = { git = "https://github.com/VectorPrivacy/arti.git", branch = "vector/rusqlite-0.32", default-features = false, features = ["tokio", "rustls"], optional = true }
+# For circuit introspection (the "Advanced" panel showing live hops). Direct git
+# deps from the same fork so type identities line up with arti-client's transitive
+# tree — see the note above on type-identity splits.
+tor-circmgr = { git = "https://github.com/VectorPrivacy/arti.git", branch = "vector/rusqlite-0.32", default-features = false, optional = true }
+tor-dirmgr = { git = "https://github.com/VectorPrivacy/arti.git", branch = "vector/rusqlite-0.32", default-features = false, optional = true }
+tor-linkspec = { git = "https://github.com/VectorPrivacy/arti.git", branch = "vector/rusqlite-0.32", default-features = false, optional = true }
+tor-guardmgr = { git = "https://github.com/VectorPrivacy/arti.git", branch = "vector/rusqlite-0.32", default-features = false, features = ["bridge-client", "pt-client"], optional = true }
 # tokio_util::compat bridges arti's futures::io::AsyncRead to tokio::io::AsyncRead so
 # we can splice Arti's DataStream into a tokio TcpStream for the SOCKS5 bridge.
 tokio-util = { version = "0.7", features = ["compat"], optional = true }
@@ -79,7 +86,7 @@ default = []
 # Enables embedded Tor (Arti) — bootstraps Arti, runs a localhost SOCKS5 listener
 # bridging into the Tor network. Consumers (HTTP / Nostr) opt into the proxy via
 # `tor::proxy_url()` returning `Some(socks5://127.0.0.1:<port>)` when active.
-tor = ["dep:arti-client", "dep:tor-rtcompat", "dep:tokio-util"]
+tor = ["dep:arti-client", "dep:tor-rtcompat", "dep:tokio-util", "dep:tor-circmgr", "dep:tor-dirmgr", "dep:tor-linkspec", "dep:tor-guardmgr"]
 
 [dev-dependencies]
 tempfile = "3"

@@ -298,6 +298,14 @@ pub async fn switch_account<R: Runtime>(
         notified.clear();
     }
 
+    // Stop the previous account's TorService BEFORE init_profile_database
+    // hydrates the new account's Tor pref cache. Otherwise there's a window
+    // where cache reflects the NEW account's pref but the slot still holds
+    // the OLD service, and transport_state() can return Disabled while the
+    // old proxy is up — letting any in-flight build_http_client call build
+    // a no-proxy client.
+    crate::commands::tor::stop_and_join_if_running().await;
+
     // Initialize database for this profile
     vector_core::db::close_database();
     init_profile_database(&handle, &npub).await?;
@@ -314,6 +322,13 @@ pub async fn switch_account<R: Runtime>(
     // Update MLS directory
     if let Ok(mls_dir) = vector_core::mls::get_mls_directory() {
         println!("[Account Manager] MLS directory: {}", mls_dir.display());
+    }
+
+    // Start a fresh TorService for the new account if its pref says so. The
+    // slot was already cleared by the stop above, so this is effectively
+    // just the "start if wanted" half of sync_to_active_account.
+    if let Err(e) = crate::commands::tor::sync_to_active_account().await {
+        eprintln!("[Account Manager] Tor start for new account failed: {}", e);
     }
 
     Ok(())

@@ -2303,7 +2303,7 @@ body.chat-bg-disabled .chat-messages::before {
   border-radius: 12px;
   padding: 4px 0;
   min-width: 180px;
-  max-width: 280px;
+  max-width: 320px;
   max-height: 250px;
   overflow-y: auto;
   box-shadow: 0 8px 32px rgba(0,0,0,0.5);
@@ -2337,6 +2337,11 @@ body.chat-bg-disabled .chat-messages::before {
 .reaction-details-label {
   font-size: 13px;
   color: rgba(255,255,255,0.45);
+  /* Size to content; let it shrink + ellipsis when the popup hits max-width. */
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .reaction-detail-row {
@@ -4514,6 +4519,520 @@ select {
 .tor-card-toggle .neon-toggle {
   /* slim down so the toggle doesn't dominate the card */
   margin: 0;
+}
+
+/* ---- Tor Advanced disclosure -------------------------------------------
+   Design intent: read as a continuation of the Tor card, not a separate
+   block. No purple wash, no halo. A single hairline rule under the toggle
+   marks the seam; everything else is typography + tight rhythm. */
+#settings-tor-card {
+  box-shadow: none !important;
+}
+
+.tor-card.has-advanced:has(+ #settings-tor-advanced.expanded) {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  border-bottom-color: transparent;
+}
+
+.tor-advanced {
+  margin-top: 0;
+  border: 1px solid transparent;
+  border-top: 0;
+  border-bottom-left-radius: 14px;
+  border-bottom-right-radius: 14px;
+  background: transparent;
+  overflow: hidden;
+  position: relative;
+  isolation: isolate;
+  transition:
+    background 0.22s ease,
+    border-color 0.22s ease;
+}
+/* Expanded panel mirrors the connected card's purple surface + border so
+   the two read as one continuous element. (`.tor-state-connected` uses
+   `rgba(149,48,244,0.10)` bg + `rgba(149,48,244,0.30)` border — match
+   exactly.) Card's box-shadow halo is killed by `#settings-tor-card`'s
+   `box-shadow: none` rule above, so no glow bleeds across the seam. */
+.tor-advanced.expanded {
+  border-color: rgba(149,48,244,0.30);
+  background: rgba(149,48,244,0.10);
+}
+
+.tor-advanced-toggle {
+  width: 100%;
+  background: transparent;
+  border: 0;
+  padding: 8px 16px 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.50);
+  cursor: pointer;
+  transition: color 0.18s ease;
+  -webkit-user-select: none;
+  user-select: none;
+  line-height: 1.5;
+  position: relative;
+}
+.tor-advanced-toggle:hover { color: rgba(217,179,255,0.95); }
+.tor-advanced.expanded .tor-advanced-toggle {
+  color: rgba(217,179,255,0.78);
+}
+
+/* Hairline that separates the toggle from the panel content. Inset 16px
+   on each side, fades to transparent at the edges so it doesn't crash
+   into the rounded corners. */
+.tor-advanced.expanded .tor-advanced-toggle::after {
+  content: "";
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: 0;
+  height: 1px;
+  background: linear-gradient(to right,
+    transparent 0,
+    rgba(178,102,255,0.22) 14%,
+    rgba(178,102,255,0.22) 86%,
+    transparent 100%);
+  pointer-events: none;
+}
+
+.tor-advanced-chevron {
+  width: 9px;
+  height: 9px;
+  background-color: currentColor;
+  flex-shrink: 0;
+  position: relative;
+  margin: 0;
+  transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.tor-advanced.expanded .tor-advanced-chevron { transform: rotate(180deg); }
+
+.tor-advanced-panel {
+  padding: 0 18px 14px;
+}
+
+/* Header above the circuit list. The hairline below the toggle replaces
+   the previous border-top here — fewer rules, cleaner read. */
+.tor-circuits-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 0 6px;
+}
+.tor-circuits-head-label {
+  font-size: 10px;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.58);
+  font-weight: 700;
+}
+
+/* Rebuild button: subtle filled chip with conviction, not a ghost outline. */
+.tor-circuits-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(149,48,244,0.12);
+  border: 1px solid rgba(149,48,244,0.30);
+  color: #c9a4ff;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 4px 11px 4px 9px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease, transform 0.18s ease;
+}
+.tor-circuits-refresh:hover {
+  background: rgba(149,48,244,0.24);
+  border-color: rgba(178,102,255,0.65);
+  color: #f1e1ff;
+}
+.tor-circuits-refresh:active { transform: scale(0.97); }
+.tor-circuits-refresh:disabled {
+  opacity: 0.55;
+  cursor: default;
+  transform: none;
+}
+.tor-circuits-refresh svg {
+  width: 10px;
+  height: 10px;
+  flex-shrink: 0;
+  display: block;
+}
+.tor-circuits-refresh:disabled svg {
+  animation: torRefreshSpin 0.85s linear infinite;
+  transform-origin: center;
+}
+@keyframes torRefreshSpin { to { transform: rotate(360deg); } }
+
+/* Circuit list — tightened from 32px/row to 26px/row by trimming hop
+   padding 7→4. Mono alignment on addresses + fingerprints. */
+.tor-circuits {
+  list-style: none;
+  margin: 0;
+  padding: 2px 0 2px;
+  position: relative;
+  font-variant-numeric: tabular-nums;
+}
+/* Rail spans first-dot-bottom (15px = padding-top 2 + hop padding 4 + dot
+   center 9) to last-dot-top (15px from bottom, mirror). */
+.tor-circuits:has(.tor-hop)::before {
+  content: "";
+  position: absolute;
+  left: 9px;
+  top: 19px;
+  bottom: 17px;
+  width: 1px;
+  transform: translateX(-50%);
+  background: linear-gradient(to bottom,
+    rgba(178,102,255,0.55) 0%,
+    rgba(178,102,255,0.92) 100%);
+  pointer-events: none;
+  z-index: 0;
+}
+.tor-hop {
+  display: grid;
+  grid-template-columns: 18px 100px 1fr auto;
+  grid-template-rows: 18px;
+  line-height: 18px;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 0;
+  position: relative;
+}
+.tor-hop-mark {
+  position: relative;
+  width: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 18px;
+}
+
+.tor-hop-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: rgba(20, 8, 36, 0.95);
+  border: 1.5px solid rgba(178,102,255,0.65);
+  position: relative;
+  z-index: 1;
+  transition: transform 0.18s ease;
+}
+.tor-hop[data-position="Middle"] .tor-hop-dot {
+  background: #9530f4;
+  border-color: rgba(217,179,255,0.85);
+}
+.tor-hop[data-position="Exit"] .tor-hop-dot {
+  background: #d9b3ff;
+  border-color: #c285ff;
+}
+
+/* Position label — bumped from 0.55 → 0.72 to read clearly without losing
+   its eyebrow character. */
+.tor-hop-pos {
+  font-size: 9.5px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  font-weight: 700;
+  color: rgba(255,255,255,0.72);
+  white-space: nowrap;
+  font-feature-settings: "ss01";
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tor-hop[data-position="Exit"] .tor-hop-pos { color: #d9b3ff; }
+
+.tor-hop-addr {
+  font-family: "JetBrains Mono", "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: rgba(255,255,255,0.94);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  letter-spacing: -0.005em;
+  font-feature-settings: "tnum";
+}
+
+/* Fingerprint — bumped from 0.32 → 0.55 so the hex is actually readable
+   instead of fading into the background. */
+.tor-hop-fp {
+  font-family: "JetBrains Mono", "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  color: rgba(255,255,255,0.55);
+  white-space: nowrap;
+  cursor: help;
+  letter-spacing: 0;
+  transition: color 0.18s ease;
+}
+.tor-hop-fp:hover { color: rgba(217,179,255,0.92); }
+
+.tor-hop:hover .tor-hop-dot { transform: scale(1.18); }
+.tor-hop:hover .tor-hop-addr { color: #fff; }
+
+.tor-circuits-empty,
+.tor-circuits-error {
+  list-style: none;
+  font-size: 11px;
+  padding: 14px 0 8px;
+  text-align: center;
+  letter-spacing: 0.04em;
+}
+.tor-circuits-empty {
+  color: rgba(255,255,255,0.55);
+  font-style: italic;
+}
+.tor-circuits-empty.is-loading::before {
+  content: "";
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  border: 1.5px solid rgba(178,102,255,0.22);
+  border-top-color: rgba(217,179,255,0.90);
+  border-radius: 50%;
+  margin-right: 8px;
+  vertical-align: -1px;
+  animation: torCircuitSpin 0.85s linear infinite;
+}
+@keyframes torCircuitSpin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .tor-circuits-empty.is-loading::before { animation: none; }
+}
+.tor-circuits-error { color: #ff8c75; }
+
+/* Pulse fades in parked at Guard, travels the rail, fades out parked at
+   Exit. Anchors recalibrated for the tighter row padding. */
+.tor-advanced.expanded .tor-circuits:has(.tor-hop)::after {
+  content: "";
+  position: absolute;
+  left: 9px;
+  top: 17px;
+  width: 4px;
+  height: 4px;
+  margin-left: -2px;
+  margin-top: -2px;
+  border-radius: 50%;
+  background: #f6e6ff;
+  pointer-events: none;
+  animation: torDataFlow 4.2s cubic-bezier(0.65, 0.05, 0.35, 0.95) infinite;
+  opacity: 0;
+  z-index: 2;
+}
+@keyframes torDataFlow {
+  0%   { top: 19px;                opacity: 0;    }
+  8%   { top: 19px;                opacity: 0.95; }
+  92%  { top: calc(100% - 17px);   opacity: 0.95; }
+  100% { top: calc(100% - 17px);   opacity: 0;    }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tor-advanced.expanded .tor-circuits:has(.tor-hop)::after { animation: none; opacity: 0; }
+}
+
+/* ---- Bridges section ---------------------------------------------------
+   No container box, no border-around — section reads as a continuation
+   below the circuit list, separated by the same fading hairline used at
+   the top of the panel. */
+.tor-bridges {
+  margin-top: 14px;
+  padding-top: 12px;
+  position: relative;
+}
+.tor-bridges::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 1px;
+  background: linear-gradient(to right,
+    transparent 0,
+    rgba(178,102,255,0.20) 14%,
+    rgba(178,102,255,0.20) 86%,
+    transparent 100%);
+}
+
+.tor-bridges-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.tor-bridges-head-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.tor-bridges-head-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.78);
+}
+.tor-bridges-head-sub {
+  font-size: 11px;
+  color: rgba(255,255,255,0.58);
+  margin-top: 3px;
+  line-height: 1.4;
+}
+.tor-bridges-toggle-wrap {
+  margin: 0;
+  flex-shrink: 0;
+}
+.tor-bridges-body {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tor-bridges-textarea {
+  width: 100%;
+  min-height: 76px;
+  resize: vertical;
+  background: rgba(0,0,0,0.32);
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: rgba(255,255,255,0.94);
+  font-family: "JetBrains Mono", "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  outline: none;
+  box-sizing: border-box;
+  box-shadow: inset 0 1px 0 rgba(0,0,0,0.18);
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+  white-space: pre;
+  overflow-x: auto;
+  overflow-y: auto;
+}
+.tor-bridges-textarea:focus {
+  border-color: rgba(178,102,255,0.55);
+  box-shadow:
+    inset 0 1px 0 rgba(0,0,0,0.18),
+    0 0 0 3px rgba(149,48,244,0.10);
+}
+.tor-bridges-textarea::placeholder {
+  color: rgba(255,255,255,0.28);
+}
+.tor-bridges-help {
+  font-size: 11px;
+  color: rgba(255,255,255,0.55);
+  line-height: 1.5;
+}
+/* obfs4 missing-binary banner — left-rule callout, not a boxed alert. */
+.tor-obfs4-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  background: rgba(255, 184, 99, 0.07);
+  border: 0;
+  border-left: 2px solid rgba(255, 184, 99, 0.55);
+  border-radius: 0 6px 6px 0;
+  padding: 7px 10px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: rgba(255, 220, 180, 0.95);
+}
+.tor-obfs4-banner-icon {
+  flex-shrink: 0;
+  color: #ffb863;
+  font-size: 12px;
+  line-height: 1;
+  padding-top: 1px;
+}
+.tor-obfs4-banner code {
+  background: rgba(255, 184, 99, 0.16);
+  border-radius: 3px;
+  padding: 0 4px;
+  font-family: "JetBrains Mono", "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  color: #ffd9a8;
+}
+.tor-bridges-help code {
+  background: rgba(149,48,244,0.12);
+  border-radius: 3px;
+  padding: 0 4px;
+  font-family: "JetBrains Mono", "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+}
+.tor-bridges-help a {
+  color: #c9a4ff;
+  text-decoration: none;
+  border-bottom: 1px dotted rgba(201,164,255,0.40);
+  transition: color 0.18s ease, border-bottom-color 0.18s ease;
+}
+.tor-bridges-help a:hover {
+  color: #ecd5ff;
+  border-bottom-color: rgba(236,213,255,0.85);
+}
+.tor-bridges-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 2px;
+}
+.tor-bridges-status {
+  font-size: 11px;
+  color: rgba(255,255,255,0.62);
+  flex: 1;
+  min-width: 0;
+  line-height: 1.4;
+}
+.tor-bridges-status.is-error { color: #ff8c75; }
+.tor-bridges-status.is-ok    { color: #c9a4ff; }
+
+/* Apply: a real CTA. Soft purple gradient fill + visible disabled state
+   so users can see when their changes are stale vs. ready. */
+.tor-bridges-apply {
+  background: linear-gradient(180deg,
+    rgba(178,102,255,0.32) 0%,
+    rgba(149,48,244,0.32) 100%);
+  border: 1px solid rgba(178,102,255,0.55);
+  color: #f1e1ff;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  padding: 6px 14px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease, transform 0.12s ease, opacity 0.18s ease, box-shadow 0.18s ease;
+  flex-shrink: 0;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
+}
+.tor-bridges-apply:hover {
+  background: linear-gradient(180deg,
+    rgba(178,102,255,0.48) 0%,
+    rgba(149,48,244,0.48) 100%);
+  border-color: rgba(217,179,255,0.78);
+  color: #fff;
+}
+.tor-bridges-apply:active { transform: scale(0.97); }
+.tor-bridges-apply:disabled {
+  opacity: 0.55;
+  cursor: default;
+  transform: none;
+  background: rgba(255,255,255,0.04);
+  border-color: rgba(255,255,255,0.08);
+  color: rgba(255,255,255,0.50);
+  box-shadow: none;
+}
+
+/* "Via bridge" annotation on the guard hop when bridges are active. */
+.tor-hop[data-bridge="true"] .tor-hop-pos::after {
+  content: " · BRIDGE";
+  color: #c9a4ff;
+  font-weight: 700;
+  letter-spacing: 0.10em;
 }
 
 /* Narrow viewports: stack the card vertically so the title gets the full

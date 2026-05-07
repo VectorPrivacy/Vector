@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use arti_client::{TorClient, IntoTorAddr};
+use arti_client::{StreamPrefs, TorClient, IntoTorAddr};
 use tor_rtcompat::PreferredRuntime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -38,13 +38,21 @@ pub(super) async fn run(
     mut shutdown: oneshot::Receiver<()>,
 ) {
     let tor = Arc::new(tor);
+    // Track every per-stream task so stop can wait for them to drop their
+    // TorClient Arcs before returning. Without this, the state-dir lock
+    // (held inside the TorClient) outlives our `stop()` call and a
+    // restart-with-bridges fails with "guard manager" / NoLock.
+    let mut streams = tokio::task::JoinSet::<()>::new();
     loop {
         tokio::select! {
-            _ = &mut shutdown => return,
+            _ = &mut shutdown => break,
+            // Reap any finished stream tasks so JoinSet doesn't grow unbounded
+            // for long-lived listeners.
+            Some(_) = streams.join_next(), if !streams.is_empty() => {}
             accept = listener.accept() => match accept {
                 Ok((stream, _peer)) => {
                     let tor = Arc::clone(&tor);
-                    tokio::spawn(async move {
+                    streams.spawn(async move {
                         if let Err(e) = handle(stream, tor).await {
                             log_debug!("[Tor SOCKS] connection failed: {}", e);
                         }
@@ -57,6 +65,13 @@ pub(super) async fn run(
             }
         }
     }
+    // Listener is dropping; abort any in-flight per-stream tasks rather than
+    // wait indefinitely (a stuck `copy_bidirectional` could stall forever).
+    // This forces every per-stream Arc<TorClient> to be dropped immediately,
+    // which releases the state-dir lock so a subsequent TorService::start
+    // for the same account can acquire it cleanly.
+    streams.abort_all();
+    while streams.join_next().await.is_some() {}
 }
 
 async fn handle(
@@ -121,10 +136,16 @@ async fn handle(
     let port = u16::from_be_bytes(port_buf);
 
     // ---- Connect via Arti ----
+    // Tag the stream with the current isolation token so all of Vector's
+    // traffic shares circuits matching that token. When the user clicks
+    // "New circuit", super::rotate_circuits() bumps the token and new
+    // streams land on a fresh circuit.
     let addr = (host.as_str(), port)
         .into_tor_addr()
         .map_err(|e| format!("addr parse: {e}"))?;
-    let stream = match tor.connect(addr).await {
+    let mut prefs = StreamPrefs::new();
+    prefs.set_isolation(super::current_isolation_token());
+    let stream = match tor.connect_with_prefs(addr, &prefs).await {
         Ok(s) => s,
         Err(e) => {
             log_debug!("[Tor SOCKS] tor.connect({}:{}) failed: {}", host, port, e);

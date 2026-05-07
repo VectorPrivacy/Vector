@@ -76,9 +76,18 @@ pub fn nostr_client_options() -> nostr_sdk::ClientOptions {
     let opts = nostr_sdk::ClientOptions::new();
     #[cfg(all(feature = "tor", not(target_arch = "wasm32")))]
     {
-        if let Some(addr) = tor::socks_addr() {
-            let conn = nostr_sdk::client::Connection::new().proxy(addr);
-            return opts.connection(conn);
+        match tor::transport_state() {
+            tor::TorTransportState::Active(addr) => {
+                return opts.connection(nostr_sdk::client::Connection::new().proxy(addr));
+            }
+            tor::TorTransportState::RequiredButInactive => {
+                // Tor failsafe: route to a blackhole so the relay socket can't
+                // accidentally come up direct while Tor is mid-bootstrap.
+                return opts.connection(
+                    nostr_sdk::client::Connection::new().proxy(tor::blackhole_proxy_addr()),
+                );
+            }
+            tor::TorTransportState::Disabled => {}
         }
     }
     opts
@@ -96,8 +105,18 @@ pub fn nostr_client_options() -> nostr_sdk::ClientOptions {
 pub fn tor_aware_relay_options(opts: nostr_sdk::RelayOptions) -> nostr_sdk::RelayOptions {
     #[cfg(all(feature = "tor", not(target_arch = "wasm32")))]
     {
-        if let Some(addr) = tor::socks_addr() {
-            return opts.connection_mode(nostr_sdk::pool::ConnectionMode::proxy(addr));
+        match tor::transport_state() {
+            tor::TorTransportState::Active(addr) => {
+                return opts.connection_mode(nostr_sdk::pool::ConnectionMode::proxy(addr));
+            }
+            tor::TorTransportState::RequiredButInactive => {
+                // Tor failsafe: pin to blackhole so this relay can never come
+                // up direct while Tor isn't running.
+                return opts.connection_mode(
+                    nostr_sdk::pool::ConnectionMode::proxy(tor::blackhole_proxy_addr()),
+                );
+            }
+            tor::TorTransportState::Disabled => {}
         }
     }
     opts

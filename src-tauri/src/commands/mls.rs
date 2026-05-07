@@ -472,11 +472,10 @@ pub async fn cache_group_avatar(
             .collect()
     };
 
-    // Try downloading from each URL until one succeeds
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    // Try downloading from each URL until one succeeds. Build via vector-core
+    // so the Tor failsafe (block clearnet when Tor is enabled but not active)
+    // applies to MLS group avatar downloads too.
+    let client = vector_core::net::build_http_client(std::time::Duration::from_secs(30))?;
 
     const MAX_AVATAR_SIZE: usize = 10 * 1024 * 1024; // 10 MB
     let mut encrypted_data: Option<Vec<u8>> = None;
@@ -574,11 +573,8 @@ pub async fn cache_invite_avatar(
         .map(|s| format!("{}/{}", s.trim_end_matches('/'), image_hash))
         .collect();
 
-    // Download encrypted blob
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
+    // Download encrypted blob via vector-core so the Tor failsafe applies.
+    let client = vector_core::net::build_http_client(std::time::Duration::from_secs(30))?;
 
     const MAX_AVATAR_SIZE: usize = 10 * 1024 * 1024; // 10 MB
     let mut encrypted_data: Option<Vec<u8>> = None;

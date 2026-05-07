@@ -247,6 +247,30 @@ pub fn init_database(npub: &str) -> Result<(), String> {
     let write_conn = create_connection(&db_path)?;
     *DB_WRITE_CONN.lock().unwrap() = Some(write_conn);
 
+    // Hydrate Tor's hot-path settings cache from the new account's DB.
+    // Use a direct rusqlite query against `db_path` rather than the global
+    // `get_sql_setting()` helper — that helper resolves through the read
+    // pool + `get_current_account()`, both of which may not yet reflect THIS
+    // account at the moment we run (switch_account calls init_database
+    // BEFORE set_current_account). Reading the path directly removes the
+    // race entirely.
+    #[cfg(feature = "tor")]
+    {
+        let enabled = create_connection(&db_path)
+            .ok()
+            .and_then(|c| {
+                c.query_row(
+                    "SELECT value FROM settings WHERE key = 'tor_enabled'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok()
+            })
+            .map(|v| v == "1" || v == "true")
+            .unwrap_or(false);
+        crate::tor::set_tor_enabled_pref(enabled);
+    }
+
     Ok(())
 }
 

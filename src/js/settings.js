@@ -131,6 +131,373 @@ function applyTorBootstrapProgress(progress) {
 let _torPollHandle = null;
 
 /**
+ * Is Tor currently in a transitional state (bootstrap in flight, or "starting"
+ * between user click and the service spawning)? In these windows we lock the
+ * toggle so the user can't spam it into a confused state — start/stop ops
+ * aren't reentrancy-safe across rapid clicks.
+ */
+function isTorTransitional(state) {
+    if (!state || !state.supported) return false;
+    const status = state.status || '';
+    if (status.startsWith('bootstrapping')) return true;
+    // enabled-but-not-running with no failure = the service is mid-spawn.
+    if (state.enabled && !state.running && !status.startsWith('failed')) return true;
+    return false;
+}
+
+/**
+ * Lock the toggle while Tor is in a transitional state, restore once stable.
+ * Doesn't touch unsupported builds — those have their own permanently-disabled
+ * path set during init.
+ */
+function applyTorToggleLock(state) {
+    const toggle = document.getElementById('privacy-tor-toggle');
+    if (!toggle) return;
+    if (!state || !state.supported) return;
+    toggle.disabled = isTorTransitional(state);
+}
+
+/**
+ * Show the Advanced disclosure only when Tor is fully connected — pre-connect
+ * there's nothing to inspect, and exposing it during bootstrap risks the user
+ * tapping Refresh and pinning a partially-built circuit. On disconnect we
+ * collapse + drop the cached circuit so the next connect re-fetches fresh.
+ *
+ * Adds `.has-advanced` to the Tor card when shown so the card drops its
+ * bottom rounding + bottom border when the panel is expanded — the two
+ * boxes then read as one continuous panel.
+ */
+function applyTorAdvancedVisibility(state) {
+    const adv = document.getElementById('settings-tor-advanced');
+    const card = document.getElementById('settings-tor-card');
+    if (!adv) return;
+    const shouldShow = !!(state && state.running);
+    adv.style.display = shouldShow ? '' : 'none';
+    if (card) card.classList.toggle('has-advanced', shouldShow);
+    if (!shouldShow) {
+        adv.classList.remove('expanded');
+        const panel = document.getElementById('tor-advanced-panel');
+        if (panel) panel.style.display = 'none';
+        _torCircuitsLoaded = false;
+    }
+}
+
+/** Cached so re-expanding the disclosure doesn't re-build a circuit unless the
+ *  user explicitly hits Refresh (or Tor reconnects, which clears this flag). */
+let _torCircuitsLoaded = false;
+let _torCircuitsLoading = false;
+
+/**
+ * Fetch the current circuit's hops and render them. First call (or after
+ * Refresh) actually builds a circuit through Arti, which can take a few
+ * seconds — show a loading state.
+ */
+async function loadTorCircuits(forceRefresh = false, forceNewCircuit = false) {
+    const list = document.getElementById('tor-circuits-list');
+    const refreshBtn = document.getElementById('tor-circuits-refresh');
+    if (!list) return;
+    if (_torCircuitsLoading) return;
+    if (_torCircuitsLoaded && !forceRefresh) return;
+
+    _torCircuitsLoading = true;
+    if (refreshBtn) refreshBtn.disabled = true;
+
+    list.replaceChildren();
+    const loading = document.createElement('li');
+    loading.className = 'tor-circuits-empty is-loading';
+    loading.textContent = 'Building circuit…';
+    list.appendChild(loading);
+
+    try {
+        const hops = await invoke('tor_get_circuits', { forceNew: forceNewCircuit });
+        list.replaceChildren();
+        if (!Array.isArray(hops) || hops.length === 0) {
+            const empty = document.createElement('li');
+            empty.className = 'tor-circuits-empty';
+            empty.textContent = 'No active circuit.';
+            list.appendChild(empty);
+        } else {
+            for (const hop of hops) {
+                const row = document.createElement('li');
+                row.className = 'tor-hop';
+                row.dataset.position = hop.position || '';
+                if (hop.is_bridge) row.dataset.bridge = 'true';
+
+                const mark = document.createElement('span');
+                mark.className = 'tor-hop-mark';
+                const dot = document.createElement('span');
+                dot.className = 'tor-hop-dot';
+                mark.appendChild(dot);
+                row.appendChild(mark);
+
+                const pos = document.createElement('span');
+                pos.className = 'tor-hop-pos';
+                pos.textContent = hop.position || '';
+                row.appendChild(pos);
+
+                const addr = document.createElement('span');
+                addr.className = 'tor-hop-addr';
+                addr.textContent = hop.address || '—';
+                row.appendChild(addr);
+
+                if (hop.fingerprint) {
+                    const fp = document.createElement('span');
+                    fp.className = 'tor-hop-fp';
+                    // 8-char prefix is enough to disambiguate at a glance;
+                    // hover tooltip carries the full 43-char ed25519 id.
+                    fp.textContent = hop.fingerprint.slice(0, 8) + '…';
+                    fp.title = hop.fingerprint;
+                    row.appendChild(fp);
+                }
+
+                list.appendChild(row);
+            }
+        }
+        _torCircuitsLoaded = true;
+    } catch (err) {
+        console.warn('[Tor] tor_get_circuits failed:', err);
+        list.replaceChildren();
+        const errEl = document.createElement('li');
+        errEl.className = 'tor-circuits-error';
+        errEl.textContent = `Failed: ${err}`;
+        list.appendChild(errEl);
+    } finally {
+        _torCircuitsLoading = false;
+        if (refreshBtn) refreshBtn.disabled = false;
+    }
+}
+
+/**
+ * Wire the Bridges section under Tor → Advanced. Toggle reveals the textarea;
+ * Apply persists via tor_set_bridges (which also restarts Tor if it's
+ * currently running so the new bridges take effect immediately).
+ */
+async function initTorBridgesUI() {
+    const toggle = document.getElementById('tor-bridges-toggle');
+    const body = document.getElementById('tor-bridges-body');
+    const textarea = document.getElementById('tor-bridges-textarea');
+    const applyBtn = document.getElementById('tor-bridges-apply');
+    const statusEl = document.getElementById('tor-bridges-status');
+    const link = document.getElementById('tor-bridges-link');
+    if (!toggle || !body || !textarea || !applyBtn || !statusEl) return;
+
+    // Hydrate from backend.
+    // Track the persisted lines so Apply can be gated on a real diff.
+    let savedLines = '';
+    const isDirty = () => textarea.value !== savedLines;
+    const refreshApplyEnabled = () => {
+        applyBtn.disabled = !isDirty();
+    };
+
+    try {
+        const cur = await invoke('tor_get_bridges');
+        toggle.checked = !!(cur && cur.enabled);
+        textarea.value = (cur && cur.lines) || '';
+        savedLines = textarea.value;
+        body.style.display = toggle.checked ? '' : 'none';
+        renderBridgesStatus(statusEl, textarea.value);
+        refreshApplyEnabled();
+    } catch (e) {
+        console.warn('[Tor] tor_get_bridges failed:', e);
+        refreshApplyEnabled();
+    }
+
+    toggle.addEventListener('change', async () => {
+        body.style.display = toggle.checked ? '' : 'none';
+        refreshObfs4Banner(textarea.value);
+
+        // Toggling ON with no lines yet: just expand the UI and wait for
+        // the user to enter bridges + hit Apply. Skipping persist/reconfigure
+        // here avoids a wasted Tor reconfigure cycle (enabled-but-no-lines
+        // resolves to direct anyway), and avoids any "empty obfs4" attempt.
+        if (toggle.checked && !textarea.value.trim()) {
+            statusEl.textContent = 'Add bridge lines, then Apply.';
+            statusEl.classList.remove('is-error', 'is-ok');
+            refreshApplyEnabled();
+            return;
+        }
+
+        // The toggle is itself the apply for the on/off state. Without this,
+        // flipping the toggle off would leave the saved-and-running config
+        // untouched (Tor would keep using bridges until the user found and
+        // hit Apply). Persist + reconfigure immediately. The textarea still
+        // requires a separate Apply for content edits.
+        toggle.disabled = true;
+        const torToggle = document.getElementById('privacy-tor-toggle');
+        const wasTorToggleDisabled = torToggle ? torToggle.disabled : false;
+        if (torToggle) torToggle.disabled = true;
+        statusEl.textContent = toggle.checked
+            ? 'Enabling bridges, reconnecting…'
+            : 'Disabling bridges, reconnecting…';
+        statusEl.classList.remove('is-error', 'is-ok');
+        try {
+            await invoke('tor_set_bridges', {
+                enabled: !!toggle.checked,
+                lines: textarea.value,
+            });
+            // Toggle persists the textarea content as a side effect; the
+            // saved baseline now matches the textarea, so Apply has nothing
+            // to do. Sync.
+            savedLines = textarea.value;
+            // Refresh the displayed circuit, but DON'T pass forceNewCircuit:
+            // tor_set_bridges already cycled relays once. Passing
+            // force_new=true here would rotate the isolation token and
+            // cycle sockets a second time.
+            try { await loadTorCircuits(true, false); } catch (_) {}
+            statusEl.textContent = toggle.checked
+                ? 'Bridges enabled. Tor reconnected.'
+                : 'Bridges disabled. Tor reconnected directly.';
+            statusEl.classList.add('is-ok');
+        } catch (err) {
+            console.error('[Tor] tor_set_bridges (toggle) failed:', err);
+            // Roll the toggle back so the UI matches the actual (unchanged)
+            // backend state. KEEP the body visible regardless so the user
+            // can see the error message + the obfs4 banner that explains
+            // why — the status element lives inside the body, so hiding
+            // the body would silence the failure entirely.
+            toggle.checked = !toggle.checked;
+            body.style.display = '';
+            statusEl.textContent = `Failed: ${err}`;
+            statusEl.classList.add('is-error');
+        } finally {
+            toggle.disabled = false;
+            if (torToggle) torToggle.disabled = wasTorToggleDisabled;
+            refreshApplyEnabled();
+        }
+    });
+    textarea.addEventListener('input', () => {
+        renderBridgesStatus(statusEl, textarea.value);
+        refreshObfs4Banner(textarea.value);
+        refreshApplyEnabled();
+    });
+    // Initial banner state.
+    refreshObfs4Banner(textarea.value);
+
+    // bridges.torproject.org link → external open via Tauri (matches the
+    // Tor logo attribution link's pattern in main.js).
+    if (link) {
+        link.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            // obfs4 is the realistic anti-censorship transport; vanilla
+            // bridges are essentially abandoned by The Tor Project.
+            openUrl('https://bridges.torproject.org/bridges/en?transport=obfs4');
+        };
+    }
+
+    applyBtn.addEventListener('click', async () => {
+        applyBtn.disabled = true;
+        textarea.disabled = true;
+        toggle.disabled = true;
+        // Lock the main Tor toggle too so the user can't rip the rug out
+        // mid-restart.
+        const torToggle = document.getElementById('privacy-tor-toggle');
+        const wasTorToggleDisabled = torToggle ? torToggle.disabled : false;
+        if (torToggle) torToggle.disabled = true;
+        statusEl.textContent = 'Applying & reconnecting…';
+        statusEl.classList.remove('is-error', 'is-ok');
+        try {
+            const res = await invoke('tor_set_bridges', {
+                enabled: !!toggle.checked,
+                lines: textarea.value,
+            });
+            // Update the saved baseline so the Apply button gates back to
+            // disabled until the user types another change.
+            savedLines = textarea.value;
+            // Re-render circuit display only — tor_set_bridges already cycled
+            // relays. Don't pass forceNewCircuit or we'd rotate the isolation
+            // token + cycle sockets a second time.
+            try { await loadTorCircuits(true, false); } catch (_) {}
+            statusEl.textContent = res && res.enabled
+                ? 'Bridges applied. Tor reconnected.'
+                : 'Bridges saved. Tor will use them when next enabled.';
+            statusEl.classList.add('is-ok');
+        } catch (err) {
+            console.error('[Tor] tor_set_bridges failed:', err);
+            statusEl.textContent = `Failed: ${err}`;
+            statusEl.classList.add('is-error');
+        } finally {
+            textarea.disabled = false;
+            toggle.disabled = false;
+            if (torToggle) torToggle.disabled = wasTorToggleDisabled;
+            // Re-evaluate Apply against the (possibly newly-saved) baseline
+            // rather than blindly enabling it.
+            refreshApplyEnabled();
+        }
+    });
+}
+
+/**
+ * Show the obfs4-needs-install banner inline when (a) the user's bridge
+ * lines include any obfs4 entry AND (b) `obfs4proxy` isn't detected on the
+ * system. Otherwise hide it. Renders a platform-tailored install command so
+ * the user can copy-paste-fix instead of guessing.
+ */
+let _obfs4BannerGen = 0;
+async function refreshObfs4Banner(text) {
+    const banner = document.getElementById('tor-obfs4-banner');
+    const msg = document.getElementById('tor-obfs4-banner-msg');
+    if (!banner || !msg) return;
+
+    // Stamp this invocation. Fast typing can fire many parallel checks; only
+    // the most recent one is allowed to mutate the DOM. Otherwise an older
+    // "obfs4 + missing" check resolving after a newer "no obfs4" check would
+    // re-show the banner against an empty textarea.
+    const myGen = ++_obfs4BannerGen;
+
+    const lines = (text || '').split(/\r?\n/);
+    const hasObfs4 = lines.some(l => l.trim().toLowerCase().startsWith('obfs4 '));
+    if (!hasObfs4) {
+        banner.style.display = 'none';
+        return;
+    }
+    let status;
+    try {
+        status = await invoke('tor_check_obfs4_proxy');
+    } catch (_) {
+        if (myGen !== _obfs4BannerGen) return;
+        banner.style.display = 'none';
+        return;
+    }
+    if (myGen !== _obfs4BannerGen) return;
+    if (status && status.installed) {
+        banner.style.display = 'none';
+        return;
+    }
+
+    // Platform-specific install hint.
+    const os = (platformFeatures && platformFeatures.os) || 'unknown';
+    let hint;
+    switch (os) {
+        case 'macos':
+            hint = '<code>brew install obfs4proxy</code>';
+            break;
+        case 'linux':
+            hint = '<code>apt install obfs4proxy</code> (or your distro\'s package manager)';
+            break;
+        case 'windows':
+            hint = 'download from torproject.org and add to PATH';
+            break;
+        default:
+            hint = 'install <code>obfs4proxy</code> for your platform';
+            break;
+    }
+    msg.innerHTML = `obfs4 bridges need <code>obfs4proxy</code> installed: ${hint}. Apply will fail until it\'s available.`;
+    banner.style.display = '';
+}
+
+/** Show a tiny "N bridges configured" / "0 bridges" line under the textarea. */
+function renderBridgesStatus(el, text) {
+    const lines = (text || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    el.classList.remove('is-error', 'is-ok');
+    if (lines.length === 0) {
+        el.textContent = 'No bridges configured.';
+    } else {
+        el.textContent = `${lines.length} bridge${lines.length === 1 ? '' : 's'} configured`;
+    }
+}
+
+/**
  * Poll `tor_get_state` every 1.5s and refresh the card until we hit a stable
  * state (running OR disabled-and-not-bootstrapping OR failed). Avoids the
  * "stuck on Starting Tor…" UX where the panel rendered before the
@@ -145,6 +512,8 @@ function ensureTorStatePolling(toggleEl, statusEl) {
             toggleEl.checked = !!state.running || !!state.enabled;
             applyTorCardState(state);
             applyTorBootstrapProgress(state.bootstrap_progress);
+            applyTorToggleLock(state);
+            applyTorAdvancedVisibility(state);
             statusEl.textContent = formatTorStatus(state);
             const stable = state.running
                 || (!state.enabled && !(state.status || '').startsWith('bootstrapping'))
@@ -1862,8 +2231,11 @@ async function initSettings() {
             torToggle.checked = !!state.running || !!state.enabled;
             applyTorCardState(state);
             applyTorBootstrapProgress(state.bootstrap_progress);
+            applyTorAdvancedVisibility(state);
             if (!state.supported) {
                 torToggle.disabled = true;
+            } else {
+                applyTorToggleLock(state);
             }
             torStatus.textContent = formatTorStatus(state);
             // If we landed in a transient state (bootstrap still mid-flight
@@ -1878,42 +2250,69 @@ async function initSettings() {
         torToggle.addEventListener('change', async (e) => {
             const desired = e.target.checked;
             torToggle.disabled = true;
-            // Optimistically reflect the bootstrapping animation immediately
-            // — user clicked, awaitable is in flight.
-            applyTorCardState({ supported: true, enabled: desired, running: false, status: desired ? 'bootstrapping' : 'disabled' });
+            const optimistic = { supported: true, enabled: desired, running: false, status: desired ? 'bootstrapping' : 'disabled' };
+            applyTorCardState(optimistic);
             applyTorBootstrapProgress(desired ? 0 : null);
+            applyTorAdvancedVisibility(optimistic);
             torStatus.textContent = desired ? 'Bootstrapping…' : 'Disabling…';
-            // Start polling immediately — `tor_set_enabled` doesn't return
-            // until bootstrap is fully complete (20–30s on a fresh cache),
-            // so without an in-flight poll the UI sees zero updates during
-            // that window and jumps straight from 0% → connected.
+            // tor_set_enabled doesn't return until bootstrap completes (~20-30s
+            // first boot) — start polling now so the UI gets live progress.
             if (desired) ensureTorStatePolling(torToggle, torStatus);
             try {
                 const state = await invoke('tor_set_enabled', { enabled: desired });
                 torToggle.checked = !!state.running || !!state.enabled;
                 applyTorCardState(state);
                 applyTorBootstrapProgress(state.bootstrap_progress);
+                applyTorAdvancedVisibility(state);
                 torStatus.textContent = formatTorStatus(state);
-                // tor_set_enabled awaits bootstrap before returning, so this
-                // path is normally already stable — but leave the poll in
-                // place to catch the rare slow-bootstrap edge case.
                 if (state.enabled && !state.running) {
                     ensureTorStatePolling(torToggle, torStatus);
                 }
+                applyTorToggleLock(state);
             } catch (err) {
                 console.error('[Tor] tor_set_enabled failed:', err);
-                // Roll the toggle back to actual state.
                 try {
                     const state = await invoke('tor_get_state');
                     torToggle.checked = !!state.running || !!state.enabled;
                     applyTorCardState({ ...state, status: 'failed: ' + err });
                     applyTorBootstrapProgress(state.bootstrap_progress);
+                    applyTorAdvancedVisibility(state);
                     torStatus.textContent = `Failed: ${err}`;
+                    applyTorToggleLock(state);
                 } catch (_) { /* nothing else we can do */ }
             } finally {
-                torToggle.disabled = false;
+                // Keep the toggle locked if Tor re-entered a transitional state
+                // (the poller will release once stable).
+                try {
+                    const post = await invoke('tor_get_state');
+                    if (!isTorTransitional(post)) torToggle.disabled = false;
+                } catch (_) {
+                    torToggle.disabled = false;
+                }
             }
         });
+
+        const advWrap = document.getElementById('settings-tor-advanced');
+        const advToggle = document.getElementById('tor-advanced-toggle');
+        const advPanel = document.getElementById('tor-advanced-panel');
+        const advRefresh = document.getElementById('tor-circuits-refresh');
+        if (advWrap && advToggle && advPanel) {
+            advToggle.addEventListener('click', () => {
+                const willOpen = !advWrap.classList.contains('expanded');
+                advWrap.classList.toggle('expanded', willOpen);
+                advPanel.style.display = willOpen ? '' : 'none';
+                if (willOpen) loadTorCircuits(false);
+            });
+        }
+        if (advRefresh) {
+            // "New circuit" intentionally rotates the isolation token AND
+            // cycles relay sockets. Bridges flows below only refresh the
+            // display (without doubling up on switch_relay_transport).
+            advRefresh.addEventListener('click', () => loadTorCircuits(true, true));
+        }
+
+        // Bridges: toggle reveals textarea, Apply persists + reconnects Tor.
+        await initTorBridgesUI();
     }
 
     // Load blocked users list + toggle

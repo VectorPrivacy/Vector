@@ -253,6 +253,17 @@ fn run_standalone_sync_loop(data_dir: &str) {
     }
 
     rt.block_on(async {
+        // If the account has Tor enabled, bootstrap a TorService now. Without
+        // this, every relay connection in the bg-sync flow blackholes against
+        // the failsafe — no leak, but no notifications either. The cache was
+        // hydrated from the new account's DB by `init_database` above, so
+        // sync_to_active_account starts a service iff this account wants Tor.
+        // First-boot pays a 5-15s consensus fetch; subsequent boots are ~2s
+        // off the cached directory.
+        if let Err(e) = crate::commands::tor::sync_to_active_account().await {
+            logcat(&format!("Tor bootstrap for bg-sync failed: {} (relays will blackhole)", e));
+        }
+
         // Bootstrap the standalone client — get connected ASAP
         let (client, my_public_key, can_decrypt, keys) = match bootstrap_client(data_dir).await {
             Ok(result) => result,
@@ -409,9 +420,18 @@ fn run_standalone_sync_loop(data_dir: &str) {
             Err(e) => logcat(&format!("handle_notifications returned Err: {:?}", e)),
         }
 
-        // Clean up
+        // Clean up: stop the nostr client first, then the Tor service.
+        // The TorService was spawned on this transient runtime; if we let
+        // the runtime drop without an explicit awaited stop, the SOCKS
+        // accept loop and per-stream tasks abort abruptly, leaving the
+        // state-dir lockfile release time non-deterministic — Windows can
+        // throw sharing violations on the next foreground start, and we
+        // can leak the lock across runtimes since `tor_slot()` is process-
+        // global. Awaiting stop_and_join here guarantees the JoinSet drains
+        // and all `Arc<TorClient>` clones release before the runtime dies.
         client.disconnect().await;
-        logcat("Client disconnected");
+        crate::commands::tor::stop_and_join_if_running().await;
+        logcat("Client disconnected; Tor stopped");
     });
 }
 
@@ -488,10 +508,14 @@ async fn bg_connect_single_relay(client: &Client, data_dir: &str) -> Result<(), 
         candidates.extend(DEFAULT_RELAYS.iter().map(|s| s.to_string()));
     }
 
-    // Try each relay until one connects successfully
+    // Try each relay until one connects successfully.
+    // Use pool().add_relay with tor_aware_relay_options — `client.add_relay()`
+    // does NOT inherit `ClientOptions::connection`, so without this the bg
+    // sync connects direct over clearnet on Tor-enabled accounts.
     for url in &candidates {
         logcat(&format!("Background: trying relay {}", url));
-        if let Err(e) = client.add_relay(url.as_str()).await {
+        let opts = vector_core::tor_aware_relay_options(RelayOptions::new());
+        if let Err(e) = client.pool().add_relay(url.as_str(), opts).await {
             logcat(&format!("Failed to add relay {}: {:?}", url, e));
             continue;
         }

@@ -49,21 +49,42 @@ fn is_ipv6_private(ip: &std::net::Ipv6Addr) -> bool {
 
 /// Build an HTTP client with the given timeout.
 ///
-/// When the `tor` feature is enabled and `tor::TorService` is currently active,
-/// the returned client routes all requests through Tor's local SOCKS5 proxy.
-/// When Tor is disabled or the feature is off, this is the identity client.
+/// Honors the Tor failsafe: when the user has Tor enabled, every connection
+/// goes through Tor — period. If Tor is enabled but not currently running
+/// (bootstrap in flight, mid-restart, service crashed), the returned client
+/// is wired to a blackhole SOCKS proxy so requests fail at the TCP layer
+/// without any chance of leaking clearnet traffic. Direct connections are
+/// only ever issued when the user has explicitly disabled Tor.
 ///
 /// Callers should use this rather than `reqwest::Client::builder()` directly
-/// so the Tor toggle automatically covers their traffic.
+/// so the failsafe automatically covers their traffic. The `disallowed_methods`
+/// clippy lint enforces this everywhere except this one canonical call site.
+#[allow(clippy::disallowed_methods)]
 pub fn build_http_client(timeout: std::time::Duration) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder().timeout(timeout);
 
     #[cfg(feature = "tor")]
     {
-        if let Some(url) = crate::tor::proxy_url() {
-            let proxy = reqwest::Proxy::all(&url)
-                .map_err(|e| format!("Tor proxy URL ({url}) invalid: {e}"))?;
-            builder = builder.proxy(proxy);
+        match crate::tor::transport_state() {
+            crate::tor::TorTransportState::Active(addr) => {
+                // Use the addr from the variant directly — re-querying via
+                // proxy_url() races against TorService::stop() and can panic.
+                let url = format!("socks5h://{addr}");
+                let proxy = reqwest::Proxy::all(&url)
+                    .map_err(|e| format!("Tor proxy URL ({url}) invalid: {e}"))?;
+                builder = builder.proxy(proxy);
+            }
+            crate::tor::TorTransportState::RequiredButInactive => {
+                // Tor failsafe: route to a blackhole so connections fail safe
+                // instead of leaking direct.
+                let url = format!("socks5h://{}", crate::tor::blackhole_proxy_addr());
+                let proxy = reqwest::Proxy::all(&url)
+                    .map_err(|e| format!("blackhole proxy invalid: {e}"))?;
+                builder = builder.proxy(proxy);
+            }
+            crate::tor::TorTransportState::Disabled => {
+                // No proxy — user has Tor off.
+            }
         }
     }
 

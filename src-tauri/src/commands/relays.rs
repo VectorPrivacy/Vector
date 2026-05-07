@@ -125,6 +125,63 @@ pub fn validate_relay_url(url: &str) -> Result<String, String> {
     Ok(normalized.to_string())
 }
 
+/// Add a relay to the pool with race-safe handling of Tor bootstrap completing
+/// mid-call. The relay's stored `connection_mode` is captured at `add_relay`
+/// time. If the user was bootstrapping when we built options but bootstrap
+/// completes before we'd connect, the stored options point at the blackhole
+/// while the live transport is now the actual proxy. Detect this transition
+/// and refresh by cycling the relay; otherwise just add. The closure is
+/// invoked twice only on the rare race path.
+async fn add_relay_failsafe<F>(
+    client: &nostr_sdk::Client,
+    url: &str,
+    mut make_opts: F,
+) -> Result<(), nostr_sdk::client::Error>
+where
+    F: FnMut() -> nostr_sdk::RelayOptions,
+{
+    let was_deferring = defer_connect_for_bootstrap();
+    client.pool().add_relay(url, make_opts()).await?;
+
+    if defer_connect_for_bootstrap() {
+        // Still bootstrapping; switch_relay_transport will cycle this relay
+        // when bootstrap completes.
+        return Ok(());
+    }
+
+    if was_deferring {
+        // Bootstrap completed between the options-capture and now. Stored
+        // mode is stale (blackhole), refresh by cycling. Propagate the
+        // re-add error so the caller can log it; otherwise a vanished
+        // relay would be reported as success.
+        let _ = client.remove_relay(url).await;
+        client.pool().add_relay(url, make_opts()).await?;
+    }
+    if let Err(e) = client.pool().connect_relay(url).await {
+        eprintln!("[Relay] connect_relay({}) failed: {}", url, e);
+    }
+    Ok(())
+}
+
+/// True when the user has Tor enabled but the service hasn't finished
+/// bootstrapping yet. While in this state every TCP connection blackholes
+/// (failsafe), so a `connect_relay` would always fail. Better to skip it —
+/// `switch_relay_transport` cycles every relay onto the live proxy as soon
+/// as bootstrap completes, picking up anything we deferred here.
+fn defer_connect_for_bootstrap() -> bool {
+    #[cfg(feature = "tor")]
+    {
+        matches!(
+            vector_core::tor::transport_state(),
+            vector_core::tor::TorTransportState::RequiredButInactive
+        )
+    }
+    #[cfg(not(feature = "tor"))]
+    {
+        false
+    }
+}
+
 /// Add a log entry for a relay
 pub fn add_relay_log(url: &str, level: &str, message: &str) {
     let normalized = url.trim().trim_end_matches('/').to_lowercase();
@@ -399,10 +456,18 @@ pub async fn toggle_default_relay<R: Runtime>(handle: AppHandle<R>, url: String,
 
     if let Some(client) = NOSTR_CLIENT.get() {
         if enabled {
-            match client.pool().add_relay(&normalized_url, RelayOptions::new().reconnect(false)).await {
+            // Wrap with tor_aware_relay_options so a re-enabled default relay
+            // doesn't come up Direct when Tor is on (or pre-bootstrap). The
+            // failsafe helper handles the boot-completes-mid-call race.
+            match add_relay_failsafe(client, &normalized_url, || {
+                vector_core::tor_aware_relay_options(RelayOptions::new().reconnect(false))
+            }).await {
                 Ok(_) => {
-                    let _ = client.pool().connect_relay(&normalized_url).await;
-                    println!("[Relay] Enabled default relay: {}", normalized_url);
+                    if defer_connect_for_bootstrap() {
+                        println!("[Relay] Enabled default relay (deferred connect, Tor bootstrapping): {}", normalized_url);
+                    } else {
+                        println!("[Relay] Enabled default relay: {}", normalized_url);
+                    }
                 }
                 Err(e) => eprintln!("[Relay] Failed to enable default relay: {}", e),
             }
@@ -450,11 +515,13 @@ pub async fn add_custom_relay<R: Runtime>(handle: AppHandle<R>, url: String, mod
 
     if let Some(client) = NOSTR_CLIENT.get() {
         if client.relays().await.len() > 0 {
-            match client.pool().add_relay(&new_relay.url, relay_options_for_mode(&relay_mode)).await {
+            match add_relay_failsafe(client, &new_relay.url, || {
+                relay_options_for_mode(&relay_mode)
+            }).await {
                 Ok(_) => {
                     println!("[Relay] Added custom relay to pool: {} (mode: {})", new_relay.url, relay_mode);
-                    if let Err(e) = client.pool().connect_relay(&new_relay.url).await {
-                        eprintln!("[Relay] Failed to connect to new relay: {}", e);
+                    if defer_connect_for_bootstrap() {
+                        println!("[Relay] Connect deferred, Tor still bootstrapping: {}", new_relay.url);
                     }
                     crate::inbox_relays::republish_inbox_relays_debounced();
                 }
@@ -519,11 +586,8 @@ pub async fn toggle_custom_relay<R: Runtime>(handle: AppHandle<R>, url: String, 
 
     if let Some(client) = NOSTR_CLIENT.get() {
         if enabled {
-            match client.pool().add_relay(&url, relay_options_for_mode(&relay_mode)).await {
-                Ok(_) => {
-                    let _ = client.pool().connect_relay(&url).await;
-                    println!("[Relay] Enabled custom relay: {} (mode: {})", url, relay_mode);
-                }
+            match add_relay_failsafe(client, &url, || relay_options_for_mode(&relay_mode)).await {
+                Ok(_) => println!("[Relay] Enabled custom relay: {} (mode: {})", url, relay_mode),
                 Err(e) => eprintln!("[Relay] Failed to enable relay: {}", e),
             }
         } else {
@@ -569,11 +633,8 @@ pub async fn update_relay_mode<R: Runtime>(handle: AppHandle<R>, url: String, mo
     if is_enabled {
         if let Some(client) = NOSTR_CLIENT.get() {
             let _ = client.pool().remove_relay(&url).await;
-            match client.pool().add_relay(&url, relay_options_for_mode(&mode)).await {
-                Ok(_) => {
-                    let _ = client.pool().connect_relay(&url).await;
-                    println!("[Relay] Updated relay mode: {} -> {}", url, mode);
-                }
+            match add_relay_failsafe(client, &url, || relay_options_for_mode(&mode)).await {
+                Ok(_) => println!("[Relay] Updated relay mode: {} -> {}", url, mode),
                 Err(e) => eprintln!("[Relay] Failed to update relay mode: {}", e),
             }
         }

@@ -236,6 +236,10 @@
     "allow-get-audio-metadata",
     "allow-get-logs",
     "allow-tor-get-state",
-    "allow-tor-set-enabled"
+    "allow-tor-set-enabled",
+    "allow-tor-get-circuits",
+    "allow-tor-get-bridges",
+    "allow-tor-set-bridges",
+    "allow-tor-check-obfs4-proxy"
   ]
 }

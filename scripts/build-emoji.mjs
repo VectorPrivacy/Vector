@@ -272,7 +272,8 @@ function migrateCustomKeywords(emojis, cldrMap) {
     // Parse existing emoji.js
     const raw = readFileSync(EMOJI_JS, 'utf-8');
     const existing = new Map();
-    const re = /\{\s*emoji:\s*'([^']+)',\s*name:\s*'([^']+)'\s*\}/g;
+    // Tolerate both old `{emoji,name}` and new `{emoji,name,display}` shapes.
+    const re = /\{\s*emoji:\s*'([^']+)',\s*name:\s*'([^']+)'/g;
     let m;
     while ((m = re.exec(raw)) !== null) {
         const char = m[1];
@@ -387,6 +388,10 @@ function buildKeywords(emojis, cldrMap, customMap) {
         }
 
         emoji.keywords = [...words].join(' ');
+
+        // Display name (canonical, for UI labels). Prefer CLDR tts (e.g.
+        // "rolling on the floor laughing"); fall back to emoji-test.txt name.
+        emoji.display = (cldr && cldr.tts) ? cldr.tts : emoji.name;
     }
 
     console.log(`  CLDR matched ${cldrHits}/${emojis.length} emojis`);
@@ -420,9 +425,10 @@ function writeEmojiJs(emojis) {
             if (lines[lines.length - 1] !== '') lines.push('');
             lines.push(`    // ${currentGroup}`);
         }
-        // Escape single quotes in keywords (shouldn't happen but be safe)
+        // Escape single quotes (shouldn't happen but be safe)
         const safeKeywords = emoji.keywords.replace(/'/g, "\\'");
-        lines.push(`    { emoji: '${emoji.char}', name: '${safeKeywords}' },`);
+        const safeDisplay = (emoji.display || '').replace(/'/g, "\\'");
+        lines.push(`    { emoji: '${emoji.char}', name: '${safeKeywords}', display: '${safeDisplay}' },`);
     }
 
     // Remove trailing comma from last entry
