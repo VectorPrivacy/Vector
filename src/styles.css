@@ -12027,4 +12027,14 @@ hr {
 .dmsg-toolbar-btn:hover .icon {
   background-color: #fff;
 }
+/* Danger variant — paints the icon red so the Delete action reads
+   distinctly from the additive ones (react/reply/edit) without
+   tinting the whole button. */
+.dmsg-toolbar-btn-danger .icon {
+  background-color: #FC595C;
+}
+.dmsg-toolbar-btn-danger:hover .icon {
+  background-color: #FC595C;
+  filter: brightness(1.15);
+}
 

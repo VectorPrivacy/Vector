@@ -1936,6 +1936,16 @@ impl MlsService {
                             RumorProcessingResult::WebxdcPeerLeft { .. } => {
                                 // WebXDC handled by platform layer
                             }
+                            RumorProcessingResult::DeletionRequest { target_event_id } => {
+                                // Authorization + apply both live in
+                                // mls::cooperative_hide so the live and
+                                // bulk-sync paths share one source of truth.
+                                let _ = crate::mls::cooperative_hide::apply_cooperative_hide(
+                                    &target_event_id,
+                                    &rumor_event.pubkey,
+                                    &gid_for_fetch,
+                                ).await;
+                            }
                             RumorProcessingResult::Ignored => {}
                         }
                     }

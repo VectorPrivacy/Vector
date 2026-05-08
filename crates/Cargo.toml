@@ -6,3 +6,13 @@ resolver = "2"
 # nostr SDK's SecretKey Drop uses non_secure_erase which the compiler can optimize away.
 # Patched to use zeroize (volatile writes) so secret key bytes are guaranteed cleared from the stack.
 nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "zeroize-secretkey" }
+
+# MDK fork branched from rev 136a9ee with `build_message_event_retained`
+# added — exposes the kind-445 wrapper's ephemeral signing key so the
+# sender can later publish a NIP-09 deletion against the wrapper.
+# In-repo so collaborators get the patched source without an external
+# checkout. Maintained as a thin diff on top of the pinned upstream rev.
+[patch."https://github.com/marmot-protocol/mdk.git"]
+mdk-core = { path = "../patches/mdk/crates/mdk-core" }
+mdk-sqlite-storage = { path = "../patches/mdk/crates/mdk-sqlite-storage" }
+mdk-storage-traits = { path = "../patches/mdk/crates/mdk-storage-traits" }

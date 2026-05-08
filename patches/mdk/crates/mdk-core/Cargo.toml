@@ -1,0 +1,66 @@
+[package]
+name = "mdk-core"
+version = "0.6.0"
+edition = "2024"
+description = "A simplified interface to build secure messaging apps on nostr with MLS."
+authors = ["Jeff Gardner <j@jeffg.me>", "Yuki Kishimoto <yukikishimoto@protonmail.com>", "MDK Developers"]
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+readme = "README.md"
+rust-version = "1.90.0"
+keywords = ["nostr", "mls", "openmls"]
+categories = ["cryptography", "network-programming"]
+
+[features]
+default = []
+mip04 = []
+debug-examples = []
+
+[dependencies]
+hex = { workspace = true, features = ["std"] }
+nostr = { workspace = true, features = ["std", "nip44"] }
+mdk-storage-traits.workspace = true
+openmls.workspace = true
+openmls_basic_credential.workspace = true
+openmls_rust_crypto.workspace = true
+openmls_traits.workspace = true
+serde = { workspace = true, features = ["derive"] }
+tls_codec.workspace = true
+tracing = { workspace = true, features = ["std"] }
+thiserror.workspace = true
+
+# Crypto dependencies for MIP-01 (group image encryption) - mandatory
+chacha20poly1305.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
+
+# Image processing dependencies - mandatory (used by both MIP-01 and MIP-04)
+image = { workspace = true, features = ["jpeg", "png", "webp", "gif"] }
+blurhash.workspace = true
+kamadak-exif.workspace = true  # EXIF stripping for privacy (used by both MIP-01 and MIP-04)
+
+[dev-dependencies]
+mdk-storage-traits = { workspace = true, features = ["test-utils"] }
+mdk-memory-storage.workspace = true
+mdk-sqlite-storage.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[[example]]
+name = "mls_memory"
+path = "examples/mls_memory.rs"
+
+[[example]]
+name = "mls_sqlite"
+path = "examples/mls_sqlite.rs"
+
+[[example]]
+name = "key_package_inspection"
+path = "examples/key_package_inspection.rs"
+
+[[example]]
+name = "group_inspection"
+path = "examples/group_inspection.rs"
+required-features = ["debug-examples"]

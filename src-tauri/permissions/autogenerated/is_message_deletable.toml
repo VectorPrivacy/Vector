@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-is-message-deletable"
+description = "Enables the is_message_deletable command without any pre-configured scope."
+commands.allow = ["is_message_deletable"]
+
+[[permission]]
+identifier = "deny-is-message-deletable"
+description = "Denies the is_message_deletable command without any pre-configured scope."
+commands.deny = ["is_message_deletable"]

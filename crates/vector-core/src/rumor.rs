@@ -129,6 +129,14 @@ pub enum RumorProcessingResult {
     },
     /// Event was ignored (invalid, expired, or should not be stored)
     Ignored,
+    /// A NIP-09 deletion request — sender asks live clients to drop a
+    /// previously-received message from local storage. Cooperative
+    /// delete-for-everyone signal that pairs with Vector's gift-wrap
+    /// nuke at the relay layer (see `vector_core::deletion`).
+    DeletionRequest {
+        /// Hex id of the rumor being deleted (target's `["e", ...]` tag).
+        target_event_id: String,
+    },
     /// A message edit event
     Edit {
         /// The ID of the message being edited
@@ -186,6 +194,15 @@ pub fn process_rumor(
         // Application-specific data (typing indicators, etc.)
         Kind::ApplicationSpecificData => {
             process_app_specific(rumor, context)
+        }
+        // NIP-09 cooperative deletion (Layer 2 of Vector's delete flow).
+        // The relay-layer wrap nuke happens via the retained ephemeral
+        // key in `vector_core::deletion`; this rumor tells live clients
+        // that already decrypted the original to drop it from local
+        // storage. Authorization (sender == original author) is
+        // verified at commit time, not parse time.
+        Kind::EventDeletion => {
+            process_deletion(rumor, context)
         }
         // Unknown or unsupported kind - store for future compatibility
         _ => {
@@ -464,6 +481,24 @@ fn process_file_attachment(
     };
 
     Ok(RumorProcessingResult::FileAttachment(msg))
+}
+
+/// Process a NIP-09 deletion rumor (Layer 2 cooperative hide).
+///
+/// Extracts the target event id from the `["e", ...]` tag. Authorization
+/// (sender pubkey == original message author) is verified at commit
+/// time so callers can short-circuit without an extra DB hit at parse.
+fn process_deletion(
+    rumor: RumorEvent,
+    _context: RumorContext,
+) -> Result<RumorProcessingResult, String> {
+    let target_tag = rumor.tags
+        .find(TagKind::e())
+        .ok_or("Deletion rumor missing target event tag")?;
+    let target_event_id = target_tag.content()
+        .ok_or("Deletion target tag has no content")?
+        .to_string();
+    Ok(RumorProcessingResult::DeletionRequest { target_event_id })
 }
 
 /// Process a reaction rumor

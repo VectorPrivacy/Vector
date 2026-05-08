@@ -153,6 +153,214 @@ async fn mark_message_failed(pending_id: Arc<String>, _receiver: &str) {
     }
 }
 
+/// What removal action(s) are available to the user for a given
+/// message? Used by the toolbar to gate the trash icon, pick the
+/// right confirm copy + backend command, and decide on visual
+/// affordance (full vs reduced opacity).
+#[derive(serde::Serialize, Default)]
+pub struct MessageDeleteOptions {
+    /// User's own message — always shown a trash icon.
+    pub mine: bool,
+    /// Retained ephemeral wrap key exists, so we can do a true
+    /// relay-level nuke (Layer 1). False on older messages or
+    /// messages sent from a different device.
+    pub has_retained_keys: bool,
+    /// Message has at least one Blossom-uploaded attachment we can
+    /// delete from the storage server even without retained wrap keys.
+    pub has_attachments: bool,
+    /// User can cooperatively hide someone else's group message
+    /// (they are an admin of that group). Cooperative-only — relays
+    /// keep the wrapper; cooperating Vector clients drop the row.
+    pub can_admin_hide: bool,
+}
+
+/// Surface what the toolbar should know about this message's
+/// deletability. The toolbar uses these flags to gate the trash icon,
+/// pick visual affordance (full / reduced opacity), and choose the
+/// right confirm copy and backend command.
+///
+/// Always returns successfully — an absent message returns the all-
+/// false default (no toolbar). The flags are advisory; the backend
+/// commands themselves do whatever is actually possible at click time.
+#[tauri::command]
+pub async fn get_message_delete_options(message_id: String) -> Result<MessageDeleteOptions, String> {
+    use nostr_sdk::EventId;
+    use vector_core::ChatType;
+
+    let (chat_id, chat_type, mine, has_attachments) = {
+        let state = STATE.lock().await;
+        match state.find_message(&message_id) {
+            Some((chat, msg)) => (
+                chat.id.clone(),
+                chat.chat_type.clone(),
+                msg.mine,
+                msg.attachments.iter().any(|a| !a.url.is_empty()),
+            ),
+            None => return Ok(MessageDeleteOptions::default()),
+        }
+    };
+
+    let has_retained_keys = if mine {
+        match chat_type {
+            ChatType::MlsGroup => {
+                vector_core::db::mls_wrap_keys::has_wrap_keys_for_message(&message_id)
+                    .unwrap_or(false)
+            }
+            ChatType::DirectMessage => {
+                EventId::from_hex(&message_id)
+                    .ok()
+                    .and_then(|rid| vector_core::db::nip17_keys::has_wrap_keys_for_rumor(&rid).ok())
+                    .unwrap_or(false)
+            }
+        }
+    } else {
+        false
+    };
+
+    // Admin-hide branch: someone else's group message AND we're an
+    // admin of the group. We don't need retained keys — admin-hide
+    // is cooperative-only, since admins don't hold others' ephemeral
+    // wrap keys.
+    let can_admin_hide = if !mine && matches!(chat_type, ChatType::MlsGroup) {
+        match vector_core::mls::MlsService::new_persistent_static() {
+            Ok(svc) => match svc.get_group_members(&chat_id) {
+                Ok((_wire, _members, admins)) => {
+                    let my_npub = vector_core::MY_PUBLIC_KEY
+                        .get()
+                        .and_then(|pk| nostr_sdk::ToBech32::to_bech32(pk).ok())
+                        .unwrap_or_default();
+                    !my_npub.is_empty() && admins.iter().any(|a| a == &my_npub)
+                }
+                Err(_) => false,
+            },
+            Err(_) => false,
+        }
+    } else {
+        false
+    };
+
+    Ok(MessageDeleteOptions {
+        mine,
+        has_retained_keys,
+        has_attachments,
+        can_admin_hide,
+    })
+}
+
+/// Backwards-compat shim: kept so older frontends/tests that call
+/// `is_message_deletable` keep working. New code should use
+/// `get_message_delete_options`.
+#[tauri::command]
+pub async fn is_message_deletable(message_id: String) -> Result<bool, String> {
+    let opts = get_message_delete_options(message_id).await?;
+    Ok(opts.mine || opts.can_admin_hide)
+}
+
+/// Admin-moderation hide of someone else's group message.
+///
+/// Cooperative-only: a kind-5 rumor sent inside the MLS group, signed
+/// by the admin's main key. Authorization is verified by every
+/// receiving Vector client (sender must be a current admin of the
+/// group). The encrypted kind-445 wrapper stays on relays — only
+/// cooperating clients drop the local row.
+#[tauri::command]
+pub async fn admin_hide_message(group_id: String, message_id: String) -> Result<(), String> {
+    vector_core::admin_hide_group_message(&group_id, &message_id).await?;
+    // Optimistically drop the row locally too (admin won't see the
+    // notice come back to them via MLS — they sent it).
+    let removed = {
+        let mut state = STATE.lock().await;
+        state.remove_message(&message_id)
+    };
+    if removed.is_some() {
+        let _ = crate::db::delete_event(&message_id).await;
+        if let Some(handle) = TAURI_APP.get() {
+            handle.emit("message_removed", serde_json::json!({
+                "id": &message_id,
+                "chat_id": &group_id,
+                "reason": "hidden-by-admin"
+            })).ok();
+        }
+    }
+    Ok(())
+}
+
+/// Delete an outbound message (DM or MLS group) from the network *and* locally.
+///
+/// Branches on the chat type of the containing chat:
+/// - DM: NIP-17 path — NIP-09 against every retained gift-wrap.
+/// - MLS group: kind-445 path — NIP-09 against every retained wrapper
+///   (signed by the wrapper's retained ephemeral key) plus a kind-5
+///   cooperative-hide rumor INSIDE the MLS group.
+///
+/// Only allows deletion of the user's own outbound messages
+/// (`mine == true`). Messages without retained wrap keys (predate the
+/// retention feature, sent from a different device) get a
+/// distinguishable `NOT_DELETABLE` error so the frontend shows a clear
+/// explanatory popup.
+#[tauri::command]
+pub async fn delete_own_message(message_id: String) -> Result<vector_core::DeleteOutcome, String> {
+    use nostr_sdk::EventId;
+    use vector_core::ChatType;
+
+    // Confirm the message exists, is ours, and grab its chat type.
+    let (chat_id, chat_type, is_mine) = {
+        let state = STATE.lock().await;
+        let (chat, msg) = state.find_message(&message_id)
+            .ok_or_else(|| {
+                eprintln!(
+                    "[delete_own_message] message_id `{}` not found in STATE; chats={}",
+                    message_id,
+                    state.chats.len()
+                );
+                format!("Message not found (id: {})", message_id)
+            })?;
+        (chat.id.clone(), chat.chat_type.clone(), msg.mine)
+    };
+    if !is_mine {
+        return Err("Cannot delete a message that isn't yours".to_string());
+    }
+
+    // Branch on chat type. The backend always does what it can —
+    // retained-key relay nuke when available, cooperative-hide notice,
+    // Blossom blob delete on attachments. The returned outcome tells
+    // the frontend exactly which layers fired.
+    let outcome = match chat_type {
+        ChatType::MlsGroup => {
+            vector_core::delete_own_group_message(&chat_id, &message_id).await?
+        }
+        ChatType::DirectMessage => {
+            let rumor_id = EventId::from_hex(&message_id)
+                .map_err(|e| format!("Invalid message id: {}", e))?;
+            vector_core::delete_own_dm(&rumor_id).await?
+        }
+    };
+
+    // Remove from in-memory state.
+    let removed = {
+        let mut state = STATE.lock().await;
+        state.remove_message(&message_id)
+    };
+
+    // Drop the local DB row.
+    if removed.is_some() {
+        if let Err(e) = crate::db::delete_event(&message_id).await {
+            eprintln!("[delete_own_message] DB delete failed: {}", e);
+        }
+    }
+
+    // Tell the frontend to drop the row.
+    if let Some(handle) = TAURI_APP.get() {
+        handle.emit("message_removed", serde_json::json!({
+            "id": &message_id,
+            "chat_id": &chat_id,
+            "reason": "deleted"
+        })).ok();
+    }
+
+    Ok(outcome)
+}
+
 /// Delete a failed message from state and database.
 /// Only allows deletion of messages with `failed == true` (security guard).
 #[tauri::command]
@@ -345,8 +553,19 @@ async fn encrypt_and_upload_mls_media(
         .map_err(|e| format!("Failed to get MDK engine: {}", e))?;
     let media_manager = mdk.media_manager(gid);
 
-    // Determine MIME type from file extension
-    let mime_type = util::mime_from_extension(&file.extension);
+    // Trust the file content over the claimed extension. A file might be
+    // named `pasted_image.png` but actually contain JPEG bytes (Vector's
+    // own compression saves compressed JPEGs with the user-provided
+    // filename, which may carry the pre-compression extension). MDK's
+    // MIP-04 validates content against the claimed MIME and rejects
+    // mismatches, so we sniff magic bytes first and prefer the detected
+    // type when it's a known image format.
+    let detected_mime = vector_core::crypto::mime_from_magic_bytes(&file.bytes);
+    let mime_type = if detected_mime.starts_with("image/") {
+        detected_mime.to_string()
+    } else {
+        util::mime_from_extension(&file.extension)
+    };
 
     // Normalize MIME type for MDK - it has strict validation and rejects many types
     // Use the original for images (which MDK handles well), otherwise use octet-stream

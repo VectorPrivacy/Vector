@@ -130,6 +130,11 @@ pub struct SendResult {
 
 /// Shared tail of send_dm / send_file_dm / send_rumor_dm:
 /// gift-wrap → retry loop → finalize/fail → self-send.
+///
+/// Each successful wrap is persisted via `db::nip17_keys::store_wrap_key`
+/// so that the user can later issue a NIP-09 deletion against the
+/// kind-1059 wrap event id. Recipient wrap and self-send wrap each
+/// retain their own ephemeral key.
 async fn retry_send_gift_wrap(
     client: &Client,
     receiver: &PublicKey,
@@ -141,11 +146,32 @@ async fn retry_send_gift_wrap(
     callback: Arc<dyn SendCallback>,
 ) -> Result<SendResult, String> {
     let my_pk = *MY_PUBLIC_KEY.get().ok_or("Public key not set")?;
+    let inner_rumor_id = rumor.id;
 
     for attempt in 0..config.max_send_attempts {
-        match crate::inbox_relays::send_gift_wrap(client, receiver, rumor.clone(), []).await {
-            Ok(output) if !output.success.is_empty() => {
-                // At least one relay accepted — success
+        match crate::inbox_relays::send_gift_wrap_retained(client, receiver, rumor.clone(), []).await {
+            Ok(outcome) if !outcome.output.success.is_empty() => {
+                // At least one relay accepted — success.
+                // Persist the retained ephemeral key so the user can
+                // later issue NIP-09 deletion against this wrap.
+                if let Some(rid) = inner_rumor_id {
+                    let role = if attempt == 0 {
+                        crate::db::nip17_keys::WrapRole::Recipient
+                    } else {
+                        crate::db::nip17_keys::WrapRole::Retry
+                    };
+                    if let Err(e) = crate::db::nip17_keys::store_wrap_key(
+                        &outcome.wrap_event_id,
+                        &rid,
+                        receiver,
+                        role,
+                        &outcome.wrap_secret,
+                        &outcome.targeted_relays,
+                    ) {
+                        eprintln!("[NIP-17] failed to persist wrap key: {}", e);
+                    }
+                }
+
                 let finalized = {
                     let mut state = STATE.lock().await;
                     state.finalize_pending_message(receiver_npub, pending_id, event_id)
@@ -156,15 +182,34 @@ async fn retry_send_gift_wrap(
                     callback.on_persist(receiver_npub, finalized_msg);
                 }
 
-                // Self-send for recovery (fire-and-forget)
+                // Self-send for recovery (fire-and-forget). Also retain
+                // the self-wrap key so the user can later delete their
+                // own copy from their own inbox relays.
                 if config.self_send {
                     let client = client.clone();
                     let my_pk_clone = my_pk;
                     let rumor_clone = rumor.clone();
+                    let rid_for_self = inner_rumor_id;
                     tokio::spawn(async move {
-                        let _ = crate::inbox_relays::send_gift_wrap(
+                        match crate::inbox_relays::send_gift_wrap_retained(
                             &client, &my_pk_clone, rumor_clone, [],
-                        ).await;
+                        ).await {
+                            Ok(self_outcome) if !self_outcome.output.success.is_empty() => {
+                                if let Some(rid) = rid_for_self {
+                                    if let Err(e) = crate::db::nip17_keys::store_wrap_key(
+                                        &self_outcome.wrap_event_id,
+                                        &rid,
+                                        &my_pk_clone,
+                                        crate::db::nip17_keys::WrapRole::SelfSend,
+                                        &self_outcome.wrap_secret,
+                                        &self_outcome.targeted_relays,
+                                    ) {
+                                        eprintln!("[NIP-17] failed to persist self-wrap key: {}", e);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
                     });
                 }
 
@@ -332,10 +377,17 @@ pub async fn send_file_dm(
     // Save file locally so the attachment is immediately viewable
     let download_dir = crate::db::get_download_dir();
     let _ = std::fs::create_dir_all(&download_dir);
+    // Save with an extension matching the actual content. The caller's
+    // `extension` argument is post-compression (e.g. JPEG when an
+    // original PNG was compressed), but `filename` is the user-facing
+    // name which may still carry the pre-compression extension. If we
+    // honored `filename` verbatim we'd save JPEG bytes as `.png` and
+    // poison any future re-upload with a MIP-04 mismatch.
     let local_name = if filename.is_empty() {
         format!("{}.{}", &file_hash, extension)
     } else {
-        filename.to_string()
+        let stem = filename.rsplit_once('.').map(|(s, _)| s).unwrap_or(filename);
+        format!("{}.{}", stem, extension)
     };
     // Resolve unique path (pasted_image.png → pasted_image-1.png on collision)
     let local_path = crypto::resolve_unique_filename(&download_dir, &local_name);

@@ -42,15 +42,19 @@ pub async fn send_mls_message(
                 GroupId::from_slice(&crate::simd::hex::hex_string_to_bytes(&group_meta.group.engine_group_id))
             };
 
-            // Create MLS message (no await while engine in scope)
+            // Create MLS message via the retained-key path (no await
+            // while engine in scope). The returned Keys is the
+            // ephemeral keypair that signed the kind-445 wrapper —
+            // we'll persist its secret on success so the user can
+            // later issue a NIP-09 deletion against this wrapper.
             let mls_wrapper_result = {
                 let engine = service.engine()
                     .map_err(|e| format!("Failed to get MLS engine: {}", e))?;
-                engine.create_message(&engine_group_id, rumor.clone())
+                engine.create_message_retained(&engine_group_id, rumor.clone())
             }; // engine dropped
 
-            let mls_wrapper = match mls_wrapper_result {
-                Ok(wrapper) => wrapper,
+            let (mls_wrapper, ephemeral_keys) = match mls_wrapper_result {
+                Ok(pair) => pair,
                 Err(e) => {
                     let error_msg = e.to_string();
 
@@ -133,6 +137,31 @@ pub async fn send_mls_message(
                         &group_id,
                         mls_wrapper.created_at.as_secs(),
                     );
+                }
+
+                // Persist the kind-445 wrapper's ephemeral signing
+                // key so the user can later sign a NIP-09 deletion
+                // against this wrapper. Skipped for typing indicators
+                // because they're auto-expired and the typing path
+                // re-signs the wrapper with the user's main key
+                // (the retained ephemeral key would mismatch the
+                // published wrapper's pubkey).
+                if !is_typing_indicator {
+                    if let Some(ref real_id) = inner_event_id {
+                        let urls = crate::inbox_relays::trusted_relay_urls();
+                        let url_strs: Vec<String> = urls.iter()
+                            .map(|u| u.to_string())
+                            .collect();
+                        if let Err(e) = crate::db::mls_wrap_keys::store_wrap_key(
+                            &mls_wrapper.id,
+                            real_id,
+                            &group_id,
+                            ephemeral_keys.secret_key(),
+                            &url_strs,
+                        ) {
+                            eprintln!("[MLS] failed to persist wrap key: {}", e);
+                        }
+                    }
                 }
             }
 

@@ -183,6 +183,12 @@ CREATE TABLE IF NOT EXISTS processed_wrappers (
     wrapper_created_at INTEGER NOT NULL DEFAULT 0
 );
 
+-- Wrap-key vaults (nip17_wrap_keys, mls_wrap_keys) are introduced by
+-- migrations 21 and 22 respectively. Migrations are the single source
+-- of truth for these tables — running them on a fresh DB creates
+-- everything in order, so there's no need to duplicate the CREATE
+-- TABLE here.
+
 -- Schema migrations tracking table
 CREATE TABLE IF NOT EXISTS schema_migrations (
     id INTEGER PRIMARY KEY,
@@ -333,6 +339,56 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         tx.execute_batch(
             "ALTER TABLE profiles ADD COLUMN is_blocked INTEGER NOT NULL DEFAULT 0;"
         ).map_err(|e| format!("Failed to add is_blocked column: {}", e))?;
+        Ok(())
+    })?;
+
+    // =========================================================================
+    // Migration 21: NIP-17 ephemeral wrap-key vault for deletable DMs
+    // =========================================================================
+    // Stores the ephemeral secp256k1 secret used to sign each kind-1059
+    // gift-wrap so the user can later publish a NIP-09 deletion against
+    // the wrap event ID — actually removing the message from inbox relays.
+    // Encryption-at-rest is handled by Vector's per-account database
+    // envelope (ChaCha20 if the account has a password; plaintext otherwise).
+    // One row per published wrap; deletion uses (wrap_event_id, secret,
+    // relay_urls) to issue an author-signed NIP-09 to the same relay set.
+    run_atomic_migration(conn, 21, "Create nip17_wrap_keys table", |tx| {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS nip17_wrap_keys (
+                wrap_event_id    TEXT PRIMARY KEY,
+                rumor_id         TEXT NOT NULL,
+                recipient_pubkey TEXT NOT NULL,
+                role             INTEGER NOT NULL,
+                secret           BLOB NOT NULL,
+                relay_urls       TEXT NOT NULL,
+                created_at       INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_nip17_wrap_keys_rumor ON nip17_wrap_keys(rumor_id);"
+        ).map_err(|e| format!("Failed to create nip17_wrap_keys table: {}", e))?;
+        Ok(())
+    })?;
+
+    // =========================================================================
+    // Migration 22: MLS ephemeral wrap-key vault for deletable group messages
+    // =========================================================================
+    // Sibling of nip17_wrap_keys: every kind-445 MLS wrapper is signed by an
+    // ephemeral keypair that MDK normally discards. With our `create_message_retained`
+    // patch the sender retains the secret so a later NIP-09 deletion against
+    // the kind-445 event id is valid (NIP-09 requires `event.pubkey ==
+    // deletion.pubkey`). One row per published wrapper; retries write new rows.
+    run_atomic_migration(conn, 22, "Create mls_wrap_keys table", |tx| {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS mls_wrap_keys (
+                wrap_event_id TEXT PRIMARY KEY,
+                message_id    TEXT NOT NULL,
+                group_id      TEXT NOT NULL,
+                secret        BLOB NOT NULL,
+                relay_urls    TEXT NOT NULL,
+                created_at    INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_mls_wrap_keys_message ON mls_wrap_keys(message_id);
+            CREATE INDEX IF NOT EXISTS idx_mls_wrap_keys_group ON mls_wrap_keys(group_id);"
+        ).map_err(|e| format!("Failed to create mls_wrap_keys table: {}", e))?;
         Ok(())
     })?;
 

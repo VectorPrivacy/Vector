@@ -3,8 +3,8 @@
 //! Fetches, caches, and publishes kind 10050 events so that DM gift wraps
 //! are delivered to the recipient's preferred inbox relays.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
@@ -12,6 +12,159 @@ use nostr_sdk::prelude::*;
 use std::sync::LazyLock;
 
 use crate::state::NOSTR_CLIENT;
+
+// ============================================================================
+// Per-relay publish tracker — closes "dependent-event-races-parent" races
+// ============================================================================
+//
+// Vector returns on the first relay ack so the UI can mark a message
+// as "Sent" without waiting for stragglers. Other relays continue
+// receiving the event in the background. Any operation that publishes
+// a *dependent* event referencing the just-sent one (NIP-09 deletion,
+// edit, reaction, reply, …) can race those background publishes: at
+// a relay where the parent hasn't arrived yet, the dependent gets
+// dropped or stored disconnected, and when the parent arrives later
+// it stays without the dependent ever being applied.
+//
+// `EventPublishTracker` exposes a per-relay event stream of "parent
+// successfully published to X". Dependent senders subscribe, drain
+// relays that have already settled, then wait for stragglers and
+// fire their dependent event to each one as soon as it confirms the
+// parent. Every relay that ever received the parent gets the
+// dependent in real time, and the user sees no UX latency on either
+// the parent send or the dependent action.
+//
+// This pattern is generic: deletion is the first consumer, but rapid
+// edits, self-reactions, and replies-to-just-sent all benefit. The
+// tracker doesn't care what the event is or what the dependent
+// operation does — it only knows "this parent landed at this relay".
+
+/// Per-relay publish tracker. One per outbound event whose dependents
+/// (deletions, edits, reactions, replies, ...) need to fire only
+/// after the parent has actually landed at each individual relay.
+pub struct EventPublishTracker {
+    event_id: EventId,
+    /// Successful relays in arrival order. Subscribers walk this with
+    /// a cursor and wait on `notify` for new entries.
+    successes: Mutex<Vec<RelayUrl>>,
+    notify: tokio::sync::Notify,
+    /// Relays still publishing. When this hits 0, the tracker
+    /// removes itself from the global registry and any pending
+    /// `next_success` waiters are woken so they observe end-of-stream.
+    in_flight: AtomicUsize,
+}
+
+impl EventPublishTracker {
+    fn new(event_id: EventId, initial_in_flight: usize) -> Arc<Self> {
+        Arc::new(Self {
+            event_id,
+            successes: Mutex::new(Vec::new()),
+            notify: tokio::sync::Notify::new(),
+            in_flight: AtomicUsize::new(initial_in_flight),
+        })
+    }
+
+    /// Called by a per-relay publish task on success.
+    fn note_success(&self, url: RelayUrl) {
+        self.successes.lock().unwrap().push(url);
+        self.notify.notify_waiters();
+    }
+
+    /// Called by every per-relay task on completion (success OR fail).
+    /// When the last in-flight task settles, drops the tracker from
+    /// the global registry.
+    fn note_settled(&self) {
+        if self.in_flight.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.notify.notify_waiters();
+            PUBLISH_TRACKERS.lock().unwrap().remove(&self.event_id);
+        }
+    }
+
+    /// Async iterator over successful relays. Yields each URL once,
+    /// regardless of whether it settled before or after the call.
+    /// Returns `None` when every spawned per-relay task has settled
+    /// AND the cursor has consumed every success — i.e. the dependent
+    /// sender has visited every relay that ever held the parent.
+    pub async fn next_success(&self, cursor: &mut usize) -> Option<RelayUrl> {
+        loop {
+            // Pre-create the notified future BEFORE inspecting state
+            // so a notify_waiters() that fires between the check and
+            // the await doesn't get lost.
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            let (next, done) = {
+                let successes = self.successes.lock().unwrap();
+                let next = successes.get(*cursor).cloned();
+                let done = self.in_flight.load(Ordering::SeqCst) == 0
+                    && *cursor >= successes.len();
+                (next, done)
+            };
+
+            if let Some(url) = next {
+                *cursor += 1;
+                return Some(url);
+            }
+            if done {
+                return None;
+            }
+
+            notified.await;
+        }
+    }
+}
+
+/// Global registry of in-flight tracked publishes. Keyed by event id.
+/// Trackers self-remove once all per-relay tasks settle.
+static PUBLISH_TRACKERS: LazyLock<Mutex<HashMap<EventId, Arc<EventPublishTracker>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Look up the tracker for an event currently being published.
+/// Returns `None` if the publish has fully settled (all relays done)
+/// or if the tracker never existed (e.g. the event was sent in a
+/// previous app session, or via a non-tracked send path). Dependent
+/// senders fall back to a best-effort broadcast in that case.
+pub fn get_publish_tracker(event_id: &EventId) -> Option<Arc<EventPublishTracker>> {
+    PUBLISH_TRACKERS.lock().unwrap().get(event_id).cloned()
+}
+
+/// Spawn one publish task per resolved relay and register a tracker
+/// keyed by the event id. Returns the join handles so the caller can
+/// race them for first-ok or wait for all to settle as needed. The
+/// spawned tasks continue updating the tracker after the caller
+/// stops waiting on the handles.
+///
+/// Generic primitive — any send path that wants its event referenced
+/// by a future dependent (deletions, edits, reactions, replies)
+/// should publish via this helper so the dependent can later look up
+/// the tracker via `get_publish_tracker(parent_id)`.
+pub fn spawn_tracked_publish(
+    resolved: Vec<(RelayUrl, Relay)>,
+    event: Event,
+) -> Vec<tokio::task::JoinHandle<(RelayUrl, Result<EventId, String>)>> {
+    let event_id = event.id;
+    let tracker = EventPublishTracker::new(event_id, resolved.len());
+    PUBLISH_TRACKERS.lock().unwrap().insert(event_id, tracker.clone());
+
+    let mut handles = Vec::with_capacity(resolved.len());
+    for (url, relay) in resolved {
+        let event = event.clone();
+        let tracker = tracker.clone();
+        handles.push(tokio::spawn(async move {
+            let result = relay
+                .send_event(&event)
+                .await
+                .map_err(|e| e.to_string());
+            if result.is_ok() {
+                tracker.note_success(url.clone());
+            }
+            tracker.note_settled();
+            (url, result)
+        }));
+    }
+    handles
+}
 
 // ============================================================================
 // Cache
@@ -264,6 +417,14 @@ pub fn trusted_relay_urls() -> Vec<RelayUrl> {
 
 /// Send an event to specific relays, returning as soon as the **first** relay
 /// acknowledges success. Remaining relays continue sending in the background.
+///
+/// Uses `spawn_tracked_publish` under the hood, so every event published
+/// here automatically registers an `EventPublishTracker` keyed by event
+/// id. Dependent operations (NIP-09 deletions, edits, reactions, replies)
+/// can look up the tracker via `get_publish_tracker(event_id)` and drive
+/// per-relay dispatch only after each relay confirms the parent — closing
+/// the publish/dependent race for any send that goes through here,
+/// including MLS kind-445 wrappers.
 pub async fn send_event_first_ok(
     client: &Client,
     urls: Vec<RelayUrl>,
@@ -285,14 +446,10 @@ pub async fn send_event_first_ok(
         return client.send_event(event).await;
     }
 
-    // Spawn all relay sends as individual tasks
-    let mut handles = Vec::with_capacity(resolved.len());
-    for (url, relay) in resolved {
-        let event = event.clone();
-        handles.push(tokio::spawn(async move {
-            (url, relay.send_event(&event).await)
-        }));
-    }
+    // Spawn tracked per-relay tasks. This registers a tracker so any
+    // future dependent send (deletion, edit, reaction) can fire only
+    // after each relay confirms the parent.
+    let handles = spawn_tracked_publish(resolved, event.clone());
 
     // Race: return as soon as the first relay succeeds
     let mut output = Output {
@@ -311,12 +468,13 @@ pub async fn send_event_first_ok(
                 Ok(_) => {
                     output.success.insert(url);
                     // First success — remaining spawned tasks continue in background
-                    // (dropping JoinHandles detaches but does NOT cancel them)
+                    // updating the tracker as they settle. Dropping JoinHandles
+                    // detaches but does NOT cancel them.
                     drop(remaining);
                     return Ok(output);
                 }
                 Err(e) => {
-                    output.failed.insert(url, e.to_string());
+                    output.failed.insert(url, e);
                 }
             }
         }
@@ -342,6 +500,177 @@ pub async fn send_event_pool_first_ok(
     send_event_first_ok(client, write_urls, event).await
 }
 
+/// Build a NIP-59 kind-1059 gift wrap from a sealed event, returning
+/// **both** the signed wrap event and the ephemeral secp256k1 secret
+/// used to sign it.
+///
+/// Wire-compatible with `EventBuilder::gift_wrap_from_seal` — other
+/// clients cannot tell the wraps apart. The only difference is that we
+/// keep the ephemeral key instead of dropping it on the floor, so the
+/// user can later sign a NIP-09 deletion against the wrap event id and
+/// have relays drop it. This is Vector's "delete from network" primitive.
+pub fn wrap_with_retained_key(
+    receiver: &PublicKey,
+    seal: &Event,
+    extra_tags: impl IntoIterator<Item = Tag>,
+) -> Result<(Event, SecretKey), String> {
+    use nostr_sdk::nips::nip44;
+    use nostr_sdk::nips::nip59::RANGE_RANDOM_TIMESTAMP_TWEAK;
+
+    if seal.kind != Kind::Seal {
+        return Err(format!("expected Seal kind, got {:?}", seal.kind));
+    }
+    let keys = Keys::generate();
+    let secret = keys.secret_key().clone();
+    let content = nip44::encrypt(
+        keys.secret_key(),
+        receiver,
+        seal.as_json(),
+        nip44::Version::default(),
+    )
+    .map_err(|e| format!("nip44 encrypt: {}", e))?;
+    let mut tags: Vec<Tag> = extra_tags.into_iter().collect();
+    tags.push(Tag::public_key(*receiver));
+    let event = EventBuilder::new(Kind::GiftWrap, content)
+        .tags(tags)
+        .custom_created_at(Timestamp::tweaked(RANGE_RANDOM_TIMESTAMP_TWEAK))
+        .sign_with_keys(&keys)
+        .map_err(|e| format!("sign wrap: {}", e))?;
+    Ok((event, secret))
+}
+
+/// Outcome of a retained-key gift-wrap send. Caller is expected to
+/// persist `wrap_event_id`, `wrap_secret`, and `targeted_relays` for
+/// future deletion.
+pub struct GiftWrapSendOutcome {
+    pub output: Output<EventId>,
+    pub wrap_event_id: EventId,
+    pub wrap_secret: SecretKey,
+    /// Relay URL set we attempted (inbox if known, pool write-relays as
+    /// fallback). Deletion publishes the NIP-09 to this same set.
+    pub targeted_relays: Vec<String>,
+}
+
+/// Send a gift-wrapped rumor to a recipient using a retained ephemeral
+/// key. Routes to the recipient's inbox relays (kind 10050) when
+/// available, falling back to pool write-relays otherwise.
+///
+/// Spawns one publish task per resolved relay and registers a
+/// `EventPublishTracker` keyed by wrap event id so the deletion path
+/// can fire NIP-09 to each relay as soon as that relay confirms the
+/// wrap (closing the publish/delete race for fast deleters). Returns
+/// the wrap event id, the ephemeral secret, and the relay set
+/// attempted.
+pub async fn send_gift_wrap_retained(
+    client: &Client,
+    recipient: &PublicKey,
+    rumor: UnsignedEvent,
+    extra_tags: impl IntoIterator<Item = Tag>,
+) -> Result<GiftWrapSendOutcome, String> {
+    let signer = client.signer().await.map_err(|e| e.to_string())?;
+    let seal: Event = EventBuilder::seal(&signer, recipient, rumor)
+        .await
+        .map_err(|e| e.to_string())?
+        .sign(&signer)
+        .await
+        .map_err(|e| e.to_string())?;
+    let (event, secret) = wrap_with_retained_key(recipient, &seal, extra_tags)?;
+    let wrap_event_id = event.id;
+
+    // Resolve target relays: recipient's inbox relays (NIP-17) if they
+    // advertise any, otherwise our pool's write-relays.
+    let inbox_strs = get_or_fetch_inbox_relays(client, recipient).await;
+    let targeted_strs: Vec<String> = if !inbox_strs.is_empty() {
+        inbox_strs.clone()
+    } else {
+        let pool = client.pool();
+        let relays = pool.relays().await;
+        relays.iter()
+            .filter(|(_, r)| r.flags().has_write())
+            .map(|(url, _)| url.to_string())
+            .collect()
+    };
+    let target_urls: Vec<RelayUrl> = targeted_strs
+        .iter()
+        .filter_map(|s| RelayUrl::parse(s).ok())
+        .collect();
+
+    // Resolve to live Relay handles in the pool. Anything not in the
+    // pool gets silently skipped (consistent with prior behaviour).
+    let pool = client.pool();
+    let pool_relays = pool.relays().await;
+    let resolved: Vec<(RelayUrl, Relay)> = target_urls
+        .iter()
+        .filter_map(|url| pool_relays.get(url).map(|r| (url.clone(), r.clone())))
+        .collect();
+
+    if resolved.is_empty() {
+        // No matching relays in the pool — last-ditch broadcast via
+        // client.send_event(). No tracker (no per-relay machinery).
+        let output = client
+            .send_event(&event)
+            .await
+            .map_err(|e| e.to_string())?;
+        return Ok(GiftWrapSendOutcome {
+            output,
+            wrap_event_id,
+            wrap_secret: secret,
+            targeted_relays: targeted_strs,
+        });
+    }
+
+    if !inbox_strs.is_empty() {
+        println!(
+            "[InboxRelays] Routing gift-wrap to {} inbox relays for {}",
+            resolved.len(),
+            recipient
+        );
+    }
+
+    // Spawn tracked per-relay publish tasks. The tracker is keyed by
+    // the wrap event id; the deletion path looks it up via
+    // get_publish_tracker(wrap_event_id) and walks next_success() to
+    // fire NIP-09 only at relays that have actually received the
+    // wrap. The same primitive is used by any other operation whose
+    // dependent event must arrive after the parent on each relay
+    // (rapid edits, self-reactions, replies-to-just-sent).
+    let handles = spawn_tracked_publish(resolved, event.clone());
+
+    // Race for first-ok so the caller (and UI) sees "Sent" the
+    // moment any one relay accepts. Remaining tasks continue in
+    // the background, updating the tracker as they settle. The
+    // dropped JoinHandles detach but do not cancel the tasks.
+    let mut output = Output {
+        val: wrap_event_id,
+        success: HashSet::new(),
+        failed: HashMap::new(),
+    };
+    let mut remaining = handles;
+    while !remaining.is_empty() {
+        let (result, _idx, rest) = futures_util::future::select_all(remaining).await;
+        remaining = rest;
+        if let Ok((url, relay_result)) = result {
+            match relay_result {
+                Ok(_) => {
+                    output.success.insert(url);
+                    drop(remaining);
+                    break;
+                }
+                Err(e) => {
+                    output.failed.insert(url, e.to_string());
+                }
+            }
+        }
+    }
+
+    Ok(GiftWrapSendOutcome {
+        output,
+        wrap_event_id,
+        wrap_secret: secret,
+        targeted_relays: targeted_strs,
+    })
+}
+
 /// Send a gift-wrapped rumor to a recipient, routing to their inbox relays
 /// (kind 10050) when available. Falls back to pool broadcast if no inbox
 /// relays are found or if targeted delivery fails entirely.
@@ -349,45 +678,19 @@ pub async fn send_event_pool_first_ok(
 /// Returns as soon as the first relay acknowledges success — remaining relays
 /// continue in the background. This minimises the time messages spend in
 /// "pending" state.
+///
+/// Thin wrapper over `send_gift_wrap_retained`. Discards the retained
+/// ephemeral key — use this for sends where future deletion is not
+/// required (e.g. PIVX payment rumors). For user-facing DMs, prefer
+/// `send_gift_wrap_retained` and persist the secret.
 pub async fn send_gift_wrap(
     client: &Client,
     recipient: &PublicKey,
     rumor: UnsignedEvent,
     extra_tags: impl IntoIterator<Item = Tag>,
 ) -> Result<Output<EventId>, String> {
-    // Wrap once upfront so we can reuse on fallback (avoids ~165us re-encrypt)
-    let signer = client.signer().await.map_err(|e| e.to_string())?;
-    let event = EventBuilder::gift_wrap(&signer, recipient, rumor, extra_tags).await.map_err(|e| e.to_string())?;
-
-    let inbox_strs = get_or_fetch_inbox_relays(client, recipient).await;
-
-    if inbox_strs.is_empty() {
-        // No 10050 found — broadcast to pool
-        return send_event_pool_first_ok(client, &event).await.map_err(|e| e.to_string());
-    }
-
-    let inbox: Vec<RelayUrl> = inbox_strs
-        .iter()
-        .filter_map(|s| RelayUrl::parse(s).ok())
-        .collect();
-
-    println!(
-        "[InboxRelays] Routing gift-wrap to {} inbox relays for {}",
-        inbox.len(),
-        recipient
-    );
-
-    match send_event_first_ok(client, inbox, &event).await {
-        Ok(output) if !output.success.is_empty() => Ok(output),
-        Ok(_) | Err(_) => {
-            // All inbox relays failed — fall back to pool broadcast with same wrap
-            eprintln!(
-                "[InboxRelays] Inbox relays failed for {}, falling back to pool broadcast",
-                recipient
-            );
-            send_event_pool_first_ok(client, &event).await.map_err(|e| e.to_string())
-        }
-    }
+    let outcome = send_gift_wrap_retained(client, recipient, rumor, extra_tags).await?;
+    Ok(outcome.output)
 }
 
 // ============================================================================

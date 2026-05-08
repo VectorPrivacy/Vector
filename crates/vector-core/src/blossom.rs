@@ -3,6 +3,7 @@ use nostr_sdk::hashes::{sha256::Hash as Sha256Hash, Hash};
 use nostr_blossom::prelude::*;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Body, StatusCode};
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
@@ -442,4 +443,129 @@ where
 
     // All servers failed
     Err(format!("All Blossom servers failed. Last error: {}", last_error))
+}
+
+// ============================================================================
+// Blossom DELETE — paired with NIP-17 message deletion
+// ============================================================================
+
+/// Build a Blossom DELETE authorization header (BUD-01 auth, kind-24242,
+/// verb=delete, scope=blob hash). Mirrors `build_auth_header` but with
+/// the Delete verb so the server validates the right action.
+async fn build_delete_auth_header<T>(
+    signer: &T,
+    hash: Sha256Hash,
+) -> Result<HeaderValue, String>
+where
+    T: NostrSigner,
+{
+    let expiration = Timestamp::now() + std::time::Duration::from_secs(300);
+    let auth = BlossomAuthorization::new(
+        "Blossom delete authorization".to_string(),
+        expiration,
+        BlossomAuthorizationVerb::Delete,
+        BlossomAuthorizationScope::BlobSha256Hashes(vec![hash]),
+    );
+
+    let auth_event: Event = EventBuilder::blossom_auth(auth)
+        .sign(signer)
+        .await
+        .map_err(|e| format!("Failed to sign auth event: {}", e))?;
+
+    let encoded_auth = base64_simd::STANDARD.encode_to_string(auth_event.as_json());
+    let value = format!("Nostr {}", encoded_auth);
+
+    HeaderValue::try_from(value)
+        .map_err(|e| format!("Failed to create header value: {}", e))
+}
+
+/// Delete a blob from a Blossom server (BUD-01 DELETE endpoint).
+/// Idempotent: a `404`
+/// counts as success since the goal of DELETE is "this blob isn't on
+/// the server anymore". Other 2xx responses also count as success.
+/// `403`/`401` mean we lack authority (different uploader, server
+/// policy); `5xx` and network errors propagate so the caller can log.
+///
+/// `server_url` is the origin we uploaded to (parsed from the stored
+/// attachment URL). `hash` is the SHA-256 of the encrypted ciphertext
+/// (matches the path segment of the original upload URL).
+pub async fn delete_blob<T>(
+    signer: T,
+    server_url: &Url,
+    hash: Sha256Hash,
+) -> Result<(), String>
+where
+    T: NostrSigner + Clone,
+{
+    let auth_header = build_delete_auth_header(&signer, hash).await?;
+
+    let mut url = server_url.clone();
+    // Blossom DELETE endpoint is `<origin>/<hash>`. Replace the path
+    // (drops any extension or subpath the original URL had).
+    url.set_path(&format!("/{}", hash));
+
+    let mut headers = HeaderMap::new();
+    headers.insert(AUTHORIZATION, auth_header);
+
+    // Proxy-aware client (Tor-routed when the failsafe is on).
+    let client = crate::net::build_http_client(std::time::Duration::from_secs(30))?;
+
+    let response = client
+        .delete(url)
+        .headers(headers)
+        .send()
+        .await
+        .map_err(|e| format!("Blossom DELETE request failed: {}", e))?;
+
+    let status = response.status();
+    if status.is_success() || status == StatusCode::NOT_FOUND {
+        Ok(())
+    } else {
+        let body = response.text().await.unwrap_or_else(|_| "<no body>".into());
+        Err(format!("Blossom DELETE returned {}: {}", status, body))
+    }
+}
+
+/// Best-effort delete of every blob parseable from `urls`. Each
+/// DELETE is sent in its own background task. Errors are logged but
+/// do not propagate — caller treats this as fire-and-forget.
+///
+/// Pairs with `delete_own_dm` so deleting a NIP-17 file message also
+/// removes the encrypted ciphertext from the Blossom server it was
+/// uploaded to.
+pub fn delete_blobs_best_effort<T>(signer: T, urls: Vec<String>)
+where
+    T: NostrSigner + Clone + Send + Sync + 'static,
+{
+    for url_str in urls {
+        let url = match Url::parse(&url_str) {
+            Ok(u) => u,
+            Err(_) => continue,
+        };
+
+        // Last path segment, optionally with a `.ext` suffix some servers
+        // add for browser-friendly fetches.
+        let last_segment = match url.path_segments().and_then(|mut s| s.next_back()) {
+            Some(s) => s,
+            None => continue,
+        };
+        let hash_str = last_segment.split('.').next().unwrap_or("");
+        let hash = match Sha256Hash::from_str(hash_str) {
+            Ok(h) => h,
+            Err(_) => continue,
+        };
+
+        // Origin only.
+        let mut origin = url.clone();
+        origin.set_path("/");
+        origin.set_query(None);
+        origin.set_fragment(None);
+
+        let signer = signer.clone();
+        tokio::spawn(async move {
+            if let Err(e) = delete_blob(signer, &origin, hash).await {
+                eprintln!("[Blossom delete] {} from {}: {}", hash, origin, e);
+            }
+        });
+    }
 }

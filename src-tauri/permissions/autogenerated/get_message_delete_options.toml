@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-message-delete-options"
+description = "Enables the get_message_delete_options command without any pre-configured scope."
+commands.allow = ["get_message_delete_options"]
+
+[[permission]]
+identifier = "deny-get-message-delete-options"
+description = "Denies the get_message_delete_options command without any pre-configured scope."
+commands.deny = ["get_message_delete_options"]

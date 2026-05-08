@@ -32,6 +32,10 @@ pub trait InboundEventHandler: Send + Sync {
     /// An MLS group message was received and committed to STATE + DB.
     /// Called after MDK decryption + rumor processing. The message is ready for display.
     fn on_group_message(&self, _group_id: &str, _msg: &Message) {}
+
+    /// A previously-stored message was deleted by its sender (Layer 2
+    /// cooperative hide via NIP-09 over NIP-17). Frontend drops the row.
+    fn on_message_deleted(&self, _chat_id: &str, _message_id: &str) {}
 }
 
 /// No-op handler for CLI/tests.
@@ -296,6 +300,9 @@ pub async fn commit_prepared_event(
                     // WebXDC is platform-specific — handled by src-tauri directly
                     false
                 }
+                RumorProcessingResult::DeletionRequest { target_event_id } => {
+                    commit_deletion(&target_event_id, &contact, &sender, handler).await
+                }
                 RumorProcessingResult::Ignored => false,
             }
         }
@@ -499,6 +506,111 @@ async fn commit_edit(
             "chat_id": contact
         }));
     }
+    true
+}
+
+/// Commit a NIP-09 cooperative deletion request.
+///
+/// Authorization: only the original message's author can delete it
+/// (matches NIP-09's `event.pubkey == deletion.pubkey` rule applied to
+/// the inner rumor). For DMs, that means either the sender is `MY` (we
+/// deleted from another device) or the sender is the chat counterpart
+/// who originally sent that message. Anyone else's deletion is silently
+/// ignored.
+///
+/// On success: drops the message from in-memory STATE, removes the row
+/// from the events table, and emits `message_removed` so the frontend
+/// can fade the row out — same code path as failed-message cleanup.
+async fn commit_deletion(
+    target_event_id: &str,
+    contact: &str,
+    sender: &PublicKey,
+    handler: &dyn InboundEventHandler,
+) -> bool {
+    // Look up the original. If not present locally there's nothing to
+    // delete — the deletion notice arrived before the original (rare),
+    // or we never had it. Either way, no-op.
+    //
+    // KNOWN LIMITATION: late-binding deletions are not handled. If
+    // the deletion arrives BEFORE the original (cold sync, out-of-order
+    // relay delivery), we drop the deletion silently here, and when the
+    // original arrives later it shows up unhidden. A future enhancement
+    // would persist a `pending_deletions` table keyed by target id and
+    // apply queued deletions when the target is committed in
+    // commit_dm_message. The common case (deletion arrives after the
+    // original) works correctly today.
+    //
+    // For DM rumors the `npub` field is intentionally empty: the chat
+    // is between two parties, so the author is implicit from `mine`
+    // (me if true, chat counterpart if false). We derive the original
+    // author from that, since the rumor pubkey isn't stored.
+    let (mine, chat_id) = {
+        let state = crate::state::STATE.lock().await;
+        match state.find_message(target_event_id) {
+            Some((chat, msg)) => (msg.mine, chat.id.clone()),
+            None => return false,
+        }
+    };
+
+    // Authorization: deletion sender must match the original author.
+    // For DMs:
+    //   - mine == true:  original author == us (MY_PUBLIC_KEY).
+    //                    Authorized if the deletion sender is also us
+    //                    (i.e. came in via our own self-wrap from
+    //                    another device, multi-device sync).
+    //   - mine == false: original author == chat counterpart. Chat id
+    //                    for a DM is the counterpart's npub, so we
+    //                    parse it and compare against the deletion
+    //                    sender.
+    let authorized = if mine {
+        match crate::state::MY_PUBLIC_KEY.get() {
+            Some(my_pk) => sender == my_pk,
+            None => false,
+        }
+    } else {
+        match nostr_sdk::PublicKey::from_bech32(&chat_id) {
+            Ok(counterpart) => sender == &counterpart,
+            Err(_) => false, // chat id wasn't an npub (shouldn't happen for DMs)
+        }
+    };
+    if !authorized {
+        eprintln!(
+            "[NIP-17 cooperative-delete] unauthorized: sender {} not the author of target {} (mine={}, chat={})",
+            sender.to_hex(), target_event_id, mine, chat_id
+        );
+        return false;
+    }
+
+    // Drop from in-memory state.
+    let removed = {
+        let mut state = crate::state::STATE.lock().await;
+        state.remove_message(target_event_id)
+    };
+    if removed.is_none() {
+        return false;
+    }
+
+    // Drop from the events table.
+    if let Err(e) = crate::db::events::delete_event(target_event_id).await {
+        eprintln!(
+            "[NIP-17 cooperative-delete] DB delete failed for {}: {}",
+            target_event_id, e
+        );
+    }
+
+    // Tell the frontend to fade the row out. Reuses the existing
+    // message_removed event handled in main.js, so no new wiring.
+    crate::traits::emit_event(
+        "message_removed",
+        &serde_json::json!({
+            "id": target_event_id,
+            "chat_id": &chat_id,
+            "reason": "deleted-by-sender",
+        }),
+    );
+
+    handler.on_message_deleted(&chat_id, target_event_id);
+    let _ = contact;
     true
 }
 

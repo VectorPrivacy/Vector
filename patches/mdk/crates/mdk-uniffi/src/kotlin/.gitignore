@@ -1,0 +1,10 @@
+# Gradle
+.gradle/
+build/
+!src/main/kotlin/build
+!src/main/kotlin/build/**
+!src/main/kotlin/build/marmot
+!src/main/kotlin/build/marmot/**
+!src/main/kotlin/build/marmot/mdk
+!src/main/kotlin/build/marmot/mdk/**
+local.properties

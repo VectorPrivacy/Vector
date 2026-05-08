@@ -259,6 +259,17 @@ pub async fn handle_mls_group_message_with_handler(
                                             // WebXDC handled by platform layer
                                             None
                                         }
+                                        RumorProcessingResult::DeletionRequest { target_event_id } => {
+                                            // Authorization + apply both live in
+                                            // mls::cooperative_hide so the bulk-sync
+                                            // path uses the exact same logic.
+                                            let _ = crate::mls::cooperative_hide::apply_cooperative_hide(
+                                                &target_event_id,
+                                                &msg.pubkey,
+                                                &group_id_for_persist,
+                                            ).await;
+                                            None
+                                        }
                                         RumorProcessingResult::Ignored => None,
                                     }
                                 }

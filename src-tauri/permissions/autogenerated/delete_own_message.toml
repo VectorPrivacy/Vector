@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-delete-own-message"
+description = "Enables the delete_own_message command without any pre-configured scope."
+commands.allow = ["delete_own_message"]
+
+[[permission]]
+identifier = "deny-delete-own-message"
+description = "Denies the delete_own_message command without any pre-configured scope."
+commands.deny = ["delete_own_message"]

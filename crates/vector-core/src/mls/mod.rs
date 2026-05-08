@@ -14,6 +14,7 @@ pub mod service;
 pub mod messaging;
 pub mod rumor_mls;
 pub mod group_handler;
+pub(crate) mod cooperative_hide;
 pub mod invites;
 pub mod keypackage;
 

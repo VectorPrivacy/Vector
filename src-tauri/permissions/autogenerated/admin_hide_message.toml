@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-admin-hide-message"
+description = "Enables the admin_hide_message command without any pre-configured scope."
+commands.allow = ["admin_hide_message"]
+
+[[permission]]
+identifier = "deny-admin-hide-message"
+description = "Denies the admin_hide_message command without any pre-configured scope."
+commands.deny = ["admin_hide_message"]

@@ -1,0 +1,47 @@
+[package]
+name = "mdk-uniffi"
+version = "0.6.0"
+edition = "2024"
+description = "UniFFI bindings for mdk-core with SQLite storage"
+authors = [
+    "Danny Morabito <danny@arx-ccn.com>",
+    "Jeff Gardner <j@jeffg.me>",
+    "Yuki Kishimoto <yukikishimoto@protonmail.com>",
+    "MDK Developers",
+]
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+rust-version = "1.90.0"
+keywords = ["nostr", "mls", "openmls", "uniffi", "bindings"]
+categories = ["cryptography", "api-bindings"]
+readme = "README.md"
+publish = false
+
+[lib]
+name = "mdk_uniffi"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+mdk-core = { workspace = true, default-features = false }
+mdk-sqlite-storage = { workspace = true, default-features = false }
+mdk-storage-traits = { workspace = true, default-features = false }
+nostr = { workspace = true, features = ["std", "nip44"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+hex = { workspace = true, features = ["std"] }
+tracing = { workspace = true, features = ["std"] }
+uniffi = { version = "0.30", features = ["cli"] }
+uniffi_macros = "0.30"
+
+[features]
+default = []
+mip04 = ["mdk-core/mip04"]
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/main.rs"

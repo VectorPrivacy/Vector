@@ -131,6 +131,9 @@ pub mod rumor;
 // === Messaging ===
 pub mod sending;
 
+// === Message Deletion (NIP-09 against retained gift-wraps) ===
+pub mod deletion;
+
 // === SIMD Operations ===
 pub mod simd;
 
@@ -151,6 +154,7 @@ pub use error::{VectorError, Result};
 pub use traits::{EventEmitter, NoOpEmitter, set_event_emitter, emit_event};
 pub use db::{set_app_data_dir, get_app_data_dir};
 pub use sending::{SendCallback, NoOpSendCallback, SendConfig, SendResult};
+pub use deletion::{delete_own_dm, delete_own_group_message, admin_hide_group_message, DeleteOutcome};
 pub use stored_event::{StoredEvent, StoredEventBuilder, SystemEventType};
 pub use rumor::{RumorEvent, RumorContext, ConversationType, RumorProcessingResult, process_rumor};
 pub use profile::{SyncPriority, ProfileSyncHandler, NoOpProfileSyncHandler};

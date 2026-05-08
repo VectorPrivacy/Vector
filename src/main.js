@@ -2134,8 +2134,10 @@ async function setupRustListeners() {
             }
         }
 
-        // Show toast only for cancelled uploads (not for deleted failed messages)
-        if (reason !== 'deleted') {
+        // Toast only for actual cancelled uploads. Deletions (failed-message
+        // cleanup, self-delete, admin-hide, cooperative-hide receiver) all
+        // skip the toast — the row vanishing is signal enough.
+        if (reason === 'cancelled') {
             showToast('Upload Cancelled');
         }
 

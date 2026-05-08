@@ -5,13 +5,13 @@
  * Repositioned via getBoundingClientRect on row hover. Saves ~25k DOM nodes on a
  * 5k-message chat compared to per-row button columns.
  *
- * Buttons: 😀 react, ↩ reply, ✎ edit (mine + text only), 📁 reveal-file (mine + downloaded attachment).
+ * Buttons: 😀 react, ↩ reply, ✎ edit (mine + text only), 📁 reveal-file (mine + downloaded attachment), 🗑 delete (mine).
  *
  * Wiring:
  *   - mouseover/mouseleave delegated on .chat-messages
  *   - mouseenter/leave on toolbar itself (cancels/restarts the hide timer)
  *   - scroll on .chat-messages: reposition; if row scrolls out, hide
- *   - click delegated on toolbar: routes to react / reply / edit / reveal-file handlers
+ *   - click delegated on toolbar: routes to react / reply / edit / reveal-file / delete handlers
  */
 
 let _dmsgToolbarEl = null;
@@ -41,6 +41,7 @@ function initMessageToolbar() {
             <button class="dmsg-toolbar-btn btn" data-action="reply" aria-label="Reply" title="Reply"><span class="icon icon-reply"></span></button>
             <button class="dmsg-toolbar-btn btn" data-action="edit" aria-label="Edit" title="Edit" hidden><span class="icon icon-edit"></span></button>
             <button class="dmsg-toolbar-btn btn" data-action="reveal-file" aria-label="Reveal in folder" title="Reveal in folder" hidden><span class="icon icon-file-search"></span></button>
+            <button class="dmsg-toolbar-btn btn dmsg-toolbar-btn-danger" data-action="delete" aria-label="Delete message" title="Delete message" hidden><span class="icon icon-trash"></span></button>
         `;
         // Append INSIDE the scrolling container so the toolbar moves with the message
         // content automatically (no per-frame reposition on scroll = no lag).
@@ -103,6 +104,7 @@ function showMessageToolbar(rowEl) {
     const reactBtn = _dmsgToolbarEl.querySelector('[data-action="react"]');
     const editBtn = _dmsgToolbarEl.querySelector('[data-action="edit"]');
     const revealBtn = _dmsgToolbarEl.querySelector('[data-action="reveal-file"]');
+    const deleteBtn = _dmsgToolbarEl.querySelector('[data-action="delete"]');
 
     const msg = _dmsgLookupMessage(rowEl);
     const hasContent = !!(msg && msg.content);
@@ -130,6 +132,68 @@ function showMessageToolbar(rowEl) {
         revealBtn.dataset.path = downloadedPath;
     } else {
         delete revealBtn.dataset.path;
+    }
+
+    // Delete / Hide button visibility:
+    //   - Own messages: SYNC reveal at full opacity (always actionable).
+    //     The click always does something useful — relay nuke if we
+    //     hold retained keys, otherwise cooperative-hide + Blossom
+    //     blob delete on attachments + local hide. The popup explains
+    //     what will happen.
+    //   - Others' group messages: ASYNC reveal only if the user is an
+    //     admin (admin-hide flow). Costs one round-trip per hover for
+    //     non-mine rows; cached via the data-mode attribute so repeats
+    //     don't re-fetch.
+    //   - Pending/failed messages: hidden — those have their own
+    //     cancel-upload / delete-failed paths.
+    const isPending = rowEl.dataset.status === 'pending' || rowEl.dataset.status === 'failed';
+    deleteBtn.hidden = true;
+    delete deleteBtn.dataset.mode;
+    delete deleteBtn.dataset.partial;
+    delete deleteBtn.dataset.hasAttachments;
+    deleteBtn.style.opacity = '';
+    if (!isPending) {
+        if (mine) {
+            // Sync reveal — the icon is always present on own rows, so
+            // there's no async pop-in. Opacity is resolved by the
+            // backend round-trip below; until then we render at full
+            // opacity (the common case) and dial it down only if the
+            // backend reports no retained keys.
+            deleteBtn.dataset.mode = 'delete';
+            deleteBtn.setAttribute('aria-label', 'Delete message');
+            deleteBtn.setAttribute('title', 'Delete message');
+            deleteBtn.hidden = false;
+        }
+        const targetId = rowEl.id;
+        invoke('get_message_delete_options', { messageId: targetId }).then(opts => {
+            // Bail if the toolbar moved on — async hop may resolve
+            // after hover ends.
+            if (_dmsgToolbarTarget !== rowEl) return;
+            let widthChanged = false;
+            if (opts.mine) {
+                // Reduced opacity when full network deletion isn't
+                // available (no retained keys). The icon stays clickable
+                // — the popup explains what will and won't happen.
+                const fullyDeletable = opts.has_retained_keys;
+                deleteBtn.style.opacity = fullyDeletable ? '' : '0.45';
+                deleteBtn.dataset.partial = fullyDeletable ? '' : '1';
+                deleteBtn.dataset.hasAttachments = opts.has_attachments ? '1' : '';
+                const tip = fullyDeletable
+                    ? 'Delete message'
+                    : 'Delete message (limited)';
+                deleteBtn.setAttribute('title', tip);
+            } else if (opts.can_admin_hide) {
+                deleteBtn.dataset.mode = 'hide';
+                deleteBtn.setAttribute('aria-label', 'Hide message');
+                deleteBtn.setAttribute('title', 'Hide message');
+                if (deleteBtn.hidden) widthChanged = true;
+                deleteBtn.hidden = false;
+            }
+            // Width changed only when admin-hide reveals an icon that
+            // wasn't there at sync time. Mine rows already had the icon
+            // at sync time, so no reposition needed there.
+            if (widthChanged) _dmsgPositionToolbar(rowEl);
+        }).catch(() => {/* opacity stays default for own messages */});
     }
 
     _dmsgPositionToolbar(rowEl);
@@ -208,6 +272,88 @@ function _dmsgHandleToolbarClick(e) {
             if (path) revealItemInDir(path);
             break;
         }
+        case 'delete': {
+            const mode = btn.dataset.mode === 'hide' ? 'hide' : 'delete';
+            const partial = btn.dataset.partial === '1';
+            const hasAttachments = btn.dataset.hasAttachments === '1';
+            _dmsgConfirmAndDelete(targetId, mode, { partial, hasAttachments });
+            break;
+        }
+    }
+}
+
+/**
+ * Confirm-and-delete flow. Asks the user once, then issues the delete
+ * via the backend. The backend publishes NIP-09 deletions against every
+ * retained gift-wrap (real "delete from network") and emits
+ * `message_removed` to fade the row out — same handler as cancel-upload
+ * and delete-failed, so no extra DOM work needed here.
+ *
+ * Honest framing: we promise removal from inbox relays, not from
+ * recipients who already received the message. If the message predates
+ * the retention feature (no ephemeral keys held) we refuse outright and
+ * explain — silently local-deleting would mislead the user into
+ * thinking the message is gone when it's still sitting on relays.
+ */
+async function _dmsgConfirmAndDelete(targetMsgId, mode, opts) {
+    opts = opts || {};
+    // Three flows behind one button:
+    //   delete (full)    = own message + retained keys: real
+    //                      delete-from-network (NIP-09 against retained
+    //                      wraps + cooperative-hide + Blossom blob delete)
+    //   delete (partial) = own message, no retained keys: cooperative-hide
+    //                      + Blossom blob delete + local hide. The relay
+    //                      copy of the encrypted wrapper persists. Popup
+    //                      explains why.
+    //   hide             = admin moderation of someone else's group
+    //                      message. Cooperative-only (kind-5 inside MLS).
+    if (mode === 'hide') {
+        const confirmed = await popupConfirm(
+            'Hide this message?',
+            'Are you sure you want to hide this message?',
+            false,
+            '',
+            'vector_warning.svg'
+        );
+        if (!confirmed) return;
+        const groupId = strOpenChat;
+        if (!groupId) {
+            popupConfirm('Hide Failed', 'Could not determine the group this message belongs to.', true, '', 'vector_warning.svg');
+            return;
+        }
+        try {
+            await invoke('admin_hide_message', { groupId, messageId: targetMsgId });
+        } catch (err) {
+            popupConfirm('Hide Failed', escapeHtml(String(err)), true, '', 'vector_warning.svg');
+        }
+        return;
+    }
+
+    // delete branch
+    let title, body;
+    if (opts.partial) {
+        title = 'Limited Delete';
+        if (opts.hasAttachments) {
+            body = 'This message can\'t be fully removed from relays because the signing key isn\'t on this device (sent from another device, or predates deletion support).<br><br>' +
+                'We can still:<br>' +
+                '<b>Delete the attached file</b> from the storage server.<br>' +
+                '<b>Notify other Vector users</b> to drop the message.<br><br>' +
+                'Continue?';
+        } else {
+            body = 'This message can\'t be fully removed from relays because the signing key isn\'t on this device (sent from another device, or predates deletion support).<br><br>' +
+                'We can still <b>notify other Vector users</b> to drop the message from their copy.<br><br>' +
+                'Continue?';
+        }
+    } else {
+        title = 'Delete this message?';
+        body = 'Are you sure you want to delete this message?';
+    }
+    const confirmed = await popupConfirm(title, body, false, '', 'vector_warning.svg');
+    if (!confirmed) return;
+    try {
+        await invoke('delete_own_message', { messageId: targetMsgId });
+    } catch (err) {
+        popupConfirm('Delete Failed', escapeHtml(String(err)), true, '', 'vector_warning.svg');
     }
 }
 
