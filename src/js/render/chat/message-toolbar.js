@@ -112,6 +112,18 @@ function showMessageToolbar(rowEl) {
 
     _dmsgToolbarTarget = rowEl;
     _dmsgCancelToolbarHide();
+
+    // Pending/failed messages aren't on the wire yet — there's nothing for
+    // others to react/reply/edit/delete against. Hide the whole toolbar
+    // (each button being individually gated would still leave an empty
+    // floating bar). Cancel-send / retry / delete-failed live on the row
+    // itself, not in this hover toolbar.
+    const status = rowEl.dataset.status;
+    if (status === 'pending' || status === 'failed') {
+        _dmsgToolbarEl.hidden = true;
+        return;
+    }
+
     _dmsgToolbarEl.hidden = false;
     _dmsgToolbarEl.dataset.target = rowEl.id;
 
@@ -159,57 +171,54 @@ function showMessageToolbar(rowEl) {
     //     admin (admin-hide flow). Costs one round-trip per hover for
     //     non-mine rows; cached via the data-mode attribute so repeats
     //     don't re-fetch.
-    //   - Pending/failed messages: hidden — those have their own
-    //     cancel-upload / delete-failed paths.
-    const isPending = rowEl.dataset.status === 'pending' || rowEl.dataset.status === 'failed';
+    // Pending/failed are handled by the early-return above — those rows
+    // have their own cancel-upload / delete-failed UI on the row itself.
     deleteBtn.hidden = true;
     delete deleteBtn.dataset.mode;
     delete deleteBtn.dataset.partial;
     delete deleteBtn.dataset.hasAttachments;
     deleteBtn.style.opacity = '';
-    if (!isPending) {
-        if (mine) {
-            // Sync reveal — the icon is always present on own rows, so
-            // there's no async pop-in. Opacity is resolved by the
-            // backend round-trip below; until then we render at full
-            // opacity (the common case) and dial it down only if the
-            // backend reports no retained keys.
-            deleteBtn.dataset.mode = 'delete';
-            deleteBtn.setAttribute('aria-label', 'Delete message');
-            deleteBtn.setAttribute('title', 'Delete message');
+    if (mine) {
+        // Sync reveal — the icon is always present on own rows, so
+        // there's no async pop-in. Opacity is resolved by the
+        // backend round-trip below; until then we render at full
+        // opacity (the common case) and dial it down only if the
+        // backend reports no retained keys.
+        deleteBtn.dataset.mode = 'delete';
+        deleteBtn.setAttribute('aria-label', 'Delete message');
+        deleteBtn.setAttribute('title', 'Delete message');
+        deleteBtn.hidden = false;
+    }
+    const targetId = rowEl.id;
+    invoke('get_message_delete_options', { messageId: targetId }).then(opts => {
+        // Bail if the toolbar moved on — async hop may resolve
+        // after hover ends.
+        if (_dmsgToolbarTarget !== rowEl) return;
+        let widthChanged = false;
+        if (opts.mine) {
+            // Reduced opacity when full network deletion isn't
+            // available (no retained keys). The icon stays clickable
+            // — the popup explains what will and won't happen.
+            const fullyDeletable = opts.has_retained_keys;
+            deleteBtn.style.opacity = fullyDeletable ? '' : '0.45';
+            deleteBtn.dataset.partial = fullyDeletable ? '' : '1';
+            deleteBtn.dataset.hasAttachments = opts.has_attachments ? '1' : '';
+            const tip = fullyDeletable
+                ? 'Delete message'
+                : 'Delete message (limited)';
+            deleteBtn.setAttribute('title', tip);
+        } else if (opts.can_admin_hide) {
+            deleteBtn.dataset.mode = 'hide';
+            deleteBtn.setAttribute('aria-label', 'Hide message');
+            deleteBtn.setAttribute('title', 'Hide message');
+            if (deleteBtn.hidden) widthChanged = true;
             deleteBtn.hidden = false;
         }
-        const targetId = rowEl.id;
-        invoke('get_message_delete_options', { messageId: targetId }).then(opts => {
-            // Bail if the toolbar moved on — async hop may resolve
-            // after hover ends.
-            if (_dmsgToolbarTarget !== rowEl) return;
-            let widthChanged = false;
-            if (opts.mine) {
-                // Reduced opacity when full network deletion isn't
-                // available (no retained keys). The icon stays clickable
-                // — the popup explains what will and won't happen.
-                const fullyDeletable = opts.has_retained_keys;
-                deleteBtn.style.opacity = fullyDeletable ? '' : '0.45';
-                deleteBtn.dataset.partial = fullyDeletable ? '' : '1';
-                deleteBtn.dataset.hasAttachments = opts.has_attachments ? '1' : '';
-                const tip = fullyDeletable
-                    ? 'Delete message'
-                    : 'Delete message (limited)';
-                deleteBtn.setAttribute('title', tip);
-            } else if (opts.can_admin_hide) {
-                deleteBtn.dataset.mode = 'hide';
-                deleteBtn.setAttribute('aria-label', 'Hide message');
-                deleteBtn.setAttribute('title', 'Hide message');
-                if (deleteBtn.hidden) widthChanged = true;
-                deleteBtn.hidden = false;
-            }
-            // Width changed only when admin-hide reveals an icon that
-            // wasn't there at sync time. Mine rows already had the icon
-            // at sync time, so no reposition needed there.
-            if (widthChanged) _dmsgPositionToolbar(rowEl);
-        }).catch(() => {/* opacity stays default for own messages */});
-    }
+        // Width changed only when admin-hide reveals an icon that
+        // wasn't there at sync time. Mine rows already had the icon
+        // at sync time, so no reposition needed there.
+        if (widthChanged) _dmsgPositionToolbar(rowEl);
+    }).catch(() => {/* opacity stays default for own messages */});
 
     _dmsgPositionToolbar(rowEl);
 }
