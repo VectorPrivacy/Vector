@@ -1,0 +1,16 @@
+# Tauri dev-watcher ignore list (gitignore syntax).
+# Anything matched here won't trigger an app rebuild during `tauri dev`.
+
+# Patched/vendored dependencies often carry their own .git metadata
+# (clones, worktrees) — git's transient writes (index.lock, ORIG_HEAD,
+# packed-refs, etc.) would otherwise trigger spurious rebuilds.
+patches/**/.git/
+**/.git/
+
+# Build artefacts inside patched crates.
+patches/**/target/
+
+# IDE / OS / temp files.
+**/.DS_Store
+**/*.swp
+**/*.swo
