@@ -2169,8 +2169,15 @@ async function setupRustListeners() {
             showToast('Upload Cancelled');
         }
 
-        // Update chatlist preview if the last message was removed
-        updateChatlistPreview(chat_id);
+        // Re-render the chatlist (not just the preview) so the unread glow
+        // recomputes — when an unread message is deleted the chat may flip
+        // back to a fully-read state, which an in-place preview update can't
+        // express. Deletions are rare enough that a full render is fine.
+        renderChatlist();
+
+        // Recompute the OS taskbar badge — if the deleted message was unread,
+        // the badge would otherwise stay stuck on its pre-deletion count.
+        invoke('update_unread_counter');
     });
 
     // Listen for headless mark-as-read (e.g., notification "Mark Read" action while app backgrounded)
