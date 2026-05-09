@@ -148,12 +148,8 @@ pub async fn sync_to_active_account() -> Result<(), String> {
 
 #[cfg(feature = "tor")]
 fn tor_data_dirs() -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
-    // Stash Arti's state + cache under the active account's data dir so
-    // multiple accounts have independent Tor consensus caches when the user
-    // switches between them.
-    let app_dir = vector_core::db::get_app_data_dir()?;
     let account = vector_core::db::get_current_account()?;
-    let base = app_dir.join("data").join(&account).join("tor");
+    let base = vector_core::db::account_dir(&account)?.join("tor");
     let state = base.join("state");
     let cache = base.join("cache");
     std::fs::create_dir_all(&state).map_err(|e| format!("create state dir: {e}"))?;

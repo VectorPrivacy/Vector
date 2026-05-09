@@ -264,6 +264,26 @@ fn run_standalone_sync_loop(data_dir: &str) {
             logcat(&format!("Tor bootstrap for bg-sync failed: {} (relays will blackhole)", e));
         }
 
+        // Service-only mode silently drops Rust eprintln (which is what
+        // log_info!/log_warn! use), so the Tor lifecycle traces never reach
+        // logcat. Surface the resulting transport state via the JNI logger
+        // so users can confirm bg-sync is honouring the Tor preference.
+        #[cfg(feature = "tor")]
+        {
+            use vector_core::tor::TorTransportState;
+            match vector_core::tor::transport_state() {
+                TorTransportState::Active(addr) => {
+                    logcat(&format!("Tor active for bg-sync — SOCKS proxy on {}", addr));
+                }
+                TorTransportState::RequiredButInactive => {
+                    logcat("Tor required but inactive — bg-sync relays will blackhole until bootstrap completes");
+                }
+                TorTransportState::Disabled => {
+                    logcat("Tor disabled for this account — bg-sync using direct relay connections");
+                }
+            }
+        }
+
         // Bootstrap the standalone client — get connected ASAP
         let (client, my_public_key, can_decrypt, keys) = match bootstrap_client(data_dir).await {
             Ok(result) => result,

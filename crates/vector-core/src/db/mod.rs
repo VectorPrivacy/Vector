@@ -169,10 +169,18 @@ impl Drop for WriteConnectionGuard {
 // Connection Factory
 // ============================================================================
 
+/// Single source of truth for per-account directories. Every per-account
+/// subsystem (DB, MLS storage, Tor state, etc.) resolves its path through
+/// this so on-disk layout stays consistent. Compose further subpaths with
+/// `.join(...)` on the returned PathBuf; never insert layers between
+/// `<app_data>` and `<npub>`.
+pub fn account_dir(npub: &str) -> Result<PathBuf, String> {
+    Ok(get_app_data_dir()?.join(npub))
+}
+
 fn get_current_db_path() -> Result<PathBuf, String> {
-    let app_data = get_app_data_dir()?;
     let npub = get_current_account()?;
-    Ok(app_data.join(&npub).join("vector.db"))
+    Ok(account_dir(&npub)?.join("vector.db"))
 }
 
 fn create_connection(path: &PathBuf) -> Result<rusqlite::Connection, String> {
@@ -219,8 +227,7 @@ pub fn get_write_connection_guard_static() -> Result<WriteConnectionGuard, Strin
 
 /// Initialize the database for a given account (creates tables if needed).
 pub fn init_database(npub: &str) -> Result<(), String> {
-    let app_data = get_app_data_dir()?;
-    let profile_dir = app_data.join(npub);
+    let profile_dir = account_dir(npub)?;
 
     if !profile_dir.exists() {
         std::fs::create_dir_all(&profile_dir)
@@ -308,11 +315,10 @@ pub fn get_accounts() -> Result<Vec<String>, String> {
 
 /// Get the profile directory path for a given npub.
 pub fn get_profile_directory(npub: &str) -> Result<PathBuf, String> {
-    let app_data = get_app_data_dir()?;
     if !npub.starts_with("npub1") {
         return Err(format!("Invalid npub format: {}", npub));
     }
-    let dir = app_data.join(npub);
+    let dir = account_dir(npub)?;
     if !dir.exists() {
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("Failed to create profile directory: {}", e))?;

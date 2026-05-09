@@ -36,11 +36,12 @@ pub fn get_group_sync_lock(group_id: &str) -> Arc<TokioMutex<()>> {
 // MLS Directory Resolution
 // ============================================================================
 
-/// Get the MLS directory for the current account using vector-core's app data dir.
+/// Get the MLS directory for the current account. Resolved through the
+/// canonical `account_dir` helper so the layout stays in lockstep with
+/// every other per-account subsystem.
 pub fn get_mls_directory() -> Result<std::path::PathBuf, String> {
     let npub = crate::db::get_current_account()?;
-    let data_dir = crate::db::get_app_data_dir()?;
-    let mls_dir = data_dir.join(&npub).join("mls");
+    let mls_dir = crate::db::account_dir(&npub)?.join("mls");
 
     if !mls_dir.exists() {
         std::fs::create_dir_all(&mls_dir)
