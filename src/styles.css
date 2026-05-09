@@ -1507,14 +1507,31 @@ html, body {
   width: calc(100% - 120px);
 }
 
+/* Inline emoji inside the chatlist preview row. Explicit width AND height
+   (with !important to beat the 50px avatar cap from `.chatlist-contact img`).
+   The actual right-edge clipping is handled by `contain: paint` on the
+   parent `.cutoff` below — overflow:hidden alone doesn't reliably clip
+   compositor-promoted SVG <img> layers in WebKit, which is why the emoji
+   sometimes paints on top of already-laid-out text until a layout-
+   triggering event (hover, resize) flushes a fresh paint pass. */
 .chatlist-contact-preview .emoji {
-  object-fit: cover;
-  object-position: none !important;
   width: 15px !important;
+  height: 15px !important;
+  display: inline-block;
   border-radius: 0;
   min-width: unset;
   min-height: unset;
   vertical-align: -3px;
+}
+
+/* Force paint containment on the chatlist preview's truncated lines so
+   inline <img> emoji can't paint outside the box — the root cause of the
+   "emoji on top of text" bug under content-visibility:auto. `contain: paint`
+   creates a real clipping boundary that compositor layers respect, unlike
+   plain `overflow: hidden`. Layout-affecting properties (white-space:nowrap,
+   text-overflow:ellipsis) are still inherited from the global `.cutoff` rule. */
+.chatlist-contact-preview .cutoff {
+  contain: paint;
 }
 
 .chatlist-contact-timestamp {

@@ -908,9 +908,9 @@ async function init(skipAccountCheck = false) {
                         updateChatHeaderSubtext(chat);
                     }
 
-                    // Refresh chat list
+                    // Refresh chat list (in-place; typing doesn't affect sort order)
                     if (domChats.style.display !== 'none') {
-                        renderChatlist();
+                        updateChatlistPreview(chat.id);
                     }
                 }
             }
@@ -1934,8 +1934,10 @@ async function setupRustListeners() {
             updateChatHeaderSubtext(chat);
         }
 
-        // Update the chat list preview
-        renderChatlist();
+        // Update the chat list preview in-place (typing doesn't affect sort
+        // order, so a full renderChatlist() would just churn DOM and waste
+        // cycles on every keystroke from the other side).
+        updateChatlistPreview(conversation_id);
     });
 
     // Listen for incoming DM messages

@@ -1,5 +1,5 @@
 /**
- * Soft fade-in for chat list rows when they enter the viewport.
+ * Soft fade-in for chat list rows when they SCROLL into the viewport.
  *
  * Preferred path: `contentvisibilityautostatechange` (Chromium) — fires only
  * when content-visibility:auto's skipped state flips back to rendered.
@@ -8,6 +8,14 @@
  * Used on WebKit (macOS WKWebView) where the cv event isn't shipped yet.
  *
  * Animation is opacity-only (GPU compositor) — no layout/paint retrigger.
+ *
+ * Insertion vs. scroll. renderChatlist() rebuilds the list via
+ * replaceChildren(), so every render swaps in fresh DOM nodes. Both paths
+ * fire their initial callback for each new row on observe, which would
+ * animate the entire visible list on every render (the black flash). We
+ * gate on data-cv-was-off: a row only animates on transition to visible
+ * AFTER it has been observed off-screen at least once. Freshly inserted
+ * rows don't have the flag, so the initial in-view callback is a no-op.
  */
 
 (function () {
@@ -41,24 +49,35 @@
             if (!(target instanceof HTMLElement)) return;
             if (!target.classList.contains('chatlist-contact')) return;
             if (e.skipped) {
+                // Row is now off-screen: arm it for fade-in on next scroll-in.
+                target.dataset.cvWasOff = '1';
                 target.classList.remove('cv-revealed');
                 skipCount++;
-            } else {
+            } else if (target.dataset.cvWasOff === '1') {
+                // Row was previously off-screen and is now scrolling back in.
                 triggerReveal(target);
             }
+            // Otherwise: initial in-viewport render after insertion. Skip.
         });
 
-        // IntersectionObserver fallback. Observe each row; animate on entry.
-        // To avoid double-animating on Chromium (where cv event also fires),
-        // we suppress IO callbacks once we've seen a cv event.
+        // IntersectionObserver fallback. Observe each row; animate on entry
+        // only after the row has been off-screen (otherwise initial-observe
+        // callbacks would fade-in the whole visible list on every render).
+        // Suppressed on Chromium once the cv event takes over.
         const io = new IntersectionObserver((entries) => {
             if (cvEventSeen) return;
             mode = 'intersection';
             for (const entry of entries) {
-                if (!entry.isIntersecting) continue;
                 const el = entry.target;
-                if (el instanceof HTMLElement && el.classList.contains('chatlist-contact')) {
-                    triggerReveal(el);
+                if (!(el instanceof HTMLElement)) continue;
+                if (!el.classList.contains('chatlist-contact')) continue;
+                if (entry.isIntersecting) {
+                    if (el.dataset.cvWasOff === '1') {
+                        triggerReveal(el);
+                    }
+                } else {
+                    el.dataset.cvWasOff = '1';
+                    skipCount++;
                 }
             }
         }, { root: list, threshold: 0 });

@@ -2140,6 +2140,34 @@ function twemojify(domElement) {
         if (stripped !== node.textContent) node.textContent = stripped;
     }
     twemoji.parse(domElement, { callback: (icon, _) => '/twemoji/svg/' + icon + '.svg' });
+    const imgs = domElement.querySelectorAll('img.emoji:not([width])');
+    for (const img of imgs) {
+        // Stamp width/height attributes (1:1) so the browser knows the
+        // aspect-ratio at parse time, before the SVG fetch resolves.
+        img.setAttribute('width', '1');
+        img.setAttribute('height', '1');
+        // After each SVG actually loads, force a relayout on the nearest
+        // truncated ancestor (.cutoff). Without this, the chatlist preview
+        // bug appears on cold-cache boots: layout reserves 0 width for the
+        // not-yet-loaded image, text fills the line, then once the SVG
+        // resolves it paints at its 0-width layout position — overlapping
+        // the last ~15px of text. A hover or window resize triggers exactly
+        // this same relayout, which is why the bug "fixes itself" then.
+        if (img.complete && img.naturalWidth > 0) continue;
+        img.addEventListener('load', () => {
+            const cutoff = img.closest('.cutoff');
+            if (!cutoff) return;
+            // display:none → reflow → restore. Hard-resets the box layout so
+            // the truncation algorithm can't reuse a stale calculation done
+            // against an unknown-dimension image. Any softer trick (toggling
+            // text-overflow, reading offsetWidth alone) leaves WebKit's
+            // ellipsis cache intact and the bug persists.
+            const prev = cutoff.style.display;
+            cutoff.style.display = 'none';
+            void cutoff.offsetHeight;
+            cutoff.style.display = prev;
+        }, { once: true });
+    }
 }
 
 function addToRecentEmojis(emoji) {
