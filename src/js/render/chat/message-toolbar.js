@@ -71,6 +71,21 @@ function initMessageToolbar() {
         }
         showMessageToolbar(row);
     });
+    // mouseout (bubbles) — fires when the cursor leaves a row, including
+    // when it lands in the gap between rows or on chat-messages chrome.
+    // Schedule a hide; the next mouseover (on another row, or the toolbar's
+    // own mouseenter) cancels the pending timer if the cursor is just
+    // transiting between hover targets.
+    domChatMessages.addEventListener('mouseout', (e) => {
+        const fromRow = e.target.closest('.dmsg');
+        if (!fromRow) return;
+        const to = e.relatedTarget;
+        // Same row (cursor moved to a child within the row): ignore.
+        if (to && fromRow.contains(to)) return;
+        // Onto the toolbar: its own mouseenter handler cancels the hide,
+        // so it's safe to still schedule here — the cancel wins the race.
+        _dmsgScheduleToolbarHide();
+    });
     domChatMessages.addEventListener('mouseleave', () => {
         _dmsgScheduleToolbarHide();
     });
