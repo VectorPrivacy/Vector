@@ -22,6 +22,8 @@ mdk-storage-traits = { git = "https://github.com/marmot-protocol/mdk.git", rev =
 # OpenMLS crypto pins — must match MDK's transitive deps (avoids curve25519-dalek conflict with iroh in src-tauri)
 openmls_rust_crypto = "=0.5.0"
 hpke-rs-rust-crypto = "=0.4.0"
+# Needed to access engine.provider.storage() via OpenMlsProvider trait method
+openmls_traits = { version = "0.5", default-features = false }
 
 # Async
 tokio = { version = "1.49.0", features = ["sync", "time", "net", "io-util", "rt-multi-thread", "macros"] }

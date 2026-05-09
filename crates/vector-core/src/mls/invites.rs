@@ -10,6 +10,8 @@
 
 use serde::{Deserialize, Serialize};
 use nostr_sdk::prelude::*;
+use mdk_storage_traits::messages::MessageStorage;
+use openmls_traits::OpenMlsProvider;
 
 use crate::simd::hex::bytes_to_hex_string;
 use super::{MlsService, MlsError, MlsGroup, MlsGroupFull, MlsGroupProfile, emit_group_metadata_event};
@@ -143,15 +145,74 @@ pub async fn accept_invite(welcome_event_id: &str) -> Result<String, MlsError> {
 
                 let nostr_group_id = bytes_to_hex_string(&nostr_group_id_bytes);
 
-                // Find our engine_group_id for the freshly joined group
-                let engine_group_id = {
+                // Find our engine_group_id for the freshly joined group.
+                // Falling back to nostr_group_id is a last-resort id-space
+                // alias — it shouldn't happen in practice (we just accepted
+                // the welcome and engine.get_groups should list us). Log a
+                // warning so a real "post-accept-state-not-listed" bug
+                // doesn't masquerade as the happy path.
+                // Resolve our engine_group_id. Track whether it came from
+                // engine.get_groups() (true) or the nostr_group_id fallback
+                // (false). The fallback string happens to be 32 bytes and
+                // would otherwise pass the length gate below — but it's the
+                // wrong id-space, and calling MDK's storage API against it
+                // would silently target the wrong rows. Use the boolean to
+                // gate resurrection explicitly.
+                let (engine_group_id, engine_id_resolved) = {
                     let groups = engine.get_groups()
                         .map_err(|e| MlsError::NostrMlsError(format!("get_groups failed: {}", e)))?;
-                    groups.iter()
-                        .find(|g| bytes_to_hex_string(&g.nostr_group_id) == nostr_group_id)
-                        .map(|g| bytes_to_hex_string(g.mls_group_id.as_slice()))
-                        .unwrap_or_else(|| nostr_group_id.clone())
+                    match groups.iter().find(|g| bytes_to_hex_string(&g.nostr_group_id) == nostr_group_id) {
+                        Some(g) => (bytes_to_hex_string(g.mls_group_id.as_slice()), true),
+                        None => {
+                            log_warn!("[MLS] accept_invite: get_groups didn't list freshly-joined group {}; falling back to nostr_group_id (id-space mismatch — Failed-message resurrection will be skipped)",
+                                nostr_group_id);
+                            (nostr_group_id.clone(), false)
+                        }
+                    }
                 };
+
+                // Resurrect Failed messages so the welcome's new keys can
+                // decrypt them. Without this, any kind=445 events that
+                // arrived during the offline/kicked window get cached as
+                // state=Failed in MDK's processed_messages and stay
+                // permanently unprocessable — MDK's Step-0 dedup short-
+                // circuits Failed entries to Unprocessable on retry.
+                // mark_processed_message_retryable transitions Failed →
+                // Retryable, allowing process_message to attempt decryption
+                // again with the new epoch's keys we just received.
+                //
+                // Note: this front-loads the transition; sync_group_since_cursor
+                // (called in Phase 3 below) ALSO has a self-heal block that
+                // does the same scan on every sync. Running it here means the
+                // first post-rejoin batch hits Retryable state on the first
+                // pass instead of a second cycle — cheaper for users with
+                // accumulated Failed entries.
+                let engine_gid_bytes = crate::simd::hex::hex_string_to_bytes(&engine_group_id);
+                let acceptable_len = engine_gid_bytes.len() == 16 || engine_gid_bytes.len() == 32;
+                if engine_id_resolved && acceptable_len {
+                    let engine_gid = mdk_storage_traits::GroupId::from_slice(&engine_gid_bytes);
+                    let storage = engine.provider.storage();
+                    match storage.find_failed_messages_for_retry(&engine_gid) {
+                        Ok(failed_ids) => {
+                            if !failed_ids.is_empty() {
+                                log_info!("[MLS] Marking {} previously-failed messages retryable for {}", failed_ids.len(), nostr_group_id);
+                                for ev_id in &failed_ids {
+                                    if let Err(e) = storage.mark_processed_message_retryable(ev_id) {
+                                        log_warn!("[MLS] mark_processed_message_retryable failed for {}: {}", ev_id, e);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => log_warn!("[MLS] find_failed_messages_for_retry failed: {}", e),
+                    }
+                } else if engine_id_resolved {
+                    // Hex parse produced a non-16/32 byte length even though
+                    // we resolved through engine.get_groups. This shouldn't
+                    // happen; surface it loudly so a future MDK GroupId
+                    // representation change doesn't silently break recovery.
+                    log_warn!("[MLS] Skipping Failed-message resurrection: unexpected engine_group_id byte length ({} bytes) for {}",
+                        engine_gid_bytes.len(), nostr_group_id);
+                }
 
                 (nostr_group_id, engine_group_id, group_name, group_description,
                  welcomer_hex, invite_sent_at)
@@ -221,6 +282,15 @@ pub async fn accept_invite(welcome_event_id: &str) -> Result<String, MlsError> {
             if let Err(e) = mls.sync_group_since_cursor(&nostr_group_id, None).await {
                 log_warn!("[MLS] Post-accept initial sync failed: {}", e);
             }
+
+            // Refresh the integration layer's live subscription so the newly
+            // joined group's #h tag is included from now on. Without this,
+            // post-rejoin messages only arrive via the periodic polling
+            // sync (visible delay of ~30s+), not via push from relays.
+            // The src-tauri accept_mls_welcome command historically didn't
+            // refresh post-rejoin (only post-create_group did), so this
+            // belongs in vector-core to cover all callers consistently.
+            crate::traits::refresh_subscriptions();
 
             Ok::<String, MlsError>(nostr_group_id)
         })

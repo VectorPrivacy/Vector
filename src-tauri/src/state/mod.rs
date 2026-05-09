@@ -1,7 +1,7 @@
 mod globals;
 
 pub use globals::{
-    TAURI_APP, TauriEventEmitter,
+    TAURI_APP, TauriEventEmitter, TauriSubscriptionRefresher,
     NOSTR_CLIENT, MY_SECRET_KEY, MY_PUBLIC_KEY, STATE,
     active_trusted_relays,
     MNEMONIC_SEED, ENCRYPTION_KEY, PENDING_NSEC,

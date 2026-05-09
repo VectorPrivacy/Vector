@@ -370,6 +370,15 @@ pub fn run() {
             // Bridge vector-core's EventEmitter to Tauri's emit system
             vector_core::set_event_emitter(Box::new(TauriEventEmitter));
 
+            // Bridge vector-core's SubscriptionRefresher so eviction/leave
+            // immediately drops the kicked group from our live subscription.
+            // Without this, post-eviction kind=445 events keep arriving and
+            // get cached in MDK's processed_messages as Failed — blocking
+            // recovery even after rejoin.
+            vector_core::traits::set_subscription_refresher(
+                Box::new(state::TauriSubscriptionRefresher),
+            );
+
             // Initialize the unified audio engine (persistent cpal output stream)
             audio_engine::AudioEngine::init();
 

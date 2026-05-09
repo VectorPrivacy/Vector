@@ -6297,6 +6297,7 @@ dependencies = [
  "nostr-blossom",
  "nostr-sdk",
  "openmls_rust_crypto",
+ "openmls_traits",
  "rand 0.8.6",
  "reqwest",
  "rusqlite",

@@ -423,24 +423,19 @@ impl MiniAppsState {
         {
             let packages = self.packages.read().await;
             if let Some(pkg) = packages.get(id) {
-                log_trace!("[MiniApp] Package cache hit for {}", id);
                 return Ok(Arc::clone(pkg));
             }
         }
 
-        log_trace!("[MiniApp] Loading package {} from {:?}", id, path);
-
-        // Load on a blocking thread so sync I/O doesn't starve the async runtime
+        // Load on a blocking thread so sync I/O doesn't starve the async runtime.
+        // No per-step trace logs — boot already preloads every installed app,
+        // which spams 4× lines per app for no actionable signal.
         let id_owned = id.to_string();
         let path_display = path.display().to_string();
         let package = tokio::task::spawn_blocking(move || {
-            log_trace!("[MiniApp] spawn_blocking: starting load for {}", id_owned);
-            let result = MiniAppPackage::load(id_owned, path);
-            log_trace!("[MiniApp] spawn_blocking: load finished, success={}", result.is_ok());
-            result
+            MiniAppPackage::load(id_owned, path)
         }).await.map_err(|e| Error::Anyhow(anyhow::anyhow!("Package load task failed for {}: {}", path_display, e)))??;
 
-        log_trace!("[MiniApp] Package loaded: {} ({})", package.manifest.name, id);
         let package = Arc::new(package);
 
         {

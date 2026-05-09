@@ -184,10 +184,11 @@ CREATE TABLE IF NOT EXISTS processed_wrappers (
 );
 
 -- Wrap-key vaults (nip17_wrap_keys, mls_wrap_keys) are introduced by
--- migrations 21 and 22 respectively. Migrations are the single source
--- of truth for these tables — running them on a fresh DB creates
--- everything in order, so there's no need to duplicate the CREATE
--- TABLE here.
+-- migrations 21 and 22 respectively, and the MLS pending-event queue
+-- (mls_pending_events) by migration 23. Migrations are the single
+-- source of truth for these tables — running them on a fresh DB
+-- creates everything in order, so there's no need to duplicate the
+-- CREATE TABLE here.
 
 -- Schema migrations tracking table
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -389,6 +390,30 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
             CREATE INDEX IF NOT EXISTS idx_mls_wrap_keys_message ON mls_wrap_keys(message_id);
             CREATE INDEX IF NOT EXISTS idx_mls_wrap_keys_group ON mls_wrap_keys(group_id);"
         ).map_err(|e| format!("Failed to create mls_wrap_keys table: {}", e))?;
+        Ok(())
+    })?;
+
+    // =========================================================================
+    // Migration 23: MLS pending event queue for cross-sync retry
+    // =========================================================================
+    // When MDK can't process an MLS event because its prerequisite commit
+    // hasn't arrived, we previously marked it "processed" and advanced the
+    // cursor past it — losing it forever. This table persists such events
+    // so subsequent syncs can retry once the prerequisite shows up (possibly
+    // from a different relay, days or weeks later). Pruned at 90 days.
+    run_atomic_migration(conn, 23, "Create mls_pending_events table", |tx| {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS mls_pending_events (
+                event_id      TEXT PRIMARY KEY,
+                group_id      TEXT NOT NULL,
+                event_json    TEXT NOT NULL,
+                first_seen_at INTEGER NOT NULL,
+                last_retry_at INTEGER NOT NULL,
+                retry_count   INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_mls_pending_events_group ON mls_pending_events(group_id);
+            CREATE INDEX IF NOT EXISTS idx_mls_pending_events_first_seen ON mls_pending_events(first_seen_at);"
+        ).map_err(|e| format!("Failed to create mls_pending_events table: {}", e))?;
         Ok(())
     })?;
 

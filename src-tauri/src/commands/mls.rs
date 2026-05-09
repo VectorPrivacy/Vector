@@ -1235,7 +1235,12 @@ pub async fn sync_mls_group_participants(group_id: String) -> Result<(), String>
         }
     } else {
         drop(state);
-        eprintln!("[MLS] Chat not found when syncing participants: {}", group_id);
+        // Expected during eviction: cleanup_evicted_group already removed the
+        // chat from STATE before this participants-sync step ran. Keep at
+        // debug level so it's silent in release but recoverable when
+        // diagnosing welcome-accept ordering bugs in dev.
+        log_debug!("[MLS] sync_mls_group_participants: chat not found for {} (likely post-eviction race)",
+            &group_id[..8.min(group_id.len())]);
     }
 
     Ok(())

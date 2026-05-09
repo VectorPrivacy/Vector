@@ -16,6 +16,19 @@ impl vector_core::EventEmitter for TauriEventEmitter {
     }
 }
 
+/// Bridges vector-core's SubscriptionRefresher to Tauri's MLS subscription
+/// management. Spawns the async refresh on Tauri's runtime so vector-core
+/// can call this from sync contexts (e.g. inside cleanup_evicted_group).
+pub struct TauriSubscriptionRefresher;
+
+impl vector_core::traits::SubscriptionRefresher for TauriSubscriptionRefresher {
+    fn refresh(&self) {
+        tauri::async_runtime::spawn(async {
+            crate::services::subscription_handler::refresh_mls_subscription().await;
+        });
+    }
+}
+
 pub use vector_core::state::{
     NOSTR_CLIENT, MY_SECRET_KEY, MY_PUBLIC_KEY, STATE,
     active_trusted_relays,

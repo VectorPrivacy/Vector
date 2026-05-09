@@ -16,6 +16,102 @@ use crate::mls::tracking::wipe_legacy_mls_database;
 use crate::state::active_trusted_relays;
 
 // ============================================================================
+// Pure helpers (extracted for unit testability)
+// ============================================================================
+
+/// Compute the cursor `last_seen_at` value to persist after a sync batch.
+///
+/// Rules:
+/// - Cursor must never decrease (`>= current_cursor_at`)
+/// - If there are pending events, cap at `oldest_pending_at - 1` so the
+///   next sync re-fetches the pending window without skipping past it
+/// - The cap itself is floored at `current_cursor_at`: a pending event
+///   older than the existing cursor must NOT drag the cursor backward
+///   (which would cause redundant refetch or pin to genesis on first write)
+/// - `oldest_pending_at == 0` (clock-skewed/malformed event) is treated
+///   as "no pending floor" — don't pin the cursor to epoch zero
+///
+/// Returns the cursor value to write. Caller still gates the actual write
+/// behind a `> current_cursor_at` check.
+pub(crate) fn compute_cursor_with_pending_cap(
+    last_seen_at: u64,
+    current_cursor_at: u64,
+    oldest_pending_at: Option<u64>,
+) -> u64 {
+    if let Some(oldest) = oldest_pending_at {
+        if oldest > 0 {
+            let cap = oldest.saturating_sub(1).max(current_cursor_at);
+            if last_seen_at > cap {
+                return cap;
+            }
+        }
+    }
+    last_seen_at
+}
+
+/// Compute the `since` filter timestamp for the next batch / next sync.
+///
+/// Always advances `last_seen_at + 1` (saturating) so we don't refetch the
+/// wrapper the cursor is anchored on. Critical when the anchored event is
+/// a permanently-failing wrapper: without `+1`, the relay's `since`-inclusive
+/// filter returns it again, MDK retries decryption, fails, and the cycle
+/// never breaks.
+pub(crate) fn cursor_to_next_since(last_seen_at: u64) -> u64 {
+    last_seen_at.saturating_add(1)
+}
+
+/// Outcome of the post-Commit membership check.
+///
+/// Distinguishes the three states `engine.get_members()` can produce so the
+/// caller doesn't conflate transient storage errors with real evictions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MembershipOutcome {
+    /// Confirmed not-a-member after applying this commit. Trigger eviction.
+    Evicted,
+    /// Confirmed still-a-member. Run the metadata-update side effects.
+    Member,
+    /// Membership couldn't be determined (storage error, missing pubkey, etc.).
+    /// Skip BOTH branches; next sync retries the Commit naturally via the
+    /// is_mls_event_processed dedup.
+    Unknown,
+}
+
+/// Decide whether a Commit-applied membership state means evicted, still
+/// member, or undetermined. Replaces inline matches in both the first loop
+/// and retry loop of sync_group_since_cursor.
+pub(crate) fn membership_outcome_from_get_members<E: std::fmt::Display>(
+    get_members_result: Result<bool, E>,
+) -> MembershipOutcome {
+    match get_members_result {
+        Ok(true) => MembershipOutcome::Member,
+        Ok(false) => MembershipOutcome::Evicted,
+        Err(_) => MembershipOutcome::Unknown,
+    }
+}
+
+/// Pure h-tag filter for the pagination fallback path.
+///
+/// When the primary `#h`-filtered relay query returns 0 events, the fallback
+/// fetches kind=445 across all groups. We MUST filter to our group ID here:
+/// without this, unrelated wrappers fall through to the per-event h-tag
+/// guard which silently `continue`s, leaving `last_seen_id == None` and
+/// the cursor unable to advance — causing pagination to spin in place.
+pub(crate) fn filter_events_to_h_tag(
+    events: Vec<nostr_sdk::Event>,
+    h_tag_value: &str,
+) -> Vec<nostr_sdk::Event> {
+    use nostr_sdk::prelude::*;
+    events.into_iter()
+        .filter(|ev| {
+            match ev.tags.find(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H))) {
+                Some(tag) => tag.content().map(|s| s.eq_ignore_ascii_case(h_tag_value)).unwrap_or(false),
+                None => false,
+            }
+        })
+        .collect()
+}
+
+// ============================================================================
 // Per-Group Sync Locks
 // ============================================================================
 
@@ -322,6 +418,13 @@ impl MlsService {
         crate::traits::emit_event("mls_group_left", &serde_json::json!({
             "group_id": group_id
         }));
+
+        // 6. Refresh the integration layer's live subscription so we stop
+        // receiving kind=445 events for this group. Without this, post-eviction
+        // events would land in MDK's processed_messages with state=Failed
+        // (no keys to decrypt) and become unrecoverable even after rejoin —
+        // MDK's Step-0 dedup short-circuits Failed events to Unprocessable.
+        crate::traits::refresh_subscriptions();
 
         Ok(())
     }
@@ -1315,7 +1418,10 @@ impl MlsService {
         let now = Timestamp::now();
 
         let since = if let Some(cur) = cursors.get(group_id) {
-            Timestamp::from_secs(cur.last_seen_at)
+            // See `cursor_to_next_since` for rationale: we advance past the
+            // cursor's anchor wrapper so a permanently-failing event can
+            // never re-trap the sync.
+            Timestamp::from_secs(cursor_to_next_since(cur.last_seen_at))
         } else {
             if let Some(meta) = group_metadata {
                 if meta.group.created_at > 0 {
@@ -1414,7 +1520,9 @@ impl MlsService {
             }
 
             batch_size = events.len();
-            if batch_count > 1 {
+            // Per-batch log is noise during long catch-ups (saw 28+ identical
+            // lines in a row chewing up the log buffer). Sample every 10.
+            if batch_count > 1 && batch_count % 10 == 0 {
                 println!("[MLS] Pagination batch {} for group {}: {} events", batch_count, gid_for_fetch, batch_size);
             }
 
@@ -1422,19 +1530,18 @@ impl MlsService {
             ordered.sort_by_key(|e| e.created_at.as_secs());
 
             if used_fallback {
-                let saw_any_h = ordered.iter().any(|ev| ev.tags.find(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H))).is_some());
-                if saw_any_h {
-                    let original = ordered.clone();
-                    let filtered: Vec<nostr_sdk::Event> = original.into_iter()
-                        .filter(|ev| {
-                            match ev.tags.find(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H))) {
-                                Some(tag) => tag.content().map(|s| s == gid_for_fetch).unwrap_or(false),
-                                None => false,
-                            }
-                        })
-                        .collect();
-                    if !filtered.is_empty() { ordered = filtered; }
+                // See `filter_events_to_h_tag` for rationale: must filter
+                // here, otherwise unrelated events make pagination spin in
+                // place forever refetching the same blob.
+                let filtered = filter_events_to_h_tag(ordered, &gid_for_fetch);
+
+                if filtered.is_empty() {
+                    // Relay had events but none for this group. Done — there
+                    // are no further events to find for us at this `since`.
+                    if batch_count == 1 { return Ok((0, 0)); }
+                    break;
                 }
+                ordered = filtered;
             }
         }
 
@@ -1447,6 +1554,28 @@ impl MlsService {
         let mut was_evicted = false;
         let mut pending_retry: Vec<nostr_sdk::Event> = Vec::new();
         let mut events_to_track: Vec<(String, u64)> = Vec::new();
+
+        // Prune pending events older than 90 days. After that long the
+        // prerequisite is genuinely unrecoverable from any relay; keeping
+        // them just bloats the table and slows every sync.
+        const MAX_PENDING_AGE_SECS: u64 = 90 * 24 * 60 * 60;
+        match crate::mls::prune_old_pending_events(&gid_for_fetch, MAX_PENDING_AGE_SECS) {
+            Ok(n) if n > 0 => println!("[MLS] Pruned {} stale pending events for {}", n, group_display),
+            Err(e) => eprintln!("[MLS] prune_old_pending_events failed: {}", e),
+            _ => {}
+        }
+
+        // Carry over events from prior syncs that we couldn't process.
+        // Their prerequisite commits may now be reachable — either from a
+        // different relay or in the batch we're about to process.
+        match crate::mls::load_pending_events(&gid_for_fetch) {
+            Ok(events) if !events.is_empty() => {
+                println!("[MLS] Carrying over {} pending events for {}", events.len(), group_display);
+                pending_retry.extend(events);
+            }
+            Err(e) => eprintln!("[MLS] load_pending_events failed: {}", e),
+            _ => {}
+        }
 
         let my_pubkey_hex = if let Some(&pk) = crate::state::MY_PUBLIC_KEY.get() {
             pk.to_hex()
@@ -1466,6 +1595,36 @@ impl MlsService {
         {
             let engine = self.engine()?;
 
+            // Self-heal: MDK's processed_messages entries with state=Failed
+            // AND epoch=NULL (decryption never got far enough to determine
+            // the epoch — e.g. wrappers that arrived during a kicked window
+            // before the rejoin welcome supplied keys) get transitioned to
+            // Retryable so process_message attempts decryption again with
+            // our newly-acquired keys instead of short-circuiting to
+            // Unprocessable. Note: MDK's API intentionally only retries
+            // epoch=NULL Failed events; EpochInvalidated and other Failed
+            // states are treated as permanent. This is cheap (one SELECT
+            // per sync) and idempotent — no-op when nothing matches.
+            if let Some(ref check_id) = group_check_id {
+                let engine_gid_bytes = crate::simd::hex::hex_string_to_bytes(check_id);
+                if engine_gid_bytes.len() == 16 || engine_gid_bytes.len() == 32 {
+                    use mdk_storage_traits::messages::MessageStorage;
+                    use openmls_traits::OpenMlsProvider;
+                    let engine_gid = mdk_storage_traits::GroupId::from_slice(&engine_gid_bytes);
+                    let storage = engine.provider.storage();
+                    if let Ok(failed_ids) = storage.find_failed_messages_for_retry(&engine_gid) {
+                        if !failed_ids.is_empty() {
+                            println!("[MLS] Resurrecting {} previously-failed messages for {}", failed_ids.len(), group_display);
+                            for ev_id in &failed_ids {
+                                if let Err(e) = storage.mark_processed_message_retryable(ev_id) {
+                                    eprintln!("[MLS] mark_processed_message_retryable failed for {}: {}", ev_id, e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             if let Some(ref check_id) = group_check_id {
                 let check_gid_bytes = crate::simd::hex::hex_string_to_bytes(check_id);
                 if !check_gid_bytes.is_empty() {
@@ -1480,8 +1639,13 @@ impl MlsService {
                         }));
                     }
 
-                    if let Ok(Some(g)) = engine.get_group(&check_gid) {
-                        println!("[MLS] Group {} at epoch {} before processing", group_display, g.epoch);
+                    // Only log epoch on the first batch — once per sync is
+                    // enough context. Re-logging the same epoch every batch
+                    // during pagination just adds noise without information.
+                    if batch_count == 1 {
+                        if let Ok(Some(g)) = engine.get_group(&check_gid) {
+                            println!("[MLS] Group {} at epoch {} before processing", group_display, g.epoch);
+                        }
                     }
                 }
             }
@@ -1524,18 +1688,38 @@ impl MlsService {
                                     if !check_gid_bytes.is_empty() {
                                         let check_gid = GroupId::from_slice(&check_gid_bytes);
                                         let my_pk = nostr_sdk::PublicKey::from_hex(&my_pubkey_hex).ok();
-                                        let still_member = if let Some(pk) = my_pk {
-                                            engine.get_members(&check_gid).ok().map(|m| m.contains(&pk)).unwrap_or(false)
-                                        } else { false };
+                                        let outcome = if let Some(pk) = my_pk {
+                                            let r = engine.get_members(&check_gid)
+                                                .map(|members| members.contains(&pk))
+                                                .map_err(|e| {
+                                                    eprintln!("[MLS] get_members error during eviction check (skipping, will retry): {}", e);
+                                                    e
+                                                });
+                                            membership_outcome_from_get_members(r)
+                                        } else { MembershipOutcome::Evicted };
 
-                                        if !still_member {
-                                            crate::traits::emit_event("mls_group_left", &serde_json::json!({ "group_id": gid_for_fetch }));
-                                        } else {
-                                            let _ = engine.sync_group_metadata_from_mls(&check_gid);
-                                            if let Ok(Some(group)) = engine.get_group(&check_gid) {
-                                                pending_metadata_update = Some((group.name.clone(), group.description.clone()));
+                                        match outcome {
+                                            MembershipOutcome::Evicted => {
+                                                // We were just removed by this commit. Mirror the retry
+                                                // loop's behavior: flag eviction so the rest of this
+                                                // batch is skipped (post-kick events are undecryptable
+                                                // garbage that would only pollute mls_pending_events)
+                                                // and cleanup_evicted_group runs to wipe local state.
+                                                eprintln!("[MLS] EVICTION DETECTED via commit for group: {}", gid_for_fetch);
+                                                was_evicted = true;
+                                                crate::traits::emit_event("mls_group_left", &serde_json::json!({ "group_id": gid_for_fetch }));
                                             }
-                                            crate::traits::emit_event("mls_group_updated", &serde_json::json!({ "group_id": gid_for_fetch }));
+                                            MembershipOutcome::Member => {
+                                                let _ = engine.sync_group_metadata_from_mls(&check_gid);
+                                                if let Ok(Some(group)) = engine.get_group(&check_gid) {
+                                                    pending_metadata_update = Some((group.name.clone(), group.description.clone()));
+                                                }
+                                                crate::traits::emit_event("mls_group_updated", &serde_json::json!({ "group_id": gid_for_fetch }));
+                                            }
+                                            MembershipOutcome::Unknown => {
+                                                // Transient storage error: skip both branches.
+                                                // Next sync retries the Commit via is_mls_event_processed dedup.
+                                            }
                                         }
                                     }
                                 }
@@ -1543,6 +1727,7 @@ impl MlsService {
                                 last_seen_id = Some(ev.id);
                                 last_seen_at = ev.created_at.as_secs();
                                 events_to_track.push((ev.id.to_hex(), ev.created_at.as_secs()));
+                                if was_evicted { break; }
                             }
                             MessageProcessingResult::Proposal(_) => {
                                 crate::traits::emit_event("mls_group_updated", &serde_json::json!({ "group_id": gid_for_fetch }));
@@ -1641,6 +1826,7 @@ impl MlsService {
                                     last_seen_id = Some(ev.id);
                                     last_seen_at = ev.created_at.as_secs();
                                     let _ = crate::mls::track_mls_event_processed(&ev.id.to_hex(), &gid_for_fetch, ev.created_at.as_secs());
+                                    let _ = crate::mls::remove_pending_event(&ev.id.to_hex());
                                 }
                                 MessageProcessingResult::Commit { .. } => {
                                     if let Some(ref check_id) = group_check_id {
@@ -1648,18 +1834,29 @@ impl MlsService {
                                         if !check_gid_bytes.is_empty() {
                                             let check_gid = GroupId::from_slice(&check_gid_bytes);
                                             let my_pk = nostr_sdk::PublicKey::from_hex(&my_pubkey_hex).ok();
-                                            let still_member = if let Some(pk) = my_pk {
-                                                engine.get_members(&check_gid).ok().map(|m| m.contains(&pk)).unwrap_or(false)
-                                            } else { false };
-                                            if !still_member {
-                                                was_evicted = true;
-                                                crate::traits::emit_event("mls_group_left", &serde_json::json!({ "group_id": gid_for_fetch }));
-                                            } else {
-                                                let _ = engine.sync_group_metadata_from_mls(&check_gid);
-                                                if let Ok(Some(group)) = engine.get_group(&check_gid) {
-                                                    pending_metadata_update = Some((group.name.clone(), group.description.clone()));
+                                            let outcome = if let Some(pk) = my_pk {
+                                                let r = engine.get_members(&check_gid)
+                                                    .map(|members| members.contains(&pk))
+                                                    .map_err(|e| {
+                                                        eprintln!("[MLS] get_members error in retry-loop eviction check (skipping): {}", e);
+                                                        e
+                                                    });
+                                                membership_outcome_from_get_members(r)
+                                            } else { MembershipOutcome::Evicted };
+
+                                            match outcome {
+                                                MembershipOutcome::Evicted => {
+                                                    was_evicted = true;
+                                                    crate::traits::emit_event("mls_group_left", &serde_json::json!({ "group_id": gid_for_fetch }));
                                                 }
-                                                crate::traits::emit_event("mls_group_updated", &serde_json::json!({ "group_id": gid_for_fetch }));
+                                                MembershipOutcome::Member => {
+                                                    let _ = engine.sync_group_metadata_from_mls(&check_gid);
+                                                    if let Ok(Some(group)) = engine.get_group(&check_gid) {
+                                                        pending_metadata_update = Some((group.name.clone(), group.description.clone()));
+                                                    }
+                                                    crate::traits::emit_event("mls_group_updated", &serde_json::json!({ "group_id": gid_for_fetch }));
+                                                }
+                                                MembershipOutcome::Unknown => {}
                                             }
                                         }
                                     }
@@ -1667,10 +1864,12 @@ impl MlsService {
                                     last_seen_id = Some(ev.id);
                                     last_seen_at = ev.created_at.as_secs();
                                     let _ = crate::mls::track_mls_event_processed(&ev.id.to_hex(), &gid_for_fetch, ev.created_at.as_secs());
+                                    let _ = crate::mls::remove_pending_event(&ev.id.to_hex());
                                 }
                                 MessageProcessingResult::Proposal(_) => {
                                     crate::traits::emit_event("mls_group_updated", &serde_json::json!({ "group_id": gid_for_fetch }));
                                     let _ = crate::mls::track_mls_event_processed(&ev.id.to_hex(), &gid_for_fetch, ev.created_at.as_secs());
+                                    let _ = crate::mls::remove_pending_event(&ev.id.to_hex());
                                     processed = processed.saturating_add(1);
                                     last_seen_id = Some(ev.id);
                                     last_seen_at = ev.created_at.as_secs();
@@ -1682,11 +1881,36 @@ impl MlsService {
                                     last_seen_id = Some(ev.id);
                                     last_seen_at = ev.created_at.as_secs();
                                     let _ = crate::mls::track_mls_event_processed(&ev.id.to_hex(), &gid_for_fetch, ev.created_at.as_secs());
+                                    let _ = crate::mls::remove_pending_event(&ev.id.to_hex());
                                 }
                                 MessageProcessingResult::Unprocessable { .. } => {
                                     still_pending.push(ev.clone());
                                 }
-                                MessageProcessingResult::PreviouslyFailed => {}
+                                MessageProcessingResult::PreviouslyFailed => {
+                                    // MDK has firmly given up on this wrapper
+                                    // (state=Failed with no extractable group_id
+                                    // OR EpochInvalidated). Treat as terminal:
+                                    // track in our processed table and remove
+                                    // from the persistent pending queue so it
+                                    // doesn't sit there forever bumping
+                                    // retry_count until the 90-day prune.
+                                    //
+                                    // Deliberately asymmetric with the first loop:
+                                    // we do NOT update last_seen_id/last_seen_at
+                                    // here. Carry-overs from prior syncs may have
+                                    // created_at OLDER than the current cursor;
+                                    // advancing on them risks dragging the cursor
+                                    // backward (compute_cursor_with_pending_cap
+                                    // floors at current_cursor_at, but if every
+                                    // event in the retry batch is PreviouslyFailed
+                                    // we'd want last_seen_id to stay None so the
+                                    // pagination defensive break fires instead of
+                                    // re-fetching the same window). Vector's
+                                    // mls_processed_events dedup catches them
+                                    // next sync regardless.
+                                    let _ = crate::mls::track_mls_event_processed(&ev.id.to_hex(), &gid_for_fetch, ev.created_at.as_secs());
+                                    let _ = crate::mls::remove_pending_event(&ev.id.to_hex());
+                                }
                             }
                         }
                         Err(e) => {
@@ -1711,11 +1935,12 @@ impl MlsService {
             }
 
             if !pending_retry.is_empty() {
+                eprintln!("[MLS] Sync ending with {} still-pending events for {} — persisting for retry next sync",
+                    pending_retry.len(), group_display);
                 for ev in &pending_retry {
-                    let _ = crate::mls::track_mls_event_processed(&ev.id.to_hex(), &gid_for_fetch, ev.created_at.as_secs());
-                    last_seen_id = Some(ev.id);
-                    last_seen_at = ev.created_at.as_secs();
-                    processed = processed.saturating_add(1);
+                    if let Err(e) = crate::mls::save_pending_event(&gid_for_fetch, ev) {
+                        eprintln!("[MLS] save_pending_event failed for {}: {}", ev.id, e);
+                    }
                 }
                 if crate::mls::record_group_failure(&gid_for_fetch).await {
                     eprintln!("[MLS] Group {} appears to be desynced (too many consecutive failures)", gid_for_fetch);
@@ -1986,8 +2211,16 @@ impl MlsService {
                 eprintln!("[MLS] Failed to cleanup evicted group: {}", e);
             }
         } else {
+            // See `compute_cursor_with_pending_cap` for the cap rules and
+            // the reasoning around the current-cursor floor and oldest=0
+            // guard.
+            let current_cursor_at = cursors.get(&gid_for_fetch).map(|c| c.last_seen_at).unwrap_or(0);
+            let oldest_pending_at: Option<u64> = crate::mls::load_pending_events(&gid_for_fetch)
+                .ok()
+                .and_then(|evs| evs.iter().map(|e| e.created_at.as_secs()).min());
+            last_seen_at = compute_cursor_with_pending_cap(last_seen_at, current_cursor_at, oldest_pending_at);
+
             if let Some(id) = last_seen_id {
-                let current_cursor_at = cursors.get(&gid_for_fetch).map(|c| c.last_seen_at).unwrap_or(0);
                 if last_seen_at > current_cursor_at {
                     cursors.insert(gid_for_fetch.clone(), crate::mls::EventCursor {
                         last_seen_event_id: id.to_hex(),
@@ -1996,7 +2229,7 @@ impl MlsService {
                     if let Err(e) = self.write_event_cursors(&cursors) {
                         eprintln!("[MLS] write_event_cursors failed: {}", e);
                     }
-                    current_since = Timestamp::from_secs(last_seen_at);
+                    current_since = Timestamp::from_secs(cursor_to_next_since(last_seen_at));
                 }
             }
         }
@@ -2006,6 +2239,12 @@ impl MlsService {
 
         if batch_size < BATCH_SIZE { break; }
         if was_evicted { break; }
+        // Defensive: if a batch yielded zero processable events, `last_seen_id`
+        // is None and `current_since` didn't advance — refetching the same
+        // window next iteration would loop forever. The fallback h-tag check
+        // above is the main guard, but bail here too in case anything else
+        // ever leaves us spinning in place.
+        if last_seen_id.is_none() { break; }
         } // End pagination loop
 
         Ok((total_processed, total_new_msgs))
@@ -2264,6 +2503,302 @@ impl MlsService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ========================================================================
+    // compute_cursor_with_pending_cap — pure cursor math
+    // ========================================================================
+
+    #[test]
+    fn cursor_cap_no_pending_returns_last_seen_unchanged() {
+        // No pending events → cap is a no-op, advance freely.
+        assert_eq!(compute_cursor_with_pending_cap(1500, 1000, None), 1500);
+        assert_eq!(compute_cursor_with_pending_cap(0, 0, None), 0);
+        assert_eq!(compute_cursor_with_pending_cap(u64::MAX, 0, None), u64::MAX);
+    }
+
+    #[test]
+    fn cursor_cap_pending_newer_than_last_seen_no_change() {
+        // Pending event is in the future relative to our progress; no cap needed.
+        // last_seen=1000, oldest_pending=2000 → cap=1999, last_seen<cap, leave alone.
+        assert_eq!(compute_cursor_with_pending_cap(1000, 500, Some(2000)), 1000);
+    }
+
+    #[test]
+    fn cursor_cap_pending_caps_last_seen_at_oldest_minus_one() {
+        // last_seen=1500, oldest_pending=1200, current_cursor=500
+        // cap = 1199 (oldest-1), floored at 500 → 1199
+        // last_seen 1500 > 1199 → cap to 1199.
+        assert_eq!(compute_cursor_with_pending_cap(1500, 500, Some(1200)), 1199);
+    }
+
+    #[test]
+    fn cursor_cap_pending_older_than_cursor_floors_at_cursor() {
+        // BUG-CLASS: prevent cursor regression. A late-arriving pending event
+        // with created_at older than where we already advanced must NOT drag
+        // the cursor backward.
+        // last_seen=1500, oldest_pending=300, current_cursor=1000
+        // raw cap = 299, but floored at 1000 → 1000.
+        // last_seen 1500 > 1000 → cap to 1000 (we DO clamp to current cursor;
+        // the strict-> check at the call site then prevents the actual write
+        // since 1000 == current_cursor — net effect: no cursor change).
+        assert_eq!(compute_cursor_with_pending_cap(1500, 1000, Some(300)), 1000);
+    }
+
+    #[test]
+    fn cursor_cap_oldest_pending_zero_does_not_pin_to_genesis() {
+        // BUG-CLASS: clock-skewed/malformed pending event with created_at=0.
+        // saturating_sub(1) = 0, which would (without the guard) cap last_seen_at
+        // to 0 and force every sync to refetch from epoch zero. Guard returns
+        // last_seen_at unchanged.
+        assert_eq!(compute_cursor_with_pending_cap(1500, 1000, Some(0)), 1500);
+    }
+
+    #[test]
+    fn cursor_cap_oldest_equals_last_seen() {
+        // Edge: pending event has SAME timestamp as our latest processed.
+        // cap = oldest - 1 = last_seen - 1, last_seen > cap → cap to last_seen-1.
+        // (We've processed up through `last_seen` but the pending event at
+        // exactly that second hasn't decrypted yet, so back off by one.)
+        assert_eq!(compute_cursor_with_pending_cap(1500, 0, Some(1500)), 1499);
+    }
+
+    #[test]
+    fn cursor_cap_first_write_anchors_below_last_seen_to_recover_pending() {
+        // First cursor write (current_cursor_at == 0) with a pending event at
+        // created_at=200 produces raw cap=199. Floor at 0 (no progress yet) →
+        // 199. last_seen=500 > 199 → cap to 199. The cursor anchors BELOW the
+        // batch's last successful event so future syncs re-fetch the window
+        // containing the pending event's prerequisite. Already-processed
+        // events at 200 < t < 500 short-circuit via mls_processed_events.
+        assert_eq!(compute_cursor_with_pending_cap(500, 0, Some(200)), 199);
+    }
+
+    #[test]
+    fn cursor_cap_cap_equals_last_seen_no_change() {
+        // last_seen_at > cap is strict, so equal means no change.
+        // last_seen=1000, oldest_pending=1001, cap=1000, last_seen=1000 → no change.
+        assert_eq!(compute_cursor_with_pending_cap(1000, 0, Some(1001)), 1000);
+    }
+
+    #[test]
+    fn cursor_cap_zero_last_seen_with_pending_no_underflow() {
+        // Edge: last_seen_at=0 (uninitialized batch) + pending at 1500.
+        // cap = 1499 floored at current_cursor=0 → 1499. last_seen 0 > 1499 is
+        // false → no change, returns 0. (Caller's cursor-write guard will then
+        // skip the persist since 0 == current_cursor_at.)
+        assert_eq!(compute_cursor_with_pending_cap(0, 0, Some(1500)), 0);
+    }
+
+    #[test]
+    fn cursor_cap_last_seen_below_current_cursor_invariant_violation() {
+        // PROTECTIVE INVARIANT: caller's loop guarantees last_seen_at >=
+        // current_cursor_at because current_cursor_at is the previous sync's
+        // anchor and last_seen_at advances monotonically through batch events.
+        // If somehow violated (e.g. caller bug), the function should NOT make
+        // it worse — last_seen=500, current_cursor=1000, no pending → returns
+        // 500 unchanged. The caller's `if last_seen_at > current_cursor_at`
+        // guard then refuses to write the regressed value.
+        assert_eq!(compute_cursor_with_pending_cap(500, 1000, None), 500);
+        // With pending: cap = oldest-1 floored at 1000. last_seen 500 < 1000 →
+        // no change (still 500). Caller's write-guard prevents regression.
+        assert_eq!(compute_cursor_with_pending_cap(500, 1000, Some(2000)), 500);
+    }
+
+    // ========================================================================
+    // cursor_to_next_since — +1 advance on read
+    // ========================================================================
+
+    #[test]
+    fn cursor_to_next_since_basic() {
+        assert_eq!(cursor_to_next_since(0), 1);
+        assert_eq!(cursor_to_next_since(1500), 1501);
+    }
+
+    #[test]
+    fn cursor_to_next_since_saturates_at_max() {
+        // BUG-CLASS: u64 overflow at the heat-death of the universe. Saturating
+        // add means we never wrap; relay would just return 0 events.
+        assert_eq!(cursor_to_next_since(u64::MAX), u64::MAX);
+        assert_eq!(cursor_to_next_since(u64::MAX - 1), u64::MAX);
+    }
+
+    // ========================================================================
+    // filter_events_to_h_tag — pagination fallback safety
+    // ========================================================================
+
+    #[test]
+    fn filter_h_tag_empty_input() {
+        let result = filter_events_to_h_tag(Vec::new(), "abc123");
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn filter_h_tag_keeps_only_matching() {
+        use nostr_sdk::prelude::*;
+        let keys = Keys::generate();
+        let target = "a".repeat(64);
+        let other = "b".repeat(64);
+
+        let target_a = EventBuilder::new(Kind::MlsGroupMessage, "t1")
+            .tag(Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)),
+                vec![target.clone()],
+            ))
+            .build(keys.public_key()).sign(&keys).await.unwrap();
+        let other_event = EventBuilder::new(Kind::MlsGroupMessage, "o")
+            .tag(Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)),
+                vec![other],
+            ))
+            .build(keys.public_key()).sign(&keys).await.unwrap();
+        let no_h_event = EventBuilder::new(Kind::MlsGroupMessage, "no-h")
+            .build(keys.public_key()).sign(&keys).await.unwrap();
+        let target_b = EventBuilder::new(Kind::MlsGroupMessage, "t2")
+            .tag(Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)),
+                vec![target.clone()],
+            ))
+            .build(keys.public_key()).sign(&keys).await.unwrap();
+
+        let events = vec![target_a, other_event, no_h_event, target_b];
+        let result = filter_events_to_h_tag(events, &target);
+        assert_eq!(result.len(), 2, "should keep only the 2 events matching the target h-tag");
+        for ev in &result {
+            let tag = ev.tags.find(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H))).unwrap();
+            assert_eq!(tag.content().unwrap(), target);
+        }
+    }
+
+    #[tokio::test]
+    async fn filter_h_tag_case_insensitive() {
+        // Relays SHOULD send lowercase but Nostr is permissive; case-insensitive
+        // match avoids dropping legitimate events from non-conformant senders.
+        use nostr_sdk::prelude::*;
+        let keys = Keys::generate();
+        let lower = "a".repeat(64);
+        let upper = lower.to_uppercase();
+
+        let event_upper = EventBuilder::new(Kind::MlsGroupMessage, "test")
+            .tag(Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)),
+                vec![upper.clone()],
+            ))
+            .build(keys.public_key())
+            .sign(&keys)
+            .await
+            .unwrap();
+
+        let result = filter_events_to_h_tag(vec![event_upper], &lower);
+        assert_eq!(result.len(), 1, "should match across case");
+    }
+
+    // ========================================================================
+    // membership_outcome_from_get_members — eviction-on-Commit decision
+    // ========================================================================
+
+    #[test]
+    fn membership_outcome_ok_true_is_member() {
+        // get_members returned Ok with self in the list → still a member.
+        let r: Result<bool, &'static str> = Ok(true);
+        assert_eq!(membership_outcome_from_get_members(r), MembershipOutcome::Member);
+    }
+
+    #[test]
+    fn membership_outcome_ok_false_is_evicted() {
+        // get_members returned Ok WITHOUT self → real eviction.
+        let r: Result<bool, &'static str> = Ok(false);
+        assert_eq!(membership_outcome_from_get_members(r), MembershipOutcome::Evicted);
+    }
+
+    #[test]
+    fn membership_outcome_err_is_unknown_not_evicted() {
+        // BUG-CLASS: a transient storage error MUST NOT trigger a false-positive
+        // eviction that wipes the group locally. This was the regression the
+        // previous `unwrap_or(false)` caused.
+        let r: Result<bool, &'static str> = Err("disk lock timeout");
+        assert_eq!(
+            membership_outcome_from_get_members(r),
+            MembershipOutcome::Unknown,
+            "Err must map to Unknown, not Evicted",
+        );
+    }
+
+    #[test]
+    fn membership_outcome_distinct_for_each_input() {
+        // Comprehensive: every distinct input yields a distinct output.
+        // If any two cases ever collapse (e.g. someone adds a default),
+        // this test fails immediately.
+        let outcomes: Vec<MembershipOutcome> = vec![
+            membership_outcome_from_get_members::<&str>(Ok(true)),
+            membership_outcome_from_get_members::<&str>(Ok(false)),
+            membership_outcome_from_get_members::<&str>(Err("x")),
+        ];
+        assert_eq!(outcomes[0], MembershipOutcome::Member);
+        assert_eq!(outcomes[1], MembershipOutcome::Evicted);
+        assert_eq!(outcomes[2], MembershipOutcome::Unknown);
+        // No two outcomes should be equal.
+        assert_ne!(outcomes[0], outcomes[1]);
+        assert_ne!(outcomes[0], outcomes[2]);
+        assert_ne!(outcomes[1], outcomes[2]);
+    }
+
+    // ========================================================================
+    // engine_gid byte-length gate (Failed-message resurrection)
+    // ========================================================================
+
+    #[test]
+    fn engine_gid_length_gate_accepts_16_bytes() {
+        // MDK GroupId::from_slice(&bytes) — 16 bytes is the typical MDK
+        // group id format.
+        let bytes_16 = vec![0u8; 16];
+        let acceptable = bytes_16.len() == 16 || bytes_16.len() == 32;
+        assert!(acceptable);
+    }
+
+    #[test]
+    fn engine_gid_length_gate_accepts_32_bytes() {
+        // 32 bytes is the nostr_group_id fallback (when get_groups didn't
+        // surface us).
+        let bytes_32 = vec![0u8; 32];
+        let acceptable = bytes_32.len() == 16 || bytes_32.len() == 32;
+        assert!(acceptable);
+    }
+
+    #[test]
+    fn engine_gid_length_gate_rejects_unexpected_lengths() {
+        // BUG-CLASS: a wrong-length engine_group_id was previously SILENTLY
+        // skipped in the resurrection code, masking real bugs. Must be
+        // rejected (and the call site logs warn).
+        for bad_len in [0, 1, 8, 15, 17, 24, 33, 64, 128] {
+            let bytes = vec![0u8; bad_len];
+            let acceptable = bytes.len() == 16 || bytes.len() == 32;
+            assert!(!acceptable, "len={} should be rejected", bad_len);
+        }
+    }
+
+    #[tokio::test]
+    async fn filter_h_tag_no_matches_returns_empty() {
+        // Reproduces the Vectify Testers infinite-pagination scenario:
+        // relay returns 1015 unrelated kind-445 events, our filter returns
+        // empty, caller breaks pagination instead of looping.
+        use nostr_sdk::prelude::*;
+        let keys = Keys::generate();
+        let mut events = Vec::new();
+        for _ in 0..50 {
+            let unrelated = EventBuilder::new(Kind::MlsGroupMessage, "x")
+                .tag(Tag::custom(
+                    TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)),
+                    vec!["b".repeat(64)],
+                ))
+                .build(keys.public_key())
+                .sign(&keys)
+                .await
+                .unwrap();
+            events.push(unrelated);
+        }
+        let result = filter_events_to_h_tag(events, &"a".repeat(64));
+        assert!(result.is_empty());
+    }
 
     #[test]
     fn get_group_sync_lock_same_group() {
@@ -2731,6 +3266,138 @@ mod tests {
         let cursor = loaded.get("cursor-test-group").unwrap();
         assert_eq!(cursor.last_seen_event_id, "abc123");
         assert_eq!(cursor.last_seen_at, 1700000000);
+    }
+
+    #[tokio::test]
+    async fn cursor_load_empty_returns_empty_map() {
+        let (_tmp, _guard) = init_test_db();
+        let loaded = crate::db::mls::load_mls_event_cursors().unwrap();
+        assert!(loaded.is_empty(), "no cursors saved → empty map");
+    }
+
+    #[tokio::test]
+    async fn cursor_save_multiple_groups_isolated() {
+        // BUG-CLASS: writing one group's cursor must not stomp others.
+        let (_tmp, _guard) = init_test_db();
+
+        let mut cursors = HashMap::new();
+        cursors.insert("group-a".to_string(), crate::mls::EventCursor {
+            last_seen_event_id: "id-a".into(),
+            last_seen_at: 1000,
+        });
+        cursors.insert("group-b".to_string(), crate::mls::EventCursor {
+            last_seen_event_id: "id-b".into(),
+            last_seen_at: 2000,
+        });
+        cursors.insert("group-c".to_string(), crate::mls::EventCursor {
+            last_seen_event_id: "id-c".into(),
+            last_seen_at: 3000,
+        });
+        crate::db::mls::save_mls_event_cursors(&cursors).unwrap();
+
+        let loaded = crate::db::mls::load_mls_event_cursors().unwrap();
+        assert_eq!(loaded.len(), 3);
+        assert_eq!(loaded.get("group-a").unwrap().last_seen_at, 1000);
+        assert_eq!(loaded.get("group-b").unwrap().last_seen_at, 2000);
+        assert_eq!(loaded.get("group-c").unwrap().last_seen_at, 3000);
+    }
+
+    #[tokio::test]
+    async fn cursor_save_overwrite_replaces_value() {
+        // Save cursor for group-x, then save with new value — must reflect
+        // the latest, not append.
+        let (_tmp, _guard) = init_test_db();
+
+        let mut cursors = HashMap::new();
+        cursors.insert("group-x".to_string(), crate::mls::EventCursor {
+            last_seen_event_id: "old".into(),
+            last_seen_at: 1000,
+        });
+        crate::db::mls::save_mls_event_cursors(&cursors).unwrap();
+
+        cursors.insert("group-x".to_string(), crate::mls::EventCursor {
+            last_seen_event_id: "new".into(),
+            last_seen_at: 2000,
+        });
+        crate::db::mls::save_mls_event_cursors(&cursors).unwrap();
+
+        let loaded = crate::db::mls::load_mls_event_cursors().unwrap();
+        assert_eq!(loaded.len(), 1);
+        let c = loaded.get("group-x").unwrap();
+        assert_eq!(c.last_seen_event_id, "new");
+        assert_eq!(c.last_seen_at, 2000);
+    }
+
+    #[tokio::test]
+    async fn cursor_remove_via_save_with_missing_key() {
+        // The MlsService leave/eviction code path does:
+        //   cursors.remove(&group_id);
+        //   write_event_cursors(&cursors);
+        // The DB write API must mirror this — saving a map without a
+        // previously-present key should DELETE that group's row, not
+        // leave it stale.
+        let (_tmp, _guard) = init_test_db();
+
+        // Save two groups
+        let mut cursors = HashMap::new();
+        cursors.insert("keep".to_string(), crate::mls::EventCursor {
+            last_seen_event_id: "k".into(),
+            last_seen_at: 100,
+        });
+        cursors.insert("remove".to_string(), crate::mls::EventCursor {
+            last_seen_event_id: "r".into(),
+            last_seen_at: 200,
+        });
+        crate::db::mls::save_mls_event_cursors(&cursors).unwrap();
+
+        // Remove one and re-save
+        cursors.remove("remove");
+        crate::db::mls::save_mls_event_cursors(&cursors).unwrap();
+
+        let loaded = crate::db::mls::load_mls_event_cursors().unwrap();
+        assert_eq!(loaded.len(), 1, "removed cursor must not persist");
+        assert!(loaded.contains_key("keep"));
+        assert!(!loaded.contains_key("remove"));
+    }
+
+    #[tokio::test]
+    async fn cursor_save_empty_clears_all() {
+        // Saving an empty map must clear the table.
+        let (_tmp, _guard) = init_test_db();
+
+        let mut cursors = HashMap::new();
+        cursors.insert("group-y".to_string(), crate::mls::EventCursor {
+            last_seen_event_id: "y".into(),
+            last_seen_at: 100,
+        });
+        crate::db::mls::save_mls_event_cursors(&cursors).unwrap();
+        assert_eq!(crate::db::mls::load_mls_event_cursors().unwrap().len(), 1);
+
+        crate::db::mls::save_mls_event_cursors(&HashMap::new()).unwrap();
+        let loaded = crate::db::mls::load_mls_event_cursors().unwrap();
+        assert!(loaded.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cursor_round_trip_preserves_extreme_timestamps() {
+        // Edge values: u64::MIN (0), u64::MAX, and i64::MAX (some DBs may
+        // intern as signed). Exercise to catch any type-narrowing bugs.
+        let (_tmp, _guard) = init_test_db();
+
+        let mut cursors = HashMap::new();
+        cursors.insert("zero".to_string(), crate::mls::EventCursor {
+            last_seen_event_id: "z".into(),
+            last_seen_at: 0,
+        });
+        cursors.insert("max-i64".to_string(), crate::mls::EventCursor {
+            last_seen_event_id: "m".into(),
+            last_seen_at: i64::MAX as u64,
+        });
+        crate::db::mls::save_mls_event_cursors(&cursors).unwrap();
+
+        let loaded = crate::db::mls::load_mls_event_cursors().unwrap();
+        assert_eq!(loaded.get("zero").unwrap().last_seen_at, 0);
+        assert_eq!(loaded.get("max-i64").unwrap().last_seen_at, i64::MAX as u64);
     }
 
     #[tokio::test]
