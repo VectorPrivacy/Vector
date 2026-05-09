@@ -142,7 +142,7 @@ function updateChatlistPreview(chatId) {
         } else {
             pChatPreview.textContent = preview.text;
         }
-        if (preview.needsTwemoji) twemojify(pChatPreview);
+        if (preview.needsTwemoji) twemojify(pChatPreview, { layoutHint: true });
     }
 
     // Update timestamp

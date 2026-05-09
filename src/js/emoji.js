@@ -2129,9 +2129,16 @@ function isoToFlagEmoji(isoCode) {
 
 /**
  * Convert all Unicode emojis in the given DOM element to Twemoji SVGs
- * @param {HTMLElement} domElement 
+ * @param {HTMLElement} domElement
+ * @param {{ layoutHint?: boolean }} [opts] — when layoutHint is true, stamp
+ *        inline 1em sizing + load handler that forces a reflow on the nearest
+ *        .cutoff ancestor. Required for ellipsis-truncated text containers
+ *        (chatlist preview) where layout reserves 0×0 for the unloaded image,
+ *        text fills the line, then the SVG paints over already-laid-out text
+ *        once it resolves. Off by default — picker grids and other contexts
+ *        size emojis via dedicated CSS rules.
  */
-function twemojify(domElement) {
+function twemojify(domElement, opts) {
     // Strip skin tone modifiers from text nodes — our Twemoji set only has neutral/yellow variants
     const walker = document.createTreeWalker(domElement, NodeFilter.SHOW_TEXT);
     while (walker.nextNode()) {
@@ -2140,27 +2147,20 @@ function twemojify(domElement) {
         if (stripped !== node.textContent) node.textContent = stripped;
     }
     twemoji.parse(domElement, { callback: (icon, _) => '/twemoji/svg/' + icon + '.svg' });
-    const imgs = domElement.querySelectorAll('img.emoji:not([width])');
+    if (!opts || !opts.layoutHint) return;
+    const imgs = domElement.querySelectorAll('img.emoji:not([data-sized])');
     for (const img of imgs) {
-        // Stamp width/height attributes (1:1) so the browser knows the
-        // aspect-ratio at parse time, before the SVG fetch resolves.
-        img.setAttribute('width', '1');
-        img.setAttribute('height', '1');
-        // After each SVG actually loads, force a relayout on the nearest
-        // truncated ancestor (.cutoff). Without this, the chatlist preview
-        // bug appears on cold-cache boots: layout reserves 0 width for the
-        // not-yet-loaded image, text fills the line, then once the SVG
-        // resolves it paints at its 0-width layout position — overlapping
-        // the last ~15px of text. A hover or window resize triggers exactly
-        // this same relayout, which is why the bug "fixes itself" then.
+        img.style.width = '1em';
+        img.style.height = '1em';
+        img.setAttribute('data-sized', '');
         if (img.complete && img.naturalWidth > 0) continue;
         img.addEventListener('load', () => {
             const cutoff = img.closest('.cutoff');
             if (!cutoff) return;
             // display:none → reflow → restore. Hard-resets the box layout so
             // the truncation algorithm can't reuse a stale calculation done
-            // against an unknown-dimension image. Any softer trick (toggling
-            // text-overflow, reading offsetWidth alone) leaves WebKit's
+            // against an unknown-dimension image. Softer tricks (toggling
+            // text-overflow, reading offsetWidth alone) leave WebKit's
             // ellipsis cache intact and the bug persists.
             const prev = cutoff.style.display;
             cutoff.style.display = 'none';
