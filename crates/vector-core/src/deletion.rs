@@ -81,9 +81,10 @@ pub async fn delete_own_dm(rumor_id: &EventId) -> Result<DeleteOutcome, String> 
         .unwrap_or_default();
 
     // Snapshot the message + recipient BEFORE any state/DB cleanup.
-    // Attachment URLs feed Blossom DELETE; recipient pubkey feeds the
-    // cooperative-hide gift wrap. We try to recover both even when no
-    // retained keys exist (older messages, pre-retention sends).
+    // Attachment URLs feed Blossom DELETE; the attachments themselves
+    // feed local-cache file removal; recipient pubkey feeds the
+    // cooperative-hide gift wrap. We try to recover all three even when
+    // no retained keys exist (older messages, pre-retention sends).
     //
     // INVARIANT: `chat.id` for a DM is the counterpart's npub. The
     // `find_message` lookup here is unscoped, but `delete_own_dm` is
@@ -93,7 +94,7 @@ pub async fn delete_own_dm(rumor_id: &EventId) -> Result<DeleteOutcome, String> 
     // breaks; that just disables Layer 2 cooperative-hide for the
     // call. Layer 1 (retained-key relay nuke) and Layer 3 (Blossom)
     // remain functional.
-    let (attachment_urls, recipient_from_state) = {
+    let (all_attachments, recipient_from_state) = {
         let state = crate::state::STATE.lock().await;
         match state.find_message(&rumor_id.to_hex()) {
             Some((chat, msg)) => {
@@ -101,18 +102,33 @@ pub async fn delete_own_dm(rumor_id: &EventId) -> Result<DeleteOutcome, String> 
                     matches!(chat.chat_type, crate::chat::ChatType::DirectMessage),
                     "delete_own_dm called on non-DM chat — caller bug"
                 );
-                let urls = msg
-                    .attachments
-                    .iter()
-                    .map(|a| a.url.to_string())
-                    .filter(|u| !u.is_empty())
-                    .collect::<Vec<_>>();
                 let recipient = nostr_sdk::PublicKey::from_bech32(&chat.id).ok();
-                (urls, recipient)
+                (msg.attachments.clone(), recipient)
             }
             None => (Vec::new(), None),
         }
     };
+
+    // Refcount filter: drop attachments still referenced by sibling
+    // messages so we don't yank cached files / Blossom blobs from
+    // messages that still need them. Vector dedupes uploads by SHA-256:
+    // re-sending the same file produces multiple messages pointing at
+    // the same cached path AND the same Blossom blob. Deleting one
+    // shouldn't delete the underlying resources.
+    let unique_attachments = filter_unreferenced_attachments(
+        &rumor_id.to_hex(),
+        all_attachments,
+    ).await;
+
+    // Local cache nuke (canonicalize + managed-dir-only inside helper).
+    delete_cached_attachment_files(&unique_attachments);
+
+    // Blossom URLs derived from the filtered (refcount-aware) set.
+    let attachment_urls: Vec<String> = unique_attachments
+        .iter()
+        .map(|a| a.url.to_string())
+        .filter(|u| !u.is_empty())
+        .collect();
 
     let wraps_total = keys.len();
     let mut wraps_dispatched = 0usize;
@@ -246,6 +262,96 @@ async fn delete_wrap_per_relay(
             delivered,
             total
         );
+    }
+}
+
+/// Best-effort delete of every cached attachment file for a message.
+/// Only unlinks files that canonicalize to a path under Vector's
+/// managed download directory — files the user has moved or copied
+/// elsewhere are never touched. Symlink and `..` escape attempts are
+/// rejected by the canonicalize check.
+///
+/// Used by both sender-initiated deletes (so the user's own cached
+/// copy disappears alongside the network deletion) and cooperative-
+/// hide receivers (so the recipient's downloaded copy goes when the
+/// sender asks for the message to disappear). Mirrors the
+/// "delete-for-everyone" semantics of iMessage/Signal at the file
+/// layer, scoped to Vector's own cache.
+pub fn delete_cached_attachment_files_pub(attachments: &[crate::types::Attachment]) {
+    delete_cached_attachment_files(attachments);
+}
+
+/// Filter `attachments` down to those NOT referenced by any OTHER
+/// undeleted message in STATE.
+///
+/// Vector dedupes uploads by SHA-256 hash: re-sending the same file
+/// reuses the on-disk cache + the same Blossom URL across multiple
+/// messages. Without this filter, deleting one of those messages
+/// would unlink the cached file (or DELETE the Blossom blob) even
+/// though sibling messages still reference it — the user's other
+/// copies would 404 and lose their local preview.
+///
+/// `excluding_message_id` is the id of the message we're deleting,
+/// so it doesn't count as a "reference" to itself when determining
+/// whether the attachment is shared.
+pub async fn filter_unreferenced_attachments(
+    excluding_message_id: &str,
+    attachments: Vec<crate::types::Attachment>,
+) -> Vec<crate::types::Attachment> {
+    if attachments.is_empty() {
+        return attachments;
+    }
+    let state = crate::state::STATE.lock().await;
+    attachments
+        .into_iter()
+        .filter(|att| {
+            // Dedup key: the attachment's SHA-256 (Attachment.id).
+            // Empty id can't be matched, so treat as unique.
+            let hash = &*att.id;
+            if hash.is_empty() {
+                return true;
+            }
+            let referenced_elsewhere = state.chats.iter().any(|chat| {
+                chat.iter_compact().any(|m| {
+                    let msg_id_hex = m.id_hex();
+                    msg_id_hex != excluding_message_id
+                        && m.attachments.iter().any(|a| a.id_eq(hash))
+                })
+            });
+            !referenced_elsewhere
+        })
+        .collect()
+}
+
+fn delete_cached_attachment_files(attachments: &[crate::types::Attachment]) {
+    if attachments.is_empty() {
+        return;
+    }
+    let download_dir = match crate::db::get_download_dir().canonicalize() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    for att in attachments {
+        if att.path.is_empty() {
+            continue;
+        }
+        let candidate = match std::path::PathBuf::from(&*att.path).canonicalize() {
+            Ok(p) => p,
+            // File already gone, or path unresolvable — nothing to do.
+            Err(_) => continue,
+        };
+        if !candidate.starts_with(&download_dir) {
+            // User-managed path (moved/copied out of Vector's cache);
+            // never touch.
+            continue;
+        }
+        if let Err(e) = std::fs::remove_file(&candidate) {
+            crate::log_warn!(
+                "[delete] failed to remove cached attachment {}: {}",
+                candidate.display(),
+                e
+            );
+        }
     }
 }
 
@@ -467,20 +573,27 @@ pub async fn delete_own_group_message(
     let keys = crate::db::mls_wrap_keys::get_wrap_keys_for_message(message_id)
         .unwrap_or_default();
 
-    // Snapshot attachments BEFORE any state/DB cleanup so we can also
-    // remove the encrypted ciphertext from Blossom servers.
-    let attachment_urls: Vec<String> = {
+    // Snapshot attachments BEFORE any state/DB cleanup, then refcount-
+    // filter so we don't yank cached files / Blossom blobs from sibling
+    // messages that share the same SHA-256.
+    let all_attachments: Vec<crate::types::Attachment> = {
         let state = crate::state::STATE.lock().await;
         state.find_message(message_id)
-            .map(|(_, msg)| {
-                msg.attachments
-                    .iter()
-                    .map(|a| a.url.to_string())
-                    .filter(|u| !u.is_empty())
-                    .collect()
-            })
+            .map(|(_, msg)| msg.attachments.clone())
             .unwrap_or_default()
     };
+    let unique_attachments = filter_unreferenced_attachments(
+        message_id,
+        all_attachments,
+    ).await;
+
+    delete_cached_attachment_files(&unique_attachments);
+
+    let attachment_urls: Vec<String> = unique_attachments
+        .iter()
+        .map(|a| a.url.to_string())
+        .filter(|u| !u.is_empty())
+        .collect();
 
     let wraps_total = keys.len();
     let mut wraps_dispatched = 0usize;

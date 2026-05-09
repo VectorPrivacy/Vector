@@ -987,21 +987,44 @@ async function loadMLSInvites() {
  * @param {string} welcomeEventId - The welcome event ID
  */
 async function acceptMLSInvite(welcomeEventId) {
+    // Optimistic UI update: drop the invite from the list immediately so the
+    // user sees their action take effect without waiting for the 2-4s backend
+    // round-trip (welcome processing + group join + list refresh). If the
+    // backend rejects, we restore via loadMLSInvites in the catch path.
+    const snapshot = arrMLSInvites;
+    arrMLSInvites = arrMLSInvites.filter(i => i.id !== welcomeEventId);
+    updateChatBackNotification();
+    renderChatlist();
+    adjustSize();
+
     try {
         console.log('Accepting MLS invite:', welcomeEventId);
         const success = await invoke('accept_mls_welcome', {
             welcomeEventIdHex: welcomeEventId
         });
-        
-        if (success) {
-            // Reload invites
-            await loadMLSInvites();
 
-            // After rendering UI changes, ensure layout recalculates to prevent oversized chat list
+        if (success) {
+            // Reload invites from backend (canonical source) and re-render
+            // so the chatlist reflects any other invites that may have
+            // arrived in the meantime.
+            await loadMLSInvites();
+            renderChatlist();
+            adjustSize();
+        } else {
+            // Backend returned not-success without throwing — restore the
+            // invite so the user can retry.
+            arrMLSInvites = snapshot;
+            updateChatBackNotification();
+            renderChatlist();
             adjustSize();
         }
     } catch (e) {
         console.error('Failed to accept invite:', e);
+        // Restore the invite on failure so the user can retry.
+        arrMLSInvites = snapshot;
+        updateChatBackNotification();
+        renderChatlist();
+        adjustSize();
         popupConfirm('Error', 'Failed to join group: ' + escapeHtml(String(e)), true, '', 'vector_warning.svg');
     }
 }
@@ -1016,6 +1039,9 @@ function declineMLSInvite(welcomeEventId) {
 
     // Make sure to notify if there's still pending invites, or remove the notification
     updateChatBackNotification();
+
+    // Re-render the chatlist so the invite row leaves the DOM immediately.
+    renderChatlist();
 
     // After rendering UI changes, ensure layout recalculates to prevent oversized chat list
     adjustSize();

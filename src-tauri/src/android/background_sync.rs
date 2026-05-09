@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::{NOSTR_CLIENT, MY_SECRET_KEY, MY_PUBLIC_KEY};
+use crate::{NOSTR_CLIENT, MY_SECRET_KEY, MY_PUBLIC_KEY, ENCRYPTION_KEY};
 use crate::commands::relays::DEFAULT_RELAYS;
 use crate::services::event_handler::handle_event_with_context;
 
@@ -282,7 +282,7 @@ fn run_standalone_sync_loop(data_dir: &str) {
             let _ = NOSTR_CLIENT.set(client.clone());
             let _ = MY_PUBLIC_KEY.set(my_public_key);
             if let Some(keys) = keys {
-                MY_SECRET_KEY.store_from_keys(&keys);
+                MY_SECRET_KEY.store_from_keys(&keys, &[&ENCRYPTION_KEY]);
                 drop(keys);
             }
         }
@@ -319,7 +319,7 @@ fn run_standalone_sync_loop(data_dir: &str) {
             let group_ids: Vec<String> = match crate::db::load_mls_groups().await {
                 Ok(groups) => groups.into_iter()
                     .filter(|g| !g.evicted)
-                    .map(|g| g.group_id)
+                    .map(|g| g.group_id.clone())
                     .collect(),
                 Err(_) => vec![],
             };
@@ -653,7 +653,7 @@ async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey, bool, Op
             &my_public_key.to_bech32().unwrap_or_default()[..20.min(my_public_key.to_bech32().unwrap_or_default().len())]));
 
         let public_key_for_signer = keys.public_key();
-        MY_SECRET_KEY.store_from_keys(&keys);
+        MY_SECRET_KEY.store_from_keys(&keys, &[&ENCRYPTION_KEY]);
 
         let client = Client::builder()
             .signer(vector_core::GuardedSigner::new(public_key_for_signer))
@@ -731,7 +731,7 @@ async fn preload_mls_groups_into_state() {
                 if group.evicted { continue; }
                 state.create_or_get_mls_group_chat(&group.group_id, vec![]);
                 if let Some(chat) = state.get_chat_mut(&group.group_id) {
-                    chat.metadata.set_name(group.name.clone());
+                    chat.metadata.set_name(group.profile.name.clone());
                 }
             }
             logcat(&format!("Preloaded {} MLS groups into STATE", count));

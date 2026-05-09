@@ -586,9 +586,25 @@ async fn commit_deletion(
         let mut state = crate::state::STATE.lock().await;
         state.remove_message(target_event_id)
     };
-    if removed.is_none() {
-        return false;
-    }
+    let removed_msg = match removed {
+        Some((_chat_id, msg)) => msg,
+        None => return false,
+    };
+
+    // Nuke any cached attachment files for this message — sender asked
+    // for the message to disappear, and a downloaded file the receiver
+    // never moved out of Vector's cache should go with it.
+    //
+    // Refcount filter: drop attachments still referenced by sibling
+    // messages so we don't yank a cached file from messages that
+    // still need it (Vector dedupes by SHA-256, so the same file
+    // can back multiple messages). User-managed paths are also left
+    // alone (canonicalize + starts_with check).
+    let unique = crate::deletion::filter_unreferenced_attachments(
+        target_event_id,
+        removed_msg.attachments,
+    ).await;
+    crate::deletion::delete_cached_attachment_files_pub(&unique);
 
     // Drop from the events table.
     if let Err(e) = crate::db::events::delete_event(target_event_id).await {
