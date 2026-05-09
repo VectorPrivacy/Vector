@@ -27,6 +27,7 @@ pub use types::{
 pub use tracking::{
     is_mls_event_processed, track_mls_event_processed,
     save_pending_event, load_pending_events, remove_pending_event, prune_old_pending_events,
+    remove_processed_events_by_ids,
     wipe_legacy_mls_database,
 };
 pub use service::{

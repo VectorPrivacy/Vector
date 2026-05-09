@@ -127,6 +127,40 @@ pub fn prune_old_pending_events(group_id: &str, max_age_secs: u64) -> Result<u32
     Ok(n as u32)
 }
 
+/// Remove specific wrapper IDs from `mls_processed_events` so the next sync
+/// re-fetches them and re-presents them to MDK.
+///
+/// Used by the sync-start self-heal to unstick events that Vector
+/// previously Err-tracked but MDK has now transitioned to Retryable.
+/// Without this, `is_mls_event_processed` would skip them before MDK is
+/// asked, and the Retryable state goes unused.
+///
+/// Chunked at 500 IDs per statement to stay safely under SQLite's
+/// `SQLITE_MAX_VARIABLE_NUMBER` (32766 in modern builds, 999 in older
+/// bundled versions).
+pub fn remove_processed_events_by_ids(event_ids: &[String]) -> Result<u32, String> {
+    if event_ids.is_empty() { return Ok(0); }
+    const CHUNK: usize = 500;
+    let conn = crate::db::get_write_connection_guard_static()?;
+    let mut total: u32 = 0;
+    for chunk in event_ids.chunks(CHUNK) {
+        let mut placeholders = String::with_capacity(chunk.len() * 2);
+        for i in 0..chunk.len() {
+            if i > 0 { placeholders.push(','); }
+            placeholders.push('?');
+        }
+        let sql = format!(
+            "DELETE FROM mls_processed_events WHERE event_id IN ({})",
+            placeholders
+        );
+        let params: Vec<&dyn rusqlite::ToSql> = chunk.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let n = conn.execute(&sql, &params[..])
+            .map_err(|e| format!("Failed to remove processed events by ids: {}", e))?;
+        total = total.saturating_add(n as u32);
+    }
+    Ok(total)
+}
+
 /// Wipe an old MDK database (v0.2.x) that is incompatible with the current engine.
 ///
 /// Detection: the old dual-connection architecture created an
@@ -286,6 +320,75 @@ mod tests {
         let (_tmp, _guard) = init_test_db();
         let loaded = load_pending_events(&"d".repeat(64)).unwrap();
         assert!(loaded.is_empty());
+    }
+
+    // ========================================================================
+    // remove_processed_events_by_ids
+    // ========================================================================
+
+    #[tokio::test]
+    async fn remove_processed_events_empty_input_short_circuits() {
+        // Empty IN () would be a SQL syntax error — the helper must early-return.
+        let (_tmp, _guard) = init_test_db();
+        assert_eq!(remove_processed_events_by_ids(&[]).unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn remove_processed_events_round_trip() {
+        let (_tmp, _guard) = init_test_db();
+        let group_id = "g".repeat(64);
+        let id_a = "a".repeat(64);
+        let id_b = "b".repeat(64);
+        let id_c = "c".repeat(64);
+
+        track_mls_event_processed(&id_a, &group_id, 1).unwrap();
+        track_mls_event_processed(&id_b, &group_id, 2).unwrap();
+        track_mls_event_processed(&id_c, &group_id, 3).unwrap();
+
+        // Sanity: all three present.
+        assert!(is_mls_event_processed(&id_a));
+        assert!(is_mls_event_processed(&id_b));
+        assert!(is_mls_event_processed(&id_c));
+
+        let removed = remove_processed_events_by_ids(&[id_a.clone(), id_b.clone()]).unwrap();
+        assert_eq!(removed, 2);
+
+        // Removed IDs gone; untouched ID remains.
+        assert!(!is_mls_event_processed(&id_a));
+        assert!(!is_mls_event_processed(&id_b));
+        assert!(is_mls_event_processed(&id_c));
+    }
+
+    #[tokio::test]
+    async fn remove_processed_events_nonexistent_ids_is_noop() {
+        // BUG-CLASS: removing IDs that were never tracked must not error.
+        let (_tmp, _guard) = init_test_db();
+        let bogus = vec!["1".repeat(64), "2".repeat(64), "3".repeat(64)];
+        let removed = remove_processed_events_by_ids(&bogus).unwrap();
+        assert_eq!(removed, 0);
+    }
+
+    #[tokio::test]
+    async fn remove_processed_events_chunks_large_input() {
+        // BUG-CLASS: chunking guards SQLite's SQLITE_MAX_VARIABLE_NUMBER.
+        // 1500 IDs spans 3 chunks at CHUNK=500. Verify all rows removed.
+        let (_tmp, _guard) = init_test_db();
+        let group_id = "g".repeat(64);
+        let mut ids = Vec::with_capacity(1500);
+        for i in 0..1500u32 {
+            // Synthesize 64-char hex ids with a counter prefix.
+            let id = format!("{:016x}{}", i, "0".repeat(48));
+            track_mls_event_processed(&id, &group_id, i as u64).unwrap();
+            ids.push(id);
+        }
+
+        let removed = remove_processed_events_by_ids(&ids).unwrap();
+        assert_eq!(removed, 1500);
+
+        // Every ID gone.
+        for id in &ids {
+            assert!(!is_mls_event_processed(id));
+        }
     }
 
     #[tokio::test]

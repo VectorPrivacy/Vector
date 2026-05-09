@@ -16,6 +16,27 @@ use crate::mls::tracking::wipe_legacy_mls_database;
 use crate::state::active_trusted_relays;
 
 // ============================================================================
+// MDK config — extended event-age window for catch-up sync
+// ============================================================================
+
+/// Build an MDK engine configured for long-offline catch-up sync.
+///
+/// MDK's default `max_event_age_secs` is 45 days — anti-replay defense at
+/// the nostr-event layer. For legitimate group members coming back after
+/// extended downtime, that gate rejects valid commits at `validate_event`
+/// before MDK can attempt MLS decryption. MLS already provides
+/// epoch-sequenced anti-replay so the nostr-layer window is redundant; we
+/// extend it to 10 years (kept finite as a sanity guard).
+pub(crate) fn build_mdk_engine(storage: MdkSqliteStorage) -> MDK<MdkSqliteStorage> {
+    use mdk_core::MdkConfig;
+    let config = MdkConfig {
+        max_event_age_secs: 10 * 365 * 24 * 60 * 60, // 10 years
+        ..MdkConfig::default()
+    };
+    MDK::builder(storage).with_config(config).build()
+}
+
+// ============================================================================
 // Pure helpers (extracted for unit testability)
 // ============================================================================
 
@@ -79,7 +100,7 @@ pub(crate) enum MembershipOutcome {
 /// Decide whether a Commit-applied membership state means evicted, still
 /// member, or undetermined. Replaces inline matches in both the first loop
 /// and retry loop of sync_group_since_cursor.
-pub(crate) fn membership_outcome_from_get_members<E: std::fmt::Display>(
+pub(crate) fn membership_outcome_from_get_members<E>(
     get_members_result: Result<bool, E>,
 ) -> MembershipOutcome {
     match get_members_result {
@@ -229,7 +250,7 @@ pub async fn publish_and_merge_commit(
     if let Err(e) = publish_event_with_retries(client, event, relay_arg).await {
         // Rollback the pending commit so the group isn't stuck
         if let Ok(s) = MdkSqliteStorage::new_unencrypted(db_path) {
-            let rollback_engine = MDK::new(s);
+            let rollback_engine = build_mdk_engine(s);
             if let Err(re) = rollback_engine.clear_pending_commit(mls_group_id) {
                 eprintln!("[MLS] Failed to rollback pending commit: {}", re);
             } else {
@@ -241,7 +262,7 @@ pub async fn publish_and_merge_commit(
 
     let storage = MdkSqliteStorage::new_unencrypted(db_path)
         .map_err(|e| format!("Failed to open storage for merge: {}", e))?;
-    let engine = MDK::new(storage);
+    let engine = build_mdk_engine(storage);
     engine.merge_pending_commit(mls_group_id)
         .map_err(|e| format!("Failed to merge commit: {}", e))?;
 
@@ -315,7 +336,7 @@ impl MlsService {
 
         let storage = MdkSqliteStorage::new_unencrypted(&self.db_path)
             .map_err(|e| MlsError::StorageError(format!("open sqlite storage: {}", e)))?;
-        Ok(MDK::new(storage))
+        Ok(build_mdk_engine(storage))
     }
 
     /// Get the path to the MLS SQLite database.
@@ -882,7 +903,7 @@ impl MlsService {
                         return;
                     }
                 };
-                let engine = MDK::new(storage);
+                let engine = build_mdk_engine(storage);
                 let relays: Vec<nostr_sdk::RelayUrl> = engine.get_relays(&mls_group_id)
                     .unwrap_or_default().into_iter().collect();
                 match engine.add_members(&mls_group_id, std::slice::from_ref(&kp_event)) {
@@ -1038,7 +1059,7 @@ impl MlsService {
                         return;
                     }
                 };
-                let engine = MDK::new(storage);
+                let engine = build_mdk_engine(storage);
                 let relays: Vec<nostr_sdk::RelayUrl> = engine.get_relays(&mls_group_id)
                     .unwrap_or_default().into_iter().collect();
                 match engine.add_members(&mls_group_id, &member_kp_events) {
@@ -1158,7 +1179,7 @@ impl MlsService {
                         return;
                     }
                 };
-                let engine = MDK::new(storage);
+                let engine = build_mdk_engine(storage);
 
                 let current_members = match engine.get_members(&mls_group_id) {
                     Ok(m) => m,
@@ -1272,7 +1293,7 @@ impl MlsService {
                         return;
                     }
                 };
-                let engine = MDK::new(storage);
+                let engine = build_mdk_engine(storage);
 
                 let mut update = NostrGroupDataUpdate::new();
                 if let Some(ref n) = name_clone { update = update.name(n.clone()); }
@@ -1450,100 +1471,266 @@ impl MlsService {
             return Ok((0, 0));
         }
 
+        // ====================================================================
+        // Phase 0 — Auto-recovery self-heal
+        // ====================================================================
+        //
+        // Transition recoverable MDK Failed events to Retryable so MDK will
+        // re-attempt decryption instead of short-circuiting. Three categories:
+        //
+        //   (a) Failed in this group with epoch=NULL — via MDK's typed API.
+        //   (b) Failed with mls_group_id IS NULL — events killed at
+        //       validate_event before group could be determined. Direct SQL
+        //       (typed API filters on group_id). Group-agnostic by nature
+        //       (the events have no attributable group); MDK's retry will
+        //       attribute them on success.
+        //   (c) Failed with mls_group_id = engine_gid AND
+        //       failure_reason='invalid_event_format'. Scoped to current
+        //       group to avoid cross-group blast radius. Direct SQL because
+        //       the typed API filters only on epoch=NULL.
+        //
+        // Each transitioned wrapper is also removed from Vector's
+        // mls_processed_events; without that, is_mls_event_processed below
+        // skips them before MDK is asked. If any transitions happen, we
+        // wipe the cursor — Phase 1's backward-walk needs to start from
+        // mls_groups.created_at, not the last-seen timestamp.
+        //
+        // Skipped entirely for prefetched_events syncs (negentropy quick
+        // path): the prefetched set was selected against the OLD cursor;
+        // wiping it here would advance the new cursor based only on that
+        // strict subset, leaving older events forever unreachable.
+        //
+        // String constant 'invalid_event_format' is coupled to MDK rev
+        // 136a9ee (see error_handling.rs). Re-verify on MDK upgrade.
+        //
+        // Idempotent: no-op when nothing matches. Recovered events become
+        // Processed/ProcessedCommit; events that fail again under a
+        // different failure_reason aren't re-transitioned. Note: every
+        // transition triggers a cursor wipe, which means Phase 1 below
+        // does a full archival re-walk on this sync — expected to be rare.
+        let mut all_transitioned: Vec<String> = Vec::new();
+        let mut engine_gid_hex_for_phase0: Option<String> = None;
+        if prefetched_events.is_none() {
+            if let Ok(engine) = self.engine() {
+                let group_check_id_local: Option<String> = if let Ok(groups) = self.read_groups() {
+                    groups.iter()
+                        .find(|g| g.group.group_id == gid_for_fetch || g.group.engine_group_id == gid_for_fetch)
+                        .map(|m| if !m.group.engine_group_id.is_empty() { m.group.engine_group_id.clone() } else { m.group.group_id.clone() })
+                } else { None };
+
+                if let Some(check_id) = group_check_id_local {
+                    let engine_gid_bytes = crate::simd::hex::hex_string_to_bytes(&check_id);
+                    if engine_gid_bytes.len() == 16 || engine_gid_bytes.len() == 32 {
+                        use mdk_storage_traits::messages::MessageStorage;
+                        use openmls_traits::OpenMlsProvider;
+                        let engine_gid = mdk_storage_traits::GroupId::from_slice(&engine_gid_bytes);
+                        let storage = engine.provider.storage();
+                        // (a) MDK typed API
+                        if let Ok(failed_ids) = storage.find_failed_messages_for_retry(&engine_gid) {
+                            for ev_id in &failed_ids {
+                                if storage.mark_processed_message_retryable(ev_id).is_ok() {
+                                    all_transitioned.push(ev_id.to_hex());
+                                }
+                            }
+                        }
+                        engine_gid_hex_for_phase0 = Some(check_id);
+                    }
+                }
+            }
+
+            // (b) + (c) Direct SQL on MDK's DB. Skip if the file doesn't
+            // exist (a fresh install or a path mis-config — opening would
+            // create an empty file with no schema).
+            if self.db_path.exists() {
+                if let Ok(mdk_conn) = rusqlite::Connection::open(&self.db_path) {
+                    // (b) NULL mls_group_id — group-agnostic by definition.
+                    let null_ids: Vec<String> = mdk_conn
+                        .prepare("SELECT lower(hex(wrapper_event_id)) FROM processed_messages WHERE state='failed' AND mls_group_id IS NULL")
+                        .and_then(|mut stmt| stmt.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>())
+                        .unwrap_or_else(|e| { crate::log_warn!("[MLS] Phase 0 (b) SELECT failed: {}", e); Vec::new() });
+                    if !null_ids.is_empty() {
+                        match mdk_conn.execute(
+                            "UPDATE processed_messages SET state='retryable' WHERE state='failed' AND mls_group_id IS NULL",
+                            [],
+                        ) {
+                            Ok(_) => all_transitioned.extend(null_ids),
+                            Err(e) => crate::log_warn!("[MLS] Phase 0 (b) UPDATE failed: {}", e),
+                        }
+                    }
+                    // (c) failure_reason='invalid_event_format' — scoped to
+                    // current group to prevent cross-group transitions.
+                    if let Some(ref engine_gid_hex) = engine_gid_hex_for_phase0 {
+                        let engine_gid_bytes = crate::simd::hex::hex_string_to_bytes(engine_gid_hex);
+                        let invalid_ids: Vec<String> = mdk_conn
+                            .prepare("SELECT lower(hex(wrapper_event_id)) FROM processed_messages WHERE state='failed' AND failure_reason='invalid_event_format' AND mls_group_id = ?1")
+                            .and_then(|mut stmt| stmt.query_map(rusqlite::params![&engine_gid_bytes], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>())
+                            .unwrap_or_else(|e| { crate::log_warn!("[MLS] Phase 0 (c) SELECT failed: {}", e); Vec::new() });
+                        if !invalid_ids.is_empty() {
+                            match mdk_conn.execute(
+                                "UPDATE processed_messages SET state='retryable' WHERE state='failed' AND failure_reason='invalid_event_format' AND mls_group_id = ?1",
+                                rusqlite::params![&engine_gid_bytes],
+                            ) {
+                                Ok(_) => all_transitioned.extend(invalid_ids),
+                                Err(e) => crate::log_warn!("[MLS] Phase 0 (c) UPDATE failed: {}", e),
+                            }
+                        }
+                    }
+                }
+            }
+
+            all_transitioned.sort();
+            all_transitioned.dedup();
+
+            if !all_transitioned.is_empty() {
+                crate::log_info!("[MLS] Auto-recovery: {} previously-failed messages re-eligible for {}",
+                    all_transitioned.len(), group_display);
+                if let Err(e) = crate::mls::remove_processed_events_by_ids(&all_transitioned) {
+                    crate::log_warn!("[MLS] remove_processed_events_by_ids failed: {}", e);
+                }
+                let mut cursors_for_wipe = self.read_event_cursors().unwrap_or_default();
+                if cursors_for_wipe.remove(&gid_for_fetch).is_some() {
+                    if let Err(e) = self.write_event_cursors(&cursors_for_wipe) {
+                        crate::log_warn!("[MLS] Auto-recovery cursor wipe failed: {}", e);
+                    }
+                }
+            }
+        }
+
         const BATCH_SIZE: usize = 1000;
         const MAX_BATCHES: usize = 100;
 
-        let mut total_processed: u32 = 0;
-        let mut total_new_msgs: u32 = 0;
-        let mut current_since = since;
-        let mut batch_count: usize = 0;
-        let had_prefetched = prefetched_events.is_some();
-        let mut prefetched_remaining = prefetched_events;
+        let total_processed: u32;
+        let total_new_msgs: u32;
 
-        // Pagination loop
-        loop {
-            batch_count += 1;
-            if batch_count > MAX_BATCHES {
-                eprintln!("[MLS] Pagination safety limit reached ({} batches) for group {}", MAX_BATCHES, gid_for_fetch);
-                break;
-            }
+        // ============================================================
+        // Phase 1: COLLECT all events in [since, until]
+        // ============================================================
+        //
+        // Relays often cap responses below the requested `limit`. When the
+        // matching event count exceeds that cap, the relay returns the
+        // most-recent N in DESC order, silently dropping older ones.
+        // Walking `since` forward never reaches the dropped events. We
+        // walk `until` BACKWARD instead: after each batch, set
+        // `current_until = MIN(created_at) - 1` and re-query.
+        //
+        // Events must be processed in chronological order (MLS commits
+        // ratchet sequentially), so we collect everything first and run
+        // ONE processing pass on the sorted set.
+        let mut all_events: Vec<nostr_sdk::Event> = Vec::new();
+        let mut used_fallback_anywhere = false;
 
-        // Fetch or consume prefetched events
-        let mut ordered: Vec<nostr_sdk::Event>;
-        let batch_size: usize;
-
-        if let Some(events) = prefetched_remaining.take() {
+        if let Some(events) = prefetched_events {
+            // Quick-sync (NIP-77 negentropy) supplied the events directly.
+            // Skip Phase 1 entirely.
             if events.is_empty() { return Ok((0, 0)); }
-            ordered = events;
-            ordered.sort_by_key(|e| e.created_at.as_secs());
-            batch_size = ordered.len();
-        } else if had_prefetched {
-            break;
+            all_events = events;
         } else {
             let client = crate::state::NOSTR_CLIENT.get().ok_or(MlsError::NotInitialized)?;
+            let mut current_until = until;
+            let mut batch_count: usize = 0;
 
-            let mut filter = Filter::new()
-                .kind(Kind::MlsGroupMessage)
-                .since(current_since)
-                .until(until)
-                .custom_tag(SingleLetterTag::lowercase(Alphabet::H), &gid_for_fetch)
-                .limit(BATCH_SIZE);
+            loop {
+                batch_count += 1;
+                if batch_count > MAX_BATCHES {
+                    // Likely silent partial sync — events older than the
+                    // last fetched batch's window may be unreached. The
+                    // cursor that gets written reflects only what we
+                    // collected, so subsequent syncs would skip past
+                    // the gap. Loud warning so an operator notices.
+                    crate::log_warn!("[MLS] Pagination safety limit reached ({} batches) for group {} — possible partial sync; {} events collected", MAX_BATCHES, gid_for_fetch, all_events.len());
+                    break;
+                }
 
-            let mut used_fallback = false;
-            let mut events = match client
-                .fetch_events_from(crate::state::active_trusted_relays().await, filter.clone(), std::time::Duration::from_secs(15))
-                .await
-            {
-                Ok(evts) => evts,
-                Err(e) => return Err(MlsError::NetworkError(format!("fetch MLS events (with h tag) failed: {}", e))),
-            };
-
-            if events.is_empty() {
-                used_fallback = true;
-                filter = Filter::new()
+                let mut filter = Filter::new()
                     .kind(Kind::MlsGroupMessage)
-                    .since(current_since)
-                    .until(until)
+                    .since(since)
+                    .until(current_until)
+                    .custom_tag(SingleLetterTag::lowercase(Alphabet::H), &gid_for_fetch)
                     .limit(BATCH_SIZE);
-                events = match client
-                    .fetch_events_from(crate::state::active_trusted_relays().await, filter, std::time::Duration::from_secs(15))
+
+                let mut used_fallback = false;
+                let mut events = match client
+                    .fetch_events_from(crate::state::active_trusted_relays().await, filter.clone(), std::time::Duration::from_secs(15))
                     .await
                 {
                     Ok(evts) => evts,
-                    Err(e) => return Err(MlsError::NetworkError(format!("fetch MLS events (fallback) failed: {}", e))),
+                    Err(e) => return Err(MlsError::NetworkError(format!("fetch MLS events (with h tag) failed: {}", e))),
                 };
-            }
 
-            if events.is_empty() {
-                if batch_count == 1 { return Ok((0, 0)); }
-                break;
-            }
+                if events.is_empty() {
+                    used_fallback = true;
+                    filter = Filter::new()
+                        .kind(Kind::MlsGroupMessage)
+                        .since(since)
+                        .until(current_until)
+                        .limit(BATCH_SIZE);
+                    events = match client
+                        .fetch_events_from(crate::state::active_trusted_relays().await, filter, std::time::Duration::from_secs(15))
+                        .await
+                    {
+                        Ok(evts) => evts,
+                        Err(e) => return Err(MlsError::NetworkError(format!("fetch MLS events (fallback) failed: {}", e))),
+                    };
+                }
 
-            batch_size = events.len();
-            // Per-batch log is noise during long catch-ups (saw 28+ identical
-            // lines in a row chewing up the log buffer). Sample every 10.
-            if batch_count > 1 && batch_count % 10 == 0 {
-                println!("[MLS] Pagination batch {} for group {}: {} events", batch_count, gid_for_fetch, batch_size);
-            }
-
-            ordered = events.into_iter().collect();
-            ordered.sort_by_key(|e| e.created_at.as_secs());
-
-            if used_fallback {
-                // See `filter_events_to_h_tag` for rationale: must filter
-                // here, otherwise unrelated events make pagination spin in
-                // place forever refetching the same blob.
-                let filtered = filter_events_to_h_tag(ordered, &gid_for_fetch);
-
-                if filtered.is_empty() {
-                    // Relay had events but none for this group. Done — there
-                    // are no further events to find for us at this `since`.
-                    if batch_count == 1 { return Ok((0, 0)); }
+                if events.is_empty() {
+                    // No more events at or before `current_until`. Done.
                     break;
                 }
-                ordered = filtered;
+
+                let batch_vec: Vec<nostr_sdk::Event> = if used_fallback {
+                    used_fallback_anywhere = true;
+                    let filtered = filter_events_to_h_tag(events.into_iter().collect(), &gid_for_fetch);
+                    if filtered.is_empty() {
+                        // Relay had events but none for our group. Done.
+                        break;
+                    }
+                    filtered
+                } else {
+                    events.into_iter().collect()
+                };
+
+                let count = batch_vec.len();
+                let oldest = batch_vec.iter().map(|e| e.created_at.as_secs()).min().unwrap_or(since.as_secs());
+                if batch_count > 1 && batch_count % 10 == 0 {
+                    println!("[MLS] Collection batch {} for group {}: {} events (oldest at {})", batch_count, gid_for_fetch, count, oldest);
+                }
+
+                all_events.extend(batch_vec);
+
+                // Walk backward for the next batch. If `oldest <= since`,
+                // we've covered the whole window — stop.
+                if oldest <= since.as_secs() { break; }
+                current_until = Timestamp::from_secs(oldest.saturating_sub(1));
+                if current_until.as_secs() <= since.as_secs() { break; }
+
+                // If the relay returned fewer than our requested limit, it
+                // has no more events at or before this batch's window.
+                // Still walk one more step to be safe — relays may chunk
+                // responses, so a small batch isn't a guaranteed terminator.
+                // The empty-batch check at the top of the next iteration
+                // catches the true end.
+                let _ = count; // count consumed via batch_vec.len above
             }
         }
+
+        if all_events.is_empty() { return Ok((0, 0)); }
+
+        // Dedupe (relays may have overlapping coverage) and sort ASC for
+        // chronological MLS commit application.
+        all_events.sort_by(|a, b| a.created_at.as_secs().cmp(&b.created_at.as_secs()).then(a.id.cmp(&b.id)));
+        all_events.dedup_by(|a, b| a.id == b.id);
+
+        if used_fallback_anywhere {
+            println!("[MLS] Collection complete (fallback path): {} events for {}", all_events.len(), group_display);
+        }
+
+        // ============================================================
+        // Phase 2: PROCESS the entire collected set as one batch
+        // ============================================================
+        {
+            let ordered: Vec<nostr_sdk::Event> = all_events;
+            let batch_size: usize = ordered.len();
 
         // Process with engine
         let mut processed: u32 = 0;
@@ -1595,35 +1782,8 @@ impl MlsService {
         {
             let engine = self.engine()?;
 
-            // Self-heal: MDK's processed_messages entries with state=Failed
-            // AND epoch=NULL (decryption never got far enough to determine
-            // the epoch — e.g. wrappers that arrived during a kicked window
-            // before the rejoin welcome supplied keys) get transitioned to
-            // Retryable so process_message attempts decryption again with
-            // our newly-acquired keys instead of short-circuiting to
-            // Unprocessable. Note: MDK's API intentionally only retries
-            // epoch=NULL Failed events; EpochInvalidated and other Failed
-            // states are treated as permanent. This is cheap (one SELECT
-            // per sync) and idempotent — no-op when nothing matches.
-            if let Some(ref check_id) = group_check_id {
-                let engine_gid_bytes = crate::simd::hex::hex_string_to_bytes(check_id);
-                if engine_gid_bytes.len() == 16 || engine_gid_bytes.len() == 32 {
-                    use mdk_storage_traits::messages::MessageStorage;
-                    use openmls_traits::OpenMlsProvider;
-                    let engine_gid = mdk_storage_traits::GroupId::from_slice(&engine_gid_bytes);
-                    let storage = engine.provider.storage();
-                    if let Ok(failed_ids) = storage.find_failed_messages_for_retry(&engine_gid) {
-                        if !failed_ids.is_empty() {
-                            println!("[MLS] Resurrecting {} previously-failed messages for {}", failed_ids.len(), group_display);
-                            for ev_id in &failed_ids {
-                                if let Err(e) = storage.mark_processed_message_retryable(ev_id) {
-                                    eprintln!("[MLS] mark_processed_message_retryable failed for {}: {}", ev_id, e);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            // Self-heal moved to Phase 0 (before cursor read) — see the
+            // "Phase 0 — Auto-recovery self-heal" block earlier in this fn.
 
             if let Some(ref check_id) = group_check_id {
                 let check_gid_bytes = crate::simd::hex::hex_string_to_bytes(check_id);
@@ -1639,13 +1799,10 @@ impl MlsService {
                         }));
                     }
 
-                    // Only log epoch on the first batch — once per sync is
-                    // enough context. Re-logging the same epoch every batch
-                    // during pagination just adds noise without information.
-                    if batch_count == 1 {
-                        if let Ok(Some(g)) = engine.get_group(&check_gid) {
-                            println!("[MLS] Group {} at epoch {} before processing", group_display, g.epoch);
-                        }
+                    // Single-pass processing — log group epoch once at the
+                    // start of the sole processing block.
+                    if let Ok(Some(g)) = engine.get_group(&check_gid) {
+                        println!("[MLS] Group {} at epoch {} before processing", group_display, g.epoch);
                     }
                 }
             }
@@ -2229,23 +2386,15 @@ impl MlsService {
                     if let Err(e) = self.write_event_cursors(&cursors) {
                         eprintln!("[MLS] write_event_cursors failed: {}", e);
                     }
-                    current_since = Timestamp::from_secs(cursor_to_next_since(last_seen_at));
+                    // (Single-pass: no `current_since` to advance for next batch.)
                 }
             }
         }
 
-        total_processed += processed;
-        total_new_msgs += new_msgs;
-
-        if batch_size < BATCH_SIZE { break; }
-        if was_evicted { break; }
-        // Defensive: if a batch yielded zero processable events, `last_seen_id`
-        // is None and `current_since` didn't advance — refetching the same
-        // window next iteration would loop forever. The fallback h-tag check
-        // above is the main guard, but bail here too in case anything else
-        // ever leaves us spinning in place.
-        if last_seen_id.is_none() { break; }
-        } // End pagination loop
+        total_processed = processed;
+        total_new_msgs = new_msgs;
+        let _ = batch_size; // shadow-suppress: lifted out of the legacy per-batch loop
+        } // End Phase 2 single-pass processing block
 
         Ok((total_processed, total_new_msgs))
     }
@@ -2503,6 +2652,25 @@ impl MlsService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ========================================================================
+    // build_mdk_engine — extended event-age window
+    // ========================================================================
+
+    #[test]
+    fn build_mdk_engine_smoke_test() {
+        // Compile-gate against future MDK schema changes; ensures the
+        // builder pipeline + storage open + config spread compose without
+        // panicking. If MDK upstream renames a config field or removes
+        // `..MdkConfig::default()` semantics, this test breaks at compile.
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = MdkSqliteStorage::new_unencrypted(tmp.path().join("smoke.db"))
+            .expect("storage open");
+        let _engine = build_mdk_engine(storage);
+        // Engine instances are non-Send and don't expose config publicly,
+        // so we can't assert on max_event_age_secs here. The behavioral
+        // proof is integration-level; this test catches API drift.
+    }
 
     // ========================================================================
     // compute_cursor_with_pending_cap — pure cursor math
@@ -2778,9 +2946,10 @@ mod tests {
 
     #[tokio::test]
     async fn filter_h_tag_no_matches_returns_empty() {
-        // Reproduces the Vectify Testers infinite-pagination scenario:
-        // relay returns 1015 unrelated kind-445 events, our filter returns
-        // empty, caller breaks pagination instead of looping.
+        // Pagination footgun: relay returns hundreds of unrelated kind-445
+        // events, none with our group's h-tag. Without the filter, the
+        // caller's per-event h-tag guard would silently skip all of them,
+        // last_seen_id would stay None, and pagination would loop.
         use nostr_sdk::prelude::*;
         let keys = Keys::generate();
         let mut events = Vec::new();
