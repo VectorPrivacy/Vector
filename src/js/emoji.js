@@ -2139,12 +2139,17 @@ function isoToFlagEmoji(isoCode) {
  *        size emojis via dedicated CSS rules.
  */
 function twemojify(domElement, opts) {
-    // Strip skin tone modifiers from text nodes — our Twemoji set only has neutral/yellow variants
+    // Strip skin tone modifiers from text nodes — our Twemoji set only has neutral/yellow variants.
+    // Also normalize ZWJ sequences whose Twemoji regex entry omits FE0F variation selectors
+    // that platforms (macOS, iOS) include in fully-qualified input. Without this, the regex
+    // splits the sequence into its component emojis and renders them separately.
     const walker = document.createTreeWalker(domElement, NodeFilter.SHOW_TEXT);
     while (walker.nextNode()) {
         const node = walker.currentNode;
-        const stripped = node.textContent.replace(/[\u{1F3FB}-\u{1F3FF}]/gu, '');
-        if (stripped !== node.textContent) node.textContent = stripped;
+        let next = node.textContent.replace(/[\u{1F3FB}-\u{1F3FF}]/gu, '');
+        // 👁️‍🗨️ eye-in-speech-bubble (1F441 FE0F? 200D 1F5E8 FE0F?) → unqualified form
+        next = next.replace(/\u{1F441}\u{FE0F}?\u{200D}\u{1F5E8}\u{FE0F}?/gu, '\u{1F441}\u{200D}\u{1F5E8}');
+        if (next !== node.textContent) node.textContent = next;
     }
     twemoji.parse(domElement, { callback: (icon, _) => '/twemoji/svg/' + icon + '.svg' });
     if (!opts || !opts.layoutHint) return;

@@ -171,7 +171,16 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
     // Defensive: msg.content can be null/undefined for attachment-only messages.
     const safeContent = msg.content || '';
     const strEmojiCleaned = safeContent.replace(/\s/g, '');
-    const fEmojiOnly = strEmojiCleaned && isEmojiOnly(strEmojiCleaned) && strEmojiCleaned.length <= 6;
+    // Cap at 6 graphemes, not UTF-16 units — fully-qualified ZWJ sequences
+    // (e.g. 👁️‍🗨️ = 7 code units) are still a single visual emoji.
+    let graphemeCount = 0;
+    if (strEmojiCleaned) {
+        const seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+        for (const _ of seg.segment(strEmojiCleaned)) {
+            if (++graphemeCount > 6) break;
+        }
+    }
+    const fEmojiOnly = strEmojiCleaned && isEmojiOnly(strEmojiCleaned) && graphemeCount <= 6;
 
     const textSpan = _dmsgBuildText(msg, displayContent, fEmojiOnly, isGroupChat, currentChat, isRevealedBlockedMsg);
     if (textSpan && (textSpan.textContent || textSpan.querySelector('img,video'))) {
