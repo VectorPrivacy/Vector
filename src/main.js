@@ -7764,9 +7764,15 @@ function adjustSize() {
 function softChatScroll() {
     if (!strOpenChat) return;
 
-    // If the chat is open, and they've not significantly scrolled up: auto-scroll down to correct against container resizes
+    // Only stick to bottom if the user is essentially pinned there. The
+    // previous 1000px window meant a reaction or media-load anywhere in the
+    // last ~10 messages snapped the viewport down on top of someone who had
+    // intentionally scrolled up to read. 80px ≈ one message row, which lines
+    // up with the at-bottom feel without fighting an active reader. Stays
+    // well below createScrollHandler's 250px scroll-to-bottom button cutoff
+    // so the button never shows simultaneously with auto-stick.
     const pxFromBottom = domChatMessages.scrollHeight - domChatMessages.scrollTop - domChatMessages.clientHeight;
-    if (pxFromBottom < 1000) {
+    if (pxFromBottom < 80) {
         scrollToBottom(domChatMessages, false);
     }
 }
