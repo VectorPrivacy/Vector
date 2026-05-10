@@ -6067,7 +6067,6 @@ select:disabled:hover {
   text-align: center;
   box-sizing: border-box;
   display: none;
-  pointer-events: none;
   box-shadow: 0 0 0 2px #0a0a0a;
 }
 
