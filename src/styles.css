@@ -11897,7 +11897,7 @@ hr {
  * a block-level antecedent (attachment, link preview, npub preview, payment),
  * the status flips to its own line below them, right-aligned. */
 .dmsg-status {
-  display: inline-flex;
+  display: none;
   align-items: center;
   gap: 4px;
   margin-left: 6px;
