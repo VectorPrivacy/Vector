@@ -11913,7 +11913,7 @@ hr {
 .dmsg-preview ~ .dmsg-status,
 .msg-profile-preview ~ .dmsg-status,
 .msg-pivx-payment ~ .dmsg-status {
-  display: block;
+  display: none !important;
   text-align: right;
   margin-left: 0;
   margin-top: 2px;
