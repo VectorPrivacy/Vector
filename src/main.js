@@ -4979,6 +4979,11 @@ async function openChat(contact) {
     // Record when the chat was opened
     chatOpenTimestamp = Date.now();
 
+    // Chat-open paths render the latest messages and scroll-to-bottom,
+    // so the user starts pinned. Reset here in case the previous chat
+    // was scrolled up.
+    chatPinnedToBottom = true;
+
     // After 100ms, stop auto-scrolling on media loads
     chatOpenAutoScrollTimer = setTimeout(() => {
         chatOpenTimestamp = 0; // Reset timestamp to disable auto-scrolling
@@ -6763,10 +6768,13 @@ window.addEventListener("DOMContentLoaded", async () => {
     };
     domChatNewBackBtn.onclick = closeChat;
     
-    // Add scroll event listener for procedural message loading
+    // Add scroll event listener for procedural message loading + intent tracking
     let scrollTimeout;
     domChatMessages.addEventListener('scroll', () => {
-        // Debounce scroll events for performance
+        // Pin/unpin tracking has to run synchronously — a debounced update
+        // would let a media-load callback observe a stale pinned=true after
+        // the user has already scrolled away.
+        handleChatScrollIntent();
         if (scrollTimeout) clearTimeout(scrollTimeout);
         scrollTimeout = setTimeout(() => {
             handleProceduralScroll();
@@ -7761,20 +7769,40 @@ function adjustSize() {
  * 
  * This is used to correct against container resizes, i.e: if an image loads, or a message is received.
  */
+/**
+ * Tracks whether the user wants to be pinned to the bottom of the chat.
+ *
+ * Updated only by user-initiated scroll events (handleChatScrollIntent),
+ * never by reflows. This is the key invariant: media loading can grow the
+ * scroll height and visually push the user away from the bottom, but it
+ * doesn't change their *intent* to be there. softChatScroll uses this flag
+ * (instead of a snapshot pxFromBottom check) so a chat full of un-loaded
+ * media still snaps down on every reflow until everything settles, while
+ * a user who deliberately scrolled up stays put through reactions, edits,
+ * favicon loads, etc.
+ *
+ * Initial true: chat-open paths scroll to bottom synchronously, so the
+ * user starts pinned by definition.
+ */
+let chatPinnedToBottom = true;
+
+const PIN_THRESHOLD_PX = 80;
+
+/**
+ * Update chatPinnedToBottom from the scroll listener — only fires on
+ * user-driven scrollTop changes, since reflow-induced height changes
+ * don't dispatch a scroll event.
+ */
+function handleChatScrollIntent() {
+    if (!strOpenChat || !domChatMessages) return;
+    const pxFromBottom = domChatMessages.scrollHeight - domChatMessages.scrollTop - domChatMessages.clientHeight;
+    chatPinnedToBottom = pxFromBottom < PIN_THRESHOLD_PX;
+}
+
 function softChatScroll() {
     if (!strOpenChat) return;
-
-    // Only stick to bottom if the user is essentially pinned there. The
-    // previous 1000px window meant a reaction or media-load anywhere in the
-    // last ~10 messages snapped the viewport down on top of someone who had
-    // intentionally scrolled up to read. 80px ≈ one message row, which lines
-    // up with the at-bottom feel without fighting an active reader. Stays
-    // well below createScrollHandler's 250px scroll-to-bottom button cutoff
-    // so the button never shows simultaneously with auto-stick.
-    const pxFromBottom = domChatMessages.scrollHeight - domChatMessages.scrollTop - domChatMessages.clientHeight;
-    if (pxFromBottom < 80) {
-        scrollToBottom(domChatMessages, false);
-    }
+    if (!chatPinnedToBottom) return;
+    scrollToBottom(domChatMessages, false);
 }
 
 window.onresize = adjustSize;
