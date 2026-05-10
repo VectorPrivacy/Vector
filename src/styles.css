@@ -11646,8 +11646,6 @@ hr {
  * Row skeleton: avatar gutter, author/time header, content slot, reactions row.
  * Streak collapse (data-streak="continuation"), floating hover toolbar, and
  * attribute-driven highlight states (data-pinged / data-replying-to / data-jumped).
- *
- * Plan: ~/.claude/plans/discord-style-message-redesign.md (§5)
  * ============================================================================ */
 
 .chat-messages {
