@@ -4955,6 +4955,10 @@ async function openChat(contact) {
     const isGroup = chat?.chat_type === 'MlsGroup';
     const profile = !isGroup ? getProfile(contact) : null;
     strOpenChat = contact;
+    // Snapshot last_read BEFORE any updateChat call — updateChat queues
+    // an async markAsRead that races ahead and would erase the boundary
+    // we need to find the first unread message.
+    const lastReadOnOpen = chat?.last_read || '';
 
     // Render the header SYNCHRONOUSLY using whatever in-memory data we have,
     // so the user sees the contact name + avatar the instant the chat panel
@@ -5061,6 +5065,31 @@ async function openChat(contact) {
     initProceduralScrollWithCache(contact, initialMessages.length, totalMessages);
     
     await updateChat(chat, initialMessages, profile, true);
+
+    // After render, drop a "New" divider above the first incoming message
+    // that arrived after the captured last_read pointer. Three branches:
+    //   1. last_read points to a message in the loaded batch → divider goes
+    //      above the first non-mine message after it.
+    //   2. last_read is empty (chat never read) or older than the batch →
+    //      every loaded incoming is unread; divider goes at the top.
+    //   3. last_read matches the most recent incoming → no divider.
+    if (initialMessages.length > 0) {
+        const idx = lastReadOnOpen ? initialMessages.findIndex(m => m.id === lastReadOnOpen) : -1;
+        let firstUnread = null;
+        if (idx >= 0) {
+            for (let i = idx + 1; i < initialMessages.length; i++) {
+                if (!initialMessages[i].mine) { firstUnread = initialMessages[i]; break; }
+            }
+        } else if (lastReadOnOpen) {
+            // last_read existed but isn't in the batch — older than what we
+            // loaded — so all loaded incoming are unread.
+            firstUnread = initialMessages.find(m => !m.mine);
+        }
+        if (firstUnread) {
+            const node = document.getElementById(firstUnread.id);
+            if (node) insertUnreadDivider(node);
+        }
+    }
 
     // If the user is blocked (DM only), disable the chat input and show a system message
     const isBlockedChat = !isGroup && profile?.is_blocked;
