@@ -6771,15 +6771,31 @@ window.addEventListener("DOMContentLoaded", async () => {
     // Add scroll event listener for procedural message loading + intent tracking
     let scrollTimeout;
     domChatMessages.addEventListener('scroll', () => {
-        // Pin/unpin tracking has to run synchronously — a debounced update
-        // would let a media-load callback observe a stale pinned=true after
-        // the user has already scrolled away.
         handleChatScrollIntent();
         if (scrollTimeout) clearTimeout(scrollTimeout);
         scrollTimeout = setTimeout(() => {
             handleProceduralScroll();
         }, 100);
     });
+    // Mark user-initiated scroll intent. handleChatScrollIntent only updates
+    // chatPinnedToBottom when a scroll event lands within USER_SCROLL_WINDOW_MS
+    // of one of these inputs, so reflow-driven and programmatic scrolls
+    // (softChatScroll → scrollToBottom) can't unpin a user who's at bottom
+    // and shouldn't pin a user who is reading above.
+    domChatMessages.addEventListener('wheel', markUserScrollIntent, { passive: true });
+    domChatMessages.addEventListener('touchstart', markUserScrollIntent, { passive: true });
+    domChatMessages.addEventListener('touchmove', markUserScrollIntent, { passive: true });
+    domChatMessages.addEventListener('keydown', (e) => {
+        if (['PageUp', 'PageDown', 'ArrowUp', 'ArrowDown', 'Home', 'End', ' ', 'Spacebar'].includes(e.key)) {
+            markUserScrollIntent();
+        }
+    });
+    // Scroll-to-bottom button is an explicit "I want to be at bottom" signal.
+    if (domChatMessagesScrollReturnBtn) {
+        domChatMessagesScrollReturnBtn.addEventListener('click', () => {
+            chatPinnedToBottom = true;
+        });
+    }
     domChatNewStartBtn.onclick = () => {
         let inputValue = domChatNewInput.value.trim();
         // Parse npub from vectorapp.io profile URL if pasted
@@ -7772,14 +7788,14 @@ function adjustSize() {
 /**
  * Tracks whether the user wants to be pinned to the bottom of the chat.
  *
- * Updated only by user-initiated scroll events (handleChatScrollIntent),
- * never by reflows. This is the key invariant: media loading can grow the
- * scroll height and visually push the user away from the bottom, but it
- * doesn't change their *intent* to be there. softChatScroll uses this flag
- * (instead of a snapshot pxFromBottom check) so a chat full of un-loaded
- * media still snaps down on every reflow until everything settles, while
- * a user who deliberately scrolled up stays put through reactions, edits,
- * favicon loads, etc.
+ * Only flipped by *user-initiated* scrolls — wheel, touch, keyboard. Pure
+ * scroll events from a programmatic scrollTo, or from layout reflow as
+ * media loads in, are ignored. This separation is what makes the chat
+ * "self-heal" during chat-open: every async load fires softChatScroll,
+ * which re-snaps to bottom; the resulting scroll event would normally
+ * confuse a snapshot-based check during transitional layout, but here
+ * it never sees a recent user-input timestamp and so leaves pinned=true
+ * alone.
  *
  * Initial true: chat-open paths scroll to bottom synchronously, so the
  * user starts pinned by definition.
@@ -7787,14 +7803,23 @@ function adjustSize() {
 let chatPinnedToBottom = true;
 
 const PIN_THRESHOLD_PX = 80;
+// 500ms covers iOS/Android momentum-scroll: scroll events keep firing
+// after touchend until momentum decays. A shorter window would miss
+// late-firing pxFromBottom updates and leave pinned stale.
+const USER_SCROLL_WINDOW_MS = 500;
+
+let lastUserScrollIntentAt = 0;
+function markUserScrollIntent() { lastUserScrollIntentAt = Date.now(); }
 
 /**
- * Update chatPinnedToBottom from the scroll listener — only fires on
- * user-driven scrollTop changes, since reflow-induced height changes
- * don't dispatch a scroll event.
+ * Recompute chatPinnedToBottom — but only honour scroll events that
+ * trail a recent user input. Programmatic scrollTo() and overflow-anchor
+ * adjustments still fire scroll events, but we don't want those to flip
+ * the user's intent.
  */
 function handleChatScrollIntent() {
     if (!strOpenChat || !domChatMessages) return;
+    if (Date.now() - lastUserScrollIntentAt > USER_SCROLL_WINDOW_MS) return;
     const pxFromBottom = domChatMessages.scrollHeight - domChatMessages.scrollTop - domChatMessages.clientHeight;
     chatPinnedToBottom = pxFromBottom < PIN_THRESHOLD_PX;
 }
