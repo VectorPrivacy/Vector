@@ -2478,7 +2478,7 @@ body.chat-bg-disabled .chat-messages::before {
   position: relative;
   width: 100%;
   align-items: center;
-  background-color: #0a0a0a;
+  background-color: #030303;
   height: 45px;
   margin-top: auto;
   margin-bottom: auto;
@@ -2522,6 +2522,7 @@ body.chat-bg-disabled .chat-messages::before {
   max-height: 150px;
   padding: 10px;
   padding-left: 0;
+  background: transparent !important;
 }
 
 #chat-input::placeholder {
@@ -11597,19 +11598,19 @@ hr {
   /* Scoped tokens — override via theme to retune. */
   --dmsg-row-padding-y: 0px;
   --dmsg-row-padding-x: 2px;
-  --dmsg-streak-gap: 14px;
-  --dmsg-continuation-gap: 0px;
+  --dmsg-streak-gap: 16px;
+  --dmsg-continuation-gap: 2px;
   --dmsg-gutter-width: 56px;
   --dmsg-avatar-size: 40px;
   --dmsg-author-color: #ffffff;
-  --dmsg-text-color: rgba(255, 255, 255, 0.92);
+  --dmsg-text-color: rgba(255, 255, 255, 0.85);
   --dmsg-time-color: rgba(255, 255, 255, 0.4);
   --dmsg-pending-opacity: 0.6;
   --dmsg-hover-bg: rgba(255, 255, 255, 0.05);
   --dmsg-pinged-bg: color-mix(in srgb, var(--icon-color-primary, #59fcb3) 13%, transparent);
   --dmsg-pinged-border: var(--icon-color-primary, #59fcb3);
-  --dmsg-replying-bg: rgba(255, 255, 255, 0.09);
-  --dmsg-replying-border: rgba(255, 255, 255, 0.65);
+  --dmsg-replying-bg: rgba(255, 255, 255, 0.05);
+  --dmsg-replying-border: rgba(255, 255, 255, 0.5);
 }
 
 .dmsg {
@@ -11720,7 +11721,7 @@ hr {
 
 .dmsg-header {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   margin-bottom: -2px;
   flex-wrap: wrap;
@@ -11734,6 +11735,8 @@ hr {
   line-height: 1.3;
   user-select: none;
   -webkit-user-select: none;
+  position: relative;
+  top: 1px;
 }
 .dmsg-author:hover { text-decoration: underline; }
 
@@ -11746,7 +11749,7 @@ hr {
   padding: 2px 5px;
   border-radius: 3px;
   line-height: 1;
-  vertical-align: middle;
+  vertical-align: center;
 }
 .dmsg-author-badge.admin {
   background: var(--icon-color-primary, #59fcb3);
@@ -11896,7 +11899,7 @@ hr {
  * a block-level antecedent (attachment, link preview, npub preview, payment),
  * the status flips to its own line below them, right-aligned. */
 .dmsg-status {
-  display: inline-flex;
+  display: none;
   align-items: center;
   gap: 4px;
   margin-left: 6px;
@@ -11910,7 +11913,7 @@ hr {
 .dmsg-preview ~ .dmsg-status,
 .msg-profile-preview ~ .dmsg-status,
 .msg-pivx-payment ~ .dmsg-status {
-  display: block;
+  display: none !important;
   text-align: right;
   margin-left: 0;
   margin-top: 2px;
