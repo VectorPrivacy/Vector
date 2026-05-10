@@ -11920,6 +11920,8 @@ hr {
 .dmsg-preview img:not(.favicon):not(.emoji) {
   width: 100%;
   height: auto;
+  max-height: 350px;
+  object-fit: cover;
   border-radius: 4px;
   margin-top: 6px;
 }
