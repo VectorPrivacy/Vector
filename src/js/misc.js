@@ -429,6 +429,14 @@ function createScrollHandler(scrollableDiv, bottomButton, options = {}) {
     const SCROLL_THRESHOLD = options.threshold ?? 250;
     const THROTTLE_TIME = options.throttleTime ?? 150;
     const SMOOTH_SCROLL = options.smoothScroll ?? true;
+    // Optional override: when this returns true the button must stay hidden
+    // regardless of the distance-from-bottom check. Used to suppress the
+    // "scroll down" arrow during chat-open reflow, when content is still
+    // settling and the user hasn't actually scrolled away.
+    const isPinned = typeof options.isPinned === 'function' ? options.isPinned : null;
+    // Optional onClick — called instead of (well, alongside) the default
+    // scroll-to-bottom so callers can clear unread badges, etc.
+    const onClick = typeof options.onClick === 'function' ? options.onClick : null;
 
     /**
      * Throttles a function call
@@ -452,10 +460,14 @@ function createScrollHandler(scrollableDiv, bottomButton, options = {}) {
      * @private
      */
     const handleScroll = throttle(() => {
+        if (isPinned && isPinned()) {
+            bottomButton.classList.remove('visible');
+            return;
+        }
         const currentScrollTop = scrollableDiv.scrollTop;
         const maxScroll = scrollableDiv.scrollHeight - scrollableDiv.clientHeight;
         const distanceFromBottom = maxScroll - currentScrollTop;
-        
+
         if (distanceFromBottom > SCROLL_THRESHOLD) {
             bottomButton.classList.add('visible');
         } else {
@@ -470,6 +482,7 @@ function createScrollHandler(scrollableDiv, bottomButton, options = {}) {
     const handleButtonClick = () => {
         scrollToBottom(scrollableDiv, SMOOTH_SCROLL);
         bottomButton.classList.remove('visible');
+        if (onClick) onClick();
     };
 
     // Add event listeners

@@ -4044,6 +4044,10 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
                         // Remove the animation class once it finishes
                         domMsg?.classList?.remove('new-anim');
                     }, { once: true });
+                    // Bump the scroll-down badge if the user is reading
+                    // above; softChatScroll is a no-op for them, so this is
+                    // the only signal that something new arrived.
+                    if (!chatPinnedToBottom) incrementUnreadBelow();
                 }
 
                 domChatMessages.appendChild(domMsg);
@@ -4981,8 +4985,9 @@ async function openChat(contact) {
 
     // Chat-open paths render the latest messages and scroll-to-bottom,
     // so the user starts pinned. Reset here in case the previous chat
-    // was scrolled up.
+    // was scrolled up. Also wipes any unread badge from the prior chat.
     chatPinnedToBottom = true;
+    clearUnreadBelow();
 
     // After 100ms, stop auto-scrolling on media loads
     chatOpenAutoScrollTimer = setTimeout(() => {
@@ -6832,7 +6837,11 @@ window.addEventListener("DOMContentLoaded", async () => {
     };
 
     // Hook up a scroll handler in the chat to display UI elements at certain scroll depths
-    createScrollHandler(domChatMessages, domChatMessagesScrollReturnBtn, { threshold: 500 })
+    createScrollHandler(domChatMessages, domChatMessagesScrollReturnBtn, {
+        threshold: 500,
+        isPinned: () => chatPinnedToBottom,
+        onClick: clearUnreadBelow,
+    });
 
     // Hook up an in-chat File Upload listener
     const isAndroid = platformFeatures.os === 'android';
@@ -7811,6 +7820,22 @@ const USER_SCROLL_WINDOW_MS = 500;
 let lastUserScrollIntentAt = 0;
 function markUserScrollIntent() { lastUserScrollIntentAt = Date.now(); }
 
+let unreadBelowCount = 0;
+const domChatScrollReturnBadge = document.getElementById('chat-scroll-return-badge');
+function setUnreadBelow(n) {
+    unreadBelowCount = Math.max(0, n);
+    if (!domChatScrollReturnBadge) return;
+    if (unreadBelowCount > 0) {
+        domChatScrollReturnBadge.textContent = unreadBelowCount > 99 ? '99+' : String(unreadBelowCount);
+        domChatScrollReturnBadge.classList.add('visible');
+    } else {
+        domChatScrollReturnBadge.textContent = '';
+        domChatScrollReturnBadge.classList.remove('visible');
+    }
+}
+function incrementUnreadBelow() { setUnreadBelow(unreadBelowCount + 1); }
+function clearUnreadBelow() { setUnreadBelow(0); }
+
 /**
  * Recompute chatPinnedToBottom — but only honour scroll events that
  * trail a recent user input. Programmatic scrollTo() and overflow-anchor
@@ -7821,7 +7846,11 @@ function handleChatScrollIntent() {
     if (!strOpenChat || !domChatMessages) return;
     if (Date.now() - lastUserScrollIntentAt > USER_SCROLL_WINDOW_MS) return;
     const pxFromBottom = domChatMessages.scrollHeight - domChatMessages.scrollTop - domChatMessages.clientHeight;
+    const wasPinned = chatPinnedToBottom;
     chatPinnedToBottom = pxFromBottom < PIN_THRESHOLD_PX;
+    // User scrolled themselves back into pin range — clear the unread badge
+    // since they're effectively caught up.
+    if (!wasPinned && chatPinnedToBottom) clearUnreadBelow();
 }
 
 function softChatScroll() {

@@ -6051,6 +6051,30 @@ select:disabled:hover {
   z-index: 1;
 }
 
+.scroll-return-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background-color: #59fcb3;
+  color: #0a0a0a;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  box-sizing: border-box;
+  display: none;
+  pointer-events: none;
+  box-shadow: 0 0 0 2px #0a0a0a;
+}
+
+.scroll-return-badge.visible {
+  display: inline-block;
+}
+
 .sync-line {
   height: 2px;
   width: 100%;
