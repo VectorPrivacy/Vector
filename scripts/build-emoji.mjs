@@ -27,6 +27,11 @@ const SVG_OVERRIDES_DIR = join(__dirname, 'emoji-svg-overrides');
 const EMOJI_TEST_URL = 'https://unicode.org/Public/emoji/latest/emoji-test.txt';
 const CLDR_ANNOTATIONS_URL = 'https://cdn.jsdelivr.net/npm/cldr-annotations-full@48.1.0/annotations/en/annotations.json';
 const CLDR_DERIVED_URL = 'https://cdn.jsdelivr.net/npm/cldr-annotations-derived-full@48.1.0/annotationsDerived/en/annotations.json';
+// Unicode publishes a logarithmic-bucket frequency ranking of ~1454 emojis
+// at this URL (rank 0 = most-used pair 😂 ❤️, higher = less-used). Used as
+// a tiebreaker when ranking-tier scores match, so e.g. searching "smile"
+// promotes 😄 (popular) over 😼 (rare) on equal score.
+const UNICODE_FREQUENCY_URL = 'https://home.unicode.org/emoji/emoji-frequency/';
 // emojibase-data ships the iamcal shortcode set (the same Slack/Discord-style
 // canonical aliases like :heart: → ❤️, :pray: → 🙏, :fire: → 🔥). Loaded
 // from the local devDependency so the build is offline-friendly once
@@ -80,12 +85,13 @@ function toTwemojiFilename(codepoints) {
 
 async function downloadAll() {
     console.log('Phase 1: Downloading Unicode data...');
-    const [emojiTestRaw, cldrRaw, cldrDerivedRaw] = await Promise.all([
+    const [emojiTestRaw, cldrRaw, cldrDerivedRaw, frequencyRaw] = await Promise.all([
         cachedFetch(EMOJI_TEST_URL, 'emoji-test.txt'),
         cachedFetch(CLDR_ANNOTATIONS_URL, 'cldr-annotations.json'),
         cachedFetch(CLDR_DERIVED_URL, 'cldr-annotations-derived.json'),
+        cachedFetch(UNICODE_FREQUENCY_URL, 'unicode-emoji-frequency.html'),
     ]);
-    return { emojiTestRaw, cldrRaw, cldrDerivedRaw };
+    return { emojiTestRaw, cldrRaw, cldrDerivedRaw, frequencyRaw };
 }
 
 // ── Phase 2: Parse emoji-test.txt ───────────────────────────────────────
@@ -356,6 +362,29 @@ function cldrLookup(cldrMap, char) {
     return null;
 }
 
+function parseFrequencyTable(html) {
+    // Unicode's frequency page is a WordPress-rendered HTML table with rows
+    // like: <td...>RANK</td><td...>EMOJI EMOJI ...</td>
+    // We extract grapheme clusters from the emoji column to handle ZWJ
+    // sequences and variation selectors correctly.
+    const rowRe = /<td[^>]*>(\d+)\s*<\/td>\s*<td[^>]*>([^<]+)<\/td>/g;
+    const ranks = new Map();
+    const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+    let m;
+    while ((m = rowRe.exec(html)) !== null) {
+        const rank = parseInt(m[1], 10);
+        const emojiText = m[2];
+        for (const seg of segmenter.segment(emojiText)) {
+            const e = seg.segment;
+            if (!e || /^\s+$/.test(e)) continue;
+            const prev = ranks.get(e);
+            if (prev === undefined || rank < prev) ranks.set(e, rank);
+        }
+    }
+    console.log(`  ${ranks.size} emojis in Unicode frequency table`);
+    return ranks;
+}
+
 function loadIamcalShortcodes() {
     if (!existsSync(IAMCAL_SHORTCODES_PATH)) {
         throw new Error(`Missing emojibase-data. Run: npm install --save-dev emojibase-data`);
@@ -383,12 +412,23 @@ function lookupIamcal(iamcalMap, codepoints) {
     return null;
 }
 
-function buildKeywords(emojis, cldrMap, customMap, iamcalMap) {
+function buildKeywords(emojis, cldrMap, customMap, iamcalMap, frequencyMap) {
     console.log('  Merging keywords (iamcal + CLDR + emoji-test.txt + custom)...');
 
+    // Unranked emojis fall back to a value larger than the highest observed
+    // rank, so they sort behind every ranked one without affecting score-tier
+    // ordering.
+    const UNRANKED = 99;
+    let freqHits = 0;
     let cldrHits = 0;
     let iamcalHits = 0;
     for (const emoji of emojis) {
+        // Look up frequency rank — try with and without FE0F, since the
+        // Unicode page uses fully-qualified forms inconsistently.
+        let rank = frequencyMap.get(emoji.char);
+        if (rank === undefined) rank = frequencyMap.get(emoji.char.replaceAll('️', ''));
+        if (rank !== undefined) freqHits++;
+        emoji.freq = rank !== undefined ? rank : UNRANKED;
         const words = new Set();
 
         // Layer 0: iamcal shortcode (Discord/Slack canonical alias). Stored
@@ -441,7 +481,7 @@ function buildKeywords(emojis, cldrMap, customMap, iamcalMap) {
         emoji.display = (cldr && cldr.tts) ? cldr.tts : emoji.name;
     }
 
-    console.log(`  CLDR matched ${cldrHits}/${emojis.length} emojis, iamcal matched ${iamcalHits}/${emojis.length}`);
+    console.log(`  CLDR matched ${cldrHits}/${emojis.length} emojis, iamcal matched ${iamcalHits}/${emojis.length}, frequency matched ${freqHits}/${emojis.length}`);
 }
 
 // ── Phase 5: Output ─────────────────────────────────────────────────────
@@ -477,7 +517,8 @@ function writeEmojiJs(emojis) {
         const safeDisplay = (emoji.display || '').replace(/'/g, "\\'");
         const safeShortcode = (emoji.shortcode || '').replace(/'/g, "\\'");
         const shortcodeField = safeShortcode ? `, shortcode: '${safeShortcode}'` : '';
-        lines.push(`    { emoji: '${emoji.char}', name: '${safeKeywords}', display: '${safeDisplay}'${shortcodeField} },`);
+        const freqField = (typeof emoji.freq === 'number' && emoji.freq < 99) ? `, freq: ${emoji.freq}` : '';
+        lines.push(`    { emoji: '${emoji.char}', name: '${safeKeywords}', display: '${safeDisplay}'${shortcodeField}${freqField} },`);
     }
 
     // Remove trailing comma from last entry
@@ -499,7 +540,7 @@ async function main() {
     console.log('=== build-emoji.mjs ===\n');
 
     // Phase 1: Download
-    const { emojiTestRaw, cldrRaw, cldrDerivedRaw } = await downloadAll();
+    const { emojiTestRaw, cldrRaw, cldrDerivedRaw, frequencyRaw } = await downloadAll();
 
     // Phase 2: Parse
     const emojis = parseEmojiTest(emojiTestRaw);
@@ -512,6 +553,7 @@ async function main() {
     // Phase 4: Keywords
     const cldrMap = parseCLDR(cldrRaw, cldrDerivedRaw);
     const iamcalMap = loadIamcalShortcodes();
+    const frequencyMap = parseFrequencyTable(frequencyRaw);
 
     let customMap;
     if (!existsSync(CUSTOM_KEYWORDS_FILE)) {
@@ -520,7 +562,7 @@ async function main() {
         customMap = loadCustomKeywords();
     }
 
-    buildKeywords(available, cldrMap, customMap, iamcalMap);
+    buildKeywords(available, cldrMap, customMap, iamcalMap, frequencyMap);
 
     // Phase 5: Output
     writeEmojiJs(available);
