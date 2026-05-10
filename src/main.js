@@ -874,23 +874,10 @@ let chatOpenAutoScrollTimer = null;
  */
 let chatOpenTimestamp = 0;
 
-/**
- * Synchronise all messages from the backend
- */
-async function init(skipAccountCheck = false) {
-    // Check if account is selected (skip during boot — we just logged in)
-    if (!skipAccountCheck) {
-        try {
-            await invoke("get_current_account");
-        } catch (e) {
-            console.log('[Init] No account selected, triggering fetch_messages');
-            await invoke("fetch_messages", { init: true });
-            return;
-        }
-    }
-
-    // Set up UI maintenance interval first (before any async calls that might fail)
-    // Runs every 5 seconds to clear expired typing indicators and update timestamps
+let maintenanceLoopStarted = false;
+function startMaintenanceLoop() {
+    if (maintenanceLoopStarted) return;
+    maintenanceLoopStarted = true;
     let maintenanceTick = 0;
     setInterval(() => {
         maintenanceTick++;
@@ -921,6 +908,28 @@ async function init(skipAccountCheck = false) {
             updateChatlistTimestamps();
         }
     }, 5000);
+}
+
+/**
+ * Synchronise all messages from the backend
+ */
+async function init(skipAccountCheck = false) {
+    // Check if account is selected (skip during boot — we just logged in)
+    if (!skipAccountCheck) {
+        try {
+            await invoke("get_current_account");
+        } catch (e) {
+            console.log('[Init] No account selected, triggering fetch_messages');
+            await invoke("fetch_messages", { init: true });
+            return;
+        }
+    }
+
+    // UI maintenance: typing-indicator expiry + chatlist timestamp refresh.
+    // Extracted so the dev-mode hot-reload path can also start it — that path
+    // hydrates state and renders the UI without going through init(), which
+    // would otherwise leave typing indicators stuck on hot-reloads.
+    startMaintenanceLoop();
 
     // Proceed to load and decrypt the database, and begin iterative Nostr synchronisation
     await invoke("fetch_messages", { init: true });
@@ -6710,7 +6719,12 @@ window.addEventListener("DOMContentLoaded", async () => {
                 initializeUpdater();
                 
                 console.log(`[Debug Hot-Reload] Restored ${arrProfiles.length} profiles, ${arrChats.length} chats`);
-                
+
+                // Hot-reload skips init(), which is where the typing-indicator
+                // expiration sweep normally registers. Start it explicitly so
+                // dev sessions don't accumulate stuck typing indicators.
+                startMaintenanceLoop();
+
                 // Mark as hot-reloaded so we skip the login flow but continue with button setup
                 fDebugHotReloaded = true;
             }
