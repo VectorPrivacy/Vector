@@ -11597,8 +11597,8 @@ hr {
   /* Scoped tokens — override via theme to retune. */
   --dmsg-row-padding-y: 0px;
   --dmsg-row-padding-x: 2px;
-  --dmsg-streak-gap: 14px;
-  --dmsg-continuation-gap: 0px;
+  --dmsg-streak-gap: 16px;
+  --dmsg-continuation-gap: 2px;
   --dmsg-gutter-width: 56px;
   --dmsg-avatar-size: 40px;
   --dmsg-author-color: #ffffff;
