@@ -2478,7 +2478,7 @@ body.chat-bg-disabled .chat-messages::before {
   position: relative;
   width: 100%;
   align-items: center;
-  background-color: #0a0a0a;
+  background-color: #030303;
   height: 45px;
   margin-top: auto;
   margin-bottom: auto;
@@ -2522,6 +2522,7 @@ body.chat-bg-disabled .chat-messages::before {
   max-height: 150px;
   padding: 10px;
   padding-left: 0;
+  background: transparent !important;
 }
 
 #chat-input::placeholder {
