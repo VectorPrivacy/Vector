@@ -4047,13 +4047,22 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
                     // Bump the scroll-down badge if the user is reading
                     // above; softChatScroll is a no-op for them, so this is
                     // the only signal that something new arrived.
-                    if (!chatPinnedToBottom) incrementUnreadBelow();
+                    if (!chatPinnedToBottom) {
+                        incrementUnreadBelow();
+                        insertUnreadDivider(domMsg);
+                    }
                 }
 
                 domChatMessages.appendChild(domMsg);
 
                 // If this was our pending message, then snap the view to the bottom
-                if (msg.mine && msg.pending) scrollToBottom(domChatMessages, false);
+                // and clear the unread divider — sending counts as "I've read up
+                // to here". Covers every send path (text/file/voice/miniapp) with
+                // a single hook since they all funnel through this rendering.
+                if (msg.mine && msg.pending) {
+                    scrollToBottom(domChatMessages, false);
+                    clearUnreadDivider();
+                }
                 continue;
             }
 
@@ -4985,9 +4994,11 @@ async function openChat(contact) {
 
     // Chat-open paths render the latest messages and scroll-to-bottom,
     // so the user starts pinned. Reset here in case the previous chat
-    // was scrolled up. Also wipes any unread badge from the prior chat.
+    // was scrolled up. Also wipes the unread badge + divider from the
+    // prior chat — re-entering a chat counts as "I've read up to here".
     chatPinnedToBottom = true;
     clearUnreadBelow();
+    clearUnreadDivider();
 
     // After 100ms, stop auto-scrolling on media loads
     chatOpenAutoScrollTimer = setTimeout(() => {
@@ -7821,7 +7832,29 @@ let lastUserScrollIntentAt = 0;
 function markUserScrollIntent() { lastUserScrollIntentAt = Date.now(); }
 
 let unreadBelowCount = 0;
+let unreadDividerEl = null;
 const domChatScrollReturnBadge = document.getElementById('chat-scroll-return-badge');
+
+/**
+ * Insert (or reuse) the "New" divider above the given message element.
+ * Persists for the chat session — only the first unread message gets a
+ * divider; later messages just stack under it. Cleared by openChat()
+ * (close + re-enter) and by sending a message.
+ */
+function insertUnreadDivider(beforeEl) {
+    if (unreadDividerEl || !beforeEl?.parentNode) return;
+    const p = document.createElement('p');
+    p.classList.add('msg-inline-timestamp', 'unread-divider');
+    p.textContent = 'New';
+    beforeEl.parentNode.insertBefore(p, beforeEl);
+    unreadDividerEl = p;
+}
+function clearUnreadDivider() {
+    if (unreadDividerEl) {
+        unreadDividerEl.remove();
+        unreadDividerEl = null;
+    }
+}
 function setUnreadBelow(n) {
     unreadBelowCount = Math.max(0, n);
     if (!domChatScrollReturnBadge) return;

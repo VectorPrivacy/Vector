@@ -1806,6 +1806,23 @@ body.chat-bg-disabled .chat-messages::before {
 .msg-inline-timestamp::before { margin-right: 12px; }
 .msg-inline-timestamp::after  { margin-left: 12px; }
 
+/* "New" divider — same flexbox shape as inline timestamps but tinted with
+   the active accent. Marks the boundary between read and unread messages. */
+.msg-inline-timestamp.unread-divider {
+  color: var(--accent);
+  opacity: 1;
+  font-weight: 700;
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  margin: 14px 0 6px;
+}
+.msg-inline-timestamp.unread-divider::before,
+.msg-inline-timestamp.unread-divider::after {
+  background: var(--accent);
+  opacity: 0.55;
+}
+
 .file-ext-badge {
   position: absolute;
   bottom: 8px;
@@ -11644,7 +11661,7 @@ hr {
   --dmsg-text-color: rgba(255, 255, 255, 0.85);
   --dmsg-time-color: rgba(255, 255, 255, 0.4);
   --dmsg-pending-opacity: 0.6;
-  --dmsg-hover-bg: rgba(255, 255, 255, 0.05);
+  --dmsg-hover-bg: rgba(255, 255, 255, 0.03);
   --dmsg-pinged-bg: color-mix(in srgb, var(--icon-color-primary, #59fcb3) 13%, transparent);
   --dmsg-pinged-border: var(--icon-color-primary, #59fcb3);
   --dmsg-replying-bg: rgba(255, 255, 255, 0.05);
