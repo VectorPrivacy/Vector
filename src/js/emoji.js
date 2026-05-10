@@ -1952,101 +1952,104 @@ for (cEmoji of arrEmojis) {
  */
 function searchEmojis(search) {
     if (!search || search.length < 1) return [];
-    
+
     search = search.toLowerCase();
     const results = [];
-    
+
     for (const emojiData of arrEmojis) {
         const name = emojiData.name.toLowerCase();
+        const display = (emojiData.display || '').toLowerCase();
         const words = name.split(' ');
-        
+
         let bestMatch = null;
-        
-        for (const word of words) {
-            // Exact match - highest priority
-            if (word === search) {
-                bestMatch = { score: 0, word };
-                break;
+        const consider = (score, word, wordIndex) => {
+            if (!bestMatch || score < bestMatch.score) {
+                bestMatch = { score, word, wordIndex };
             }
-            
+        };
+
+        // Display-name tier — strongest signal (search "fire" → 🔥 "fire" wins)
+        if (display === search) {
+            consider(-1.0, display, 0);
+        } else if (display.startsWith(search + ' ')) {
+            consider(-0.5, display, 0);
+        }
+
+        for (let i = 0; i < words.length; i++) {
+            const word = words[i];
+
+            // Exact word match — first-word matches outrank later positions.
+            // Without this, "fire" matches both 🔥 (word 0) and ❤️‍🔥 (word 1)
+            // identically; the emoji at word position 0 is the more specific
+            // referent and should rank first.
+            if (word === search) {
+                consider(0 + i * 0.02, word, i);
+                continue;
+            }
+
             // Word starts with search
             if (word.startsWith(search) && search.length >= 2) {
-                const score = 0.1;
-                if (!bestMatch || score < bestMatch.score) {
-                    bestMatch = { score, word };
-                }
+                consider(0.1 + i * 0.02, word, i);
             }
-            
+
             // Fuzzy matching for 3+ character searches
             if (search.length >= 3) {
                 const lengthDiff = Math.abs(word.length - search.length);
-                
+
                 // Check words with similar length
                 if (lengthDiff <= 1) {
                     const distance = levenshteinDistance(word, search);
-                    
+
                     if (distance === 1) {
                         // Verify sufficient character overlap
                         const searchChars = new Set(search);
                         const wordChars = new Set(word);
                         const commonChars = [...searchChars].filter(c => wordChars.has(c)).length;
-                        
+
                         if (commonChars >= search.length - 1) {
                             let score = 0.5;
-                            
-                            // Better score for missing letter at end (hart → heart)
                             if (word.length > search.length && word.startsWith(search)) {
-                                score = 0.3;
-                            }
-                            // Better score for missing letter in middle
-                            else if (word.length > search.length && 
-                                     word[0] === search[0] && 
+                                score = 0.3; // missing letter at end (hart → heart)
+                            } else if (word.length > search.length &&
+                                     word[0] === search[0] &&
                                      word[word.length-1] === search[search.length-1]) {
-                                score = 0.35;
+                                score = 0.35; // missing letter in middle
                             }
-                            
-                            if (!bestMatch || score < bestMatch.score) {
-                                bestMatch = { score, word };
-                            }
+                            consider(score + i * 0.02, word, i);
                         }
                     }
                 }
-                
+
                 // Check if search matches beginning of longer words
                 if (word.length > search.length && lengthDiff <= 3) {
                     const wordStart = word.substring(0, search.length);
                     const distance = levenshteinDistance(wordStart, search);
-                    
+
                     if (distance === 1) {
-                        const score = 0.6;
-                        if (!bestMatch || score < bestMatch.score) {
-                            bestMatch = { score, word };
-                        }
+                        consider(0.6 + i * 0.02, word, i);
                     }
                 }
             }
-            
+
             // For 5+ character searches, allow distance 2
             if (search.length >= 5) {
                 const distance = levenshteinDistance(word, search);
                 if (distance === 2 && Math.abs(word.length - search.length) <= 1) {
-                    const score = 0.8;
-                    if (!bestMatch || score < bestMatch.score) {
-                        bestMatch = { score, word };
-                    }
+                    consider(0.8 + i * 0.02, word, i);
                 }
             }
         }
-        
+
         if (bestMatch) {
             results.push({
                 ...emojiData,
                 score: bestMatch.score,
-                matchedWord: bestMatch.word
+                matchedWord: bestMatch.word,
+                matchedIndex: bestMatch.wordIndex
             });
         }
     }
-    
+
     // If no results found, fall back to includes search
     if (results.length === 0) {
         for (const emojiData of arrEmojis) {
@@ -2054,26 +2057,29 @@ function searchEmojis(search) {
             if (name.includes(search)) {
                 results.push({
                     ...emojiData,
-                    score: 1.0, // Lower priority than fuzzy matches
-                    matchedWord: name
+                    score: 1.0,
+                    matchedWord: name,
+                    matchedIndex: 99
                 });
             }
         }
     }
-    
+
     // Sort by relevance
     return results
         .sort((a, b) => {
             if (Math.abs(a.score - b.score) > 0.01) return a.score - b.score;
-            
-            // For same scores, prefer shorter matched words
-            const aLen = a.matchedWord.length;
-            const bLen = b.matchedWord.length;
-            if (aLen !== bLen) return aLen - bLen;
-            
+            // Earlier-position matches first (primary keyword > secondary)
+            if (a.matchedIndex !== b.matchedIndex) return a.matchedIndex - b.matchedIndex;
+            // Shorter matched word is more specific
+            if (a.matchedWord.length !== b.matchedWord.length) return a.matchedWord.length - b.matchedWord.length;
+            // Shorter total name is more specific (fire-engine beats fire-engine-with-bells)
+            const aNameLen = a.name ? a.name.length : 0;
+            const bNameLen = b.name ? b.name.length : 0;
+            if (aNameLen !== bNameLen) return aNameLen - bNameLen;
             return a.matchedWord.localeCompare(b.matchedWord);
         })
-        .map(({ score, matchedWord, ...emoji }) => emoji);
+        .map(({ score, matchedWord, matchedIndex, ...emoji }) => emoji);
 }
 
 /** Return our most used emojis */
