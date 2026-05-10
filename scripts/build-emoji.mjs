@@ -27,6 +27,11 @@ const SVG_OVERRIDES_DIR = join(__dirname, 'emoji-svg-overrides');
 const EMOJI_TEST_URL = 'https://unicode.org/Public/emoji/latest/emoji-test.txt';
 const CLDR_ANNOTATIONS_URL = 'https://cdn.jsdelivr.net/npm/cldr-annotations-full@48.1.0/annotations/en/annotations.json';
 const CLDR_DERIVED_URL = 'https://cdn.jsdelivr.net/npm/cldr-annotations-derived-full@48.1.0/annotationsDerived/en/annotations.json';
+// emojibase-data ships the iamcal shortcode set (the same Slack/Discord-style
+// canonical aliases like :heart: → ❤️, :pray: → 🙏, :fire: → 🔥). Loaded
+// from the local devDependency so the build is offline-friendly once
+// node_modules is populated.
+const IAMCAL_SHORTCODES_PATH = join(ROOT, 'node_modules', 'emojibase-data', 'en', 'shortcodes', 'iamcal.json');
 
 // Skin tone modifier codepoints (1F3FB–1F3FF)
 const SKIN_TONES = new Set(['1F3FB', '1F3FC', '1F3FD', '1F3FE', '1F3FF']);
@@ -351,12 +356,54 @@ function cldrLookup(cldrMap, char) {
     return null;
 }
 
-function buildKeywords(emojis, cldrMap, customMap) {
-    console.log('  Merging keywords (CLDR + emoji-test.txt + custom)...');
+function loadIamcalShortcodes() {
+    if (!existsSync(IAMCAL_SHORTCODES_PATH)) {
+        throw new Error(`Missing emojibase-data. Run: npm install --save-dev emojibase-data`);
+    }
+    const raw = JSON.parse(readFileSync(IAMCAL_SHORTCODES_PATH, 'utf-8'));
+    console.log(`  ${Object.keys(raw).length} iamcal shortcodes loaded`);
+    return raw;
+}
+
+function pickIamcalShortcode(value) {
+    if (!value) return null;
+    return Array.isArray(value) ? value[0] : value;
+}
+
+function lookupIamcal(iamcalMap, codepoints) {
+    // iamcal stores some keys with FE0F (ZWJ sequences, keycaps) and some
+    // without (most singleton emojis like ❤ U+2764). Try both forms.
+    const upper = codepoints.map(cp => cp.toUpperCase());
+    const withFe0f = upper.join('-');
+    if (iamcalMap[withFe0f]) return pickIamcalShortcode(iamcalMap[withFe0f]);
+    const withoutFe0f = upper.filter(cp => cp !== 'FE0F').join('-');
+    if (withoutFe0f !== withFe0f && iamcalMap[withoutFe0f]) {
+        return pickIamcalShortcode(iamcalMap[withoutFe0f]);
+    }
+    return null;
+}
+
+function buildKeywords(emojis, cldrMap, customMap, iamcalMap) {
+    console.log('  Merging keywords (iamcal + CLDR + emoji-test.txt + custom)...');
 
     let cldrHits = 0;
+    let iamcalHits = 0;
     for (const emoji of emojis) {
         const words = new Set();
+
+        // Layer 0: iamcal shortcode (Discord/Slack canonical alias). Stored
+        // as a separate `shortcode` field used by the search ranker for the
+        // top-priority exact-match tier — :heart: → ❤️, :fire: → 🔥, etc.
+        // The shortcode words are also added to the keyword bag so partial
+        // searches still match.
+        const rawShortcode = lookupIamcal(iamcalMap, emoji.codepoints);
+        if (rawShortcode) {
+            iamcalHits++;
+            emoji.shortcode = rawShortcode;
+            for (const w of rawShortcode.toLowerCase().split(/[_\-\s]+/)) {
+                if (w && !STOPWORDS.has(w)) words.add(w);
+            }
+        }
 
         // Layer 1: emoji-test.txt name (e.g. "grinning face")
         for (const w of emoji.name.toLowerCase().split(/\s+/)) {
@@ -394,7 +441,7 @@ function buildKeywords(emojis, cldrMap, customMap) {
         emoji.display = (cldr && cldr.tts) ? cldr.tts : emoji.name;
     }
 
-    console.log(`  CLDR matched ${cldrHits}/${emojis.length} emojis`);
+    console.log(`  CLDR matched ${cldrHits}/${emojis.length} emojis, iamcal matched ${iamcalHits}/${emojis.length}`);
 }
 
 // ── Phase 5: Output ─────────────────────────────────────────────────────
@@ -428,7 +475,9 @@ function writeEmojiJs(emojis) {
         // Escape single quotes (shouldn't happen but be safe)
         const safeKeywords = emoji.keywords.replace(/'/g, "\\'");
         const safeDisplay = (emoji.display || '').replace(/'/g, "\\'");
-        lines.push(`    { emoji: '${emoji.char}', name: '${safeKeywords}', display: '${safeDisplay}' },`);
+        const safeShortcode = (emoji.shortcode || '').replace(/'/g, "\\'");
+        const shortcodeField = safeShortcode ? `, shortcode: '${safeShortcode}'` : '';
+        lines.push(`    { emoji: '${emoji.char}', name: '${safeKeywords}', display: '${safeDisplay}'${shortcodeField} },`);
     }
 
     // Remove trailing comma from last entry
@@ -462,6 +511,7 @@ async function main() {
 
     // Phase 4: Keywords
     const cldrMap = parseCLDR(cldrRaw, cldrDerivedRaw);
+    const iamcalMap = loadIamcalShortcodes();
 
     let customMap;
     if (!existsSync(CUSTOM_KEYWORDS_FILE)) {
@@ -470,7 +520,7 @@ async function main() {
         customMap = loadCustomKeywords();
     }
 
-    buildKeywords(available, cldrMap, customMap);
+    buildKeywords(available, cldrMap, customMap, iamcalMap);
 
     // Phase 5: Output
     writeEmojiJs(available);
