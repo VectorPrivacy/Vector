@@ -1419,6 +1419,21 @@ html, body {
   margin-right: unset;
 }
 
+/* Larger profile-page status: allow wrap up to 3 lines, then ellipsize.
+   Overrides the global .cutoff rule (nowrap + single-line ellipsis) which
+   makes long statuses unreadable on narrow viewports. */
+#profile-secondary-status.cutoff {
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+  word-break: break-word;
+  line-height: 1.5;
+  margin-top: 5px;
+}
+
 .account #account-name .emoji {
   height: 16px;
   width: 16px;
