@@ -11609,8 +11609,8 @@ hr {
   --dmsg-hover-bg: rgba(255, 255, 255, 0.05);
   --dmsg-pinged-bg: color-mix(in srgb, var(--icon-color-primary, #59fcb3) 13%, transparent);
   --dmsg-pinged-border: var(--icon-color-primary, #59fcb3);
-  --dmsg-replying-bg: rgba(255, 255, 255, 0.09);
-  --dmsg-replying-border: rgba(255, 255, 255, 0.65);
+  --dmsg-replying-bg: rgba(255, 255, 255, 0.05);
+  --dmsg-replying-border: rgba(255, 255, 255, 0.5);
 }
 
 .dmsg {
