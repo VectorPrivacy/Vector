@@ -1809,7 +1809,7 @@ body.chat-bg-disabled .chat-messages::before {
 /* "New" divider — same flexbox shape as inline timestamps but tinted with
    the active accent. Marks the boundary between read and unread messages. */
 .msg-inline-timestamp.unread-divider {
-  color: var(--accent);
+  color: var(--accent-color);
   opacity: 1;
   font-weight: 700;
   text-transform: uppercase;
@@ -1819,8 +1819,9 @@ body.chat-bg-disabled .chat-messages::before {
 }
 .msg-inline-timestamp.unread-divider::before,
 .msg-inline-timestamp.unread-divider::after {
-  background: var(--accent);
-  opacity: 0.55;
+  background: var(--accent-color);
+  height: 1px;
+  opacity: 0.6;
 }
 
 .file-ext-badge {
