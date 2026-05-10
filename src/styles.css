@@ -11603,7 +11603,7 @@ hr {
   --dmsg-gutter-width: 56px;
   --dmsg-avatar-size: 40px;
   --dmsg-author-color: #ffffff;
-  --dmsg-text-color: rgba(255, 255, 255, 0.92);
+  --dmsg-text-color: rgba(255, 255, 255, 0.85);
   --dmsg-time-color: rgba(255, 255, 255, 0.4);
   --dmsg-pending-opacity: 0.6;
   --dmsg-hover-bg: rgba(255, 255, 255, 0.05);
