@@ -872,10 +872,20 @@ pub async fn update_group_metadata(
 pub async fn sync_mls_groups_now(
     group_id: Option<String>,
 ) -> Result<(u32, u32), String> {
+    // Pin this multi-group sync to the session that requested it. The
+    // `mls` instance captures `db_path` at construction; if a swap
+    // happens mid-loop it would otherwise keep decrypting account A's
+    // messages and (via `sync_group_since_cursor`) try to write them
+    // into account B's STATE. The inner per-group function is also
+    // session-gated, but bailing here saves the wasted network fetch.
+    let session = vector_core::state::SessionGuard::capture();
     // Run non-Send MLS engine work on blocking thread; drive async via current runtime
     tokio::task::spawn_blocking(move || {
         let rt = tokio::runtime::Handle::current();
         rt.block_on(async move {
+            if !session.is_valid() {
+                return Ok((0u32, 0u32));
+            }
             let mls = MlsService::new_persistent_static().map_err(|e| e.to_string())?;
 
             if let Some(id) = group_id {
@@ -902,6 +912,9 @@ pub async fn sync_mls_groups_now(
                 let mut total_new: u32 = 0;
 
                 for gid in group_ids {
+                    if !session.is_valid() {
+                        return Ok((total_processed, total_new));
+                    }
                     match mls.sync_group_since_cursor(&gid, None).await {
                         Ok((processed, new_msgs)) => {
                             total_processed = total_processed.saturating_add(processed);
@@ -932,9 +945,14 @@ pub async fn sync_mls_groups_now(
 pub async fn sync_mls_groups_quick() -> Result<(u32, u32), String> {
     use futures_util::StreamExt;
 
+    // Session pinning — see `sync_mls_groups_now` for the rationale.
+    let session = vector_core::state::SessionGuard::capture();
     tokio::task::spawn_blocking(move || {
         let rt = tokio::runtime::Handle::current();
         rt.block_on(async move {
+            if !session.is_valid() {
+                return Ok((0u32, 0u32));
+            }
             let mls = MlsService::new_persistent_static().map_err(|e| e.to_string())?;
 
             // Load all non-evicted groups
@@ -1177,6 +1195,9 @@ pub async fn sync_mls_groups_quick() -> Result<(u32, u32), String> {
             let mut total_new: u32 = 0;
 
             for group in &recent_groups {
+                if !session.is_valid() {
+                    return Ok((total_processed, total_new));
+                }
                 let group_events = events_by_group.remove(&group.group_id).unwrap_or_default();
                 if group_events.is_empty() {
                     continue;

@@ -512,7 +512,10 @@ pub async fn fetch_messages<R: Runtime>(
     if primary_relay.is_some() && !relay_futs.is_empty() {
         let primary_set: std::collections::HashSet<EventId> = primary_missing.iter().copied().collect();
         let bg_client = client.clone();
+        // Pin to the session that scheduled this fetch — see archive task.
+        let straggler_session = vector_core::state::SessionGuard::capture();
         tokio::spawn(async move {
+            if !straggler_session.is_valid() { return; }
             let mut extra_ids: Vec<EventId> = Vec::new();
             while let Some((url, result)) = relay_futs.next().await {
                 match result {
@@ -548,6 +551,7 @@ pub async fn fetch_messages<R: Runtime>(
                             tokio::pin!(stream);
                             let mut count = 0u32;
                             while let Some(event) = stream.next().await {
+                                if !straggler_session.is_valid() { return; }
                                 let prepared = vector_core::event_handler::prepare_event(
                                     event, &bg_client, my_public_key,
                                 ).await;
@@ -561,6 +565,7 @@ pub async fn fetch_messages<R: Runtime>(
                         }
                         Err(e) => eprintln!("[Sync][BG] Batch fetch error: {}", e),
                     }
+                    if !straggler_session.is_valid() { return; }
                 }
                 println!("[Sync][BG] Background sync complete");
             }
@@ -712,7 +717,15 @@ pub async fn fetch_messages<R: Runtime>(
     {
         let bg_client = client.clone();
         let handle_bg = handle.clone();
+        // Pin this archive task to the session that started it. After an
+        // account swap, downstream commits go through `commit_prepared_event`
+        // which is session-gated, but the negentropy + fetch loop above
+        // still burns relay bandwidth pointlessly and the post-sync
+        // `sync_mls_groups_now` call would re-enter MLS sync against the
+        // new account. Bail early on swap.
+        let archive_session = vector_core::state::SessionGuard::capture();
         tokio::spawn(async move {
+            if !archive_session.is_valid() { return; }
             let archive_start = std::time::Instant::now();
             let mut archive_new = 0u32;
 
@@ -780,6 +793,7 @@ pub async fn fetch_messages<R: Runtime>(
                         Ok(stream) => {
                             tokio::pin!(stream);
                             while let Some(event) = stream.next().await {
+                                if !archive_session.is_valid() { return; }
                                 let prepared = vector_core::event_handler::prepare_event(
                                     event, &bg_client, my_public_key,
                                 ).await;
@@ -799,6 +813,7 @@ pub async fn fetch_messages<R: Runtime>(
                         }
                         Err(e) => eprintln!("[Sync] Archive: batch fetch error: {}", e),
                     }
+                    if !archive_session.is_valid() { return; }
                 }
             } else {
                 println!("[Sync] Archive: no missing events");
@@ -830,10 +845,12 @@ pub async fn fetch_messages<R: Runtime>(
 
             // Post-sync: MLS groups + weekly vacuum
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            if !archive_session.is_valid() { return; }
             if let Err(e) = crate::commands::mls::sync_mls_groups_now(None).await {
                 eprintln!("[MLS] Post-sync MLS group sync failed: {}", e);
             }
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            if !archive_session.is_valid() { return; }
             if let Err(e) = db::check_and_vacuum_if_needed().await {
                 eprintln!("[Maintenance] Weekly VACUUM check failed: {}", e);
             }

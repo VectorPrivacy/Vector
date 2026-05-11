@@ -4264,9 +4264,22 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
             if (isProcessing) {
                 domLoginEncryptTitle.classList.add('startup-subtext-gradient');
                 pinRow.style.display = 'none';
+                // Past the point of no return — backend is decrypting or
+                // encrypting against THIS account. Mid-flight account swap
+                // would race the in-progress crypto and bind the wrong
+                // session to the result.
+                if (typeof loginPicker !== 'undefined') loginPicker.hide();
             } else {
                 domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
                 pinRow.style.display = '';
+                // Back to input state. On the unlock path, re-show the
+                // picker so a wrong-PIN retry can swap accounts. On the
+                // new-account setup path (fUnlock=false) the picker was
+                // intentionally hidden by openEncryptionFlow and stays so.
+                if (fUnlock && typeof loginPicker !== 'undefined'
+                    && loginPicker.accounts && loginPicker.accounts.length >= 2) {
+                    loginPicker.show(loginPicker.activeNpub);
+                }
             }
             domLoginEncryptPassword.style.display = 'none';
         }
@@ -4406,9 +4419,16 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
             if (isProcessing) {
                 domLoginEncryptTitle.classList.add('startup-subtext-gradient');
                 domLoginEncryptPassword.style.display = 'none';
+                // Past the point of no return — see PIN flow.
+                if (typeof loginPicker !== 'undefined') loginPicker.hide();
             } else {
                 domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
                 domLoginEncryptPassword.style.display = '';
+                // See PIN flow for the rationale.
+                if (fUnlock && typeof loginPicker !== 'undefined'
+                    && loginPicker.accounts && loginPicker.accounts.length >= 2) {
+                    loginPicker.show(loginPicker.activeNpub);
+                }
             }
             domLoginEncryptPinRow.style.display = 'none';
         }
@@ -7512,6 +7532,10 @@ window.addEventListener("DOMContentLoaded", async () => {
                 // with "Decrypting Database…" / sync progress.
                 domLoginEncryptTitle.textContent = 'Connecting…';
                 domLoginEncryptTitle.classList.add('startup-subtext-gradient');
+                // Past the point of no return — login_from_stored_key is
+                // about to install this account's keys into the live
+                // session. A mid-flight picker swap would race the bind.
+                loginPicker.hide();
 
                 try {
                     console.time('[Boot] login_from_stored_key');
@@ -7590,7 +7614,11 @@ window.addEventListener("DOMContentLoaded", async () => {
         loginPicker.hide();
     };
     domLoginBackBtn.onclick = async () => {
-        // Add Profile flow back-from-start has two cases:
+        // Add Profile flow back has two cases — independent of which sub-
+        // screen the user happens to be on (start / import / encryption /
+        // welcome). Without this, backing out from the encryption screen
+        // after Create Account left both `domLoginStart` and
+        // `domLoginEncrypt` visible at the same time.
         //
         //   - Browsing (not committed): the original session is still alive
         //     in memory. Soft-restore the main UI; no backend touch, no
@@ -7599,7 +7627,7 @@ window.addEventListener("DOMContentLoaded", async () => {
         //   - Committed: enter_add_account_mode already tore the session
         //     down. We have to write the previous-account marker back and
         //     reload so the next boot lands on the original account.
-        if (addAccountFlow.active && domLoginStart.style.display !== 'none') {
+        if (addAccountFlow.active) {
             if (!addAccountFlow.committed) {
                 addAccountFlow.restore();
                 return;
@@ -7618,8 +7646,13 @@ window.addEventListener("DOMContentLoaded", async () => {
             window.location.reload();
             return;
         }
+        // Regular login back: collapse every sub-screen back to the start
+        // picker. Encrypt + welcome were missing here, which is what made
+        // the post-commit Add Profile case render two panels at once.
         domLoginImport.style.display = 'none';
         domLoginInvite.style.display = 'none';
+        domLoginEncrypt.style.display = 'none';
+        domLoginWelcome.style.display = 'none';
         domLoginBackBar.style.display = 'none';
         domLoginStart.style.display = '';
         domLoginInput.value = '';

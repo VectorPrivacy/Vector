@@ -1454,9 +1454,25 @@ impl MlsService {
             return Err(MlsError::InvalidGroupId);
         }
 
+        // Account-swap defence. `self.db_path` is frozen at construction
+        // time; if a swap landed between then and now, every decrypt below
+        // would still succeed against account A's MLS storage but the
+        // resulting plaintext would be committed into account B's STATE.
+        // Snapshot the live generation and short-circuit before doing any
+        // network I/O or STATE write. Re-checked again right before each
+        // chat / message mutation below.
+        let session = crate::state::SessionGuard::capture();
+        if !session.is_valid() {
+            return Ok((0, 0));
+        }
+
         // Acquire per-group lock
         let group_lock = get_group_sync_lock(group_id);
         let _guard = group_lock.lock().await;
+
+        if !session.is_valid() {
+            return Ok((0, 0));
+        }
 
         // Check eviction
         let groups = self.read_groups().ok();
@@ -2167,6 +2183,9 @@ impl MlsService {
                     }
                 }
                 if changed {
+                    if !session.is_valid() {
+                        return Ok((0, 0));
+                    }
                     let updated_meta = groups.iter().find(|g| g.group.group_id == gid_for_fetch || g.group.engine_group_id == gid_for_fetch).cloned();
                     let _ = self.write_groups(&groups);
                     if let Some(meta) = updated_meta {
@@ -2186,6 +2205,17 @@ impl MlsService {
 
         // Process buffered rumors (skip if evicted)
         if !rumors_to_process.is_empty() && !was_evicted {
+            // Account-swap defence: an in-flight `MlsService` instance keeps
+            // its `db_path` pinned to the account that was active at
+            // construction. After a swap the rumors above were decrypted
+            // against the OLD account's MLS storage; if we proceeded with
+            // `create_or_get_mls_group_chat` here we would synthesize an
+            // OLD group_id into the NEW account's STATE and persist its
+            // plaintext messages there. Bail before any STATE/DB write.
+            if !session.is_valid() {
+                return Ok((0, 0));
+            }
+
             let group_meta = self.read_groups().ok()
                 .and_then(|groups| groups.into_iter().find(|g| g.group.group_id == gid_for_fetch));
 
@@ -2208,6 +2238,10 @@ impl MlsService {
 
             let download_dir = crate::db::get_download_dir();
             for (rumor_event, _wrapper_id, is_mine) in rumors_to_process.iter() {
+                // Re-validate per rumor in case the swap happened mid-loop.
+                if !session.is_valid() {
+                    return Ok((0, 0));
+                }
                 let rumor_context = RumorContext {
                     sender: rumor_event.pubkey,
                     is_mine: *is_mine,
