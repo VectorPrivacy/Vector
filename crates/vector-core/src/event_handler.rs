@@ -188,15 +188,24 @@ pub async fn prepare_event(
 // Phase 2: Commit — sequential state mutation, DB save, emit
 // ============================================================================
 
-/// Phase 2: Commit a prepared event (sequential — not parallel-safe).
-///
+/// Phase 2: commit a prepared event (sequential — not parallel-safe).
 /// Saves to DB, updates STATE, emits to frontend, calls handler hooks.
 /// Returns true if a new displayable message was committed.
+///
+/// Session-safety: captures the generation at the first line. If a swap
+/// occurred between `prepare_event()` and here (e.g. long-running
+/// negentropy fetch queued events for commit), bail before any STATE /
+/// DB write. Centralized so individual spawn sites (sync.rs fetch_messages,
+/// archive task, sync_dms, subscription_handler) don't have to wrap.
 pub async fn commit_prepared_event(
     prepared: PreparedEvent,
     is_new: bool,
     handler: &dyn InboundEventHandler,
 ) -> bool {
+    let session = crate::state::SessionGuard::capture();
+    if !session.is_valid() {
+        return false;
+    }
     match prepared {
         PreparedEvent::Processed { result, contact, sender, is_mine, wrapper_event_id, wrapper_event_id_bytes, wrapper_created_at, .. } => {
             // Cache wrapper for session dedup
@@ -563,8 +572,8 @@ async fn commit_deletion(
     //                    parse it and compare against the deletion
     //                    sender.
     let authorized = if mine {
-        match crate::state::MY_PUBLIC_KEY.get() {
-            Some(my_pk) => sender == my_pk,
+        match crate::state::my_public_key() {
+            Some(my_pk) => *sender == my_pk,
             None => false,
         }
     } else {
@@ -643,11 +652,10 @@ pub async fn process_event(
     is_new: bool,
     handler: &dyn InboundEventHandler,
 ) -> std::result::Result<bool, String> {
-    let client = crate::state::NOSTR_CLIENT.get()
+    let client = crate::state::nostr_client()
         .ok_or_else(|| "Nostr client not initialized".to_string())?;
-    let my_pk = crate::state::MY_PUBLIC_KEY.get()
-        .copied()
+    let my_pk = crate::state::my_public_key()
         .ok_or_else(|| "Public key not initialized".to_string())?;
-    let prepared = prepare_event(event, client, my_pk).await;
+    let prepared = prepare_event(event, &client, my_pk).await;
     Ok(commit_prepared_event(prepared, is_new, handler).await)
 }

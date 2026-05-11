@@ -14,7 +14,7 @@ use vector_core::{Message, RumorProcessingResult};
 use crate::{
     db, miniapps, commands,
     MlsService, NotificationData, show_notification_generic,
-    STATE, TAURI_APP, NOSTR_CLIENT, WRAPPER_ID_CACHE, NOTIFIED_WELCOMES,
+    STATE, TAURI_APP, nostr_client, WRAPPER_ID_CACHE, NOTIFIED_WELCOMES,
     util::get_file_type_description,
     state::{is_processing_allowed, PENDING_EVENTS},
 };
@@ -227,10 +227,14 @@ fn get_file_notification_info(
 // ============================================================================
 
 /// Internal event handler — called by subscription handler and encryption drain.
+///
+/// Returns `false` if no session is active or the session has been swapped
+/// out from under us. The subscription loop treats `false` as "drop this
+/// event"; the encryption-drain loop tolerates the same outcome.
 pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
-    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-    let my_public_key = *crate::MY_PUBLIC_KEY.get().expect("Public key not initialized");
-    handle_event_with_context(event, is_new, client, my_public_key).await
+    let Some(client) = nostr_client() else { return false; };
+    let Some(my_public_key) = crate::my_public_key() else { return false; };
+    handle_event_with_context(event, is_new, &client, my_public_key).await
 }
 
 /// Full event processing — accepts dependencies as parameters.

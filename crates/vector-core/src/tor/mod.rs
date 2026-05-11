@@ -509,6 +509,17 @@ pub fn active_bridge_addrs() -> Vec<SocketAddr> {
         .clone()
 }
 
+/// Drop the active bridge socket addresses. Used by `reset_session()` so
+/// stale bridge metadata from the prior account doesn't get reported as
+/// "via bridge" by `current_circuit_hops` until the new account's Tor
+/// service repopulates the slot on next start.
+pub fn clear_active_bridge_addrs() {
+    bridge_addrs_slot()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+}
+
 /// Resolve the system path to `obfs4proxy`. Looks at `$PATH` first, then a
 /// few common install locations on each desktop OS. Returns `None` if the
 /// binary isn't installed; callers surface a clear error so the user can

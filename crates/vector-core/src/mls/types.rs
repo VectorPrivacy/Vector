@@ -172,6 +172,14 @@ pub async fn record_group_success(group_id: &str) {
     counts.remove(group_id);
 }
 
+/// Clear every group's failure counter — called by `reset_session()`.
+/// Failure counters are keyed by group id; a collision between A's and
+/// B's group ids would trigger spurious desync detection on the new
+/// account (rare but legal under MLS semantics).
+pub async fn clear_group_failure_counts() {
+    GROUP_FAILURE_COUNTS.lock().await.clear();
+}
+
 // ============================================================================
 // Tests
 // ============================================================================

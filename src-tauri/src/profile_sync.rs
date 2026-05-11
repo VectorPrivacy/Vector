@@ -18,8 +18,14 @@ impl ProfileSyncHandler for TauriProfileSyncHandler {
         let avatar = avatar_url.to_string();
         let banner = banner_url.to_string();
         let npub = slim.id.clone();
+        // SessionGuard pre-spawn — a profile fetched for account A and
+        // queued just before reset_session would otherwise land in
+        // account B's DB after the swap.
+        let session = vector_core::state::SessionGuard::capture();
         tokio::spawn(async move {
+            if !session.is_valid() { return; }
             db::set_profile(slim).await.ok();
+            if !session.is_valid() { return; }
             profile::cache_profile_images(&npub, &avatar, &banner).await;
         });
     }

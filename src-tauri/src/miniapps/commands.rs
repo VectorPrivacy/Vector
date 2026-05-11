@@ -732,7 +732,7 @@ pub async fn miniapp_open(
                 let channel_state = state.remove_realtime_channel(&existing_label).await;
                 if let Some(channel) = channel_state {
                     let topic_encoded = super::realtime::encode_topic_id(&channel.topic);
-                    if let Some(my_pk) = crate::MY_PUBLIC_KEY.get() {
+                    if let Some(my_pk) = crate::my_public_key() {
                         if let Ok(my_npub) = my_pk.to_bech32() {
                             state.remove_session_peer(&channel.topic, &my_npub).await;
                         }
@@ -860,8 +860,8 @@ pub async fn miniapp_open(
             bootstrap_peers.extend(cached);
 
             // Persisted from DB
-            let my_npub = crate::MY_PUBLIC_KEY.get()
-                .and_then(|pk| nostr_sdk::prelude::ToBech32::to_bech32(pk).ok())
+            let my_npub = crate::my_public_key()
+                .and_then(|pk| nostr_sdk::prelude::ToBech32::to_bech32(&pk).ok())
                 .unwrap_or_default();
             if let Ok(records) = crate::db::get_active_peer_advertisements(&topic_encoded, &my_npub) {
                 for record in &records {
@@ -893,7 +893,7 @@ pub async fn miniapp_open(
                 ).await;
             }
 
-            if let Some(pk) = crate::MY_PUBLIC_KEY.get() {
+            if let Some(pk) = crate::my_public_key() {
                 let npub = pk.to_bech32().unwrap();
                 state.add_session_peer(topic, npub).await;
             }
@@ -913,8 +913,8 @@ pub async fn miniapp_open(
 
             // Connect to known peers (runs after signal — doesn't block joinRealtimeChannel).
             // Single attempt, 5s timeout — stale peers fail fast.
-            let my_npub = crate::MY_PUBLIC_KEY.get()
-                .and_then(|pk| nostr_sdk::prelude::ToBech32::to_bech32(pk).ok())
+            let my_npub = crate::my_public_key()
+                .and_then(|pk| nostr_sdk::prelude::ToBech32::to_bech32(&pk).ok())
                 .unwrap_or_default();
             let mut connected_ids = std::collections::HashSet::new();
 
@@ -1087,7 +1087,7 @@ pub async fn miniapp_open(
                         }
 
                         // Remove ourselves from session peers
-                        if let Some(my_pk) = crate::MY_PUBLIC_KEY.get() {
+                        if let Some(my_pk) = crate::my_public_key() {
                             let my_npub = my_pk.to_bech32().unwrap();
                             state.remove_session_peer(&channel.topic, &my_npub).await;
                         }
@@ -1208,7 +1208,7 @@ pub async fn miniapp_close(
             let topic_encoded = super::realtime::encode_topic_id(&channel.topic);
 
             // Remove ourselves from session peers
-            if let Some(my_pk) = crate::MY_PUBLIC_KEY.get() {
+            if let Some(my_pk) = crate::my_public_key() {
                 let my_npub = my_pk.to_bech32().unwrap();
                 state.remove_session_peer(&channel.topic, &my_npub).await;
             }
@@ -1386,8 +1386,8 @@ pub async fn miniapp_join_realtime_channel(
     if !is_rejoin {
         // Preconnect didn't run (scan false negative or non-realtime app).
         // Do peer connections + advertisement here as fallback.
-        let my_npub = crate::MY_PUBLIC_KEY.get()
-            .and_then(|pk| ToBech32::to_bech32(pk).ok())
+        let my_npub = crate::my_public_key()
+            .and_then(|pk| ToBech32::to_bech32(&pk).ok())
             .unwrap_or_default();
         let mut connected_ids = std::collections::HashSet::new();
 
@@ -1439,7 +1439,7 @@ pub async fn miniapp_join_realtime_channel(
     }
 
     // Add self + emit status
-    if let Some(my_pk) = crate::MY_PUBLIC_KEY.get() {
+    if let Some(my_pk) = crate::my_public_key() {
         let npub = my_pk.to_bech32().unwrap();
         state.add_session_peer(topic, npub).await;
     }
@@ -1855,9 +1855,9 @@ pub async fn marketplace_publish_app(
     source_url: Option<String>,
     permissions: Option<String>,
 ) -> Result<String, Error> {
-    use crate::{NOSTR_CLIENT, get_blossom_servers};
+    use crate::{nostr_client, get_blossom_servers};
 
-    let client = NOSTR_CLIENT.get()
+    let client = nostr_client()
         .ok_or_else(|| Error::Anyhow(anyhow::anyhow!("Nostr client not initialized")))?;
 
     let signer = client.signer().await

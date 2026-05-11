@@ -4,9 +4,9 @@
 //! uses the `EventEmitter` trait via `crate::traits::emit_event`.
 
 use nostr_sdk::prelude::*;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::LazyLock;
 use tokio::sync::Mutex;
 
@@ -67,7 +67,7 @@ pub static TRUSTED_RELAYS: &[&str] = &[
 ];
 
 pub async fn active_trusted_relays() -> Vec<&'static str> {
-    let Some(client) = NOSTR_CLIENT.get() else { return Vec::new() };
+    let Some(client) = nostr_client() else { return Vec::new() };
     let pool_relays = client.relays().await;
     TRUSTED_RELAYS.iter().copied()
         .filter(|url| {
@@ -103,19 +103,139 @@ pub fn is_encryption_enabled_fast() -> bool { ENCRYPTION_ENABLED.load(Ordering::
 #[inline]
 pub fn set_encryption_enabled(enabled: bool) { ENCRYPTION_ENABLED.store(enabled, Ordering::Release); }
 
+/// Resolve "is this account encrypted?" from raw DB settings. Single
+/// source of truth — every caller (crypto::is_encryption_enabled,
+/// init_encryption_enabled, Android bg-sync) delegates here, so the
+/// answer is consistent regardless of code path.
+///
+/// Rules:
+///   * `encryption_enabled = "false"` → not encrypted (explicit opt-out)
+///   * `encryption_enabled = "true"`  → encrypted (explicit opt-in)
+///   * row missing                    → encrypted iff `security_type` exists
+///
+/// The `security_type` fallback handles pre-multi-account installs that
+/// wrote `security_type` without `encryption_enabled`. A brand-new
+/// account has neither row, so the answer is "not encrypted".
+pub fn resolve_encryption_enabled(
+    encryption_enabled_row: Option<&str>,
+    security_type_row: Option<&str>,
+) -> bool {
+    match encryption_enabled_row {
+        Some("false") => false,
+        Some(_) => true,
+        None => security_type_row.is_some(),
+    }
+}
+
+/// Resolve from the current account's DB via the global settings helper.
+/// Returns `false` if the DB is not yet open.
+pub fn resolve_encryption_enabled_from_db() -> bool {
+    let enc = crate::db::get_sql_setting("encryption_enabled".to_string()).ok().flatten();
+    let sec = crate::db::get_sql_setting("security_type".to_string()).ok().flatten();
+    resolve_encryption_enabled(enc.as_deref(), sec.as_deref())
+}
+
 pub fn init_encryption_enabled() {
-    let enabled = crate::db::get_sql_setting("encryption_enabled".to_string())
-        .ok().flatten()
-        .map(|v| v != "false")
-        .unwrap_or(true);
+    let enabled = resolve_encryption_enabled_from_db();
     set_encryption_enabled(enabled);
 }
 
-pub static NOSTR_CLIENT: OnceLock<Client> = OnceLock::new();
+#[cfg(test)]
+mod resolve_encryption_enabled_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_false_wins_even_with_security_type() {
+        assert!(!resolve_encryption_enabled(Some("false"), Some("password")));
+    }
+
+    #[test]
+    fn explicit_true_is_encrypted() {
+        assert!(resolve_encryption_enabled(Some("true"), None));
+    }
+
+    #[test]
+    fn missing_row_defaults_to_security_type_presence() {
+        // Pre-multi-account install that wrote security_type but not the
+        // encryption_enabled flag — must be treated as encrypted.
+        assert!(resolve_encryption_enabled(None, Some("password")));
+        // Fresh account with no rows — must be treated as unencrypted.
+        assert!(!resolve_encryption_enabled(None, None));
+    }
+
+    #[test]
+    fn explicit_non_false_value_is_encrypted() {
+        // Anything other than the literal "false" string is treated as
+        // encrypted, matching the previous behaviour of `v != "false"`.
+        assert!(resolve_encryption_enabled(Some("1"), None));
+        assert!(resolve_encryption_enabled(Some(""), None));
+    }
+}
+
+// ============================================================================
+// Per-session globals — must be resettable for inline account swap
+// ============================================================================
+//
+// `NOSTR_CLIENT` and `MY_PUBLIC_KEY` are RwLock<Option<_>> rather than OnceLock
+// so `reset_session()` can swap them atomically — mobile cannot rely on
+// `app.restart()`. Callers should prefer the helpers below over locking directly.
+
+pub static NOSTR_CLIENT: LazyLock<RwLock<Option<Client>>> =
+    LazyLock::new(|| RwLock::new(None));
 
 pub static MY_SECRET_KEY: crate::crypto::GuardedKey = crate::crypto::GuardedKey::empty();
 
-pub static MY_PUBLIC_KEY: OnceLock<PublicKey> = OnceLock::new();
+pub static MY_PUBLIC_KEY: LazyLock<RwLock<Option<PublicKey>>> =
+    LazyLock::new(|| RwLock::new(None));
+
+/// Get a clone of the active Nostr client. The clone is cheap — `Client`
+/// is internally `Arc`-counted, so all clones share connections, signers,
+/// and subscription state. Returns `None` when no session is active.
+#[inline]
+pub fn nostr_client() -> Option<Client> {
+    NOSTR_CLIENT.read().unwrap().as_ref().cloned()
+}
+
+/// Returns `true` when there is an active session (client + pubkey set).
+#[inline]
+pub fn has_active_session() -> bool {
+    NOSTR_CLIENT.read().unwrap().is_some()
+}
+
+/// Get the active user's public key. `PublicKey` is `Copy`, so this is by-value.
+#[inline]
+pub fn my_public_key() -> Option<PublicKey> {
+    *MY_PUBLIC_KEY.read().unwrap()
+}
+
+/// Install the Nostr client for the current session. Replaces any prior client
+/// without shutting it down — `reset_session()` is responsible for orderly
+/// teardown of the outgoing client.
+#[inline]
+pub fn set_nostr_client(client: Client) {
+    *NOSTR_CLIENT.write().unwrap() = Some(client);
+}
+
+/// Install the active user's public key for the current session.
+#[inline]
+pub fn set_my_public_key(pk: PublicKey) {
+    *MY_PUBLIC_KEY.write().unwrap() = Some(pk);
+}
+
+/// Atomically take the current Nostr client out of global state.
+/// Used by `reset_session()` so the post-take shutdown call doesn't race
+/// with new readers.
+#[inline]
+pub fn take_nostr_client() -> Option<Client> {
+    NOSTR_CLIENT.write().unwrap().take()
+}
+
+/// Clear `MY_PUBLIC_KEY`. The Nostr client is taken separately via
+/// `take_nostr_client()` so the caller can shut it down before this clear.
+#[inline]
+pub fn clear_my_public_key() {
+    *MY_PUBLIC_KEY.write().unwrap() = None;
+}
 
 #[derive(Clone)]
 pub struct PendingInviteAcceptance {
@@ -123,9 +243,172 @@ pub struct PendingInviteAcceptance {
     pub inviter_pubkey: PublicKey,
 }
 
-pub static PENDING_INVITE: OnceLock<PendingInviteAcceptance> = OnceLock::new();
+// Per-session: tracks an invite captured during account-creation that should
+// be broadcast to relays once login finishes. Must reset across accounts so a
+// pending invite captured for account A doesn't auto-execute on account B.
+pub static PENDING_INVITE: LazyLock<RwLock<Option<PendingInviteAcceptance>>> =
+    LazyLock::new(|| RwLock::new(None));
+
+#[inline]
+pub fn pending_invite() -> Option<PendingInviteAcceptance> {
+    PENDING_INVITE.read().unwrap().clone()
+}
+
+#[inline]
+pub fn set_pending_invite(invite: PendingInviteAcceptance) {
+    *PENDING_INVITE.write().unwrap() = Some(invite);
+}
+
+#[inline]
+pub fn clear_pending_invite() {
+    *PENDING_INVITE.write().unwrap() = None;
+}
 
 pub static NOTIFIED_WELCOMES: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+// ============================================================================
+// Session generation — defends background tasks against account swaps
+// ============================================================================
+//
+// Monotonic counter bumped at the start of `reset_session()`. Background
+// tasks capture the value via `SessionGuard::capture()` at spawn time and
+// check `is_valid()` before each side-effect; a stale guard means a swap
+// occurred and the task must exit. Defends the post-swap window — when
+// `NOSTR_CLIENT` is once again Some but it's account B's client and a
+// leaked account-A task would otherwise write A's state into B's DB.
+//
+// Pairs with `db::POOL_GENERATION`: pool counter defends the connection
+// pool's Drop pathway; this counter defends application-level work.
+
+static SESSION_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Snapshot of the current session generation.
+#[inline]
+pub fn current_session_generation() -> u64 {
+    SESSION_GENERATION.load(Ordering::Acquire)
+}
+
+/// Advance the session generation. Called at the start of `reset_session()`
+/// so any task that captured the previous value before the swap can detect
+/// it and short-circuit before writing to the new account's state.
+#[inline]
+pub fn bump_session_generation() -> u64 {
+    SESSION_GENERATION.fetch_add(1, Ordering::AcqRel).wrapping_add(1)
+}
+
+/// Lightweight handle that remembers the session generation at the moment
+/// it was created. Pass it into background tasks (via move-capture into a
+/// spawned future) and check `is_valid()` before any side-effect.
+///
+/// Cheap to copy — just a `u64`. Never holds a lock.
+#[derive(Copy, Clone, Debug)]
+pub struct SessionGuard {
+    generation: u64,
+}
+
+impl SessionGuard {
+    /// Snapshot the current session generation for later validation.
+    #[inline]
+    pub fn capture() -> Self {
+        Self { generation: current_session_generation() }
+    }
+
+    /// `true` while the captured generation still matches the live counter.
+    /// Once `false`, any captured per-account context (npub, keys, chat ids)
+    /// is no longer guaranteed to belong to the active session.
+    #[inline]
+    pub fn is_valid(&self) -> bool {
+        self.generation == current_session_generation()
+    }
+
+    /// Raw generation value (for logging / structured comparisons).
+    #[inline]
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
+#[cfg(test)]
+mod session_generation_tests {
+    use super::*;
+
+    #[test]
+    fn guard_is_valid_when_no_swap_occurred() {
+        let guard = SessionGuard::capture();
+        assert!(guard.is_valid());
+    }
+
+    #[test]
+    fn guard_invalidates_after_bump() {
+        let guard = SessionGuard::capture();
+        bump_session_generation();
+        assert!(!guard.is_valid(), "guard must invalidate after a swap");
+    }
+
+    #[test]
+    fn bump_advances_counter_monotonically() {
+        let before = current_session_generation();
+        let after = bump_session_generation();
+        assert_eq!(after, before.wrapping_add(1));
+        assert_eq!(current_session_generation(), after);
+    }
+}
+
+#[cfg(test)]
+mod session_globals_tests {
+    use super::*;
+
+    /// Single combined test so the global statics aren't raced by parallel
+    /// runners. cargo runs each `#[test]` on its own thread, so anything
+    /// touching `MY_PUBLIC_KEY`/`PENDING_INVITE` lives here.
+    #[test]
+    fn session_helpers_round_trip_and_clear() {
+        // Defensive cleanup: a previous test panic could have left global
+        // state behind. Start every run from a known-empty baseline so the
+        // assertions below aren't fooled by leftover values.
+        clear_my_public_key();
+        clear_pending_invite();
+
+        // PublicKey: set → get → clear.
+        // Use a deterministic key from a hex seed; nostr_sdk::Keys::generate()
+        // would also work but the deterministic form makes failures easier
+        // to reproduce.
+        let keys = Keys::parse(
+            "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5",
+        ).expect("parse test nsec");
+        let pk = keys.public_key;
+
+        assert_eq!(my_public_key(), None, "starts as None");
+
+        set_my_public_key(pk);
+        assert_eq!(my_public_key(), Some(pk));
+
+        clear_my_public_key();
+        assert_eq!(my_public_key(), None, "cleared returns None");
+
+        // PendingInvite: set → get → clear.
+        let invite = PendingInviteAcceptance {
+            invite_code: "abc123".to_string(),
+            inviter_pubkey: pk,
+        };
+
+        assert!(pending_invite().is_none(), "starts as None");
+
+        set_pending_invite(invite.clone());
+        let got = pending_invite().expect("set then read");
+        assert_eq!(got.invite_code, invite.invite_code);
+        assert_eq!(got.inviter_pubkey, invite.inviter_pubkey);
+
+        clear_pending_invite();
+        assert!(pending_invite().is_none(), "cleared returns None");
+
+        // Take semantics for nostr_client: with no client installed,
+        // `take_nostr_client()` returns None and is_active is false.
+        assert!(!has_active_session(), "no client installed");
+        assert!(take_nostr_client().is_none(), "take from empty returns None");
+        assert!(!has_active_session(), "still none after take-of-empty");
+    }
+}
 
 pub static WRAPPER_ID_CACHE: LazyLock<Mutex<WrapperIdCache>> = LazyLock::new(|| Mutex::new(WrapperIdCache::new()));
 

@@ -14,7 +14,7 @@ use vector_core::PreparedEvent;
 use crate::{
     db, profile, profile_sync,
     ChatType, Profile,
-    NOSTR_CLIENT, STATE, WRAPPER_ID_CACHE,
+    nostr_client, STATE, WRAPPER_ID_CACHE,
 };
 
 // ============================================================================
@@ -81,10 +81,15 @@ pub async fn fetch_messages<R: Runtime>(
     relay_url: Option<String>
 ) {
     println!("[Boot] fetch_messages called (init={}, relay={:?})", init, relay_url);
-    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-
-    // Grab our pubkey
-    let my_public_key = *crate::MY_PUBLIC_KEY.get().expect("Public key not initialized");
+    // Return type is `()` — silently early-exit on no-session.
+    let Some(client) = nostr_client() else {
+        eprintln!("[Boot] fetch_messages aborted: no active session");
+        return;
+    };
+    let Some(my_public_key) = crate::my_public_key() else {
+        eprintln!("[Boot] fetch_messages aborted: no public key");
+        return;
+    };
 
     // Single-relay reconnection sync — uses negentropy just like the main sync
     if let Some(url) = relay_url {

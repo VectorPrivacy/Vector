@@ -16,7 +16,7 @@ use crate::util::hex_string_to_bytes;
 
 /// Global set of attachment IDs currently being downloaded.
 /// Prevents duplicate download threads for the same file (deduplication).
-static ACTIVE_DOWNLOADS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+pub(crate) static ACTIVE_DOWNLOADS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// RAII guard that removes an attachment ID from ACTIVE_DOWNLOADS when dropped.
 /// Prevents leaking IDs if any code path panics or returns early.

@@ -11,7 +11,7 @@ use nostr_sdk::prelude::*;
 use rand::{thread_rng, Rng};
 use rand::distributions::Alphanumeric;
 
-use crate::{NOSTR_CLIENT, active_trusted_relays, PENDING_INVITE, PendingInviteAcceptance};
+use crate::{nostr_client, active_trusted_relays, PendingInviteAcceptance};
 use crate::db;
 
 // ============================================================================
@@ -49,10 +49,10 @@ pub async fn get_or_create_invite_code() -> Result<String, String> {
     }
 
     // No local code found, check the network
-    let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
+    let client = nostr_client().ok_or("Nostr client not initialized")?;
 
     // Get our public key
-    let my_public_key = *crate::MY_PUBLIC_KEY.get().ok_or("Public key not initialized")?;
+    let my_public_key = crate::my_public_key().ok_or("Public key not initialized")?;
 
     // Check if we've already published an invite on the network
     let filter = Filter::new()
@@ -105,7 +105,7 @@ pub async fn get_or_create_invite_code() -> Result<String, String> {
 /// Accept an invite code from another user (deferred until after encryption setup)
 #[tauri::command]
 pub async fn accept_invite_code(invite_code: String) -> Result<String, String> {
-    let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
+    let client = nostr_client().ok_or("Nostr client not initialized")?;
 
     // Validate invite code format (8 alphanumeric characters)
     if invite_code.len() != 8 || !invite_code.chars().all(|c| c.is_alphanumeric()) {
@@ -142,7 +142,7 @@ pub async fn accept_invite_code(invite_code: String) -> Result<String, String> {
     let inviter_npub = inviter_pubkey.to_bech32().map_err(|e| e.to_string())?;
 
     // Get our public key
-    let my_public_key = *crate::MY_PUBLIC_KEY.get().ok_or("Public key not initialized")?;
+    let my_public_key = crate::my_public_key().ok_or("Public key not initialized")?;
 
     // Check if we're trying to accept our own invite
     if inviter_pubkey == my_public_key {
@@ -155,8 +155,12 @@ pub async fn accept_invite_code(invite_code: String) -> Result<String, String> {
         inviter_pubkey: inviter_pubkey.clone(),
     };
 
-    // Try to set the pending invite, ignore if already set
-    let _ = PENDING_INVITE.set(pending_invite);
+    // First-invite-wins: a second invite acceptance during the same
+    // pre-login window must NOT clobber the original (matches the prior
+    // OnceLock::set() semantics, which silently ignored second calls).
+    if crate::state::pending_invite().is_none() {
+        crate::state::set_pending_invite(pending_invite);
+    }
 
     // Return the inviter's npub so the frontend can initiate a chat
     Ok(inviter_npub)
@@ -165,7 +169,7 @@ pub async fn accept_invite_code(invite_code: String) -> Result<String, String> {
 /// Get the count of unique users who accepted invites from a given npub
 #[tauri::command]
 pub async fn get_invited_users(npub: String) -> Result<u32, String> {
-    let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
+    let client = nostr_client().ok_or("Nostr client not initialized")?;
 
     // Convert npub to PublicKey
     let inviter_pubkey = PublicKey::from_bech32(&npub).map_err(|e| e.to_string())?;
@@ -236,7 +240,7 @@ pub async fn get_invited_users(npub: String) -> Result<u32, String> {
 /// Verifies they have a valid badge claim event from the November 5, 2025 event
 #[tauri::command]
 pub async fn check_fawkes_badge(npub: String) -> Result<bool, String> {
-    let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
+    let client = nostr_client().ok_or("Nostr client not initialized")?;
 
     // Convert npub to PublicKey
     let user_pubkey = PublicKey::from_bech32(&npub).map_err(|e| e.to_string())?;

@@ -1352,8 +1352,14 @@ domSettingsLogout.onclick = async (evt) => {
     const fConfirm = await popupConfirm('Going Incognito?', 'Logging out of Vector will fully erase the database, <b>ensure you have a backup of your keys before logging out!</b><br><br><b>You will permanently lose access to your Group Chats after logging out!</b><br><br>That said, would you like to continue?', false, '', 'vector_warning.svg');
     if (!fConfirm) return;
 
-    // Begin the logout sequence
-    await invoke('logout');
+    // Begin the logout sequence. The backend now returns `Result<(), String>`
+    // and refuses while an encryption migration is in flight — surface that
+    // refusal as a popup instead of an uncaught rejection.
+    try {
+        await invoke('logout');
+    } catch (e) {
+        await popupConfirm('Logout failed', String(e), true);
+    }
 };
 
 // Check if this device is the primary one (has the latest keypackage)
@@ -1519,12 +1525,17 @@ domSettingsExport.onclick = async (evt) => {
             <p style="opacity: 0.75; font-size: 13px; margin: 0 0 16px 0; word-break: break-word;">These keys are your identity on Vector. There are no recovery options! If lost, your account cannot be restored. Never share them.</p>
         `;
 
+        // Both the seed phrase and the nsec are long single-line strings.
+        // We render each in its own horizontally-scrollable container with
+        // `min-width: 0` on the flex child so the popup doesn't get pushed
+        // wider than the viewport. The content stays on one line and the
+        // user scrolls/swipes horizontally to read it.
         if (keys.seed_phrase) {
         exportContent += `
             <div style="text-align: left; padding: 0 8px; margin-bottom: 12px;">
-            <p style="font-weight: bold; margin: 0 0 4px 0;">Seed Phrase</p>
-            <div style="display: flex; align-items: center; gap: 6px;">
-                <p id="export-seed-value" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: #1a1a1a; padding: 8px 10px; border-radius: 5px; font-family: monospace; font-size: 12px; flex: 1; margin: 0;">${safeSeed}</p>
+            <p style="font-weight: bold; margin: 0 0 4px 0; text-align: center;">Seed Phrase</p>
+            <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+                <p id="export-seed-value" style="overflow-x: auto; overflow-y: hidden; white-space: nowrap; background: #1a1a1a; padding: 8px 10px; border-radius: 5px; font-family: monospace; font-size: 12px; flex: 1; min-width: 0; margin: 0;">${safeSeed}</p>
                 <button id="export-seed-copy" style="flex-shrink: 0; padding: 6px 10px; border-radius: 5px; cursor: pointer;">Copy</button>
             </div>
             </div>
@@ -1532,23 +1543,29 @@ domSettingsExport.onclick = async (evt) => {
         }
 
         exportContent += `
-        <div style="text-align: center; padding: 0 8px;">
-            <p style="font-weight: bold; margin: 0 0 4px 0;">Private Key (nsec)</p>
-            <div style="display: flex; align-items: center; gap: 6px;">
-            <p id="export-nsec-value" style="display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-all; background: #1a1a1a; padding: 8px 10px; border-radius: 5px; font-family: monospace; font-size: 12px; flex: 1; margin: 0;">${safeNsec}</p>
+        <div style="text-align: left; padding: 0 8px;">
+            <p style="font-weight: bold; margin: 0 0 4px 0; text-align: center;">Private Key (nsec)</p>
+            <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+            <p id="export-nsec-value" style="overflow-x: auto; overflow-y: hidden; white-space: nowrap; background: #1a1a1a; padding: 8px 10px; border-radius: 5px; font-family: monospace; font-size: 12px; flex: 1; min-width: 0; margin: 0;">${safeNsec}</p>
+            <button id="export-nsec-copy" style="flex-shrink: 0; padding: 6px 10px; border-radius: 5px; cursor: pointer;">Copy</button>
             </div>
             <p style="color: #4de0a0; font-size: 12px; margin: 8px 0 -10px 0; text-align: center;">Do Not Store on Device. Backup Offline.</p>
         </div>
         `;
 
-        // Show the export information in a popup
-        await popupConfirm('Export Account', exportContent, true, '', 'vector_warning.svg');
+        // Kick off the popup. `popupConfirm` is async but the DOM mutations
+        // it does (assigning the innerHTML for our subtext) run synchronously
+        // before it returns its promise, so we can wire the copy buttons up
+        // BEFORE awaiting — `await popupConfirm(...)` only resolves on the
+        // user's Okay click, by which point the popup is gone.
+        const popupPromise = popupConfirm('Export Account', exportContent, true, '', 'vector_warning.svg');
 
-        // Bind copy buttons via DOM (safe — no inline onclick with interpolated values)
         const seedCopyBtn = document.getElementById('export-seed-copy');
         if (seedCopyBtn) seedCopyBtn.onclick = () => navigator.clipboard.writeText(keys.seed_phrase);
-        const nsecCopyBtn = document.getElementById('export-nsec-value');
-        if (nsecCopyBtn) nsecCopyBtn.style.cursor = 'pointer', nsecCopyBtn.onclick = () => navigator.clipboard.writeText(keys.nsec);
+        const nsecCopyBtn = document.getElementById('export-nsec-copy');
+        if (nsecCopyBtn) nsecCopyBtn.onclick = () => navigator.clipboard.writeText(keys.nsec);
+
+        await popupPromise;
     } catch (error) {
         console.error('Export failed:', error);
         await popupConfirm('Export Failed', escapeHtml(error.toString()), true, '', 'vector_warning.svg');

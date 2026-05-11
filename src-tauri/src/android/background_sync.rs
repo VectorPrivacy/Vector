@@ -16,7 +16,8 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::{NOSTR_CLIENT, MY_SECRET_KEY, MY_PUBLIC_KEY, ENCRYPTION_KEY};
+use crate::{NOSTR_CLIENT, MY_SECRET_KEY, ENCRYPTION_KEY, set_my_public_key};
+use vector_core::state::{set_nostr_client, MY_PUBLIC_KEY};
 use crate::commands::relays::DEFAULT_RELAYS;
 use crate::services::event_handler::handle_event_with_context;
 
@@ -299,8 +300,8 @@ fn run_standalone_sync_loop(data_dir: &str) {
         // client that would poison the OnceCell and prevent the full app from
         // creating a proper client with signer after PIN unlock.
         if can_decrypt {
-            let _ = NOSTR_CLIENT.set(client.clone());
-            let _ = MY_PUBLIC_KEY.set(my_public_key);
+            set_nostr_client(client.clone());
+            set_my_public_key(my_public_key);
             if let Some(keys) = keys {
                 MY_SECRET_KEY.store_from_keys(&keys, &[&ENCRYPTION_KEY]);
                 drop(keys);
@@ -465,15 +466,26 @@ async fn bg_connect_single_relay(client: &Client, data_dir: &str) -> Result<(), 
     // Build the candidate list: user's custom relays first, then defaults
     let mut candidates: Vec<String> = Vec::new();
 
-    // Read user's relay config from DB (custom relays + disabled defaults)
-    let npub_dir = std::fs::read_dir(data_dir)
+    // Read user's relay config from DB (custom relays + disabled defaults).
+    // Marker first, then fall back to first npub dir for pre-marker
+    // installs. Picking by `read_dir` order on a multi-account install
+    // grabs a filesystem-order-dependent account and silently breaks
+    // notifications for the user.
+    let data_path = std::path::Path::new(data_dir);
+    let npub_dir = vector_core::db::read_active_account_file()
         .ok()
-        .and_then(|entries| {
-            entries.flatten().find(|e| {
-                e.file_name().to_str().map_or(false, |n| n.starts_with("npub1"))
+        .flatten()
+        // Symlinks rejected so a crafted `<data>/<npub-name>` link
+        // can't redirect bg-sync into the wrong tree.
+        .or_else(|| {
+            std::fs::read_dir(data_dir).ok().and_then(|entries| {
+                entries.flatten()
+                    .filter(|e| matches!(e.file_type(), Ok(ft) if ft.is_dir() && !ft.is_symlink()))
+                    .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+                    .find(|n| n.starts_with("npub1"))
             })
         })
-        .map(|e| e.path());
+        .map(|npub| data_path.join(npub));
 
     let (custom_relays, disabled_defaults) = if let Some(ref dir) = npub_dir {
         let db_path = dir.join("vector.db");
@@ -576,24 +588,42 @@ async fn bg_connect_single_relay(client: &Client, data_dir: &str) -> Result<(), 
 async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey, bool, Option<Keys>), String> {
     let data_path = std::path::Path::new(data_dir);
 
-    // Scan for npub directories
-    let entries = std::fs::read_dir(data_path)
-        .map_err(|e| format!("Failed to read dataDir: {:?}", e))?;
-
-    let mut npub_dir = None;
-    let mut npub_name = String::new();
-    for entry in entries.flatten() {
-        if let Some(name) = entry.file_name().to_str() {
-            if name.starts_with("npub1") {
-                logcat(&format!("Found account dir: {}", name));
-                npub_name = name.to_string();
-                npub_dir = Some(entry.path());
-                break;
-            }
+    // Marker first; fall back to first npub dir only on legacy installs.
+    // Same pattern as `bg_connect_single_relay` and `bootstrap_pipeline`.
+    let (npub_name, npub_dir) = match vector_core::db::read_active_account_file().ok().flatten() {
+        Some(npub) => {
+            logcat(&format!("Resolved account via marker: {}", npub));
+            let dir = data_path.join(&npub);
+            (npub, dir)
         }
+        None => {
+            let entries = std::fs::read_dir(data_path)
+                .map_err(|e| format!("Failed to read dataDir: {:?}", e))?;
+            let mut name = String::new();
+            let mut dir = None;
+            for entry in entries.flatten() {
+                // Symlinks rejected — a crafted link named after a
+                // valid npub must not redirect bg-sync.
+                let Ok(ft) = entry.file_type() else { continue; };
+                if !ft.is_dir() || ft.is_symlink() { continue; }
+                if let Some(n) = entry.file_name().to_str() {
+                    if n.starts_with("npub1") {
+                        logcat(&format!("No marker; falling back to first npub dir: {}", n));
+                        name = n.to_string();
+                        dir = Some(entry.path());
+                        break;
+                    }
+                }
+            }
+            (name, dir.ok_or("No npub account directory found")?)
+        }
+    };
+    // Validate the resolved path's basename matches a real account dir on
+    // disk — defends against a stale marker pointing at a directory the
+    // user deleted out of band.
+    if !npub_dir.exists() {
+        return Err(format!("Account directory missing for {}", npub_name));
     }
-
-    let npub_dir = npub_dir.ok_or("No npub account directory found")?;
     let db_path = npub_dir.join("vector.db");
 
     if !db_path.exists() {
@@ -630,10 +660,12 @@ async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey, bool, Op
         )
         .ok();
 
-    let encrypted = match encryption_enabled_val.as_deref() {
-        Some("false") => false,
-        _ => security_type.is_some(),
-    };
+    // Canonical resolver — bg-sync and Activity must agree on the
+    // "is this account encrypted?" answer.
+    let encrypted = vector_core::state::resolve_encryption_enabled(
+        encryption_enabled_val.as_deref(),
+        security_type.as_deref(),
+    );
 
     if encrypted {
         // Encrypted account — can't read nsec, but we can derive the pubkey from the
@@ -696,25 +728,47 @@ fn bootstrap_pipeline(data_dir: &str) -> Result<String, String> {
     // Set APP_DATA_DIR so static path helpers work
     crate::account_manager::set_app_data_dir(data_path.clone());
 
-    // Find the npub directory
-    let entries = std::fs::read_dir(&data_path)
-        .map_err(|e| format!("Failed to read dataDir: {:?}", e))?;
+    // Install the download dir override before any inbound event
+    // handler persists an attachment. Must match `lib.rs` setup hook
+    // (OnceLock::set is winner-takes-all and the two race depending
+    // on bg-sync vs Activity start order); both compute the same
+    // `<app_data>/vector_downloads` deterministically.
+    vector_core::db::set_download_dir(data_path.join("vector_downloads"));
 
-    let mut npub = None;
-    for entry in entries.flatten() {
-        if let Some(name) = entry.file_name().to_str() {
-            if name.starts_with("npub1") {
-                npub = Some(name.to_string());
-                break;
+    // Prefer the active-account marker so background sync stays aligned with
+    // whichever account the user last picked in the GUI. Fall back to the
+    // first npub directory if no marker is set yet.
+    let npub = if let Ok(Some(active)) = vector_core::db::read_active_account_file() {
+        active
+    } else {
+        let entries = std::fs::read_dir(&data_path)
+            .map_err(|e| format!("Failed to read dataDir: {:?}", e))?;
+        let mut found = None;
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with("npub1") {
+                    found = Some(name.to_string());
+                    break;
+                }
             }
         }
-    }
-
-    let npub = npub.ok_or("No npub account directory found")?;
+        let picked = found.ok_or("No npub account directory found")?;
+        logcat(&format!(
+            "No active-account marker; bg-sync falling back to first npub dir: {}",
+            &picked[..20.min(picked.len())]
+        ));
+        picked
+    };
 
     // Set current account + initialize DB pool (account_manager delegates to vector-core)
     crate::account_manager::set_current_account(npub.clone())?;
     vector_core::db::init_database(&npub)?;
+
+    // Seed the encryption atomic so any subsequent maybe_encrypt /
+    // maybe_decrypt call inside bg-sync agrees with on-disk state. The
+    // foreground Activity also seeds via `get_encryption_and_key`, but
+    // bg-sync may run alone for minutes before the Activity attaches.
+    vector_core::state::init_encryption_enabled();
 
     logcat(&format!("Pipeline bootstrapped for {}", &npub[..20.min(npub.len())]));
     Ok(npub)
@@ -926,7 +980,7 @@ pub extern "C" fn Java_io_vectorapp_NotificationActionReceiver_nativeSendReply(
             // This handles the race where the service just restarted and bootstrap
             // hasn't completed yet when the user taps Reply.
             let mut waited = 0u32;
-            while crate::NOSTR_CLIENT.get().is_none() && waited < 150 {
+            while crate::nostr_client().is_none() && waited < 150 {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 waited += 1;
             }
@@ -939,7 +993,7 @@ pub extern "C" fn Java_io_vectorapp_NotificationActionReceiver_nativeSendReply(
                     logcat("Inline reply sent successfully");
                     // Look up our own profile for avatar and display name
                     let (sender_label, avatar) = {
-                        let my_pk = crate::MY_PUBLIC_KEY.get()
+                        let my_pk = crate::my_public_key()
                             .and_then(|pk| pk.to_bech32().ok());
                         match my_pk {
                             Some(npub) => {

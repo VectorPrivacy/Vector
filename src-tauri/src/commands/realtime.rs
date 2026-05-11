@@ -6,7 +6,7 @@
 
 use nostr_sdk::prelude::*;
 
-use crate::{mls, NOSTR_CLIENT, active_trusted_relays};
+use crate::{mls, nostr_client, active_trusted_relays};
 
 // ============================================================================
 // Typing Indicators
@@ -15,8 +15,10 @@ use crate::{mls, NOSTR_CLIENT, active_trusted_relays};
 /// Send a typing indicator to a DM recipient or MLS group
 #[tauri::command]
 pub async fn start_typing(receiver: String) -> bool {
-    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-    let my_public_key = *crate::MY_PUBLIC_KEY.get().expect("Public key not initialized");
+    // Return false on no-session — typing fires continuously from
+    // keystrokes, so a panic here would crash the runtime mid-swap.
+    let Some(client) = nostr_client() else { return false; };
+    let Some(my_public_key) = crate::my_public_key() else { return false; };
 
     // Check if this is a group chat (group IDs are hex, not bech32)
     match PublicKey::from_bech32(receiver.as_str()) {
@@ -95,8 +97,8 @@ pub async fn send_webxdc_peer_advertisement(
     topic_id: String,
     node_addr: String,
 ) -> bool {
-    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-    let my_public_key = *crate::MY_PUBLIC_KEY.get().expect("Public key not initialized");
+    let Some(client) = nostr_client() else { return false; };
+    let Some(my_public_key) = crate::my_public_key() else { return false; };
 
     log_info!("Sending WebXDC peer advertisement to {} for topic {}", receiver, topic_id);
     log_debug!("Node address: {}", node_addr);
@@ -154,8 +156,8 @@ pub async fn send_webxdc_peer_left(
     receiver: String,
     topic_id: String,
 ) -> bool {
-    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-    let my_public_key = *crate::MY_PUBLIC_KEY.get().expect("Public key not initialized");
+    let Some(client) = nostr_client() else { return false; };
+    let Some(my_public_key) = crate::my_public_key() else { return false; };
 
     log_info!("Sending WebXDC peer-left to {} for topic {}", receiver, topic_id);
 

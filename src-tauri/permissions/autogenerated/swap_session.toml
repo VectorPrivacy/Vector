@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-swap-session"
+description = "Enables the swap_session command without any pre-configured scope."
+commands.allow = ["swap_session"]
+
+[[permission]]
+identifier = "deny-swap-session"
+description = "Denies the swap_session command without any pre-configured scope."
+commands.deny = ["swap_session"]

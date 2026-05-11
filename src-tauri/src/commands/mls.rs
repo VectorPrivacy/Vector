@@ -11,7 +11,7 @@ use tauri::Emitter;
 use std::sync::Arc;
 #[cfg(not(target_os = "android"))]
 use tauri_plugin_fs::FsExt;
-use crate::{db, mls, MlsService, NotificationData, show_notification_generic, NOSTR_CLIENT, NOTIFIED_WELCOMES, STATE, TAURI_APP, active_trusted_relays};
+use crate::{db, mls, MlsService, NotificationData, show_notification_generic, nostr_client, NOTIFIED_WELCOMES, STATE, TAURI_APP, active_trusted_relays};
 use crate::util::{bytes_to_hex_string, hex_string_to_bytes};
 
 // ============================================================================
@@ -1008,7 +1008,7 @@ pub async fn sync_mls_groups_quick() -> Result<(u32, u32), String> {
                 .initial_timeout(std::time::Duration::from_secs(10))
                 .dry_run();
 
-            let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
+            let client = nostr_client().ok_or("Nostr client not initialized")?;
 
             // Get Relay objects for trusted relays
             let relay_map = client.relays().await;
@@ -1067,7 +1067,12 @@ pub async fn sync_mls_groups_quick() -> Result<(u32, u32), String> {
                 let primary_set: std::collections::HashSet<EventId> = missing_ids.iter().copied().collect();
                 let bg_client = client.clone();
                 let bg_group_ids: Vec<String> = recent_groups.iter().map(|g| g.group_id.clone()).collect();
+                // SessionGuard: bg-fetch writes to per-account MLS
+                // storage. After swap the captured group_ids belong to
+                // account A but storage targets account B — bail.
+                let session = vector_core::state::SessionGuard::capture();
                 tokio::spawn(async move {
+                    if !session.is_valid() { return; }
                     let mut extra_ids: Vec<EventId> = Vec::new();
                     while let Some((url, result)) = relay_futs.next().await {
                         match result {
@@ -1089,6 +1094,7 @@ pub async fn sync_mls_groups_quick() -> Result<(u32, u32), String> {
 
                     // Fetch + process extra events found by background relays
                     if !extra_ids.is_empty() {
+                        if !session.is_valid() { return; }
                         println!("[MLS][BG] Fetching {} additional events from background relays", extra_ids.len());
                         match bg_client.fetch_events_from(
                             active_trusted_relays().await,
@@ -1096,6 +1102,7 @@ pub async fn sync_mls_groups_quick() -> Result<(u32, u32), String> {
                             std::time::Duration::from_secs(15),
                         ).await {
                             Ok(events) => {
+                                if !session.is_valid() { return; }
                                 // Group by h-tag and process per group
                                 let mut by_group: std::collections::HashMap<String, Vec<nostr_sdk::Event>> =
                                     std::collections::HashMap::new();
@@ -1397,7 +1404,11 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
 
     // Note: vector-core's accept_invite() auto-rotates the keypackage after success.
     let gid_for_avatar = nostr_group_id.clone();
+    // SessionGuard: cache path is account-scoped; without this gate
+    // account A's group avatar could land in account B's cache dir.
+    let session = vector_core::state::SessionGuard::capture();
     tokio::spawn(async move {
+        if !session.is_valid() { return; }
         match cache_group_avatar(gid_for_avatar.clone(), None, None, None, None).await {
             Ok(Some(path)) => println!("[MLS] Cached group avatar after welcome: {}", path),
             Ok(None) => {}

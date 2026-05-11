@@ -105,7 +105,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppManager_onMiniAppClosed(
                 let topic_encoded = crate::miniapps::realtime::encode_topic_id(&channel.topic);
 
                 // Remove ourselves from session peers
-                if let Some(my_pk) = crate::MY_PUBLIC_KEY.get() {
+                if let Some(my_pk) = crate::my_public_key() {
                     let my_npub = my_pk.to_bech32().unwrap();
                     state.remove_session_peer(&channel.topic, &my_npub).await;
                 }
@@ -515,7 +515,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
         } // if !is_rejoin (advertisement)
 
         // Add ourselves to session peers
-        if let Some(my_pk) = crate::MY_PUBLIC_KEY.get() {
+        if let Some(my_pk) = crate::my_public_key() {
             let my_npub = my_pk.to_bech32().unwrap();
             state.add_session_peer(topic, my_npub).await;
         }
@@ -799,7 +799,7 @@ fn create_error_string(env: &mut JNIEnv, error: &str) -> jstring {
 }
 
 fn get_user_npub() -> String {
-    if let Some(&pubkey) = crate::MY_PUBLIC_KEY.get() {
+    if let Some(pubkey) = crate::my_public_key() {
         nostr_sdk::prelude::ToBech32::to_bech32(&pubkey)
             .unwrap_or_else(|_| "unknown".to_string())
     } else {

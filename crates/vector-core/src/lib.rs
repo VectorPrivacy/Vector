@@ -148,7 +148,12 @@ pub use types::{Message, Attachment, Reaction, EditEntry, ImageMetadata, SiteMet
 pub use profile::{Profile, ProfileFlags, SlimProfile, Status};
 pub use chat::{Chat, ChatType, ChatMetadata, SerializableChat};
 pub use compact::{CompactMessage, CompactMessageVec, NpubInterner};
-pub use state::{ChatState, NOSTR_CLIENT, MY_SECRET_KEY, MY_PUBLIC_KEY, STATE, ENCRYPTION_KEY};
+pub use state::{
+    ChatState, NOSTR_CLIENT, MY_SECRET_KEY, MY_PUBLIC_KEY, STATE, ENCRYPTION_KEY,
+    nostr_client, my_public_key, has_active_session,
+    set_nostr_client, set_my_public_key,
+    take_nostr_client, clear_my_public_key,
+};
 pub use crypto::{GuardedKey, GuardedSigner};
 pub use error::{VectorError, Result};
 pub use traits::{EventEmitter, NoOpEmitter, set_event_emitter, emit_event};
@@ -166,6 +171,13 @@ use std::sync::Arc;
 /// Current MLS group message subscription ID. Updated by `refresh_group_subscription()`.
 static MLS_SUB_ID: std::sync::LazyLock<tokio::sync::Mutex<Option<nostr_sdk::SubscriptionId>>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(None));
+
+/// Drop the cached MLS subscription ID — `reset_session()` calls this
+/// so the new session's `listen()` doesn't reference a sub id that
+/// belonged to the previous account's relay pool.
+pub async fn clear_mls_sub_id() {
+    *MLS_SUB_ID.lock().await = None;
+}
 
 // ============================================================================
 // VectorCore — High-level API
@@ -247,7 +259,7 @@ impl VectorCore {
         // Store in GuardedKey vault (pass other vaults to protect during decoy writes)
         let secret_bytes = keys.secret_key().to_secret_bytes();
         state::MY_SECRET_KEY.set(secret_bytes, &[&state::ENCRYPTION_KEY]);
-        let _ = state::MY_PUBLIC_KEY.set(public_key);
+        state::set_my_public_key(public_key);
 
         // Initialize database for this account
         db::set_current_account(npub.clone())?;
@@ -263,19 +275,19 @@ impl VectorCore {
             db::set_pkey(&nsec)?;
         }
 
-        // Check if encryption is set up
-        let has_encryption = db::get_sql_setting("encryption_enabled".to_string())
-            .ok().flatten()
-            .map(|v| v != "false")
-            .unwrap_or(false);
+        // Use the canonical resolver so this high-level API agrees with
+        // crypto::is_encryption_enabled and the Android bg-sync probe.
+        let has_encryption = state::resolve_encryption_enabled_from_db();
 
         if has_encryption {
             if let Some(pwd) = password {
                 let key = crate::crypto::hash_pass(pwd).await;
                 state::ENCRYPTION_KEY.set(key, &[&state::MY_SECRET_KEY]);
             }
-            state::init_encryption_enabled();
         }
+        // Seed the atomic unconditionally — `is_encryption_enabled_fast()`
+        // must agree with the DB regardless of branch.
+        state::init_encryption_enabled();
 
         // Build Nostr client
         let client = ClientBuilder::new().signer(keys).build();
@@ -288,7 +300,7 @@ impl VectorCore {
         // Connect
         client.connect().await;
 
-        let _ = state::NOSTR_CLIENT.set(client);
+        let _ = { state::set_nostr_client(client); Ok::<(), ()>(()) };
 
         Ok(LoginResult { npub, has_encryption })
     }
@@ -395,8 +407,8 @@ impl VectorCore {
 
     /// Get the current user's npub.
     pub fn my_npub(&self) -> Option<String> {
-        state::MY_PUBLIC_KEY.get()
-            .and_then(|pk| ToBech32::to_bech32(pk).ok())
+        state::my_public_key()
+            .and_then(|pk| ToBech32::to_bech32(&pk).ok())
     }
 
     // ========================================================================
@@ -437,10 +449,13 @@ impl VectorCore {
         // Refresh subscription so listen() picks up the new group
         let _ = self.refresh_group_subscription().await;
 
-        // MLS security: rotate keypackage so the next join uses a fresh one.
-        // Reusing a KeyPackage across multiple group joins breaks forward secrecy.
-        // Fire-and-forget — group creation already succeeded.
+        // MLS security: rotate keypackage so the next join uses a fresh
+        // one — reusing a KeyPackage breaks forward secrecy. Fire-and-
+        // forget; SessionGuard prevents a swap from writing the new
+        // keypackage into account A's storage signed by account B's keys.
+        let session = state::SessionGuard::capture();
         tokio::spawn(async move {
+            if !session.is_valid() { return; }
             if let Err(e) = mls::publish_keypackage(false).await {
                 log_warn!("[MLS] KeyPackage rotation after create_group failed: {}", e);
             }
@@ -453,8 +468,7 @@ impl VectorCore {
     pub async fn send_group_message(&self, group_id: &str, content: &str) -> Result<()> {
         use nostr_sdk::prelude::*;
 
-        let my_pk = state::MY_PUBLIC_KEY.get()
-            .copied()
+        let my_pk = state::my_public_key()
             .ok_or(VectorError::Other("Not logged in".into()))?;
 
         let milliseconds = std::time::SystemTime::now()
@@ -531,7 +545,7 @@ impl VectorCore {
         use futures_util::StreamExt;
         use nostr_sdk::prelude::*;
 
-        let client = state::NOSTR_CLIENT.get()
+        let client = state::nostr_client()
             .ok_or(VectorError::Other("Not connected".into()))?;
         let contact_pubkey = PublicKey::from_bech32(npub)
             .map_err(|e| VectorError::Nostr(format!("Invalid npub: {}", e)))?;
@@ -697,11 +711,13 @@ impl VectorCore {
         // Refresh subscription so listen() picks up the new group
         let _ = self.refresh_group_subscription().await;
 
-        // MLS security: rotate keypackage so our NEXT invite uses a fresh one.
-        // The keypackage we just consumed is now burnt — reusing it would break
-        // forward secrecy and can corrupt MDK's internal state.
-        // Fire-and-forget — we're already in the group.
+        // MLS security: rotate keypackage so the NEXT invite uses a
+        // fresh one — the one we just consumed is burnt, and reusing
+        // it would break forward secrecy + corrupt MDK state. Fire-
+        // and-forget; SessionGuard prevents cross-account rotation.
+        let session = state::SessionGuard::capture();
         tokio::spawn(async move {
+            if !session.is_valid() { return; }
             if let Err(e) = mls::publish_keypackage(false).await {
                 log_warn!("[MLS] KeyPackage rotation after accept_invite failed: {}", e);
             }
@@ -767,10 +783,9 @@ impl VectorCore {
         use futures_util::StreamExt;
         use nostr_sdk::prelude::*;
 
-        let client = state::NOSTR_CLIENT.get()
+        let client = state::nostr_client()
             .ok_or(VectorError::Other("Not connected".into()))?;
-        let my_pk = state::MY_PUBLIC_KEY.get()
-            .copied()
+        let my_pk = state::my_public_key()
             .ok_or(VectorError::Other("Not logged in".into()))?;
 
         // Load known wrapper IDs + timestamps for negentropy fingerprinting
@@ -900,10 +915,9 @@ impl VectorCore {
     /// For a complete listen-and-process loop, use [`listen()`](Self::listen) instead.
     pub async fn subscribe_dms(&self) -> Result<nostr_sdk::SubscriptionId> {
         use nostr_sdk::prelude::*;
-        let client = state::NOSTR_CLIENT.get()
+        let client = state::nostr_client()
             .ok_or(VectorError::Other("Not connected".into()))?;
-        let my_pk = state::MY_PUBLIC_KEY.get()
-            .copied()
+        let my_pk = state::my_public_key()
             .ok_or(VectorError::Other("Not logged in".into()))?;
 
         let filter = Filter::new()
@@ -923,7 +937,7 @@ impl VectorCore {
     /// `invite_member`, and `remove_member`. Can also be called manually.
     pub async fn refresh_group_subscription(&self) -> Result<()> {
         use nostr_sdk::prelude::*;
-        let client = state::NOSTR_CLIENT.get()
+        let client = state::nostr_client()
             .ok_or(VectorError::Other("Not connected".into()))?;
 
         let mut sub_guard = MLS_SUB_ID.lock().await;
@@ -993,10 +1007,9 @@ impl VectorCore {
     pub async fn listen(&self, handler: Arc<dyn InboundEventHandler>) -> Result<()> {
         use nostr_sdk::prelude::*;
 
-        let client = state::NOSTR_CLIENT.get()
+        let client = state::nostr_client()
             .ok_or(VectorError::Other("Not connected".into()))?;
-        let my_pk = state::MY_PUBLIC_KEY.get()
-            .copied()
+        let my_pk = state::my_public_key()
             .ok_or(VectorError::Other("Not logged in".into()))?;
 
         // Subscribe to DMs (GiftWraps)
@@ -1031,7 +1044,7 @@ impl VectorCore {
 
     /// Disconnect and clean up.
     pub async fn logout(&self) {
-        if let Some(client) = state::NOSTR_CLIENT.get() {
+        if let Some(client) = state::nostr_client() {
             let _ = client.disconnect().await;
         }
         db::close_database();

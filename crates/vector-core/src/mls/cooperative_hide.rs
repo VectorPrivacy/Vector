@@ -54,9 +54,8 @@ pub(crate) async fn apply_cooperative_hide(
             // binding from a remote sender) get a warn since they're
             // worth noticing. The forthcoming generic deferred-event-
             // resolution feature will queue late-binding cases.
-            let is_own_echo = crate::state::MY_PUBLIC_KEY
-                .get()
-                .map(|my_pk| my_pk == sender)
+            let is_own_echo = crate::state::my_public_key()
+                .map(|my_pk| my_pk == *sender)
                 .unwrap_or(false);
             if is_own_echo {
                 crate::log_debug!(
@@ -87,8 +86,8 @@ pub(crate) async fn apply_cooperative_hide(
     let is_self_delete = if !original_author_npub.is_empty() {
         original_author_npub == sender_npub
     } else if original_is_mine {
-        match crate::state::MY_PUBLIC_KEY.get() {
-            Some(my_pk) => my_pk == sender,
+        match crate::state::my_public_key() {
+            Some(my_pk) => my_pk == *sender,
             None => false,
         }
     } else {

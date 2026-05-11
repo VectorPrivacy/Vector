@@ -561,6 +561,12 @@
       <div class="profile-header-name-row">
         <div id="profile-header-avatar-container"></div>
         <h3 id="profile-name" class="cutoff chat-contact-with-status"></h3>
+        <div id="my-profile-switcher" class="my-profile-switcher" style="display: none;">
+          <h3>My Profile</h3>
+          <svg class="my-profile-switcher-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
       </div>
       <span id="profile-status" class="cutoff chat-contact-status"></span>
     </div>
@@ -1376,6 +1382,17 @@
                 <p class="chat-new-back-text">Back</p>
             </div>
         </div>
+        <!-- Multi-account: pre-login picker (read-only). Shown only when N accounts exist. -->
+        <div id="login-account-picker" class="login-account-picker" style="display: none;">
+          <img id="login-account-picker-avatar" src="" alt="">
+          <span id="login-account-picker-name" class="login-account-picker-name"></span>
+          <svg class="login-account-picker-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <!-- Expanded account list — fullscreen blurred overlay -->
+        <div id="login-account-list-backdrop" class="login-account-list-backdrop"></div>
+        <div id="login-account-list" class="login-account-list" role="dialog" aria-label="Pick account"></div>
         <img src="./icons/vector-logo.svg" class="login-logo">
         <h4 class="startup-subtext-gradient login-subtext">Private & Encrypted Messenger</h4>
         <div id="login-start">
@@ -1463,5 +1480,30 @@
   
   <!-- Global tooltip element -->
   <div id="global-tooltip" class="global-tooltip"></div>
+
+  <!-- Multi-account: My Profile dropdown (in-app) -->
+  <div id="profile-switcher-backdrop" class="profile-switcher-backdrop"></div>
+  <div id="profile-switcher-panel" class="profile-switcher-panel" role="dialog" aria-label="My Profile">
+    <div class="profile-switcher-header">
+      <span class="profile-switcher-header-label">
+        <svg class="profile-switcher-header-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M18 15.8369C19.4559 16.5683 20.7041 17.742 21.6152 19.2096C21.7956 19.5003 21.8858 19.6456 21.917 19.8468C21.9804 20.2558 21.7008 20.7585 21.3199 20.9204C21.1325 21 20.9216 21 20.5 21M16 11.5322C17.4817 10.7959 18.5 9.26686 18.5 7.5C18.5 5.73314 17.4817 4.20411 16 3.46776M14 7.5C14 9.98528 11.9852 12 9.49996 12C7.01468 12 4.99996 9.98528 4.99996 7.5C4.99996 5.01472 7.01468 3 9.49996 3C11.9852 3 14 5.01472 14 7.5ZM2.55919 18.9383C4.1535 16.5446 6.66933 15 9.49996 15C12.3306 15 14.8464 16.5446 16.4407 18.9383C16.79 19.4628 16.9646 19.725 16.9445 20.0599C16.9289 20.3207 16.7579 20.64 16.5495 20.7976C16.2819 21 15.9138 21 15.1776 21H3.82232C3.08613 21 2.71804 21 2.4504 20.7976C2.24201 20.64 2.07105 20.3207 2.05539 20.0599C2.03529 19.725 2.20992 19.4628 2.55919 18.9383Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        Profiles
+      </span>
+      <button id="profile-switcher-trash-toggle" class="profile-switcher-trash-toggle btn" aria-label="Toggle delete mode">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14ZM10 11v6M14 11v6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+    </div>
+    <div id="profile-switcher-list" class="profile-switcher-list"></div>
+    <div id="profile-switcher-add" class="profile-switcher-add btn">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M19 8v6M22 11h-6M8.5 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span class="profile-switcher-add-label">Add Profile</span>
+    </div>
+  </div>
   </body>
 </html>

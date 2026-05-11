@@ -11,7 +11,7 @@ use std::time::Instant;
 use nostr_sdk::prelude::*;
 use std::sync::LazyLock;
 
-use crate::state::NOSTR_CLIENT;
+use crate::state::nostr_client;
 
 // ============================================================================
 // Per-relay publish tracker — closes "dependent-event-races-parent" races
@@ -186,6 +186,17 @@ struct CachedRelays {
 
 static INBOX_RELAY_CACHE: LazyLock<Mutex<HashMap<PublicKey, CachedRelays>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Drop every cached recipient relay list — called by `reset_session()`.
+/// The cache is recipient-keyed (so technically account-agnostic) but
+/// grows unboundedly across sessions; the 1-hour TTL only reclaims
+/// re-queried entries. Clear on swap to free memory and avoid
+/// stale-data revivals.
+pub fn clear_inbox_relay_cache() {
+    if let Ok(mut cache) = INBOX_RELAY_CACHE.lock() {
+        cache.clear();
+    }
+}
 
 /// Per-key locks to prevent cache stampede (thundering herd).
 /// When multiple messages target the same recipient with a cold cache, only the
@@ -497,7 +508,7 @@ pub async fn send_event_pool_first_ok(
         .filter(|(_, r)| r.flags().has_write())
         .map(|(url, _)| url.clone())
         .collect();
-    send_event_first_ok(client, write_urls, event).await
+    send_event_first_ok(&client, write_urls, event).await
 }
 
 /// Build a NIP-59 kind-1059 gift wrap from a sealed event, returning
@@ -744,6 +755,11 @@ static DEBOUNCE_PASS_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Rapid successive calls coalesce into a single publish.
 pub fn republish_inbox_relays_debounced() {
     let gen = REPUBLISH_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    // REPUBLISH_GEN dedupes within a session; SessionGuard dedupes
+    // across sessions. Without the guard, a swap during the 800ms
+    // debounce window would publish account A's inbox-relay claim
+    // signed by account B's client.
+    let session = crate::state::SessionGuard::capture();
     tokio::spawn(async move {
         // Wait for the relay pool to settle; if another call arrives
         // during this window it will bump the generation and we'll exit.
@@ -751,13 +767,16 @@ pub fn republish_inbox_relays_debounced() {
         if REPUBLISH_GEN.load(Ordering::SeqCst) != gen {
             return; // superseded by a newer call
         }
+        if !session.is_valid() {
+            return; // swap occurred during the debounce window
+        }
         #[cfg(test)]
         DEBOUNCE_PASS_COUNT.fetch_add(1, Ordering::SeqCst);
-        let client = match NOSTR_CLIENT.get() {
+        let client = match nostr_client() {
             Some(c) => c,
             None => return,
         };
-        if let Err(e) = publish_inbox_relays(client).await {
+        if let Err(e) = publish_inbox_relays(&client).await {
             eprintln!("[InboxRelays] Failed to republish after config change: {}", e);
         }
     });
@@ -1096,7 +1115,7 @@ mod tests {
 
         let pass_after = DEBOUNCE_PASS_COUNT.load(Ordering::SeqCst);
         // Exactly one task should have passed the generation gate.
-        // (It then exits at NOSTR_CLIENT.get() since the client isn't
+        // (It then exits at nostr_client() since the client isn't
         // initialised in tests, but the coalescing behaviour is proven.)
         assert_eq!(pass_after - pass_before, 1);
     }

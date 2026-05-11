@@ -33,7 +33,7 @@ static DOWNLOAD_SEMAPHORE: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new
 
 /// Track URLs currently being downloaded to prevent duplicate downloads
 /// (e.g., when messages re-render from Pending to Sent)
-static DOWNLOADS_IN_PROGRESS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+pub(crate) static DOWNLOADS_IN_PROGRESS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// Maximum entries in DOWNLOADS_IN_PROGRESS before forced cleanup
 const MAX_IN_PROGRESS_ENTRIES: usize = 100;

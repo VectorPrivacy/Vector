@@ -1234,8 +1234,8 @@ pub async fn pivx_send_payment<R: Runtime>(
         );    }
 
     // Now send the funded promo via Nostr
-    let client = crate::NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
-    let my_public_key = *crate::MY_PUBLIC_KEY.get().ok_or("Public key not initialized")?;
+    let client = crate::nostr_client().ok_or("Nostr client not initialized")?;
+    let my_public_key = crate::my_public_key().ok_or("Public key not initialized")?;
 
     let content = serde_json::json!({
         "amount_piv": amount_piv,
@@ -1254,14 +1254,16 @@ pub async fn pivx_send_payment<R: Runtime>(
 
         let event_id = rumor.id.ok_or("Failed to get event ID")?.to_hex();
 
-        crate::inbox_relays::send_gift_wrap(client, &receiver_pubkey, rumor.clone(), [])
+        crate::inbox_relays::send_gift_wrap(&client, &receiver_pubkey, rumor.clone(), [])
             .await
             .map_err(|e| format!("Failed to send payment: {}", e))?;
 
-        // Send self-copy for recovery (fire-and-forget)
+        // Self-copy for recovery (in-scope client clone + SessionGuard).
+        let self_wrap_client = client.clone();
+        let self_wrap_session = vector_core::state::SessionGuard::capture();
         tokio::spawn(async move {
-            let client = crate::NOSTR_CLIENT.get().unwrap();
-            let _ = client.gift_wrap(&my_public_key, rumor, []).await;
+            if !self_wrap_session.is_valid() { return; }
+            let _ = self_wrap_client.gift_wrap(&my_public_key, rumor, []).await;
         });
 
         event_id
@@ -1351,8 +1353,8 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
     }
 
     // Get Nostr client
-    let client = crate::NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
-    let my_public_key = *crate::MY_PUBLIC_KEY.get().ok_or("Public key not initialized")?;
+    let client = crate::nostr_client().ok_or("Nostr client not initialized")?;
+    let my_public_key = crate::my_public_key().ok_or("Public key not initialized")?;
 
     // Build content JSON
     let content = serde_json::json!({
@@ -1380,14 +1382,16 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
         let event_id = rumor.id.ok_or("Failed to get event ID")?.to_hex();
 
         // Send to receiver (routed to their inbox relays if available)
-        crate::inbox_relays::send_gift_wrap(client, &receiver_pubkey, rumor.clone(), [])
+        crate::inbox_relays::send_gift_wrap(&client, &receiver_pubkey, rumor.clone(), [])
             .await
             .map_err(|e| format!("Failed to send payment: {}", e))?;
 
-        // Send self-copy for recovery (fire-and-forget)
+        // Self-copy for recovery (in-scope client clone + SessionGuard).
+        let self_wrap_client = client.clone();
+        let self_wrap_session = vector_core::state::SessionGuard::capture();
         tokio::spawn(async move {
-            let client = crate::NOSTR_CLIENT.get().unwrap();
-            let _ = client.gift_wrap(&my_public_key, rumor, []).await;
+            if !self_wrap_session.is_valid() { return; }
+            let _ = self_wrap_client.gift_wrap(&my_public_key, rumor, []).await;
         });
 
         event_id

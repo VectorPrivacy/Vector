@@ -14,7 +14,7 @@ use nostr_sdk::prelude::*;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 /// Cancel flags for in-progress uploads, keyed by pending message ID.
-static UPLOAD_CANCEL_FLAGS: LazyLock<std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>> =
+pub(crate) static UPLOAD_CANCEL_FLAGS: LazyLock<std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>> =
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 #[cfg(not(target_os = "android"))]
@@ -126,7 +126,11 @@ impl SendCallback for TauriSendCallback {
     fn on_persist(&self, chat_id: &str, msg: &Message) {
         let chat_id = chat_id.to_string();
         let msg = msg.clone();
+        // SessionGuard so a swap before the DB write doesn't persist
+        // account A's outgoing message as a phantom chat row in B's DB.
+        let session = vector_core::state::SessionGuard::capture();
         tokio::spawn(async move {
+            if !session.is_valid() { return; }
             let _ = crate::db::save_message(&chat_id, &msg).await;
         });
     }
@@ -225,9 +229,8 @@ pub async fn get_message_delete_options(message_id: String) -> Result<MessageDel
         match vector_core::mls::MlsService::new_persistent_static() {
             Ok(svc) => match svc.get_group_members(&chat_id) {
                 Ok((_wire, _members, admins)) => {
-                    let my_npub = vector_core::MY_PUBLIC_KEY
-                        .get()
-                        .and_then(|pk| nostr_sdk::ToBech32::to_bech32(pk).ok())
+                    let my_npub = vector_core::my_public_key()
+                        .and_then(|pk| nostr_sdk::ToBech32::to_bech32(&pk).ok())
                         .unwrap_or_default();
                     !my_npub.is_empty() && admins.iter().any(|a| a == &my_npub)
                 }
@@ -664,7 +667,7 @@ pub async fn send_text_reply_headless(chat_id: &str, content: &str) -> Result<St
 
     let event_id = if is_group {
         // MLS path stays local
-        let my_public_key = *crate::MY_PUBLIC_KEY.get().ok_or("Public key not initialized")?;
+        let my_public_key = crate::my_public_key().ok_or("Public key not initialized")?;
         let milliseconds = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap()
             .as_millis() % 1000;
@@ -758,7 +761,9 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap();
     let pending_id = Arc::new(String::from("pending-") + &current_time.as_nanos().to_string());
-    let my_public_key = *crate::MY_PUBLIC_KEY.get().expect("Public key not initialized");
+    // Function returns `Result<_, String>` — propagate cleanly instead of
+    // panicking when the session has been swapped out from under us.
+    let my_public_key = crate::my_public_key().ok_or("Public key not initialized")?;
 
     let msg = Message {
         id: pending_id.as_ref().clone(),

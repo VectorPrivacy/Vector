@@ -22,11 +22,11 @@ use super::sending::{message, MessageSendResult};
 use crate::android::filesystem;
 
 /// Cache for bytes received from JavaScript (for Android file handling)
-static JS_FILE_CACHE: LazyLock<std::sync::Mutex<Option<(Arc<Vec<u8>>, String, String)>>> =
+pub(crate) static JS_FILE_CACHE: LazyLock<std::sync::Mutex<Option<(Arc<Vec<u8>>, String, String)>>> =
     LazyLock::new(|| std::sync::Mutex::new(None));
 
 /// Cache for compressed bytes from JavaScript file
-static JS_COMPRESSION_CACHE: LazyLock<TokioMutex<Option<CachedCompressedImage>>> =
+pub(crate) static JS_COMPRESSION_CACHE: LazyLock<TokioMutex<Option<CachedCompressedImage>>> =
     LazyLock::new(|| TokioMutex::new(None));
 
 /// Response from caching file bytes, includes preview for images
@@ -851,7 +851,7 @@ pub async fn clear_compression_cache(file_path: String) -> Result<(), String> {
 // ─── Directory Zip & Send ───────────────────────────────────────────────────
 
 /// Pending zip path for cleanup
-static PENDING_ZIP_PATH: LazyLock<std::sync::Mutex<Option<String>>> =
+pub(crate) static PENDING_ZIP_PATH: LazyLock<std::sync::Mutex<Option<String>>> =
     LazyLock::new(|| std::sync::Mutex::new(None));
 
 /// Generation counter for zip_directory — each new zip increments this.

@@ -22,7 +22,7 @@ pub async fn send_mls_message(
     tokio::task::spawn_blocking(move || {
         let rt = tokio::runtime::Handle::current();
         rt.block_on(async move {
-            let client = crate::state::NOSTR_CLIENT.get()
+            let client = crate::state::nostr_client()
                 .ok_or_else(|| "Nostr client not initialized".to_string())?;
 
             let service = MlsService::new_persistent_static()
@@ -118,10 +118,10 @@ pub async fn send_mls_message(
                     .map_err(|e| format!("Failed to sign wrapper with expiration: {}", e))?;
 
                 let urls = crate::inbox_relays::trusted_relay_urls();
-                crate::inbox_relays::send_event_first_ok(client, urls, &wrapper_with_expiry).await
+                crate::inbox_relays::send_event_first_ok(&client, urls, &wrapper_with_expiry).await
             } else {
                 let urls = crate::inbox_relays::trusted_relay_urls();
-                crate::inbox_relays::send_event_first_ok(client, urls, &mls_wrapper).await
+                crate::inbox_relays::send_event_first_ok(&client, urls, &mls_wrapper).await
             };
 
             // Track wrapper to dedup relay echo

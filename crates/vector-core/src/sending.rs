@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use nostr_sdk::prelude::*;
 
-use crate::state::{NOSTR_CLIENT, MY_SECRET_KEY, MY_PUBLIC_KEY, STATE};
+use crate::state::{nostr_client, my_public_key, MY_SECRET_KEY, STATE};
 use crate::types::{Message, Attachment};
 use crate::crypto;
 
@@ -145,7 +145,7 @@ async fn retry_send_gift_wrap(
     config: &SendConfig,
     callback: Arc<dyn SendCallback>,
 ) -> Result<SendResult, String> {
-    let my_pk = *MY_PUBLIC_KEY.get().ok_or("Public key not set")?;
+    let my_pk = my_public_key().ok_or("Public key not set")?;
     let inner_rumor_id = rumor.id;
 
     for attempt in 0..config.max_send_attempts {
@@ -182,19 +182,24 @@ async fn retry_send_gift_wrap(
                     callback.on_persist(receiver_npub, finalized_msg);
                 }
 
-                // Self-send for recovery (fire-and-forget). Also retain
-                // the self-wrap key so the user can later delete their
-                // own copy from their own inbox relays.
+                // Self-send for recovery + retain wrap key so the user
+                // can later delete their own copy from inbox relays.
+                // SessionGuard skips publish + DB write on swap; without
+                // it account A's wrap key would corrupt account B's
+                // nip17_keys delete-history.
                 if config.self_send {
                     let client = client.clone();
                     let my_pk_clone = my_pk;
                     let rumor_clone = rumor.clone();
                     let rid_for_self = inner_rumor_id;
+                    let session = crate::state::SessionGuard::capture();
                     tokio::spawn(async move {
+                        if !session.is_valid() { return; }
                         match crate::inbox_relays::send_gift_wrap_retained(
                             &client, &my_pk_clone, rumor_clone, [],
                         ).await {
                             Ok(self_outcome) if !self_outcome.output.success.is_empty() => {
+                                if !session.is_valid() { return; }
                                 if let Some(rid) = rid_for_self {
                                     if let Err(e) = crate::db::nip17_keys::store_wrap_key(
                                         &self_outcome.wrap_event_id,
@@ -263,8 +268,8 @@ pub async fn send_dm(
     config: &SendConfig,
     callback: Arc<dyn SendCallback>,
 ) -> Result<SendResult, String> {
-    let client = NOSTR_CLIENT.get().ok_or("Not logged in")?;
-    let my_pk = *MY_PUBLIC_KEY.get().ok_or("Public key not set")?;
+    let client = nostr_client().ok_or("Not logged in")?;
+    let my_pk = my_public_key().ok_or("Public key not set")?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap();
@@ -311,7 +316,7 @@ pub async fn send_dm(
 
     // Send via gift-wrap with retry
     retry_send_gift_wrap(
-        client, &receiver, receiver_npub, &pending_id,
+        &client, &receiver, receiver_npub, &pending_id,
         built_rumor, &event_id, config, callback,
     ).await
 }
@@ -330,7 +335,7 @@ pub async fn send_rumor_dm(
     config: &SendConfig,
     callback: Arc<dyn SendCallback>,
 ) -> Result<SendResult, String> {
-    let client = NOSTR_CLIENT.get().ok_or("Not logged in")?;
+    let client = nostr_client().ok_or("Not logged in")?;
 
     let receiver = PublicKey::from_bech32(receiver_npub)
         .map_err(|e| format!("Invalid npub: {}", e))?;
@@ -338,7 +343,7 @@ pub async fn send_rumor_dm(
     let event_id = rumor.id.ok_or("Rumor has no id")?.to_hex();
 
     retry_send_gift_wrap(
-        client, &receiver, receiver_npub, pending_id,
+        &client, &receiver, receiver_npub, pending_id,
         rumor, &event_id, config, callback,
     ).await
 }
@@ -359,8 +364,8 @@ pub async fn send_file_dm(
     config: &SendConfig,
     callback: Arc<dyn SendCallback>,
 ) -> Result<SendResult, String> {
-    let client = NOSTR_CLIENT.get().ok_or("Not logged in")?;
-    let my_pk = *MY_PUBLIC_KEY.get().ok_or("Public key not set")?;
+    let client = nostr_client().ok_or("Not logged in")?;
+    let my_pk = my_public_key().ok_or("Public key not set")?;
     let keys = MY_SECRET_KEY.to_keys().ok_or("Keys not available")?;
 
     let now = std::time::SystemTime::now()
@@ -493,7 +498,7 @@ pub async fn send_file_dm(
     let event_id = built_rumor.id.ok_or("Rumor has no id")?.to_hex();
 
     retry_send_gift_wrap(
-        client, &receiver, receiver_npub, &pending_id,
+        &client, &receiver, receiver_npub, &pending_id,
         built_rumor, &event_id, config, callback,
     ).await
 }

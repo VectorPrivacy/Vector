@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use crate::audio;
 use crate::audio_engine::{AudioEngine, AudioLoadResult};
 
-static RECORDER: OnceLock<AudioRecorder> = OnceLock::new();
+pub(crate) static RECORDER: OnceLock<AudioRecorder> = OnceLock::new();
 
 /// Trim leading and trailing silence from i16 audio samples.
 /// Uses adaptive RMS threshold based on the recording's noise floor
@@ -177,6 +177,36 @@ impl AudioRecorder {
         });
 
         Ok(())
+    }
+
+    /// Cancel any in-progress recording, discarding the buffer. No-op if
+    /// not recording. Used by `reset_session()` so a voice note in flight
+    /// for account A doesn't bleed into account B's session.
+    ///
+    /// Also clears the `pending` slot — a recording that was *stopped*
+    /// (and stashed for the user to send) survives the in-flight check
+    /// otherwise, surfacing in account B's compose box after a swap.
+    pub fn cancel(&self) {
+        if self.recording.load(Ordering::SeqCst) {
+            if let Some(tx) = self.stop_tx.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            self.recording.store(false, Ordering::SeqCst);
+            if let Ok(mut samples) = self.samples.lock() {
+                samples.clear();
+            }
+        }
+        // Always clear pending — independent of whether we're currently
+        // recording. A stopped-but-not-sent recording for account A must
+        // not appear in account B.
+        if let Ok(mut p) = self.pending.lock() {
+            *p = None;
+        }
+    }
+
+    /// True iff a recording is currently in progress.
+    pub fn is_recording(&self) -> bool {
+        self.recording.load(Ordering::SeqCst)
     }
 
     /// Stop recording and load the result into the audio engine for preview.

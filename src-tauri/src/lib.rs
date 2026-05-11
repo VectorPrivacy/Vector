@@ -91,12 +91,18 @@ mod simd;
 
 // State management module
 mod state;
-// Re-export commonly used state items at crate root for backwards compatibility
+// Re-export commonly used state items at crate root for backwards compatibility.
+// Trimmed to only what callers actually reach for via `crate::*`. Direct vault
+// manipulation (`take_nostr_client`, `clear_my_public_key`, etc.) lives behind
+// `account_manager::reset_session()` and goes through `vector_core::state::*`,
+// not these re-exports.
 pub(crate) use state::{
     TAURI_APP, TauriEventEmitter,
-    NOSTR_CLIENT, MY_SECRET_KEY, MY_PUBLIC_KEY, STATE,
+    NOSTR_CLIENT, MY_SECRET_KEY, STATE,
+    nostr_client, my_public_key,
+    set_my_public_key,
     active_trusted_relays, NOTIFIED_WELCOMES, WRAPPER_ID_CACHE,
-    MNEMONIC_SEED, ENCRYPTION_KEY, PENDING_NSEC, PENDING_INVITE,
+    MNEMONIC_SEED, ENCRYPTION_KEY, PENDING_NSEC,
     get_blossom_servers, PendingInviteAcceptance,
 };
 
@@ -331,7 +337,7 @@ pub fn run() {
                         }
 
                         // Cleanly shutdown our Nostr client
-                        if let Some(nostr_client) = NOSTR_CLIENT.get() {
+                        if let Some(nostr_client) = nostr_client() {
                             tauri::async_runtime::block_on(async {
                                 // Shutdown the Nostr client
                                 nostr_client.shutdown().await;
@@ -343,16 +349,50 @@ pub fn run() {
             });
 
             // Set the static app data directory FIRST (before any DB access)
-            // This must happen before auto_select_account so that static DB
+            // This must happen before boot_select_account so that static DB
             // connection functions can resolve paths correctly.
             if let Ok(data_dir) = handle.path().app_data_dir() {
                 account_manager::set_app_data_dir(data_dir);
             }
 
-            // Auto-select account on startup if one exists but isn't selected
+            // Install the platform-correct download directory into
+            // vector-core. Desktop & iOS use OS conventions (xdg-user-dirs
+            // on Linux → `~/Téléchargements` etc., Known Folders on
+            // Windows, NSDownloadsDirectory on macOS, NSDocumentDirectory
+            // on iOS).
+            //
+            // Android uses `<app_data>/vector_downloads` because the
+            // service-only bg-sync path (BootReceiver, START_STICKY
+            // restart) installs its own override before the Activity
+            // attaches and can't use Tauri's path resolver. Both paths
+            // must agree or the last-account cascade wipes a different
+            // dir than where attachments were written.
+            {
+                #[cfg(target_os = "android")]
+                {
+                    if let Ok(data_dir) = handle.path().app_data_dir() {
+                        vector_core::db::set_download_dir(data_dir.join("vector_downloads"));
+                    }
+                }
+                #[cfg(not(target_os = "android"))]
+                {
+                    let base_directory = if cfg!(target_os = "ios") {
+                        tauri::path::BaseDirectory::Document
+                    } else {
+                        tauri::path::BaseDirectory::Download
+                    };
+                    if let Ok(downloads) = handle.path().resolve("vector", base_directory) {
+                        vector_core::db::set_download_dir(downloads);
+                    }
+                }
+            }
+
+            // Boot account selection: honors active_account marker file, falls
+            // back to single-account, otherwise leaves CURRENT_ACCOUNT unset so
+            // the frontend shows the multi-account picker.
             {
                 let handle_clone = handle.clone();
-                let _ = account_manager::auto_select_account(&handle_clone);
+                let _ = account_manager::boot_select_account(&handle_clone);
             }
 
             // Startup log: persistent MLS device_id if present
@@ -550,8 +590,13 @@ pub fn run() {
             // Account manager commands
             account_manager::get_current_account,
             account_manager::list_all_accounts,
+            account_manager::list_accounts_with_metadata,
             account_manager::check_any_account_exists,
-            account_manager::switch_account,
+            account_manager::set_active_account,
+            account_manager::clear_active_account,
+            account_manager::enter_add_account_mode,
+            account_manager::swap_session,
+            account_manager::delete_account,
             // Mini Apps commands
             miniapps::commands::miniapp_load_info,
             miniapps::commands::miniapp_load_info_from_bytes,

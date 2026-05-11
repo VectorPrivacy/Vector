@@ -149,6 +149,13 @@ pub fn get_group_sync_lock(group_id: &str) -> Arc<TokioMutex<()>> {
         .clone()
 }
 
+/// Drop every cached per-group sync lock — called by `reset_session()`.
+/// The map grows unbounded across sessions otherwise; lock identity
+/// also shouldn't be assumed to persist across an account swap.
+pub fn clear_group_sync_locks() {
+    GROUP_SYNC_LOCKS.lock().unwrap().clear();
+}
+
 // ============================================================================
 // MLS Directory Resolution
 // ============================================================================
@@ -566,7 +573,7 @@ impl MlsService {
     ) -> Result<String, MlsError> {
         use nostr_sdk::prelude::*;
 
-        let client = crate::state::NOSTR_CLIENT.get().ok_or(MlsError::NotInitialized)?;
+        let client = crate::state::nostr_client().ok_or(MlsError::NotInitialized)?;
         let signer = client.signer().await
             .map_err(|e| MlsError::NetworkError(e.to_string()))?;
         let my_pubkey = signer.get_public_key().await
@@ -729,6 +736,7 @@ impl MlsService {
                 .map(|i| {
                     let welcome = welcome_rumors[i].clone();
                     let target = invited_recipients[i];
+                    let client = client.clone();
                     async move {
                         match client.gift_wrap_to(crate::state::active_trusted_relays().await.into_iter(), &target, welcome, []).await {
                             Ok(wrapper_id) => {
@@ -822,7 +830,7 @@ impl MlsService {
     ) -> Result<(), MlsError> {
         use nostr_sdk::prelude::*;
 
-        let client = crate::state::NOSTR_CLIENT.get().ok_or(MlsError::NotInitialized)?;
+        let client = crate::state::nostr_client().ok_or(MlsError::NotInitialized)?;
 
         let member_pk = PublicKey::from_bech32(member_pubkey)
             .map_err(|e| MlsError::CryptoError(format!("Invalid member npub: {}", e)))?;
@@ -883,12 +891,22 @@ impl MlsService {
         let db_path = self.db_path.clone();
         let group_id_owned = group_id.to_string();
         let engine_group_id = group_meta.group.engine_group_id.clone();
+        // SessionGuard captured pre-spawn — the task bypasses POOL_GENERATION
+        // (opens MdkSqliteStorage directly against the captured `db_path`)
+        // so without this gate a post-swap wake-up would write into the
+        // wrong account's MLS storage.
+        let session = crate::state::SessionGuard::capture();
 
         tokio::spawn(async move {
-            let Some(client) = crate::state::NOSTR_CLIENT.get() else { return; };
+            let Some(client) = crate::state::nostr_client() else { return; };
 
             let group_lock = get_group_sync_lock(&group_id_owned);
             let _guard = group_lock.lock().await;
+
+            // Re-check after lock — a swap may have completed while
+            // we were waiting; abandoning prevents account A's MLS
+            // evolution leaking into account B's session.
+            if !session.is_valid() { return; }
 
             let mls_group_id = GroupId::from_slice(&crate::simd::hex::hex_string_to_bytes(&engine_group_id));
 
@@ -918,7 +936,7 @@ impl MlsService {
                 }
             };
 
-            if let Err(e) = publish_and_merge_commit(client, &evolution_event, &db_path, &mls_group_id, &group_relays).await {
+            if let Err(e) = publish_and_merge_commit(&client, &evolution_event, &db_path, &mls_group_id, &group_relays).await {
                 eprintln!("[MLS] Failed to publish/merge add-member commit: {}", e);
                 crate::traits::emit_event("mls_error", &serde_json::json!({
                     "group_id": group_id_owned, "error": format!("Failed to publish invite: {}", e)
@@ -933,9 +951,12 @@ impl MlsService {
             // Send welcome messages
             if let Some(welcome_rumors) = welcome_rumors {
                 let futs: Vec<_> = welcome_rumors.into_iter()
-                    .map(|welcome| async move {
-                        if let Err(e) = client.gift_wrap_to(crate::state::active_trusted_relays().await.into_iter(), &member_pk, welcome, []).await {
-                            eprintln!("[MLS] Failed to send welcome: {}", e);
+                    .map(|welcome| {
+                        let client = client.clone();
+                        async move {
+                            if let Err(e) = client.gift_wrap_to(crate::state::active_trusted_relays().await.into_iter(), &member_pk, welcome, []).await {
+                                eprintln!("[MLS] Failed to send welcome: {}", e);
+                            }
                         }
                     })
                     .collect();
@@ -973,7 +994,7 @@ impl MlsService {
     ) -> Result<(), MlsError> {
         use nostr_sdk::prelude::*;
 
-        let client = crate::state::NOSTR_CLIENT.get().ok_or(MlsError::NotInitialized)?;
+        let client = crate::state::nostr_client().ok_or(MlsError::NotInitialized)?;
         let index = self.read_keypackage_index().unwrap_or_default();
 
         let mut member_kp_events: Vec<Event> = Vec::new();
@@ -1039,12 +1060,22 @@ impl MlsService {
         let db_path = self.db_path.clone();
         let group_id_owned = group_id.to_string();
         let engine_group_id = group_meta.group.engine_group_id.clone();
+        // SessionGuard captured pre-spawn — the task bypasses POOL_GENERATION
+        // (opens MdkSqliteStorage directly against the captured `db_path`)
+        // so without this gate a post-swap wake-up would write into the
+        // wrong account's MLS storage.
+        let session = crate::state::SessionGuard::capture();
 
         tokio::spawn(async move {
-            let Some(client) = crate::state::NOSTR_CLIENT.get() else { return; };
+            let Some(client) = crate::state::nostr_client() else { return; };
 
             let group_lock = get_group_sync_lock(&group_id_owned);
             let _guard = group_lock.lock().await;
+
+            // Re-check after lock — a swap may have completed while
+            // we were waiting; abandoning prevents account A's MLS
+            // evolution leaking into account B's session.
+            if !session.is_valid() { return; }
 
             let mls_group_id = GroupId::from_slice(&crate::simd::hex::hex_string_to_bytes(&engine_group_id));
 
@@ -1074,7 +1105,7 @@ impl MlsService {
                 }
             };
 
-            if let Err(e) = publish_and_merge_commit(client, &evolution_event, &db_path, &mls_group_id, &group_relays).await {
+            if let Err(e) = publish_and_merge_commit(&client, &evolution_event, &db_path, &mls_group_id, &group_relays).await {
                 eprintln!("[MLS] Failed to publish/merge add-members commit: {}", e);
                 crate::traits::emit_event("mls_error", &serde_json::json!({
                     "group_id": group_id_owned, "error": format!("Failed to publish invite: {}", e)
@@ -1093,6 +1124,7 @@ impl MlsService {
                     .map(|i| {
                         let welcome = welcome_rumors[i].clone();
                         let target = invited_recipients[i];
+                        let client = client.clone();
                         async move {
                             match client
                                 .gift_wrap_to(crate::state::active_trusted_relays().await.into_iter(), &target, welcome, [])
@@ -1145,7 +1177,7 @@ impl MlsService {
     ) -> Result<(), MlsError> {
         use nostr_sdk::prelude::*;
 
-        let _client = crate::state::NOSTR_CLIENT.get().ok_or(MlsError::NotInitialized)?;
+        let _client = crate::state::nostr_client().ok_or(MlsError::NotInitialized)?;
 
         let member_pk = PublicKey::from_bech32(member_pubkey)
             .map_err(|e| MlsError::CryptoError(format!("Invalid member pubkey: {}", e)))?;
@@ -1159,12 +1191,16 @@ impl MlsService {
         let group_id_owned = group_id.to_string();
         let engine_group_id = group_meta.group.engine_group_id.clone();
         let member_pubkey_owned = member_pubkey.to_string();
+        let session = crate::state::SessionGuard::capture();
 
         tokio::spawn(async move {
-            let Some(client) = crate::state::NOSTR_CLIENT.get() else { return; };
+            let Some(client) = crate::state::nostr_client() else { return; };
 
             let group_lock = get_group_sync_lock(&group_id_owned);
             let _guard = group_lock.lock().await;
+
+            // Re-check after lock — see add_member above.
+            if !session.is_valid() { return; }
 
             let mls_group_id = GroupId::from_slice(&crate::simd::hex::hex_string_to_bytes(&engine_group_id));
 
@@ -1214,7 +1250,7 @@ impl MlsService {
                 }
             }; // engine dropped before await
 
-            if let Err(e) = publish_and_merge_commit(client, &evolution_event, &db_path, &mls_group_id, &group_relays).await {
+            if let Err(e) = publish_and_merge_commit(&client, &evolution_event, &db_path, &mls_group_id, &group_relays).await {
                 eprintln!("[MLS] Failed to publish/merge remove-member commit: {}", e);
                 crate::traits::emit_event("mls_error", &serde_json::json!({
                     "group_id": group_id_owned, "error": format!("Failed to publish remove commit: {}", e)
@@ -1256,7 +1292,7 @@ impl MlsService {
     ) -> Result<(), MlsError> {
         use nostr_sdk::prelude::*;
 
-        let client = crate::state::NOSTR_CLIENT.get().ok_or(MlsError::NotInitialized)?;
+        let client = crate::state::nostr_client().ok_or(MlsError::NotInitialized)?;
         let signer = client.signer().await
             .map_err(|e| MlsError::NetworkError(e.to_string()))?;
         let my_pubkey = signer.get_public_key().await
@@ -1272,12 +1308,16 @@ impl MlsService {
         let engine_group_id = _group_meta.group.engine_group_id.clone();
         let name_clone = name.clone();
         let description_clone = description.clone();
+        let session = crate::state::SessionGuard::capture();
 
         tokio::spawn(async move {
-            let Some(client) = crate::state::NOSTR_CLIENT.get() else { return; };
+            let Some(client) = crate::state::nostr_client() else { return; };
 
             let group_lock = get_group_sync_lock(&group_id_owned);
             let _guard = group_lock.lock().await;
+
+            // Re-check after lock acquisition: see remove path above.
+            if !session.is_valid() { return; }
 
             let mls_group_id = GroupId::from_slice(&crate::simd::hex::hex_string_to_bytes(&engine_group_id));
 
@@ -1329,7 +1369,7 @@ impl MlsService {
             }; // engine dropped before await
 
             // 2. Publish and merge (MIP-03 ordering)
-            if let Err(e) = publish_and_merge_commit(client, &evolution_event, &db_path, &mls_group_id, &group_relays).await {
+            if let Err(e) = publish_and_merge_commit(&client, &evolution_event, &db_path, &mls_group_id, &group_relays).await {
                 eprintln!("[MLS] Failed to publish/merge update-group-data commit: {}", e);
                 crate::traits::emit_event("mls_error", &serde_json::json!({
                     "group_id": group_id_owned, "error": format!("Failed to publish update commit: {}", e)
@@ -1625,7 +1665,7 @@ impl MlsService {
             if events.is_empty() { return Ok((0, 0)); }
             all_events = events;
         } else {
-            let client = crate::state::NOSTR_CLIENT.get().ok_or(MlsError::NotInitialized)?;
+            let client = crate::state::nostr_client().ok_or(MlsError::NotInitialized)?;
             let mut current_until = until;
             let mut batch_count: usize = 0;
 
@@ -1764,7 +1804,7 @@ impl MlsService {
             _ => {}
         }
 
-        let my_pubkey_hex = if let Some(&pk) = crate::state::MY_PUBLIC_KEY.get() {
+        let my_pubkey_hex = if let Some(pk) = crate::state::my_public_key() {
             pk.to_hex()
         } else {
             String::new()
@@ -2243,7 +2283,7 @@ impl MlsService {
                                 };
 
                                 let am_i_admin = if let Some(meta) = &group_metadata {
-                                    if let Some(&my_pk) = crate::state::MY_PUBLIC_KEY.get() {
+                                    if let Some(my_pk) = crate::state::my_public_key() {
                                         let my_npub = my_pk.to_bech32().unwrap_or_default();
                                         let my_hex = my_pk.to_hex();
                                         meta.group.creator_pubkey == my_npub || meta.group.creator_pubkey == my_hex
@@ -2407,7 +2447,7 @@ impl MlsService {
         use nostr_sdk::prelude::*;
 
         // Verify client is initialized (match original contract)
-        let _client = crate::state::NOSTR_CLIENT.get().ok_or(MlsError::NotInitialized)?;
+        let _client = crate::state::nostr_client().ok_or(MlsError::NotInitialized)?;
 
         // Find the group metadata (may not exist if already partially cleaned)
         let groups = self.read_groups().unwrap_or_default();
@@ -2417,9 +2457,9 @@ impl MlsService {
 
         // Best-effort: send a "leave request" application message so admins auto-remove us
         // Skip if engine not available (cleanup still happens below)
-        if let (Some(ref meta), Some(&my_pubkey)) = (
+        if let (Some(ref meta), Some(my_pubkey)) = (
             &group_meta,
-            crate::state::MY_PUBLIC_KEY.get(),
+            crate::state::my_public_key(),
         ) {
             let mls_group_id = GroupId::from_slice(&crate::simd::hex::hex_string_to_bytes(&meta.group.engine_group_id));
             let leave_rumor = EventBuilder::new(Kind::ApplicationSpecificData, "leave")
@@ -2431,8 +2471,13 @@ impl MlsService {
                     match engine.create_message(&mls_group_id, leave_rumor) {
                         Ok(mls_event) => {
                             let gid = group_id.to_string();
+                            // SessionGuard pre-spawn: a swap before the relay
+                            // round-trip would otherwise broadcast a leave
+                            // signed under account A through account B's client.
+                            let session = crate::state::SessionGuard::capture();
                             tokio::spawn(async move {
-                                let Some(client) = crate::state::NOSTR_CLIENT.get() else { return; };
+                                if !session.is_valid() { return; }
+                                let Some(client) = crate::state::nostr_client() else { return; };
                                 if let Err(e) = client.send_event(&mls_event).await {
                                     eprintln!("[MLS] Failed to send leave request message: {}", e);
                                 } else {
@@ -3047,12 +3092,38 @@ mod tests {
     /// Counter to give each test a unique account, avoiding DB pool cross-contamination.
     static TEST_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+    /// Generate a bech32-shaped placeholder npub for tests.
+    ///
+    /// `account_dir` enforces `is_valid_npub` (63 chars, bech32 alphabet),
+    /// so the old `format!("npub1test{n}")` form is now rejected. We pad a
+    /// counter into a fixed-length valid string instead. Only the prefix
+    /// + length + alphabet matter — no checksum validation happens here.
+    fn make_test_npub(n: u32) -> String {
+        // Bech32 alphabet excludes 1, b, i, o.
+        // 58-char payload composed of 'q' filler plus a counter encoded in
+        // bech32 chars (max u32 is 10 decimal digits → 10 chars).
+        const FILLER: char = 'q';
+        const BECH32: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l"; // 32 chars
+        let mut payload = vec![FILLER as u8; 58];
+        let mut x = n as u64;
+        let mut i = 58;
+        while x > 0 && i > 0 {
+            i -= 1;
+            payload[i] = BECH32[(x as usize) % 32];
+            x /= 32;
+        }
+        // Force at least one non-filler char so back-to-back tests differ.
+        payload[57] = BECH32[(n as usize) % 32];
+        let payload_str = std::str::from_utf8(&payload).unwrap();
+        format!("npub1{}", payload_str)
+    }
+
     fn init_test_db() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
         let guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::db::close_database();
         let tmp = tempfile::tempdir().unwrap();
         let n = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let account = format!("npub1test{}", n);
+        let account = make_test_npub(n);
         std::fs::create_dir_all(tmp.path().join(&account)).unwrap();
         crate::db::set_app_data_dir(tmp.path().to_path_buf());
         crate::db::set_current_account(account.clone()).unwrap();

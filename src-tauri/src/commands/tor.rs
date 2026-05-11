@@ -435,7 +435,7 @@ async fn switch_relay_transport(tor_enabled: bool) -> Result<(), String> {
     use nostr_sdk::pool::ConnectionMode;
     use nostr_sdk::RelayUrl;
 
-    let client = match crate::NOSTR_CLIENT.get() {
+    let client = match crate::nostr_client() {
         Some(c) => c,
         None => return Ok(()), // Client hasn't been built yet (e.g. pre-login). No-op.
     };

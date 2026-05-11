@@ -17,7 +17,7 @@
 use nostr_sdk::prelude::*;
 
 use crate::inbox_relays::{get_publish_tracker, send_gift_wrap};
-use crate::state::{MY_PUBLIC_KEY, MY_SECRET_KEY, NOSTR_CLIENT};
+use crate::state::{my_public_key, MY_SECRET_KEY, nostr_client};
 
 /// Cooperative-hide notice expiry: 30 days. After this window relays
 /// drop the gift-wrap (NIP-40) and clients that come online later won't
@@ -76,7 +76,10 @@ pub struct DeleteOutcome {
 /// Returns `Err` if no retained keys exist for the rumor (predates
 /// the retention feature, sent from a different device, etc).
 pub async fn delete_own_dm(rumor_id: &EventId) -> Result<DeleteOutcome, String> {
-    let client = NOSTR_CLIENT.get().ok_or("Not logged in")?;
+    let client = nostr_client().ok_or("Not logged in")?;
+    // Session captured for the relay-nuke loop — without this, an
+    // account-A wrap-key purge could land in account B's nip17_keys.
+    let session = crate::state::SessionGuard::capture();
     let keys = crate::db::nip17_keys::get_wrap_keys_for_rumor(rumor_id)
         .unwrap_or_default();
 
@@ -137,11 +140,14 @@ pub async fn delete_own_dm(rumor_id: &EventId) -> Result<DeleteOutcome, String> 
     // retained wrap keys for this rumor.
     for stored in keys.iter() {
         let client = client.clone();
+        let task_session = session;
         let wrap_event_id = stored.wrap_event_id;
         let secret = stored.secret.clone();
         let relay_urls = stored.relay_urls.clone();
         tokio::spawn(async move {
+            if !task_session.is_valid() { return; }
             delete_wrap_per_relay(&client, wrap_event_id, secret, relay_urls).await;
+            if !task_session.is_valid() { return; }
             if let Err(e) = crate::db::nip17_keys::purge_wrap_keys(&[wrap_event_id]) {
                 crate::log_warn!("[NIP-17 delete] failed to purge wrap key: {}", e);
             }
@@ -166,7 +172,7 @@ pub async fn delete_own_dm(rumor_id: &EventId) -> Result<DeleteOutcome, String> 
 
     let mut cooperative_hide_sent = false;
     if let Some(recipient) = cooperative_recipient {
-        match publish_cooperative_hide(client, rumor_id, &recipient).await {
+        match publish_cooperative_hide(&client, rumor_id, &recipient).await {
             Ok(()) => cooperative_hide_sent = true,
             Err(e) => crate::log_warn!("[NIP-17 delete] cooperative-hide notice failed: {}", e),
         }
@@ -569,7 +575,10 @@ pub async fn delete_own_group_message(
     group_id: &str,
     message_id: &str,
 ) -> Result<DeleteOutcome, String> {
-    let _client = NOSTR_CLIENT.get().ok_or("Not logged in")?;
+    // Bind client + session ONCE — re-fetching per-loop would risk
+    // capturing account B's client into a task spawned for account A.
+    let client = nostr_client().ok_or("Not logged in")?;
+    let session = crate::state::SessionGuard::capture();
     let keys = crate::db::mls_wrap_keys::get_wrap_keys_for_message(message_id)
         .unwrap_or_default();
 
@@ -601,12 +610,15 @@ pub async fn delete_own_group_message(
     // Layer 1 — kind-445 wrapper relay-nuke. Only possible when we
     // still hold retained wrap keys.
     for stored in keys.iter() {
-        let client = NOSTR_CLIENT.get().unwrap().clone();
+        let task_client = client.clone();
+        let task_session = session;
         let wrap_event_id = stored.wrap_event_id;
         let secret = stored.secret.clone();
         let relay_urls = stored.relay_urls.clone();
         tokio::spawn(async move {
-            delete_mls_wrap_per_relay(&client, wrap_event_id, secret, relay_urls).await;
+            if !task_session.is_valid() { return; }
+            delete_mls_wrap_per_relay(&task_client, wrap_event_id, secret, relay_urls).await;
+            if !task_session.is_valid() { return; }
             if let Err(e) = crate::db::mls_wrap_keys::purge_wrap_keys(&[wrap_event_id]) {
                 crate::log_warn!("[MLS delete] failed to purge wrap key: {}", e);
             }
@@ -744,7 +756,7 @@ async fn publish_group_cooperative_hide(
     group_id: &str,
     target_message_id: &EventId,
 ) -> Result<(), String> {
-    let my_pk = *MY_PUBLIC_KEY.get().ok_or("Public key not set")?;
+    let my_pk = my_public_key().ok_or("Public key not set")?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| e.to_string())?
@@ -769,7 +781,7 @@ async fn publish_cooperative_hide(
     target_rumor_id: &EventId,
     recipient: &PublicKey,
 ) -> Result<(), String> {
-    let my_pk = *MY_PUBLIC_KEY.get().ok_or("Public key not set")?;
+    let my_pk = my_public_key().ok_or("Public key not set")?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| e.to_string())?

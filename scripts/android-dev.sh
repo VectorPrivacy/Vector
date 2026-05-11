@@ -47,6 +47,16 @@ export OPENSSL_INCLUDE_DIR="$OPENSSL_ANDROID_DIR/include"
 export AARCH64_LINUX_ANDROID_OPENSSL_LIB_DIR="$OPENSSL_ANDROID_DIR/aarch64/lib"
 export ARMV7_LINUX_ANDROIDEABI_OPENSSL_LIB_DIR="$OPENSSL_ANDROID_DIR/armv7/lib"
 
+# Strip debuginfo on Android dev builds ONLY (scoped to this script's env).
+# Default debug `libvector_lib.so` is ~800MB of DWARF, producing a ~1.5GB
+# APK that Android refuses to install on devices with only a few GB free
+# (INSTALL_FAILED_INSUFFICIENT_STORAGE). `strip=debuginfo` brings the .so
+# down ~10x; `debug=line-tables-only` keeps panics + backtrace line numbers
+# usable. Desktop `npm run dev` runs from a different shell and is
+# unaffected — these env vars exist only for the duration of this script.
+export CARGO_PROFILE_DEV_STRIP=debuginfo
+export CARGO_PROFILE_DEV_DEBUG=line-tables-only
+
 # Run tauri android dev
 cd "$PROJECT_ROOT"
 npx tauri android dev "$@"

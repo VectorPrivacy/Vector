@@ -9,7 +9,7 @@ use nostr_sdk::prelude::*;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 
 use super::{MlsService, MlsError};
-use crate::state::{NOSTR_CLIENT, MY_PUBLIC_KEY, MY_SECRET_KEY, active_trusted_relays};
+use crate::state::{nostr_client, my_public_key, MY_SECRET_KEY, active_trusted_relays};
 
 /// Result of publishing a keypackage.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -26,7 +26,7 @@ pub struct PublishedKeyPackage {
 /// If `use_cache` is true and a valid cached keypackage exists on relay, reuse it.
 /// Otherwise always generate and publish a fresh one.
 pub async fn publish_keypackage(use_cache: bool) -> Result<PublishedKeyPackage, MlsError> {
-    let client = NOSTR_CLIENT.get()
+    let client = nostr_client()
         .ok_or_else(|| MlsError::NostrMlsError("Not connected".into()))?;
 
     // Ensure persistent device_id
@@ -44,7 +44,7 @@ pub async fn publish_keypackage(use_cache: bool) -> Result<PublishedKeyPackage, 
         }
     };
 
-    let my_pubkey = *MY_PUBLIC_KEY.get()
+    let my_pubkey = my_public_key()
         .ok_or_else(|| MlsError::NostrMlsError("Not logged in".into()))?;
     let owner_pubkey_b32 = my_pubkey.to_bech32()
         .map_err(|e| MlsError::NostrMlsError(e.to_string()))?;

@@ -48,7 +48,7 @@ use tokio::sync::RwLock;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use crate::net::ProgressReporter;
 use crate::blossom;
-use crate::NOSTR_CLIENT;
+use crate::nostr_client;
 use crate::image_cache::{self, CacheResult, ImageType};
 use crate::util::bytes_to_hex_string;
 
@@ -182,6 +182,14 @@ impl MarketplaceState {
             last_sync: 0,
             trusted_publishers: vec![TRUSTED_PUBLISHER.to_string()],
         }
+    }
+
+    /// Reset to a fresh state — called by `reset_session()`. Install
+    /// status and version info live in the per-account DB, so the previous
+    /// account's view would otherwise paint stale "installed" indicators
+    /// on the new account's marketplace UI until something refreshes.
+    pub fn clear_for_session_reset(&mut self) {
+        *self = Self::new();
     }
 
     /// Add or update an app in the cache
@@ -464,7 +472,7 @@ pub async fn fetch_marketplace_apps(trusted_only: bool) -> Result<Vec<Marketplac
         }
     }
 
-    let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
+    let client = nostr_client().ok_or("Nostr client not initialized")?;
 
     // Build filter for marketplace events
     let mut filter = Filter::new()
@@ -1006,9 +1014,9 @@ pub async fn publish_to_marketplace<T: NostrSigner + Clone>(
     .await?;
 
     // Publish to relays
-    let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
+    let client = nostr_client().ok_or("Nostr client not initialized")?;
     
-    crate::inbox_relays::send_event_pool_first_ok(client, &event)
+    crate::inbox_relays::send_event_pool_first_ok(&client, &event)
         .await
         .map_err(|e| format!("Failed to publish marketplace event: {}", e))?;
 

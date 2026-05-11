@@ -77,11 +77,14 @@ pub fn decrypt_with_key(hex_data: &str, key: &[u8; 32]) -> Result<String, String
 }
 
 /// Check if encryption is enabled in the database.
+///
+/// Delegates to `state::resolve_encryption_enabled_from_db` — the single
+/// source of truth that handles the missing-row case consistently. The
+/// previous implementation defaulted to `false` on missing rows, which
+/// silently disagreed with `init_encryption_enabled` (defaulted to `true`)
+/// and silently mis-routed login flows after an account swap.
 pub fn is_encryption_enabled() -> bool {
-    crate::db::get_sql_setting("encryption_enabled".to_string())
-        .ok().flatten()
-        .map(|v| v != "false")
-        .unwrap_or(false)
+    crate::state::resolve_encryption_enabled_from_db()
 }
 
 /// Simple hex encode/decode (for crypto module internal use).

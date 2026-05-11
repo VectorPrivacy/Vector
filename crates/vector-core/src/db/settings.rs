@@ -68,3 +68,57 @@ pub fn set_seed(seed: &str) -> Result<(), String> {
     ).map_err(|e| format!("Failed to set seed: {}", e))?;
     Ok(())
 }
+
+/// Atomically commit the four settings written during new-account setup:
+/// the (possibly-encrypted) pkey, the `encryption_enabled` flag, the
+/// `security_type` (only when encrypted), and the (already-encrypted) seed
+/// phrase. Wrapping these in a single transaction makes the new-account
+/// flow crash-safe: either all four land or none do. The previous design
+/// wrote them through four separate `set_sql_setting` calls, which left a
+/// window where pkey was persisted but `encryption_enabled` was not — the
+/// next boot would then mis-interpret the encrypted blob as plaintext nsec
+/// and brick the account.
+///
+/// `security_type` is `Some(_)` for encrypted accounts and `None` for
+/// skip-encryption flows (passing `Some("")` would write an empty string,
+/// which `resolve_encryption_enabled` treats as encrypted — not what we
+/// want for the skip path).
+pub fn commit_account_setup(
+    pkey: &str,
+    encryption_enabled: bool,
+    security_type: Option<&str>,
+    encrypted_seed: Option<&str>,
+) -> Result<(), String> {
+    let mut conn = super::get_write_connection_guard_static()?;
+    let tx = conn.transaction()
+        .map_err(|e| format!("Failed to begin tx: {}", e))?;
+    tx.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('pkey', ?1)",
+        rusqlite::params![pkey],
+    ).map_err(|e| format!("Failed to set pkey: {}", e))?;
+    tx.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('encryption_enabled', ?1)",
+        rusqlite::params![if encryption_enabled { "true" } else { "false" }],
+    ).map_err(|e| format!("Failed to set encryption_enabled: {}", e))?;
+    if let Some(st) = security_type {
+        tx.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('security_type', ?1)",
+            rusqlite::params![st],
+        ).map_err(|e| format!("Failed to set security_type: {}", e))?;
+    } else {
+        // Skip path: ensure no stale security_type from a previous setup
+        // attempt lingers (would mis-route `resolve_encryption_enabled`).
+        tx.execute(
+            "DELETE FROM settings WHERE key = 'security_type'",
+            [],
+        ).map_err(|e| format!("Failed to clear security_type: {}", e))?;
+    }
+    if let Some(seed) = encrypted_seed {
+        tx.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('seed', ?1)",
+            rusqlite::params![seed],
+        ).map_err(|e| format!("Failed to set seed: {}", e))?;
+    }
+    tx.commit().map_err(|e| format!("Failed to commit tx: {}", e))?;
+    Ok(())
+}

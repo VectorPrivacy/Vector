@@ -12,7 +12,7 @@ use std::sync::LazyLock;
 use nostr_sdk::prelude::*;
 use tauri::{AppHandle, Emitter, Runtime};
 
-use crate::{db, NOSTR_CLIENT, TAURI_APP, get_blossom_servers};
+use crate::{db, nostr_client, TAURI_APP, get_blossom_servers};
 
 // ============================================================================
 // Constants
@@ -91,11 +91,11 @@ fn default_relay_mode() -> String {
 // ============================================================================
 
 /// Global storage for relay metrics
-static RELAY_METRICS: LazyLock<RwLock<HashMap<String, RelayMetrics>>> =
+pub(crate) static RELAY_METRICS: LazyLock<RwLock<HashMap<String, RelayMetrics>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
 /// Global storage for relay logs (max 10 per relay)
-static RELAY_LOGS: LazyLock<RwLock<HashMap<String, VecDeque<RelayLog>>>> =
+pub(crate) static RELAY_LOGS: LazyLock<RwLock<HashMap<String, VecDeque<RelayLog>>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
 // ============================================================================
@@ -352,7 +352,7 @@ pub async fn get_relay_logs(url: String) -> Result<Vec<RelayLog>, String> {
 /// Get all relays with their current status
 #[tauri::command]
 pub async fn get_relays<R: Runtime>(handle: AppHandle<R>) -> Result<Vec<RelayInfo>, String> {
-    let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
+    let client = nostr_client().ok_or("Nostr client not initialized")?;
 
     let custom_relays = get_custom_relays(handle.clone()).await.unwrap_or_default();
     let disabled_defaults = get_disabled_default_relays(&handle).await.unwrap_or_default();
@@ -454,12 +454,12 @@ pub async fn toggle_default_relay<R: Runtime>(handle: AppHandle<R>, url: String,
 
     save_disabled_default_relays(&handle, &disabled).await?;
 
-    if let Some(client) = NOSTR_CLIENT.get() {
+    if let Some(client) = nostr_client() {
         if enabled {
             // Wrap with tor_aware_relay_options so a re-enabled default relay
             // doesn't come up Direct when Tor is on (or pre-bootstrap). The
             // failsafe helper handles the boot-completes-mid-call race.
-            match add_relay_failsafe(client, &normalized_url, || {
+            match add_relay_failsafe(&client, &normalized_url, || {
                 vector_core::tor_aware_relay_options(RelayOptions::new().reconnect(false))
             }).await {
                 Ok(_) => {
@@ -513,9 +513,9 @@ pub async fn add_custom_relay<R: Runtime>(handle: AppHandle<R>, url: String, mod
     relays.push(new_relay.clone());
     save_custom_relays(&handle, &relays).await?;
 
-    if let Some(client) = NOSTR_CLIENT.get() {
+    if let Some(client) = nostr_client() {
         if client.relays().await.len() > 0 {
-            match add_relay_failsafe(client, &new_relay.url, || {
+            match add_relay_failsafe(&client, &new_relay.url, || {
                 relay_options_for_mode(&relay_mode)
             }).await {
                 Ok(_) => {
@@ -547,7 +547,7 @@ pub async fn remove_custom_relay<R: Runtime>(handle: AppHandle<R>, url: String) 
 
     save_custom_relays(&handle, &relays).await?;
 
-    if let Some(client) = NOSTR_CLIENT.get() {
+    if let Some(client) = nostr_client() {
         if let Err(e) = client.pool().remove_relay(&url).await {
             eprintln!("[Relay] Note: Could not remove relay from pool: {}", e);
         } else {
@@ -584,9 +584,9 @@ pub async fn toggle_custom_relay<R: Runtime>(handle: AppHandle<R>, url: String, 
 
     save_custom_relays(&handle, &relays).await?;
 
-    if let Some(client) = NOSTR_CLIENT.get() {
+    if let Some(client) = nostr_client() {
         if enabled {
-            match add_relay_failsafe(client, &url, || relay_options_for_mode(&relay_mode)).await {
+            match add_relay_failsafe(&client, &url, || relay_options_for_mode(&relay_mode)).await {
                 Ok(_) => println!("[Relay] Enabled custom relay: {} (mode: {})", url, relay_mode),
                 Err(e) => eprintln!("[Relay] Failed to enable relay: {}", e),
             }
@@ -631,9 +631,9 @@ pub async fn update_relay_mode<R: Runtime>(handle: AppHandle<R>, url: String, mo
     save_custom_relays(&handle, &relays).await?;
 
     if is_enabled {
-        if let Some(client) = NOSTR_CLIENT.get() {
+        if let Some(client) = nostr_client() {
             let _ = client.pool().remove_relay(&url).await;
-            match add_relay_failsafe(client, &url, || relay_options_for_mode(&mode)).await {
+            match add_relay_failsafe(&client, &url, || relay_options_for_mode(&mode)).await {
                 Ok(_) => println!("[Relay] Updated relay mode: {} -> {}", url, mode),
                 Err(e) => eprintln!("[Relay] Failed to update relay mode: {}", e),
             }
@@ -651,10 +651,15 @@ pub async fn validate_relay_url_cmd(url: String) -> Result<String, String> {
     validate_relay_url(&url)
 }
 
-/// Monitor relay pool connection status changes
+/// Tracks whether the relay-monitor task is live for the current session.
+/// Reset by `reset_session()`: the monitor task exits with its channel when
+/// the old client drops, so without a reset the relay-status UI would freeze
+/// on the prior account's state with no new monitor ever spawning.
+pub(crate) static MONITOR_STARTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 #[tauri::command]
 pub async fn monitor_relay_connections() -> Result<bool, String> {
-    static MONITOR_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if MONITOR_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return Ok(false);
     }
@@ -662,7 +667,7 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
     // Wait for client/app to be available — monitor is started fire-and-forget from
     // frontend, so returning Err would silently kill it forever (MONITOR_STARTED stays true).
     let (client, handle) = loop {
-        if let (Some(c), Some(h)) = (NOSTR_CLIENT.get(), TAURI_APP.get()) {
+        if let (Some(c), Some(h)) = (nostr_client(), TAURI_APP.get()) {
             break (c, h.clone());
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -845,7 +850,10 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
 /// Returns `true` if the client connected, `false` if already connected
 #[tauri::command]
 pub async fn connect<R: Runtime>(handle: AppHandle<R>) -> bool {
-    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
+    // Frontend invokes `connect` speculatively on every reload; if
+    // login hasn't installed the client yet, return `false` so the
+    // frontend's retry path handles the no-op.
+    let Some(client) = nostr_client() else { return false; };
 
     // If we're already connected to some relays - skip and tell the frontend our client is already online
     if !client.relays().await.is_empty() {
@@ -929,11 +937,11 @@ pub async fn connect<R: Runtime>(handle: AppHandle<R>) -> bool {
     tokio::spawn(async {
         // Small delay to let relay connections stabilise
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        let client = match NOSTR_CLIENT.get() {
+        let client = match nostr_client() {
             Some(c) => c,
             None => return,
         };
-        if let Err(e) = crate::inbox_relays::publish_inbox_relays(client).await {
+        if let Err(e) = crate::inbox_relays::publish_inbox_relays(&client).await {
             eprintln!("[Relay] Failed to publish inbox relays: {}", e);
         }
     });

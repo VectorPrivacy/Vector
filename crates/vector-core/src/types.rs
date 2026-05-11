@@ -113,8 +113,8 @@ impl Message {
 
     /// Check if this message mentions the current user.
     pub fn mentions_me(&self) -> bool {
-        crate::state::MY_PUBLIC_KEY.get()
-            .and_then(|pk| nostr_sdk::prelude::ToBech32::to_bech32(pk).ok())
+        crate::state::my_public_key()
+            .and_then(|pk| nostr_sdk::prelude::ToBech32::to_bech32(&pk).ok())
             .map_or(false, |my_npub| self.content.contains(&format!("@{}", my_npub)))
     }
 

@@ -41,13 +41,13 @@ use tokio::sync::Mutex;
 use crate::{
     commands, db,
     MlsService, NotificationData, show_notification_generic,
-    TAURI_APP, NOSTR_CLIENT,
+    TAURI_APP, nostr_client,
     util::get_file_type_description,
 };
 
 /// Current MLS group message subscription ID. Updated by `refresh_mls_subscription()`
 /// when groups are joined or left — single subscription, never accumulates.
-static MLS_SUB_ID: LazyLock<Mutex<Option<SubscriptionId>>> = LazyLock::new(|| Mutex::new(None));
+pub(crate) static MLS_SUB_ID: LazyLock<Mutex<Option<SubscriptionId>>> = LazyLock::new(|| Mutex::new(None));
 
 /// Process an MLS group message event through the full pipeline.
 ///
@@ -179,7 +179,7 @@ async fn show_mls_group_notification(group_id: &str, msg: &vector_core::Message)
 /// Unsubscribes the old subscription (if any) and creates a new one scoped to our groups.
 /// Called at boot and whenever groups change (join/leave/evict).
 pub(crate) async fn refresh_mls_subscription() {
-    let Some(client) = NOSTR_CLIENT.get() else { return; };
+    let Some(client) = nostr_client() else { return; };
 
     let group_ids: Vec<String> = crate::db::load_mls_groups().await
         .unwrap_or_default()
@@ -213,7 +213,11 @@ pub(crate) async fn refresh_mls_subscription() {
 /// Uses vector-core's `subscribe_dms()` for the GiftWrap subscription,
 /// then layers on MLS group subscription (Tauri-specific MDK dependency).
 pub(crate) async fn start_subscriptions() -> Result<bool, String> {
-    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
+    let client = nostr_client().ok_or("Nostr client not initialized")?;
+    // Session captured at subscription start; every notification short-
+    // circuits on swap so account A's inbound events don't persist into
+    // account B's DB.
+    let session = vector_core::state::SessionGuard::capture();
 
     // GiftWrap subscription via vector-core (DMs, files, MLS welcomes)
     let core = vector_core::VectorCore;
@@ -226,13 +230,16 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
     // MLS group messages through the MDK handler
     match client
         .handle_notifications(|notification| async {
+            // If the session has been swapped out from under us, exit the
+            // notification loop. Returning Ok(true) tells nostr-sdk to break.
+            if !session.is_valid() { return Ok(true); }
             if let RelayPoolNotification::Event { event, subscription_id, .. } = notification {
                 if subscription_id == gift_sub_id {
                     // DMs/files/reactions/edits + MLS welcomes (via tauri_commit_prepared_event)
                     super::handle_event(*event, true).await;
                 } else if MLS_SUB_ID.lock().await.as_ref() == Some(&subscription_id) {
                     // MLS group messages via MDK engine
-                    if let Some(&my_pk) = crate::MY_PUBLIC_KEY.get() {
+                    if let Some(my_pk) = crate::my_public_key() {
                         handle_mls_group_message((*event).clone(), my_pk).await;
                     }
                 }

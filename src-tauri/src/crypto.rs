@@ -15,9 +15,12 @@ use chacha20poly1305::{
 };
 use zeroize::Zeroize;
 
-// Re-export from vector-core
+// Re-export from vector-core. `is_encryption_enabled` is intentionally NOT
+// re-exported: src-tauri callers now go through
+// `vector_core::state::is_encryption_enabled_fast()` (atomic, seeded by
+// `init_encryption_enabled()` via the canonical resolver). Routing through
+// the atomic keeps every code site in agreement about the missing-row case.
 pub use vector_core::crypto::{
-    is_encryption_enabled,
     maybe_encrypt, maybe_decrypt,
 };
 

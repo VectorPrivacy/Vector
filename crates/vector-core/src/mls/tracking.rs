@@ -205,12 +205,29 @@ mod tests {
     static DB_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     static TEST_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+    /// Generate a bech32-shaped placeholder npub — `account_dir` enforces
+    /// `is_valid_npub` (63 chars, bech32 alphabet) so naive names like
+    /// `npub1pendingtest0` are rejected.
+    fn make_test_npub(n: u32) -> String {
+        const BECH32: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l"; // 32 chars
+        let mut payload = vec![b'q'; 58];
+        let mut x = n as u64;
+        let mut i = 58;
+        while x > 0 && i > 0 {
+            i -= 1;
+            payload[i] = BECH32[(x as usize) % 32];
+            x /= 32;
+        }
+        payload[57] = BECH32[(n as usize) % 32];
+        format!("npub1{}", std::str::from_utf8(&payload).unwrap())
+    }
+
     fn init_test_db() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
         let guard = DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::db::close_database();
         let tmp = tempfile::tempdir().unwrap();
         let n = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let account = format!("npub1pendingtest{}", n);
+        let account = make_test_npub(n);
         std::fs::create_dir_all(tmp.path().join(&account)).unwrap();
         crate::db::set_app_data_dir(tmp.path().to_path_buf());
         crate::db::set_current_account(account.clone()).unwrap();

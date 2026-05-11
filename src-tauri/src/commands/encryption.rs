@@ -8,9 +8,31 @@
 
 use tauri::{command, AppHandle, Emitter, Runtime};
 use zeroize::Zeroize;
-use crate::crypto::{encrypt_with_key, decrypt_with_key, is_encryption_enabled};
+use crate::crypto::{encrypt_with_key, decrypt_with_key};
 use crate::state::{close_processing_gate, open_processing_gate, set_encryption_enabled, PENDING_EVENTS};
 use crate::stored_event::event_kind;
+
+/// Set when an encryption migration (encrypt/decrypt/rekey) is mid-flight.
+/// `reset_session()` checks this to refuse a swap while data is being
+/// transformed — yanking the DB connection mid-transaction would leave the
+/// account in a half-migrated state.
+pub(crate) static MIGRATION_IN_PROGRESS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// RAII guard for `MIGRATION_IN_PROGRESS` — clears the flag on drop so a
+/// migration that returns early or panics can't leave the guard stuck.
+struct MigrationGuard;
+impl MigrationGuard {
+    fn enter() -> Self {
+        MIGRATION_IN_PROGRESS.store(true, std::sync::atomic::Ordering::Release);
+        Self
+    }
+}
+impl Drop for MigrationGuard {
+    fn drop(&mut self) {
+        MIGRATION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
 
 /// Progress update for encryption migration
 #[derive(serde::Serialize, Clone)]
@@ -51,8 +73,10 @@ pub async fn get_encryption_status<R: Runtime>(
     };
 
     // Initialize the cached flag from DB (first call seeds the AtomicBool)
+    // then read back from the same atomic so we agree with the rest of the
+    // app about the missing-row case (resolved via `security_type`).
     crate::state::init_encryption_enabled();
-    let enabled = is_encryption_enabled();
+    let enabled = vector_core::state::is_encryption_enabled_fast();
 
     let security_type = if enabled {
         crate::db::get_sql_setting("security_type".to_string())
@@ -69,7 +93,7 @@ pub async fn get_encryption_status<R: Runtime>(
 }
 
 /// Combined boot query: account existence + encryption status.
-/// Account existence is derived from CURRENT_ACCOUNT (set by auto_select_account at startup).
+/// Account existence is derived from CURRENT_ACCOUNT (set by boot_select_account at startup).
 /// Private key is NEVER returned — use login_from_stored_key to authenticate.
 #[derive(serde::Serialize)]
 pub struct BootEncryptionInfo {
@@ -79,9 +103,42 @@ pub struct BootEncryptionInfo {
 }
 
 #[command]
-pub fn get_encryption_and_key<R: Runtime>(_handle: AppHandle<R>) -> Result<BootEncryptionInfo, String> {
-    // auto_select_account already ran at Tauri startup — just check the result
-    let has_account = crate::account_manager::get_current_account().is_ok();
+pub fn get_encryption_and_key<R: Runtime>(handle: AppHandle<R>) -> Result<BootEncryptionInfo, String> {
+    // CURRENT_ACCOUNT may be None when called after a webview reload that
+    // followed a `swap_session` — `boot_select_account` only runs at Tauri
+    // startup, not on reload. Honor the active-account marker file here so
+    // the post-swap reload lands on the right account. If the marker is
+    // missing AND multiple accounts exist on disk, recover by pointing at
+    // the first one — without this the user gets dumped on the bare
+    // Create / Login screen even when they have valid accounts available
+    // (e.g. an old delete-flow run that didn't repoint the marker, or
+    // Add Profile abort paths). The frontend's picker pill then lets them
+    // jump to the account they actually wanted.
+    // CURRENT_ACCOUNT is set by `boot_select_account` at Tauri startup.
+    // It can be None at this point in two cases:
+    //   1. Multiple accounts on disk with no marker — boot intentionally
+    //      returned None so the frontend can show the picker.
+    //   2. A `swap_session` cleared in-memory state, then the frontend
+    //      reloaded; only the marker file (set by `set_active_account`
+    //      before the swap) tells us where to land.
+    //
+    // We honor the marker but never auto-pick from `list_accounts` —
+    // "first alphabetically" is the wrong default for multi-account
+    // installs; the frontend's picker pill exists precisely so the user
+    // can make this choice.
+    let has_account = if crate::account_manager::get_current_account().is_ok() {
+        true
+    } else if let Some(npub) = vector_core::db::read_active_account_file().ok().flatten() {
+        match crate::account_manager::set_current_account(npub.clone()) {
+            Ok(()) => {
+                let _ = vector_core::db::init_database(&npub);
+                true
+            }
+            Err(_) => false,
+        }
+    } else {
+        false
+    };
 
     if !has_account {
         return Ok(BootEncryptionInfo {
@@ -90,10 +147,16 @@ pub fn get_encryption_and_key<R: Runtime>(_handle: AppHandle<R>) -> Result<BootE
             security_type: "pin".to_string(),
         });
     }
+    let _ = handle;
 
-    // Initialize the cached flag from DB (first call seeds the AtomicBool)
+    // Seed the cached flag from the new account's DB and read it back from
+    // the same atomic. Historically the two helpers had divergent missing-
+    // row defaults (one defaulted false, the other true), which silently
+    // mis-routed boots through the wrong login path after a swap. Both now
+    // delegate to `state::resolve_encryption_enabled_from_db` so this is
+    // robust against either being called independently.
     crate::state::init_encryption_enabled();
-    let enabled = is_encryption_enabled();
+    let enabled = vector_core::state::is_encryption_enabled_fast();
 
     let security_type = if enabled {
         crate::db::get_sql_setting("security_type".to_string())
@@ -120,6 +183,9 @@ pub fn get_encryption_and_key<R: Runtime>(_handle: AppHandle<R>) -> Result<BootE
 /// paths (audit C2).
 #[command]
 pub async fn disable_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), String> {
+    // Mark migration in flight so reset_session() refuses to fire mid-tx.
+    let _guard = MigrationGuard::enter();
+
     // Close the processing gate — events are queued until we reopen
     close_processing_gate();
 
@@ -180,6 +246,7 @@ pub async fn enable_encryption<R: Runtime>(
     credential: String,
     security_type: String,
 ) -> Result<(), String> {
+    let _guard = MigrationGuard::enter();
     // Derive key from credential (this is the slow Argon2 step)
     let key = crate::crypto::hash_pass(credential).await;
     crate::ENCRYPTION_KEY.set(key, &[&crate::MY_SECRET_KEY]);
@@ -814,6 +881,8 @@ pub async fn rekey_encryption<R: Runtime>(
     new_credential: String,
     security_type: String,
 ) -> Result<(), String> {
+    let _guard = MigrationGuard::enter();
+
     // 1. Derive old key and verify it by test-decrypting pkey
     let old_key = crate::crypto::hash_pass(old_credential).await;
     {

@@ -104,11 +104,54 @@ function renderChatlist() {
     // Give the final element a bottom-margin boost to allow scrolling past the fadeout
     if (fragment.lastElementChild) fragment.lastElementChild.style.marginBottom = `50px`;
 
+    // Empty-state intro for fresh accounts (no chats, no invites). The
+    // visible chat list normally only contains DMs with at least one
+    // message and groups the user has joined; if the fragment came out
+    // empty AND there are no pending invites, surface a friendly nudge
+    // so the user understands what to do next.
+    if (!fragment.firstElementChild && arrMLSInvites.length === 0) {
+        fragment.appendChild(buildChatlistEmptyState());
+    }
+
     // Replace the existing list in one native call
     domChatList.replaceChildren(fragment);
 
     // Update the back button notification
     updateChatBackNotification();
+}
+
+/**
+ * Build the empty-state placeholder shown when the chat list has no
+ * chats or invites. Pulls the user toward the New Chat / Group Chat
+ * buttons at the top of the screen, plus a one-tap "Share My Contact"
+ * button that copies the user's vectorapp.io profile link to the
+ * clipboard so they can paste it into another channel and bootstrap
+ * their first conversations.
+ */
+function buildChatlistEmptyState() {
+    const wrap = document.createElement('div');
+    wrap.className = 'chatlist-empty-state';
+    wrap.innerHTML = `
+        <div class="chatlist-empty-state-icon">
+            <span class="icon icon-chats"></span>
+        </div>
+        <h3>No chats yet</h3>
+        <p>Start a <strong>New Chat</strong> or create a <strong>Group Chat</strong> from the buttons above. Messages you receive from other Vector users will appear here automatically.</p>
+        <button class="chatlist-empty-state-share cancel-btn" type="button">
+            Share My Contact
+        </button>
+    `;
+    const btn = wrap.querySelector('.chatlist-empty-state-share');
+    btn.addEventListener('click', () => {
+        if (!strPubkey) return;
+        const profileUrl = `https://vectorapp.io/profile/${strPubkey}`;
+        navigator.clipboard.writeText(profileUrl).then(() => {
+            showToast('Contact Link Copied');
+        }).catch(() => {
+            showToast('Failed to Copy Contact Link');
+        });
+    });
+    return wrap;
 }
 
 /**

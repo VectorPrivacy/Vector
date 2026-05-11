@@ -9,13 +9,36 @@ use crate::net;
 use crate::STATE;
 use crate::util;
 use crate::TAURI_APP;
-use crate::NOSTR_CLIENT;
+use crate::nostr_client;
 
 // Submodules
-mod types;
+pub(crate) mod types;
 mod compression;
-mod sending;
-mod files;
+pub(crate) mod sending;
+pub(crate) mod files;
+
+/// Per-session message-content caches that must be cleared on session reset.
+/// Holds plaintext upload buffers, compressed-image cache, pending zip path,
+/// upload-cancel flags, etc. — all of which would leak across accounts.
+pub(crate) async fn clear_all_message_caches() {
+    if let Ok(mut f) = files::JS_FILE_CACHE.lock() { *f = None; }
+    { *files::JS_COMPRESSION_CACHE.lock().await = None; }
+    if let Ok(mut p) = files::PENDING_ZIP_PATH.lock() { *p = None; }
+    if let Ok(mut a) = types::ANDROID_FILE_CACHE.lock() { a.clear(); }
+    { types::COMPRESSION_CACHE.lock().await.clear(); }
+    // Drop any pending COMPRESSION_NOTIFY entries. These are
+    // content-hash-keyed so they aren't correctness-critical, but they
+    // accumulate `Arc<Notify>` allocations across the process lifetime
+    // and abandoning them on session reset is the right cleanup point.
+    { types::COMPRESSION_NOTIFY.lock().await.clear(); }
+}
+
+#[inline]
+pub(crate) fn upload_cancel_flags()
+    -> &'static std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>
+{
+    &sending::UPLOAD_CANCEL_FLAGS
+}
 
 // Re-exports (use * for Tauri commands to include generated __cmd__ macros)
 pub use sending::*;
@@ -30,8 +53,8 @@ pub use vector_core::compact::CompactAttachment;
 pub async fn react_to_message(reference_id: String, chat_id: String, emoji: String) -> Result<bool, String> {
     use crate::chat::ChatType;
     
-    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-    let my_public_key = *crate::MY_PUBLIC_KEY.get().ok_or("Public key not initialized")?;
+    let client = nostr_client().ok_or("Nostr client not initialized")?;
+    let my_public_key = crate::my_public_key().ok_or("Public key not initialized")?;
 
     // Determine chat type
     let state = STATE.lock().await;
@@ -59,14 +82,18 @@ pub async fn react_to_message(reference_id: String, chat_id: String, emoji: Stri
             let rumor_id = rumor.id.ok_or("Failed to get rumor ID")?.to_hex();
             
             // Send reaction to the receiver (routed to their inbox relays if available)
-            crate::inbox_relays::send_gift_wrap(client, &receiver_pubkey, rumor.clone(), [])
+            crate::inbox_relays::send_gift_wrap(&client, &receiver_pubkey, rumor.clone(), [])
                 .await
                 .map_err(|e| e.to_string())?;
             
-            // Send reaction to ourselves for recovery (fire-and-forget)
+            // Self-wrap for recovery. Clone existing `client` (cheap Arc;
+            // no re-fetch that could observe a different account) and
+            // capture SessionGuard so a swap aborts before signing.
+            let self_wrap_client = client.clone();
+            let self_wrap_session = vector_core::state::SessionGuard::capture();
             tokio::spawn(async move {
-                let client = crate::NOSTR_CLIENT.get().unwrap();
-                let _ = client.gift_wrap(&my_public_key, rumor, []).await;
+                if !self_wrap_session.is_valid() { return; }
+                let _ = self_wrap_client.gift_wrap(&my_public_key, rumor, []).await;
             });
 
             // Add reaction to local state (bech32 npub to match DB format and frontend strPubkey)
@@ -263,8 +290,8 @@ pub async fn edit_message(
     use crate::chat::ChatType;
     use crate::stored_event::event_kind;
 
-    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-    let my_public_key = *crate::MY_PUBLIC_KEY.get().ok_or("Public key not initialized")?;
+    let client = nostr_client().ok_or("Nostr client not initialized")?;
+    let my_public_key = crate::my_public_key().ok_or("Public key not initialized")?;
     let my_npub = my_public_key.to_bech32().map_err(|e| e.to_string())?;
 
     // Determine chat type and get db chat_id
@@ -294,14 +321,16 @@ pub async fn edit_message(
             let receiver_pubkey = PublicKey::from_bech32(&chat_id).map_err(|e| e.to_string())?;
 
             // Send edit to the receiver (routed to their inbox relays if available)
-            crate::inbox_relays::send_gift_wrap(client, &receiver_pubkey, rumor.clone(), [])
+            crate::inbox_relays::send_gift_wrap(&client, &receiver_pubkey, rumor.clone(), [])
                 .await
                 .map_err(|e| e.to_string())?;
 
-            // Send edit to ourselves for recovery (fire-and-forget)
+            // Self-wrap for recovery (same pattern as react_to_message).
+            let self_wrap_client = client.clone();
+            let self_wrap_session = vector_core::state::SessionGuard::capture();
             tokio::spawn(async move {
-                let client = crate::NOSTR_CLIENT.get().unwrap();
-                let _ = client.gift_wrap(&my_public_key, rumor, []).await;
+                if !self_wrap_session.is_valid() { return; }
+                let _ = self_wrap_client.gift_wrap(&my_public_key, rumor, []).await;
             });
         }
         ChatType::MlsGroup => {

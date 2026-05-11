@@ -112,15 +112,21 @@ pub async fn cache_all_profile_images() {
 
     log_info!("[Profile] Caching images for {} profiles", profiles_to_cache.len());
 
-    // Spawn caching tasks for each profile (they run concurrently with semaphore limiting)
+    // SessionGuard is Copy so each spawn can move-capture a snapshot.
+    // Without this, image fetches completing after a swap would land
+    // in account B's STATE/DB/cache under account A's npub.
+    let session = vector_core::state::SessionGuard::capture();
+    // Spawn caching tasks for each profile (concurrent with semaphore limiting)
     for (npub, avatar_url, banner_url) in profiles_to_cache {
         let handle = handle.clone();
+        let task_session = session;
         tokio::spawn(async move {
             // Cache avatar if needed
             if !avatar_url.is_empty() {
                 if let CacheResult::Cached(path) | CacheResult::AlreadyCached(path) =
                     image_cache::cache_avatar(&handle, &avatar_url).await
                 {
+                    if !task_session.is_valid() { return; }
                     let mut state = STATE.lock().await;
                     if let Some(id) = state.interner.lookup(&npub) {
                         let needs_emit = {
@@ -146,6 +152,7 @@ pub async fn cache_all_profile_images() {
                 if let CacheResult::Cached(path) | CacheResult::AlreadyCached(path) =
                     image_cache::cache_banner(&handle, &banner_url).await
                 {
+                    if !task_session.is_valid() { return; }
                     let mut state = STATE.lock().await;
                     if let Some(id) = state.interner.lookup(&npub) {
                         let needs_emit = {

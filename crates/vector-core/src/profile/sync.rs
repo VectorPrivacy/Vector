@@ -16,7 +16,7 @@ use nostr_sdk::prelude::*;
 
 use crate::compact::secs_to_compact;
 use crate::profile::Profile;
-use crate::state::{NOSTR_CLIENT, MY_PUBLIC_KEY, STATE};
+use crate::state::{nostr_client, my_public_key, STATE};
 use crate::traits::emit_event;
 
 // ============================================================================
@@ -135,6 +135,17 @@ impl ProfileSyncQueue {
         self.low_queue.retain(|e| e.npub != npub);
     }
 
+    /// Drop every queued + in-flight entry. Used by `reset_session()` so a
+    /// post-reset processor doesn't keep fetching the prior account's contacts.
+    pub fn clear(&mut self) {
+        self.critical_queue.clear();
+        self.high_queue.clear();
+        self.medium_queue.clear();
+        self.low_queue.clear();
+        self.processing.clear();
+        self.last_fetched.clear();
+    }
+
     /// Get the next batch of profiles ready to process (highest priority first).
     pub(crate) fn get_next_batch(&mut self) -> Vec<QueueEntry> {
         let mut batch = Vec::new();
@@ -185,6 +196,15 @@ impl ProfileSyncQueue {
 static PROFILE_SYNC_QUEUE: LazyLock<Arc<Mutex<ProfileSyncQueue>>> =
     LazyLock::new(|| Arc::new(Mutex::new(ProfileSyncQueue::new())));
 
+/// Drop every queued profile-sync entry. Called by `reset_session()` so the
+/// long-lived `start_profile_sync_processor` loop doesn't service the prior
+/// account's contacts after an inline session swap.
+pub fn clear_profile_sync_queue() {
+    if let Ok(mut q) = PROFILE_SYNC_QUEUE.lock() {
+        q.clear();
+    }
+}
+
 // ============================================================================
 // ProfileSyncHandler — platform-specific callbacks
 // ============================================================================
@@ -215,18 +235,24 @@ impl ProfileSyncHandler for NoOpProfileSyncHandler {}
 ///
 /// Returns `true` if the fetch succeeded (even if nothing changed).
 pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> bool {
-    let client = match NOSTR_CLIENT.get() {
+    let client = match nostr_client() {
         Some(c) => c,
         None => return false,
     };
+
+    // Session captured for the whole load_profile lifecycle. Relay
+    // fetches can sleep multi-second; we re-check before writing back
+    // to STATE / DB so a mid-fetch swap doesn't land account A's
+    // profile in account B's storage.
+    let session = crate::state::SessionGuard::capture();
 
     let profile_pubkey = match PublicKey::from_bech32(npub.as_str()) {
         Ok(pk) => pk,
         Err(_) => return false,
     };
 
-    let my_public_key = match MY_PUBLIC_KEY.get() {
-        Some(&pk) => pk,
+    let my_public_key = match my_public_key() {
+        Some(pk) => pk,
         None => return false,
     };
 
@@ -281,6 +307,9 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
     let fetch_result = client
         .fetch_metadata(profile_pubkey, Duration::from_secs(15))
         .await;
+
+    // Abandon the fetch result if a swap happened during the await.
+    if !session.is_valid() { return false; }
 
     match fetch_result {
         Ok(meta) => {
@@ -367,13 +396,13 @@ pub async fn update_profile(
     name: String, avatar: String, banner: String, about: String,
     handler: &dyn ProfileSyncHandler,
 ) -> bool {
-    let client = match NOSTR_CLIENT.get() {
+    let client = match nostr_client() {
         Some(c) => c,
         None => return false,
     };
 
-    let my_public_key = match MY_PUBLIC_KEY.get() {
-        Some(&pk) => pk,
+    let my_public_key = match my_public_key() {
+        Some(pk) => pk,
         None => return false,
     };
 
@@ -461,7 +490,7 @@ pub async fn update_profile(
     };
 
     // Broadcast — first-ACK so UI updates as soon as the fastest relay responds
-    match crate::inbox_relays::send_event_pool_first_ok(client, &event).await {
+    match crate::inbox_relays::send_event_pool_first_ok(&client, &event).await {
         Ok(_) => {
             let npub = match my_public_key.to_bech32() {
                 Ok(n) => n,
@@ -504,13 +533,13 @@ pub async fn update_profile(
 /// Status is ephemeral — updated in STATE + frontend but not persisted to DB.
 /// (Re-fetched from relays on next `load_profile` call.)
 pub async fn update_status(status: String) -> bool {
-    let client = match NOSTR_CLIENT.get() {
+    let client = match nostr_client() {
         Some(c) => c,
         None => return false,
     };
 
-    let my_public_key = match MY_PUBLIC_KEY.get() {
-        Some(&pk) => pk,
+    let my_public_key = match my_public_key() {
+        Some(pk) => pk,
         None => return false,
     };
 
@@ -522,7 +551,7 @@ pub async fn update_status(status: String) -> bool {
         return false;
     };
 
-    match crate::inbox_relays::send_event_pool_first_ok(client, &event).await {
+    match crate::inbox_relays::send_event_pool_first_ok(&client, &event).await {
         Ok(_) => {
             let mut state = STATE.lock().await;
             let npub = match my_public_key.to_bech32() {
@@ -560,7 +589,7 @@ pub async fn update_status(status: String) -> bool {
 /// Returns `false` if trying to block yourself or if the profile can't be found.
 pub async fn block_user(npub: String, handler: &dyn ProfileSyncHandler) -> bool {
     // Prevent blocking yourself
-    if let Some(&my_pk) = MY_PUBLIC_KEY.get() {
+    if let Some(my_pk) = my_public_key() {
         if my_pk.to_bech32().ok().as_deref() == Some(npub.as_str()) {
             return false;
         }
@@ -703,8 +732,15 @@ pub async fn start_profile_sync_processor(handler: Arc<dyn ProfileSyncHandler>) 
             continue;
         }
 
-        // Process the batch
+        // Session captured per-batch so a swap aborts the loop before
+        // account A's queue work lands in account B's DB. The next
+        // outer-loop iteration picks up the new session's queue cleanly.
+        let batch_session = crate::state::SessionGuard::capture();
+
         for entry in &batch {
+            if !batch_session.is_valid() {
+                break;
+            }
             load_profile(entry.npub.clone(), handler.as_ref()).await;
 
             {

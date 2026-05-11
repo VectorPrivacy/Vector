@@ -371,7 +371,7 @@ async fn handle_miniapp_request<R: tauri::Runtime>(
 /// when called from the protocol handler
 async fn get_user_info() -> (String, String) {
     // Get user's npub from Nostr client
-    let user_npub = if let Some(&pk) = crate::MY_PUBLIC_KEY.get() {
+    let user_npub = if let Some(pk) = crate::my_public_key() {
         pk.to_bech32().unwrap_or_else(|_| "unknown".to_string())
     } else {
         "unknown".to_string()

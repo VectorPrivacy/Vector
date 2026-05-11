@@ -12,6 +12,595 @@ const SystemEventType = {
     MemberRemoved: 2,
 };
 
+/**
+ * Multi-account API surface. Wraps the Tauri commands that the in-app My
+ * Profile dropdown and the pre-login picker both consume. Keeping it in one
+ * place so the two callers can't drift on validation or error handling.
+ */
+const MAX_ACCOUNTS = 5;
+
+const multiAccount = {
+    /**
+     * List every locally-known account with display metadata (name, avatar,
+     * has_encryption flag, last_active timestamp). Sorted by last_active desc.
+     */
+    list() {
+        return invoke('list_accounts_with_metadata');
+    },
+
+    /**
+     * Switch to a different account. Writes the active-account marker file
+     * and triggers a full session reset; the backend emits `session_reload`
+     * which the listener at top of setupRustListeners catches and reloads.
+     */
+    async setActiveAndSwap(npub) {
+        // Capture the previous marker so we can roll back if swap_session
+        // rejects (e.g. mid-encryption-migration). Otherwise the marker
+        // would point at the new account while the in-memory session
+        // stayed on the previous one — the next manual launch would boot
+        // into the wrong account silently.
+        let prev = null;
+        try { prev = await invoke('get_current_account'); } catch (_) {}
+        await invoke('set_active_account', { npub });
+        try {
+            await invoke('swap_session');
+        } catch (e) {
+            if (prev) {
+                try { await invoke('set_active_account', { npub: prev }); } catch (_) {}
+            } else {
+                try { await invoke('clear_active_account'); } catch (_) {}
+            }
+            throw e;
+        }
+    },
+
+    /**
+     * Permanently delete an account. Returns whether the deleted account was
+     * the active one (in which case the backend already ran reset_session and
+     * the caller should issue swap_session to fire the reload).
+     */
+    delete(npub) {
+        return invoke('delete_account', { npub });
+    },
+
+    /**
+     * Reset + reload the session without changing the active account marker.
+     * Used after account deletion to surface the picker / fresh boot state.
+     */
+    swap() {
+        return invoke('swap_session');
+    },
+};
+
+/**
+ * Build one row of the My Profile dropdown / pre-login picker.
+ * `meta` is an AccountMetadata record from the backend.
+ * `isActive` adds the green dot + accent ring to the active row.
+ */
+function buildAccountRow(meta, { isActive, onClick, onDelete }) {
+    const row = document.createElement('div');
+    row.className = 'profile-switcher-row' + (isActive ? ' active' : '');
+    row.dataset.npub = meta.npub;
+
+    const dot = document.createElement('span');
+    dot.className = 'profile-switcher-active-dot';
+    row.appendChild(dot);
+
+    // Reuse the shared avatar helper so accounts without a profile-set
+    // avatar render the same Nostr placeholder used by chat rows / contact
+    // headers, and a failed image load falls back to the placeholder
+    // automatically.
+    const avatarSrc = meta.avatar_cached
+        ? convertFileSrc(meta.avatar_cached)
+        : (meta.avatar_url || null);
+    const avatar = createAvatarImg(avatarSrc, 28, false);
+    avatar.classList.add('profile-switcher-avatar');
+    row.appendChild(avatar);
+
+    const meta_el = document.createElement('div');
+    meta_el.className = 'profile-switcher-meta';
+    const name = document.createElement('span');
+    name.className = 'profile-switcher-name';
+    name.textContent = meta.display_name || 'Unnamed';
+    const npub = document.createElement('span');
+    npub.className = 'profile-switcher-npub';
+    // Full npub — CSS handles overflow with `text-overflow: ellipsis`,
+    // so the visible cut adapts to the row width on any screen size
+    // instead of being hard-coded to a slice length.
+    npub.textContent = meta.npub;
+    meta_el.appendChild(name);
+    meta_el.appendChild(npub);
+    row.appendChild(meta_el);
+
+    if (onDelete) {
+        const trash = document.createElement('button');
+        trash.className = 'profile-switcher-row-trash btn';
+        trash.setAttribute('aria-label', 'Delete account');
+        // Inline SVG — Vector's `.icon` class is position:absolute inside
+        // sized parents and would render at 0×0 here. Using SVG keeps the
+        // trash icon flowing inline with the row.
+        trash.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14ZM10 11v6M14 11v6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+        trash.addEventListener('click', (ev) => {
+            ev.stopPropagation();
+            onDelete(meta);
+        });
+        row.appendChild(trash);
+    }
+
+    if (onClick && !isActive) {
+        row.addEventListener('click', (ev) => {
+            onClick(meta);
+        });
+    }
+
+    return row;
+}
+
+/**
+ * In-app My Profile dropdown — full-feature: switch / add / delete.
+ * Opened by clicking #my-profile-switcher. Renders accounts via multiAccount.list().
+ */
+const profileSwitcher = {
+    isOpen: false,
+    isEditing: false,
+    isOpening: false,
+
+    init() {
+        const trigger = document.getElementById('my-profile-switcher');
+        const backdrop = document.getElementById('profile-switcher-backdrop');
+        const panel = document.getElementById('profile-switcher-panel');
+        const trashToggle = document.getElementById('profile-switcher-trash-toggle');
+        const addBtn = document.getElementById('profile-switcher-add');
+        if (!trigger || !panel) return;
+
+        trigger.addEventListener('click', () => this.toggle());
+        backdrop.addEventListener('click', () => this.close());
+        trashToggle.addEventListener('click', (ev) => {
+            ev.stopPropagation();
+            this.toggleEditMode();
+        });
+        addBtn.addEventListener('click', () => this.onAddProfile());
+
+        // Close on Escape
+        document.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Escape' && this.isOpen) this.close();
+        });
+    },
+
+    async toggle() {
+        if (this.isOpen) {
+            this.close();
+        } else {
+            await this.open();
+        }
+    },
+
+    async open() {
+        if (this.isOpening) return;
+        this.isOpening = true;
+        try {
+            const accounts = await multiAccount.list();
+            this.render(accounts);
+            document.getElementById('profile-switcher-backdrop').classList.add('visible');
+            document.getElementById('profile-switcher-panel').classList.add('open');
+            document.getElementById('my-profile-switcher').classList.add('open');
+            this.isOpen = true;
+        } catch (e) {
+            console.error('[profile-switcher] open failed:', e);
+        } finally {
+            this.isOpening = false;
+        }
+    },
+
+    close() {
+        document.getElementById('profile-switcher-backdrop').classList.remove('visible');
+        document.getElementById('profile-switcher-panel').classList.remove('open');
+        document.getElementById('my-profile-switcher').classList.remove('open');
+        this.isOpen = false;
+        // Always reset edit mode on close so the next open starts neutral.
+        this.exitEditMode();
+    },
+
+    render(accounts) {
+        const list = document.getElementById('profile-switcher-list');
+        list.innerHTML = '';
+        const myProfile = arrProfiles.find(p => p.mine);
+        const activeNpub = myProfile?.id || '';
+        for (const meta of accounts) {
+            const row = buildAccountRow(meta, {
+                isActive: meta.npub === activeNpub,
+                onClick: (m) => this.onSwitchTo(m),
+                onDelete: (m) => this.onDeleteRow(m),
+            });
+            list.appendChild(row);
+        }
+        // Cap at MAX_ACCOUNTS — replace the Add button label and disable
+        // the click affordance once the user has hit the ceiling.
+        const addBtn = document.getElementById('profile-switcher-add');
+        if (addBtn) {
+            const atCap = accounts.length >= MAX_ACCOUNTS;
+            addBtn.classList.toggle('disabled', atCap);
+            const label = addBtn.querySelector('.profile-switcher-add-label');
+            if (label) label.textContent = atCap ? 'Maximum Accounts' : 'Add Profile';
+        }
+    },
+
+    toggleEditMode() {
+        if (this.isEditing) {
+            this.exitEditMode();
+        } else {
+            document.body.classList.add('profile-switcher-editing');
+            this.isEditing = true;
+        }
+    },
+    exitEditMode() {
+        document.body.classList.remove('profile-switcher-editing');
+        this.isEditing = false;
+    },
+
+    async onSwitchTo(meta) {
+        // Active row click is no-op (the click handler is gated above).
+        try {
+            this.close();
+            await multiAccount.setActiveAndSwap(meta.npub);
+            // Backend emits session_reload; the listener calls window.location.reload().
+        } catch (e) {
+            console.error('[profile-switcher] switch failed:', e);
+            popupConfirm('Switch failed', String(e), true);
+        }
+    },
+
+    async onDeleteRow(meta) {
+        // Pre-flight: if this is the LAST account on the device, the
+        // backend cascade will ALSO wipe the shared downloads dir
+        // (`~/Downloads/vector` or platform-equivalent) and the legacy
+        // MLS folder. Warn the user up-front so they can copy attachments
+        // out first if they want to keep them.
+        let isLastAccount = false;
+        try {
+            const all = await multiAccount.list();
+            isLastAccount = all.length === 1 && all[0].npub === meta.npub;
+        } catch (_) { /* err side: don't block the popup */ }
+
+        const baseMsg = `${meta.display_name || 'This account'} will be permanently removed from this device. Make sure you have the seed phrase or nsec backed up if you want to recover it later.`;
+        const lastAccountWarning = `\n\n<b>This is your only Vector account on this device.</b> All downloaded attachments will also be removed. Copy any files you want to keep before continuing.`;
+        const message = isLastAccount ? baseMsg + lastAccountWarning : baseMsg;
+
+        const ok = await popupConfirm(
+            'Delete profile?',
+            message,
+            false,
+        );
+        if (!ok) return;
+        try {
+            const wasActive = await multiAccount.delete(meta.npub);
+            if (wasActive) {
+                // Backend ran `reset_session` and cleared the marker. If there
+                // are other accounts on disk, point the marker at one of them
+                // so the post-reload boot lands directly on it. Walk the list
+                // in last-active order; if the first candidate's marker write
+                // fails for any reason (rare — e.g. a concurrent disk hiccup),
+                // try the next so we don't dump the user onto the bare
+                // Create / Login screen when other accounts still exist.
+                const remaining = await multiAccount.list();
+                let restored = false;
+                for (const candidate of remaining) {
+                    try {
+                        await invoke('set_active_account', { npub: candidate.npub });
+                        restored = true;
+                        break;
+                    } catch (e) {
+                        console.error('[profile-switcher] failed to point marker at', candidate.npub, e);
+                    }
+                }
+                if (!restored && remaining.length > 0) {
+                    console.warn('[profile-switcher] all remaining accounts rejected; landing on Create / Login');
+                }
+                await multiAccount.swap();
+            } else {
+                // Refresh dropdown in place.
+                const accounts = await multiAccount.list();
+                this.render(accounts);
+                if (accounts.length === 0) this.close();
+            }
+        } catch (e) {
+            console.error('[profile-switcher] delete failed:', e);
+            popupConfirm('Delete failed', String(e), true);
+        }
+    },
+
+    onAddProfile() {
+        const addBtn = document.getElementById('profile-switcher-add');
+        if (addBtn?.classList.contains('disabled')) return;
+        this.close();
+        addAccountFlow.start();
+    },
+};
+
+/**
+ * Pre-login account picker — read-only. Visible only when N>=2 accounts
+ * exist locally; lets the user choose which one's PIN/password to enter.
+ * Single-account boot stays unchanged (picker is hidden).
+ */
+const loginPicker = {
+    isOpen: false,
+    accounts: [],
+    activeNpub: null,
+
+    init() {
+        const trigger = document.getElementById('login-account-picker');
+        if (!trigger) return;
+        trigger.addEventListener('click', () => {
+            // Single-account form has the .single class and is non-interactive.
+            if (trigger.classList.contains('single')) return;
+            this.toggle();
+        });
+        // Close when clicking the backdrop (outside the list itself).
+        const backdrop = document.getElementById('login-account-list-backdrop');
+        if (backdrop) backdrop.addEventListener('click', () => this.close());
+        // Escape closes too.
+        document.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Escape' && this.isOpen) this.close();
+        });
+    },
+
+    /**
+     * Render and reveal the picker. Caller passes the marker-derived
+     * "active" npub so the corresponding row is rendered with the dot/ring.
+     *
+     * Single-account boots stay completely unchanged — no picker, no name
+     * pill — so the unlock screen looks identical to pre-multi-account UX.
+     * The picker only appears when there's an actual choice to make.
+     */
+    async show(activeNpub) {
+        const trigger = document.getElementById('login-account-picker');
+        try {
+            this.accounts = await multiAccount.list();
+        } catch (e) {
+            console.error('[login-picker] list failed:', e);
+            if (trigger) trigger.style.display = 'none';
+            return;
+        }
+        this.activeNpub = activeNpub;
+        if (this.accounts.length < 2) {
+            if (trigger) trigger.style.display = 'none';
+            return;
+        }
+        // When `activeNpub` is null (marker-missing recovery branch), the
+        // pill has no real "active" identity to display. Render a neutral
+        // "Select profile" affordance instead of `accounts[0]`'s avatar +
+        // name, which read like "you are signed in as accounts[0]" when
+        // the user actually has no active session. The list itself
+        // correctly shows every row as equally selectable (open() does
+        // `isActive: meta.npub === this.activeNpub` and null can't match
+        // any real npub).
+        const hasActive = !!activeNpub && this.accounts.some(a => a.npub === activeNpub);
+        const meta = hasActive
+            ? this.accounts.find(a => a.npub === activeNpub)
+            : null;
+        const avatarSrc = meta
+            ? (meta.avatar_cached ? convertFileSrc(meta.avatar_cached) : (meta.avatar_url || null))
+            : null;
+        const oldImg = document.getElementById('login-account-picker-avatar');
+        if (oldImg && oldImg.parentNode) {
+            const replacement = createAvatarImg(avatarSrc, 36, false);
+            replacement.id = 'login-account-picker-avatar';
+            oldImg.parentNode.replaceChild(replacement, oldImg);
+        }
+        const label = meta ? (meta.display_name || meta.npub) : 'Select Profile';
+        document.getElementById('login-account-picker-name').textContent = label;
+        trigger.classList.remove('single');
+        trigger.style.display = '';
+    },
+
+    hide() {
+        const trigger = document.getElementById('login-account-picker');
+        if (trigger) trigger.style.display = 'none';
+        this.close();
+    },
+
+    toggle() {
+        if (this.isOpen) this.close(); else this.open();
+    },
+
+    open() {
+        const list = document.getElementById('login-account-list');
+        const backdrop = document.getElementById('login-account-list-backdrop');
+        const trigger = document.getElementById('login-account-picker');
+        list.innerHTML = '';
+        // Active account stays anchored in the pill at the top — only
+        // alternates appear as switchable rows below it.
+        for (const meta of this.accounts) {
+            if (meta.npub === this.activeNpub) continue;
+            const row = buildAccountRow(meta, {
+                isActive: false,
+                onClick: (m) => this.onPick(m),
+                // No delete in pre-login picker (per design).
+            });
+            list.appendChild(row);
+        }
+        // Anchor the list directly below the pill — measure the pill's
+        // current bottom edge so the list always sits flush against it,
+        // regardless of how #login-form lays out at this viewport size.
+        if (trigger) {
+            const rect = trigger.getBoundingClientRect();
+            list.style.top = `${Math.round(rect.bottom + 8)}px`;
+        }
+        list.classList.add('open');
+        if (backdrop) backdrop.classList.add('visible');
+        if (trigger) trigger.classList.add('open');
+        this.isOpen = true;
+    },
+
+    close() {
+        const list = document.getElementById('login-account-list');
+        const backdrop = document.getElementById('login-account-list-backdrop');
+        const trigger = document.getElementById('login-account-picker');
+        if (list) list.classList.remove('open');
+        if (backdrop) backdrop.classList.remove('visible');
+        if (trigger) trigger.classList.remove('open');
+        this.isOpen = false;
+    },
+
+    async onPick(meta) {
+        this.close();
+        if (meta.npub === this.activeNpub) return;
+        try {
+            await multiAccount.setActiveAndSwap(meta.npub);
+        } catch (e) {
+            console.error('[login-picker] switch failed:', e);
+            popupConfirm('Switch failed', String(e), true);
+        }
+    },
+};
+
+/**
+ * Add Profile flow.
+ *
+ * Two phases:
+ *
+ *   - **Browsing** (`active && !committed`): the user clicked Add Profile
+ *     and is sitting on the login-start screen but hasn't committed to
+ *     creating/importing yet. The current account stays fully alive in
+ *     memory — DM listeners keep firing, decrypted keys stay in the vault,
+ *     STATE keeps its profiles+chats. Back is an instant, free UI restore.
+ *
+ *   - **Committed** (`active && committed`): set when the user actually
+ *     clicks Create Account or Login. We invoke `enter_add_account_mode`
+ *     which calls `reset_session` + clears the marker — required because
+ *     `login`/`create_account` are guarded by lock-and-check and would
+ *     otherwise silently no-op against the still-active session. From
+ *     this point Back can no longer be free; if the user backs all the
+ *     way out we restore the previous account's marker and reload.
+ *
+ * Existing accounts on disk are NEVER touched by this flow — switching
+ * back via My Profile is always available once the new account is set up.
+ */
+const ADD_PROFILE_BACK_TARGET = 'vector:add_profile_back_target';
+
+const addAccountFlow = {
+    /** Browsing phase active (login overlay shown over current session). */
+    active: false,
+    /** Committed (`enter_add_account_mode` invoked, original session torn down). */
+    committed: false,
+    /** Snapshot of which UI panel was visible before Add Profile took over. */
+    _restoreFn: null,
+
+    async start() {
+        // Set the active flag SYNCHRONOUSLY before any await. If the user
+        // rapid-clicks Add Profile → Back, the Back handler must see
+        // `active: true` even if our IPC roundtrip is still in flight.
+        if (this.active) return;
+        this.active = true;
+        this.committed = false;
+
+        // Cache who we'll need to restore to if the user backs out AFTER
+        // committing. We grab it now while CURRENT_ACCOUNT is still set
+        // because by the time we'd need it (post-reset_session), it's gone.
+        try {
+            const prev = await invoke('get_current_account');
+            if (prev) sessionStorage.setItem(ADD_PROFILE_BACK_TARGET, prev);
+        } catch (_) {
+            // No active account; nothing to restore on back.
+        }
+
+        // Snapshot the current UI so back can put it back.
+        this._restoreFn = captureMainUiSnapshot();
+
+        // Pure UI swap — no backend touch. Hide every main-app panel and
+        // surface the login form with the start screen + back-bar visible.
+        domNavbar.style.display = 'none';
+        domChats.style.display = 'none';
+        domChat.style.display = 'none';
+        domProfile.style.display = 'none';
+        domSettings.style.display = 'none';
+        domInvites.style.display = 'none';
+        domGroupOverview.style.display = 'none';
+
+        domLoginImport.style.display = 'none';
+        domLoginInvite.style.display = 'none';
+        domLoginEncrypt.style.display = 'none';
+        domLoginWelcome.style.display = 'none';
+        domLoginStart.style.display = '';
+        domLoginBackBar.style.display = '';
+        document.getElementById('login-form').classList.add('has-back-bar');
+        domLogin.style.display = '';
+
+        // Hide the pre-login picker pill during Add Profile — the user is
+        // creating a new account, not picking an existing one. Without
+        // this, the picker pill renders above the start screen and lets
+        // the user switch to another existing account mid-import.
+        if (typeof loginPicker !== 'undefined') loginPicker.hide();
+    },
+
+    /**
+     * The user clicked Create Account or Login from inside the Add Profile
+     * overlay. Tear down the current session so the new account's keys can
+     * be installed without colliding with the lock-and-check guards.
+     */
+    async commit() {
+        if (this.committed) return;
+        await invoke('enter_add_account_mode');
+        this.committed = true;
+    },
+
+    /** Soft restore — only valid before commit. */
+    restore() {
+        domLoginImport.style.display = 'none';
+        domLoginInvite.style.display = 'none';
+        domLoginEncrypt.style.display = 'none';
+        domLoginWelcome.style.display = 'none';
+        domLoginStart.style.display = '';
+        domLoginBackBar.style.display = 'none';
+        document.getElementById('login-form').classList.remove('has-back-bar');
+        domLogin.style.display = 'none';
+        if (this._restoreFn) {
+            this._restoreFn();
+            this._restoreFn = null;
+        }
+        this.active = false;
+        this.committed = false;
+        sessionStorage.removeItem(ADD_PROFILE_BACK_TARGET);
+    },
+
+    finish() {
+        this.active = false;
+        this.committed = false;
+        this._restoreFn = null;
+        sessionStorage.removeItem(ADD_PROFILE_BACK_TARGET);
+    },
+
+    backTarget() {
+        return sessionStorage.getItem(ADD_PROFILE_BACK_TARGET);
+    },
+};
+
+/**
+ * Capture which main-app panel is currently visible so the Add Profile
+ * back button can put it back. Called before the overlay takes over the
+ * viewport. Returns a closure that re-applies the snapshot.
+ */
+function captureMainUiSnapshot() {
+    const visible = {
+        navbar: domNavbar.style.display,
+        chats: domChats.style.display,
+        chat: domChat.style.display,
+        profile: domProfile.style.display,
+        settings: domSettings.style.display,
+        invites: domInvites.style.display,
+        groupOverview: domGroupOverview.style.display,
+    };
+    return () => {
+        domNavbar.style.display = visible.navbar;
+        domChats.style.display = visible.chats;
+        domChat.style.display = visible.chat;
+        domProfile.style.display = visible.profile;
+        domSettings.style.display = visible.settings;
+        domInvites.style.display = visible.invites;
+        domGroupOverview.style.display = visible.groupOverview;
+    };
+}
+
 const domTheme = document.getElementById('theme');
 
 const domLoginStart = document.getElementById('login-start');
@@ -2871,6 +3460,9 @@ function copyRelayLogs() {
  */
 async function login(skipAnimations = false) {
     if (strPubkey) {
+        // Successful end of the Add Profile flow — drop the back-target
+        // and reset flags so the next session starts clean.
+        addAccountFlow.finish();
         // Fire connect + all listener registrations in parallel (no sequential IPC waits)
         console.time('[Boot] connect + listeners');
         const _connectP = invoke("connect");
@@ -2934,6 +3526,23 @@ async function login(skipAnimations = false) {
                 // Show navbar and bookmarks
                 domNavbar.style.display = '';
                 domChatBookmarksBtn.style.display = 'flex';
+
+                // Land on the Chat tab. Without an explicit reset here, the
+                // visibility of the main panels is whatever they were before
+                // login fired — which is fine for fresh boots (chats panel
+                // is visible by default) but not for the Add Profile flow,
+                // which hid every panel and never re-showed them. Always
+                // resetting to Chat gives one consistent landing point for
+                // new accounts, imported accounts, and normal logins alike.
+                domChats.style.display = '';
+                domChat.style.display = 'none';
+                domProfile.style.display = 'none';
+                domSettings.style.display = 'none';
+                domInvites.style.display = 'none';
+                if (typeof domGroupOverview !== 'undefined') {
+                    domGroupOverview.style.display = 'none';
+                }
+                navbarSelect('chat-btn');
 
                 // Render our profile
                 const cProfile = arrProfiles.find(p => p.mine);
@@ -3136,9 +3745,19 @@ function renderProfileTab(cProfile) {
     domHeaderAvatar.classList.add('btn');
     domProfileHeaderAvatarContainer.appendChild(domHeaderAvatar);
 
-    // Display Name - use profile's npub as fallback
-    domProfileName.innerHTML = cProfile?.nickname || cProfile?.name || (cProfile?.id ? cProfile.id.substring(0, 10) + '…' : 'Unknown');
-    if (cProfile?.nickname || cProfile?.name) twemojify(domProfileName);
+    // Header title: "My Profile ⌄" switcher when viewing our own profile,
+    // otherwise the contact's display name. The switcher opens the multi-
+    // account dropdown; the name is non-interactive.
+    const domSwitcher = document.getElementById('my-profile-switcher');
+    if (cProfile?.mine) {
+        domProfileName.style.display = 'none';
+        if (domSwitcher) domSwitcher.style.display = '';
+    } else {
+        if (domSwitcher) domSwitcher.style.display = 'none';
+        domProfileName.style.display = '';
+        domProfileName.innerHTML = cProfile?.nickname || cProfile?.name || (cProfile?.id ? cProfile.id.substring(0, 10) + '…' : 'Unknown');
+        if (cProfile?.nickname || cProfile?.name) twemojify(domProfileName);
+    }
 
     // Status
     const strStatusPlaceholder = cProfile.mine ? 'Set a Status' : '';
@@ -3533,6 +4152,10 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
     domLoginImport.style.display = 'none';
     domLoginInvite.style.display = 'none';
     domLoginEncrypt.style.display = '';
+    // Hide the picker only for the NEW-account PIN-setup path (fUnlock=false).
+    // The unlock path keeps it visible so the user can switch between
+    // existing accounts before entering their PIN/password.
+    if (!fUnlock) loginPicker.hide();
 
     // Hide all input variants initially
     domLoginEncryptPinRow.style.display = 'none';
@@ -3586,8 +4209,18 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
             document.querySelector('.login-lock-icon').style.display = 'none';
             domLoginEncryptTitle.textContent = 'Setting up your account...';
             domLoginEncryptTitle.classList.add('startup-subtext-gradient');
-            await invoke('skip_encryption');
-            login();
+            try {
+                await invoke('skip_encryption');
+                login();
+            } catch (e) {
+                // Backend rejected (disk full, DB locked by AV, migration
+                // in flight, etc.) — PENDING_NSEC is preserved server-side
+                // so a retry is possible. Surface the error and bring the
+                // user back to the type-selector so they can try again.
+                domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
+                await popupConfirm('Could not finish setup', String(e), true);
+                domLoginEncryptTypeSelect.style.display = '';
+            }
         };
     }
 
@@ -3688,9 +4321,19 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                 const isMatching = strPinLast.every((char, idx) => char === strPinCurrent[idx]);
                 if (isMatching) {
                     updateStatusMessage(ENCRYPTING_MSG, true);
-                    // Encrypt and store key entirely in backend (key never crosses IPC)
-                    await invoke('setup_encryption', { password: strPinLast.join(''), securityType: chosenSecurityType });
-                    login();
+                    // Encrypt and store key entirely in backend (key never crosses IPC).
+                    // Wrap in try/catch — `setup_encryption` can reject (disk
+                    // full, DB locked, migration mid-flight). Backend preserves
+                    // PENDING_NSEC on failure so a retry is possible.
+                    try {
+                        await invoke('setup_encryption', { password: strPinLast.join(''), securityType: chosenSecurityType });
+                        login();
+                    } catch (e) {
+                        await popupConfirm('Could not save your PIN', String(e), true);
+                        strPinLast = [];
+                        resetPinDisplay(true, true);
+                        pinProcessing = false;
+                    }
                 } else {
                     updateStatusMessage(MISMATCH_PIN_MSG);
                     strPinLast = [];
@@ -3824,9 +4467,20 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                 if (password === lastPassword) {
                     passwordProcessing = true;
                     updateStatusMessage(ENCRYPTING_MSG, true);
-                    // Encrypt and store key entirely in backend (key never crosses IPC)
-                    await invoke('setup_encryption', { password: lastPassword, securityType: chosenSecurityType });
-                    login();
+                    // Encrypt and store key entirely in backend (key never crosses IPC).
+                    // Wrap in try/catch — `setup_encryption` can reject (disk
+                    // full, DB locked, migration mid-flight). Backend preserves
+                    // PENDING_NSEC on failure so a retry is possible.
+                    try {
+                        await invoke('setup_encryption', { password: lastPassword, securityType: chosenSecurityType });
+                        login();
+                    } catch (e) {
+                        await popupConfirm('Could not save your password', String(e), true);
+                        lastPassword = '';
+                        newInput.value = '';
+                        newInput.focus();
+                        passwordProcessing = false;
+                    }
                 } else {
                     updateStatusMessage(MISMATCH_MSG);
                     lastPassword = '';
@@ -6472,9 +7126,38 @@ function exitProfileEditMode(fCancel = false) {
             const nameInput = document.querySelector('#profile-edit-name input');
             const statusInput = document.querySelector('#profile-edit-status input');
             const bioInput = document.querySelector('#profile-edit-bio textarea');
-            if (nameInput) cProfile.name = nameInput.value.trim();
-            if (statusInput && cProfile.status) cProfile.status.title = statusInput.value.trim();
-            if (bioInput) cProfile.about = bioInput.value.trim();
+            const newName = nameInput ? nameInput.value.trim() : cProfile.name;
+            const newStatus = statusInput ? statusInput.value.trim() : (cProfile.status?.title ?? '');
+            const newAbout = bioInput ? bioInput.value.trim() : (cProfile.about ?? '');
+            const prevName = objProfileEditSnapshot.name || '';
+            const prevStatus = objProfileEditSnapshot.status?.title ?? objProfileEditSnapshot.status ?? '';
+            const prevAbout = objProfileEditSnapshot.about || '';
+
+            // Optimistic update so the UI reflects the save instantly.
+            cProfile.name = newName;
+            if (cProfile.status) cProfile.status.title = newStatus;
+            cProfile.about = newAbout;
+
+            // Persist to the network. Each field maps to its own backend
+            // call; only fire on actual changes to avoid pointless relay
+            // chatter and stray kind-0 / kind-30315 events.
+            const nameChanged = newName !== prevName;
+            const aboutChanged = newAbout !== prevAbout;
+            const statusChanged = newStatus !== prevStatus;
+            if (nameChanged || aboutChanged) {
+                invoke('update_profile', {
+                    name: nameChanged ? newName : '',
+                    avatar: '',
+                    banner: '',
+                    about: aboutChanged ? newAbout : '',
+                }).then(ok => {
+                    if (!ok) popupConfirm('Profile Update Failed!', 'Failed to broadcast profile update to the network.', true, '', 'vector_warning.svg');
+                }).catch(e => popupConfirm('Profile Update Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg'));
+            }
+            if (statusChanged) {
+                invoke('update_status', { status: newStatus }).catch(e => popupConfirm('Status Update Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg'));
+            }
+
             showToast('Profile Saved');
         }
         renderProfileTab(cProfile);
@@ -6619,6 +7302,12 @@ window.addEventListener("DOMContentLoaded", async () => {
     // Initialize relay dialog event listeners
     initRelayDialogs();
 
+    // Wire the multi-account UI — both the in-app dropdown and the pre-login
+    // picker register their event listeners here. Safe to call before login
+    // because both surfaces lazily fetch their data when first opened.
+    profileSwitcher.init();
+    loginPicker.init();
+
     // Set up early deep link listener BEFORE login flow
     // This handles deep link events that arrive while the app is running
     // Note: Deep links received before JS loads are stored in Rust and retrieved after login
@@ -6638,6 +7327,14 @@ window.addEventListener("DOMContentLoaded", async () => {
     await listen('loading_error', (evt) => {
         console.error('[Boot] Loading error:', evt.payload);
         popupConfirm('Loading Error', evt.payload, true, '', 'vector_warning.svg');
+    });
+
+    // Multi-account: listen for `session_reload` from `swap_session`. Must be
+    // registered HERE (DOMContentLoaded) — not inside `setupRustListeners`,
+    // which only fires after a successful login. The pre-login picker emits
+    // `swap_session` from the unlock screen, well before any login completes.
+    await listen('session_reload', () => {
+        window.location.reload();
     });
 
     // Immediately load and apply theme settings (visual only, don't save)
@@ -6735,37 +7432,124 @@ window.addEventListener("DOMContentLoaded", async () => {
     }
 
     // Single IPC call: account existence + encryption status
-    // (auto_select_account already ran at Tauri startup, so this is just a static read + 1 DB query)
+    // (boot_select_account already ran at Tauri startup, so this is just a static read + 1 DB query)
     if (!fDebugHotReloaded) {
         console.time('[Boot] getBootStatus');
         const { account_exists, enabled, security_type } = await invoke('get_encryption_and_key');
         console.timeEnd('[Boot] getBootStatus');
+
+        // Show the pre-login picker pill whenever ≥2 accounts exist on disk
+        // — both for the normal multi-account boot AND for the "marker
+        // missing, accounts on disk" recovery case where the backend
+        // intentionally returns account_exists=false to defer the choice
+        // to the user. Without this branch, marker-missing users would land
+        // on the bare Create / Login screen with no visible path to their
+        // existing accounts. `loginPicker.show()` is self-gating: it hides
+        // the pill again if the account list ends up <2 long.
+        if (account_exists) {
+            try {
+                const activeNpub = await invoke('get_current_account');
+                await loginPicker.show(activeNpub);
+            } catch (_) {
+                // No current account or list failed — leave picker hidden.
+            }
+        } else {
+            try {
+                await loginPicker.show(null);
+            } catch (_) { /* hide-on-fail handled inside show() */ }
+
+            // Single-account recovery: if exactly ONE account is on disk
+            // but the marker is missing, the user has no visible path to
+            // their existing account (the picker pill hides for accounts
+            // <2). Promote the lone account to active automatically —
+            // `setActiveAndSwap` writes the marker and triggers a reload
+            // which re-enters this boot flow with `account_exists: true`.
+            // Without this, a user who lost their marker (Add Profile
+            // abort, file corruption, manual delete) sees the bare
+            // Create / Login screen with no indication their account
+            // still exists on disk.
+            if (loginPicker.accounts && loginPicker.accounts.length === 1) {
+                const onlyNpub = loginPicker.accounts[0].npub;
+                try {
+                    await multiAccount.setActiveAndSwap(onlyNpub);
+                    // The above triggers `session_reload` which reloads
+                    // the page; control never returns here in practice.
+                    return;
+                } catch (e) {
+                    // Could not promote (migration in flight, etc.) —
+                    // fall through to Create / Login as a last resort.
+                    console.error('[Boot] Single-account auto-promote failed:', e);
+                }
+            }
+        }
+
         if (account_exists) {
             if (enabled) {
                 // Encryption enabled - show PIN or password screen for decryption
                 openEncryptionFlow(true, security_type || 'pin');
             } else {
                 // Encryption disabled - login directly from stored key (key never crosses IPC).
-                // Keep the lockscreen visible during the call so the
-                // "Bootstrapping Tor…" status from runWithTorBootstrapStatus is
-                // actually on screen. Hide it once we're past Tor and into
-                // the proper login flow.
+                //
+                // Show the lockscreen with a neutral status title so the
+                // user gets feedback during the multi-second boot —
+                // particularly important on first-launch with Tor enabled,
+                // where consensus fetch can take 5-15s. Without this, the
+                // user sees a frozen Create/Login screen with no progress
+                // indication. We hide the type-select / PIN / password
+                // input UI inside `#login-encrypt` since we're not
+                // soliciting anything; the title is the whole UX.
+                domLoginStart.style.display = 'none';
+                domLoginEncrypt.style.display = '';
+                const typeSelect = document.getElementById('login-encrypt-type-select');
+                const pinRow = document.getElementById('login-encrypt-pins');
+                const passwordBox = document.getElementById('login-encrypt-password');
+                if (typeSelect) typeSelect.style.display = 'none';
+                if (pinRow) pinRow.style.display = 'none';
+                if (passwordBox) passwordBox.style.display = 'none';
+                // Set a neutral baseline title; `runWithTorBootstrapStatus`
+                // overrides it with "Bootstrapping Tor… NN%" when Arti is
+                // mid-consensus, and `init()` later overrides it again
+                // with "Decrypting Database…" / sync progress.
+                domLoginEncryptTitle.textContent = 'Connecting…';
+                domLoginEncryptTitle.classList.add('startup-subtext-gradient');
+
                 try {
                     console.time('[Boot] login_from_stored_key');
                     const npub = await runWithTorBootstrapStatus(() =>
                         invoke("login_from_stored_key", { password: null })
                     );
                     console.timeEnd('[Boot] login_from_stored_key');
-                    domLogin.style.display = 'none';
+                    domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
+                    // domLogin (the whole lockscreen) is hidden later by
+                    // login() once the chat surface is ready.
 
                     strPubkey = npub;
                     console.time('[Boot] login() total');
                     login(true); // skipAnimations = true
                 } catch (e) {
                     console.error('Direct login failed:', e);
-                    // Fallback to PIN screen in case of error
-                    domLogin.style.display = '';
-                    openEncryptionFlow(true);
+                    domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
+                    // The unencrypted account couldn't be loaded — this
+                    // is not a wrong-PIN scenario (no PIN exists), it's
+                    // a "stored key unreadable" failure. Surfacing the
+                    // PIN screen would just loop the user through PIN
+                    // entry that can't succeed. Instead, show the error
+                    // and bounce back to the Create / Login screen so
+                    // they can re-import or create fresh.
+                    await popupConfirm(
+                        'Could not load your account',
+                        String(e),
+                        true
+                    );
+                    domLoginEncrypt.style.display = 'none';
+                    domLoginStart.style.display = '';
+                    // Re-show picker if any other accounts exist; the
+                    // user can switch to a working one.
+                    if (typeof loginPicker !== 'undefined'
+                        && loginPicker.accounts
+                        && loginPicker.accounts.length >= 2) {
+                        loginPicker.show(loginPicker.activeNpub);
+                    }
                 }
             }
         }
@@ -6778,6 +7562,11 @@ window.addEventListener("DOMContentLoaded", async () => {
     domSettingsBtn.onclick = openSettings;
     domLoginAccountCreationBtn.onclick = async () => {
         try {
+            // Add Profile commit point: tear down the existing session
+            // before generating a new keypair, otherwise create_account's
+            // lock-and-check guard would silently reuse the old client.
+            if (addAccountFlow.active) await addAccountFlow.commit();
+
             const { public: pubKey } = await invoke("create_account");
             strPubkey = pubKey;
 
@@ -6796,18 +7585,63 @@ window.addEventListener("DOMContentLoaded", async () => {
         domLoginStart.style.display = 'none';
         domLoginBackBar.style.display = '';
         document.getElementById('login-form').classList.add('has-back-bar');
+        // Hide the picker pill — once the user is entering an nsec / seed
+        // phrase, the active-account-from-marker context no longer applies.
+        loginPicker.hide();
     };
-    domLoginBackBtn.onclick = () => {
+    domLoginBackBtn.onclick = async () => {
+        // Add Profile flow back-from-start has two cases:
+        //
+        //   - Browsing (not committed): the original session is still alive
+        //     in memory. Soft-restore the main UI; no backend touch, no
+        //     reload, the user keeps their decrypted keys + listeners.
+        //
+        //   - Committed: enter_add_account_mode already tore the session
+        //     down. We have to write the previous-account marker back and
+        //     reload so the next boot lands on the original account.
+        if (addAccountFlow.active && domLoginStart.style.display !== 'none') {
+            if (!addAccountFlow.committed) {
+                addAccountFlow.restore();
+                return;
+            }
+            const target = addAccountFlow.backTarget();
+            try {
+                if (target) {
+                    await invoke('set_active_account', { npub: target });
+                }
+            } catch (e) {
+                console.error('[add-account] restore marker failed:', e);
+                popupConfirm('Could not return to your account', String(e), true);
+                return;
+            }
+            addAccountFlow.finish();
+            window.location.reload();
+            return;
+        }
         domLoginImport.style.display = 'none';
         domLoginInvite.style.display = 'none';
         domLoginBackBar.style.display = 'none';
         domLoginStart.style.display = '';
         domLoginInput.value = '';
         document.getElementById('login-form').classList.remove('has-back-bar');
+        // Re-reveal the picker pill if we have ≥2 accounts on disk. The
+        // Login button's onclick hides the picker (the user is about to
+        // import a key, so it'd be confusing to show), and without this
+        // restore the picker stays hidden after the user backs out —
+        // effectively removing their ability to switch accounts from the
+        // start screen without restarting the app.
+        if (typeof loginPicker !== 'undefined'
+            && loginPicker.accounts && loginPicker.accounts.length >= 2) {
+            loginPicker.show(loginPicker.activeNpub);
+        }
     };
     domLoginBtn.onclick = async () => {
         // Import and derive our keys
         try {
+            // Add Profile commit point: tear down the existing session
+            // before importing the new key.
+            if (addAccountFlow.active) await addAccountFlow.commit();
+
             const { public: pubKey } = await invoke("login", { importKey: domLoginInput.value.trim() });
             strPubkey = pubKey;
 
