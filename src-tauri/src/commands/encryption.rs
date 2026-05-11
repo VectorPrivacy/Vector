@@ -156,11 +156,40 @@ pub fn get_encryption_and_key<R: Runtime>(handle: AppHandle<R>) -> Result<BootEn
     // delegate to `state::resolve_encryption_enabled_from_db` so this is
     // robust against either being called independently.
     crate::state::init_encryption_enabled();
-    let enabled = vector_core::state::is_encryption_enabled_fast();
+    let mut enabled = vector_core::state::is_encryption_enabled_fast();
+
+    // Self-heal: legacy accounts predating the `encryption_enabled` row
+    // store an encrypted pkey with no flag set. A pkey that doesn't begin
+    // with `nsec1` is ciphertext — backfill the flags so the boot routes
+    // to the PIN screen. Default to "pin" because passwords didn't exist
+    // before the security_type row was introduced.
+    let mut healed_security_type: Option<String> = None;
+    if !enabled {
+        if let Ok(Some(stored)) = vector_core::db::get_pkey() {
+            if !stored.starts_with("nsec1") {
+                let _ = vector_core::db::set_sql_setting(
+                    "encryption_enabled".to_string(),
+                    "true".to_string(),
+                );
+                if crate::db::get_sql_setting("security_type".to_string())
+                    .ok().flatten().is_none()
+                {
+                    let _ = vector_core::db::set_sql_setting(
+                        "security_type".to_string(),
+                        "pin".to_string(),
+                    );
+                    healed_security_type = Some("pin".to_string());
+                }
+                vector_core::state::set_encryption_enabled(true);
+                enabled = true;
+            }
+        }
+    }
 
     let security_type = if enabled {
-        crate::db::get_sql_setting("security_type".to_string())
-            .ok().flatten().unwrap_or_else(|| "pin".to_string())
+        healed_security_type
+            .or_else(|| crate::db::get_sql_setting("security_type".to_string()).ok().flatten())
+            .unwrap_or_else(|| "pin".to_string())
     } else {
         "pin".to_string()
     };

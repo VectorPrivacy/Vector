@@ -137,11 +137,11 @@ function _populateMiniProfile(popup, npub, profile) {
         img.alt = '';
         img.draggable = false;
         img.onerror = () => {
-            img.replaceWith(createPlaceholderAvatar(false, 72));
+            img.replaceWith(createPlaceholderAvatar(false, 64));
         };
         avatarWrap.appendChild(img);
     } else {
-        avatarWrap.appendChild(createPlaceholderAvatar(false, 72));
+        avatarWrap.appendChild(createPlaceholderAvatar(false, 64));
     }
     popup.appendChild(avatarWrap);
 

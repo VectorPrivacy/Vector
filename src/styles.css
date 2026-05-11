@@ -5723,7 +5723,7 @@ select:disabled:hover {
   font-size: clamp(10px, 2.4vh, 16px);
 }
 
-@media (max-height: 300px) {
+@media (max-height: 325px) {
   .login-logo {
     display: none;
   }
@@ -5755,14 +5755,15 @@ select:disabled:hover {
   }
 }
 
-@media (max-height: 600px) {
+@media (max-height: 625px) {
   .login-credits {
     display: none;
   }
 
-  #login-start,
-  .login-encrypt-container {
-    padding-bottom: 20px;
+  /* Credits provided the bottom breathing room; reclaim it on the
+     button stack so Login doesn't kiss the viewport edge. */
+  #login-start {
+    padding-bottom: 16px;
   }
 }
 

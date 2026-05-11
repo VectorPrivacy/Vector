@@ -1557,6 +1557,22 @@ async function refreshGroupMemberCount(groupId) {
         if (strOpenChat === groupId) {
             // Update the chat header subtext (respects typing indicators)
             updateChatHeaderSubtext(chat);
+
+            // Admin list arrives async — re-render rows from now-known
+            // admins so admin badges + @everyone treatment apply.
+            const admins = chat.metadata?.admins;
+            if (Array.isArray(admins) && admins.length > 0 && domChatMessages) {
+                const adminSet = new Set(admins);
+                const rows = domChatMessages.querySelectorAll('.dmsg');
+                rows.forEach(row => {
+                    const m = row._dmsgMsg;
+                    if (!m || m.mine) return;
+                    const senderNpub = m.npub || '';
+                    if (!adminSet.has(senderNpub)) return;
+                    const profile = getProfile(senderNpub);
+                    row.replaceWith(renderMessage(m, profile, m.id));
+                });
+            }
         }
     } catch (e) {
         console.warn('Failed to refresh group member count for', groupId, e);
@@ -4366,9 +4382,21 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                         const newTitle = fUnlock ? DECRYPTION_PROMPT : (strPinLast.length > 0 ? RE_ENTER_PROMPT : INITIAL_ENCRYPTION_PROMPT);
                         updateStatusMessage(newTitle);
                     }
-                    input.value = '';
-                    strPinCurrent[nIndex] = '-';
+                    if (input.value !== '') {
+                        input.value = '';
+                        strPinCurrent[nIndex] = '-';
+                    } else if (nIndex > 0) {
+                        const prev = arrPinDOMs[nIndex - 1];
+                        prev.value = '';
+                        strPinCurrent[nIndex - 1] = '-';
+                        prev.focus();
+                    }
+                } else if (event.key === 'ArrowLeft') {
+                    event.preventDefault();
                     if (nIndex > 0) arrPinDOMs[nIndex - 1].focus();
+                } else if (event.key === 'ArrowRight') {
+                    event.preventDefault();
+                    if (nIndex + 1 < arrPinDOMs.length) arrPinDOMs[nIndex + 1].focus();
                 } else if (event.key.length === 1 && !event.key.match(/^[0-9]$/)) {
                     event.preventDefault();
                 }
