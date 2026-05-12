@@ -428,6 +428,163 @@ pub async fn get_media_servers() -> Vec<String> {
     get_blossom_servers()
 }
 
+// ============================================================================
+// Blossom (BUD-03) server CRUD
+// ============================================================================
+
+#[tauri::command]
+pub async fn get_blossom_servers_config() -> Vec<vector_core::blossom_servers::BlossomServerInfo> {
+    vector_core::blossom_servers::list_all_servers()
+}
+
+/// Guard CRUD against account swap: requires an active account and pins
+/// the SessionGuard to the one in effect when the call started.
+fn require_active_blossom_session() -> Result<vector_core::state::SessionGuard, String> {
+    crate::account_manager::get_current_account()
+        .map_err(|_| "No active account".to_string())?;
+    Ok(vector_core::state::SessionGuard::capture())
+}
+
+/// Fire-and-forget probe of a single server. No-op when a fresh
+/// capability row already exists.
+fn spawn_probe_for_server(server_url: String) {
+    let session = vector_core::state::SessionGuard::capture();
+    tokio::spawn(async move {
+        if !session.is_valid() { return; }
+        let signer = match crate::MY_SECRET_KEY.to_keys() {
+            Some(keys) => keys,
+            None => return,
+        };
+        match vector_core::blossom::probe_servers_for_octet_stream(
+            signer, vec![server_url], session,
+        ).await {
+            Ok(0) => {}
+            Ok(_) => {
+                vector_core::traits::emit_event("blossom_capabilities_updated", &());
+            }
+            Err(e) => vector_core::log_warn!("[Blossom Probe] Single-server probe failed: {}", e),
+        }
+    });
+}
+
+#[tauri::command]
+pub async fn add_custom_blossom_server(url: String) -> Result<(), String> {
+    let session = require_active_blossom_session()?;
+    let normalized = vector_core::blossom_servers::validate_url(&url)?;
+    if vector_core::blossom_servers::is_default_server(&normalized) {
+        return Err("Cannot add a default server as custom".to_string());
+    }
+    let key = normalized.to_lowercase();
+    let mut customs = vector_core::blossom_servers::load_custom_blossom_servers()?;
+    if customs.iter().any(|c| c.url.trim_end_matches('/').to_lowercase() == key) {
+        return Err("Server already exists".to_string());
+    }
+    let probe_url = normalized.clone();
+    customs.push(vector_core::blossom_servers::CustomBlossomServer {
+        url: normalized,
+        enabled: true,
+    });
+    if !session.is_valid() { return Err("Session changed".to_string()); }
+    vector_core::blossom_servers::save_custom_blossom_servers(&customs)?;
+    vector_core::blossom_servers::refresh_cache();
+    vector_core::blossom_servers::republish_blossom_servers_debounced();
+    spawn_probe_for_server(probe_url);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn remove_custom_blossom_server(url: String) -> Result<bool, String> {
+    let session = require_active_blossom_session()?;
+    let target = url.trim().trim_end_matches('/').to_lowercase();
+    let mut customs = vector_core::blossom_servers::load_custom_blossom_servers()?;
+    let before = customs.len();
+    customs.retain(|c| c.url.trim_end_matches('/').to_lowercase() != target);
+    if customs.len() == before {
+        return Ok(false);
+    }
+    if !session.is_valid() { return Err("Session changed".to_string()); }
+    vector_core::blossom_servers::save_custom_blossom_servers(&customs)?;
+    // Clean slate on re-add.
+    let _ = vector_core::blossom_capabilities::purge_server(&url);
+    vector_core::blossom_servers::refresh_cache();
+    vector_core::blossom_servers::republish_blossom_servers_debounced();
+    Ok(true)
+}
+
+#[tauri::command]
+pub async fn toggle_custom_blossom_server(url: String, enabled: bool) -> Result<bool, String> {
+    let session = require_active_blossom_session()?;
+    let target = url.trim().trim_end_matches('/').to_lowercase();
+    let mut customs = vector_core::blossom_servers::load_custom_blossom_servers()?;
+    let mut found = false;
+    let mut stored_url: Option<String> = None;
+    for c in customs.iter_mut() {
+        if c.url.trim_end_matches('/').to_lowercase() == target {
+            c.enabled = enabled;
+            found = true;
+            stored_url = Some(c.url.clone());
+            break;
+        }
+    }
+    if !found { return Err("Server not found".to_string()); }
+    if !session.is_valid() { return Err("Session changed".to_string()); }
+    vector_core::blossom_servers::save_custom_blossom_servers(&customs)?;
+    vector_core::blossom_servers::refresh_cache();
+    vector_core::blossom_servers::republish_blossom_servers_debounced();
+    if enabled {
+        if let Some(u) = stored_url { spawn_probe_for_server(u); }
+    } else {
+        // Disable wipes cached capabilities so re-enable starts fresh.
+        if let Some(u) = stored_url { let _ = vector_core::blossom_capabilities::purge_server(&u); }
+    }
+    Ok(true)
+}
+
+#[tauri::command]
+pub async fn toggle_default_blossom_server(url: String, enabled: bool) -> Result<bool, String> {
+    let session = require_active_blossom_session()?;
+    if !vector_core::blossom_servers::is_default_server(&url) {
+        return Err("Not a default server".to_string());
+    }
+    let key = url.trim().trim_end_matches('/').to_lowercase();
+    let mut disabled = vector_core::blossom_servers::load_disabled_default_blossom_servers()?;
+    if enabled {
+        disabled.retain(|d| d.trim_end_matches('/').to_lowercase() != key);
+    } else if !disabled.iter().any(|d| d.trim_end_matches('/').to_lowercase() == key) {
+        disabled.push(key);
+    }
+    if !session.is_valid() { return Err("Session changed".to_string()); }
+    vector_core::blossom_servers::save_disabled_default_blossom_servers(&disabled)?;
+    vector_core::blossom_servers::refresh_cache();
+    vector_core::blossom_servers::republish_blossom_servers_debounced();
+    if enabled {
+        spawn_probe_for_server(url);
+    } else {
+        let _ = vector_core::blossom_capabilities::purge_server(&url);
+    }
+    Ok(true)
+}
+
+#[tauri::command]
+pub async fn get_blossom_server_capabilities(url: String) -> Result<Vec<vector_core::blossom_capabilities::CapabilityEntry>, String> {
+    vector_core::blossom_capabilities::list_for_server(&url)
+}
+
+/// Pre-flight: returns false only when every enabled server has already
+/// rejected this MIME or has a known size cap at-or-below `size_bytes`.
+/// MIME is resolved server-side via the same `mime_from_extension` table
+/// the upload uses, so the pre-flight key matches the upload's cache row.
+#[tauri::command]
+pub async fn blossom_can_likely_upload(
+    extension: String,
+    size_bytes: u64,
+    is_encrypted: bool,
+) -> bool {
+    let mime = vector_core::crypto::mime_from_extension(&extension);
+    let servers = vector_core::state::get_blossom_servers();
+    vector_core::blossom_capabilities::any_server_likely_accepts(&servers, mime, is_encrypted, size_bytes)
+}
+
 /// Get the list of custom relays from settings (Tauri command)
 #[tauri::command]
 pub async fn get_custom_relays<R: Runtime>(handle: AppHandle<R>) -> Result<Vec<CustomRelay>, String> {

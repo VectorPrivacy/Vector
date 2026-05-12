@@ -69,6 +69,54 @@ Frontend communicates with backend via `window.__TAURI__.core.invoke()`.
 
 ## Key Patterns
 
+### 🚨 Multi-account session safety — read this BEFORE writing any code that touches STATE, DB, or relays
+
+Vector supports N accounts per install. A `swap_session` / `reset_session` can happen at **any await point**: the user might switch accounts mid-fetch, mid-publish, mid-MLS-sync, mid-anything. When that happens:
+
+- `STATE` (chats/profiles) is replaced with the new account's data
+- The DB pool (`POOL_GENERATION`) is swapped to the new account's vector.db
+- `MY_KEYS` / `MY_PUBLIC_KEY` / `ENCRYPTION_KEY` are rebound
+- The per-account marker file points at the new npub
+
+**Any task still running with values captured before the swap will write account A's data into account B's storage.** This has caused multiple real bugs: MLS messages from the previous account appearing in a fresh account's chat list, profile updates persisting to the wrong DB, kind-10063 server lists merging across accounts. The damage is invisible until the user opens the wrong chat.
+
+#### The SessionGuard contract
+
+Use `vector_core::state::SessionGuard` to defend against this:
+
+```rust
+let session = SessionGuard::capture();   // snapshot generation NOW
+// ...network/file/long-await work...
+if !session.is_valid() { return; }       // bail if the generation advanced
+// ...STATE/DB mutation...
+```
+
+**Rules — apply every single one of these:**
+
+1. **Every `tokio::spawn` that touches per-account state needs a captured `SessionGuard` BEFORE the spawn boundary and an `is_valid()` check before its first side effect.** Capturing inside the `async move` block is too late — the spawn order is unobserved.
+2. **Every long async function (≥ ~1s, anything network-bound) that ends in a write needs a re-check before that write**, even if the caller already validated. Fetches can take seconds; the validation must straddle the I/O.
+3. **Every Tauri command that mutates per-account settings/DB needs a guard at entry.** Pattern: capture `SessionGuard`, do the read/mutate/save sandwich, re-check `is_valid()` immediately before `save_*`. Don't trust `get_current_account()` alone — it returns the *current* account, which may not be the one the caller expects.
+4. **Per-group locks and account-scoped service instances (`MlsService`, etc.) freeze their per-account paths at construction.** A stale instance keeps decrypting account A's MLS storage successfully and writes the plaintext into account B's STATE. Gate every method that mutates state on a `SessionGuard` captured at the call site, not at construction.
+5. **The debounced republish pattern (`republish_*_debounced`) captures `SessionGuard` before the sleep.** Copy that pattern for any debounced effect.
+
+#### Smell signals — grep for these in any PR
+
+- `tokio::spawn(` without a `SessionGuard::capture()` on the lines just before it
+- `client.fetch_events`, `client.send_event_builder`, `tokio::time::sleep` between two writes to STATE/DB (without an `is_valid()` between fetch and save)
+- `static` / `OnceLock` / `LazyLock` storing anything per-account that doesn't refresh on swap
+- A function that takes `&Client` plus an `npub` / `PublicKey` argument *and* writes to STATE or per-account DB — almost certainly needs a `SessionGuard` parameter too
+- New tables / settings keys created without `account_dir(npub)` scoping
+- Anything pre-fetched into a `Vec<String>` before a `for` loop that does network/DB writes — the loop must re-check session each iteration
+
+#### Reference implementations (copy these patterns)
+
+- `crates/vector-core/src/inbox_relays.rs::republish_inbox_relays_debounced` — debounced publish with SessionGuard
+- `crates/vector-core/src/blossom_servers.rs::fetch_and_merge_own_list` — long fetch + write, takes `SessionGuard` parameter, re-checks before save AND before cache refresh
+- `crates/vector-core/src/mls/service.rs::sync_group_since_cursor` — SessionGuard captured at entry, re-validated before each per-rumor STATE write
+- `src-tauri/src/commands/relays.rs::require_active_blossom_session` — entry-guard helper for mutation commands
+
+When in doubt, add a guard. Cost: one atomic load. Cost of the bug it prevents: catastrophic cross-account data corruption.
+
 ### Adding new Tauri commands
 
 Every new `#[tauri::command]` requires THREE things:
@@ -78,6 +126,8 @@ Every new `#[tauri::command]` requires THREE things:
 3. Registration in the `invoke_handler` macro in `lib.rs`
 
 Missing any = `invoke()` silently rejects with "Command X not allowed by ACL".
+
+**If the command mutates per-account state**, also see the multi-account section above — capture `SessionGuard` at entry, re-validate before any `save_*` call.
 
 ### SendCallback — Unified DM Send Pipeline
 

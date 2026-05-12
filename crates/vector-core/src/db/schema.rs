@@ -417,5 +417,54 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // =========================================================================
+    // Migration 24: Blossom capability cache — drives smart upload routing.
+    // =========================================================================
+    run_atomic_migration(conn, 24, "Create blossom_server_capabilities table", |tx| {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS blossom_server_capabilities (
+                server_url        TEXT    NOT NULL,
+                mime_type         TEXT    NOT NULL,
+                outcome           INTEGER NOT NULL,
+                max_accepted_size INTEGER NOT NULL DEFAULT 0,
+                updated_at        INTEGER NOT NULL,
+                PRIMARY KEY (server_url, mime_type)
+            );"
+        ).map_err(|e| format!("Failed to create blossom_server_capabilities table: {}", e))?;
+        Ok(())
+    })?;
+
+    // =========================================================================
+    // Migration 25: Add `min_rejected_size` (smallest observed 413).
+    // =========================================================================
+    run_atomic_migration(conn, 25, "Add min_rejected_size to blossom_server_capabilities", |tx| {
+        tx.execute_batch(
+            "ALTER TABLE blossom_server_capabilities ADD COLUMN min_rejected_size INTEGER;"
+        ).map_err(|e| format!("Failed to add min_rejected_size column: {}", e))?;
+        Ok(())
+    })?;
+
+    // =========================================================================
+    // Migration 26: Split capability rows by encrypted vs plaintext context.
+    // Same wire MIME means different things for ciphertext vs real bytes;
+    // pre-migration rows didn't track the distinction so they're dropped.
+    // =========================================================================
+    run_atomic_migration(conn, 26, "Add is_encrypted to capability cache PK", |tx| {
+        tx.execute_batch(
+            "DROP TABLE IF EXISTS blossom_server_capabilities;
+             CREATE TABLE blossom_server_capabilities (
+                server_url        TEXT    NOT NULL,
+                mime_type         TEXT    NOT NULL,
+                is_encrypted      INTEGER NOT NULL DEFAULT 0,
+                outcome           INTEGER NOT NULL,
+                max_accepted_size INTEGER NOT NULL DEFAULT 0,
+                min_rejected_size INTEGER,
+                updated_at        INTEGER NOT NULL,
+                PRIMARY KEY (server_url, mime_type, is_encrypted)
+             );"
+        ).map_err(|e| format!("Failed to recreate blossom_server_capabilities: {}", e))?;
+        Ok(())
+    })?;
+
     Ok(())
 }

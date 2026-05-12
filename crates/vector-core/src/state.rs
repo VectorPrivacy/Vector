@@ -77,11 +77,14 @@ pub async fn active_trusted_relays() -> Vec<&'static str> {
         .collect()
 }
 
-/// Blossom media servers with failover.
+/// Blossom media servers with failover. Held in a mutex so the per-account
+/// resolver (defaults minus disabled + enabled customs) can refresh it after
+/// edits and on login. Until the DB is open, falls back to the seed list.
 pub static BLOSSOM_SERVERS: OnceLock<std::sync::Mutex<Vec<String>>> = OnceLock::new();
 
 pub fn init_blossom_servers() -> Vec<String> {
-    vec!["https://blossom.primal.net".to_string()]
+    crate::blossom_servers::DEFAULT_BLOSSOM_SERVERS
+        .iter().map(|s| s.to_string()).collect()
 }
 
 pub fn get_blossom_servers() -> Vec<String> {

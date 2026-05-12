@@ -64,7 +64,7 @@
           <h2 id="popupTitle"></h2>
           <p id="popupSubtext"><br><i style="opacity: 0.5"></i></p>
 
-          <input id="popupInput">
+          <input id="popupInput" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
         </div>
         <div class="popup-buttons">
           <button id="popupConfirm">Confirm</button><button id="popupCancel" class="cancel-btn">Cancel</button>
@@ -496,6 +496,39 @@
       <div class="relay-dialog-buttons">
         <button class="btn cancel-btn" id="add-relay-cancel">Cancel</button>
         <button class="btn primary-btn" id="add-relay-confirm">Add Relay</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Blossom Media Server Info Dialog -->
+<div class="relay-dialog-overlay" id="blossom-info-overlay">
+  <div class="relay-dialog relay-info-dialog">
+    <div class="relay-dialog-header">
+      <h3 id="blossom-info-url">Server URL</h3>
+      <button class="relay-dialog-close" id="blossom-info-close">&times;</button>
+    </div>
+    <div class="relay-dialog-content">
+      <div class="relay-metrics-section">
+        <div class="relay-metrics-header">
+          <h4>Status</h4>
+          <span class="relay-status relay-status-small" id="blossom-info-status">enabled</span>
+        </div>
+      </div>
+      <div class="relay-metrics-section">
+        <div class="relay-metrics-header">
+          <h4>Capabilities</h4>
+        </div>
+        <p class="blossom-cap-blurb">
+          Servers don’t all accept the same files. Vector quietly tests them and remembers what each one handles, then routes every upload to the best-suited server automatically.
+        </p>
+        <div id="blossom-info-capabilities" class="blossom-cap-slot">
+          No capability data yet. Vector learns each server’s file-type and size limits as you send files.
+        </div>
+      </div>
+      <div class="relay-dialog-buttons">
+        <button class="btn danger-btn" id="blossom-info-action">Remove Server</button>
+        <button class="btn primary-btn" id="blossom-info-done">Done</button>
       </div>
     </div>
   </div>

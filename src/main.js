@@ -1848,10 +1848,50 @@ async function sendFile(pubkey, replied_to, filepath) {
             finalizePendingMessage(pubkey, result.pending_id, result.event_id);
         }
     } catch (e) {
-        // Notify of an attachment send failure
-        popupConfirm(e, '', true, '', 'vector_warning.svg');
+        const { title, body } = humanizeUploadError(String(e));
+        popupConfirm(title, body, true, '', 'vector_warning.svg');
     }
     nLastTypingIndicator = 0;
+}
+
+/** Raw upload error → user-friendly { title, body }. Technical detail
+ *  is appended in small text for users who want to dig in. */
+function humanizeUploadError(raw) {
+    const lower = raw.toLowerCase();
+    const technical = `<br><br><span style="opacity: 0.5; font-size: 12px;">${escapeHtml(raw)}</span>`;
+
+    if (/status\s+413/.test(lower) || /payload too large/.test(lower)) {
+        return {
+            title: 'File too large',
+            body: 'None of your media servers will accept a file this big. Try a smaller file, or add a server that supports larger uploads in Settings → Network.' + technical,
+        };
+    }
+    if (/status\s+415/.test(lower)
+        || /file could not be processed/.test(lower)
+        || /file type not detected/.test(lower)
+        || /not allowed/.test(lower)
+        || /unsupported/.test(lower)) {
+        return {
+            title: 'File type not supported',
+            body: 'Your media servers don\'t accept this kind of file. Try a different file format, or add a server with broader file type support in Settings → Network.' + technical,
+        };
+    }
+    if (/status\s+401/.test(lower) || /unauthorized/.test(lower)) {
+        return {
+            title: 'Media server rejected your account',
+            body: 'This server refused Vector\'s upload signature. It may require allowlisting or paid access. Open Settings → Network to swap in a server that accepts your account.' + technical,
+        };
+    }
+    if (/all blossom servers failed/.test(lower)) {
+        return {
+            title: 'No media server could take this file',
+            body: 'Every media server you have configured rejected the upload. Open Settings → Network to see which servers you have enabled, or add one that supports your file.' + technical,
+        };
+    }
+    return {
+        title: 'File send failed',
+        body: 'Vector could not send this file. Check your connection and try again, or pick a different file.' + technical,
+    };
 }
 
 /**
@@ -2469,9 +2509,13 @@ async function setupRustListeners() {
             updateNostrProfilePreview(preview, evt.payload);
         });
         
-        // If this user is being viewed in the Expanded Profile View, update it
+        // Skip Expanded Profile View repaints during our own edit mode —
+        // backend may emit stale `banner_cached` and clobber the just-picked image.
         if (domProfile.style.display !== 'none' && domProfileId.textContent === evt.payload.id) {
-            renderProfileTab(evt.payload);
+            const isOwnEditingProfile = fProfileEditMode && evt.payload.mine;
+            if (!isOwnEditingProfile) {
+                renderProfileTab(evt.payload);
+            }
         }
 
         // Refresh the mini profile popup if it's open for this npub.
@@ -2857,6 +2901,16 @@ async function setupRustListeners() {
         await getCurrentWindow().setOverlayIcon(evt.payload.enable ? "./icons/icon_badge_notification.png" : undefined);
     });
 
+    _on('blossom_servers_updated', () => {
+        if (typeof renderRelayList === 'function') renderRelayList();
+    });
+
+    _on('blossom_capabilities_updated', () => {
+        if (currentBlossomInfo) {
+            renderBlossomCapabilities(currentBlossomInfo.url, ++_blossomCapsToken);
+        }
+    });
+
     // Listen for relay status changes
     _on('relay_status_change', (evt) => {
         // Update the relay status in the network list
@@ -2955,7 +3009,6 @@ let fSyncComplete = false;
 async function renderRelayList() {
     try {
         const relays = await invoke('get_relays');
-        const mediaServers = await invoke('get_media_servers');
         const networkList = document.getElementById('network-list');
 
         // Clear existing content
@@ -3085,17 +3138,18 @@ async function renderRelayList() {
             networkList.appendChild(relayItem);
         });
         
-        // Add Media Servers subtitle with info button - wrap in container for centering
+        const blossomServers = await invoke('get_blossom_servers_config');
+
         const mediaTitleContainer = document.createElement('div');
-        mediaTitleContainer.style.textAlign = 'center';
+        mediaTitleContainer.className = 'relay-section-header';
         mediaTitleContainer.style.marginTop = '2rem';
-        
+
         const mediaTitle = document.createElement('h3');
         mediaTitle.className = 'network-section-title';
         mediaTitle.style.display = 'inline-flex';
         mediaTitle.style.alignItems = 'center';
         mediaTitle.textContent = 'Media Servers';
-        
+
         const mediaInfoBtn = document.createElement('span');
         mediaInfoBtn.className = 'icon icon-info btn';
         mediaInfoBtn.style.width = '16px';
@@ -3106,29 +3160,63 @@ async function renderRelayList() {
         mediaInfoBtn.onclick = (e) => {
             e.preventDefault();
             e.stopPropagation();
-            popupConfirm('Media Servers', 'Media Servers are <b>Blossom-compatible servers that store your files</b> (images, videos, documents) for sharing in messages and for storage in an encrypted cloud.', true);
+            popupConfirm('Media Servers', 'Media Servers are <b>Blossom-compatible servers that store your files</b> (images, videos, documents) for sharing in messages and for storage in an encrypted cloud.<br><br>Your server list syncs automatically across your devices.', true);
         };
-        
+
+        const addMediaBtn = document.createElement('button');
+        addMediaBtn.className = 'relay-add-btn';
+        addMediaBtn.textContent = '+';
+        addMediaBtn.title = 'Add Custom Media Server';
+        addMediaBtn.onclick = async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const url = await popupConfirm(
+                'Add Media Server',
+                'Enter the address of a Blossom-compatible server. A bare domain like <b>blossom.primal.net</b> works. Vector adds <b>https://</b> automatically.',
+                false,
+                'blossom.primal.net',
+            );
+            if (!url) return;
+            try {
+                await addCustomBlossomServer(url.trim());
+                renderRelayList();
+            } catch (err) {
+                popupConfirm('Could not add server', String(err), true, '', 'vector_warning.svg');
+            }
+        };
+
         mediaTitle.appendChild(mediaInfoBtn);
         mediaTitleContainer.appendChild(mediaTitle);
+        mediaTitleContainer.appendChild(addMediaBtn);
         networkList.appendChild(mediaTitleContainer);
-        
-        // Create media server items
-        mediaServers.forEach(serverUrl => {
+
+        blossomServers.forEach(server => {
             const serverItem = document.createElement('div');
-            serverItem.className = 'relay-item media-server-item';
-            serverItem.setAttribute('data-server-url', serverUrl);
-            
+            serverItem.className = 'relay-item media-server-item' + (server.enabled ? '' : ' disabled');
+            serverItem.setAttribute('data-server-url', server.url);
+
+            const serverContent = document.createElement('div');
+            serverContent.className = 'relay-item-content';
+            serverContent.onclick = () => openBlossomServerInfoDialog(server);
+
+            if (server.is_default) {
+                const defaultBadge = document.createElement('span');
+                defaultBadge.className = 'relay-default-badge';
+                defaultBadge.textContent = 'default';
+                serverContent.appendChild(defaultBadge);
+            }
+
             const serverUrlSpan = document.createElement('span');
             serverUrlSpan.className = 'relay-url';
-            serverUrlSpan.textContent = serverUrl;
-            
-            const serverStatus = document.createElement('span');
-            serverStatus.className = 'relay-status connected';
-            serverStatus.textContent = 'active';
-            
-            serverItem.appendChild(serverUrlSpan);
-            serverItem.appendChild(serverStatus);
+            serverUrlSpan.textContent = server.url.replace(/^https?:\/\//, '');
+            serverContent.appendChild(serverUrlSpan);
+
+            const statusBadge = document.createElement('span');
+            statusBadge.className = `relay-status ${server.enabled ? 'connected' : 'disabled'}`;
+            statusBadge.textContent = server.enabled ? 'active' : 'disabled';
+
+            serverItem.appendChild(serverContent);
+            serverItem.appendChild(statusBadge);
             networkList.appendChild(serverItem);
         });
     } catch (error) {
@@ -3342,6 +3430,196 @@ async function handleRelayModeChange() {
     }
 }
 
+// =============================================================================
+// Blossom Media Server Info Dialog
+// =============================================================================
+
+/** Currently-open blossom server (info dialog). */
+let currentBlossomInfo = null;
+
+function openBlossomServerInfoDialog(server) {
+    currentBlossomInfo = server;
+    const overlay = document.getElementById('blossom-info-overlay');
+    document.getElementById('blossom-info-url').textContent = server.url.replace(/^https?:\/\//, '');
+
+    const statusEl = document.getElementById('blossom-info-status');
+    statusEl.className = `relay-status relay-status-small ${server.enabled ? 'connected' : 'disabled'}`;
+    statusEl.textContent = server.enabled ? 'enabled' : 'disabled';
+
+    const actionBtn = document.getElementById('blossom-info-action');
+    if (server.is_custom) {
+        actionBtn.textContent = 'Remove Server';
+    } else {
+        actionBtn.textContent = server.enabled ? 'Disable Server' : 'Enable Server';
+    }
+
+    overlay.classList.add('active');
+    // Reset slot synchronously so stale data doesn't flash mid-fetch.
+    const slot = document.getElementById('blossom-info-capabilities');
+    if (slot) {
+        slot.textContent = 'Loading…';
+        slot.style.opacity = '0.6';
+    }
+    const token = ++_blossomCapsToken;
+    renderBlossomCapabilities(server.url, token);
+}
+
+/** Monotonic token — rapid open(A) → open(B) races resolve in B's favour. */
+let _blossomCapsToken = 0;
+
+/** Chip distinguishing encrypted (chat) from public (avatar/banner) contexts. */
+function buildBlossomContextBadge(isEncrypted) {
+    const badge = document.createElement('span');
+    badge.className = 'blossom-cap-context';
+    if (isEncrypted) {
+        badge.textContent = 'encrypted';
+        badge.title = 'Tested with encrypted chat data';
+    } else {
+        badge.textContent = 'public';
+        badge.title = 'Tested with public uploads (avatar, banner, etc.)';
+    }
+    return badge;
+}
+
+async function renderBlossomCapabilities(url, token) {
+    const slot = document.getElementById('blossom-info-capabilities');
+    if (!slot) return;
+    try {
+        const caps = await getBlossomServerCapabilities(url);
+        if (token !== _blossomCapsToken) return;
+        if (!caps || caps.length === 0) {
+            slot.textContent = 'No capability data yet. Vector learns each server’s file-type and size limits as you send files.';
+            slot.style.opacity = '0.6';
+            return;
+        }
+        // outcome 1 = accepted, 2 = MIME rejected, 3 = size-only seed.
+        const accepted = caps.filter(c => c.outcome === 1 && c.max_accepted_size > 0);
+        const sizeLimited = caps.filter(c =>
+            (c.outcome === 3 && c.min_rejected_size != null) ||
+            (c.outcome === 1 && c.max_accepted_size === 0 && c.min_rejected_size != null)
+        );
+        const rejected = caps.filter(c => c.outcome === 2);
+        slot.innerHTML = '';
+        slot.style.opacity = '';
+
+        if (accepted.length) {
+            const h = document.createElement('div');
+            h.className = 'blossom-cap-group-label blossom-cap-accepted';
+            h.textContent = 'Accepts';
+            slot.appendChild(h);
+            const ul = document.createElement('ul');
+            ul.className = 'blossom-cap-list';
+            for (const c of accepted) {
+                const li = document.createElement('li');
+                const marker = document.createElement('span');
+                marker.className = 'blossom-cap-marker blossom-cap-accepted';
+                marker.textContent = '✓';
+                marker.setAttribute('aria-label', 'accepted');
+                const mime = document.createElement('span');
+                mime.className = 'blossom-cap-mime';
+                mime.textContent = c.mime_type;
+                li.appendChild(marker);
+                li.appendChild(mime);
+                li.appendChild(buildBlossomContextBadge(c.is_encrypted));
+                const size = document.createElement('span');
+                size.className = 'blossom-cap-size';
+                size.textContent = `${formatBytes(c.max_accepted_size, 1)} max`;
+                li.appendChild(size);
+                ul.appendChild(li);
+            }
+            slot.appendChild(ul);
+        }
+        if (sizeLimited.length) {
+            const h = document.createElement('div');
+            h.className = 'blossom-cap-group-label blossom-cap-limited';
+            h.textContent = 'Size-limited';
+            slot.appendChild(h);
+            const ul = document.createElement('ul');
+            ul.className = 'blossom-cap-list';
+            for (const c of sizeLimited) {
+                const li = document.createElement('li');
+                li.classList.add('blossom-cap-limited-row');
+                const marker = document.createElement('span');
+                marker.className = 'blossom-cap-marker blossom-cap-limited';
+                marker.textContent = '⚠';
+                marker.setAttribute('aria-label', 'size limited');
+                const mime = document.createElement('span');
+                mime.className = 'blossom-cap-mime';
+                mime.textContent = c.mime_type;
+                const size = document.createElement('span');
+                size.className = 'blossom-cap-size';
+                size.textContent = `rejects ≥ ${formatBytes(c.min_rejected_size, 1)}`;
+                li.appendChild(marker);
+                li.appendChild(mime);
+                li.appendChild(buildBlossomContextBadge(c.is_encrypted));
+                li.appendChild(size);
+                ul.appendChild(li);
+            }
+            slot.appendChild(ul);
+        }
+        if (rejected.length) {
+            const h = document.createElement('div');
+            h.className = 'blossom-cap-group-label blossom-cap-rejected';
+            h.textContent = 'Rejects';
+            slot.appendChild(h);
+            const ul = document.createElement('ul');
+            ul.className = 'blossom-cap-list';
+            for (const c of rejected) {
+                const li = document.createElement('li');
+                li.classList.add('blossom-cap-rejected-row');
+                const mime = document.createElement('span');
+                mime.className = 'blossom-cap-mime';
+                mime.textContent = c.mime_type;
+                const marker = document.createElement('span');
+                marker.className = 'blossom-cap-marker blossom-cap-rejected';
+                marker.textContent = '✕';
+                marker.setAttribute('aria-label', 'rejected');
+                li.appendChild(mime);
+                li.appendChild(buildBlossomContextBadge(c.is_encrypted));
+                li.appendChild(marker);
+                ul.appendChild(li);
+            }
+            slot.appendChild(ul);
+        }
+    } catch (err) {
+        console.error('Failed to load blossom capabilities:', err);
+        if (token !== _blossomCapsToken) return;
+        slot.textContent = 'Could not load capability data.';
+        slot.style.opacity = '0.6';
+    }
+}
+
+function closeBlossomServerInfoDialog() {
+    document.getElementById('blossom-info-overlay').classList.remove('active');
+    currentBlossomInfo = null;
+}
+
+async function handleBlossomAction() {
+    if (!currentBlossomInfo) return;
+    const server = currentBlossomInfo;
+    try {
+        if (server.is_custom) {
+            const ok = await popupConfirm(
+                'Remove media server?',
+                `<b>${server.url}</b> will be removed from your list. Existing uploads on that server remain accessible.`,
+                false,
+            );
+            if (!ok) return;
+            await removeCustomBlossomServer(server.url);
+            closeBlossomServerInfoDialog();
+            renderRelayList();
+        } else {
+            const newEnabled = !server.enabled;
+            await toggleDefaultBlossomServer(server.url, newEnabled);
+            currentBlossomInfo = { ...server, enabled: newEnabled };
+            openBlossomServerInfoDialog(currentBlossomInfo);
+            renderRelayList();
+        }
+    } catch (err) {
+        popupConfirm('Error', String(err), true, '', 'vector_warning.svg');
+    }
+}
+
 /**
  * Handles disable/remove button from info dialog
  */
@@ -3426,6 +3704,14 @@ function initRelayDialogs() {
 
     // Copy logs button
     document.getElementById('relay-logs-copy').onclick = copyRelayLogs;
+
+    // Blossom server info dialog
+    document.getElementById('blossom-info-close').onclick = closeBlossomServerInfoDialog;
+    document.getElementById('blossom-info-done').onclick = closeBlossomServerInfoDialog;
+    document.getElementById('blossom-info-action').onclick = handleBlossomAction;
+    document.getElementById('blossom-info-overlay').onclick = (e) => {
+        if (e.target.id === 'blossom-info-overlay') closeBlossomServerInfoDialog();
+    };
 }
 
 /**

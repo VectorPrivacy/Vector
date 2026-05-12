@@ -630,6 +630,9 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
         // `is_encryption_enabled_fast()` returns stale `false` and
         // `maybe_encrypt`/`maybe_decrypt` silently bypass encryption.
         crate::state::init_encryption_enabled();
+        // Seed BLOSSOM_SERVERS from local prefs; kind-10063 merge runs
+        // in fetch_messages after Quick Sync.
+        vector_core::blossom_servers::refresh_cache();
     }
 
     // MLS keypackage bootstrap (non-blocking, same as decrypt command)
@@ -737,6 +740,7 @@ pub async fn setup_encryption<R: Runtime>(
     drop(seed_plain);
 
     crate::state::set_encryption_enabled(true);
+    vector_core::blossom_servers::refresh_cache();
 
     // MLS keypackage bootstrap.
     let bootstrap_session = vector_core::state::SessionGuard::capture();
@@ -821,6 +825,7 @@ pub async fn skip_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), Str
     drop(seed_plain);
 
     crate::state::set_encryption_enabled(false);
+    vector_core::blossom_servers::refresh_cache();
 
     // MLS keypackage bootstrap.
     let bootstrap_session = vector_core::state::SessionGuard::capture();

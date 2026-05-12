@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-toggle-custom-blossom-server"
+description = "Enables the toggle_custom_blossom_server command without any pre-configured scope."
+commands.allow = ["toggle_custom_blossom_server"]
+
+[[permission]]
+identifier = "deny-toggle-custom-blossom-server"
+description = "Denies the toggle_custom_blossom_server command without any pre-configured scope."
+commands.deny = ["toggle_custom_blossom_server"]

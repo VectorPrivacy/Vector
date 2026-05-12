@@ -273,6 +273,54 @@ async function updateRelayMode(url, mode) {
     return await invoke('update_relay_mode', { url, mode });
 }
 
+// ============================================================================
+// Blossom (BUD-03) Media Server Management
+// ============================================================================
+
+/**
+ * @typedef {Object} BlossomServerInfo
+ * @property {string} url
+ * @property {boolean} is_default
+ * @property {boolean} is_custom
+ * @property {boolean} enabled
+ */
+
+/** @returns {Promise<BlossomServerInfo[]>} */
+async function loadBlossomServersConfig() {
+    return await invoke('get_blossom_servers_config');
+}
+
+async function addCustomBlossomServer(url) {
+    return await invoke('add_custom_blossom_server', { url });
+}
+
+async function removeCustomBlossomServer(url) {
+    return await invoke('remove_custom_blossom_server', { url });
+}
+
+async function toggleCustomBlossomServer(url, enabled) {
+    return await invoke('toggle_custom_blossom_server', { url, enabled });
+}
+
+async function toggleDefaultBlossomServer(url, enabled) {
+    return await invoke('toggle_default_blossom_server', { url, enabled });
+}
+
+/**
+ * @typedef {Object} BlossomCapability
+ * @property {string} mime_type
+ * @property {boolean} is_encrypted - true for encrypted chat uploads, false for public (avatar/banner)
+ * @property {number} outcome - 1=accepted, 2=rejected_mime, 3=size_only (no acceptance observed yet)
+ * @property {number} max_accepted_size - largest blob of this MIME the server has accepted, in bytes
+ * @property {?number} min_rejected_size - smallest blob size the server has rejected with HTTP 413, or null
+ * @property {number} updated_at - epoch seconds
+ */
+
+/** @returns {Promise<BlossomCapability[]>} */
+async function getBlossomServerCapabilities(url) {
+    return await invoke('get_blossom_server_capabilities', { url });
+}
+
 /**
  * Validate a relay URL format without saving
  * @param {string} url - The relay URL to validate

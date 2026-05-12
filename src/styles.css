@@ -808,6 +808,49 @@ html, body {
   background-color: rgba(255,255,255,0) !important;
 }
 
+/* Hide the add-photo glyph and dim the banner during upload so the
+   injected progress ring reads cleanly. */
+.profile-edit-active #profile-banner-container.uploading::before {
+  display: none !important;
+}
+.profile-edit-active #profile-banner-container.uploading::after {
+  background: rgba(0, 0, 0, 0.45) !important;
+}
+/* Progress ring for avatar/banner upload. Needs its own spin keyframe:
+   the shared `inline-image-spin` rotates with a bare transform that
+   would clobber the centering translate below. */
+.profile-upload-ring {
+  --progress: 5%;
+  position: absolute;
+  width: 48px;
+  height: 48px;
+  z-index: 4;
+  pointer-events: none;
+  border-radius: 50%;
+  background: conic-gradient(
+    var(--icon-color-primary) 0% var(--progress),
+    rgba(255, 255, 255, 0.2) var(--progress) 100%
+  );
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #fff calc(100% - 3px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #fff calc(100% - 3px));
+  animation: profile-upload-ring-spin 2s linear infinite;
+  transition: --progress 0.3s ease;
+}
+@keyframes profile-upload-ring-spin {
+  from { transform: translate(-50%, -50%) rotate(0deg); }
+  to   { transform: translate(-50%, -50%) rotate(360deg); }
+}
+#profile-banner-container .profile-upload-ring {
+  top: 70px;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+.profile-avatar-container .profile-upload-ring {
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
 /* Banner Hover Overlay */
 #profile-banner-container::after {
   content: '';
@@ -870,6 +913,14 @@ html, body {
 
 .profile-edit-active .profile-avatar-container:hover::before {
   background-color: #B2B2B2;
+}
+
+/* Avatar upload state — same hide-glyph + dim pattern as banner. */
+.profile-edit-active .profile-avatar-container.uploading::before {
+  display: none !important;
+}
+.profile-edit-active .profile-avatar-container.uploading::after {
+  background: rgba(0, 0, 0, 0.45) !important;
 }
 
 .profile-avatar-container::after {
@@ -999,6 +1050,14 @@ html, body {
   margin: 0;
   padding: 0;
   padding-top: 4px;
+}
+
+#profile-edit-cancel-btn,
+#profile-edit-save-btn,
+#profile-edit-mode-label {
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
 }
 
 #profile-edit-cancel-btn .icon,
@@ -6889,6 +6948,77 @@ select:disabled:hover {
   gap: 10px;
 }
 
+.blossom-cap-blurb {
+  margin: 8px 0 12px;
+  font-size: 12px;
+  line-height: 1.45;
+  opacity: 0.55;
+}
+.blossom-cap-slot {
+  margin-top: 8px;
+  font-size: 13px;
+  opacity: 0.85;
+}
+.blossom-cap-group-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-top: 8px;
+  margin-bottom: 4px;
+  opacity: 0.7;
+}
+.blossom-cap-accepted { color: #59fcb3; }
+.blossom-cap-limited { color: #ffc107; }
+.blossom-cap-rejected { color: #ff6464; }
+.blossom-cap-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.blossom-cap-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 13px;
+}
+.blossom-cap-list li:last-child { border-bottom: none; }
+.blossom-cap-marker {
+  display: inline-block;
+  width: 14px;
+  text-align: center;
+  font-weight: 700;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.blossom-cap-marker.blossom-cap-accepted { color: #59fcb3; }
+.blossom-cap-marker.blossom-cap-rejected { color: #ff6464; }
+.blossom-cap-mime {
+  flex: 1;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  opacity: 0.85;
+}
+.blossom-cap-rejected-row .blossom-cap-mime { opacity: 0.5; }
+.blossom-cap-limited-row .blossom-cap-mime { opacity: 0.75; }
+.blossom-cap-context {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 2px 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.55);
+}
+.blossom-cap-size {
+  font-size: 11px;
+  opacity: 0.5;
+  margin-left: auto;
+}
+
 .relay-add-btn {
   width: 24px;
   height: 24px;
@@ -6902,6 +7032,7 @@ select:disabled:hover {
   font-weight: bold;
   transition: all 0.2s ease;
 }
+
 
 /* Responsive adjustments */
 @media (max-width: 480px) {
@@ -11670,6 +11801,8 @@ hr {
   --dmsg-pinged-border: var(--icon-color-primary, #59fcb3);
   --dmsg-replying-bg: rgba(255, 255, 255, 0.05);
   --dmsg-replying-border: rgba(255, 255, 255, 0.5);
+  --dmsg-failed-bg: rgba(255, 100, 100, 0.10);
+  --dmsg-failed-border: #ff6464;
 }
 
 .dmsg {
@@ -11708,6 +11841,15 @@ hr {
 .dmsg[data-pinged="true"]              { background: var(--dmsg-pinged-bg); border-left-color: var(--dmsg-pinged-border); }
 .dmsg[data-replying-to="true"]         { background: var(--dmsg-replying-bg); border-left-color: var(--dmsg-replying-border); }
 .dmsg[data-status="pending"] .dmsg-content { opacity: var(--dmsg-pending-opacity); }
+/* Failed sends need a row-level signal — the inline "Failed" text alone
+   gets lost on rich attachments. Red left border + soft red wash matches
+   the ping/reply pattern, and the attachment gets dimmed so a failed image
+   doesn't read as "delivered". */
+.dmsg[data-status="failed"] {
+  background: var(--dmsg-failed-bg);
+  border-left-color: var(--dmsg-failed-border);
+}
+.dmsg[data-status="failed"] .dmsg-content { opacity: var(--dmsg-pending-opacity); }
 /* Ephemeral flash when scrolling to a message (e.g., clicking a reply context).
  * Reuses the per-theme `highlightMessage` keyframes (themes/<name>/dark.css).
  * No `forwards` fill mode — without it, animation reverts to base CSS at end,

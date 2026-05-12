@@ -381,7 +381,29 @@ pub async fn delete_failed_message(message_id: String) -> Result<(), String> {
         }
     };
 
-    if let Some((chat_id, _)) = removed {
+    if let Some((chat_id, msg)) = removed {
+        // Best-effort: drop the staged preview copy. Canonicalize both sides
+        // so a stale or symlinked `att.path` can't follow out of download_dir.
+        if let Ok(canonical_dl_dir) = std::fs::canonicalize(vector_core::db::get_download_dir()) {
+            for att in &msg.attachments {
+                if att.path.is_empty() { continue; }
+                if let Ok(canonical_att) = std::fs::canonicalize(&att.path) {
+                    if canonical_att.starts_with(&canonical_dl_dir) {
+                        let _ = std::fs::remove_file(&canonical_att);
+                    }
+                }
+            }
+        }
+        // Best-effort: free any blob already uploaded before the wrap failed.
+        let remote_urls: Vec<String> = msg.attachments.iter()
+            .filter_map(|a| if a.url.is_empty() { None } else { Some(a.url.to_string()) })
+            .collect();
+        if !remote_urls.is_empty() {
+            if let Some(keys) = crate::MY_SECRET_KEY.to_keys() {
+                vector_core::blossom::delete_blobs_best_effort(keys, remote_urls);
+            }
+        }
+
         // Delete from database
         if let Err(e) = crate::db::delete_event(&message_id).await {
             eprintln!("[delete_failed_message] DB delete failed: {}", e);
@@ -602,6 +624,7 @@ async fn encrypt_and_upload_mls_media(
         servers,
         Arc::new(std::mem::take(&mut upload.encrypted_data)),
         Some(&mime_type),
+        /* is_encrypted */ true,
         progress_callback,
         Some(3),
         Some(std::time::Duration::from_secs(2)),

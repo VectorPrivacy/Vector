@@ -57,6 +57,8 @@ pub mod db;
 // === Network ===
 pub mod net;
 pub mod blossom;
+pub mod blossom_servers;
+pub mod blossom_capabilities;
 pub mod inbox_relays;
 #[cfg(feature = "tor")]
 pub mod tor;

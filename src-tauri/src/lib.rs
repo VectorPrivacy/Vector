@@ -709,6 +709,13 @@ pub fn run() {
             // Relay commands (commands/relays.rs)
             commands::relays::get_relays,
             commands::relays::get_media_servers,
+            commands::relays::get_blossom_servers_config,
+            commands::relays::add_custom_blossom_server,
+            commands::relays::remove_custom_blossom_server,
+            commands::relays::toggle_custom_blossom_server,
+            commands::relays::toggle_default_blossom_server,
+            commands::relays::get_blossom_server_capabilities,
+            commands::relays::blossom_can_likely_upload,
             commands::relays::get_custom_relays,
             commands::relays::add_custom_relay,
             commands::relays::remove_custom_relay,

@@ -492,8 +492,33 @@ async function openPublishDialog() {
  * @param {string} receiver - Receiver pubkey or group ID
  * @param {string} replyRef - Reply reference (optional)
  */
-// Maximum file size allowed (100MB)
-const MAX_FILE_SIZE = 100 * 1024 * 1024;
+/**
+ * Pre-flight: returns true (and shows a popup) only when every enabled
+ * server is known to size-reject this magnitude or MIME-reject this type.
+ * Unknown servers count as likely-accept, so the check is optimistic.
+ */
+async function checkUploadBlocked(fileSize, extension) {
+    try {
+        const likely = await invoke('blossom_can_likely_upload', {
+            extension: extension || 'bin',
+            sizeBytes: fileSize,
+            isEncrypted: true,
+        });
+        if (!likely) {
+            popupConfirm(
+                'File Too Large',
+                `No configured media server is known to accept files of <b>${formatBytes(fileSize, 1)}</b>. Add a server that supports larger uploads, or shrink the file.`,
+                true, '', 'vector_warning.svg',
+            );
+            return true;
+        }
+        return false;
+    } catch (err) {
+        // Fall open — the real upload's failover surfaces any real failure.
+        console.warn('[Blossom] pre-flight check failed:', err);
+        return false;
+    }
+}
 
 async function openFilePreview(filepath, receiver, replyRef = '') {
     if (!filePreviewOverlay) {
@@ -526,11 +551,7 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
         console.log('File info from backend:', fileInfo);
         fileSize = fileInfo.size;
         
-        // Check if file is too large (100MB or more)
-        if (fileSize >= MAX_FILE_SIZE) {
-            popupConfirm('File Too Large', 'Files 100MB or larger cannot be uploaded yet.', true, '', 'vector_warning.svg');
-            return;
-        }
+        if (await checkUploadBlocked(fileSize, ext)) return;
         // On Android, use the backend's filename and extension since URI doesn't contain them
         if (isAndroid && fileInfo.name) {
             fileName = fileInfo.name;
@@ -780,11 +801,7 @@ async function startPrecompression(filepath) {
  * @param {string} replyRef - Reply reference (optional)
  */
 async function openFilePreviewWithFile(file, fileName, ext, receiver, replyRef = '') {
-    // Check if file is too large (100MB or more)
-    if (file.size >= MAX_FILE_SIZE) {
-        popupConfirm('File Too Large', 'Files 100MB or larger cannot be uploaded yet.', true, '', 'vector_warning.svg');
-        return;
-    }
+    if (await checkUploadBlocked(file.size, ext)) return;
     
     if (!filePreviewOverlay) {
         createFilePreviewOverlay();
@@ -939,11 +956,7 @@ async function openFilePreviewWithFile(file, fileName, ext, receiver, replyRef =
  * @param {string} replyRef - Reply reference (optional)
  */
 async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver, replyRef = '') {
-    // Check if file is too large (100MB or more)
-    if (fileSize >= MAX_FILE_SIZE) {
-        popupConfirm('File Too Large', 'Files 100MB or larger cannot be uploaded yet.', true, '', 'vector_warning.svg');
-        return;
-    }
+    if (await checkUploadBlocked(fileSize, ext)) return;
     
     if (!filePreviewOverlay) {
         createFilePreviewOverlay();
@@ -1470,8 +1483,18 @@ async function openFolderZipPreview(dirPath, receiver, replyRef = '') {
             ${buildFileListHtml(result.file_list, result.file_count + result.dir_count)}
         `;
 
-        // Check compressed size
-        if (result.compressed_size >= MAX_FILE_SIZE) {
+        // Same pre-flight as `checkUploadBlocked`, scoped to .zip.
+        let tooLarge = false;
+        try {
+            const likely = await invoke('blossom_can_likely_upload', {
+                extension: 'zip',
+                sizeBytes: result.compressed_size,
+                isEncrypted: true,
+            });
+            tooLarge = !likely;
+        } catch (_) { /* fall open */ }
+
+        if (tooLarge) {
             document.getElementById('file-preview-size').textContent =
                 `${formatFileSize(result.compressed_size)} — Too Large`;
             sendBtn.disabled = true;

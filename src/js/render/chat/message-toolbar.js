@@ -41,6 +41,7 @@ function initMessageToolbar() {
             <button class="dmsg-toolbar-btn btn" data-action="reply" aria-label="Reply" title="Reply"><span class="icon icon-reply"></span></button>
             <button class="dmsg-toolbar-btn btn" data-action="edit" aria-label="Edit" title="Edit" hidden><span class="icon icon-edit"></span></button>
             <button class="dmsg-toolbar-btn btn" data-action="reveal-file" aria-label="Reveal in folder" title="Reveal in folder" hidden><span class="icon icon-file-search"></span></button>
+            <button class="dmsg-toolbar-btn btn" data-action="retry" aria-label="Retry send" title="Retry send" hidden><span class="icon icon-loading"></span></button>
             <button class="dmsg-toolbar-btn btn dmsg-toolbar-btn-danger" data-action="delete" aria-label="Delete message" title="Delete message" hidden><span class="icon icon-trash"></span></button>
         `;
         // Append INSIDE the scrolling container so the toolbar moves with the message
@@ -113,13 +114,10 @@ function showMessageToolbar(rowEl) {
     _dmsgToolbarTarget = rowEl;
     _dmsgCancelToolbarHide();
 
-    // Pending/failed messages aren't on the wire yet — there's nothing for
-    // others to react/reply/edit/delete against. Hide the whole toolbar
-    // (each button being individually gated would still leave an empty
-    // floating bar). Cancel-send / retry / delete-failed live on the row
-    // itself, not in this hover toolbar.
+    // Pending messages aren't on the wire yet — cancel-send lives on the
+    // upload spinner itself, so suppress the hover toolbar entirely.
     const status = rowEl.dataset.status;
-    if (status === 'pending' || status === 'failed') {
+    if (status === 'pending') {
         _dmsgToolbarEl.hidden = true;
         return;
     }
@@ -129,9 +127,29 @@ function showMessageToolbar(rowEl) {
 
     const mine = rowEl.dataset.mine === 'true';
     const reactBtn = _dmsgToolbarEl.querySelector('[data-action="react"]');
+    const replyBtn = _dmsgToolbarEl.querySelector('[data-action="reply"]');
     const editBtn = _dmsgToolbarEl.querySelector('[data-action="edit"]');
     const revealBtn = _dmsgToolbarEl.querySelector('[data-action="reveal-file"]');
+    const retryBtn = _dmsgToolbarEl.querySelector('[data-action="retry"]');
     const deleteBtn = _dmsgToolbarEl.querySelector('[data-action="delete"]');
+
+    // Failed sends: only retry + delete make sense (the message isn't on
+    // the wire, so react/reply/edit/reveal don't apply).
+    if (status === 'failed') {
+        reactBtn.hidden = true;
+        replyBtn.hidden = true;
+        editBtn.hidden = true;
+        revealBtn.hidden = true;
+        retryBtn.hidden = false;
+        deleteBtn.hidden = false;
+        deleteBtn.dataset.mode = 'failed';
+        deleteBtn.setAttribute('aria-label', 'Delete failed message');
+        deleteBtn.setAttribute('title', 'Delete failed message');
+        _dmsgPositionToolbar(rowEl);
+        return;
+    }
+    retryBtn.hidden = true;
+    replyBtn.hidden = false;
 
     const msg = _dmsgLookupMessage(rowEl);
     const hasContent = !!(msg && msg.content);
@@ -296,7 +314,18 @@ function _dmsgHandleToolbarClick(e) {
             if (path) revealItemInDir(path);
             break;
         }
+        case 'retry': {
+            const row = document.getElementById(targetId);
+            const msg = row ? _dmsgLookupMessage(row) : null;
+            if (msg && typeof retryFailedMessage === 'function') retryFailedMessage(msg);
+            break;
+        }
         case 'delete': {
+            // Failed-message delete is local cleanup only (no NIP-09).
+            if (btn.dataset.mode === 'failed') {
+                if (typeof deleteFailedMessage === 'function') deleteFailedMessage(targetId);
+                break;
+            }
             const mode = btn.dataset.mode === 'hide' ? 'hide' : 'delete';
             const partial = btn.dataset.partial === '1';
             const hasAttachments = btn.dataset.hasAttachments === '1';

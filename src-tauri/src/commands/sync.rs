@@ -709,6 +709,39 @@ pub async fn fetch_messages<R: Runtime>(
             println!("[Sync] MLS group sync: {:.2?}", mls_start.elapsed());
         }
     );
+
+    // Deferred bootstrap: merge own kind 10063, then probe unknown servers.
+    // Runs after Quick Sync so it can't contend for boot-window bandwidth.
+    {
+        let bg_client = client.clone();
+        let session = vector_core::state::SessionGuard::capture();
+        tokio::spawn(async move {
+            if !session.is_valid() { return; }
+            match vector_core::blossom_servers::fetch_and_merge_own_list(&bg_client, my_public_key, session).await {
+                Ok(0) => {}
+                Ok(n) => vector_core::log_info!("[BlossomServers] Bootstrap merged {} server(s)", n),
+                Err(e) => vector_core::log_warn!("[BlossomServers] Bootstrap fetch failed: {}", e),
+            }
+
+            if !session.is_valid() { return; }
+            let signer = match crate::MY_SECRET_KEY.to_keys() {
+                Some(keys) => keys,
+                None => return,
+            };
+            let enabled_servers = vector_core::state::get_blossom_servers();
+            match vector_core::blossom::probe_servers_for_octet_stream(
+                signer, enabled_servers, session,
+            ).await {
+                Ok(0) => {}
+                Ok(n) => {
+                    vector_core::log_info!("[Blossom Probe] Probed {} unknown server(s)", n);
+                    vector_core::traits::emit_event("blossom_capabilities_updated", &());
+                }
+                Err(e) => vector_core::log_warn!("[Blossom Probe] Probe pass failed: {}", e),
+            }
+        });
+    }
+
     // ========================================================================
     // Archive sync — full negentropy reconciliation (drives sync UI)
     // ========================================================================

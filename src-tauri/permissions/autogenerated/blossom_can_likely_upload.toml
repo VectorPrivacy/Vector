@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-blossom-can-likely-upload"
+description = "Enables the blossom_can_likely_upload command without any pre-configured scope."
+commands.allow = ["blossom_can_likely_upload"]
+
+[[permission]]
+identifier = "deny-blossom-can-likely-upload"
+description = "Denies the blossom_can_likely_upload command without any pre-configured scope."
+commands.deny = ["blossom_can_likely_upload"]

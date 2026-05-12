@@ -1116,17 +1116,27 @@ async function askForAvatar() {
     });
     if (!file) return;
 
-    // Show upload progress spinner
+    const inEditMode = typeof fProfileEditMode !== 'undefined' && fProfileEditMode;
     const avatarEditBtn = document.querySelector('.profile-avatar-edit');
     const avatarIcon = avatarEditBtn?.querySelector('.icon');
+    const avatarContainer = inEditMode ? document.querySelector('.profile-avatar-container') : null;
     let unlisten = null;
+    let ringEl = null;
 
-    if (avatarIcon) {
-        // Replace icon with progress spinner
+    if (inEditMode && avatarContainer) {
+        avatarContainer.classList.add('uploading');
+        ringEl = document.createElement('div');
+        ringEl.className = 'profile-upload-ring';
+        avatarContainer.appendChild(ringEl);
+        unlisten = await window.__TAURI__.event.listen('profile_upload_progress', (event) => {
+            if (event.payload.type === 'avatar' && ringEl) {
+                const progress = Math.max(5, event.payload.progress);
+                ringEl.style.setProperty('--progress', `${progress}%`);
+            }
+        });
+    } else if (avatarIcon) {
         avatarIcon.className = 'profile-upload-spinner';
         avatarIcon.style.setProperty('--progress', '5%');
-
-        // Listen for progress events
         unlisten = await window.__TAURI__.event.listen('profile_upload_progress', (event) => {
             if (event.payload.type === 'avatar') {
                 const progress = Math.max(5, event.payload.progress);
@@ -1135,47 +1145,58 @@ async function askForAvatar() {
         });
     }
 
+    const restoreFeedback = () => {
+        if (avatarContainer) avatarContainer.classList.remove('uploading');
+        if (ringEl && ringEl.parentNode) ringEl.remove();
+        if (avatarIcon && !inEditMode) avatarIcon.className = 'icon icon-plus-circle';
+        if (unlisten) unlisten();
+    };
+
     // Upload the avatar to a NIP-96 server
     let strUploadURL = '';
     try {
         strUploadURL = await invoke("upload_avatar", { filepath: file, uploadType: "avatar" });
     } catch (e) {
-        // Restore icon on failure
-        if (avatarIcon) avatarIcon.className = 'icon icon-plus-circle';
-        if (unlisten) unlisten();
+        restoreFeedback();
         return await popupConfirm('Avatar Upload Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg');
     }
+    restoreFeedback();
 
-    // Restore icon on success
-    if (avatarIcon) avatarIcon.className = 'icon icon-plus-circle';
-    if (unlisten) unlisten();
-
-    // Display the change immediately
     const cProfile = arrProfiles.find(a => a.mine);
     const oldAvatar = cProfile.avatar;
     const oldAvatarCached = cProfile.avatar_cached;
     cProfile.avatar = strUploadURL;
-    cProfile.avatar_cached = ''; // Clear stale cached image so new URL is used
-    renderCurrentProfile(cProfile);
-    if (domProfile.style.display === '') renderProfileTab(cProfile);
+    cProfile.avatar_cached = '';
 
-    // Send out the metadata update
+    if (inEditMode) {
+        // Surgical swap — see askForBanner for rationale.
+        const imgEl = document.getElementById('profile-avatar');
+        if (imgEl && imgEl.tagName === 'IMG') {
+            imgEl.src = strUploadURL;
+        }
+    } else {
+        renderCurrentProfile(cProfile);
+        if (domProfile.style.display === '') renderProfileTab(cProfile);
+    }
+
     try {
         const success = await invoke("update_profile", { name: "", avatar: strUploadURL, banner: "", about: "" });
         if (!success) {
-            // Revert local change since network update failed
             cProfile.avatar = oldAvatar;
             cProfile.avatar_cached = oldAvatarCached;
-            renderCurrentProfile(cProfile);
-            if (domProfile.style.display === '') renderProfileTab(cProfile);
+            if (!inEditMode) {
+                renderCurrentProfile(cProfile);
+                if (domProfile.style.display === '') renderProfileTab(cProfile);
+            }
             return await popupConfirm('Avatar Update Failed!', 'Failed to broadcast profile update to the network.', true, '', 'vector_warning.svg');
         }
     } catch (e) {
-        // Revert local change on error
         cProfile.avatar = oldAvatar;
         cProfile.avatar_cached = oldAvatarCached;
-        renderCurrentProfile(cProfile);
-        if (domProfile.style.display === '') renderProfileTab(cProfile);
+        if (!inEditMode) {
+            renderCurrentProfile(cProfile);
+            if (domProfile.style.display === '') renderProfileTab(cProfile);
+        }
         return await popupConfirm('Avatar Update Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg');
     }
 }
@@ -1197,17 +1218,27 @@ async function askForBanner() {
     });
     if (!file) return;
 
-    // Show upload progress spinner
+    const inEditMode = typeof fProfileEditMode !== 'undefined' && fProfileEditMode;
     const bannerEditBtn = document.querySelector('.profile-banner-edit');
     const bannerIcon = bannerEditBtn?.querySelector('.icon');
+    const bannerContainer = inEditMode ? document.getElementById('profile-banner-container') : null;
     let unlisten = null;
+    let ringEl = null;
 
-    if (bannerIcon) {
-        // Replace icon with progress spinner
+    if (inEditMode && bannerContainer) {
+        bannerContainer.classList.add('uploading');
+        ringEl = document.createElement('div');
+        ringEl.className = 'profile-upload-ring';
+        bannerContainer.appendChild(ringEl);
+        unlisten = await window.__TAURI__.event.listen('profile_upload_progress', (event) => {
+            if (event.payload.type === 'banner' && ringEl) {
+                const progress = Math.max(5, event.payload.progress);
+                ringEl.style.setProperty('--progress', `${progress}%`);
+            }
+        });
+    } else if (bannerIcon) {
         bannerIcon.className = 'profile-upload-spinner';
         bannerIcon.style.setProperty('--progress', '5%');
-
-        // Listen for progress events
         unlisten = await window.__TAURI__.event.listen('profile_upload_progress', (event) => {
             if (event.payload.type === 'banner') {
                 const progress = Math.max(5, event.payload.progress);
@@ -1216,29 +1247,48 @@ async function askForBanner() {
         });
     }
 
+    const restoreFeedback = () => {
+        if (bannerContainer) bannerContainer.classList.remove('uploading');
+        if (ringEl && ringEl.parentNode) ringEl.remove();
+        if (bannerIcon && !inEditMode) bannerIcon.className = 'icon icon-edit';
+        if (unlisten) unlisten();
+    };
+
     // Upload the banner to a NIP-96 server
     let strUploadURL = '';
     try {
         strUploadURL = await invoke("upload_avatar", { filepath: file, uploadType: "banner" });
     } catch (e) {
-        // Restore icon on failure
-        if (bannerIcon) bannerIcon.className = 'icon icon-edit';
-        if (unlisten) unlisten();
+        restoreFeedback();
         return await popupConfirm('Banner Upload Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg');
     }
+    restoreFeedback();
 
-    // Restore icon on success
-    if (bannerIcon) bannerIcon.className = 'icon icon-edit';
-    if (unlisten) unlisten();
-
-    // Display the change immediately
+    // Update the in-memory profile.
     const cProfile = arrProfiles.find(a => a.mine);
     const oldBanner = cProfile.banner;
     const oldBannerCached = cProfile.banner_cached;
     cProfile.banner = strUploadURL;
     cProfile.banner_cached = ''; // Clear stale cached image so new URL is used
-    renderCurrentProfile(cProfile);
-    if (domProfile.style.display === '') renderProfileTab(cProfile);
+
+    if (inEditMode && domProfileBanner) {
+        // Surgical img.src swap. renderProfileTab would tear down the
+        // edit-bar overlay; Save's exit handler paints the final state.
+        if (domProfileBanner.tagName === 'IMG') {
+            domProfileBanner.src = strUploadURL;
+        } else {
+            // Currently a placeholder <div>; swap to a real <img>.
+            const img = document.createElement('img');
+            img.id = 'profile-banner';
+            img.className = domProfileBanner.className;
+            img.src = strUploadURL;
+            domProfileBanner.replaceWith(img);
+            domProfileBanner = img;
+        }
+    } else {
+        renderCurrentProfile(cProfile);
+        if (domProfile.style.display === '') renderProfileTab(cProfile);
+    }
 
     // Send out the metadata update
     try {
@@ -1247,16 +1297,20 @@ async function askForBanner() {
             // Revert local change since network update failed
             cProfile.banner = oldBanner;
             cProfile.banner_cached = oldBannerCached;
-            renderCurrentProfile(cProfile);
-            if (domProfile.style.display === '') renderProfileTab(cProfile);
+            if (!inEditMode) {
+                renderCurrentProfile(cProfile);
+                if (domProfile.style.display === '') renderProfileTab(cProfile);
+            }
             return await popupConfirm('Banner Update Failed!', 'Failed to broadcast profile update to the network.', true, '', 'vector_warning.svg');
         }
     } catch (e) {
         // Revert local change on error
         cProfile.banner = oldBanner;
         cProfile.banner_cached = oldBannerCached;
-        renderCurrentProfile(cProfile);
-        if (domProfile.style.display === '') renderProfileTab(cProfile);
+        if (!inEditMode) {
+            renderCurrentProfile(cProfile);
+            if (domProfile.style.display === '') renderProfileTab(cProfile);
+        }
         return await popupConfirm('Banner Update Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg');
     }
 }

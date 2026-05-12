@@ -268,6 +268,7 @@ pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Res
         servers,
         attachment_file.bytes,
         Some(mime_type.as_str()),
+        /* is_encrypted */ false, // avatars / banners are public plaintext
         progress_callback,
         None, // No retries per server
         None, // Default retry spacing

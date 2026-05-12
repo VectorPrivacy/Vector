@@ -61,7 +61,21 @@ fn is_ipv6_private(ip: &std::net::Ipv6Addr) -> bool {
 /// clippy lint enforces this everywhere except this one canonical call site.
 #[allow(clippy::disallowed_methods)]
 pub fn build_http_client(timeout: std::time::Duration) -> Result<reqwest::Client, String> {
+    build_http_client_with_options(timeout, true)
+}
+
+/// Like `build_http_client`, optionally without redirect-following.
+/// Blossom PUT uses `false`: a 3xx mid-upload would re-issue as GET and
+/// drop the body, so we surface the 3xx as the real failure status.
+#[allow(clippy::disallowed_methods)]
+pub fn build_http_client_with_options(
+    timeout: std::time::Duration,
+    follow_redirects: bool,
+) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder().timeout(timeout);
+    if !follow_redirects {
+        builder = builder.redirect(reqwest::redirect::Policy::none());
+    }
 
     #[cfg(feature = "tor")]
     {

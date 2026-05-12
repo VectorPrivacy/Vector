@@ -441,8 +441,12 @@ pub async fn send_file_dm(
         )
     });
 
+    // Send the original MIME even though bytes are ciphertext: many
+    // Blossom servers reject `application/octet-stream` but accept the
+    // same bytes under their original type.
     let upload_url = match crate::blossom::upload_blob_with_progress_and_failover(
         keys.clone(), servers, Arc::new(encrypted), Some(mime_type),
+        /* is_encrypted */ true,
         progress_cb, Some(config.upload_retries), Some(config.upload_retry_delay),
         config.cancel_token.clone(),
     ).await {
