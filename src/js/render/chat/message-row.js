@@ -527,9 +527,18 @@ function _dmsgRenderImageAttachment(target, msg, sender, isGroupChat, cAttachmen
                 const imgPreview = document.createElement('img');
                 imgPreview.className = 'spoiler-img';
                 if (cAttachment.img_meta) {
-                    imgPreview.width = cAttachment.img_meta.width;
-                    imgPreview.height = cAttachment.img_meta.height;
-                    imgPreview.style.aspectRatio = `${cAttachment.img_meta.width} / ${cAttachment.img_meta.height}`;
+                    // Pre-scale the placeholder dimensions to match what the
+                    // revealed image will display at (fit within 450×350,
+                    // preserve ratio). Without this, the thumbhash placeholder
+                    // would render at 450×350 (squashed) while the revealed
+                    // image fits the box correctly, and the spoiler appears
+                    // wider than the real image.
+                    const iw = cAttachment.img_meta.width;
+                    const ih = cAttachment.img_meta.height;
+                    const scale = Math.min(450 / iw, 350 / ih, 1);
+                    imgPreview.width = Math.round(iw * scale);
+                    imgPreview.height = Math.round(ih * scale);
+                    imgPreview.style.aspectRatio = `${iw} / ${ih}`;
                 }
                 imgPreview.style.maxWidth = '100%';
                 imgPreview.style.height = 'auto';
@@ -593,8 +602,17 @@ function _dmsgRenderImageAttachment(target, msg, sender, isGroupChat, cAttachmen
     }
 
     const imgPreview = document.createElement('img');
-    if (cAttachment.extension === 'svg') imgPreview.style.width = '25vw';
-    else imgPreview.style.maxWidth = '100%';
+    if (cAttachment.extension === 'svg') {
+        imgPreview.setAttribute('data-attachment-type', 'svg');
+        imgPreview.style.width = '25vw';
+    } else {
+        // The CSS rule that fits the image in a 450×350 box (preserving
+        // ratio for portrait shots) is scoped to this class so it doesn't
+        // override sizing of unrelated `<img>`s in the attachment area
+        // (audio cover art, mini-app icons, etc.).
+        imgPreview.classList.add('dmsg-image-attachment');
+        imgPreview.style.maxWidth = '100%';
+    }
     imgPreview.style.height = 'auto';
     imgPreview.style.borderRadius = '8px';
     imgPreview.src = assetUrl;
@@ -632,7 +650,8 @@ function _dmsgRenderVideoAttachment(target, cAttachment) {
     const vidPreview = document.createElement('video');
     vidPreview.setAttribute('controlsList', 'nodownload');
     vidPreview.controls = true;
-    vidPreview.style.width = '100%';
+    // Width handled by CSS (max-width + auto so portrait videos can shrink
+    // their width when max-height clamps, instead of squashing).
     vidPreview.style.height = 'auto';
     vidPreview.style.borderRadius = '8px';
     vidPreview.style.cursor = 'pointer';
@@ -1073,6 +1092,62 @@ function _dmsgBuildReactions(msg) {
     }
 
     return reactionsRow;
+}
+
+/**
+ * Surgically swap the reactions row of a message without touching the rest of
+ * the DOM. Preserves transient state on the body — video playback position,
+ * audio playhead, spoiler reveal, image load — which a full row re-render
+ * would otherwise reset.
+ */
+function _dmsgReplaceReactions(rowEl, msg) {
+    if (!rowEl) return;
+    rowEl._dmsgMsg = msg;
+    const body = rowEl.querySelector('.dmsg-body');
+    if (!body) return;
+    const existing = body.querySelector(':scope > .dmsg-reactions');
+    const fresh = _dmsgBuildReactions(msg);
+    if (existing && fresh) {
+        existing.replaceWith(fresh);
+    } else if (existing && !fresh) {
+        existing.remove();
+    } else if (!existing && fresh) {
+        body.appendChild(fresh);
+    }
+}
+
+/**
+ * Does `newMsg` differ from `oldMsg` only in reactions? When true, callers
+ * can use `_dmsgReplaceReactions` and avoid a full row rebuild. Conservative:
+ * any field that affects the rendered body falls back to false.
+ */
+function _dmsgIsReactionOnlyChange(oldMsg, newMsg) {
+    if (!oldMsg || !newMsg) return false;
+    if (oldMsg.id !== newMsg.id) return false;          // pending→sent ID swap
+    if (oldMsg.content !== newMsg.content) return false; // edit
+    if (oldMsg.replied_to !== newMsg.replied_to) return false;
+    if (oldMsg.at !== newMsg.at) return false;
+    if (!!oldMsg.pending !== !!newMsg.pending) return false;
+    if (!!oldMsg.failed !== !!newMsg.failed) return false;
+    if (!!oldMsg.edited !== !!newMsg.edited) return false;
+    const oa = oldMsg.attachments || [];
+    const na = newMsg.attachments || [];
+    if (oa.length !== na.length) return false;
+    for (let i = 0; i < oa.length; i++) {
+        if (oa[i].id !== na[i].id) return false;
+        if (!!oa[i].downloaded !== !!na[i].downloaded) return false;
+        if (oa[i].path !== na[i].path) return false;
+    }
+    // Link-preview metadata arrives async via message_update. Compare by
+    // identity / shallow keys so the preview card actually renders.
+    const op = oldMsg.preview_metadata, np = newMsg.preview_metadata;
+    if (!!op !== !!np) return false;
+    if (op && np && (op.og_title !== np.og_title
+        || op.og_image !== np.og_image
+        || op.og_description !== np.og_description
+        || op.title !== np.title
+        || op.description !== np.description)) return false;
+    return true;
 }
 
 function _dmsgUpdateLastSentVisibility() {

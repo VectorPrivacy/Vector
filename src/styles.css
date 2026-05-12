@@ -12052,13 +12052,23 @@ hr {
 }
 .dmsg-attachments > * { margin-top: 4px; max-width: 100%; }
 .dmsg-attachments > *:first-child { margin-top: 0; }
-.dmsg-attachments img,
+/* Raw image attachments + video previews: fit inside a 450×350 box,
+ * preserving aspect ratio. Scoped to a dedicated class so unrelated
+ * <img>s inside the attachment area (audio cover art, mini-app icons,
+ * file thumbnails) keep their own sizing. width/height BOTH auto !important
+ * so a tall portrait clamped by max-height drops its width to match. */
+.dmsg-attachments img.dmsg-image-attachment,
 .dmsg-attachments video {
-  /* min() caps at whichever is smaller — the parent width OR 450px — so wide
-   * images shrink on narrow viewports AND get capped at 450px on wide ones.
-   * !important overrides the legacy inline `style.maxWidth='100%'` /
-   * `style.width='100%'` set in message-row.js (which alone leaves images
-   * stuck at the natural width, blowing past parent on intrinsic-sized imgs). */
+  max-width: min(100%, 450px) !important;
+  max-height: 350px !important;
+  width: auto !important;
+  height: auto !important;
+}
+/* Spoiler placeholders are a tiny base64 thumbhash sized up via HTML
+ * width/height attributes plus aspect-ratio. Keep the box constraints
+ * but DON'T force width: auto — that would collapse the placeholder
+ * back to the thumbhash's intrinsic ~32px size. */
+.dmsg-attachments img.spoiler-img {
   max-width: min(100%, 450px) !important;
   max-height: 350px !important;
   height: auto;
@@ -12199,12 +12209,19 @@ hr {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 2px 6px;
-  border-radius: 999px;
+  padding: 3px 6px;
+  border-radius: 6px;
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.08);
   font-size: 12px;
   line-height: 1;
+  opacity: 0.9;
+  transition: opacity 0.12s ease, background-color 0.12s ease;
+}
+.dmsg-reactions .reaction:hover { opacity: 1; }
+/* Neutral chips (we haven't reacted) lift their fill on hover. */
+.dmsg-reactions .reaction:not([data-reacted="true"]):hover {
+  background: rgba(255, 255, 255, 0.1);
 }
 .dmsg-reactions .reaction[data-reacted="true"] {
   background: color-mix(in srgb, var(--icon-color-primary, #59fcb3) 18%, transparent);
@@ -12223,8 +12240,8 @@ hr {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 2px 8px;
-  border-radius: 999px;
+  padding: 3px 6px;
+  border-radius: 6px;
   background-color: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.08);
   transition: background-color 0.12s ease, border-color 0.12s ease;

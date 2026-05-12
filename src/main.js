@@ -2718,9 +2718,16 @@ async function setupRustListeners() {
             // so missing the surgical update here is safe.
             const domMsg = document.getElementById(evt.payload.old_id);
 
-            // For DMs, get the profile; for groups, profile will be null
-            const profile = getProfile(evt.payload.chat_id);
-            domMsg?.replaceWith(renderMessage(evt.payload.message, profile, evt.payload.old_id));
+            // Reaction-only updates (the common case) skip the full rebuild so
+            // video playback, audio playhead, and spoiler reveal aren't reset.
+            // Anything else (edits, pending→sent, attachment downloaded, etc.)
+            // still rebuilds the whole row.
+            if (domMsg && _dmsgIsReactionOnlyChange(domMsg._dmsgMsg, evt.payload.message)) {
+                _dmsgReplaceReactions(domMsg, evt.payload.message);
+            } else {
+                const profile = getProfile(evt.payload.chat_id);
+                domMsg?.replaceWith(renderMessage(evt.payload.message, profile, evt.payload.old_id));
+            }
 
             // If the old ID was a pending ID (our message), make sure to update and scroll accordingly
             if (evt.payload.old_id.startsWith('pending')) {
