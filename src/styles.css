@@ -7962,7 +7962,7 @@ details .emoji {
   height: 32px;
   padding: 0;
   background: rgba(0, 0, 0, 0.6);
-  border: 1px solid rgba(89, 252, 179, 0.3);
+  border: 1px solid color-mix(in srgb, var(--icon-color-primary, #59fcb3) 30%, transparent);
   border-radius: 6px;
   cursor: pointer;
   opacity: 0.7;
@@ -7976,19 +7976,19 @@ details .emoji {
 .code-copy-btn:hover {
   opacity: 1;
   background: rgba(0, 0, 0, 0.8);
-  border-color: rgba(89, 252, 179, 0.5);
+  border-color: color-mix(in srgb, var(--icon-color-primary, #59fcb3) 50%, transparent);
   transform: scale(1.05);
 }
 
 .code-copy-btn.copied {
-  background: rgba(89, 252, 179, 0.2);
-  border-color: #59fcb3;
+  background: color-mix(in srgb, var(--icon-color-primary, #59fcb3) 20%, transparent);
+  border-color: var(--icon-color-primary, #59fcb3);
 }
 
 .code-copy-btn .icon {
   width: 16px;
   height: 16px;
-  background-color: #59fcb3;
+  background-color: var(--icon-color-primary, #59fcb3);
 }
 
 /* Code block styling */
@@ -8008,10 +8008,10 @@ pre code {
   line-height: 1.5;
 }
 
-/* Inline code */
+/* Inline code — accent tint follows the active theme. */
 code {
-  background: rgba(90, 252, 180, 0.05);
-  border: 1px solid rgba(90, 252, 180, 0.45);
+  background: color-mix(in srgb, var(--icon-color-primary, #59fcb3) 5%, transparent);
+  border: 1px solid color-mix(in srgb, var(--icon-color-primary, #59fcb3) 45%, transparent);
   border-radius: 3px;
   padding: 2px 6px;
   font-size: 0.9em;
@@ -8056,17 +8056,21 @@ li {
 
 /* Blockquotes */
 blockquote {
-  border-left: 3px solid #59fcb3;
+  border-left: 3px solid var(--icon-color-primary, #59fcb3);
   padding-left: 12px;
   margin: 8px 0;
   color: rgba(255, 255, 255, 0.8);
   font-style: italic;
 }
 
-/* Tables */
+/* Tables — Vector-style card: rounded outer border, no internal grid,
+ * accent header, soft row separators, subtle hover. */
 .table-wrapper {
   overflow-x: auto;
-  margin: 8px 0;
+  margin: 10px 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.015);
 }
 
 table {
@@ -8074,6 +8078,7 @@ table {
   width: max-content;
   min-width: 100%;
   margin: 0;
+  font-size: 0.95em;
 }
 
 /* Emphasis */
@@ -8082,15 +8087,36 @@ table {
 }
 
 th, td {
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  padding: 8px;
+  padding: 10px 14px;
   text-align: left;
+  border: none;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  vertical-align: middle;
 }
 
 th {
-  background: rgba(89, 252, 179, 0.1);
+  background: color-mix(in srgb, var(--icon-color-primary, #59fcb3) 4%, transparent);
+  color: var(--icon-color-primary, #59fcb3);
   font-weight: 600;
+  font-size: 0.82em;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-bottom: 1px solid color-mix(in srgb, var(--icon-color-primary, #59fcb3) 18%, transparent);
 }
+
+/* Last body row sits flush with the wrapper's bottom edge. */
+tbody tr:last-child td { border-bottom: none; }
+
+/* Subtle row hover for scanability. */
+tbody tr:hover td { background: rgba(255, 255, 255, 0.025); }
+
+/* Honour markdown column alignment (marked emits align="right|center|left"). */
+th[align="right"], td[align="right"]   { text-align: right; }
+th[align="center"], td[align="center"] { text-align: center; }
+th[align="left"], td[align="left"]     { text-align: left; }
+
+/* Inline code in cells: softer chip so it doesn't fight the row. */
+td code, th code { background: rgba(255, 255, 255, 0.06); padding: 1px 6px; border-radius: 4px; }
 
 /* Horizontal rules */
 hr {
@@ -8129,14 +8155,17 @@ hr {
 
 /* Blurred, glassy cover effect - animated gradient shows through the blur */
 .spoiler:not(.revealed) {
-  background: linear-gradient(to right, #01ff96, #04110d, #00ff96);
+  background: linear-gradient(to right,
+    var(--icon-color-primary, #59fcb3),
+    #04110d,
+    var(--icon-color-primary, #59fcb3));
   background-size: 200% 200%;
   background-clip: text;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   color: transparent;
-  /* Add glow effect */
-  text-shadow: 0 0 14px rgba(89, 252, 179, 0.7);
+  /* Glow follows the active theme accent. */
+  text-shadow: 0 0 14px color-mix(in srgb, var(--icon-color-primary, #59fcb3) 70%, transparent);
   filter: blur(4px);
   -webkit-filter: blur(4px);
   /* Dark background for matte glass effect */
@@ -8168,13 +8197,13 @@ hr {
   animation: spoilerReveal 0.3s ease-out;
 }
 
-/* Smooth reveal animation */
+/* Smooth reveal animation — accent follows the active theme. */
 @keyframes spoilerReveal {
   0% {
     filter: blur(4px);
     -webkit-filter: blur(4px);
-    color: rgba(89, 252, 179, 0.7);
-    text-shadow: 0 0 16px rgba(89, 252, 179, 0.6);
+    color: color-mix(in srgb, var(--icon-color-primary, #59fcb3) 70%, transparent);
+    text-shadow: 0 0 16px color-mix(in srgb, var(--icon-color-primary, #59fcb3) 60%, transparent);
   }
   100% {
     filter: blur(0px);
@@ -11980,13 +12009,28 @@ hr {
 .dmsg-text p:last-child  { margin-bottom: 0; }
 .dmsg-text a             { color: var(--icon-color-primary, #59fcb3); }
 
+/* Markdown headers in chat: browser defaults (0.67em–2.33em) leave huge
+ * gaps between consecutive headers. Tighten to chat-appropriate spacing
+ * and let line-height stay close to the header for a denser feel. */
+.dmsg-text h1, .dmsg-text h2, .dmsg-text h3,
+.dmsg-text h4, .dmsg-text h5, .dmsg-text h6 {
+  margin: 0.4em 0 0.15em;
+  line-height: 1.2;
+}
+.dmsg-text > h1:first-child, .dmsg-text > h2:first-child,
+.dmsg-text > h3:first-child, .dmsg-text > h4:first-child,
+.dmsg-text > h5:first-child, .dmsg-text > h6:first-child { margin-top: 0; }
+.dmsg-text > h1:last-child, .dmsg-text > h2:last-child,
+.dmsg-text > h3:last-child, .dmsg-text > h4:last-child,
+.dmsg-text > h5:last-child, .dmsg-text > h6:last-child { margin-bottom: 0; }
+
 /* Inline emoji baseline (header authors, message text, reply previews, etc.).
- * Without this, twemoji SVGs render at their natural intrinsic size — which is
- * many hundreds of pixels by default — the .dmsg shell needs an explicit cap. */
+ * em units so emojis scale with the surrounding font (markdown h1/h2/h3 etc).
+ * Without an explicit cap, twemoji SVGs render at their natural intrinsic size. */
 .dmsg .emoji {
-  width: 17px;
-  height: 17px;
-  vertical-align: -3px;
+  width: 1.15em;
+  height: 1.15em;
+  vertical-align: -0.2em;
   display: inline-block;
 }
 

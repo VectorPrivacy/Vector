@@ -40,9 +40,9 @@ function initializeMarked() {
             // This prevents "loose" blockquote behavior where lines without > are included
             const cap = /^( {0,3}> ?(paragraph|[^\n]*)(?:\n|$))+/.exec(src);
             if (!cap) return;
-            
+
             const text = cap[0].replace(/^ *>[ \t]?/gm, '');
-            
+
             return {
                 type: 'blockquote',
                 raw: cap[0],
@@ -284,14 +284,21 @@ function removeParagraphTags(html) {
     temp.innerHTML = html.trim();
 
     const paragraphs = temp.querySelectorAll('p');
-    paragraphs.forEach((p, index) => {
+    paragraphs.forEach((p) => {
         const span = document.createElement('span');
         span.className = 'markdown-paragraph';
         span.innerHTML = p.innerHTML;
 
-        // Add <br><br> between consecutive paragraphs to preserve double-newline spacing
-        // (Skip for the last paragraph - no trailing breaks needed)
-        if (index < paragraphs.length - 1) {
+        // <br><br> only between consecutive SIBLING paragraphs — never when
+        // the "next paragraph" lives in a different container (e.g. the <p>
+        // inside a <blockquote> would otherwise grow phantom breaks before
+        // the next top-level <p>).
+        let next = p.nextSibling;
+        while (next && next.nodeType === Node.TEXT_NODE && !next.textContent.trim()) {
+            next = next.nextSibling;
+        }
+        const followedByP = next && next.nodeType === Node.ELEMENT_NODE && next.tagName === 'P';
+        if (followedByP) {
             const br1 = document.createElement('br');
             const br2 = document.createElement('br');
             p.replaceWith(span, br1, br2);
@@ -363,7 +370,8 @@ function parseMarkdown(md) {
 
     const SAFE_ATTRS = [
         'class', 'aria-label', 'aria-hidden', 'open', 'data-raw-code', 'data-language', 'title', 'start', 'data-spoiler-text',
-        'href', 'target', 'rel', 'data-no-preview'
+        'href', 'target', 'rel', 'data-no-preview',
+        'align', // markdown table column alignment (th/td only)
     ];
 
     // Whitelist of allowed class prefixes (for highlight.js and our own classes)
