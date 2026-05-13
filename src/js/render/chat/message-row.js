@@ -341,6 +341,16 @@ function _dmsgBuildHeader(authorFullId, authorProfile, msg, isGroupChat, current
 
     header.appendChild(author);
 
+    // Bot marker next to the name — same iconography as the chat list so
+    // bot identity stays consistent. Tooltip explains the badge.
+    if (authorProfile?.bot) {
+        const botIcon = document.createElement('span');
+        botIcon.className = 'icon icon-bot dmsg-author-bot-icon';
+        botIcon.addEventListener('mouseenter', () => showGlobalTooltip('Bot', botIcon));
+        botIcon.addEventListener('mouseleave', hideGlobalTooltip);
+        header.appendChild(botIcon);
+    }
+
     const senderIsAdmin = isGroupChat && currentChat?.metadata?.admins?.includes(authorFullId);
     if (senderIsAdmin) {
         const adminBadge = document.createElement('span');

@@ -116,13 +116,19 @@ function renderChat(chat, primaryColor) {
     divHeader.appendChild(h4ContactName);
 
     // Type marker: people-icon for groups, bot-icon for bot DMs.
+    // Hover tooltip explains the badge for users who aren't familiar with
+    // the iconography yet.
     if (isGroup) {
         const groupIcon = document.createElement('span');
         groupIcon.className = 'icon icon-users-multi chatlist-type-icon';
+        groupIcon.addEventListener('mouseenter', () => showGlobalTooltip('Group Chat', groupIcon));
+        groupIcon.addEventListener('mouseleave', hideGlobalTooltip);
         divHeader.appendChild(groupIcon);
     } else if (profile?.bot) {
         const botIcon = document.createElement('span');
         botIcon.className = 'icon icon-bot chatlist-type-icon';
+        botIcon.addEventListener('mouseenter', () => showGlobalTooltip('Bot', botIcon));
+        botIcon.addEventListener('mouseleave', hideGlobalTooltip);
         divHeader.appendChild(botIcon);
     }
 

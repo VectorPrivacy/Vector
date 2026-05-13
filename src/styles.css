@@ -12042,6 +12042,19 @@ hr {
 }
 .dmsg-author:hover { text-decoration: underline; }
 
+/* Bot indicator next to the author name. Same shape + accent tint as
+ * the chatlist version, sized to sit alongside the bold name. Reset
+ * the base `.icon` margin:auto so flex doesn't stretch it. */
+.dmsg-author-bot-icon {
+  position: relative;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  flex-shrink: 0;
+  display: inline-block;
+  background-color: var(--icon-color-primary, #59fcb3);
+}
+
 .dmsg-author-badge {
   display: inline-block;
   font-size: 9px;
