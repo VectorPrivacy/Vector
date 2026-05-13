@@ -33,7 +33,7 @@ function generateChatlistStateHash() {
         const isGroup = chat.chat_type === 'MlsGroup';
         const profile = !isGroup && chat.participants.length === 1 ? getProfile(chat.id) : null;
         const cLastMsg = chat.messages[chat.messages.length - 1];
-        const nUnread = chat.muted ? 0 : countUnreadMessages(chat);
+        const nUnread = computeRowBadgeCount(chat);
         const activeTypers = chat.active_typers || [];
 
         // Push values directly (faster than creating object)
@@ -175,7 +175,7 @@ function updateChatlistPreview(chatId) {
     if (!previewContainer) return;
 
     const pChatPreview = previewContainer.querySelector('p.cutoff');
-    const pTimeAgo = chatElement.querySelector('.chatlist-contact-timestamp');
+    const pTimeAgo = chatElement.querySelector('.chatlist-contact-timestamp, .chatlist-contact-inline-time');
 
     if (pChatPreview) {
         const preview = generateChatPreviewText(cChat);
@@ -235,6 +235,49 @@ function countUnreadMessages(chat) {
 }
 
 /**
+ * Count messages in `chat` that ping the user (a direct @-mention of our
+ * npub, or an @everyone from a group admin). Walks the same window as
+ * `countUnreadMessages` (back to last_read or our own latest message).
+ * Used for muted group rows so the badge reflects "things you'd want to
+ * see" rather than the full unread count.
+ */
+/**
+ * Resolve the badge count for a chat row:
+ *  - Muted DM/single-user chat: 0 (silenced entirely).
+ *  - Muted group: count only pings (mentions of us / admin @everyone).
+ *  - Anything else: full unread count.
+ */
+function computeRowBadgeCount(chat) {
+    if (chat.muted) {
+        return chat.chat_type === 'MlsGroup' ? countPingMessages(chat) : 0;
+    }
+    return countUnreadMessages(chat);
+}
+
+function countPingMessages(chat) {
+    if (!chat.messages || !chat.messages.length) return 0;
+    const isGroup = chat.chat_type === 'MlsGroup';
+    const admins = chat.metadata?.admins;
+    let pings = 0;
+    for (let i = chat.messages.length - 1; i >= 0; i--) {
+        const msg = chat.messages[i];
+        if (msg.mine) break;
+        if (chat.last_read && msg.id === chat.last_read) break;
+        if (isGroup && msg.npub) {
+            const authorProfile = getProfile(msg.npub);
+            if (authorProfile?.is_blocked) continue;
+        }
+        if (!msg.content) continue;
+        const mentionedMe = strPubkey && msg.content.includes('@' + strPubkey);
+        const mentionedEveryone = isGroup
+            && /@everyone\b/.test(msg.content)
+            && admins?.includes(msg.npub || '');
+        if (mentionedMe || mentionedEveryone) pings++;
+    }
+    return pings;
+}
+
+/**
  * Update the notification dot on the chat back button
  * Shows the dot if there are unread messages in OTHER chats (not the currently open one) OR unanswered invites
  */
@@ -258,11 +301,10 @@ function updateChatlistTimestamps() {
             // Messages older than 1 week display as "1w", "2w", etc. and are unlikely to change
             if (lastMessage?.at < Date.now() - 604800000) return;
 
-            // Find the timestamp element in this chat item
-            const timestampElement = item.querySelector('.chatlist-contact-timestamp');
-
+            // Tick whichever timestamp element this row has: right-side
+            // (read rows) or inline next to the name (unread rows).
+            const timestampElement = item.querySelector('.chatlist-contact-timestamp, .chatlist-contact-inline-time');
             if (timestampElement) {
-                // Update the timestamp text using timeAgo function
                 timestampElement.textContent = timeAgo(lastMessage.at);
             }
 

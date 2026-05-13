@@ -36,6 +36,10 @@
   mask-image: url("./icons/add-user.svg");
 }
 
+.icon-users-multi {
+  mask-image: url("./icons/users-multi.svg");
+}
+
 .icon-battery-full {
   mask-image: url("./icons/battery-full.svg");
 }
@@ -1625,6 +1629,26 @@ html, body {
   font-size: 0.8em;
 }
 
+/* Ping pill — negative space (solid accent fill, dark numeral) so it cuts
+ * through the row visually. Every count represents pings: full unread set
+ * on unmuted chats, @mentions only on muted groups, nothing on muted DMs. */
+.chatlist-contact-count {
+  margin-top: auto;
+  margin-bottom: auto;
+  margin-left: auto;
+  margin-right: 8px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--icon-color-primary, #59fcb3);
+  color: #000;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+  min-width: 18px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
 .chatlist-contact img {
   object-fit: cover;
   object-position: center;
@@ -1655,6 +1679,49 @@ html, body {
   border-width: 4px;
   border-style: solid;
   border-color: black;
+}
+
+/* Header row inside the preview column: name + type icon + (inline
+ * time-ago when unread). Flex layout so they sit on one line; the
+ * h4 truncates and the trailing pieces never wrap. */
+.chatlist-contact-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-bottom: -4px;
+  padding-right: 10px;
+}
+.chatlist-contact-header h4 {
+  margin: 0 !important;
+  padding-right: 0 !important;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+/* Group / bot indicator chip — sized to the name's cap height so it
+ * sits naturally beside the text. position: relative overrides the
+ * base `.icon` absolute positioning, and margin: 0 overrides its
+ * `margin: auto` (which inside a flex parent centers the item and
+ * shoves siblings apart). */
+.chatlist-contact-header .chatlist-type-icon {
+  position: relative;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  flex-shrink: 0;
+  display: inline-block;
+  background-color: rgba(255, 255, 255, 0.55);
+}
+.chatlist-contact-header .chatlist-type-icon.icon-bot {
+  background-color: var(--icon-color-primary, #59fcb3);
+}
+/* Inline time-ago (unread rows). Sits flush after the type icon, slightly
+ * smaller than the name. Color set inline to the active theme accent. */
+.chatlist-contact-inline-time {
+  font-size: 12px;
+  font-weight: 400;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .chatlist-contact-preview h4 {
@@ -2217,7 +2284,12 @@ body.chat-bg-disabled .chat-messages::before {
 
 .mini-profile-banner {
   height: 60px;
-  background: linear-gradient(135deg, #2a2440 0%, #1a1a1a 100%);
+  /* Soft theme-tinted fallback gradient (visible when the profile has no
+   * custom banner). The accent fades into near-black so it reads as a
+   * subtle wash rather than a loud color block. */
+  background: linear-gradient(135deg,
+    color-mix(in srgb, var(--icon-color-primary, #59fcb3) 18%, #1a1a1a) 0%,
+    #1a1a1a 100%);
   flex-shrink: 0;
   position: relative;
   overflow: hidden;
@@ -2684,7 +2756,7 @@ body.chat-bg-disabled .chat-messages::before {
   left: 50%;
   transform: translateX(-50%) translateY(100%);
   background: rgba(10, 10, 10, 0.95);
-  border: 1px solid var(--icon-color-primary);
+  border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 12px;
   padding: 0;
   z-index: 2000;
@@ -2724,7 +2796,7 @@ body.chat-bg-disabled .chat-messages::before {
 
 .emoji-picker-message-type {
   /* Keep all borders visible for message type */
-  border: 1px solid var(--icon-color-primary);
+  border: 1px solid rgba(73, 73, 73, 1);
   border-radius: 12px;
 }
 
@@ -12089,8 +12161,15 @@ hr {
   background: transparent;
   user-select: none;
   -webkit-user-select: none;
+  /* Hover state darkens both the border and the whole quote (via .btn's
+   * opacity:0.75) so they move together. Transition lives on .dmsg-reply
+   * so it applies to opacity even though the opacity-flip itself comes
+   * from `.btn:hover`. */
+  transition: border-left-color 0.125s ease, opacity 0.125s ease;
 }
-.dmsg-reply:hover { border-left-color: rgba(255, 255, 255, 0.5); }
+.dmsg-reply:hover {
+  border-left-color: rgba(255, 255, 255, 0.18);
+}
 
 /* Link preview card. */
 .dmsg-preview {

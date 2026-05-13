@@ -55,10 +55,6 @@
   20%, 80% { background-color: rgba(205, 61, 211, 0.18); }
 }
 
-.emoji-picker {
-  background: #251134e3;
-  border-color: #1e0d2aff;
-}
 
 .attachment-panel {
   background: #0a0a0a;

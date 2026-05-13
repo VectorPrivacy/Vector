@@ -18,13 +18,16 @@ function renderChat(chat, primaryColor) {
     const isGroup = chat.chat_type === 'MlsGroup';
     const profile = !isGroup && chat.participants.length === 1 ? getProfile(chat.id) : null;
 
-    // Collect the Unread Message count for 'Unread' emphasis and badging
-    // Ensure muted chats do not show unread glow
-    const nUnread = chat.muted ? 0 : countUnreadMessages(chat);
+    // Muted DMs stay silent; muted groups still surface pings (mentions of
+    // you / admin @everyone). See `computeRowBadgeCount` for the policy.
+    const nUnread = computeRowBadgeCount(chat);
 
-    // The Chat container (The ID is the Contact's npub)
+    // The Chat container (The ID is the Contact's npub).
+    // Theme accent piped through CSS var so theme switches re-color the
+    // border without needing a chatlist re-render (inline color literals
+    // would stay stuck on the previous theme until the next paint pass).
     const divContact = document.createElement('div');
-    if (nUnread) divContact.style.borderColor = primaryColor;
+    if (nUnread) divContact.style.borderColor = 'var(--icon-color-primary)';
     divContact.classList.add('chatlist-contact');
     divContact.id = `chatlist-${chat.id}`;
 
@@ -96,31 +99,45 @@ function renderChat(chat, primaryColor) {
 
     divContact.appendChild(divAvatarContainer);
 
-    // Add the name to the chat preview
+    // Header row: name + (group icon | bot icon) + (inline time-ago when unread).
+    // Wrapping in a flex header lets the time-ago sit adjacent to the name on
+    // unread rows while still letting the right-side count pill anchor far-right.
+    const divHeader = document.createElement('div');
+    divHeader.classList.add('chatlist-contact-header');
+
     const h4ContactName = document.createElement('h4');
     if (isGroup) {
-        // For groups, extract name from metadata or use a default
         h4ContactName.textContent = chat.metadata?.custom_fields?.name || `Group ${chat.id.substring(0, 8)}...`;
     } else {
         h4ContactName.textContent = profile?.nickname || profile?.name || chat.id;
         if (profile?.nickname || profile?.name) twemojify(h4ContactName);
-
-        // Add bot icon if this is a bot profile
-        if (profile?.bot) {
-            const botIconContainer = document.createElement('span');
-            botIconContainer.className = 'icon icon-bot';
-            botIconContainer.style.width = '14px';
-            botIconContainer.style.height = '14px';
-            botIconContainer.style.marginLeft = '6px';
-            botIconContainer.style.display = 'inline-block';
-            botIconContainer.style.verticalAlign = 'initial';
-            botIconContainer.style.position = 'relative';
-            botIconContainer.style.backgroundColor = '#59fcb3';
-            h4ContactName.appendChild(botIconContainer);
-        }
     }
-    h4ContactName.classList.add('cutoff')
-    divPreviewContainer.appendChild(h4ContactName);
+    h4ContactName.classList.add('cutoff');
+    divHeader.appendChild(h4ContactName);
+
+    // Type marker: people-icon for groups, bot-icon for bot DMs.
+    if (isGroup) {
+        const groupIcon = document.createElement('span');
+        groupIcon.className = 'icon icon-users-multi chatlist-type-icon';
+        divHeader.appendChild(groupIcon);
+    } else if (profile?.bot) {
+        const botIcon = document.createElement('span');
+        botIcon.className = 'icon icon-bot chatlist-type-icon';
+        divHeader.appendChild(botIcon);
+    }
+
+    // Inline time-ago (unread-only). Read rows keep the right-aligned variant
+    // appended further down.
+    const cLastMsgForHeader = chat.messages[chat.messages.length - 1];
+    if (nUnread && cLastMsgForHeader) {
+        const spanInlineTime = document.createElement('span');
+        spanInlineTime.classList.add('chatlist-contact-inline-time');
+        spanInlineTime.textContent = timeAgo(cLastMsgForHeader.at);
+        spanInlineTime.style.color = 'var(--icon-color-primary)';
+        divHeader.appendChild(spanInlineTime);
+    }
+
+    divPreviewContainer.appendChild(divHeader);
 
     // Display either their Last Message or Typing Indicator
     const cLastMsg = chat.messages[chat.messages.length - 1];
@@ -141,20 +158,21 @@ function renderChat(chat, primaryColor) {
     // Add the Chat Preview to the contact UI
     divContact.appendChild(divPreviewContainer);
 
-    // Display the "last message" time
-    const pTimeAgo = document.createElement('p');
-    pTimeAgo.classList.add('chatlist-contact-timestamp');
-    if (cLastMsg) {
-        pTimeAgo.textContent = timeAgo(cLastMsg.at);
-    }
-    // Apply 'Unread' final styling
+    // Right-side slot: ping pill when there's something to flag (replaces
+    // the time-ago, which has moved inline beside the name); plain time-ago
+    // otherwise. A "ping" is anything that should grab attention given the
+    // chat's mute state — see `computeRowBadgeCount` for the filtering rules.
     if (nUnread) {
-        pTimeAgo.style.color = primaryColor;
+        const spanCount = document.createElement('span');
+        spanCount.classList.add('chatlist-contact-count');
+        spanCount.textContent = String(nUnread);
+        divContact.appendChild(spanCount);
     } else {
-        // Add 'read' class for smaller font size when no unread messages
-        pTimeAgo.classList.add('read');
+        const pTimeAgo = document.createElement('p');
+        pTimeAgo.classList.add('chatlist-contact-timestamp', 'read');
+        if (cLastMsg) pTimeAgo.textContent = timeAgo(cLastMsg.at);
+        divContact.appendChild(pTimeAgo);
     }
-    divContact.appendChild(pTimeAgo);
 
     return divContact;
 }
@@ -178,7 +196,7 @@ function renderInviteItem(invite, primaryColor) {
     const divInvite = document.createElement('div');
     divInvite.classList.add('chatlist-contact', 'chatlist-invite');
     divInvite.id = `invite-${invite.id || invite.welcome_event_id || groupId}`;
-    divInvite.style.borderColor = primaryColor;
+    divInvite.style.borderColor = 'var(--icon-color-primary)';
 
     // Avatar container — show cached avatar if available, otherwise placeholder
     const divAvatarContainer = document.createElement('div');
