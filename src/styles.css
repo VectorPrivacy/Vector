@@ -1897,14 +1897,14 @@ html, body {
   min-height: 0;
   padding-left: 10px;
   padding-right: 10px;
+  /* Push scrollable content past the 60px fixed `.chat-header`. Putting the
+   * clearance on the container (not the first child) guarantees the top of
+   * the message list always lands below the header regardless of what
+   * ends up as first-child or what rebuild pass ran last. */
+  padding-top: 75px;
   font-family: 'Rubik';
 
   overscroll-behavior-y: contain;
-}
-
-.chat-messages > div:first-child {
-  /* The first message should have extra margin from the top */
-  margin-top: 75px;
 }
 
 .chat-messages > div:last-child {
@@ -11931,12 +11931,12 @@ hr {
 
 .dmsg[data-streak="first"]        { margin-top: var(--dmsg-streak-gap); }
 .dmsg[data-streak="continuation"] { margin-top: var(--dmsg-continuation-gap); }
-.dmsg:first-child                 { margin-top: 75px; }
 .dmsg:last-child                  { margin-bottom: 10px; }
-/* Day separators (<p>) can also occupy the first-child slot post-M6. Without
- * this, the chat header would overlap the first message because nothing in
- * the legacy `.chat-messages > div:first-child` rule matches a <p>. */
-.chat-messages > .msg-inline-timestamp:first-child { margin-top: 75px; }
+/* Top clearance for the fixed chat-header is handled by `.chat-messages`'s
+ * padding-top — see that rule. Putting it on the container instead of on
+ * `:first-child` means whatever ends up at the top of the list (date
+ * divider, dmsg, unread divider, system event) gets the same clearance
+ * without depending on which element won the first-child race. */
 
 .dmsg:hover                            { background: var(--dmsg-hover-bg); }
 .dmsg[data-pinged="true"]              { background: var(--dmsg-pinged-bg); border-left-color: var(--dmsg-pinged-border); }

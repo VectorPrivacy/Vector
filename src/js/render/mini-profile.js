@@ -174,7 +174,13 @@ function _populateMiniProfile(popup, npub, profile) {
     if (displayName) {
         name.textContent = displayName;
         twemojify(name);
+    } else if (profile) {
+        // Profile is loaded but the user hasn't set a name. Nostr identities
+        // are valid without metadata, so call them what they are: anonymous.
+        name.textContent = 'Anon';
     } else {
+        // Profile not yet fetched — keep the placeholder so the user knows
+        // something is still in flight.
         name.classList.add('mini-profile-name-loading');
         name.textContent = 'Loading…';
     }

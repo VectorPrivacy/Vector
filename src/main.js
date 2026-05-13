@@ -5083,17 +5083,28 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             if (oldestMsgElement) {
                 const oldestMsg = chat.messages.find(m => m.id === oldestMsgElement.id);
                 if (oldestMsg && msg.at < oldestMsg.at) {
-                    // It's the oldest message, prepend it.
-                    // Pass oldestMsgElement as context so renderMessage knows what comes after.
+                    // Prepend the new oldest. The existing day-separator above
+                    // old_oldest must stay glued to it (it labels old_oldest's
+                    // day) — otherwise each different-day prepend leaves a
+                    // stale separator stranded at the top of the chat.
                     const domMsg = renderMessage(msg, profile, '', oldestMsgElement);
+                    const existingSep = oldestMsgElement.previousElementSibling;
+                    const existingSepIsDate = existingSep
+                        && existingSep.classList?.contains('msg-inline-timestamp')
+                        && !existingSep.classList.contains('unread-divider');
 
-                    // If the prepended message is on a different day than the next-oldest,
-                    // it needs its own day separator above it.
-                    if (_dmsgIsDifferentDay(msg.at, oldestMsg.at)) {
-                        const sep = insertTimestamp(msg.at);
-                        domChatMessages.insertBefore(sep, oldestMsgElement);
-                    }
                     domChatMessages.insertBefore(domMsg, oldestMsgElement);
+                    if (_dmsgIsDifferentDay(msg.at, oldestMsg.at)) {
+                        if (existingSepIsDate) {
+                            // Reseat the existing sep between the new oldest
+                            // and old_oldest, where it still labels old_oldest's day.
+                            domChatMessages.insertBefore(existingSep, oldestMsgElement);
+                        }
+                        const newSep = insertTimestamp(msg.at);
+                        domChatMessages.insertBefore(newSep, domMsg);
+                    }
+                    // Same-day case: the existing sep now correctly sits above
+                    // both X and old_oldest, no work needed.
                     continue;
                 }
             }
@@ -5149,6 +5160,11 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
                 domChatMessages.appendChild(domMsg);
             }
         }
+
+        // Rebuild date separators from the final `.dmsg` order so any
+        // orphans or misplaced separators from per-message inserts get
+        // healed in one pass.
+        _dedupeAdjacentDaySeparators();
 
         // Auto-scroll on new messages (if the user hasn't scrolled up, or on manual chat open)
         const pxFromBottom = domChatMessages.scrollHeight - domChatMessages.scrollTop - domChatMessages.clientHeight;
@@ -5235,9 +5251,48 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
 const _insertTimestampTimeFmt = new Intl.DateTimeFormat([], { hour: 'numeric', minute: '2-digit', hour12: true });
 const _insertTimestampDateFmt = new Intl.DateTimeFormat();
 
+/**
+ * Wipe and rebuild date separators from the current `.dmsg` order. Runs
+ * after batch operations (procedural scroll prepends) so any orphans or
+ * misplaced separators left by the per-message insert paths get healed
+ * in a single O(N) sweep. Skips `.unread-divider` so the "New" marker
+ * survives untouched.
+ */
+function _dedupeAdjacentDaySeparators() {
+    if (!domChatMessages) return;
+
+    // Drop every existing date divider (system events and the "New" divider
+    // share `.msg-inline-timestamp` styling but are NOT date dividers, so
+    // the dedicated `.date-divider` class scopes this pass safely).
+    const stale = [];
+    for (const child of domChatMessages.children) {
+        if (child.classList?.contains('date-divider')) stale.push(child);
+    }
+    for (const sep of stale) sep.remove();
+
+    // Re-insert one date divider above each `.dmsg` that starts a new day.
+    let prevAt = null;
+    const inserts = [];
+    for (const child of domChatMessages.children) {
+        if (!child.classList?.contains('dmsg')) continue;
+        const at = parseInt(child.dataset.at, 10);
+        if (!Number.isFinite(at)) continue;
+        if (prevAt === null || _dmsgIsDifferentDay(prevAt, at)) {
+            inserts.push({ before: child, at });
+        }
+        prevAt = at;
+    }
+    for (const { before, at } of inserts) {
+        domChatMessages.insertBefore(insertTimestamp(at), before);
+    }
+}
+
 function insertTimestamp(timestamp, parent = null) {
     const pTimestamp = document.createElement('p');
-    pTimestamp.classList.add('msg-inline-timestamp');
+    // `.date-divider` distinguishes day-boundary timestamps from system
+    // events (which reuse `msg-inline-timestamp` styling) so the rebuild
+    // pass below only touches date dividers.
+    pTimestamp.classList.add('msg-inline-timestamp', 'date-divider');
     const messageDate = new Date(timestamp);
     const timeStr = _insertTimestampTimeFmt.format(messageDate);
 
@@ -6070,28 +6125,21 @@ async function openChat(contact) {
     
     await updateChat(chat, initialMessages, profile, true);
 
-    // After render, drop a "New" divider above the first incoming message
-    // that arrived after the captured last_read pointer. Three branches:
-    //   1. last_read points to a message in the loaded batch → divider goes
-    //      above the first non-mine message after it.
-    //   2. last_read is empty (chat never read) or older than the batch →
-    //      every loaded incoming is unread; divider goes at the top.
-    //   3. last_read matches the most recent incoming → no divider.
-    if (initialMessages.length > 0) {
-        const idx = lastReadOnOpen ? initialMessages.findIndex(m => m.id === lastReadOnOpen) : -1;
-        let firstUnread = null;
+    // Drop a "New" divider above the first non-mine message after
+    // `last_read`. Only fires when last_read matches a loaded message —
+    // stale markers (id drift, deleted msg) would otherwise stick the
+    // divider above the latest contact on every reopen.
+    if (initialMessages.length > 0 && lastReadOnOpen) {
+        const idx = initialMessages.findIndex(m => m.id === lastReadOnOpen);
         if (idx >= 0) {
+            let firstUnread = null;
             for (let i = idx + 1; i < initialMessages.length; i++) {
                 if (!initialMessages[i].mine) { firstUnread = initialMessages[i]; break; }
             }
-        } else if (lastReadOnOpen) {
-            // last_read existed but isn't in the batch — older than what we
-            // loaded — so all loaded incoming are unread.
-            firstUnread = initialMessages.find(m => !m.mine);
-        }
-        if (firstUnread) {
-            const node = document.getElementById(firstUnread.id);
-            if (node) insertUnreadDivider(node);
+            if (firstUnread) {
+                const node = document.getElementById(firstUnread.id);
+                if (node) insertUnreadDivider(node);
+            }
         }
     }
 
