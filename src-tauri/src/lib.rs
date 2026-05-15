@@ -699,6 +699,12 @@ pub fn run() {
             // Account commands (commands/account.rs)
             commands::account::login,
             commands::account::login_from_stored_key,
+            commands::account::connect_bunker,
+            commands::account::start_nostrconnect_session,
+            commands::account::cancel_bunker_session,
+            commands::account::reauthorize_bunker,
+            commands::account::get_pending_reauth_result,
+            commands::account::get_bunker_status,
             commands::account::setup_encryption,
             commands::account::skip_encryption,
             #[cfg(debug_assertions)]

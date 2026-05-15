@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-cancel-bunker-session"
+description = "Enables the cancel_bunker_session command without any pre-configured scope."
+commands.allow = ["cancel_bunker_session"]
+
+[[permission]]
+identifier = "deny-cancel-bunker-session"
+description = "Denies the cancel_bunker_session command without any pre-configured scope."
+commands.deny = ["cancel_bunker_session"]

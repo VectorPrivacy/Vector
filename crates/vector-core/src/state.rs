@@ -96,6 +96,36 @@ pub fn get_blossom_servers() -> Vec<String> {
 pub static MNEMONIC_SEED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 pub static PENDING_NSEC: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
+/// Staged bunker metadata between `connect_bunker` / `start_nostrconnect_session`
+/// and the subsequent encryption-flow commit. URL is wrapped in `Zeroizing`
+/// because it contains the NIP-46 single-use pairing secret; the pubkey hex
+/// is non-secret. `setup_encryption` / `skip_encryption` reads this when
+/// `signer_kind() == Bunker` to write the right settings rows via
+/// `commit_bunker_account_setup`.
+///
+/// Tuple order: (bunker_url, remote_pubkey_hex).
+pub static PENDING_BUNKER_SETUP:
+    std::sync::Mutex<Option<(zeroize::Zeroizing<String>, String)>> =
+    std::sync::Mutex::new(None);
+
+#[inline]
+pub fn set_pending_bunker_setup(url: String, remote_pk_hex: String) {
+    *PENDING_BUNKER_SETUP.lock().unwrap() =
+        Some((zeroize::Zeroizing::new(url), remote_pk_hex));
+}
+
+#[inline]
+pub fn pending_bunker_setup() -> Option<(String, String)> {
+    PENDING_BUNKER_SETUP.lock().unwrap()
+        .as_ref()
+        .map(|(z, pk)| (String::clone(&**z), pk.clone()))
+}
+
+#[inline]
+pub fn clear_pending_bunker_setup() {
+    *PENDING_BUNKER_SETUP.lock().unwrap() = None;
+}
+
 pub static ENCRYPTION_KEY: crate::crypto::GuardedKey = crate::crypto::GuardedKey::empty();
 
 pub static ENCRYPTION_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -410,6 +440,47 @@ mod session_globals_tests {
         assert!(!has_active_session(), "no client installed");
         assert!(take_nostr_client().is_none(), "take from empty returns None");
         assert!(!has_active_session(), "still none after take-of-empty");
+
+        // PendingBunkerSetup: set → peek → clear. The URL slot is wrapped in
+        // Zeroizing<String> because it carries the NIP-46 single-use pairing
+        // secret. The accessors return plain String clones so callers don't
+        // accidentally consume the protected buffer.
+        clear_pending_bunker_setup();
+        assert!(pending_bunker_setup().is_none(), "starts as None");
+
+        let url = "bunker://0123456789abcdef?relay=wss%3A%2F%2Frelay.example&secret=topsecret".to_string();
+        let pk_hex = "0123456789abcdef".to_string();
+        set_pending_bunker_setup(url.clone(), pk_hex.clone());
+
+        // Peek twice — the underlying Zeroizing<String> must NOT be consumed
+        // by either read, so successive reads return identical contents.
+        let first = pending_bunker_setup().expect("first peek");
+        let second = pending_bunker_setup().expect("second peek");
+        assert_eq!(first.0, url, "url survives clone-out from Zeroizing");
+        assert_eq!(first.0, second.0, "successive peeks return same data");
+        assert_eq!(first.1, pk_hex);
+
+        // Overwrite — replacing the slot scrubs the prior Zeroizing<String>
+        // on Drop. We can't assert heap-residue from a test, but we CAN
+        // assert the new value is what's exposed.
+        let url2 = "bunker://feedface?relay=wss%3A%2F%2Falt".to_string();
+        set_pending_bunker_setup(url2.clone(), "feedface".to_string());
+        let after = pending_bunker_setup().expect("overwritten read");
+        assert_eq!(after.0, url2);
+        assert_eq!(after.1, "feedface");
+
+        clear_pending_bunker_setup();
+        assert!(pending_bunker_setup().is_none(), "cleared returns None");
+
+        // SessionGuard interaction — capturing then bumping invalidates the
+        // captured guard. This mirrors the contract every Tauri command that
+        // mutates per-account state relies on (see CLAUDE.md SessionGuard
+        // section).
+        let guard = SessionGuard::capture();
+        assert!(guard.is_valid(), "fresh capture is valid");
+        bump_session_generation();
+        assert!(!guard.is_valid(),
+            "captured guard must invalidate after generation bump");
     }
 }
 

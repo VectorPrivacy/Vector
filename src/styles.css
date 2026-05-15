@@ -1030,6 +1030,92 @@ html, body {
   margin-right: 5px;
 }
 
+/* ============================================================================
+   Remote Signer — Security panel card
+   ============================================================================ */
+.remote-signer-card {
+  margin: 0.5em 0 1em;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.remote-signer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.remote-signer-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 0.95em;
+}
+.remote-signer-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #9aa0a6;
+  box-shadow: 0 0 0 0 transparent;
+  transition: background 0.2s ease, box-shadow 0.2s ease;
+  flex: 0 0 auto;
+}
+.remote-signer-dot.online {
+  background: #2ecc71;
+  box-shadow: 0 0 6px rgba(46, 204, 113, 0.55);
+}
+.remote-signer-dot.offline {
+  background: #e74c3c;
+  box-shadow: 0 0 6px rgba(231, 76, 60, 0.45);
+}
+.remote-signer-dot.connecting {
+  background: #f1c40f;
+  animation: remote-signer-dot-pulse 1.2s ease-in-out infinite;
+}
+@keyframes remote-signer-dot-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(241, 196, 15, 0); }
+  50%      { box-shadow: 0 0 6px rgba(241, 196, 15, 0.6); }
+}
+.remote-signer-head button {
+  padding: 0.35em 0.9em;
+  font-size: 0.85em;
+  margin: 0;
+}
+.remote-signer-meta {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.remote-signer-meta-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 0.85em;
+}
+.remote-signer-meta-label {
+  flex: 0 0 70px;
+  color: rgba(255, 255, 255, 0.45);
+}
+.remote-signer-meta-value {
+  flex: 1 1 auto;
+  word-break: break-all;
+  color: rgba(255, 255, 255, 0.85);
+}
+.remote-signer-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78em;
+  letter-spacing: 0.02em;
+}
+.remote-signer-hint {
+  margin: 10px 0 0;
+  font-size: 0.78em;
+  color: rgba(255, 255, 255, 0.45);
+  line-height: 1.4;
+}
+
 .profile-banner-edit {
   position: absolute;
   top: 10px;
@@ -5921,6 +6007,263 @@ select:disabled:hover {
   margin-top: 10px;
   width: 225px;
 }
+
+/* Tertiary action — Remote Signer (NIP-46) entry from the Login screen.
+   Niche feature (98% of users don't use signers), so it lives below the
+   primary nsec/seed input as a small underlined link, not a button. Bunker
+   is a login flow only — the signer is the identity, so there's no parallel
+   "create" path that would justify entry-screen prominence. */
+.login-bunker-link-btn {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 13px;
+  padding: 6px 12px;
+  cursor: pointer;
+  transition: color 0.15s ease;
+  /* Pin above the absolute-positioned input row inside login-import. The
+     input lives at bottom: 0 of its container with a glow halo; we sit
+     ~84px up so the link stays clear of the halo. */
+  position: absolute;
+  bottom: 84px;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.login-bunker-link-btn span {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.login-bunker-link-icon {
+  width: 16px;
+  height: 16px;
+  opacity: 0.7;
+  /* Key SVG uses currentColor stroke; the parent button's color flows in. */
+  filter: brightness(0) invert(1);
+  /* Match the parent button's color transition so the icon brightens in
+     sync with the text on hover instead of snapping ahead of it. */
+  transition: opacity 0.15s ease;
+}
+.login-bunker-link-btn:hover { color: rgba(255, 255, 255, 0.9); }
+.login-bunker-link-btn:hover .login-bunker-link-icon { opacity: 1; }
+
+/* Remote-signer login screen. Mirrors `.login-import-container`'s
+   bottom-anchored layout — fields land in the same screen region as the
+   Create/Login buttons and the nsec input, so the user's eye doesn't have
+   to retarget when they switch flows. Compact on short viewports. */
+/* Bunker screen claims the whole viewport below the back-bar — the QR is
+   the centrepiece, so the Vector logo + subtext (siblings outside this
+   container) are hidden via `bunker-active` on `#login-form`. The top
+   inset matches the fixed `.chat-new-header` back-bar height (60px) so
+   the heading row can't slide under it on short viewports. */
+.login-bunker-container {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  width: 100%;
+  padding-top: 60px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.login-bunker-container.is-hidden {
+  display: none !important;
+}
+
+/* Hide the Vector wordmark + tagline while bunker is active — the QR
+   needs the screen space. Toggled by show/hideBunkerForm() in main.js. */
+#login-form.bunker-active .login-logo,
+#login-form.bunker-active .login-subtext {
+  display: none !important;
+}
+
+/* On short viewports the Vector logo + subtext would overlap the bunker
+   heading. The logo is brand-critical and stays — the subtext is a tagline
+   we can drop. Threshold chosen empirically: at 700px the bunker heading
+   sits clear of the subtext; below that the two start touching. */
+@media (max-height: 700px) {
+  #login-form.bunker-active .login-subtext {
+    display: none;
+  }
+}
+.login-bunker-fields {
+  width: 100%;
+  max-width: 360px;
+  padding: 16px 18px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+.login-bunker-qr-wrap {
+  position: relative;
+  /* 220px on tall viewports (≥650px), scales linearly via vh below that,
+     floors at 120px so the QR stays scannable on extremely short screens. */
+  width: clamp(120px, 33.8vh, 220px);
+  height: clamp(120px, 33.8vh, 220px);
+  background: #fff;
+  border-radius: 12px;
+  padding: 10px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.login-bunker-qr { width: 100%; height: 100%; }
+.login-bunker-qr svg { width: 100%; height: 100%; display: block; }
+.login-bunker-qr-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(0, 0, 0, 0.55);
+  font-size: 12.5px;
+  background: #fff;
+  border-radius: 12px;
+}
+.login-bunker-qr-wrap.ready .login-bunker-qr-loading { display: none; }
+.login-bunker-copy-btn {
+  background: rgba(89, 252, 179, 0.12);
+  border: 1px solid rgba(89, 252, 179, 0.4);
+  color: #59fcb3;
+  padding: 10px 16px;
+  border-radius: 10px;
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  width: 100%;
+  max-width: 220px;
+  transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+}
+.login-bunker-copy-btn:hover:not(:disabled) {
+  background: rgba(89, 252, 179, 0.2);
+  border-color: rgba(89, 252, 179, 0.6);
+}
+.login-bunker-copy-btn:disabled { opacity: 0.5; cursor: default; }
+.login-bunker-copy-btn.copied {
+  background: rgba(89, 252, 179, 0.3);
+  border-color: rgba(89, 252, 179, 0.7);
+}
+.login-bunker-divider {
+  width: 100%;
+  max-width: 320px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 4px 0 2px 0;
+  color: rgba(255, 255, 255, 0.35);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.login-bunker-divider::before,
+.login-bunker-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.1);
+}
+/* Key icon + title on one line so the heading row stays compact on small
+   viewports (Android phones, narrow desktop windows). */
+.login-bunker-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.login-bunker-title-icon {
+  width: 22px;
+  height: 22px;
+  filter: brightness(0) invert(1);
+  opacity: 0.95;
+  flex-shrink: 0;
+}
+.login-bunker-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+}
+.login-bunker-helper {
+  margin: 0 0 4px 0;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.6);
+  text-align: center;
+  max-width: 340px;
+}
+.login-bunker-field {
+  display: flex;
+  width: 100%;
+  max-width: 360px;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  padding: 4px 4px 4px 12px;
+  box-sizing: border-box;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.login-bunker-field:focus-within {
+  border-color: rgba(89, 252, 179, 0.55);
+  background: rgba(89, 252, 179, 0.06);
+}
+.login-bunker-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: white;
+  font-size: 14px;
+  padding: 9px 0;
+  min-width: 0;
+  height: auto;
+}
+.login-bunker-input::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+.login-bunker-connect-btn {
+  flex-shrink: 0;
+  background: #59fcb3;
+  border: none;
+  border-radius: 8px;
+  width: 40px;
+  height: 34px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: filter 0.15s ease, opacity 0.15s ease;
+}
+.login-bunker-connect-btn svg {
+  display: block;
+}
+.login-bunker-connect-btn:hover { filter: brightness(1.1); }
+.login-bunker-connect-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+  filter: none;
+}
+.login-bunker-status {
+  margin: 2px 0 0 0;
+  font-size: 12px;
+  min-height: 16px;
+  color: rgba(255, 255, 255, 0.6);
+  text-align: center;
+  max-width: 360px;
+  word-break: break-word;
+}
+.login-bunker-status.error { color: #ff6b6b; }
+.login-bunker-status.connecting { color: #ffb84d; }
+.login-bunker-status.online { color: #59fcb3; }
 
 .login-credits {
   width: 275px;

@@ -5,7 +5,7 @@ use std::sync::Arc;
 #[cfg(not(target_os = "android"))]
 use tauri_plugin_fs::FsExt;
 
-use crate::{STATE, TAURI_APP};
+use crate::{STATE, TAURI_APP, nostr_client};
 use crate::db;
 use crate::image_cache::{self, CacheResult};
 #[cfg(not(target_os = "android"))]
@@ -242,8 +242,13 @@ pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Res
     let mime_type = crate::util::mime_from_extension_safe(&attachment_file.extension, true)
         .map_err(|_| "File type is not allowed for avatars (only images are permitted)")?;
 
-    // Upload the file to the server using Blossom with automatic failover and progress
-    let signer = crate::MY_SECRET_KEY.to_keys().expect("Keys not initialized");
+    // Upload the file to the server using Blossom with automatic failover
+    // and progress. Routes through the active client signer (local vault
+    // for local accounts, NostrConnect for bunker accounts) so the auth
+    // event is signed under the user's identity, not the bunker client key.
+    let client = nostr_client().ok_or("Not connected")?;
+    let signer = client.signer().await
+        .map_err(|e| format!("Signer unavailable: {}", e))?;
     let servers = crate::get_blossom_servers();
 
     // Create progress callback that emits events to frontend

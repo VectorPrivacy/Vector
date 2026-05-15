@@ -51,6 +51,9 @@ pub mod stats;
 // === Crypto ===
 pub mod crypto;
 
+// === Signer (polymorphic: local vault vs. NIP-46 remote bunker) ===
+pub mod signer;
+
 // === Database ===
 pub mod db;
 
@@ -155,8 +158,19 @@ pub use state::{
     nostr_client, my_public_key, has_active_session,
     set_nostr_client, set_my_public_key,
     take_nostr_client, clear_my_public_key,
+    set_pending_bunker_setup, pending_bunker_setup, clear_pending_bunker_setup,
 };
 pub use crypto::{GuardedKey, GuardedSigner};
+pub use signer::{
+    SignerKind, signer_kind, set_signer_kind, is_bunker,
+    BUNKER_SIGNER, bunker_signer, set_bunker_signer, take_bunker_signer,
+    build_bunker_signer, prewarm_bunker, drain_bunker_state,
+    parse_bunker_remote_pubkey, parse_bunker_relays,
+    BunkerConnectionState, bunker_state, set_bunker_state,
+    VectorAuthUrlHandler, attempt_bunker_login, WatchedBunkerSigner,
+    vector_metadata, build_nostrconnect_uri, build_nostrconnect_session,
+    VECTOR_APP_NAME, VECTOR_APP_URL, VECTOR_APP_ICON,
+};
 pub use error::{VectorError, Result};
 pub use traits::{EventEmitter, NoOpEmitter, set_event_emitter, emit_event};
 pub use db::{set_app_data_dir, get_app_data_dir};

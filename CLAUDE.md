@@ -2,6 +2,25 @@
 
 Private messaging app built with Tauri v2 (Rust backend + vanilla JS frontend) on the Nostr protocol. Supports desktop (macOS, Windows, Linux) and Android.
 
+## Comment style — read before writing any code
+
+Comments state the WHY of a non-obvious choice, in one or two lines max. They do NOT narrate the bug that led to the fix, the debugging session, the user's flow that surfaced it, audit/reviewer references, or which discovery sparked the change.
+
+**Anti-patterns (do not write these):**
+- "Sending a reply IS the read confirmation. updateChat's auto-mark is gated on focus, which can miss in race scenarios → user comes back to type a reply → auto-mark missed the receive. This catches the case where..."
+- "(Reviewer ref: B1, B7.)"
+- "Previously this pulled MY_SECRET_KEY.to_keys() directly — fine for local users, but for bunker accounts..."
+- "Originally defined later alongside X; that came after Y so the catch saw `undefined`..."
+- "Earlier versions did Z and ended up logging users in as device key..."
+- Quoting test names, dates, or which testing pass surfaced the issue.
+
+**Good patterns:**
+- "Mark on own-send: updateChat's auto-mark is focus-gated."
+- "GuardedKey vault — secret materialises in plaintext only for microseconds per op."
+- "Multi-relay by design — single-relay connect URIs are a centralisation trap."
+
+When in doubt: would this comment make sense to someone reading the code two years from now with no project context? If it requires knowing about a specific debugging episode, cut it. **Default to no comment.**
+
 ## Build & Run
 
 ```bash

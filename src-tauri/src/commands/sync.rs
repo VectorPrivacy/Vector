@@ -724,10 +724,10 @@ pub async fn fetch_messages<R: Runtime>(
             }
 
             if !session.is_valid() { return; }
-            let signer = match crate::MY_SECRET_KEY.to_keys() {
-                Some(keys) => keys,
-                None => return,
-            };
+            // Route through the active client signer (covers both local
+            // and bunker accounts).
+            let client = match crate::nostr_client() { Some(c) => c, None => return };
+            let signer = match client.signer().await { Ok(s) => s, Err(_) => return };
             let enabled_servers = vector_core::state::get_blossom_servers();
             match vector_core::blossom::probe_servers_for_octet_stream(
                 signer, enabled_servers, session,

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use nostr_sdk::prelude::*;
 
-use crate::state::{nostr_client, my_public_key, MY_SECRET_KEY, STATE};
+use crate::state::{nostr_client, my_public_key, STATE};
 use crate::types::{Message, Attachment};
 use crate::crypto;
 
@@ -366,7 +366,11 @@ pub async fn send_file_dm(
 ) -> Result<SendResult, String> {
     let client = nostr_client().ok_or("Not logged in")?;
     let my_pk = my_public_key().ok_or("Public key not set")?;
-    let keys = MY_SECRET_KEY.to_keys().ok_or("Keys not available")?;
+    // Sign the Blossom auth event via the active client signer so bunker
+    // accounts route through NostrConnect (the user's identity key lives on
+    // the remote signer; MY_SECRET_KEY only holds the NIP-46 client key).
+    let signer = client.signer().await
+        .map_err(|e| format!("Signer unavailable: {}", e))?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap();
@@ -445,7 +449,7 @@ pub async fn send_file_dm(
     // Blossom servers reject `application/octet-stream` but accept the
     // same bytes under their original type.
     let upload_url = match crate::blossom::upload_blob_with_progress_and_failover(
-        keys.clone(), servers, Arc::new(encrypted), Some(mime_type),
+        signer.clone(), servers, Arc::new(encrypted), Some(mime_type),
         /* is_encrypted */ true,
         progress_cb, Some(config.upload_retries), Some(config.upload_retry_delay),
         config.cancel_token.clone(),

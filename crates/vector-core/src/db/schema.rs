@@ -466,5 +466,23 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // =========================================================================
+    // Migration 27: Mark NIP-46 remote-signer support landed.
+    //
+    // Settings is a KV — no schema change needed for the three new keys
+    // (`signer_type`, `bunker_url`, `bunker_remote_pubkey`). Pre-bunker
+    // accounts have no `signer_type` row at all; the loader treats missing
+    // as `local`. We backfill an explicit `signer_type='local'` row so every
+    // account has a discriminator on disk after this point — makes the
+    // discriminator query a clean `=` instead of a NULL-coalesce.
+    // =========================================================================
+    run_atomic_migration(conn, 27, "Backfill signer_type=local for pre-NIP-46 accounts", |tx| {
+        tx.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES ('signer_type', 'local')",
+            [],
+        ).map_err(|e| format!("Failed to backfill signer_type: {}", e))?;
+        Ok(())
+    })?;
+
     Ok(())
 }

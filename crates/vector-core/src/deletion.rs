@@ -17,7 +17,7 @@
 use nostr_sdk::prelude::*;
 
 use crate::inbox_relays::{get_publish_tracker, send_gift_wrap};
-use crate::state::{my_public_key, MY_SECRET_KEY, nostr_client};
+use crate::state::{my_public_key, nostr_client};
 
 /// Cooperative-hide notice expiry: 30 days. After this window relays
 /// drop the gift-wrap (NIP-40) and clients that come online later won't
@@ -178,14 +178,15 @@ pub async fn delete_own_dm(rumor_id: &EventId) -> Result<DeleteOutcome, String> 
         }
     }
 
-    // Layer 3 — Blossom blob delete. Always attempt for any
-    // attachment, even when retained wrap keys are missing (Blossom
-    // auth uses the user's main signing key, not the wrap key).
+    // Layer 3 — Blossom blob delete. Route through the active client
+    // signer so bunker accounts sign DELETE auth under the user's
+    // identity (Blossom enforces "uploader == authorized signer";
+    // signing with the NIP-46 client keypair returns 401).
     let mut blobs_dispatched = 0usize;
     if !attachment_urls.is_empty() {
-        if let Some(signer_keys) = MY_SECRET_KEY.to_keys() {
+        if let Ok(signer) = client.signer().await {
             blobs_dispatched = attachment_urls.len();
-            crate::blossom::delete_blobs_best_effort(signer_keys, attachment_urls);
+            crate::blossom::delete_blobs_best_effort(signer, attachment_urls);
         }
     }
 
@@ -639,12 +640,13 @@ pub async fn delete_own_group_message(
         }
     };
 
-    // Layer 3 — Blossom blob delete. Always attempt for any attachment.
+    // Layer 3 — Blossom blob delete. Route through the active client
+    // signer (see NIP-17 delete path above for rationale).
     let mut blobs_dispatched = 0usize;
     if !attachment_urls.is_empty() {
-        if let Some(signer_keys) = MY_SECRET_KEY.to_keys() {
+        if let Ok(signer) = client.signer().await {
             blobs_dispatched = attachment_urls.len();
-            crate::blossom::delete_blobs_best_effort(signer_keys, attachment_urls);
+            crate::blossom::delete_blobs_best_effort(signer, attachment_urls);
         }
     }
 

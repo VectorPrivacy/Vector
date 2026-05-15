@@ -616,6 +616,18 @@ pub async fn reset_session() {
         }
     }
 
+    // NIP-46 bunker handle + client keypair vault. Drain first (clears state
+    // under the lock atomically), then shut the connection down outside the
+    // lock so its relay pool drains without blocking new-account install.
+    if let Some(bunker) = vector_core::drain_bunker_state() {
+        let _ = bunker.shutdown().await;
+    }
+    // Staged bunker metadata between connect → setup_encryption. Clearing
+    // here defends against a swap that interrupts a half-completed bunker
+    // login from leaking the previous bunker URL into the next account's
+    // setup_encryption call.
+    vector_core::clear_pending_bunker_setup();
+
     // In-memory state owned by vector-core's globals.
     {
         let mut state = crate::STATE.lock().await;

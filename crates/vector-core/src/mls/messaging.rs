@@ -112,8 +112,12 @@ pub async fn send_mls_message(
                 }
                 wrapper_builder = wrapper_builder.tag(Tag::expiration(expiry_time));
 
-                let signer = crate::state::MY_SECRET_KEY.to_keys()
-                    .ok_or_else(|| "Keys not initialized for typing indicator signing".to_string())?;
+                // Route through the active client signer — works for both
+                // local (GuardedSigner) and bunker (NostrConnect) accounts.
+                // Pulling MY_SECRET_KEY directly was wrong for bunker users
+                // (it returns the device keypair, not the user identity).
+                let signer = client.signer().await
+                    .map_err(|e| format!("Signer unavailable for typing indicator: {}", e))?;
                 let wrapper_with_expiry = wrapper_builder.sign(&signer).await
                     .map_err(|e| format!("Failed to sign wrapper with expiration: {}", e))?;
 

@@ -9,7 +9,7 @@ use nostr_sdk::prelude::*;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 
 use super::{MlsService, MlsError};
-use crate::state::{nostr_client, my_public_key, MY_SECRET_KEY, active_trusted_relays};
+use crate::state::{nostr_client, my_public_key, active_trusted_relays};
 
 /// Result of publishing a keypackage.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -116,13 +116,16 @@ pub async fn publish_keypackage(use_cache: bool) -> Result<PublishedKeyPackage, 
         .filter(|t| t.as_slice().first().map(|s| s.as_str()) != Some("-"))
         .collect();
 
-    let signing_keys = MY_SECRET_KEY.to_keys()
-        .ok_or_else(|| MlsError::NostrMlsError("Keys not initialized".into()))?;
-
-    let kp_event = EventBuilder::new(Kind::MlsKeyPackage, kp_encoded)
-        .tags(filtered_tags)
-        .sign_with_keys(&signing_keys)
-        .map_err(|e| MlsError::NostrMlsError(e.to_string()))?;
+    // Route through the active client signer so this works under either signer
+    // mode — local key vault or NIP-46 remote bunker. The sync `sign_with_keys`
+    // path is impossible for bunker users (round-trip required) and routing
+    // through the client keeps us mode-agnostic.
+    let kp_event = client
+        .sign_event_builder(
+            EventBuilder::new(Kind::MlsKeyPackage, kp_encoded).tags(filtered_tags),
+        )
+        .await
+        .map_err(|e| MlsError::NostrMlsError(format!("Sign KeyPackage: {}", e)))?;
 
     // Publish with retry
     let mut last_error = String::new();

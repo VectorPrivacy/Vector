@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-pending-reauth-result"
+description = "Enables the get_pending_reauth_result command without any pre-configured scope."
+commands.allow = ["get_pending_reauth_result"]
+
+[[permission]]
+identifier = "deny-get-pending-reauth-result"
+description = "Denies the get_pending_reauth_result command without any pre-configured scope."
+commands.deny = ["get_pending_reauth_result"]

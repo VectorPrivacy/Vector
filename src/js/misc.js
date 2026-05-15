@@ -248,7 +248,7 @@ function createPlaceholderAvatar(isGroup = false, limitSizeTo = null) {
  * @param {String} strTitleClass - If specified, a CSS class to be added to the title element (e.g., 'typing-indicator-text').
  * @return {Promise<Boolean>} - The Promise will resolve to 'true' if confirm button was clicked, otherwise 'false'.
  */
-async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlaceholder = '', strIcon = '', strTitleClass = '') {
+async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlaceholder = '', strIcon = '', strTitleClass = '', strConfirmText = null) {
     // Display the popup and render the UI
     domPopup.style.display = '';
     domPopupIcon.src = './icons/' + strIcon;
@@ -261,8 +261,9 @@ async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlace
     // Show the backdrop by adding the active class
     domApp.classList.add('active');
 
-    // Adjust the 'Confirm' button if this is only a notice
-    domPopupConfirmBtn.innerText = fNotice ? 'Okay' : 'Confirm';
+    // Adjust the 'Confirm' button. Caller-provided label wins; otherwise
+    // default to 'Okay' for notices, 'Confirm' for confirms.
+    domPopupConfirmBtn.innerText = strConfirmText || (fNotice ? 'Okay' : 'Confirm');
     domPopupCancelBtn.style.display = fNotice ? 'none' : '';
 
     // If a string placeholder is specified, render it

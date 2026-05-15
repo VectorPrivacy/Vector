@@ -26,7 +26,13 @@ pub mod mls;
 pub mod nip17_keys;
 pub mod mls_wrap_keys;
 
-pub use settings::{get_sql_setting, set_sql_setting, get_pkey, set_pkey, get_seed, set_seed, remove_setting};
+pub use settings::{
+    get_sql_setting, set_sql_setting, get_pkey, set_pkey, get_seed, set_seed, remove_setting,
+    get_signer_type, set_signer_type,
+    get_bunker_url, set_bunker_url,
+    get_bunker_remote_pubkey, set_bunker_remote_pubkey,
+    commit_bunker_account_setup,
+};
 
 // ============================================================================
 // App Data Directory
@@ -222,6 +228,15 @@ fn write_active_account_file_in(app_data: &std::path::Path, npub: &str) -> Resul
         std::fs::create_dir_all(app_data)
             .map_err(|e| format!("Failed to create app data dir: {}", e))?;
     }
+    // Refuse to point the marker at a directory that doesn't exist as a
+    // real subfolder. Closes the race where a concurrent `delete_account`
+    // for `npub` runs between the caller's existence check and this write.
+    // `symlink_metadata` (matching the read path) so a crafted
+    // `<app_data>/<valid-npub-name>` symlink can't satisfy the check.
+    match std::fs::symlink_metadata(app_data.join(npub)) {
+        Ok(meta) if meta.file_type().is_dir() && !meta.file_type().is_symlink() => {}
+        _ => return Err(format!("Account directory missing or invalid: {}", npub)),
+    }
     let tmp = app_data.join(format!("{}.tmp", ACTIVE_ACCOUNT_FILE));
     let final_path = app_data.join(ACTIVE_ACCOUNT_FILE);
 
@@ -347,6 +362,42 @@ mod active_account_tests {
         // No file should have been created (neither final nor temp).
         assert!(!tmp.path().join(ACTIVE_ACCOUNT_FILE).exists());
         assert!(!tmp.path().join(format!("{}.tmp", ACTIVE_ACCOUNT_FILE)).exists());
+    }
+
+    #[test]
+    fn write_rejects_missing_account_dir() {
+        // A concurrent `delete_account` between the caller's existence check
+        // and write_active_account_file would otherwise leave a stale marker
+        // pointing at a now-deleted account.
+        let tmp = TempDir::new().unwrap();
+        let err = write_active_account_file_in(tmp.path(), VALID_A).unwrap_err();
+        assert!(err.contains("missing or invalid"),
+            "expected account-dir-missing error, got: {}", err);
+        // Marker must not have been written.
+        assert!(!tmp.path().join(ACTIVE_ACCOUNT_FILE).exists());
+        assert!(!tmp.path().join(format!("{}.tmp", ACTIVE_ACCOUNT_FILE)).exists());
+    }
+
+    #[test]
+    fn write_rejects_symlinked_account_dir() {
+        // A crafted `<app_data>/<valid-npub-name>` symlink to ~/Documents
+        // would otherwise pass `is_dir()` and let the marker point at an
+        // attacker-controlled location, which downstream delete/logout paths
+        // would then traverse.
+        let tmp = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        let link = tmp.path().join(VALID_A);
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target.path(), &link).unwrap();
+            let err = write_active_account_file_in(tmp.path(), VALID_A).unwrap_err();
+            assert!(err.contains("missing or invalid"),
+                "expected symlink rejection, got: {}", err);
+        }
+        // On Windows symlink creation may require elevated privileges; skip
+        // the assertion there rather than gate the whole test on platform.
+        #[cfg(not(unix))]
+        let _ = (target, link);
     }
 
     #[test]
@@ -498,8 +549,11 @@ mod active_account_tests {
     fn write_creates_app_data_dir_if_missing() {
         let tmp = TempDir::new().unwrap();
         let nested = tmp.path().join("does/not/exist/yet");
-        // The account dir must exist before the marker can validate on read,
-        // but write_active_account_file_in itself only requires the parent.
+        // Parent app_data is auto-created by mkdir_all; the account dir must
+        // also exist by the time we write, so the marker can't end up
+        // pointing at a non-existent account.
+        std::fs::create_dir_all(&nested).unwrap();
+        touch_account_dir(&nested, VALID_A);
         write_active_account_file_in(&nested, VALID_A).unwrap();
         assert!(nested.join(ACTIVE_ACCOUNT_FILE).exists());
     }

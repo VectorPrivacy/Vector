@@ -2784,6 +2784,7 @@ name = "nostr"
 version = "0.44.0"
 source = "git+https://github.com/VectorPrivacy/nostr.git?branch=zeroize-secretkey#0f9f3a7ac42a0ac699b48458e87b4130c00cb54e"
 dependencies = [
+ "aes",
  "base64",
  "bech32",
  "bip39",
@@ -2816,10 +2817,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "nostr-connect"
+version = "0.44.0"
+source = "git+https://github.com/VectorPrivacy/nostr.git?branch=zeroize-secretkey#0f9f3a7ac42a0ac699b48458e87b4130c00cb54e"
+dependencies = [
+ "async-utility",
+ "nostr",
+ "nostr-relay-pool 0.44.0 (git+https://github.com/VectorPrivacy/nostr.git?branch=zeroize-secretkey)",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "nostr-database"
 version = "0.44.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7462c9d8ae5ef6a28d66a192d399ad2530f1f2130b13186296dbb11bdef5b3d1"
+dependencies = [
+ "lru",
+ "nostr",
+ "tokio",
+]
+
+[[package]]
+name = "nostr-database"
+version = "0.44.0"
+source = "git+https://github.com/VectorPrivacy/nostr.git?branch=zeroize-secretkey#0f9f3a7ac42a0ac699b48458e87b4130c00cb54e"
 dependencies = [
  "lru",
  "nostr",
@@ -2848,7 +2871,24 @@ dependencies = [
  "lru",
  "negentropy",
  "nostr",
- "nostr-database",
+ "nostr-database 0.44.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "nostr-relay-pool"
+version = "0.44.0"
+source = "git+https://github.com/VectorPrivacy/nostr.git?branch=zeroize-secretkey#0f9f3a7ac42a0ac699b48458e87b4130c00cb54e"
+dependencies = [
+ "async-utility",
+ "async-wsocket",
+ "atomic-destructor",
+ "hex",
+ "lru",
+ "negentropy",
+ "nostr",
+ "nostr-database 0.44.0 (git+https://github.com/VectorPrivacy/nostr.git?branch=zeroize-secretkey)",
  "tokio",
  "tracing",
 ]
@@ -2861,9 +2901,9 @@ checksum = "471732576710e779b64f04c55e3f8b5292f865fea228436daf19694f0bf70393"
 dependencies = [
  "async-utility",
  "nostr",
- "nostr-database",
+ "nostr-database 0.44.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nostr-gossip",
- "nostr-relay-pool",
+ "nostr-relay-pool 0.44.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio",
  "tracing",
 ]
@@ -6295,6 +6335,7 @@ dependencies = [
  "mdk-storage-traits",
  "nostr",
  "nostr-blossom",
+ "nostr-connect",
  "nostr-sdk",
  "openmls_rust_crypto",
  "openmls_traits",

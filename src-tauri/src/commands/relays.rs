@@ -451,10 +451,12 @@ fn spawn_probe_for_server(server_url: String) {
     let session = vector_core::state::SessionGuard::capture();
     tokio::spawn(async move {
         if !session.is_valid() { return; }
-        let signer = match crate::MY_SECRET_KEY.to_keys() {
-            Some(keys) => keys,
-            None => return,
-        };
+        // Route through the active client signer — local accounts get the
+        // local GuardedSigner, bunker accounts get NostrConnect (so the
+        // probe auth event is signed by the user identity, not the client
+        // device key).
+        let client = match crate::nostr_client() { Some(c) => c, None => return };
+        let signer = match client.signer().await { Ok(s) => s, Err(_) => return };
         match vector_core::blossom::probe_servers_for_octet_stream(
             signer, vec![server_url], session,
         ).await {

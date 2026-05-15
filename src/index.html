@@ -9,6 +9,10 @@
     <link rel="stylesheet" href="/highlight-github-dark.min.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Vector</title>
+    <!-- QR code generator (vendored from `qrcode-generator` npm). Exposes a
+         global `qrcode(typeNumber, errorCorrectionLevel)` factory used by
+         the bunker-connect screen + future Profile QR / contact-share UI. -->
+    <script src="/js/qrcode-generator.js" defer></script>
     <script src="/main.js" defer></script>
     <script src="/js/event-cache.js" defer></script>
     <script src="/js/chat-scroll.js" defer></script>
@@ -1255,6 +1259,23 @@
           <hr class="divider settings-divider">
           <h2>Security</h2>
 
+          <div id="settings-remote-signer" class="remote-signer-card" style="display: none;">
+            <div class="remote-signer-head">
+              <div class="remote-signer-title">
+                <span class="remote-signer-dot" id="remote-signer-dot"></span>
+                <span>Remote Signer</span>
+              </div>
+              <button id="remote-signer-reauth-btn" class="cancel-btn">Re-authorize</button>
+            </div>
+            <div class="remote-signer-meta">
+              <div class="remote-signer-meta-row">
+                <span class="remote-signer-meta-label">Signer key</span>
+                <span class="remote-signer-meta-value remote-signer-mono" id="remote-signer-pubkey">—</span>
+              </div>
+            </div>
+            <p class="remote-signer-hint">Your identity key lives on your signer app. Vector only holds a device pairing key.</p>
+          </div>
+
           <div class="form-group">
             <label class="toggle-container">
               <span><span id="security-encryption-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Local Encryption</span>
@@ -1270,8 +1291,8 @@
               </div>
               <button id="security-change-credential" class="btn cancel-btn">Change</button>
           </div>
-          
-          <div class="danger-option">
+
+          <div id="export-account-row" class="danger-option">
               <div class="left-group">
                 <span id="export-account-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>
                 <span>Export Account</span>
@@ -1445,6 +1466,36 @@
             </svg>
           </div>
         </div>
+          <button id="start-bunker-btn" class="login-bunker-link-btn" type="button">
+            <img src="./icons/key.svg" class="login-bunker-link-icon" alt="">
+            <span>Use a Remote Signer</span>
+          </button>
+        </div>
+        <div id="login-bunker" class="login-bunker-container is-hidden" style="display: none;">
+          <div class="login-bunker-fields">
+            <div class="login-bunker-heading">
+              <img src="./icons/key.svg" class="login-bunker-title-icon" alt="">
+              <h3 class="login-bunker-title">Connect Remote Signer</h3>
+            </div>
+            <p class="login-bunker-helper">Scan in your signer app, or copy the link to paste.</p>
+            <div class="login-bunker-qr-wrap">
+              <div id="bunker-qr" class="login-bunker-qr" aria-label="Nostr Connect QR code"></div>
+              <div class="login-bunker-qr-loading" id="bunker-qr-loading">Generating connection link…</div>
+            </div>
+            <button id="bunker-copy-url-btn" class="login-bunker-copy-btn" type="button" disabled>
+              Copy connection link
+            </button>
+            <p class="login-bunker-status" id="bunker-status-text"></p>
+            <div class="login-bunker-divider"><span>or paste a bunker URL</span></div>
+            <div class="login-bunker-field login-bunker-field-action">
+              <input type="text" class="login-input login-bunker-input" id="bunker-url-input" placeholder="bunker:// from Amber, etc." autocomplete="off" autocapitalize="none" spellcheck="false" />
+              <button id="bunker-connect-btn" class="login-bunker-connect-btn" type="button" aria-label="Connect">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M15 3H16.2C17.8802 3 18.7202 3 19.362 3.32698C19.9265 3.6146 20.3854 4.07354 20.673 4.63803C21 5.27976 21 6.11985 21 7.8V16.2C21 17.8802 21 18.7202 20.673 19.362C20.3854 19.9265 19.9265 20.3854 19.362 20.673C18.7202 21 17.8802 21 16.2 21H15M10 7L15 12M15 12L10 17M15 12L3 12" stroke="#000" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+            </div>
+          </div>
         </div>
         <div id="login-invite" class="login-invite-container" style="display: none;">
           <div class="login-invite-header">

@@ -606,10 +606,229 @@ const domTheme = document.getElementById('theme');
 const domLoginStart = document.getElementById('login-start');
 const domLoginAccountCreationBtn = document.getElementById('start-account-creation-btn');
 const domLoginAccountBtn = document.getElementById('start-login-btn');
+const domLoginBunkerStartBtn = document.getElementById('start-bunker-btn');
 const domLogin = document.getElementById('login-form');
 const domLoginImport = document.getElementById('login-import');
 const domLoginInput = document.getElementById('login-input');
 const domLoginBtn = document.getElementById('login-btn');
+const domLoginBunker = document.getElementById('login-bunker');
+const domLoginBunkerUrlInput = document.getElementById('bunker-url-input');
+const domLoginBunkerConnectBtn = document.getElementById('bunker-connect-btn');
+const domLoginBunkerStatus = document.getElementById('bunker-status-text');
+const domLoginBunkerQrWrap = document.querySelector('.login-bunker-qr-wrap');
+const domLoginBunkerQr = document.getElementById('bunker-qr');
+const domLoginBunkerCopyBtn = document.getElementById('bunker-copy-url-btn');
+
+// Active nostrconnect:// URL — captured when start_nostrconnect_session
+// returns so the Copy button can place it on the clipboard.
+let strBunkerNostrConnectUrl = '';
+
+// Bunker form mode — 'new' for fresh logins / Add Profile, 'reauth' for
+// re-pairing an already-committed account whose signer wiped its
+// permissions. Module scope so the boot-time login catch can route into
+// reauth mode before DOMContentLoaded finishes wiring click handlers.
+let bunkerFormMode = 'new';
+
+// Bunker connection URL is single-use and the backend's NostrConnect uses
+// a 120s timeout — pair this client-side so the user sees a live countdown
+// and we auto-reroll a fresh QR + URL when it expires.
+const BUNKER_SESSION_TIMEOUT_MS = 120 * 1000;
+let bunkerSessionDeadline = 0;
+let bunkerSessionTimerHandle = null;
+
+function stopBunkerSessionTimer() {
+    if (bunkerSessionTimerHandle) {
+        clearInterval(bunkerSessionTimerHandle);
+        bunkerSessionTimerHandle = null;
+    }
+    bunkerSessionDeadline = 0;
+}
+
+function renderBunkerCountdown() {
+    const status = document.getElementById('bunker-status-text');
+    if (!status) return;
+    const remaining = Math.max(0, bunkerSessionDeadline - Date.now());
+    if (remaining === 0) {
+        stopBunkerSessionTimer();
+        status.textContent = 'Refreshing connection link…';
+        status.className = 'login-bunker-status connecting';
+        startBunkerSession();
+        return;
+    }
+    const secs = Math.ceil(remaining / 1000);
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    status.textContent = `Waiting for signer… (${m}:${s.toString().padStart(2, '0')})`;
+    status.className = 'login-bunker-status connecting';
+}
+
+function armBunkerSessionTimer() {
+    stopBunkerSessionTimer();
+    bunkerSessionDeadline = Date.now() + BUNKER_SESSION_TIMEOUT_MS;
+    bunkerSessionTimerHandle = setInterval(renderBunkerCountdown, 1000);
+    renderBunkerCountdown();
+}
+
+/**
+ * Render a QR code (SVG) into a container element using the vendored
+ * qrcode-generator library. Reusable for future Profile QR / contact-share
+ * / Lightning URI flows.
+ */
+function renderQrInto(containerEl, text, opts = {}) {
+    if (!containerEl || !window.qrcode) return false;
+    const ecc = opts.ecc || 'M';
+    const qr = window.qrcode(0, ecc);
+    qr.addData(text);
+    qr.make();
+    containerEl.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 0, scalable: true });
+    return true;
+}
+
+/**
+ * Kick off a NIP-46 client-initiated session — either fresh
+ * (`start_nostrconnect_session`) or re-pairing an existing committed account
+ * (`reauthorize_bunker`). Backend returns a `nostrconnect://` URL that we
+ * render as a QR + Copy button.
+ */
+async function startBunkerSession() {
+    strBunkerNostrConnectUrl = '';
+    if (domLoginBunkerQrWrap) domLoginBunkerQrWrap.classList.remove('ready');
+    if (domLoginBunkerCopyBtn) {
+        domLoginBunkerCopyBtn.disabled = true;
+        domLoginBunkerCopyBtn.classList.remove('copied');
+        domLoginBunkerCopyBtn.textContent = 'Copy connection link';
+    }
+    if (domLoginBunkerStatus) {
+        domLoginBunkerStatus.textContent = 'Waiting for signer…';
+        domLoginBunkerStatus.className = 'login-bunker-status connecting';
+    }
+    try {
+        // Reauth re-uses the existing client keypair from MY_SECRET_KEY and
+        // is for already-committed accounts — no Add Profile commit step.
+        const cmd = bunkerFormMode === 'reauth' ? 'reauthorize_bunker' : 'start_nostrconnect_session';
+        if (bunkerFormMode !== 'reauth' && typeof addAccountFlow !== 'undefined' && addAccountFlow.active) {
+            await addAccountFlow.commit();
+        }
+        // Recover from a missed `bunker_reauthorize_succeeded` — if the
+        // frontend reloaded between the event firing and the listener
+        // registering, the backend stashes the npub in a one-shot slot we
+        // can poll here. (No-op when nothing was stashed.)
+        if (bunkerFormMode === 'reauth') {
+            try {
+                const recoveredNpub = await invoke('get_pending_reauth_result');
+                if (recoveredNpub) {
+                    // The new pairing was already installed by the bg task;
+                    // we just need to put the UI back where the user came
+                    // from. Mirror the success-listener restore logic.
+                    strPubkey = recoveredNpub;
+                    stopBunkerSessionTimer();
+                    const origin = bunkerReauthOrigin;
+                    hideBunkerForm();
+                    if (origin) {
+                        if (domLoginBackBar) domLoginBackBar.style.display = 'none';
+                        const lf = document.getElementById('login-form');
+                        if (lf) lf.classList.remove('has-back-bar', 'bunker-active');
+                        if (domLogin) domLogin.style.display = 'none';
+                        bunkerReauthOrigin = null;
+                        if (origin === 'settings' && typeof openSettings === 'function') {
+                            openSettings();
+                        } else if (typeof closeChat === 'function') {
+                            closeChat();
+                        }
+                    } else {
+                        // No origin = came from the boot-time popup; full boot.
+                        invoke('connect').catch(() => {});
+                        login(true);
+                    }
+                    return;
+                }
+            } catch (_) { /* missing-command-fail-open */ }
+        }
+        const url = await invoke(cmd);
+        strBunkerNostrConnectUrl = url;
+        const rendered = renderQrInto(domLoginBunkerQr, url, { ecc: 'M' });
+        if (rendered && domLoginBunkerQrWrap) {
+            domLoginBunkerQrWrap.classList.add('ready');
+        }
+        if (domLoginBunkerCopyBtn) domLoginBunkerCopyBtn.disabled = false;
+        // Start the live countdown — auto-rerolls a fresh QR when the
+        // 120s backend timeout expires so the user isn't stranded.
+        armBunkerSessionTimer();
+    } catch (e) {
+        stopBunkerSessionTimer();
+        if (domLoginBunkerStatus) {
+            domLoginBunkerStatus.textContent = String(e);
+            domLoginBunkerStatus.className = 'login-bunker-status error';
+        }
+    }
+}
+
+/** Tracks which main-app panel was visible when the bunker form took over
+ *  (reauth from Settings, etc.) so the back button can restore it. Null
+ *  when entering from the login screen. */
+let bunkerReauthOrigin = null;
+
+/**
+ * Show the bunker form (QR + Copy + paste fallback). `mode` is 'new' for
+ * regular login / Add Profile entry, 'reauth' for the recovery flow when a
+ * signer has wiped its permissions.
+ */
+function showBunkerForm(mode = 'new') {
+    bunkerFormMode = mode;
+    // Reauth enters from inside the main app, where Settings (or another
+    // panel) is rendered behind #login-form and shows through. Snapshot the
+    // visible panel and hide every major view so the bunker form gets the
+    // full viewport with no see-through layout.
+    if (mode === 'reauth') {
+        const settingsVisible = typeof domSettings !== 'undefined' && domSettings
+            && domSettings.style.display !== 'none';
+        bunkerReauthOrigin = settingsVisible ? 'settings' : 'chats';
+        if (typeof domNavbar !== 'undefined' && domNavbar) domNavbar.style.display = 'none';
+        if (typeof domSettings !== 'undefined' && domSettings) domSettings.style.display = 'none';
+        if (typeof domChats !== 'undefined' && domChats) domChats.style.display = 'none';
+        if (typeof domProfile !== 'undefined' && domProfile) domProfile.style.display = 'none';
+        if (typeof domInvites !== 'undefined' && domInvites) domInvites.style.display = 'none';
+        if (typeof domGroupOverview !== 'undefined' && domGroupOverview) domGroupOverview.style.display = 'none';
+    } else {
+        bunkerReauthOrigin = null;
+    }
+    if (domLoginImport) domLoginImport.style.display = 'none';
+    if (domLoginStart) domLoginStart.style.display = 'none';
+    if (domLoginInvite) domLoginInvite.style.display = 'none';
+    if (typeof domLoginEncrypt !== 'undefined' && domLoginEncrypt) domLoginEncrypt.style.display = 'none';
+    // Also show the parent login form + back-bar in case we're entering
+    // from the main app (reauth path can fire from anywhere).
+    const loginForm = document.getElementById('login-form');
+    if (loginForm) {
+        loginForm.classList.add('bunker-active');
+        loginForm.classList.add('has-back-bar');
+    }
+    if (typeof domLogin !== 'undefined' && domLogin) domLogin.style.display = '';
+    if (typeof domLoginBackBar !== 'undefined' && domLoginBackBar) domLoginBackBar.style.display = '';
+    domLoginBunker.classList.remove('is-hidden');
+    domLoginBunker.style.display = '';
+    if (domLoginBunkerStatus) {
+        domLoginBunkerStatus.textContent = '';
+        domLoginBunkerStatus.className = 'login-bunker-status';
+    }
+    // Fresh URL per open — single-use, can't be cached.
+    startBunkerSession();
+}
+window.showBunkerForm = showBunkerForm;
+
+/** Hide the bunker form and clear its in-memory state. */
+function hideBunkerForm() {
+    stopBunkerSessionTimer();
+    domLoginBunker.classList.add('is-hidden');
+    domLoginBunker.style.display = 'none';
+    const loginForm = document.getElementById('login-form');
+    if (loginForm) loginForm.classList.remove('bunker-active');
+    if (domLoginBunkerUrlInput) domLoginBunkerUrlInput.value = '';
+    strBunkerNostrConnectUrl = '';
+    if (domLoginBunkerQr) domLoginBunkerQr.innerHTML = '';
+    if (domLoginBunkerQrWrap) domLoginBunkerQrWrap.classList.remove('ready');
+}
+window.hideBunkerForm = hideBunkerForm;
 
 const domLoginImportError = document.getElementById('login-import-error');
 
@@ -773,6 +992,7 @@ const domDonorPivx = document.getElementById('donor-pivx');
 const domDonorGitcoin = document.getElementById('donor-gitcoin');
 const domSettingsLogout = document.getElementById('logout-btn');
 const domSettingsExport = document.getElementById('export-account-btn');
+const domRemoteSignerReauthBtn = document.getElementById('remote-signer-reauth-btn');
 
 const domApp = document.getElementById('popup-container');
 const domPopup = document.getElementById('popup');
@@ -1991,6 +2211,17 @@ async function setupRustListeners() {
             // Increment rendered count since we're adding a new message
             proceduralScrollState.renderedMessageCount++;
             proceduralScrollState.totalMessageCount++;
+            // Mark on own-send: updateChat's auto-mark is focus-gated.
+            if (message.mine) {
+                let lastContactMsg = null;
+                for (let i = chat.messages.length - 1; i >= 0; i--) {
+                    if (!chat.messages[i].mine) {
+                        lastContactMsg = chat.messages[i];
+                        break;
+                    }
+                }
+                if (lastContactMsg) markAsRead(chat, lastContactMsg);
+            }
         } else {
             console.log('Group chat not open, message added to background chat');
             // Own message synced from another device — mark chat as read
@@ -2663,6 +2894,19 @@ async function setupRustListeners() {
             // Increment rendered count since we're adding a new message
             proceduralScrollState.renderedMessageCount++;
             proceduralScrollState.totalMessageCount++;
+            // Mark on own-send: updateChat's auto-mark is focus-gated and
+            // won't fire for messages that arrived while Vector was
+            // backgrounded.
+            if (newMessage.mine) {
+                let lastContactMsg = null;
+                for (let i = chat.messages.length - 1; i >= 0; i--) {
+                    if (!chat.messages[i].mine) {
+                        lastContactMsg = chat.messages[i];
+                        break;
+                    }
+                }
+                if (lastContactMsg) markAsRead(chat, lastContactMsg);
+            }
         } else if (newMessage.mine) {
             // Own message synced from another device — mark chat as read
             // since we clearly saw the conversation before replying
@@ -2964,6 +3208,17 @@ async function setupRustListeners() {
     _on('miniapp_crashed', () => {
         showToast('Mini App Crashed Unexpectedly');
     });
+
+    // NIP-46 bunker lifecycle. `bunker_state` fires on every connection
+    // transition (idle → connecting → online → offline). We surface the
+    // Offline case as a toast since signing will fail until reconnect.
+    // The Connecting/Online transitions stay silent — they're noise on
+    // every relay reconnect.
+    // Bunker session listeners (bunker_state, bunker_session_staged,
+    // bunker_reauthorize_*, bunker_awaiting_approval, bunker_auth_url) are
+    // registered EARLY in the DOMContentLoaded init block — not here — so
+    // they catch events fired during the pre-login bunker / reauth flows
+    // before setupRustListeners has run.
 
     await Promise.all(_p);
 
@@ -4617,7 +4872,13 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
 
             if (strPinLast.length === 0) {
                 if (fUnlock) {
-                    updateStatusMessage(DECRYPTING_MSG, true);
+                    // For bunker accounts the decrypt is sub-second but the
+                    // bunker bootstrap RPC takes most of the wait — surface
+                    // that instead of leaving "Decrypting…" up the whole time.
+                    const loadingMsg = window.__activeSignerType === 'bunker'
+                        ? 'Connecting to Signer…'
+                        : DECRYPTING_MSG;
+                    updateStatusMessage(loadingMsg, true);
                     try {
                         // Decrypt and login entirely in backend (key never crosses IPC).
                         // The wrapper polls Tor's bootstrap state so the title flips
@@ -4629,6 +4890,14 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                         strPubkey = npub;
                         login();
                     } catch (e) {
+                        // Distinguish bunker-unreachable from wrong-PIN: the
+                        // PIN was already validated by internal_decrypt, so a
+                        // post-decrypt failure (signer unreachable) shouldn't
+                        // be presented as "Incorrect PIN".
+                        const handled = typeof window.handleBunkerLoginError === 'function'
+                            ? await window.handleBunkerLoginError(e)
+                            : false;
+                        if (handled) { pinProcessing = false; return; }
                         updateStatusMessage(INCORRECT_PIN_MSG);
                         resetPinDisplay(true, false);
                         pinProcessing = false;
@@ -4777,7 +5046,12 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                 // Unlock flow — single password entry
                 if (!password) return;
                 passwordProcessing = true;
-                updateStatusMessage(DECRYPTING_MSG, true);
+                // Bunker accounts spend the bulk of the wait on the signer
+                // RPC, not decryption — show the more accurate message.
+                const loadingMsg = window.__activeSignerType === 'bunker'
+                    ? 'Connecting to Signer…'
+                    : DECRYPTING_MSG;
+                updateStatusMessage(loadingMsg, true);
                 try {
                     // Decrypt and login entirely in backend (key never crosses IPC).
                     // Wrapper flips the title to "Bootstrapping Tor…" if Arti is
@@ -4788,6 +5062,12 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                     strPubkey = npub;
                     login();
                 } catch (e) {
+                    // Bunker-unreachable case: pass through to re-auth flow
+                    // instead of telling the user their password is wrong.
+                    const handled = typeof window.handleBunkerLoginError === 'function'
+                        ? await window.handleBunkerLoginError(e)
+                        : false;
+                    if (handled) { passwordProcessing = false; return; }
                     updateStatusMessage(INCORRECT_MSG);
                     newInput.value = '';
                     newInput.focus();
@@ -5389,7 +5669,11 @@ function createFileBoxSpinner(target, opts = {}) {
 }
 
 function isSpoilerAttachment(attachment) {
-    return attachment.name && attachment.name.toUpperCase().startsWith('SPOILER_');
+    // DMs carry the filename on `.name`; MLS group attachments carry it on
+    // `.mls_filename` (`.name` is empty for the MLS path). Without checking
+    // both, MLS spoilers render unspoilered.
+    const fileName = attachment.name || attachment.mls_filename || '';
+    return fileName.toUpperCase().startsWith('SPOILER_');
 }
 
 function createFileBox(cAttachment, state = 'downloaded') {
@@ -7291,6 +7575,49 @@ async function openChatlist() {
     updateChatlistTimestamps();
 }
 
+/** Apply the current bunker connection state to the Security panel's
+ *  status dot. State strings match the backend's `bunker_state` event:
+ *  'idle' | 'connecting' | 'online' | 'offline'. Idle clears the dot. */
+function applyRemoteSignerDot(state) {
+    const dot = document.getElementById('remote-signer-dot');
+    if (!dot) return;
+    dot.classList.remove('online', 'offline', 'connecting');
+    if (state === 'online' || state === 'offline' || state === 'connecting') {
+        dot.classList.add(state);
+    }
+}
+
+/** Populate the Remote Signer card in Security settings, or hide it
+ *  entirely for local-key accounts. Also hides the Export Account row
+ *  for bunker accounts since the identity key isn't on this device. */
+async function refreshRemoteSignerCard() {
+    const card = document.getElementById('settings-remote-signer');
+    const exportRow = document.getElementById('export-account-row');
+    if (!card) return;
+    try {
+        const status = await invoke('get_bunker_status');
+        if (!status) {
+            card.style.display = 'none';
+            if (exportRow) exportRow.style.display = '';
+            return;
+        }
+        const pkEl = document.getElementById('remote-signer-pubkey');
+        if (pkEl) {
+            const npub = status.remote_npub || '';
+            pkEl.textContent = npub
+                ? `${npub.slice(0, 12)}…${npub.slice(-6)}`
+                : '—';
+            pkEl.title = npub;
+        }
+        card.style.display = '';
+        if (exportRow) exportRow.style.display = 'none';
+    } catch (e) {
+        console.warn('[settings] get_bunker_status failed:', e);
+        card.style.display = 'none';
+        if (exportRow) exportRow.style.display = '';
+    }
+}
+
 function openSettings() {
     navbarSelect('settings-btn');
     domNavbar.style.display = '';
@@ -7307,9 +7634,10 @@ function openSettings() {
     // Update the Storage Breakdown
     initStorageSection();
 
-    // Refresh blocked users list and logs cache
+    // Refresh blocked users list, logs cache, and Remote Signer card
     loadBlockedUsersList();
     invoke('get_logs').then((log) => { window._cachedLogs = log || ''; });
+    refreshRemoteSignerCard();
 
     // Check primary device status when settings are opened
     checkPrimaryDeviceStatus();
@@ -7718,6 +8046,215 @@ window.addEventListener("DOMContentLoaded", async () => {
         popupConfirm('Loading Error', evt.payload, true, '', 'vector_warning.svg');
     });
 
+    // Bunker session events — must be registered EARLY (alongside
+    // loading_error / session_reload), not inside setupRustListeners, because
+    // the re-auth flow fires these while the user is still on the login
+    // screen, before any successful login has booted the main listener set.
+    await listen('bunker_state', (evt) => {
+        const state = evt?.payload?.state;
+        // Keep the Security panel's status dot in sync with live signer
+        // health — cheap DOM update, no-op when the card is hidden.
+        if (typeof applyRemoteSignerDot === 'function') applyRemoteSignerDot(state);
+        // Toast is for steady-state signer health changes only. When the
+        // bunker pairing form is up the form owns its own status display,
+        // and the backend's Connecting/Online events during pre-commit pairing
+        // would otherwise leak as misleading "signer online" toasts in the UI.
+        const bunkerFormVisible = domLoginBunker
+            && !domLoginBunker.classList.contains('is-hidden');
+        if (state === 'offline') {
+            if (!bunkerFormVisible && !window.__bunkerOfflineToastShown) {
+                if (typeof showToast === 'function') {
+                    showToast('Remote signer offline. Please check your signer app.');
+                }
+                window.__bunkerOfflineToastShown = true;
+            }
+        } else if (state === 'online') {
+            if (!bunkerFormVisible && window.__bunkerOfflineToastShown) {
+                if (typeof showToast === 'function') {
+                    showToast('Remote signer back online.');
+                }
+                window.__bunkerOfflineToastShown = false;
+            }
+        } else {
+            window.__bunkerOfflineToastShown = false;
+        }
+    });
+
+    await listen('bunker_awaiting_approval', () => {
+        // Countdown is reroll-bound; once we're waiting on user approval
+        // in the signer app, auto-reroll would be hostile.
+        stopBunkerSessionTimer();
+        const status = document.getElementById('bunker-status-text');
+        if (status) {
+            status.textContent = 'Check your signer app to approve…';
+            status.className = 'login-bunker-status connecting';
+        }
+    });
+
+    // Two terminal-success events for the bunker form; the choice depends on
+    // whether the account already exists locally:
+    //   `bunker_session_staged`         — first-time pairing. Account row not
+    //       yet committed; UI hands off to the encryption-choice flow which
+    //       writes the rolled-back settings via setup_encryption/skip.
+    //   `bunker_reauthorize_succeeded`  — existing account regaining a live
+    //       signer. Settings are already on disk; UI goes straight to login.
+    await listen('bunker_session_staged', async (evt) => {
+        stopBunkerSessionTimer();
+        strPubkey = evt?.payload?.npub || strPubkey;
+        const status = document.getElementById('bunker-status-text');
+        if (status) {
+            status.textContent = 'Connected. Choosing security…';
+            status.className = 'login-bunker-status online';
+        }
+        if (typeof window.hideBunkerForm === 'function') window.hideBunkerForm();
+        openEncryptionFlow(false);
+        invoke('connect').catch((err) => {
+            console.warn('[bunker_session_staged] connect() failed:', err);
+        });
+    });
+
+    await listen('bunker_session_failed', (evt) => {
+        // Failure during the pairing window almost always means the timeout
+        // fired — auto-reroll a fresh QR so the user isn't stranded with a
+        // dead code. Genuine relay-down errors will surface again on the
+        // next attempt (and the countdown will resume from there).
+        stopBunkerSessionTimer();
+        const err = evt?.payload?.error || 'Signer connection failed';
+        const status = document.getElementById('bunker-status-text');
+        if (status) {
+            status.textContent = String(err);
+            status.className = 'login-bunker-status error';
+        }
+        // Only auto-reroll if the bunker form is actually visible — don't
+        // start a fresh session if the user has navigated away.
+        if (domLoginBunker && !domLoginBunker.classList.contains('is-hidden')) {
+            setTimeout(() => {
+                if (domLoginBunker && !domLoginBunker.classList.contains('is-hidden')) {
+                    startBunkerSession();
+                }
+            }, 1500);
+        }
+    });
+
+    await listen('bunker_reauthorize_succeeded', async (evt) => {
+        stopBunkerSessionTimer();
+        // Drain the one-shot recovery slot so a later reauth attempt in the
+        // same session doesn't pick up this completed pairing's npub and
+        // mistake it for a missed-event recovery.
+        invoke('get_pending_reauth_result').catch(() => {});
+        try {
+            strPubkey = evt?.payload?.npub || strPubkey;
+            // Form hidden = user backed out; the backend already swapped the
+            // signer (identity matched, no harm done), but rebuilding the UI
+            // mid-Settings would yank them out of where they are. Skip the
+            // boot sequence — the live session is already healthy.
+            const formVisible = domLoginBunker
+                && !domLoginBunker.classList.contains('is-hidden')
+                && domLoginBunker.style.display !== 'none';
+            if (!formVisible) return;
+            const origin = bunkerReauthOrigin;
+            if (typeof window.hideBunkerForm === 'function') window.hideBunkerForm();
+            if (origin) {
+                // Reauth from inside the app: the underlying session never
+                // went down (only the signer handles were swapped), so
+                // `login(true)`'s full boot would just dump us on the login
+                // form. Mirror the Back-button restore — tear down the
+                // bunker form and put the user back on the panel they came
+                // from.
+                if (domLoginBackBar) domLoginBackBar.style.display = 'none';
+                const loginForm = document.getElementById('login-form');
+                if (loginForm) loginForm.classList.remove('has-back-bar', 'bunker-active');
+                if (domLogin) domLogin.style.display = 'none';
+                bunkerReauthOrigin = null;
+                if (origin === 'settings' && typeof openSettings === 'function') {
+                    openSettings();
+                } else if (typeof closeChat === 'function') {
+                    closeChat();
+                }
+            } else {
+                // Reauth fired from the boot-time "Signer unreachable" popup
+                // on the login screen — no session is up yet. Full boot.
+                invoke('connect').catch((err) => {
+                    console.warn('[bunker_reauthorize_succeeded] connect() failed:', err);
+                });
+                login(true);
+            }
+        } catch (e) {
+            console.error('[bunker_reauthorize_succeeded] transition failed:', e);
+        }
+    });
+
+    await listen('bunker_reauthorize_failed', (evt) => {
+        stopBunkerSessionTimer();
+        // Form hidden = user backed out; the in-flight bg task may still
+        // eventually emit failure (timeout) — silently drop it since the
+        // user already moved on and the live session is unchanged.
+        const formVisible = domLoginBunker
+            && !domLoginBunker.classList.contains('is-hidden')
+            && domLoginBunker.style.display !== 'none';
+        if (!formVisible) return;
+        const err = evt?.payload?.error || 'Re-authorization failed';
+        const status = document.getElementById('bunker-status-text');
+        if (status) {
+            status.textContent = String(err);
+            status.className = 'login-bunker-status error';
+        }
+        // Auto-reroll on reauth timeout too (same rationale as pairing).
+        if (domLoginBunker && !domLoginBunker.classList.contains('is-hidden')) {
+            setTimeout(() => {
+                if (domLoginBunker && !domLoginBunker.classList.contains('is-hidden')) {
+                    startBunkerSession();
+                }
+            }, 1500);
+        }
+    });
+
+    await listen('bunker_auth_url', async (evt) => {
+        const url = evt?.payload?.url;
+        if (!url) return;
+        // Restrict to http(s). The URL originates from the signer over a
+        // relay; an attacker between us and the bunker could otherwise
+        // push javascript:, file://, or platform-protocol URLs.
+        let parsed = null;
+        try { parsed = new URL(url); } catch (_) {}
+        if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) {
+            console.warn('[bunker_auth_url] rejected non-http(s) URL:', url);
+            return;
+        }
+        try {
+            await openUrl(parsed.toString());
+        } catch (err) {
+            popupConfirm(
+                'Approve in your signer',
+                `Open this URL to approve the request:<br><br>${escapeHtml(parsed.toString())}`,
+                true,
+            );
+        }
+    });
+
+    // Module-scope: callable from the boot-time login_from_stored_key catch.
+    window.handleBunkerLoginError = async function handleBunkerLoginError(e) {
+        const msg = String(e || '');
+        const looksLikeBunkerOffline = msg.includes('Remote signer unreachable')
+            || msg.toLowerCase().includes('bunker');
+        if (!looksLikeBunkerOffline) return false;
+        const wantsReauth = await popupConfirm(
+            'Signer unreachable',
+            'Your remote signer didn\'t respond. If you\'ve reset or revoked Vector\'s permissions in your signer app, re-pair below without losing your account data.<br><br>'
+                + escapeHtml(msg),
+            false,
+            '',
+            'vector_warning.svg',
+            '',
+            'Re-authorize Signer'
+        );
+        if (wantsReauth && typeof window.showBunkerForm === 'function') {
+            window.showBunkerForm('reauth');
+            return true;
+        }
+        return false;
+    };
+
     // Multi-account: listen for `session_reload` from `swap_session`. Must be
     // registered HERE (DOMContentLoaded) — not inside `setupRustListeners`,
     // which only fires after a successful login. The pre-login picker emits
@@ -7824,7 +8361,10 @@ window.addEventListener("DOMContentLoaded", async () => {
     // (boot_select_account already ran at Tauri startup, so this is just a static read + 1 DB query)
     if (!fDebugHotReloaded) {
         console.time('[Boot] getBootStatus');
-        const { account_exists, enabled, security_type } = await invoke('get_encryption_and_key');
+        const { account_exists, enabled, security_type, signer_type } = await invoke('get_encryption_and_key');
+        // Stash so the boot-time "Connecting…" title can be reworded for
+        // bunker accounts (the 15s wait is dominated by the signer round-trip).
+        window.__activeSignerType = signer_type || 'local';
         console.timeEnd('[Boot] getBootStatus');
 
         // Show the pre-login picker pill whenever ≥2 accounts exist on disk
@@ -7898,8 +8438,12 @@ window.addEventListener("DOMContentLoaded", async () => {
                 // Set a neutral baseline title; `runWithTorBootstrapStatus`
                 // overrides it with "Bootstrapping Tor… NN%" when Arti is
                 // mid-consensus, and `init()` later overrides it again
-                // with "Decrypting Database…" / sync progress.
-                domLoginEncryptTitle.textContent = 'Connecting…';
+                // with "Decrypting Database…" / sync progress. For bunker
+                // accounts the 15s wait is dominated by the signer RPC, so
+                // surface that to the user.
+                domLoginEncryptTitle.textContent = window.__activeSignerType === 'bunker'
+                    ? 'Connecting to Signer…'
+                    : 'Connecting…';
                 domLoginEncryptTitle.classList.add('startup-subtext-gradient');
                 // Past the point of no return — login_from_stored_key is
                 // about to install this account's keys into the live
@@ -7922,13 +8466,18 @@ window.addEventListener("DOMContentLoaded", async () => {
                 } catch (e) {
                     console.error('Direct login failed:', e);
                     domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
-                    // The unencrypted account couldn't be loaded — this
-                    // is not a wrong-PIN scenario (no PIN exists), it's
-                    // a "stored key unreadable" failure. Surfacing the
-                    // PIN screen would just loop the user through PIN
-                    // entry that can't succeed. Instead, show the error
-                    // and bounce back to the Create / Login screen so
-                    // they can re-import or create fresh.
+                    // Bunker-unreachable case: offer re-authorization
+                    // instead of bouncing the user to the start screen.
+                    // The account stays intact, only the pairing needs
+                    // refreshing in the signer app.
+                    const handled = typeof window.handleBunkerLoginError === 'function'
+                        ? await window.handleBunkerLoginError(e)
+                        : false;
+                    if (handled) return; // reauth UI is now driving
+                    // Generic failure path — the unencrypted account couldn't
+                    // be loaded. Surface the error and bounce back to the
+                    // Create / Login screen so they can re-import or create
+                    // fresh.
                     await popupConfirm(
                         'Could not load your account',
                         String(e),
@@ -7982,6 +8531,38 @@ window.addEventListener("DOMContentLoaded", async () => {
         // phrase, the active-account-from-marker context no longer applies.
         loginPicker.hide();
     };
+    // Bunker form helpers (renderQrInto, startBunkerSession, showBunkerForm,
+    // hideBunkerForm) are now defined at module scope, near the DOM-ref
+    // block — they need to be accessible to the boot-time login catch which
+    // runs before this DOMContentLoaded handler reaches button wiring.
+    // hideBunkerForm hoisted to module scope; window.hideBunkerForm assigned there.
+    if (domLoginBunkerStartBtn) {
+        // Lives inside the Login screen (not the entry screen). Bunker is a
+        // login flow — your signer *is* the identity, so there's no "create"
+        // path. Surfacing it as a secondary action under the nsec/seed input
+        // keeps the entry screen clean for the 98% of users who don't run a
+        // remote signer.
+        domLoginBunkerStartBtn.onclick = showBunkerForm;
+    }
+    if (domLoginBunkerCopyBtn) {
+        domLoginBunkerCopyBtn.onclick = async () => {
+            if (!strBunkerNostrConnectUrl) return;
+            try {
+                await navigator.clipboard.writeText(strBunkerNostrConnectUrl);
+                domLoginBunkerCopyBtn.classList.add('copied');
+                domLoginBunkerCopyBtn.textContent = 'Copied — paste in your signer';
+                setTimeout(() => {
+                    domLoginBunkerCopyBtn.classList.remove('copied');
+                    domLoginBunkerCopyBtn.textContent = 'Copy connection link';
+                }, 2500);
+            } catch (err) {
+                if (domLoginBunkerStatus) {
+                    domLoginBunkerStatus.textContent = 'Could not copy to clipboard';
+                    domLoginBunkerStatus.className = 'login-bunker-status error';
+                }
+            }
+        };
+    }
     domLoginBackBtn.onclick = async () => {
         // Add Profile flow back has two cases — independent of which sub-
         // screen the user happens to be on (start / import / encryption /
@@ -8015,6 +8596,36 @@ window.addEventListener("DOMContentLoaded", async () => {
             window.location.reload();
             return;
         }
+        // If the bunker form was visible, the user is bailing out of a
+        // staged-but-not-committed session — drain it on the backend so the
+        // next attempt doesn't see a leaked NOSTR_CLIENT. No-op when no
+        // staged session exists.
+        const wasOnBunkerForm = domLoginBunker
+            && !domLoginBunker.classList.contains('is-hidden')
+            && domLoginBunker.style.display !== 'none';
+        if (wasOnBunkerForm) {
+            invoke('cancel_bunker_session').catch((err) => {
+                console.warn('[back] cancel_bunker_session failed:', err);
+            });
+        }
+        // Reauth path: we're inside an active session, came from Settings /
+        // Chats. Restore the panel the user was on; don't fall through to
+        // the login-start picker.
+        if (wasOnBunkerForm && bunkerReauthOrigin) {
+            const origin = bunkerReauthOrigin;
+            hideBunkerForm();
+            if (domLoginBackBar) domLoginBackBar.style.display = 'none';
+            const loginForm = document.getElementById('login-form');
+            if (loginForm) loginForm.classList.remove('has-back-bar');
+            if (domLogin) domLogin.style.display = 'none';
+            bunkerReauthOrigin = null;
+            if (origin === 'settings' && typeof openSettings === 'function') {
+                openSettings();
+            } else if (typeof closeChat === 'function') {
+                closeChat();
+            }
+            return;
+        }
         // Regular login back: collapse every sub-screen back to the start
         // picker. Encrypt + welcome were missing here, which is what made
         // the post-commit Add Profile case render two panels at once.
@@ -8022,6 +8633,7 @@ window.addEventListener("DOMContentLoaded", async () => {
         domLoginInvite.style.display = 'none';
         domLoginEncrypt.style.display = 'none';
         domLoginWelcome.style.display = 'none';
+        hideBunkerForm();
         domLoginBackBar.style.display = 'none';
         domLoginStart.style.display = '';
         domLoginInput.value = '';
@@ -8044,8 +8656,13 @@ window.addEventListener("DOMContentLoaded", async () => {
             // before importing the new key.
             if (addAccountFlow.active) await addAccountFlow.commit();
 
-            const { public: pubKey } = await invoke("login", { importKey: domLoginInput.value.trim() });
+            const { public: pubKey, existing } = await invoke("login", { importKey: domLoginInput.value.trim() });
             strPubkey = pubKey;
+
+            // Pasted key matches an account already on disk; the backend has
+            // armed `session_reload` to swap into it. Skip the encryption-
+            // setup flow — the boot path will load the stored credentials.
+            if (existing) return;
 
             // Connect to Nostr
             await invoke("connect");
@@ -8056,6 +8673,58 @@ window.addEventListener("DOMContentLoaded", async () => {
             // Display the backend error
             popupConfirm(e, '', true, '', 'vector_warning.svg');
         }
+    }
+    if (domLoginBunkerConnectBtn) {
+        domLoginBunkerConnectBtn.onclick = async () => {
+            const url = (domLoginBunkerUrlInput?.value || '').trim();
+            if (!url.toLowerCase().startsWith('bunker://')) {
+                domLoginBunkerStatus.textContent = 'Must start with bunker://';
+                domLoginBunkerStatus.className = 'login-bunker-status error';
+                return;
+            }
+            // Disable inputs while the bunker handshake runs (5–10s typical
+            // while the user taps "approve" on their signer). Re-enable on
+            // failure so they can retry without leaving the screen.
+            const _disable = (v) => {
+                domLoginBunkerConnectBtn.disabled = v;
+                domLoginBunkerUrlInput.disabled = v;
+                domLoginBunkerStartBtn && (domLoginBunkerStartBtn.disabled = v);
+                if (domLoginBunkerCopyBtn) domLoginBunkerCopyBtn.disabled = v;
+            };
+            _disable(true);
+            domLoginBunkerStatus.textContent = 'Connecting to signer…';
+            domLoginBunkerStatus.className = 'login-bunker-status connecting';
+            try {
+                if (addAccountFlow.active) await addAccountFlow.commit();
+                const { public: pubKey, existing } = await invoke('connect_bunker', {
+                    bunkerUrl: url,
+                });
+                strPubkey = pubKey;
+                domLoginBunkerUrlInput.value = '';
+                if (existing) {
+                    // Bunker identity matches an existing account; backend has
+                    // armed `session_reload`. Just hide the form — the document
+                    // reload will switch into the stored account.
+                    domLoginBunkerStatus.textContent = 'Account already added — switching…';
+                    domLoginBunkerStatus.className = 'login-bunker-status online';
+                    hideBunkerForm();
+                    return;
+                }
+                domLoginBunkerStatus.textContent = 'Connected. Choosing security…';
+                domLoginBunkerStatus.className = 'login-bunker-status online';
+                // UI advances first; relay connect runs in the background so a
+                // hang there doesn't strand the user on the bunker screen.
+                hideBunkerForm();
+                openEncryptionFlow(false);
+                invoke('connect').catch((err) => {
+                    console.warn('[connect_bunker] connect() failed:', err);
+                });
+            } catch (e) {
+                domLoginBunkerStatus.textContent = String(e);
+                domLoginBunkerStatus.className = 'login-bunker-status error';
+                _disable(false);
+            }
+        };
     }
     domChatBackBtn.onclick = closeChat;
     domChatBookmarksBtn.onclick = () => {
@@ -8842,6 +9511,16 @@ domChatMessageInput.oninput = async () => {
         e.stopPropagation();
         popupConfirm('Logout', 'Logout will erase the local database and remove all stored keys. You will lose access to group chats unless you have a backup.', true);
     };
+
+    if (domRemoteSignerReauthBtn) {
+        domRemoteSignerReauthBtn.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (typeof window.showBunkerForm === 'function') {
+                window.showBunkerForm('reauth');
+            }
+        };
+    }
 
     // Donors & Contributors info button
     domSettingsDonorsInfo.onclick = (e) => {

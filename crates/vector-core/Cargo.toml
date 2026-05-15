@@ -9,6 +9,11 @@ description = "Core library for Vector — the single source of truth for all Ve
 nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "zeroize-secretkey" }
 nostr-sdk = { version = "0.44.1", features = ["nip06", "nip44", "nip59"] }
 nostr-blossom = "0.44.0"
+# NIP-46 (Nostr Connect / Remote Signing). Same fork as `nostr` so the
+# transitive nostr type identity lines up — pulling from crates.io would pin
+# upstream nostr through the patch table, but using the fork explicitly keeps
+# the resolver from juggling two branches of the same workspace.
+nostr-connect = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "zeroize-secretkey" }
 bip39 = { version = "2.2.2", features = ["rand"] }
 
 # Database

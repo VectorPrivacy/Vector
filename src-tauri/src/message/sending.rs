@@ -25,7 +25,7 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use crate::mls::MlsService;
 use crate::util::{bytes_to_hex_string, hex_string_to_bytes};
 use crate::util::calculate_file_hash;
-use crate::STATE;
+use crate::{STATE, nostr_client};
 use crate::util;
 use crate::TAURI_APP;
 use crate::miniapps::realtime::{generate_topic_id, encode_topic_id};
@@ -399,8 +399,14 @@ pub async fn delete_failed_message(message_id: String) -> Result<(), String> {
             .filter_map(|a| if a.url.is_empty() { None } else { Some(a.url.to_string()) })
             .collect();
         if !remote_urls.is_empty() {
-            if let Some(keys) = crate::MY_SECRET_KEY.to_keys() {
-                vector_core::blossom::delete_blobs_best_effort(keys, remote_urls);
+            // Best-effort blob cleanup — route through the active client
+            // signer so bunker users sign auth events under their identity
+            // instead of the client-key (which would fail with the server's
+            // pubkey check).
+            if let Some(client) = nostr_client() {
+                if let Ok(signer) = client.signer().await {
+                    vector_core::blossom::delete_blobs_best_effort(signer, remote_urls);
+                }
             }
         }
 
@@ -615,8 +621,12 @@ async fn encrypt_and_upload_mls_media(
         .encrypt_for_upload_with_options(&file.bytes, &mdk_mime_type, filename, &options)
         .map_err(|e| format!("MIP-04 encryption failed: {}", e))?;
 
-    // Upload the encrypted data to Blossom
-    let signer = crate::MY_SECRET_KEY.to_keys().expect("Keys not initialized");
+    // Upload the encrypted data to Blossom. Route through the active
+    // client signer so the auth event is signed by the user's identity
+    // (works for both local and bunker accounts).
+    let client = nostr_client().ok_or("Not connected")?;
+    let signer = client.signer().await
+        .map_err(|e| format!("Signer unavailable: {}", e))?;
     let servers = crate::get_blossom_servers();
 
     let url = crate::blossom::upload_blob_with_progress_and_failover(

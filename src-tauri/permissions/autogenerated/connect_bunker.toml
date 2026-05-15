@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-connect-bunker"
+description = "Enables the connect_bunker command without any pre-configured scope."
+commands.allow = ["connect_bunker"]
+
+[[permission]]
+identifier = "deny-connect-bunker"
+description = "Denies the connect_bunker command without any pre-configured scope."
+commands.deny = ["connect_bunker"]

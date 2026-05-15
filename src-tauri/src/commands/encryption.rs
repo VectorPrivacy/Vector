@@ -100,6 +100,9 @@ pub struct BootEncryptionInfo {
     pub account_exists: bool,
     pub enabled: bool,
     pub security_type: String,
+    /// "local" or "bunker". Lets the frontend tweak loading copy ("Connecting
+    /// to Signer…" instead of "Connecting…") for bunker accounts at boot.
+    pub signer_type: String,
 }
 
 #[command]
@@ -145,6 +148,7 @@ pub fn get_encryption_and_key<R: Runtime>(handle: AppHandle<R>) -> Result<BootEn
             account_exists: false,
             enabled: false,
             security_type: "pin".to_string(),
+            signer_type: "local".to_string(),
         });
     }
     let _ = handle;
@@ -194,7 +198,10 @@ pub fn get_encryption_and_key<R: Runtime>(handle: AppHandle<R>) -> Result<BootEn
         "pin".to_string()
     };
 
-    Ok(BootEncryptionInfo { account_exists: true, enabled, security_type })
+    let signer_type = vector_core::db::get_signer_type()
+        .unwrap_or_else(|_| "local".to_string());
+
+    Ok(BootEncryptionInfo { account_exists: true, enabled, security_type, signer_type })
 }
 
 /// Disable encryption - bulk decrypt all encrypted content
