@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-emoji-crop-and-reencode"
+description = "Enables the emoji_crop_and_reencode command without any pre-configured scope."
+commands.allow = ["emoji_crop_and_reencode"]
+
+[[permission]]
+identifier = "deny-emoji-crop-and-reencode"
+description = "Denies the emoji_crop_and_reencode command without any pre-configured scope."
+commands.deny = ["emoji_crop_and_reencode"]

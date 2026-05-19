@@ -536,3 +536,198 @@ fn extract_frame(f: image::Frame) -> (image::RgbaImage, u32) {
     let dur = if denom == 0 { 100 } else { (numer / denom).max(20) };
     (f.into_buffer(), dur)
 }
+
+// ============================================================================
+// Crop + re-encode
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct EmojiCropInput {
+    pub bytes: Vec<u8>,
+    pub mime: String,
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// Crop an image to a square region and re-encode in the same format.
+/// Supports PNG, JPEG, static WebP, GIF, and animated WebP. Animated
+/// formats decode per-frame, crop each, then re-encode with the
+/// original per-frame durations preserved.
+///
+/// `x`/`y`/`w`/`h` are source-pixel coords. Crop must be square (the
+/// frontend enforces 1:1 lock); we sanity-check anyway.
+#[tauri::command]
+pub async fn emoji_crop_and_reencode(input: EmojiCropInput) -> Result<Vec<u8>, String> {
+    if input.w != input.h {
+        return Err("crop must be square".to_string());
+    }
+    if input.w == 0 {
+        return Err("crop must be non-empty".to_string());
+    }
+    if input.bytes.len() > MAX_EMOJI_BYTES * 4 {
+        // Source is allowed to be larger than the output cap — we'll
+        // shrink during re-encode — but reject ridiculous inputs early.
+        return Err("source too large".to_string());
+    }
+
+    tokio::task::spawn_blocking(move || crop_and_reencode_blocking(input))
+        .await
+        .map_err(|e| format!("crop join: {}", e))?
+}
+
+fn crop_and_reencode_blocking(input: EmojiCropInput) -> Result<Vec<u8>, String> {
+    let EmojiCropInput { bytes, mime, x, y, w, h } = input;
+    let mime = mime.to_lowercase();
+
+    let format = if mime.contains("jpeg") || mime.contains("jpg") {
+        "jpeg"
+    } else if mime.contains("png") {
+        "png"
+    } else if mime.contains("gif") {
+        "gif"
+    } else if mime.contains("webp") {
+        // Animated WebP routes to the dedicated AnimEncoder round-trip;
+        // detect via libwebp itself rather than a header sniff so we
+        // catch single-frame-anim edge cases correctly.
+        if let Ok(anim) = webp::AnimDecoder::new(&bytes).decode() {
+            if anim.has_animation() {
+                return crop_animated_webp(&bytes, x, y, w, h);
+            }
+        }
+        "webp"
+    } else {
+        return Err(format!("unsupported mime: {}", mime));
+    };
+
+    if format == "gif" {
+        return crop_gif(&bytes, x, y, w, h);
+    }
+
+    let dynimg = image::ImageReader::new(Cursor::new(&bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("sniff: {}", e))?
+        .decode()
+        .map_err(|e| format!("decode: {}", e))?;
+    let (sw, sh) = (dynimg.width(), dynimg.height());
+    validate_crop_bounds(x, y, w, h, sw, sh)?;
+    let cropped = dynimg.crop_imm(x, y, w, h).to_rgba8();
+    encode_static(&cropped, format)
+}
+
+fn crop_animated_webp(bytes: &[u8], x: u32, y: u32, w: u32, h: u32) -> Result<Vec<u8>, String> {
+    // Reuse the existing libwebp-based decoder — it already returns
+    // fully-composed RGBA frames with per-frame deltas (the spec's
+    // disposal + blend logic is handled inside libwebp).
+    let frames = decode_webp_frames(bytes)?;
+    if frames.is_empty() {
+        return Err("webp: no frames".to_string());
+    }
+    let (fw, fh) = (frames[0].0.width(), frames[0].0.height());
+    validate_crop_bounds(x, y, w, h, fw, fh)?;
+
+    // Crop ahead of encoder construction so each AnimFrame's borrow of
+    // the pixel buffer outlives `add_frame`.
+    let cropped: Vec<(Vec<u8>, u32)> = frames
+        .into_iter()
+        .map(|(rgba, duration)| {
+            let img = image::imageops::crop_imm(&rgba, x, y, w, h).to_image();
+            (img.into_raw(), duration.max(20))
+        })
+        .collect();
+
+    let mut config = webp::WebPConfig::new().map_err(|_| "webp config init failed".to_string())?;
+    config.quality = 80.0;
+    let mut encoder = webp::AnimEncoder::new(w, h, &config);
+    encoder.set_loop_count(0);
+
+    // libwebp wants cumulative end-of-frame timestamps (not per-frame
+    // deltas). Decoder gives us deltas, so re-accumulate here.
+    let mut cumulative: i32 = 0;
+    for (pixels, duration) in &cropped {
+        cumulative = cumulative.saturating_add(*duration as i32);
+        let frame = webp::AnimFrame::from_rgba(pixels, w, h, cumulative);
+        encoder.add_frame(frame);
+    }
+
+    let mem = encoder
+        .try_encode()
+        .map_err(|e| format!("webp anim encode: {:?}", e))?;
+    Ok(mem.to_vec())
+}
+
+fn crop_gif(bytes: &[u8], x: u32, y: u32, w: u32, h: u32) -> Result<Vec<u8>, String> {
+    let frames = decode_gif_frames(bytes)?;
+    if frames.is_empty() {
+        return Err("gif: no frames".to_string());
+    }
+    let (fw, fh) = (frames[0].0.width(), frames[0].0.height());
+    validate_crop_bounds(x, y, w, h, fw, fh)?;
+
+    let mut out = Vec::new();
+    {
+        // Speed 10 = fastest encode at lowest CPU. Emoji-scale GIFs are
+        // small enough that quality difference vs default is negligible.
+        let mut encoder = image::codecs::gif::GifEncoder::new_with_speed(&mut out, 10);
+        encoder
+            .set_repeat(image::codecs::gif::Repeat::Infinite)
+            .map_err(|e| format!("gif repeat: {}", e))?;
+        for (rgba, duration_ms) in frames {
+            let cropped = image::imageops::crop_imm(&rgba, x, y, w, h).to_image();
+            let delay = image::Delay::from_numer_denom_ms(duration_ms.max(20), 1);
+            let frame = image::Frame::from_parts(cropped, 0, 0, delay);
+            encoder
+                .encode_frame(frame)
+                .map_err(|e| format!("gif frame: {}", e))?;
+        }
+    }
+    Ok(out)
+}
+
+fn validate_crop_bounds(x: u32, y: u32, w: u32, h: u32, sw: u32, sh: u32) -> Result<(), String> {
+    if x.saturating_add(w) > sw || y.saturating_add(h) > sh {
+        return Err("crop outside source bounds".to_string());
+    }
+    Ok(())
+}
+
+fn encode_static(rgba: &image::RgbaImage, format: &str) -> Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity((rgba.width() * rgba.height()) as usize);
+    match format {
+        "png" => {
+            image::codecs::png::PngEncoder::new_with_quality(
+                &mut out,
+                image::codecs::png::CompressionType::Best,
+                image::codecs::png::FilterType::Adaptive,
+            )
+            .write_image(rgba.as_raw(), rgba.width(), rgba.height(), image::ExtendedColorType::Rgba8)
+            .map_err(|e| format!("png encode: {}", e))?;
+        }
+        "jpeg" => {
+            // JPEG has no alpha — composite onto white before encode so
+            // transparent regions don't render as random noise.
+            let mut rgb = image::RgbImage::new(rgba.width(), rgba.height());
+            for (dst, src) in rgb.pixels_mut().zip(rgba.pixels()) {
+                let a = src.0[3] as u32;
+                let inv = 255 - a;
+                dst.0[0] = ((src.0[0] as u32 * a + 255 * inv) / 255) as u8;
+                dst.0[1] = ((src.0[1] as u32 * a + 255 * inv) / 255) as u8;
+                dst.0[2] = ((src.0[2] as u32 * a + 255 * inv) / 255) as u8;
+            }
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 88)
+                .write_image(rgb.as_raw(), rgb.width(), rgb.height(), image::ExtendedColorType::Rgb8)
+                .map_err(|e| format!("jpeg encode: {}", e))?;
+        }
+        "webp" => {
+            // Static WebP via libwebp — much smaller than image-webp's
+            // lossless-only encoder for natural images.
+            let encoder = webp::Encoder::from_rgba(rgba.as_raw(), rgba.width(), rgba.height());
+            let mem = encoder.encode(88.0);
+            out.extend_from_slice(&mem);
+        }
+        _ => return Err(format!("encode: unsupported format {}", format)),
+    }
+    Ok(out)
+}
+

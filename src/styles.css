@@ -4109,6 +4109,148 @@ img.emoji-img-loading {
   border-color: #ff4a8a;
   color: #ff4a8a;
 }
+/* Pack creator cropper overlay — square-crop UX for non-square static
+   uploads. Mirrors the confirm overlay's chrome (backdrop, body, action
+   buttons). Stage is a centered display rect; the crop box uses a
+   massive outset box-shadow as the "darken outside" mask. */
+.emoji-pack-creator-cropper {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: rgba(8, 8, 8, 0.86);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border: 2px solid rgba(255, 255, 255, 0.12);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 60;
+  padding: 12px;
+  box-sizing: border-box;
+}
+.emoji-pack-creator-cropper[hidden] { display: none; }
+.emoji-pack-creator-cropper-body {
+  text-align: center;
+  width: 100%;
+  max-width: 320px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.emoji-pack-creator-cropper-title {
+  font-size: 16px;
+  font-weight: 800;
+  margin: 0;
+  color: #fff;
+}
+.emoji-pack-creator-cropper-hint {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+  margin: 0;
+}
+.emoji-pack-creator-cropper-stage {
+  position: relative;
+  width: 100%;
+  height: 200px;
+  overflow: hidden;
+  border-radius: 10px;
+  background: #050505;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  /* Crosshair hints at the marquee-draw gesture for pointerdowns
+     outside the current box. Box has its own `cursor: move` and the
+     handles their own resize cursors — both win over this. */
+  cursor: crosshair;
+}
+.emoji-pack-creator-cropper-img {
+  position: absolute;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
+}
+.emoji-pack-creator-cropper-box {
+  position: absolute;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);
+  box-sizing: border-box;
+  cursor: move;
+  /* Disable WebView's tap-highlight + native gesture interception so
+     pointermove fires cleanly during a drag. */
+  -webkit-tap-highlight-color: transparent;
+}
+.epcc-handle {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  background: #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.55);
+  /* Hit-target is larger than the visible dot — easier on touch. */
+}
+.epcc-handle::after {
+  content: '';
+  position: absolute;
+}
+/* Hit-target expands only OUTWARD from the corner. Expanding inward
+   would eat the box's middle on tiny crops and steal the move-drag. */
+.epcc-handle-tl { top: -7px; left: -7px; cursor: nwse-resize; }
+.epcc-handle-tr { top: -7px; right: -7px; cursor: nesw-resize; }
+.epcc-handle-bl { bottom: -7px; left: -7px; cursor: nesw-resize; }
+.epcc-handle-br { bottom: -7px; right: -7px; cursor: nwse-resize; }
+.epcc-handle-tl::after { inset: -10px 0     0     -10px; }
+.epcc-handle-tr::after { inset: -10px -10px 0     0;     }
+.epcc-handle-bl::after { inset: 0     0     -10px -10px; }
+.epcc-handle-br::after { inset: 0     -10px -10px 0;     }
+/* Live post-crop preview chip — pinned to the top-right of the stage,
+   above the dark mask. Background-image trick: the full source image
+   is set as the background and we offset/scale it via JS so the chip
+   always renders the same square the user is about to commit. */
+.epcc-preview {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 48px;
+  height: 48px;
+  background: #050505 center / cover no-repeat;
+  border: 1px solid rgba(0, 0, 0, 0.3);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+  z-index: 2;
+}
+.emoji-pack-creator-cropper-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 4px;
+}
+.emoji-pack-creator-cropper-cancel,
+.emoji-pack-creator-cropper-ok {
+  background-color: rgba(20, 20, 20, 0.85);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  padding: 8px 20px;
+  border-radius: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+.emoji-pack-creator-cropper-ok {
+  background-color: rgba(89, 252, 179, 0.18);
+  border-color: var(--icon-color-primary);
+  color: var(--icon-color-primary);
+}
+.emoji-pack-creator-cropper-cancel:hover { border-color: rgba(255, 255, 255, 0.28); background-color: #2a2a2a; }
+.emoji-pack-creator-cropper-ok:hover     { background-color: rgba(89, 252, 179, 0.30); }
+.emoji-pack-creator-cropper-ok[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .emoji-pack-creator-confirm-cancel:hover { border-color: rgba(255, 255, 255, 0.28); background-color: #2a2a2a; }
 .emoji-pack-creator-confirm-ok:hover     { background-color: rgba(89, 252, 179, 0.30); }
 .emoji-pack-creator-confirm[data-tone="danger"] .emoji-pack-creator-confirm-ok:hover {

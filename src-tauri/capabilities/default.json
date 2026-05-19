@@ -97,6 +97,7 @@
     "allow-emoji-pack-delete",
     "allow-emoji-pack-delete-blob",
     "allow-emoji-pack-upload-image",
+    "allow-emoji-crop-and-reencode",
     "allow-setup-encryption",
     "allow-skip-encryption",
     "allow-notifs",

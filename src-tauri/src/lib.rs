@@ -718,6 +718,7 @@ pub fn run() {
             commands::emoji_packs::emoji_pack_delete,
             commands::emoji_packs::emoji_pack_delete_blob,
             commands::emoji_packs::emoji_pack_upload_image,
+            commands::emoji_packs::emoji_crop_and_reencode,
             #[cfg(debug_assertions)]
             commands::account::debug_hot_reload_sync,
             commands::account::logout,

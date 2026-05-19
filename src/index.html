@@ -299,6 +299,31 @@
     </div>
   </div>
 
+  <!-- Pack Creator cropper overlay — square 1:1 crop for non-square
+       static uploads (PNG/JPEG/static-WebP). Animated formats (GIF /
+       animated WebP) skip this and keep the existing square-or-reject
+       path. Promise-based via _pcShowCropper(). -->
+  <div class="emoji-pack-creator-cropper" id="emoji-pack-creator-cropper" hidden>
+    <div class="emoji-pack-creator-cropper-body">
+      <p class="emoji-pack-creator-cropper-title">Crop to square</p>
+      <p class="emoji-pack-creator-cropper-hint">Drag to move. Drag a corner to resize.</p>
+      <div class="emoji-pack-creator-cropper-stage" id="emoji-pack-creator-cropper-stage">
+        <img class="emoji-pack-creator-cropper-img" id="emoji-pack-creator-cropper-img" alt="">
+        <div class="emoji-pack-creator-cropper-box" id="emoji-pack-creator-cropper-box">
+          <div class="epcc-handle epcc-handle-tl" data-handle="tl"></div>
+          <div class="epcc-handle epcc-handle-tr" data-handle="tr"></div>
+          <div class="epcc-handle epcc-handle-bl" data-handle="bl"></div>
+          <div class="epcc-handle epcc-handle-br" data-handle="br"></div>
+        </div>
+        <div class="epcc-preview" id="emoji-pack-creator-cropper-preview" aria-hidden="true"></div>
+      </div>
+      <div class="emoji-pack-creator-cropper-actions">
+        <button type="button" class="emoji-pack-creator-cropper-cancel btn" id="emoji-pack-creator-cropper-cancel">CANCEL</button>
+        <button type="button" class="emoji-pack-creator-cropper-ok btn" id="emoji-pack-creator-cropper-ok">CROP</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Pack Creator error overlay — must live INSIDE .emoji-picker
        so the click-outside-to-close handler doesn't fire when the user
        hits "Try Again". Copy is variant-driven via _pcShow*Error(). -->
