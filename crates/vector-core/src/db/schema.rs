@@ -484,5 +484,47 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // =========================================================================
+    // Migration 28: NIP-30 / NIP-51 custom emoji packs
+    // =========================================================================
+    // `emoji_packs`           — kind 30030 sets (own + subscribed), one row per addr.
+    // `emoji_pack_items`      — flattened emoji rows per pack; CASCADE deletes follow.
+    // `emoji_pack_subscriptions` — local mirror of kind 10030 `a` tags; fast startup
+    //                              read without re-fetching from relays.
+    run_atomic_migration(conn, 28, "Create emoji pack tables", |tx| {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS emoji_packs (
+                addr        TEXT PRIMARY KEY,
+                pubkey      TEXT NOT NULL,
+                identifier  TEXT NOT NULL,
+                title       TEXT NOT NULL DEFAULT '',
+                image_url   TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL DEFAULT '',
+                is_own      INTEGER NOT NULL DEFAULT 0,
+                updated_at  INTEGER NOT NULL,
+                raw_event   TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_emoji_packs_pubkey ON emoji_packs(pubkey);
+            CREATE INDEX IF NOT EXISTS idx_emoji_packs_is_own ON emoji_packs(is_own);
+
+            CREATE TABLE IF NOT EXISTS emoji_pack_items (
+                pack_addr  TEXT NOT NULL,
+                shortcode  TEXT NOT NULL,
+                url        TEXT NOT NULL,
+                sha256     TEXT,
+                position   INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (pack_addr, shortcode),
+                FOREIGN KEY (pack_addr) REFERENCES emoji_packs(addr) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_emoji_pack_items_pack ON emoji_pack_items(pack_addr, position);
+
+            CREATE TABLE IF NOT EXISTS emoji_pack_subscriptions (
+                addr           TEXT PRIMARY KEY,
+                subscribed_at  INTEGER NOT NULL
+            );"
+        ).map_err(|e| format!("Failed to create emoji pack tables: {}", e))?;
+        Ok(())
+    })?;
+
     Ok(())
 }

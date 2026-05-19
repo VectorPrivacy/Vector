@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-fetch-emoji-pack-by-naddr"
+description = "Enables the fetch_emoji_pack_by_naddr command without any pre-configured scope."
+commands.allow = ["fetch_emoji_pack_by_naddr"]
+
+[[permission]]
+identifier = "deny-fetch-emoji-pack-by-naddr"
+description = "Denies the fetch_emoji_pack_by_naddr command without any pre-configured scope."
+commands.deny = ["fetch_emoji_pack_by_naddr"]

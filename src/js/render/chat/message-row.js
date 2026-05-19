@@ -170,17 +170,38 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
 
     // Defensive: msg.content can be null/undefined for attachment-only messages.
     const safeContent = msg.content || '';
-    const strEmojiCleaned = safeContent.replace(/\s/g, '');
+
+    // Strip resolved `:shortcode:` tokens before the unicode-only check so
+    // a message that's purely custom emojis (or a mix with stock emojis)
+    // still qualifies for the jumbo emoji-only treatment.
+    const emojiTagSet = (msg.emoji_tags && msg.emoji_tags.length)
+        ? new Set(msg.emoji_tags.map(t => t.shortcode))
+        : null;
+    let customEmojiCount = 0;
+    let strippedContent = safeContent;
+    if (emojiTagSet) {
+        strippedContent = safeContent.replace(/:([a-zA-Z0-9_-]+):/g, (m, code) => {
+            if (emojiTagSet.has(code)) {
+                customEmojiCount++;
+                return '';
+            }
+            return m;
+        });
+    }
+    const strEmojiCleaned = strippedContent.replace(/\s/g, '');
     // Cap at 6 graphemes, not UTF-16 units — fully-qualified ZWJ sequences
     // (e.g. 👁️‍🗨️ = 7 code units) are still a single visual emoji.
-    let graphemeCount = 0;
+    let graphemeCount = customEmojiCount;
     if (strEmojiCleaned) {
         const seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
         for (const _ of seg.segment(strEmojiCleaned)) {
             if (++graphemeCount > 6) break;
         }
     }
-    const fEmojiOnly = strEmojiCleaned && isEmojiOnly(strEmojiCleaned) && graphemeCount <= 6;
+    const remainderIsEmojiOnly = !strEmojiCleaned || isEmojiOnly(strEmojiCleaned);
+    const fEmojiOnly = graphemeCount > 0
+        && graphemeCount <= 6
+        && remainderIsEmojiOnly;
 
     const textSpan = _dmsgBuildText(msg, displayContent, fEmojiOnly, isGroupChat, currentChat, isRevealedBlockedMsg);
     if (textSpan && (textSpan.textContent || textSpan.querySelector('img,video'))) {
@@ -206,6 +227,11 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
     const cAddress = detectCryptoAddress(msg.content);
     if (cAddress) {
         content.appendChild(renderCryptoAddress(cAddress));
+    }
+
+    // ---- Emoji pack preview (NIP-19 naddr → NIP-30 kind 30030) -------------
+    if (msg.content && typeof renderEmojiPackPreviews === 'function') {
+        renderEmojiPackPreviews(content, msg.content);
     }
 
     // ---- Nostr profile preview ---------------------------------------------
@@ -472,17 +498,36 @@ function _dmsgBuildText(msg, displayContent, fEmojiOnly, isGroupChat, currentCha
         span.textContent = displayContent;
         span.style.whiteSpace = 'pre-wrap';
         span.classList.add('dmsg-emoji-only');
+        // Custom-emoji shortcodes still need swapping to <img>; the jumbo
+        // sizing rule (.dmsg-emoji-only .custom-emoji-inline) takes it from
+        // there.
+        if (msg.emoji_tags && msg.emoji_tags.length) {
+            renderCustomEmojiShortcodes(span, msg.emoji_tags);
+        }
         return span;
     }
 
+    // NIP-19 naddrs for emoji packs are rendered as a preview card; strip
+    // the bech32 string so it doesn't double up as a long unreadable line.
+    let textBody = (displayContent || '').trim();
+    if (typeof stripEmojiPackNaddrs === 'function') {
+        textBody = stripEmojiPackNaddrs(textBody);
+    }
     // Defensive: displayContent can be null/undefined for attachment-only messages.
-    span.innerHTML = parseMarkdown((displayContent || '').trim());
+    span.innerHTML = parseMarkdown(textBody);
     linkifyUrls(span);
     if (!isRevealedBlockedMsg) processInlineImages(span);
 
     const senderNpub = msg.mine ? strPubkey : (msg.npub || '');
     const senderIsAdmin = isGroupChat && currentChat?.metadata?.admins?.includes(senderNpub);
     renderMentions(span, senderIsAdmin);
+
+    // NIP-30 custom emojis ride along on the rumor; resolve them before
+    // the parent pass runs twemoji so a `:smile:` from a pack doesn't get
+    // mistaken for stray punctuation.
+    if (!isRevealedBlockedMsg && msg.emoji_tags && msg.emoji_tags.length) {
+        renderCustomEmojiShortcodes(span, msg.emoji_tags);
+    }
 
     return span;
 }
@@ -942,6 +987,16 @@ function _dmsgRenderUndownloadedAttachment(target, msg, sender, isGroupChat, cAt
 }
 
 function _dmsgBuildLinkPreview(msg) {
+    // Emoji-pack share URLs already render via the rich pack preview
+    // card (built by `renderEmojiPackPreviews`); skipping both the OG
+    // fetch and the OG render prevents the duplicate website-style
+    // card from stacking under the pack preview.
+    const isPackShareUrl = (url) => typeof url === 'string'
+        && /https?:\/\/(?:www\.)?vectorapp\.io\/emojis\/pack\//i.test(url);
+    if (msg.preview_metadata && isPackShareUrl(msg.preview_metadata.og_url)) {
+        return null;
+    }
+
     const hasMetadata = msg.preview_metadata && (
         msg.preview_metadata.og_image
         || msg.preview_metadata.og_title
@@ -952,7 +1007,12 @@ function _dmsgBuildLinkPreview(msg) {
 
     if (!hasMetadata) {
         if (!msg.preview_metadata && msg.content) {
-            const contentForPreview = msg.content.replace(/<https?:\/\/[^\s>]+>/g, '');
+            // Strip pack-share URLs + bare naddrs before deciding whether
+            // to ask the backend for OG metadata — a message that's pack-
+            // refs only has no "real" link to preview.
+            const contentForPreview = msg.content
+                .replace(/<https?:\/\/[^\s>]+>/g, '')
+                .replace(/(?:https?:\/\/(?:www\.)?vectorapp\.io\/emojis\/pack\/|nostr:)?naddr1[ac-hj-np-z02-9]{20,}(?:\.html)?\/?/gi, '');
             if (contentForPreview.includes('https') && !isImageUrl(msg.content)) {
                 // Dedupe — every re-render (e.g., reactions update) of a
                 // metadata-less message would otherwise re-fire this invoke.
@@ -1062,26 +1122,64 @@ function _dmsgBuildStatus(msg) {
 function _dmsgBuildReactions(msg) {
     if (!msg.reactions || !msg.reactions.length) return null;
 
-    // Aggregate reactions by emoji, preserving the order of first occurrence.
-    const groups = new Map();  // emoji → { count, mine }
+    // Aggregate reactions by emoji, preserving the order of first
+    // occurrence. Carry through the first non-null `emoji_url` we see
+    // for each emoji so custom-pack reactions render their image even
+    // when the user no longer has the originating pack subscribed.
+    const groups = new Map();  // emoji → { count, mine, url }
     for (const r of msg.reactions) {
-        const g = groups.get(r.emoji) || { count: 0, mine: false };
+        const g = groups.get(r.emoji) || { count: 0, mine: false, url: null };
         g.count += 1;
         if (r.author_id === strPubkey) g.mine = true;
+        if (!g.url && r.emoji_url) g.url = r.emoji_url;
         groups.set(r.emoji, g);
     }
 
     const reactionsRow = document.createElement('div');
     reactionsRow.classList.add('dmsg-reactions');
 
-    for (const [emoji, { count, mine }] of groups) {
+    for (const [emoji, { count, mine, url }] of groups) {
         const span = document.createElement('span');
         span.classList.add('reaction');  // Kept for the global '.reaction' click delegate (toggle-reaction handler in main.js).
         span.setAttribute('data-emoji', emoji);
         span.setAttribute('data-msg-id', msg.id);
         if (mine) span.setAttribute('data-reacted', 'true');
-        span.textContent = `${emoji} ${count}`;
-        twemojify(span);
+
+        // NIP-30 custom-emoji rendering — prefer the URL persisted on the
+        // reaction itself (survives reload + unsubscribe), fall back to a
+        // live lookup against subscribed packs, then to the literal
+        // `:shortcode:` text if neither knows the emoji.
+        let customUrl = url || null;
+        if (!customUrl) {
+            const m = /^:([a-zA-Z0-9_-]+):$/.exec(emoji);
+            if (m && typeof arrEmojiPacks !== 'undefined' && Array.isArray(arrEmojiPacks)) {
+                const sc = m[1];
+                for (const pack of arrEmojiPacks) {
+                    if (!pack.emojis) continue;
+                    const found = pack.emojis.find(e => e.shortcode === sc);
+                    if (found) { customUrl = found.url; break; }
+                }
+            }
+        }
+
+        if (customUrl) {
+            const img = document.createElement('img');
+            // Route reaction emoji bytes through the Rust cache — raw
+            // Blossom URL never lands on <img src>, so Tor traffic stays
+            // contained and repeat renders skip the network entirely.
+            if (typeof bindCachedEmojiImg === 'function') {
+                bindCachedEmojiImg(img, customUrl, 'emoji');
+            } else {
+                img.src = customUrl;
+            }
+            img.alt = emoji;
+            img.className = 'reaction-custom-emoji';
+            span.appendChild(img);
+            span.appendChild(document.createTextNode(` ${count}`));
+        } else {
+            span.textContent = `${emoji} ${count}`;
+            twemojify(span);
+        }
         reactionsRow.appendChild(span);
     }
 
@@ -1196,18 +1294,16 @@ function _dmsgFormatHourMinute(at) {
  */
 function _dmsgInjectReaction(rowEl, spanReaction) {
     if (!rowEl) return;
-    {
-        const emoji = spanReaction.dataset.emoji;
-        let reactionsRow = rowEl.querySelector('.dmsg-reactions');
-        if (!reactionsRow) {
-            // First reaction on this message — create the row + append.
-            reactionsRow = document.createElement('div');
-            reactionsRow.classList.add('dmsg-reactions');
-            reactionsRow.appendChild(spanReaction);
-            const body = rowEl.querySelector('.dmsg-body') || rowEl;
-            body.appendChild(reactionsRow);
-            return;
-        }
+    const emoji = spanReaction.dataset.emoji;
+    let reactionsRow = rowEl.querySelector('.dmsg-reactions');
+    if (!reactionsRow) {
+        // First reaction on this message — create the row + append.
+        reactionsRow = document.createElement('div');
+        reactionsRow.classList.add('dmsg-reactions');
+        reactionsRow.appendChild(spanReaction);
+        const body = rowEl.querySelector('.dmsg-body') || rowEl;
+        body.appendChild(reactionsRow);
+    } else {
         // If a chip for this emoji already exists, bump its count + mark reacted
         // (don't replace — replacing with the decoy chip's count of 1 would lose
         // any prior count from other users reacting with the same emoji).
@@ -1221,20 +1317,25 @@ function _dmsgInjectReaction(rowEl, spanReaction) {
                 countNode.textContent = ` ${count + 1}`;
             }
             existing.setAttribute('data-reacted', 'true');
-            return;
-        }
-        // New emoji — insert BEFORE the trailing "+" add-reaction shortcut so the
-        // chip lands in the same slot it'll occupy after the upcoming message_update
-        // re-render (no visual snap from right-of-+ to left-of-+).
-        const addBtn = reactionsRow.querySelector('.dmsg-reactions-add');
-        if (addBtn) reactionsRow.insertBefore(spanReaction, addBtn);
-        else reactionsRow.appendChild(spanReaction);
-        // If this insert pushed us to the unique-emoji ceiling, drop the "+"
-        // shortcut now so it doesn't linger until message_update re-renders.
-        if (addBtn && reactionsRow.querySelectorAll('.reaction').length >= 8) {
-            addBtn.remove();
+        } else {
+            // New emoji — insert BEFORE the trailing "+" add-reaction shortcut so the
+            // chip lands in the same slot it'll occupy after the upcoming message_update
+            // re-render (no visual snap from right-of-+ to left-of-+).
+            const addBtn = reactionsRow.querySelector('.dmsg-reactions-add');
+            if (addBtn) reactionsRow.insertBefore(spanReaction, addBtn);
+            else reactionsRow.appendChild(spanReaction);
+            // If this insert pushed us to the unique-emoji ceiling, drop the "+"
+            // shortcut now so it doesn't linger until message_update re-renders.
+            if (addBtn && reactionsRow.querySelectorAll('.reaction').length >= 8) {
+                addBtn.remove();
+            }
         }
     }
+    // Reaction chips can grow the row's height (first chip adds a whole
+    // row, wrapped chips bump to a new line). Honour the user's
+    // pinned-to-bottom state — softChatScroll no-ops if they've scrolled
+    // up so this can't snatch focus from someone reading history.
+    if (typeof softChatScroll === 'function') softChatScroll();
 }
 
 // Delegated click handler — replaces per-row inline onclick closures for

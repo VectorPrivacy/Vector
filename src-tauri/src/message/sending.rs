@@ -798,6 +798,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
     // panicking when the session has been swapped out from under us.
     let my_public_key = crate::my_public_key().ok_or("Public key not initialized")?;
 
+    let emoji_tags = vector_core::emoji_packs::resolve_outbound_emoji_tags(&content);
     let msg = Message {
         id: pending_id.as_ref().clone(),
         content,
@@ -816,6 +817,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         wrapper_event_id: None,
         edited: false,
         edit_history: None,
+        emoji_tags,
     };
 
     // Add message to appropriate chat type
@@ -1125,6 +1127,15 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         TagKind::custom("ms"),
         [milliseconds.to_string()],
     ));
+
+    // NIP-30: attach `["emoji", code, url]` tags for every `:shortcode:`
+    // resolved against the user's subscribed packs. Matches the DM path.
+    for et in &msg.emoji_tags {
+        rumor = rumor.tag(Tag::custom(
+            TagKind::custom("emoji"),
+            [et.shortcode.clone(), et.url.clone()],
+        ));
+    }
 
     // Build the rumor with our key (unsigned)
     let built_rumor = rumor.build(my_public_key);

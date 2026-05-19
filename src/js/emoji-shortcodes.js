@@ -91,22 +91,34 @@ function initEmojiShortcodeSelector(textarea, anchorEl) {
             row.className = 'emoji-shortcode-item' + (i === activeIndex ? ' active' : '');
             row.style.animationDelay = (i * 30) + 'ms';
 
-            const twemojiSrc = emojiToTwemojiUrl(item.emoji);
-            if (twemojiSrc) {
+            if (item.isCustom) {
+                // Pack-image icon — straight `<img src=...>` since we
+                // already have a URL. No twemoji indirection.
                 const img = document.createElement('img');
-                img.src = twemojiSrc;
-                img.alt = item.emoji;
+                img.className = 'emoji-shortcode-item-custom';
+                img.src = item.url;
+                img.alt = `:${item.shortcode}:`;
                 row.appendChild(img);
             } else {
-                const fallback = document.createElement('span');
-                fallback.className = 'emoji-shortcode-item-fallback';
-                fallback.textContent = item.emoji;
-                row.appendChild(fallback);
+                const twemojiSrc = emojiToTwemojiUrl(item.emoji);
+                if (twemojiSrc) {
+                    const img = document.createElement('img');
+                    img.src = twemojiSrc;
+                    img.alt = item.emoji;
+                    row.appendChild(img);
+                } else {
+                    const fallback = document.createElement('span');
+                    fallback.className = 'emoji-shortcode-item-fallback';
+                    fallback.textContent = item.emoji;
+                    row.appendChild(fallback);
+                }
             }
 
             const label = document.createElement('span');
             label.className = 'emoji-shortcode-item-label';
-            label.textContent = shortLabel(item.name);
+            label.textContent = item.isCustom
+                ? `:${item.shortcode}:`
+                : shortLabel(item.name);
             row.appendChild(label);
 
             row.addEventListener('mousedown', (e) => {
@@ -126,21 +138,44 @@ function initEmojiShortcodeSelector(textarea, anchorEl) {
             return (typeof getMostUsedEmojis === 'function' ? getMostUsedEmojis() : []).slice(0, 5);
         }
         if (cachedResults[query]) return cachedResults[query];
-        const results = searchEmojis(query).slice(0, 5);
+        // Unified merge by score. Both stock and custom bake personal
+        // usage into their score (`searchEmojis` + `searchCustomEmojis`
+        // share the USAGE_SCORE_WEIGHT constant), so frequently-picked
+        // emojis on either side climb the autocomplete identically.
+        const allCustom = typeof searchCustomEmojis === 'function'
+            ? searchCustomEmojis(query)
+            : [];
+        const stockResults = searchEmojis(query);
+        const results = stockResults.concat(allCustom)
+            .sort((a, b) => (a.score || 0) - (b.score || 0))
+            .slice(0, 5);
         cachedResults[query] = results;
         return results;
     }
 
     function selectItem(item) {
-        // Replace ':query' (or ':query:') with emoji + space
+        // Replace ':query' (or ':query:') with emoji + space. Custom
+        // emojis insert the `:shortcode:` literal — the send pipeline
+        // resolves it against the user's subscribed packs and attaches
+        // the NIP-30 tag.
         const before = textarea.value.substring(0, colonStart);
         const after = textarea.value.substring(textarea.selectionStart);
-        const insert = item.emoji + ' ';
+        const insert = item.isCustom
+            ? `:${item.shortcode}: `
+            : item.emoji + ' ';
         textarea.value = before + insert + after;
         const newPos = colonStart + insert.length;
         textarea.selectionStart = textarea.selectionEnd = newPos;
-        // Increment usage counter on the canonical arrEmojis entry (matches emoji panel behavior)
-        const canonical = typeof arrEmojis !== 'undefined' && arrEmojis.find(e => e.emoji === item.emoji);
+        // Increment usage counter so frequently-used customs (and stock)
+        // rise in the search ranking on future opens.
+        if (item.isCustom) {
+            if (typeof bumpCustomEmojiUsage === 'function') {
+                bumpCustomEmojiUsage(item.shortcode);
+            }
+        }
+        const canonical = !item.isCustom
+            && typeof arrEmojis !== 'undefined'
+            && arrEmojis.find(e => e.emoji === item.emoji);
         if (canonical) {
             canonical.used++;
             if (typeof addToRecentEmojis === 'function') addToRecentEmojis(canonical);

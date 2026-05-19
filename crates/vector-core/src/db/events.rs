@@ -74,15 +74,27 @@ pub async fn save_reaction_event(
     mine: bool,
     wrapper_event_id: Option<String>,
 ) -> Result<(), String> {
+    // Persist the NIP-30 emoji tag alongside the `e` reference so the
+    // image URL survives reload — pure `arrEmojiPacks` lookup would
+    // fail when the user hasn't yet opened the picker or unsubscribed.
+    let mut tags: Vec<Vec<String>> = vec![
+        vec!["e".to_string(), reaction.reference_id.clone()],
+    ];
+    if let Some(url) = &reaction.emoji_url {
+        if reaction.emoji.starts_with(':') && reaction.emoji.ends_with(':') && reaction.emoji.len() >= 3 {
+            let shortcode = &reaction.emoji[1..reaction.emoji.len() - 1];
+            if !shortcode.is_empty() && !url.is_empty() {
+                tags.push(vec!["emoji".to_string(), shortcode.to_string(), url.clone()]);
+            }
+        }
+    }
     let event = StoredEvent {
         id: reaction.id.clone(),
         kind: event_kind::REACTION,
         chat_id,
         user_id,
         content: reaction.emoji.clone(),
-        tags: vec![
-            vec!["e".to_string(), reaction.reference_id.clone()],
-        ],
+        tags,
         reference_id: Some(reaction.reference_id.clone()),
         created_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -165,6 +177,12 @@ fn message_to_stored_event(message: &Message, chat_id: i64, user_id: Option<i64>
         if let Ok(json) = serde_json::to_string(&message.attachments) {
             tags.push(vec!["attachments".to_string(), json]);
         }
+    }
+
+    // NIP-30 emoji tags — persist so reload from DB still renders the
+    // custom emoji image instead of the literal `:shortcode:`.
+    for et in &message.emoji_tags {
+        tags.push(vec!["emoji".to_string(), et.shortcode.clone(), et.url.clone()]);
     }
 
     let preview_metadata = message.preview_metadata.as_ref()
@@ -690,6 +708,25 @@ fn extract_tag_from_json(tags_json: &str, key: &str) -> Option<String> {
         .and_then(|tag| tag.into_iter().nth(1))
 }
 
+/// Extract the NIP-30 `["emoji", shortcode, url]` URL from a stored
+/// reaction's tags. The reaction's content must be `:shortcode:` form
+/// and the matching tag's shortcode must agree — otherwise we get the
+/// URL of a stray emoji tag that doesn't actually represent the
+/// reaction's chosen emoji.
+fn extract_reaction_emoji_url(tags: &[Vec<String>], content: &str) -> Option<String> {
+    if !content.starts_with(':') || !content.ends_with(':') || content.len() < 3 {
+        return None;
+    }
+    let sc = &content[1..content.len() - 1];
+    tags.iter().find_map(|t| {
+        if t.len() >= 3 && t[0] == "emoji" && t[1] == sc {
+            Some(t[2].clone())
+        } else {
+            None
+        }
+    })
+}
+
 /// Extract a NIP-10 reply reference ("e" tag with "reply" marker at position 3).
 fn extract_reply_tag_from_json(tags_json: &str) -> Option<String> {
     if tags_json.len() <= 2 { return None; }
@@ -733,11 +770,13 @@ pub async fn get_message_views(
         if let Some(ref_id) = &event.reference_id {
             match event.kind {
                 k if k == event_kind::REACTION => {
+                    let emoji_url = extract_reaction_emoji_url(&event.tags, &event.content);
                     reactions_by_msg.entry(ref_id.clone()).or_default().push(Reaction {
                         id: event.id.clone(),
                         reference_id: ref_id.clone(),
                         author_id: event.npub.clone().unwrap_or_default(),
                         emoji: event.content.clone(),
+                        emoji_url,
                     });
                 }
                 k if k == event_kind::MESSAGE_EDIT => {
@@ -827,6 +866,7 @@ pub async fn get_message_views(
         let preview_metadata = event.preview_metadata
             .and_then(|json| serde_json::from_str(&json).ok());
 
+        let emoji_tags = crate::types::EmojiTag::extract_from_stored(&event.tags);
         messages.push(Message {
             id: event.id, content, replied_to,
             replied_to_content: None, replied_to_npub: None, replied_to_has_attachment: None,
@@ -834,6 +874,7 @@ pub async fn get_message_views(
             pending: event.pending, failed: event.failed, mine: event.mine,
             npub: event.npub, wrapper_event_id: event.wrapper_event_id,
             edited, edit_history,
+            emoji_tags,
         });
     }
 
@@ -915,10 +956,12 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
         if let Some(ref_id) = &event.reference_id {
             match event.kind {
                 k if k == event_kind::REACTION => {
+                    let emoji_url = extract_reaction_emoji_url(&event.tags, &event.content);
                     reactions_by_msg.entry(ref_id.clone()).or_default().push(Reaction {
                         id: event.id.clone(), reference_id: ref_id.clone(),
                         author_id: event.npub.clone().unwrap_or_default(),
                         emoji: event.content.clone(),
+                        emoji_url,
                     });
                 }
                 k if k == event_kind::MESSAGE_EDIT => {
@@ -981,6 +1024,9 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
         let preview_metadata = event.preview_metadata
             .and_then(|json| serde_json::from_str(&json).ok());
 
+        let emoji_tags = serde_json::from_str::<Vec<Vec<String>>>(&tags_json)
+            .map(|t| crate::types::EmojiTag::extract_from_stored(&t))
+            .unwrap_or_default();
         result.entry(chat_identifier).or_default().push(Message {
             id: event.id, content, replied_to,
             replied_to_content: None, replied_to_npub: None, replied_to_has_attachment: None,
@@ -988,6 +1034,7 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
             pending: event.pending, failed: event.failed, mine: event.mine,
             npub: event.npub, wrapper_event_id: event.wrapper_event_id,
             edited, edit_history,
+            emoji_tags,
         });
     }
 

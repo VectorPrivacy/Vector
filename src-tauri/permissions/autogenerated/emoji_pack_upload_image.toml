@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-emoji-pack-upload-image"
+description = "Enables the emoji_pack_upload_image command without any pre-configured scope."
+commands.allow = ["emoji_pack_upload_image"]
+
+[[permission]]
+identifier = "deny-emoji-pack-upload-image"
+description = "Denies the emoji_pack_upload_image command without any pre-configured scope."
+commands.deny = ["emoji_pack_upload_image"]

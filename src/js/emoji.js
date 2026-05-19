@@ -2052,11 +2052,17 @@ function searchEmojis(search) {
         }
 
         if (bestMatch) {
+            // Personal-usage bonus: each pick subtracts from score (lower
+            // = better). Linear so picks compound predictably — used=10
+            // takes the result two whole match-tiers ahead, enough to
+            // surface above unused exact-match emojis. Keeps custom +
+            // stock comparable when the picker merges results by score.
+            const used = emojiData.used || 0;
             results.push({
                 ...emojiData,
-                score: bestMatch.score,
+                score: bestMatch.score - used * USAGE_SCORE_WEIGHT,
                 matchedWord: bestMatch.word,
-                matchedIndex: bestMatch.wordIndex
+                matchedIndex: bestMatch.wordIndex,
             });
         }
     }
@@ -2066,38 +2072,52 @@ function searchEmojis(search) {
         for (const emojiData of arrEmojis) {
             const name = emojiData.name.toLowerCase();
             if (name.includes(search)) {
+                const used = emojiData.used || 0;
                 results.push({
                     ...emojiData,
-                    score: 1.0,
+                    score: 1.0 - used * USAGE_SCORE_WEIGHT,
                     matchedWord: name,
-                    matchedIndex: 99
+                    matchedIndex: 99,
                 });
             }
         }
     }
 
-    // Sort by relevance
-    return results
-        .sort((a, b) => {
-            if (Math.abs(a.score - b.score) > 0.01) return a.score - b.score;
-            // Earlier-position matches first (primary keyword > secondary)
-            if (a.matchedIndex !== b.matchedIndex) return a.matchedIndex - b.matchedIndex;
-            // Unicode frequency rank (lower = more popular). Unranked emojis
-            // get freq=99 implicitly via undefined → Infinity here, so they
-            // sort behind every ranked one.
-            const aFreq = (typeof a.freq === 'number') ? a.freq : 99;
-            const bFreq = (typeof b.freq === 'number') ? b.freq : 99;
-            if (aFreq !== bFreq) return aFreq - bFreq;
-            // Shorter matched word is more specific
-            if (a.matchedWord.length !== b.matchedWord.length) return a.matchedWord.length - b.matchedWord.length;
-            // Shorter total name is more specific (fire-engine beats fire-engine-with-bells)
-            const aNameLen = a.name ? a.name.length : 0;
-            const bNameLen = b.name ? b.name.length : 0;
-            if (aNameLen !== bNameLen) return aNameLen - bNameLen;
-            return a.matchedWord.localeCompare(b.matchedWord);
-        })
-        .map(({ score, matchedWord, matchedIndex, ...emoji }) => emoji);
+    // Sort by relevance. Score now bakes in personal usage, so within the
+    // same match bucket frequently-picked emojis sit on top. `score`,
+    // `matchedWord`, `matchedIndex` stay on the output so callers that
+    // merge searchEmojis with other sources (e.g. searchCustomEmojis)
+    // can sort everything in one unified pass.
+    return results.sort((a, b) => {
+        if (Math.abs(a.score - b.score) > 0.01) return a.score - b.score;
+        if (a.matchedIndex !== b.matchedIndex) return a.matchedIndex - b.matchedIndex;
+        // Unicode frequency rank (lower = more popular). Unranked emojis
+        // get freq=99 implicitly via undefined → Infinity here, so they
+        // sort behind every ranked one.
+        const aFreq = (typeof a.freq === 'number') ? a.freq : 99;
+        const bFreq = (typeof b.freq === 'number') ? b.freq : 99;
+        if (aFreq !== bFreq) return aFreq - bFreq;
+        // Shorter matched word is more specific
+        if (a.matchedWord.length !== b.matchedWord.length) return a.matchedWord.length - b.matchedWord.length;
+        // Shorter total name is more specific (fire-engine beats fire-engine-with-bells)
+        const aNameLen = a.name ? a.name.length : 0;
+        const bNameLen = b.name ? b.name.length : 0;
+        if (aNameLen !== bNameLen) return aNameLen - bNameLen;
+        return a.matchedWord.localeCompare(b.matchedWord);
+    });
 }
+
+/**
+ * Per-pick score reduction for emoji search ranking. Linear: every pick
+ * subtracts this amount from the result's score (lower = better).
+ *
+ * The biggest tier gap is exact-shortcode (-2.0) vs word-prefix (0.1) =
+ * 2.1 points. Weight 0.5 means 5 picks overtake that gap — close to the
+ * user's intuition of "I've clicked this enough times now, it should
+ * be first." Stronger weights cause heavy emoji preferences to surface
+ * even past exact-shortcode matches the user doesn't actually want.
+ * Shared between searchEmojis and searchCustomEmojis. */
+const USAGE_SCORE_WEIGHT = 0.5;
 
 /** Return our most used emojis */
 function getMostUsedEmojis() {

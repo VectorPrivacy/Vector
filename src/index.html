@@ -20,6 +20,7 @@
     <script src="/js/misc.js" defer></script>
     <script src="/js/db.js" defer></script>
     <script src="/js/voice.js" defer></script>
+    <script src="/js/context-menu.js" defer></script>
     <!-- TODO: Compile-out platform-specific JS modules per distro (e.g. exclude updater.js
          from Android builds where the updater plugin isn't available, avoiding the
          'window.__TAURI__.updater is undefined' error on every boot). -->
@@ -79,6 +80,23 @@
     <!-- Edit History Popup -->
     <div id="edit-history-popup" class="edit-history-popup" style="display: none;">
       <div id="edit-history-content" class="edit-history-content"></div>
+    </div>
+
+    <!-- Pack Details Modal — opened via deep link (vector://emojis/pack/<naddr>
+         or https://vectorapp.io/emojis/pack/<naddr>) and from in-app entry
+         points like the share-pack flow. -->
+    <div id="pack-details-overlay" class="pack-details-overlay" hidden>
+      <div class="pack-details-card" id="pack-details-card">
+        <button type="button" class="pack-details-close" id="pack-details-close" aria-label="Close">
+          <span class="icon icon-x"></span>
+        </button>
+        <div class="pack-details-body" id="pack-details-body">
+          <div class="pack-details-loading">
+            <div class="pack-details-spinner"></div>
+            <p class="pack-details-loading-text">Loading pack…</p>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- Credential Entry Modal (reusable for PIN/Password/Type selection) -->
@@ -189,6 +207,33 @@
         </div>
         <div class="emoji-grid" id="emoji-all-grid"></div>
       </div>
+
+      <!-- Pack Creator inline view (hidden by default; swaps in over the
+           emoji sections when sidebar "+" or section pencil is clicked). -->
+      <div class="emoji-creator" id="emoji-creator" hidden>
+        <div class="emoji-creator-head">
+          <button type="button" class="emoji-creator-logo" id="emoji-creator-logo" aria-label="Pack logo">
+            <span class="icon icon-image"></span>
+          </button>
+          <input type="file" id="emoji-creator-logo-input" accept="image/*" hidden>
+          <input type="text" class="emoji-creator-name" id="emoji-creator-name"
+                 placeholder="Pack name" maxlength="26" autocomplete="off"
+                 autocorrect="off" autocapitalize="off" spellcheck="false">
+          <span class="emoji-creator-count" id="emoji-creator-count">(0/30)</span>
+          <button type="button" class="emoji-creator-done" id="emoji-creator-done" aria-label="Save and exit">
+            <span class="icon icon-edit"></span>
+          </button>
+        </div>
+        <div class="emoji-creator-grid" id="emoji-creator-grid"></div>
+        <button type="button" class="emoji-creator-dropzone" id="emoji-creator-dropzone">
+          <span class="icon icon-plus-circle"></span>
+          <span class="emoji-creator-dropzone-label">Upload Emoji</span>
+        </button>
+        <input type="file" id="emoji-creator-files" accept="image/*" multiple hidden>
+        <div class="emoji-creator-footer">
+          <button type="button" class="emoji-creator-delete btn" id="emoji-creator-delete" hidden>Delete Pack</button>
+        </div>
+      </div>
     </div>
   </div>
   <!-- GIF Panel (hidden by default) -->
@@ -196,6 +241,76 @@
     <div class="gif-grid" id="gif-grid"></div>
     <div class="gif-loading" id="gif-loading" style="display: none;">
       <span class="loading-spinner"></span>
+    </div>
+  </div>
+
+  <!-- Pack Creator confirm overlay — in-panel replacement for
+       `popupConfirm`. The global popup lives outside .emoji-picker, so
+       any click on it closes the picker; this one lives inside, same as
+       error/naming/progress. Promise-based via _pcShowConfirm(). -->
+  <div class="emoji-pack-creator-confirm" id="emoji-pack-creator-confirm" hidden>
+    <div class="emoji-pack-creator-confirm-body">
+      <img class="emoji-pack-creator-confirm-icon" id="emoji-pack-creator-confirm-icon" alt="" hidden>
+      <p class="emoji-pack-creator-confirm-title" id="emoji-pack-creator-confirm-title"></p>
+      <p class="emoji-pack-creator-confirm-detail" id="emoji-pack-creator-confirm-detail"></p>
+      <div class="emoji-pack-creator-confirm-actions">
+        <button type="button" class="emoji-pack-creator-confirm-cancel btn" id="emoji-pack-creator-confirm-cancel">CANCEL</button>
+        <button type="button" class="emoji-pack-creator-confirm-ok btn" id="emoji-pack-creator-confirm-ok">CONTINUE</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pack Creator progress overlay — covers the picker during long
+       operations (deletion in particular: each Blossom DELETE can take
+       seconds, plus a Nostr publish at the end). Detail line updates
+       per step so the user always knows what's in flight. -->
+  <div class="emoji-pack-creator-progress" id="emoji-pack-creator-progress" hidden>
+    <div class="emoji-pack-creator-progress-body">
+      <div class="emoji-pack-creator-progress-ring"></div>
+      <p class="emoji-pack-creator-progress-title" id="emoji-pack-creator-progress-title">Working…</p>
+      <p class="emoji-pack-creator-progress-detail" id="emoji-pack-creator-progress-detail"></p>
+    </div>
+  </div>
+
+  <!-- Pack Creator naming overlay — covers the picker while the user
+       names a new emoji or edits an existing shortcode. Same in-panel
+       chrome as the error overlay so clicks never leak through to the
+       outside-click-close handler. -->
+  <div class="emoji-pack-creator-naming" id="emoji-pack-creator-naming" hidden>
+    <div class="emoji-pack-creator-naming-body">
+      <div class="emoji-pack-creator-naming-batch" id="emoji-pack-creator-naming-batch" hidden></div>
+      <div class="emoji-pack-creator-naming-preview-wrap">
+        <img class="emoji-pack-creator-naming-preview" id="emoji-pack-creator-naming-preview" alt="">
+      </div>
+      <p class="emoji-pack-creator-naming-title" id="emoji-pack-creator-naming-title">Name this emoji</p>
+      <div class="emoji-pack-creator-naming-input-row">
+        <span class="emoji-pack-creator-naming-colon">:</span>
+        <input type="text" class="emoji-pack-creator-naming-input"
+               id="emoji-pack-creator-naming-input"
+               autocomplete="off" autocorrect="off" autocapitalize="off"
+               spellcheck="false" maxlength="22" placeholder="shortcode">
+        <span class="emoji-pack-creator-naming-colon">:</span>
+      </div>
+      <p class="emoji-pack-creator-naming-error" id="emoji-pack-creator-naming-error" hidden></p>
+      <div class="emoji-pack-creator-naming-actions">
+        <button type="button" class="emoji-pack-creator-naming-skip btn" id="emoji-pack-creator-naming-skip">SKIP</button>
+        <button type="button" class="emoji-pack-creator-naming-save btn" id="emoji-pack-creator-naming-save">SAVE</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pack Creator error overlay — must live INSIDE .emoji-picker
+       so the click-outside-to-close handler doesn't fire when the user
+       hits "Try Again". Copy is variant-driven via _pcShow*Error(). -->
+  <div class="emoji-pack-creator-error" id="emoji-pack-creator-error" hidden>
+    <div class="emoji-pack-creator-error-body">
+      <div class="emoji-pack-creator-error-art">
+        <img class="emoji-pack-creator-error-mascot" src="/icons/aggroboi.webp" alt="">
+      </div>
+      <p class="emoji-pack-creator-error-pretitle" id="emoji-pack-creator-error-pretitle">Oops! File Size Exceeded!</p>
+      <p class="emoji-pack-creator-error-title" id="emoji-pack-creator-error-title">Please Try Again.</p>
+      <p class="emoji-pack-creator-error-detail" id="emoji-pack-creator-error-detail">File Size must be under 256Kb.</p>
+      <button type="button" class="emoji-pack-creator-error-retry btn" id="emoji-pack-creator-error-retry">TRY AGAIN</button>
     </div>
   </div>
 </div>

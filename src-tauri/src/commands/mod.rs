@@ -28,3 +28,4 @@ pub mod realtime;
 pub mod encryption;
 pub mod audio;
 pub mod tor;
+pub mod emoji_packs;

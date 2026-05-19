@@ -278,6 +278,12 @@ pub async fn send_dm(
     let receiver = PublicKey::from_bech32(receiver_npub)
         .map_err(|e| format!("Invalid npub: {}", e))?;
 
+    // NIP-30: resolve any `:shortcode:` in the outbound text against the
+    // user's subscribed packs so the rumor carries `["emoji", ...]` tags.
+    // Recipients without the pack subscribed still render correctly, and
+    // our own-view echo populates `emoji_tags` for the renderer.
+    let emoji_tags = crate::emoji_packs::resolve_outbound_emoji_tags(content);
+
     // Build pending message and add to state
     let msg = Message {
         id: pending_id.clone(),
@@ -287,6 +293,7 @@ pub async fn send_dm(
         pending: true,
         mine: true,
         npub: my_pk.to_bech32().ok(),
+        emoji_tags: emoji_tags.clone(),
         ..Default::default()
     };
 
@@ -310,7 +317,13 @@ pub async fn send_dm(
         }
     }
 
-    let rumor = rumor.tag(Tag::custom(TagKind::custom("ms"), [milliseconds.to_string()]));
+    let mut rumor = rumor.tag(Tag::custom(TagKind::custom("ms"), [milliseconds.to_string()]));
+    for et in &emoji_tags {
+        rumor = rumor.tag(Tag::custom(
+            TagKind::custom("emoji"),
+            [et.shortcode.clone(), et.url.clone()],
+        ));
+    }
     let built_rumor = rumor.build(my_pk);
     let event_id = built_rumor.id.ok_or("Rumor has no id")?.to_hex();
 

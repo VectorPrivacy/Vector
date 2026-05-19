@@ -3256,6 +3256,13 @@ async function executeDeepLinkAction(payload) {
     } else if (action_type === 'chat') {
         // Open a specific chat (triggered by tapping a notification)
         await openChat(target);
+    } else if (action_type === 'emoji_pack') {
+        // Open the Pack Details modal for the given naddr. The modal
+        // owns the fetch, render, and subscribe/unsubscribe flow; we
+        // just hand it the address.
+        if (typeof openPackDetailsModal === 'function') {
+            await openPackDetailsModal(target);
+        }
     }
 }
 
@@ -9280,6 +9287,14 @@ domChatMessageInput.oninput = async () => {
     // Hook up our drag-n-drop listeners
     if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
         await getCurrentWebview().onDragDropEvent(async (event) => {
+            // Emoji pack creator takes priority over chat file send while
+            // its panel is open — drops land as new pack emojis instead.
+            if (typeof isEmojiPackCreatorOpen === 'function' && isEmojiPackCreatorOpen()) {
+                if (event.payload.type === 'drop' && Array.isArray(event.payload.paths)) {
+                    await _pcAddPaths(event.payload.paths);
+                }
+                return;
+            }
             // Only accept File Drops if a chat is open
             if (strOpenChat) {
                 if (event.payload.type === 'over') {

@@ -707,6 +707,17 @@ pub fn run() {
             commands::account::get_bunker_status,
             commands::account::setup_encryption,
             commands::account::skip_encryption,
+            // Emoji pack commands (commands/emoji_packs.rs)
+            commands::emoji_packs::list_emoji_packs,
+            commands::emoji_packs::refresh_emoji_packs,
+            commands::emoji_packs::fetch_emoji_pack_by_naddr,
+            commands::emoji_packs::subscribe_emoji_pack,
+            commands::emoji_packs::unsubscribe_emoji_pack,
+            commands::emoji_packs::decode_animated_emoji,
+            commands::emoji_packs::emoji_pack_create,
+            commands::emoji_packs::emoji_pack_delete,
+            commands::emoji_packs::emoji_pack_delete_blob,
+            commands::emoji_packs::emoji_pack_upload_image,
             #[cfg(debug_assertions)]
             commands::account::debug_hot_reload_sync,
             commands::account::logout,

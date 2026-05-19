@@ -35,6 +35,17 @@ pub struct Message {
     pub edited: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edit_history: Option<Vec<EditEntry>>,
+    /// NIP-30 custom-emoji `["emoji", shortcode, url]` tags that travelled
+    /// with the rumor. Empty for stock-emoji messages; frontend renderer
+    /// uses this map to swap `:shortcode:` for `<img>` before twemoji runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub emoji_tags: Vec<EmojiTag>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct EmojiTag {
+    pub shortcode: String,
+    pub url: String,
 }
 
 impl Default for Message {
@@ -57,7 +68,64 @@ impl Default for Message {
             wrapper_event_id: None,
             edited: false,
             edit_history: None,
+            emoji_tags: Vec::new(),
         }
+    }
+}
+
+impl EmojiTag {
+    /// Pull NIP-30 `["emoji", shortcode, url]` triples out of an event's
+    /// tag list. Invalid shortcodes are dropped to match `emoji_packs`'
+    /// parser — keeps the wire format and renderer aligned.
+    pub fn extract_from_tags<'a, I>(tags: I) -> Vec<EmojiTag>
+    where
+        I: IntoIterator<Item = &'a nostr_sdk::Tag>,
+    {
+        let mut out: Vec<EmojiTag> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for tag in tags {
+            let parts: Vec<&str> = tag.as_slice().iter().map(|s| s.as_str()).collect();
+            if parts.len() < 3 || parts[0] != "emoji" {
+                continue;
+            }
+            let shortcode = parts[1];
+            if shortcode.is_empty()
+                || !shortcode.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                continue;
+            }
+            if !seen.insert(shortcode.to_string()) {
+                continue;
+            }
+            out.push(EmojiTag {
+                shortcode: shortcode.to_string(),
+                url: parts[2].to_string(),
+            });
+        }
+        out
+    }
+
+    /// Same as `extract_from_tags` but operates on the flat
+    /// `Vec<Vec<String>>` representation used by `StoredEvent`. Lets
+    /// DB readers round-trip emoji tags without going through nostr-sdk.
+    pub fn extract_from_stored(tags: &[Vec<String>]) -> Vec<EmojiTag> {
+        let mut out: Vec<EmojiTag> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for tag in tags {
+            if tag.len() < 3 || tag[0] != "emoji" { continue; }
+            let shortcode = &tag[1];
+            if shortcode.is_empty()
+                || !shortcode.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                continue;
+            }
+            if !seen.insert(shortcode.clone()) { continue; }
+            out.push(EmojiTag {
+                shortcode: shortcode.clone(),
+                url: tag[2].clone(),
+            });
+        }
+        out
     }
 }
 
@@ -259,6 +327,12 @@ pub struct Reaction {
     pub reference_id: String,
     pub author_id: String,
     pub emoji: String,
+    /// NIP-30 custom-emoji image URL. Present when the reaction content is
+    /// `:shortcode:` and the originating event carried an `["emoji", code,
+    /// url]` tag. Frontend renders the image directly when present, so the
+    /// reaction chip survives reloads + missing pack subscriptions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emoji_url: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -422,6 +496,7 @@ mod tests {
             reference_id: "msg1".to_string(),
             author_id: "user1".to_string(),
             emoji: "\u{1F44D}".to_string(),
+            emoji_url: None,
         };
         let added = msg.add_reaction(reaction);
         assert!(added, "add_reaction should return true for a new reaction");
@@ -436,6 +511,7 @@ mod tests {
             reference_id: "msg1".to_string(),
             author_id: "user1".to_string(),
             emoji: "\u{1F44D}".to_string(),
+            emoji_url: None,
         };
         msg.add_reaction(reaction.clone());
         let added = msg.add_reaction(reaction);
@@ -452,6 +528,7 @@ mod tests {
                 reference_id: "msg1".to_string(),
                 author_id: format!("user{}", i),
                 emoji: "\u{2764}\u{FE0F}".to_string(),
+                emoji_url: None,
             };
             assert!(msg.add_reaction(reaction), "reaction {} should be new", i);
         }
@@ -478,6 +555,7 @@ mod tests {
                 reference_id: "abc123".to_string(),
                 author_id: "user1".to_string(),
                 emoji: "\u{1F44D}".to_string(),
+                emoji_url: None,
             }],
             at: 1700000000,
             pending: false,
@@ -490,6 +568,7 @@ mod tests {
                 content: "original".to_string(),
                 edited_at: 1699999999,
             }]),
+            emoji_tags: Vec::new(),
         };
 
         let json = serde_json::to_string(&msg).expect("serialize should succeed");

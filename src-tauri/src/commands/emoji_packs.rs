@@ -1,0 +1,538 @@
+//! Custom emoji pack commands (NIP-30 / NIP-51).
+//!
+//! Phase 1 surfaces a read-only API: load the locally-cached packs
+//! for fast startup, optionally refresh from relays in the background.
+
+use std::io::Cursor;
+use std::sync::{Mutex, OnceLock};
+
+use image::AnimationDecoder;
+use image::ImageEncoder;
+use serde::{Deserialize, Serialize};
+
+use vector_core::emoji_packs::{self, EmojiPack};
+
+/// Return every locally-cached emoji pack. Frontend hits this on
+/// picker open so the sidebar renders instantly off the local mirror;
+/// a background refresh keeps it current.
+#[tauri::command]
+pub async fn list_emoji_packs() -> Result<Vec<EmojiPack>, String> {
+    emoji_packs::load_all_packs()
+}
+
+/// Re-fetch the user's kind 10030 list and every referenced pack,
+/// updating the local mirror in place. Returns the freshly hydrated
+/// pack list so the frontend can swap atomically.
+#[tauri::command]
+pub async fn refresh_emoji_packs() -> Result<Vec<EmojiPack>, String> {
+    emoji_packs::refresh_subscribed_packs().await
+}
+
+/// Preview-only fetch of a pack from its NIP-19 `naddr`. Does NOT
+/// persist or subscribe — frontend uses this to render the in-chat
+/// preview card before the user commits.
+#[tauri::command]
+pub async fn fetch_emoji_pack_by_naddr(naddr: String) -> Result<EmojiPack, String> {
+    emoji_packs::fetch_pack_by_naddr(&naddr).await
+}
+
+
+/// Subscribe to a pack by `naddr`: fetch + persist + add to local
+/// subscription list, then debounce-publish kind 10030.
+#[tauri::command]
+pub async fn subscribe_emoji_pack(naddr: String) -> Result<EmojiPack, String> {
+    emoji_packs::subscribe_pack(&naddr).await
+}
+
+/// Remove a pack from the local subscription list and republish kind
+/// 10030. Pack data stays cached so existing reactions still resolve.
+#[tauri::command]
+pub async fn unsubscribe_emoji_pack(id: String) -> Result<(), String> {
+    emoji_packs::unsubscribe_pack(&id).await
+}
+
+// ============================================================================
+// Pack creator (own packs)
+// ============================================================================
+
+/// Max bytes per uploaded emoji image — picker.js mirrors this for the
+/// pre-upload gate but we enforce server-side too so a tampered frontend
+/// can't push oversized blobs onto user's Blossom servers.
+const MAX_EMOJI_BYTES: usize = 256 * 1024;
+
+#[derive(Deserialize)]
+pub struct EmojiPackEmojiInput {
+    pub shortcode: String,
+    pub url: String,
+}
+
+#[derive(Deserialize)]
+pub struct EmojiPackCreateInput {
+    /// Optional — when empty, the backend generates a fresh identifier.
+    /// When set, an existing pack's `d` tag is reused (update path).
+    pub identifier: Option<String>,
+    pub title: String,
+    pub image_url: Option<String>,
+    pub description: Option<String>,
+    pub emojis: Vec<EmojiPackEmojiInput>,
+}
+
+fn generate_pack_identifier() -> String {
+    // 12 url-safe chars from the system PRNG — fits comfortably in a
+    // NIP-19 naddr and is short enough to scan in logs.
+    use rand::{Rng, thread_rng, distributions::Alphanumeric};
+    thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(12)
+        .map(char::from)
+        .collect()
+}
+
+/// Publish (or replace) one of the user's own packs as a kind 30030
+/// event. If `identifier` is omitted, a fresh one is generated; otherwise
+/// the existing pack is overwritten (Nostr replaceable-event semantics).
+#[tauri::command]
+pub async fn emoji_pack_create(
+    input: EmojiPackCreateInput,
+) -> Result<emoji_packs::EmojiPack, String> {
+    // Entry-level guard: catches a swap that landed between IPC dispatch
+    // and command execution. publish_pack re-checks before persisting.
+    let session = vector_core::state::SessionGuard::capture();
+    if !session.is_valid() {
+        return Err("Account swap in progress.".to_string());
+    }
+
+    let identifier = input.identifier
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(generate_pack_identifier);
+
+    let emojis: Vec<emoji_packs::PackEmoji> = input.emojis.into_iter()
+        .filter(|e| !e.shortcode.trim().is_empty() && !e.url.trim().is_empty())
+        .map(|e| emoji_packs::PackEmoji {
+            shortcode: e.shortcode.trim().to_string(),
+            url: e.url.trim().to_string(),
+            sha256: None,
+        })
+        .collect();
+
+    if emojis.is_empty() {
+        return Err("A pack needs at least one emoji.".to_string());
+    }
+
+    // `pubkey` / `id` get overwritten by `publish_pack` based on the
+    // active session; we just need any valid shape here.
+    let pack = emoji_packs::EmojiPack {
+        id: String::new(),
+        pubkey: String::new(),
+        identifier,
+        title: input.title.trim().to_string(),
+        image_url: input.image_url.unwrap_or_default().trim().to_string(),
+        description: input.description.unwrap_or_default().trim().to_string(),
+        emojis,
+        is_own: true,
+        updated_at: 0,
+    };
+
+    emoji_packs::publish_pack(&pack).await
+}
+
+/// Tombstone one of the user's own packs (publishes an empty kind 30030
+/// + drops local state + republishes 10030). `id` is the naddr.
+#[tauri::command]
+pub async fn emoji_pack_delete(id: String) -> Result<(), String> {
+    let session = vector_core::state::SessionGuard::capture();
+    if !session.is_valid() {
+        return Err("Account swap in progress.".to_string());
+    }
+    emoji_packs::delete_own_pack(&id).await
+}
+
+/// Delete a single Blossom blob by its URL. Frontend calls this once
+/// per emoji during pack deletion to surface per-emoji progress before
+/// the Nostr-level `emoji_pack_delete` runs the tombstone publish.
+#[tauri::command]
+pub async fn emoji_pack_delete_blob(url: String) -> Result<(), String> {
+    let session = vector_core::state::SessionGuard::capture();
+    if !session.is_valid() {
+        return Err("Account swap in progress.".to_string());
+    }
+    let client = vector_core::state::nostr_client()
+        .ok_or_else(|| "Nostr client not initialised".to_string())?;
+    let signer = client.signer().await
+        .map_err(|e| format!("Failed to get signer: {}", e))?;
+    vector_core::blossom::delete_blob_by_url(signer, &url).await
+}
+
+/// Upload an emoji/pack image to one of the user's Blossom servers and
+/// return the resulting URL. Frontend pipes file bytes through here so
+/// the credential never leaves Rust — the signer is the active Nostr
+/// client's signer (handles both local nsec and remote NIP-46 bunker).
+// `kind` is 'emoji' (default) or 'emoji_pack_icon' — chooses the local
+// cache subdir so pre-cached bytes land where the frontend's
+// `bindCachedEmojiImg` looks them up.
+#[tauri::command]
+pub async fn emoji_pack_upload_image<R: tauri::Runtime>(
+    handle: tauri::AppHandle<R>,
+    bytes: Vec<u8>,
+    mime: String,
+    kind: Option<String>,
+) -> Result<String, String> {
+    let session = vector_core::state::SessionGuard::capture();
+    if !session.is_valid() {
+        return Err("Account swap in progress.".to_string());
+    }
+    if bytes.len() > MAX_EMOJI_BYTES {
+        return Err(format!(
+            "File is {} KB, max is {} KB.",
+            bytes.len() / 1024,
+            MAX_EMOJI_BYTES / 1024,
+        ));
+    }
+    if bytes.is_empty() {
+        return Err("File is empty.".to_string());
+    }
+
+    let client = vector_core::state::nostr_client()
+        .ok_or_else(|| "Nostr client not initialised".to_string())?;
+    let signer = client.signer().await
+        .map_err(|e| format!("Failed to get signer: {}", e))?;
+
+    let servers = vector_core::blossom_servers::compute_enabled_servers();
+    if servers.is_empty() {
+        return Err("No Blossom servers configured.".to_string());
+    }
+
+    let mime_ref = if mime.is_empty() { "application/octet-stream" } else { mime.as_str() };
+    // Wrap once + clone the Arc — upload moves ownership of the inner
+    // Vec onto its task, we keep a reference for the post-upload
+    // pre-cache write.
+    let bytes_arc = std::sync::Arc::new(bytes);
+    let upload_bytes = bytes_arc.clone();
+    let url = vector_core::blossom::upload_blob_with_failover(
+        signer,
+        servers,
+        upload_bytes,
+        Some(mime_ref),
+    ).await?;
+
+    // Re-check after the upload — caller will plumb this URL into a pack
+    // tied to the original session. Bail loudly if the account changed
+    // so the URL never gets stitched into the wrong pack.
+    if !session.is_valid() {
+        return Err("Account swapped during upload — discard this URL.".to_string());
+    }
+
+    // Pre-cache the bytes locally under the URL we just got back from
+    // Blossom. Any subsequent render of this URL (in the picker, in a
+    // chat preview card, in a freshly-published pack landing in the
+    // user's own subscriptions, etc.) will hit the local cache and
+    // never need to re-download what we already had in hand.
+    let image_type = match kind.as_deref() {
+        Some("emoji_pack_icon") => crate::image_cache::ImageType::EmojiPackIcon,
+        _ => crate::image_cache::ImageType::Emoji,
+    };
+    let _ = crate::image_cache::precache_image_bytes(
+        &handle, &url, &bytes_arc, image_type,
+    );
+
+    Ok(url)
+}
+
+// ============================================================================
+// Animated-emoji frame decoding (WKWebView lacks WebCodecs/ImageDecoder)
+// ============================================================================
+//
+// The picker's per-section canvas renderer needs decoded frames + per-frame
+// durations. WKWebView ships neither ImageDecoder nor WebP-frame access via
+// `<img>`, so we decode in Rust (image crate handles animated WebP + GIF +
+// APNG out of the box) and serve a single PNG spritesheet per emoji over
+// IPC. The frontend creates one Image element per emoji and draws sub-rects.
+//
+// Spritesheet layout: frames stacked vertically, each cell `frame_size` ×
+// `frame_size`, scaled to fit within `frame_size` while preserving aspect
+// (letterboxed). Output is base64-encoded PNG so we can ship it through
+// Tauri's JSON IPC without a binary protocol; emoji PNGs are tiny so the
+// base64 overhead is negligible.
+
+/// Square pixel size for each frame in the output spritesheet — chosen
+/// to look crisp at the picker's 28px display target on retina displays.
+const EMOJI_FRAME_SIZE: u32 = 56;
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct EmojiSpritesheet {
+    pub png_base64: String,
+    pub frame_count: u32,
+    pub frame_size: u32,
+    pub frame_durations_ms: Vec<u32>,
+}
+
+/// Cache decoded spritesheets in-memory by URL. Picker reopens reuse the
+/// decode — round-tripping a 50-frame WebP through libwebp + PNG encode
+/// is ~50ms; doing that 54× per open is precisely what we're avoiding.
+///
+/// Bounded LRU: an unbounded HashMap kept the per-emoji PNG bytes
+/// (typ. tens of KB each) around forever, so long sessions browsing many
+/// packs leaked memory. Cap at MAX_SPRITESHEET_CACHE entries with simple
+/// usage-order eviction — newest insertion goes to the back, oldest gets
+/// dropped when we exceed the cap.
+const MAX_SPRITESHEET_CACHE: usize = 500;
+
+struct SpritesheetCache {
+    /// URL → sheet. Insertion order doubles as access order: every `get`
+    /// promotes to the back, every miss inserts at the back.
+    entries: std::collections::VecDeque<(String, EmojiSpritesheet)>,
+}
+
+impl SpritesheetCache {
+    fn new() -> Self {
+        Self { entries: std::collections::VecDeque::with_capacity(MAX_SPRITESHEET_CACHE) }
+    }
+    fn get(&mut self, url: &str) -> Option<EmojiSpritesheet> {
+        let pos = self.entries.iter().position(|(k, _)| k == url)?;
+        let (k, v) = self.entries.remove(pos).unwrap();
+        let clone = v.clone();
+        self.entries.push_back((k, v));
+        Some(clone)
+    }
+    fn insert(&mut self, url: String, sheet: EmojiSpritesheet) {
+        if let Some(pos) = self.entries.iter().position(|(k, _)| k == &url) {
+            self.entries.remove(pos);
+        }
+        if self.entries.len() >= MAX_SPRITESHEET_CACHE {
+            self.entries.pop_front();
+        }
+        self.entries.push_back((url, sheet));
+    }
+}
+
+fn spritesheet_cache() -> &'static Mutex<SpritesheetCache> {
+    static CACHE: OnceLock<Mutex<SpritesheetCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(SpritesheetCache::new()))
+}
+
+/// Decode an animated emoji URL into a vertically-stacked PNG
+/// spritesheet. Idempotent + cached.
+///
+/// Lookup order:
+///   1. In-memory spritesheet cache (decoded PNG bytes ready to ship).
+///   2. Local filesystem cache (emojis + emoji_pack_icons subdirs) —
+///      pre-populated by `emoji_pack_upload_image` and by every
+///      `bindCachedEmojiImg` hit on the same URL. Critical for
+///      freshly-uploaded packs: Blossom may not have propagated the
+///      URL yet, but we have the bytes in hand.
+///   3. HTTP fetch from the URL (the original slow path).
+#[tauri::command]
+pub async fn decode_animated_emoji<R: tauri::Runtime>(
+    handle: tauri::AppHandle<R>,
+    url: String,
+) -> Result<EmojiSpritesheet, String> {
+    if let Some(cached) = spritesheet_cache().lock().unwrap().get(&url) {
+        return Ok(cached);
+    }
+
+    // Try the local filesystem cache before going to the network. We
+    // check both Emoji and EmojiPackIcon subdirs because we don't know
+    // ahead of time which subdir the URL was originally cached under
+    // (depends on whether the caller bound it as 'emoji' or
+    // 'emoji_pack_icon'). The cached file's extension (.webp/.gif/etc.)
+    // is the magic-byte-validated format from upload time — synthesise
+    // a content-type from it so the sniffer below routes to the right
+    // animated decoder.
+    let local_hit = crate::image_cache::get_cached_path(
+            &handle, &url, crate::image_cache::ImageType::Emoji,
+        )
+        .or_else(|| crate::image_cache::get_cached_path(
+            &handle, &url, crate::image_cache::ImageType::EmojiPackIcon,
+        ));
+    let local_bytes_with_type = local_hit.and_then(|path| {
+        let bytes = std::fs::read(&path).ok()?;
+        let ct = std::path::Path::new(&path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| format!("image/{}", e.to_ascii_lowercase()))
+            .unwrap_or_default();
+        Some((bytes, ct))
+    });
+
+    let (bytes, content_type) = if let Some(t) = local_bytes_with_type {
+        t
+    } else {
+        let client = vector_core::net::build_http_client(std::time::Duration::from_secs(10))?;
+        let resp = client.get(&url).send().await
+            .map_err(|e| format!("fetch: {}", e))?;
+        if !resp.status().is_success() {
+            return Err(format!("HTTP {}", resp.status()));
+        }
+        let ct = resp.headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_lowercase();
+        let body = resp.bytes().await
+            .map_err(|e| format!("read body: {}", e))?
+            .to_vec();
+        (body, ct)
+    };
+
+    let url_for_blocking = url.clone();
+    let result = tokio::task::spawn_blocking(move || decode_to_spritesheet(&bytes, &content_type, &url_for_blocking))
+        .await
+        .map_err(|e| format!("decode join: {}", e))??;
+
+    spritesheet_cache().lock().unwrap().insert(url, result.clone());
+    Ok(result)
+}
+
+fn decode_to_spritesheet(bytes: &[u8], content_type: &str, url: &str) -> Result<EmojiSpritesheet, String> {
+    let inferred = if content_type.contains("webp") || url.ends_with(".webp") {
+        "webp"
+    } else if content_type.contains("gif") || url.ends_with(".gif") {
+        "gif"
+    } else if content_type.contains("apng") || url.ends_with(".apng") {
+        "apng"
+    } else if content_type.contains("png") || url.ends_with(".png") {
+        "png"
+    } else {
+        // Fall back to image's content sniffer for everything else.
+        "auto"
+    };
+
+    let frames: Vec<(image::RgbaImage, u32)> = match inferred {
+        "webp" => decode_webp_frames(bytes)?,
+        "gif" => decode_gif_frames(bytes)?,
+        "apng" => decode_apng_frames(bytes)?,
+        _ => decode_static_fallback(bytes)?,
+    };
+
+    if frames.is_empty() {
+        return Err("no frames decoded".to_string());
+    }
+
+    let frame_size = EMOJI_FRAME_SIZE;
+    let cols = 1u32;
+    let rows = frames.len() as u32;
+    let sheet_w = frame_size * cols;
+    let sheet_h = frame_size * rows;
+
+    let mut sheet = image::RgbaImage::new(sheet_w, sheet_h);
+    let mut durations = Vec::with_capacity(frames.len());
+    for (i, (frame, duration_ms)) in frames.iter().enumerate() {
+        durations.push(*duration_ms);
+        // Letterbox each frame into a frame_size × frame_size cell so
+        // non-square emoji keep their aspect ratio.
+        let resized = image::imageops::resize(
+            frame,
+            frame_size,
+            frame_size,
+            image::imageops::FilterType::Triangle,
+        );
+        let dst_y = i as u32 * frame_size;
+        image::imageops::overlay(&mut sheet, &resized, 0, dst_y as i64);
+    }
+
+    let mut png_bytes = Vec::with_capacity((sheet_w * sheet_h * 4 / 8) as usize);
+    image::codecs::png::PngEncoder::new_with_quality(
+        &mut png_bytes,
+        image::codecs::png::CompressionType::Default,
+        image::codecs::png::FilterType::Adaptive,
+    )
+    .write_image(
+        sheet.as_raw(),
+        sheet_w,
+        sheet_h,
+        image::ExtendedColorType::Rgba8,
+    )
+    .map_err(|e| format!("png encode: {}", e))?;
+
+    let png_base64 = base64_simd::STANDARD.encode_to_string(&png_bytes);
+
+    Ok(EmojiSpritesheet {
+        png_base64,
+        frame_count: frames.len() as u32,
+        frame_size,
+        frame_durations_ms: durations,
+    })
+}
+
+fn decode_webp_frames(bytes: &[u8]) -> Result<Vec<(image::RgbaImage, u32)>, String> {
+    // Animated WebPs go through libwebp directly. `image-webp` 0.2.x
+    // returns per-frame raw pixels without applying the spec's disposal
+    // + blend modes, so transparent regions flicker as residue from the
+    // prior frame on a cleared canvas. libwebp is the reference decoder
+    // and produces fully-composed RGBA frames.
+    if let Ok(anim) = webp::AnimDecoder::new(bytes).decode() {
+        if anim.has_animation() {
+            let mut out = Vec::with_capacity(anim.len());
+            let mut prev_ts: i32 = 0;
+            for frame in anim.into_iter() {
+                let w = frame.width();
+                let h = frame.height();
+                let layout = frame.get_layout();
+                let pixels = frame.get_image();
+                let rgba = if layout.is_alpha() {
+                    image::RgbaImage::from_raw(w, h, pixels.to_vec())
+                        .ok_or_else(|| "webp anim: malformed RGBA frame".to_string())?
+                } else {
+                    let mut buf = Vec::with_capacity((w * h * 4) as usize);
+                    for px in pixels.chunks_exact(3) {
+                        buf.extend_from_slice(px);
+                        buf.push(255);
+                    }
+                    image::RgbaImage::from_raw(w, h, buf)
+                        .ok_or_else(|| "webp anim: malformed RGB frame".to_string())?
+                };
+                let ts = frame.get_time_ms();
+                // libwebp reports cumulative end-of-frame timestamps;
+                // per-frame duration is the delta from the previous one.
+                let duration = (ts - prev_ts).max(20) as u32;
+                prev_ts = ts;
+                out.push((rgba, duration));
+            }
+            if !out.is_empty() {
+                return Ok(out);
+            }
+        }
+    }
+
+    // Still WebP — image-webp handles single-frame decoding correctly.
+    let img = image::ImageReader::with_format(Cursor::new(bytes), image::ImageFormat::WebP)
+        .decode()
+        .map_err(|e| format!("webp still: {}", e))?
+        .into_rgba8();
+    Ok(vec![(img, 100)])
+}
+
+fn decode_gif_frames(bytes: &[u8]) -> Result<Vec<(image::RgbaImage, u32)>, String> {
+    let decoder = image::codecs::gif::GifDecoder::new(Cursor::new(bytes))
+        .map_err(|e| format!("gif decoder: {}", e))?;
+    let frames: Vec<image::Frame> = decoder.into_frames().collect_frames()
+        .map_err(|e| format!("gif frames: {}", e))?;
+    Ok(frames.into_iter().map(extract_frame).collect())
+}
+
+fn decode_apng_frames(bytes: &[u8]) -> Result<Vec<(image::RgbaImage, u32)>, String> {
+    let decoder = image::codecs::png::PngDecoder::new(Cursor::new(bytes))
+        .map_err(|e| format!("png decoder: {}", e))?
+        .apng()
+        .map_err(|e| format!("apng: {}", e))?;
+    let frames: Vec<image::Frame> = decoder.into_frames().collect_frames()
+        .map_err(|e| format!("apng frames: {}", e))?;
+    Ok(frames.into_iter().map(extract_frame).collect())
+}
+
+fn decode_static_fallback(bytes: &[u8]) -> Result<Vec<(image::RgbaImage, u32)>, String> {
+    let img = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("sniff: {}", e))?
+        .decode()
+        .map_err(|e| format!("decode: {}", e))?
+        .into_rgba8();
+    Ok(vec![(img, 100)])
+}
+
+fn extract_frame(f: image::Frame) -> (image::RgbaImage, u32) {
+    // image::Frame::delay is `Delay` which gives (numer, denom) for ms.
+    let (numer, denom) = f.delay().numer_denom_ms();
+    let dur = if denom == 0 { 100 } else { (numer / denom).max(20) };
+    (f.into_buffer(), dur)
+}

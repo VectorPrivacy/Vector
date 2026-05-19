@@ -3,7 +3,9 @@
 //! This module handles parsing and processing of deep link URLs for Vector.
 //! Supported URL formats:
 //! - `vector://profile/<npub>` - Opens a user's profile
+//! - `vector://emojis/pack/<naddr>` - Opens the Pack Details modal
 //! - `https://vectorapp.io/profile/<npub>` - Web URL for mobile app links
+//! - `https://vectorapp.io/emojis/pack/<naddr>` - Web URL for pack share links
 
 use serde::Serialize;
 use std::sync::Mutex;
@@ -91,6 +93,22 @@ fn parse_path_segments(path: &str) -> Option<DeepLinkAction> {
                 None
             }
         }
+        // Pack share links — `emojis/pack/<naddr>` matches the website
+        // route + the Vector app's `_sharePackToClipboard` output. Naddr
+        // decoding happens on the frontend; we only sanity-check the
+        // bech32 HRP + min length so a typo doesn't queue an action.
+        "emojis" if segments.len() >= 3 && segments[1] == "pack" => {
+            let naddr = strip_html_suffix(segments[2]);
+            if validate_naddr(naddr) {
+                Some(DeepLinkAction {
+                    action_type: "emoji_pack".to_string(),
+                    target: naddr.to_string(),
+                })
+            } else {
+                println!("[DeepLink] Invalid naddr format: {}", naddr);
+                None
+            }
+        }
         _ => {
             println!("[DeepLink] Unknown action: {}", segments[0]);
             None
@@ -102,6 +120,21 @@ fn parse_path_segments(path: &str) -> Option<DeepLinkAction> {
 fn validate_npub(npub: &str) -> bool {
     // npub1 prefix + 58 characters of bech32 data = 63 total characters
     npub.starts_with("npub1") && npub.len() == 63
+}
+
+/// Lightweight naddr sanity check. Real bech32 + TLV decoding happens
+/// on the frontend (vector-core has the helpers, but the parser doesn't
+/// need to load them just to gate a deep link). We just verify the
+/// bech32 HRP and a plausible minimum length; the frontend modal will
+/// surface a friendly error if decoding fails downstream.
+fn validate_naddr(naddr: &str) -> bool {
+    naddr.starts_with("naddr1") && naddr.len() >= 30
+}
+
+/// Some link expanders / mobile launchers append `.html` to a URL that
+/// looks like a file path. Strip it so the naddr decodes cleanly.
+fn strip_html_suffix(s: &str) -> &str {
+    s.strip_suffix(".html").unwrap_or(s)
 }
 
 /// Handle incoming deep link URLs

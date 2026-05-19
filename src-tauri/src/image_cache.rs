@@ -70,6 +70,11 @@ pub enum ImageType {
     MiniAppIcon,
     /// Inline images from URLs posted in chat messages
     InlineImage,
+    /// Custom emoji from a NIP-30 pack (image bytes only — animated
+    /// frame decoding happens via `decode_animated_emoji`).
+    Emoji,
+    /// Pack icon (kind 30030 `image`/`picture` tag).
+    EmojiPackIcon,
 }
 
 impl ImageType {
@@ -80,6 +85,8 @@ impl ImageType {
             ImageType::Banner => "banners",
             ImageType::MiniAppIcon => "miniapp_icons",
             ImageType::InlineImage => "inline_images",
+            ImageType::Emoji => "emojis",
+            ImageType::EmojiPackIcon => "emoji_pack_icons",
         }
     }
 }
@@ -480,6 +487,8 @@ pub async fn get_or_cache_image<R: Runtime>(
         "avatar" => ImageType::Avatar,
         "banner" => ImageType::Banner,
         "miniapp_icon" => ImageType::MiniAppIcon,
+        "emoji" => ImageType::Emoji,
+        "emoji_pack_icon" => ImageType::EmojiPackIcon,
         _ => return Err("Invalid image type".to_string()),
     };
 
@@ -502,6 +511,8 @@ pub async fn clear_image_cache<R: Runtime>(
     total += clear_cache(&handle, ImageType::Banner)?;
     total += clear_cache(&handle, ImageType::MiniAppIcon)?;
     total += clear_cache(&handle, ImageType::InlineImage)?;
+    total += clear_cache(&handle, ImageType::Emoji)?;
+    total += clear_cache(&handle, ImageType::EmojiPackIcon)?;
 
     // Clear stale cached path references in profiles (DB + in-memory state)
     {

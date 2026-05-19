@@ -540,6 +540,9 @@ pub struct CompactReaction {
     pub author_idx: u16,
     /// Emoji string (supports standard emoji and custom like `:cat_heart_eyes:`)
     pub emoji: Box<str>,
+    /// NIP-30 custom-emoji URL when the reaction is `:shortcode:` form.
+    /// Boxed so the cold path (stock unicode reactions) stays 8 bytes.
+    pub emoji_url: Option<Box<str>>,
 }
 
 impl CompactReaction {
@@ -562,6 +565,7 @@ impl CompactReaction {
             reference_id: hex_to_bytes_32(&reaction.reference_id),
             author_idx: interner.intern(&reaction.author_id),
             emoji: reaction.emoji.clone().into_boxed_str(),
+            emoji_url: reaction.emoji_url.as_deref().map(|s| s.into()),
         }
     }
 
@@ -572,6 +576,7 @@ impl CompactReaction {
             reference_id: hex_to_bytes_32(&reaction.reference_id),
             author_idx: interner.intern(&reaction.author_id),
             emoji: reaction.emoji.into_boxed_str(),
+            emoji_url: reaction.emoji_url.map(|s| s.into_boxed_str()),
         }
     }
 
@@ -584,6 +589,7 @@ impl CompactReaction {
                 .map(|s| s.to_string())
                 .unwrap_or_default(),
             emoji: self.emoji.to_string(),
+            emoji_url: self.emoji_url.as_deref().map(|s| s.to_string()),
         }
     }
 }
@@ -960,6 +966,10 @@ pub struct CompactMessage {
     pub edit_history: Option<Box<Vec<EditEntry>>>,
     /// Link preview metadata - boxed since ~216 bytes but rare (saves ~208 bytes)
     pub preview_metadata: Option<Box<SiteMetadata>>,
+    /// NIP-30 emoji tags travelling with this rumor — boxed because the
+    /// vast majority of messages have none, so the cold path stays cheap.
+    #[allow(clippy::box_collection)]
+    pub emoji_tags: Option<Box<Vec<crate::types::EmojiTag>>>,
 }
 
 impl CompactMessage {
@@ -1472,6 +1482,11 @@ impl CompactMessage {
             // Box rare fields to save inline space
             edit_history: msg.edit_history.clone().map(Box::new),
             preview_metadata: msg.preview_metadata.clone().map(Box::new),
+            emoji_tags: if msg.emoji_tags.is_empty() {
+                None
+            } else {
+                Some(Box::new(msg.emoji_tags.clone()))
+            },
         }
     }
 
@@ -1512,6 +1527,11 @@ impl CompactMessage {
             // Box rare fields to save inline space
             edit_history: msg.edit_history.map(Box::new),
             preview_metadata: msg.preview_metadata.map(Box::new),
+            emoji_tags: if msg.emoji_tags.is_empty() {
+                None
+            } else {
+                Some(Box::new(msg.emoji_tags))
+            },
         }
     }
 
@@ -1542,6 +1562,7 @@ impl CompactMessage {
             // Unbox rare fields
             edit_history: self.edit_history.as_ref().map(|b| (**b).clone()),
             preview_metadata: self.preview_metadata.as_ref().map(|b| (**b).clone()),
+            emoji_tags: self.emoji_tags.as_ref().map(|b| (**b).clone()).unwrap_or_default(),
         }
     }
 }
@@ -1604,6 +1625,7 @@ mod tests {
             reactions: TinyVec::new(),
             edit_history: None,
             preview_metadata: None,  // Boxed, but None = 8 bytes
+            emoji_tags: None,
         };
 
         let msg2 = CompactMessage {
@@ -1620,6 +1642,7 @@ mod tests {
             reactions: TinyVec::new(),
             edit_history: None,
             preview_metadata: None,  // Boxed, but None = 8 bytes
+            emoji_tags: None,
         };
 
         assert!(vec.insert(msg1));
@@ -1654,6 +1677,7 @@ mod tests {
             reactions: TinyVec::new(),
             edit_history: None,
             preview_metadata: None,  // Boxed
+            emoji_tags: None,
         };
 
         assert!(vec.insert(msg.clone()));
@@ -1713,6 +1737,7 @@ mod tests {
                     reactions: vec![],
                     edit_history: None,
                     preview_metadata: None,
+                    emoji_tags: Vec::new(),
                 }
             })
             .collect();
@@ -2609,6 +2634,7 @@ mod tests {
             reactions: TinyVec::new(),
             edit_history: None,
             preview_metadata: None,
+            emoji_tags: None,
         }
     }
 
@@ -2971,6 +2997,7 @@ mod tests {
                 reference_id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".into(),
                 author_id: "npub1reactor".into(),
                 emoji: "\u{1f44d}".into(), // thumbs up
+                emoji_url: None,
             }],
             at: 1705320000000, // 2024-01-15 12:00:00 UTC ms
             pending: false,
@@ -2983,6 +3010,7 @@ mod tests {
                 EditEntry { content: "Original".into(), edited_at: 1705320000000 },
                 EditEntry { content: "Edited".into(), edited_at: 1705320060000 },
             ]),
+            emoji_tags: Vec::new(),
         }
     }
 
@@ -3115,12 +3143,14 @@ mod tests {
                     reference_id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".into(),
                     author_id: "npub1alice".into(),
                     emoji: "\u{2764}".into(), // heart
+                    emoji_url: None,
                 },
                 Reaction {
                     id: "bbb0000000000000000000000000000000000000000000000000000000000000".into(),
                     reference_id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".into(),
                     author_id: "npub1bob".into(),
                     emoji: "\u{1f525}".into(), // fire
+                    emoji_url: None,
                 },
             ],
             ..Message::default()
@@ -3446,6 +3476,7 @@ mod tests {
             reference_id: "bbbb000000000000000000000000000000000000000000000000000000000000".into(),
             author_id: "npub1alice".into(),
             emoji: "+".into(),
+            emoji_url: None,
         };
         let mut interner = NpubInterner::new();
         let compact = CompactReaction::from_reaction(&reaction, &mut interner);
@@ -3467,6 +3498,7 @@ mod tests {
             reference_id: "bbbb000000000000000000000000000000000000000000000000000000000000".into(),
             author_id: "npub1alice".into(),
             emoji: "+".into(),
+            emoji_url: None,
         };
         let compact = CompactReaction::from_reaction(&reaction, &mut interner);
         assert_eq!(compact.author_idx, alice_handle, "should reuse existing interner handle");
@@ -3482,6 +3514,7 @@ mod tests {
             reference_id: "bbbb000000000000000000000000000000000000000000000000000000000000".into(),
             author_id: "npub1test".into(),
             emoji: "\u{1f431}\u{200d}\u{1f4bb}".into(), // cat with laptop (ZWJ sequence)
+            emoji_url: None,
         };
         let mut interner = NpubInterner::new();
         let compact = CompactReaction::from_reaction(&reaction, &mut interner);
@@ -3496,6 +3529,7 @@ mod tests {
             reference_id: "bbbb000000000000000000000000000000000000000000000000000000000000".into(),
             author_id: "npub1test".into(),
             emoji: ":cat_heart_eyes:".into(),
+            emoji_url: None,
         };
         let mut interner = NpubInterner::new();
         let compact = CompactReaction::from_reaction(&reaction, &mut interner);
@@ -3510,6 +3544,7 @@ mod tests {
             reference_id: "bbbb000000000000000000000000000000000000000000000000000000000000".into(),
             author_id: "npub1bob".into(),
             emoji: "\u{1f44d}".into(), // thumbs up
+            emoji_url: None,
         };
         let reaction_clone = reaction.clone();
         let mut interner = NpubInterner::new();

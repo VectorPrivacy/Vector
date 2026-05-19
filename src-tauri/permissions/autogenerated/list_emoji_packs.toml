@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-emoji-packs"
+description = "Enables the list_emoji_packs command without any pre-configured scope."
+commands.allow = ["list_emoji_packs"]
+
+[[permission]]
+identifier = "deny-list-emoji-packs"
+description = "Denies the list_emoji_packs command without any pre-configured scope."
+commands.deny = ["list_emoji_packs"]

@@ -636,6 +636,51 @@ where
     }
 }
 
+/// Parse a Blossom blob URL into (origin, hash) and DELETE that blob.
+/// Awaitable single-URL variant of `delete_blobs_best_effort` — caller
+/// drives sequencing + per-URL UI feedback.
+pub async fn delete_blob_by_url<T>(signer: T, url_str: &str) -> Result<(), String>
+where
+    T: NostrSigner + Clone,
+{
+    let parsed = Url::parse(url_str)
+        .map_err(|e| format!("Invalid Blossom URL: {}", e))?;
+    let last_segment = parsed
+        .path_segments()
+        .and_then(|segs| segs.rev().find(|s| !s.is_empty()))
+        .ok_or_else(|| "Blossom URL has no path segment".to_string())?;
+    let hash_str = last_segment.split('.').next().unwrap_or("");
+    let hash = Sha256Hash::from_str(hash_str)
+        .map_err(|e| format!("Path is not a SHA-256 hash: {}", e))?;
+
+    let mut origin = parsed.clone();
+    origin.set_path("/");
+    origin.set_query(None);
+    origin.set_fragment(None);
+
+    crate::log_info!("[Blossom] DELETE {} from {}", hash, origin);
+    // Hard ceiling — a black-holed server must not hang the caller's
+    // UI (e.g. the pack creator's "Deleting…" overlay) indefinitely.
+    // 15s is generous for a healthy server and short enough that a
+    // misbehaving one fails over to the next blob in a batch quickly.
+    let timeout = std::time::Duration::from_secs(15);
+    match tokio::time::timeout(timeout, delete_blob(signer, &origin, hash)).await {
+        Ok(Ok(())) => {
+            crate::log_info!("[Blossom] DELETE successful: {} from {}", hash, origin);
+            Ok(())
+        }
+        Ok(Err(e)) => {
+            crate::log_warn!("[Blossom] DELETE failed: {} from {}: {}", hash, origin, e);
+            Err(e)
+        }
+        Err(_) => {
+            let msg = format!("DELETE timed out after {}s", timeout.as_secs());
+            crate::log_warn!("[Blossom] {} ({} from {})", msg, hash, origin);
+            Err(msg)
+        }
+    }
+}
+
 /// Fire-and-forget DELETE for each parseable blob URL. Pairs with
 /// `delete_own_dm` so removing a NIP-17 file message also removes
 /// the ciphertext from the server it was uploaded to.

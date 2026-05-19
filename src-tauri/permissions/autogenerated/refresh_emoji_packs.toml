@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-refresh-emoji-packs"
+description = "Enables the refresh_emoji_packs command without any pre-configured scope."
+commands.allow = ["refresh_emoji_packs"]
+
+[[permission]]
+identifier = "deny-refresh-emoji-packs"
+description = "Denies the refresh_emoji_packs command without any pre-configured scope."
+commands.deny = ["refresh_emoji_packs"]

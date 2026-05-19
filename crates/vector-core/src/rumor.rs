@@ -263,6 +263,8 @@ fn process_text_message(
     // Extract millisecond-precision timestamp
     let ms_timestamp = extract_millisecond_timestamp(&rumor);
 
+    let emoji_tags = crate::types::EmojiTag::extract_from_tags(rumor.tags.iter());
+
     // Create the message
     let msg = Message {
         id: rumor.id.to_hex(),
@@ -286,6 +288,7 @@ fn process_text_message(
         wrapper_event_id: None, // Set by caller after processing
         edited: false,
         edit_history: None,
+        emoji_tags,
     };
 
     Ok(RumorProcessingResult::TextMessage(msg))
@@ -455,6 +458,8 @@ fn process_file_attachment(
         mls_filename: None,   // Kind 15 uses explicit encryption, not MIP-04
     };
 
+    let emoji_tags = crate::types::EmojiTag::extract_from_tags(rumor.tags.iter());
+
     // Create the message with attachment
     let msg = Message {
         id: rumor.id.to_hex(),
@@ -478,6 +483,7 @@ fn process_file_attachment(
         wrapper_event_id: None, // Set by caller after processing
         edited: false,
         edit_history: None,
+        emoji_tags,
     };
 
     Ok(RumorProcessingResult::FileAttachment(msg))
@@ -516,11 +522,30 @@ fn process_reaction(
         .ok_or("Reaction reference tag has no content")?
         .to_string();
 
+    // NIP-30: pull the first `["emoji", shortcode, url]` tag whose
+    // shortcode matches the reaction content (`:shortcode:` form).
+    let emoji_url = if rumor.content.starts_with(':') && rumor.content.ends_with(':')
+        && rumor.content.len() >= 3
+    {
+        let sc = &rumor.content[1..rumor.content.len() - 1];
+        rumor.tags.iter().find_map(|tag| {
+            let parts: Vec<&str> = tag.as_slice().iter().map(|s| s.as_str()).collect();
+            if parts.len() >= 3 && parts[0] == "emoji" && parts[1] == sc {
+                Some(parts[2].to_string())
+            } else {
+                None
+            }
+        })
+    } else {
+        None
+    };
+
     let reaction = Reaction {
         id: rumor.id.to_hex(),
         reference_id,
         author_id: rumor.pubkey.to_bech32().unwrap_or_else(|_| rumor.pubkey.to_hex()),
         emoji: rumor.content,
+        emoji_url,
     };
 
     Ok(RumorProcessingResult::Reaction(reaction))

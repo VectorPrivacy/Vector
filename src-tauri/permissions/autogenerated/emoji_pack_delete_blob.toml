@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-emoji-pack-delete-blob"
+description = "Enables the emoji_pack_delete_blob command without any pre-configured scope."
+commands.allow = ["emoji_pack_delete_blob"]
+
+[[permission]]
+identifier = "deny-emoji-pack-delete-blob"
+description = "Denies the emoji_pack_delete_blob command without any pre-configured scope."
+commands.deny = ["emoji_pack_delete_blob"]

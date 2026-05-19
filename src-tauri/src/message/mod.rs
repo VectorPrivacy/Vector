@@ -48,13 +48,35 @@ pub use types::{
 };
 pub use vector_core::compact::CompactAttachment;
 
-/// Protocol-agnostic reaction function that works for both DMs and Group Chats
+/// Protocol-agnostic reaction function that works for both DMs and Group Chats.
+/// `emoji_url` carries the NIP-30 image URL when reacting with a custom-pack
+/// emoji — the reaction content stays `:shortcode:` and an `["emoji",
+/// shortcode, url]` tag is attached so any spec-aware client renders the image.
 #[tauri::command]
-pub async fn react_to_message(reference_id: String, chat_id: String, emoji: String) -> Result<bool, String> {
+pub async fn react_to_message(
+    reference_id: String,
+    chat_id: String,
+    emoji: String,
+    emoji_url: Option<String>,
+) -> Result<bool, String> {
     use crate::chat::ChatType;
-    
+
     let client = nostr_client().ok_or("Nostr client not initialized")?;
     let my_public_key = crate::my_public_key().ok_or("Public key not initialized")?;
+
+    // NIP-30 custom-emoji tag — only valid when the content is `:shortcode:`
+    // and we have a URL. Defensive: a bare emoji like "👍" stays untagged.
+    let custom_emoji_tag = emoji_url.as_ref().and_then(|url| {
+        if !emoji.starts_with(':') || !emoji.ends_with(':') || emoji.len() < 3 {
+            return None;
+        }
+        let shortcode = &emoji[1..emoji.len() - 1];
+        if shortcode.is_empty() || url.is_empty() { return None; }
+        Some(Tag::custom(
+            TagKind::custom("emoji"),
+            [shortcode.to_string(), url.clone()],
+        ))
+    });
 
     // Determine chat type
     let state = STATE.lock().await;
@@ -62,13 +84,13 @@ pub async fn react_to_message(reference_id: String, chat_id: String, emoji: Stri
         .ok_or_else(|| "Chat not found".to_string())?;
     let chat_type = chat.chat_type.clone();
     drop(state);
-    
+
     match chat_type {
         ChatType::DirectMessage => {
             // For DMs, send gift-wrapped reaction
             let reference_event = EventId::from_hex(&reference_id).map_err(|e| e.to_string())?;
             let receiver_pubkey = PublicKey::from_bech32(&chat_id).map_err(|e| e.to_string())?;
-            
+
             // Build NIP-25 Reaction rumor
             let reaction_target = nostr_sdk::nips::nip25::ReactionTarget {
                 event_id: reference_event,
@@ -77,8 +99,11 @@ pub async fn react_to_message(reference_id: String, chat_id: String, emoji: Stri
                 kind: Some(Kind::PrivateDirectMessage),
                 relay_hint: None,
             };
-            let rumor = EventBuilder::reaction(reaction_target, &emoji)
-                .build(my_public_key);
+            let mut builder = EventBuilder::reaction(reaction_target, &emoji);
+            if let Some(tag) = custom_emoji_tag.clone() {
+                builder = builder.tag(tag);
+            }
+            let rumor = builder.build(my_public_key);
             let rumor_id = rumor.id.ok_or("Failed to get rumor ID")?.to_hex();
             
             // Send reaction to the receiver (routed to their inbox relays if available)
@@ -102,6 +127,7 @@ pub async fn react_to_message(reference_id: String, chat_id: String, emoji: Stri
                 reference_id: reference_id.clone(),
                 author_id: my_public_key.to_bech32().unwrap_or_else(|_| my_public_key.to_hex()),
                 emoji,
+                emoji_url: emoji_url.clone(),
             };
             
             let msg_for_save = {
@@ -132,11 +158,14 @@ pub async fn react_to_message(reference_id: String, chat_id: String, emoji: Stri
         ChatType::MlsGroup => {
             // For group chats, send reaction through MLS
             let reference_event = EventId::from_hex(&reference_id).map_err(|e| e.to_string())?;
-            
+
             // Build reaction rumor manually (simpler than using the builder for group chats)
-            let rumor = EventBuilder::new(Kind::Reaction, &emoji)
-                .tag(Tag::event(reference_event))
-                .build(my_public_key);
+            let mut builder = EventBuilder::new(Kind::Reaction, &emoji)
+                .tag(Tag::event(reference_event));
+            if let Some(tag) = custom_emoji_tag {
+                builder = builder.tag(tag);
+            }
+            let rumor = builder.build(my_public_key);
             let rumor_id = rumor.id.ok_or("Failed to get rumor ID")?.to_hex();
             
             // Send through MLS
@@ -148,6 +177,7 @@ pub async fn react_to_message(reference_id: String, chat_id: String, emoji: Stri
                 reference_id: reference_id.clone(),
                 author_id: my_public_key.to_bech32().unwrap_or_else(|_| my_public_key.to_hex()),
                 emoji,
+                emoji_url: emoji_url.clone(),
             };
             
             let msg_for_save = {
