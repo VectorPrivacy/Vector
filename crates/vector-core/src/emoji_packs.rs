@@ -365,20 +365,59 @@ pub fn parse_naddr(naddr: &str) -> Result<PackAddress, String> {
     })
 }
 
-/// Pull `a` tags out of a kind 10030 event, parsed as pack addresses.
-/// Unparseable entries are dropped silently — a malformed peer entry
-/// shouldn't break the rest of the user's pack list.
-pub fn parse_subscribed_addresses(event: &Event) -> Vec<PackAddress> {
-    event.tags.iter()
-        .filter_map(|tag| {
-            let parts: Vec<&str> = tag.as_slice().iter().map(|s| s.as_str()).collect();
-            if parts.len() >= 2 && parts[0] == "a" {
-                parse_pack_address(parts[1]).ok()
+/// Parse a NIP-51 inner tag list (the JSON array of tag tuples that
+/// lives inside the NIP-44-encrypted `content` of an encrypted-items
+/// list). Pulls out `a` tags as pack addresses; malformed inner
+/// entries are dropped silently so one bad row doesn't nuke the list.
+fn parse_inner_tag_list(plaintext: &str) -> Vec<PackAddress> {
+    let inner: Vec<Vec<String>> = match serde_json::from_str(plaintext) {
+        Ok(v) => v,
+        Err(e) => {
+            crate::log_warn!("[EmojiPacks] emoji list JSON parse failed: {}", e);
+            return Vec::new();
+        }
+    };
+    inner.into_iter()
+        .filter_map(|tup| {
+            if tup.len() >= 2 && tup[0] == "a" {
+                parse_pack_address(&tup[1]).ok()
             } else {
                 None
             }
         })
         .collect()
+}
+
+/// Decrypt + parse a kind 10030 event's encrypted subscription list.
+///
+/// Vector's emoji list is fully private by design — every `a` tag is
+/// carried inside the NIP-44-self-encrypted `content`, never in the
+/// public `tags` field. A list event with empty / undecryptable /
+/// malformed content is treated as "no subscriptions" rather than
+/// failing the whole refresh. Spec: NIP-51 "encrypted items" section.
+pub async fn decrypt_subscribed_addresses(
+    client: &Client,
+    my_pk: &PublicKey,
+    event: &Event,
+) -> Vec<PackAddress> {
+    if event.content.is_empty() {
+        return Vec::new();
+    }
+    let signer = match client.signer().await {
+        Ok(s) => s,
+        Err(e) => {
+            crate::log_warn!("[EmojiPacks] signer unavailable for emoji list decrypt: {}", e);
+            return Vec::new();
+        }
+    };
+    let plaintext = match signer.nip44_decrypt(my_pk, &event.content).await {
+        Ok(p) => p,
+        Err(e) => {
+            crate::log_warn!("[EmojiPacks] emoji list decrypt failed: {}", e);
+            return Vec::new();
+        }
+    };
+    parse_inner_tag_list(&plaintext)
 }
 
 // ============================================================================
@@ -603,7 +642,7 @@ pub async fn fetch_subscribed_packs(
     // queried don't have the event) — fall back to the local mirror.
     let list_event = list_events.into_iter().max_by_key(|e| e.created_at);
     let addrs: Vec<PackAddress> = match list_event {
-        Some(ev) => parse_subscribed_addresses(&ev),
+        Some(ev) => decrypt_subscribed_addresses(client, &my_pubkey, &ev).await,
         None => {
             crate::log_debug!(
                 "[EmojiPacks] kind 10030 not on relays — refreshing local subs only",
@@ -689,17 +728,35 @@ pub async fn fetch_pack_by_naddr(naddr: &str) -> Result<EmojiPack, String> {
         .ok_or_else(|| format!("Pack not found on any relay: {}:{}", addr.pubkey.to_hex(), addr.identifier))
 }
 
-/// Publish a kind 10030 "Emojis" list containing every subscribed pack
-/// `a`-tag. Replaceable — peers always see the freshest set on next read.
+/// Publish a kind 10030 "Emojis" list containing every subscribed pack.
+///
+/// Encrypted-items mode: the entire subscription set lives inside a
+/// NIP-44-self-encrypted JSON array of `["a", "30030:pk:d"]` tuples
+/// stored in `content`. The event's public `tags` field is left empty
+/// — Vector treats which packs a user follows as private information,
+/// matching the NIP-51 "encrypted items" pattern that mute lists use.
+/// Replaceable per spec, so peers (the same npub on another device)
+/// always read the freshest set on next sync.
 pub async fn publish_emoji_list(client: &Client) -> Result<(), String> {
     let addrs = load_subscriptions()?;
-    let mut builder = EventBuilder::new(Kind::Custom(KIND_EMOJI_LIST), "");
-    for addr in &addrs {
-        builder = builder.tag(Tag::custom(TagKind::custom("a"), [addr.clone()]));
-    }
+    let my_pk = crate::state::my_public_key()
+        .ok_or_else(|| "Not logged in".to_string())?;
+
+    let inner_tags: Vec<Vec<String>> = addrs.iter()
+        .map(|addr| vec!["a".to_string(), addr.clone()])
+        .collect();
+    let plaintext = serde_json::to_string(&inner_tags)
+        .map_err(|e| format!("Serialise emoji list: {}", e))?;
+
+    let signer = client.signer().await
+        .map_err(|e| format!("Signer unavailable: {}", e))?;
+    let content = signer.nip44_encrypt(&my_pk, &plaintext).await
+        .map_err(|e| format!("nip44 encrypt emoji list: {}", e))?;
+
+    let builder = EventBuilder::new(Kind::Custom(KIND_EMOJI_LIST), content);
     client.send_event_builder(builder).await
         .map_err(|e| format!("Failed to publish emoji list (kind 10030): {}", e))?;
-    crate::log_info!("[EmojiPacks] Published kind 10030 with {} pack subscription(s)", addrs.len());
+    crate::log_info!("[EmojiPacks] Published encrypted kind 10030 with {} pack subscription(s)", addrs.len());
     Ok(())
 }
 
@@ -1219,22 +1276,27 @@ mod tests {
     }
 
     #[test]
-    fn parse_subscribed_addresses_extracts_valid_a_tags() {
-        let k = keys();
+    fn parse_inner_tag_list_extracts_valid_a_tags() {
+        // The inner tag list lives JSON-encoded inside the NIP-44-encrypted
+        // event content; exercise the parser directly so we don't pull a
+        // signer + network into a unit test.
         let hex_a = keys().public_key().to_hex();
         let hex_b = keys().public_key().to_hex();
-        let ev = EventBuilder::new(Kind::Custom(KIND_EMOJI_LIST), "")
-            .tags(vec![
-                Tag::custom(TagKind::custom("a"), [format!("30030:{}:packA", hex_a)]),
-                Tag::custom(TagKind::custom("a"), [format!("30030:{}:packB", hex_b)]),
-                Tag::custom(TagKind::custom("a"), ["malformed".to_string()]),
-                Tag::custom(TagKind::custom("a"), [format!("10030:{}:wrongkind", hex_a)]),
-            ])
-            .sign_with_keys(&k).unwrap();
-        let addrs = parse_subscribed_addresses(&ev);
+        let plaintext = format!(
+            r#"[["a","30030:{a}:packA"],["a","30030:{b}:packB"],["a","malformed"],["a","10030:{a}:wrongkind"],["p","not-an-a-tag"]]"#,
+            a = hex_a,
+            b = hex_b,
+        );
+        let addrs = parse_inner_tag_list(&plaintext);
         assert_eq!(addrs.len(), 2);
         assert_eq!(addrs[0].identifier, "packA");
         assert_eq!(addrs[1].identifier, "packB");
+    }
+
+    #[test]
+    fn parse_inner_tag_list_returns_empty_on_malformed_json() {
+        assert!(parse_inner_tag_list("not json").is_empty());
+        assert!(parse_inner_tag_list("").is_empty());
     }
 
     #[test]
