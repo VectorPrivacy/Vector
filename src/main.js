@@ -1060,6 +1060,19 @@ async function runWithTorBootstrapStatus(fn) {
     }
 }
 
+// Mirror the attachment panel's `.visible` class into the Android back stack
+// so the hardware back press dismisses it from any open site (toggle button,
+// outside click, send finish, miniapp launch).
+if (domAttachmentPanel) {
+    new MutationObserver(() => {
+        if (domAttachmentPanel.classList.contains('visible')) {
+            pushBack('attachment-panel', closeAttachmentPanel);
+        } else {
+            popBack('attachment-panel');
+        }
+    }).observe(domAttachmentPanel, { attributes: true, attributeFilter: ['class'] });
+}
+
 function toggleAttachmentPanel() {
     if (!domAttachmentPanel.classList.contains('visible')) {
         // Close emoji panel if open
@@ -2218,9 +2231,10 @@ async function setupRustListeners() {
             // Increment rendered count since we're adding a new message
             proceduralScrollState.renderedMessageCount++;
             proceduralScrollState.totalMessageCount++;
-            // Open chat + pinned = user saw it land. Mark and drop the
-            // divider so it tracks unread state.
-            if (!message.mine && chatPinnedToBottom) {
+            // Open chat + pinned + visible = user saw it land. If the
+            // window is tabbed out / app backgrounded, leave the message
+            // unread until activity resumes.
+            if (!message.mine && chatPinnedToBottom && isWindowActive()) {
                 markAsRead(chat, message);
                 clearUnreadDivider();
             }
@@ -2917,10 +2931,10 @@ async function setupRustListeners() {
             // Increment rendered count since we're adding a new message
             proceduralScrollState.renderedMessageCount++;
             proceduralScrollState.totalMessageCount++;
-            // Open chat + pinned = user saw it land. Mark and drop the
-            // divider: receiving the message in real-time is the same
-            // "caught up" signal as closing and reopening.
-            if (!newMessage.mine && chatPinnedToBottom) {
+            // Open chat + pinned + window actually visible = user saw it
+            // land. Tabbed-out arrivals stay unread until refocus, even when
+            // the chat is open and pinned.
+            if (!newMessage.mine && chatPinnedToBottom && isWindowActive()) {
                 markAsRead(chat, newMessage);
                 clearUnreadDivider();
             }
@@ -5346,9 +5360,13 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
                     }, { once: true });
                     // Bump the scroll-down badge if the user is reading
                     // above; softChatScroll is a no-op for them, so this is
-                    // the only signal that something new arrived.
+                    // the only signal that something new arrived. Also drop
+                    // a divider when the window is inactive — they're pinned
+                    // but tabbed out, so they haven't actually seen it.
                     if (!chatPinnedToBottom) {
                         incrementUnreadBelow();
+                        insertUnreadDivider(domMsg);
+                    } else if (!isWindowActive()) {
                         insertUnreadDivider(domMsg);
                     }
                 }
@@ -6285,6 +6303,7 @@ function hideEditHistory() {
  * @param {string} contact
  */
 async function openChat(contact) {
+    pushBack('chat', closeChat);
     // Display the Chat UI
     navbarSelect('chat-btn');
     if (fProfileEditMode) exitProfileEditMode(true);
@@ -6492,6 +6511,7 @@ async function openChat(contact) {
  * Open the dialog for starting a new chat
  */
 function openNewChat() {
+    pushBack('new-chat', closeChat);
     // Display the UI
     domChatNew.style.display = '';
     domChats.style.display = 'none';
@@ -6505,6 +6525,8 @@ function openNewChat() {
  * Closes the current chat, taking the user back to the chat list
  */
 async function closeChat() {
+    popBack('chat');
+    popBack('new-chat');
     // Stop all audio engine playback (voice messages, music, etc.)
     invoke('audio_stop_all').catch(() => {});
 
@@ -6615,6 +6637,11 @@ async function closeChat() {
  * @param {Profile} cProfile - An optional profile to render
  */
 async function openProfile(cProfile) {
+    pushBack('profile', () => {
+        domProfile.style.display = 'none';
+        if (previousChatBeforeProfile) openChat(previousChatBeforeProfile);
+        else openChatlist();
+    });
     navbarSelect('profile-btn');
     domNavbar.style.display = '';
     domChats.style.display = 'none';
@@ -6673,7 +6700,13 @@ async function openProfile(cProfile) {
  */
 async function openGroupOverview(chat) {
     if (!chat || chat.chat_type !== 'MlsGroup') return;
-    
+
+    pushBack('group-overview', () => {
+        domGroupOverview.style.display = 'none';
+        domGroupOverview.removeAttribute('data-group-id');
+        openChat(chat.id);
+    });
+
     navbarSelect('chat-btn');
     domNavbar.style.display = 'none';
     domChats.style.display = 'none';
@@ -7246,6 +7279,7 @@ async function renderGroupOverview(chat) {
     
     // Back button - return to the group chat
     domGroupOverviewBackBtn.onclick = () => {
+        popBack('group-overview');
         domGroupOverview.style.display = 'none';
         domGroupOverview.removeAttribute('data-group-id');
         openChat(chat.id);
@@ -7279,6 +7313,14 @@ async function openInviteMemberToGroup(chat) {
     modal.style.justifyContent = 'center';
     modal.style.zIndex = '10000';
     modal.style.padding = '20px';
+
+    // Single dismissal entry point so close button, backdrop click, success
+    // path, and Android back all stay in sync with the back stack.
+    const dismissModal = () => {
+        activeInviteModalRerender = null;
+        modal.remove();
+        popBack('invite-member');
+    };
     
     const container = document.createElement('div');
     container.style.backgroundColor = '#0a0a0a';
@@ -7311,7 +7353,7 @@ async function openInviteMemberToGroup(chat) {
     closeBtn.className = 'btn';
     closeBtn.style.padding = '8px 12px';
     closeBtn.style.fontSize = '18px';
-    closeBtn.onclick = () => { activeInviteModalRerender = null; modal.remove(); };
+    closeBtn.onclick = dismissModal;
     header.appendChild(closeBtn);
     
     container.appendChild(header);
@@ -7522,8 +7564,7 @@ async function openInviteMemberToGroup(chat) {
 
             // Refresh the group overview
             setTimeout(async () => {
-                activeInviteModalRerender = null;
-                modal.remove();
+                dismissModal();
                 await renderGroupOverview(chat);
             }, 1000);
         } catch (e) {
@@ -7553,17 +7594,21 @@ async function openInviteMemberToGroup(chat) {
     
     modal.appendChild(container);
     document.body.appendChild(modal);
+    pushBack('invite-member', dismissModal);
 
     // Autofocus search on desktop (avoid triggering virtual keyboard on mobile)
     if (!platformFeatures.is_mobile) searchInput.focus();
 
     // Close on background click
     modal.onclick = (e) => {
-        if (e.target === modal) { activeInviteModalRerender = null; modal.remove(); }
+        if (e.target === modal) dismissModal();
     };
 }
 
 async function openChatlist() {
+    // Chatlist is the root — clearing the back stack means the next back
+    // press exits to the home screen instead of replaying old open fns.
+    clearBack();
     navbarSelect('chat-btn');
     domNavbar.style.display = '';
     if (fProfileEditMode) exitProfileEditMode(true);
@@ -7635,6 +7680,7 @@ async function refreshRemoteSignerCard() {
 }
 
 function openSettings() {
+    pushBack('settings', () => openChatlist());
     navbarSelect('settings-btn');
     domNavbar.style.display = '';
     domSettings.style.display = '';
@@ -7674,6 +7720,7 @@ function openSettings() {
 }
 
 async function openInvites() {
+    pushBack('invites', () => openChatlist());
     navbarSelect('invites-btn');
     domNavbar.style.display = '';
     domInvites.style.display = '';
@@ -9332,23 +9379,32 @@ domChatMessageInput.oninput = async () => {
             }
         });
 
-        await getCurrentWindow().onFocusChanged(async (event) => {
-            if (event.payload && strOpenChat) {
-                const currentChat = getChat(strOpenChat);
-                if (currentChat && currentChat.messages.length > 0) {
-                    // Find the last message from the contact (not from current user)
-                    let lastContactMsg = null;
-                    for (let i = currentChat.messages.length - 1; i >= 0; i--) {
-                        if (!currentChat.messages[i].mine) {
-                            lastContactMsg = currentChat.messages[i];
-                            break;
-                        }
-                    }
-                    if (lastContactMsg) {
-                        markAsRead(currentChat, lastContactMsg);
-                    }
-                }
+        // Single catch-up entry point for "the user is now actually looking":
+        // window regained focus OR tab became visible. Marks the open chat as
+        // read and clears its divider, but only when pinned — scrolled-up
+        // users haven't seen the new messages just because they refocused.
+        const onWindowResumed = () => {
+            if (!strOpenChat || !chatPinnedToBottom) return;
+            const currentChat = getChat(strOpenChat);
+            if (!currentChat?.messages?.length) return;
+            let latestNonMine = null;
+            for (let i = currentChat.messages.length - 1; i >= 0; i--) {
+                if (!currentChat.messages[i].mine) { latestNonMine = currentChat.messages[i]; break; }
             }
+            if (latestNonMine) markAsRead(currentChat, latestNonMine);
+            clearUnreadDivider();
+        };
+
+        await getCurrentWindow().onFocusChanged((event) => {
+            const wasActive = isWindowActive();
+            windowFocused = !!event.payload;
+            if (!wasActive && isWindowActive()) onWindowResumed();
+        });
+
+        document.addEventListener('visibilitychange', () => {
+            const wasActive = isWindowActive();
+            documentVisible = !document.hidden;
+            if (!wasActive && isWindowActive()) onWindowResumed();
         });
     }
 
@@ -9804,6 +9860,14 @@ function adjustSize() {
  */
 let chatPinnedToBottom = true;
 
+// "Window active" = the user can actually see the chat (window focused on
+// desktop, page visible on mobile). Real-time arrivals must NOT auto-mark
+// as read while the user is tabbed out; the catch-up fires when activity
+// resumes (handled in setup_listeners).
+let windowFocused = true;
+let documentVisible = typeof document !== 'undefined' ? !document.hidden : true;
+function isWindowActive() { return windowFocused && documentVisible; }
+
 const PIN_THRESHOLD_PX = 80;
 // 500ms covers iOS/Android momentum-scroll: scroll events keep firing
 // after touchend until momentum decays. A shorter window would miss
@@ -10106,6 +10170,7 @@ function updateCreateGroupValidation(showInline = false) {
  * Open Create Group tab
  */
 function openCreateGroup() {
+    pushBack('create-group', closeCreateGroup);
     // Show panel
     domCreateGroup.style.display = '';
     // Hide others
@@ -10145,6 +10210,7 @@ function openCreateGroup() {
  * Close Create Group tab and go back to Chat list
  */
 async function closeCreateGroup() {
+    popBack('create-group');
     domCreateGroup.style.display = 'none';
     fCreateGroupAttempt = false;
 

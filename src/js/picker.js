@@ -29,10 +29,23 @@ const picker = document.querySelector('.emoji-picker');
 // `visible` state — handles keyboard-driven closes (Enter / Esc),
 // where the mouse never moves so the usual mouseleave path doesn't
 // fire. One observer covers every close site without sprinkling
-// `hideEmojiTooltip()` calls throughout.
+// `hideEmojiTooltip()` calls throughout. The same observer drives the
+// Android back-stack push/pop so the panel can be dismissed with the
+// hardware back button from any of its many open sites.
 if (picker) {
     new MutationObserver(() => {
-        if (!picker.classList.contains('visible')) hideEmojiTooltip();
+        if (picker.classList.contains('visible')) {
+            pushBack('emoji-picker', () => {
+                picker.classList.remove('visible');
+                picker.style.bottom = '';
+                if (typeof domChatMessageInputEmoji !== 'undefined' && domChatMessageInputEmoji) {
+                    domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
+                }
+            });
+        } else {
+            hideEmojiTooltip();
+            popBack('emoji-picker');
+        }
     }).observe(picker, { attributes: true, attributeFilter: ['class'] });
 }
 

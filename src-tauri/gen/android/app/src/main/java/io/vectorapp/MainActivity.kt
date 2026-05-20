@@ -28,6 +28,8 @@ class MainActivity : TauriActivity() {
         external fun nativeOnNotificationTap(chatId: String)
     }
 
+    private var managedWebView: WebView? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -101,12 +103,30 @@ class MainActivity : TauriActivity() {
             MiniAppManager.closeMiniApp()
             return
         }
-        @Suppress("DEPRECATION")
-        super.onBackPressed()
+
+        // Ask the web frontend if it can pop its own nav stack (chats,
+        // overviews, settings tabs, custom modals). Falls back to
+        // moveTaskToBack(true) so the activity hides without tearing down
+        // state — matches native Android "back" semantics on a root screen.
+        val wv = managedWebView
+        if (wv == null) {
+            @Suppress("DEPRECATION")
+            super.onBackPressed()
+            return
+        }
+        wv.evaluateJavascript(
+            "(window.__vectorOnAndroidBack && window.__vectorOnAndroidBack()) ? 'handled' : 'unhandled'"
+        ) { result ->
+            val handled = result?.trim('"') == "handled"
+            if (!handled) {
+                moveTaskToBack(true)
+            }
+        }
     }
 
     override fun onWebViewCreate(webView: WebView) {
         super.onWebViewCreate(webView)
+        managedWebView = webView
 
         // Initialize MiniAppManager for Mini Apps overlay support
         MiniAppManager.initialize(this)

@@ -2668,8 +2668,8 @@ body.chat-bg-disabled .chat-messages::before {
 
 /* Mini profile popup — Discord-style preview when an avatar/name is clicked */
 .mini-profile-backdrop {
-  /* Created only on mobile — see mini-profile.js. Desktop keeps surrounding UI
-     clickable; outside-click dismiss is handled at the document level. */
+  /* Dim the rest of the UI so the popup reads as a focused modal. Click is
+     intercepted in JS to dismiss. */
   position: fixed;
   inset: 0;
   z-index: 999;
@@ -3610,6 +3610,10 @@ img.emoji-img-loading {
   height: 18px;
   margin-right: 2px;
   object-fit: fill;
+  -webkit-user-drag: none;
+  user-select: none;
+  -webkit-user-select: none;
+  pointer-events: none;
 }
 
 /* ============================================================================

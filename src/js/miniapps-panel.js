@@ -15,6 +15,7 @@
  * Shows the main attachment panel view (File, Mini Apps buttons)
  */
 function showAttachmentPanelMain() {
+    popBack('attachment-mini-apps');
     domAttachmentPanelMain.style.display = 'flex';
     domAttachmentPanelMiniAppsView.style.display = 'none';
     // Also hide PIVX wallet view if open
@@ -34,6 +35,7 @@ function showAttachmentPanelMain() {
  * Shows the Mini Apps list view
  */
 async function showAttachmentPanelMiniApps() {
+    pushBack('attachment-mini-apps', showAttachmentPanelMain);
     domAttachmentPanelMain.style.display = 'none';
     domAttachmentPanelMiniAppsView.style.display = 'flex';
     // Also hide PIVX wallet view if open
@@ -59,6 +61,7 @@ async function showAttachmentPanelMiniApps() {
  */
 function showMarketplacePanel() {
     if (domMarketplacePanel) {
+        pushBack('marketplace', () => { hideMarketplacePanel(); });
         domMarketplacePanel.style.display = 'flex';
         // Initialize marketplace on first show
         initMarketplace(domMarketplaceContent);
@@ -72,6 +75,7 @@ function showMarketplacePanel() {
 function hideMarketplacePanel() {
     return new Promise((resolve) => {
         if (domMarketplacePanel && domMarketplacePanel.style.display !== 'none') {
+            popBack('marketplace');
             domMarketplacePanel.classList.add('closing');
             domMarketplacePanel.addEventListener('animationend', function handler() {
                 domMarketplacePanel.removeEventListener('animationend', handler);
@@ -782,12 +786,14 @@ async function showMiniAppLaunchDialog(app) {
 
     // Show the overlay
     domMiniAppLaunchOverlay.classList.add('active');
+    pushBack('miniapp-launch', closeMiniAppLaunchDialog);
 }
 
 /**
  * Close the Mini App launch dialog
  */
 function closeMiniAppLaunchDialog() {
+    popBack('miniapp-launch');
     domMiniAppLaunchOverlay.classList.remove('active');
     pendingMiniAppLaunch = null;
 }

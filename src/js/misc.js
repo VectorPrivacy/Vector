@@ -302,10 +302,12 @@ async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlace
             if (e.key === 'Enter') {
                 e.preventDefault();
                 document.removeEventListener('keydown', onKeyDown);
+                popBack('popup-confirm');
                 onConfirmClick(resolve);
             } else if (e.key === 'Escape') {
                 e.preventDefault();
                 document.removeEventListener('keydown', onKeyDown);
+                popBack('popup-confirm');
                 if (fNotice) {
                     onConfirmClick(resolve);
                 } else {
@@ -320,13 +322,24 @@ async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlace
         // Apply event listener for the confirm button
         domPopupConfirmBtn.addEventListener('click', () => {
             document.removeEventListener('keydown', onKeyDown);
+            popBack('popup-confirm');
             onConfirmClick(resolve);
         });
 
         // Apply event listener for the cancel button
         if (!fNotice) domPopupCancelBtn.addEventListener('click', () => {
             document.removeEventListener('keydown', onKeyDown);
+            popBack('popup-confirm');
             onCancelClick(resolve);
+        });
+
+        // Hardware-back wiring: notices accept-on-back (matches Escape's
+        // behaviour above), confirm dialogs cancel-on-back. Either way we
+        // detach the keyboard listener and resolve the promise.
+        pushBack('popup-confirm', () => {
+            document.removeEventListener('keydown', onKeyDown);
+            if (fNotice) onConfirmClick(resolve);
+            else onCancelClick(resolve);
         });
     });
 }

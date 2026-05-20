@@ -266,6 +266,7 @@ async function showPermissionPrompt(app) {
         const continueBtn = document.getElementById('permission-prompt-continue');
 
         const closePrompt = () => {
+            popBack('permission-prompt');
             // Clean up event handlers to prevent memory leaks
             denyBtn.onclick = null;
             continueBtn.onclick = null;
@@ -306,6 +307,11 @@ async function showPermissionPrompt(app) {
                 resolve(false);
             }
         };
+
+        pushBack('permission-prompt', () => {
+            closePrompt();
+            resolve(false);
+        });
     });
 }
 
@@ -732,6 +738,7 @@ function closeAppDetailsPanel() {
     return new Promise((resolve) => {
         const panel = document.getElementById('app-details-panel');
         if (panel && panel.style.display !== 'none') {
+            popBack('app-details');
             panel.classList.add('closing');
             panel.addEventListener('animationend', function handler() {
                 panel.removeEventListener('animationend', handler);
@@ -757,6 +764,8 @@ async function showAppDetails(app) {
         console.error('App details panel not found');
         return;
     }
+
+    pushBack('app-details', () => { closeAppDetailsPanel(); });
 
     // Store current app ID on panel for refresh detection
     panel.dataset.appId = app.id;

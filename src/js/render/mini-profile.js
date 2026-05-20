@@ -35,20 +35,15 @@ function showMiniProfile(npub, anchorEl) {
     popup.className = 'mini-profile-popup';
     popup.dataset.npub = npub;
 
-    // Backdrop is only created (and only intercepts clicks) on mobile, where the
-    // popup is centered and we want a dim modal feel. Desktop keeps the rest of
-    // the UI clickable — the document outside-click listener handles dismiss.
-    const isMobile = (typeof platformFeatures !== 'undefined') && platformFeatures?.is_mobile;
-    let backdrop = null;
-    if (isMobile) {
-        backdrop = document.createElement('div');
-        backdrop.className = 'mini-profile-backdrop';
-        backdrop.addEventListener('click', (e) => {
-            if (e.target === backdrop) hideMiniProfile();
-        });
-        document.body.appendChild(backdrop);
-        miniProfileBackdrop = backdrop;
-    }
+    // Dim the rest of the UI so the popup reads as a focused modal on both
+    // desktop and mobile. Click anywhere outside the popup to dismiss.
+    const backdrop = document.createElement('div');
+    backdrop.className = 'mini-profile-backdrop';
+    backdrop.addEventListener('click', (e) => {
+        if (e.target === backdrop) hideMiniProfile();
+    });
+    document.body.appendChild(backdrop);
+    miniProfileBackdrop = backdrop;
 
     const profile = (typeof getProfile === 'function') ? getProfile(npub) : null;
     _populateMiniProfile(popup, npub, profile);
