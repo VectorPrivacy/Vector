@@ -2161,48 +2161,55 @@ async function setupRustListeners() {
         // During sync, only add if this chat is currently open (to avoid cache flooding)
         // After sync complete, always add to cache
         const shouldAddToCache = fSyncComplete || group_id === strOpenChat;
+        let cacheInsertedIntoChatMessages = false;
         if (shouldAddToCache) {
             const added = eventCache.addEvent(group_id, message);
             if (!added) return;
+            // openChat aliases chat.messages = entry.events, so addEvent has
+            // already inserted into chat.messages. Skip the manual insertion
+            // below to avoid duplicates.
+            cacheInsertedIntoChatMessages = chat.messages === eventCache.getEventsRef(group_id);
         }
-        
+
         // Clear typing indicator for the sender when they send a message
         if (!message.mine && chat.active_typers) {
             // For group chats, use npub if available; for DMs, use sender identifier
             chat.active_typers = chat.active_typers.filter(npub => npub !== message.npub);
         }
-        
-        // Find the correct position to insert the message based on timestamp (efficient binary search)
-        const messages = chat.messages;
-        
-        // Check if the array is empty or the new message is newer than the newest message
-        if (messages.length === 0 || message.at > messages[messages.length - 1].at) {
-            // Insert at the end (newest)
-            messages.push(message);
-        }
-        // Check if the new message is older than the oldest message
-        else if (message.at < messages[0].at) {
-            // Insert at the beginning (oldest)
-            messages.unshift(message);
-        }
-        // Otherwise, find the correct position in the middle using binary search
-        else {
-            // Binary search for better performance with large message arrays
-            let low = 0;
-            let high = messages.length - 1;
-            
-            while (low <= high) {
-                const mid = Math.floor((low + high) / 2);
-                
-                if (messages[mid].at < message.at) {
-                    low = mid + 1;
-                } else {
-                    high = mid - 1;
-                }
+
+        if (!cacheInsertedIntoChatMessages) {
+            // Find the correct position to insert the message based on timestamp (efficient binary search)
+            const messages = chat.messages;
+
+            // Check if the array is empty or the new message is newer than the newest message
+            if (messages.length === 0 || message.at > messages[messages.length - 1].at) {
+                // Insert at the end (newest)
+                messages.push(message);
             }
-            
-            // Insert the message at the correct position (low is now the index where it should go)
-            messages.splice(low, 0, message);
+            // Check if the new message is older than the oldest message
+            else if (message.at < messages[0].at) {
+                // Insert at the beginning (oldest)
+                messages.unshift(message);
+            }
+            // Otherwise, find the correct position in the middle using binary search
+            else {
+                // Binary search for better performance with large message arrays
+                let low = 0;
+                let high = messages.length - 1;
+
+                while (low <= high) {
+                    const mid = Math.floor((low + high) / 2);
+
+                    if (messages[mid].at < message.at) {
+                        low = mid + 1;
+                    } else {
+                        high = mid - 1;
+                    }
+                }
+
+                // Insert the message at the correct position (low is now the index where it should go)
+                messages.splice(low, 0, message);
+            }
         }
         
         // If this group has the open chat, update it
@@ -2211,7 +2218,13 @@ async function setupRustListeners() {
             // Increment rendered count since we're adding a new message
             proceduralScrollState.renderedMessageCount++;
             proceduralScrollState.totalMessageCount++;
-            // Mark on own-send: updateChat's auto-mark is focus-gated.
+            // Open chat + pinned = user saw it land. Mark and drop the
+            // divider so it tracks unread state.
+            if (!message.mine && chatPinnedToBottom) {
+                markAsRead(chat, message);
+                clearUnreadDivider();
+            }
+            // Own-send catches up to the latest non-mine message.
             if (message.mine) {
                 let lastContactMsg = null;
                 for (let i = chat.messages.length - 1; i >= 0; i--) {
@@ -2841,9 +2854,14 @@ async function setupRustListeners() {
         // During sync, only add if this chat is currently open (to avoid cache flooding)
         // After sync complete, always add to cache
         const shouldAddToCache = fSyncComplete || chat.id === strOpenChat;
+        let cacheInsertedIntoChatMessages = false;
         if (shouldAddToCache) {
             const added = eventCache.addEvent(chat.id, newMessage);
             if (!added) return;
+            // openChat assigns chat.messages = entry.events, so the two often
+            // share an array reference. addEvent already inserted into that
+            // shared array — a second manual insertion below would duplicate.
+            cacheInsertedIntoChatMessages = chat.messages === eventCache.getEventsRef(chat.id);
         }
 
         // Clear typing indicator for the sender when they send a message
@@ -2852,40 +2870,45 @@ async function setupRustListeners() {
             chat.active_typers = chat.active_typers.filter(npub => npub !== chat.id);
         }
 
-        // Find the correct position to insert the message based on timestamp
-        const messages = chat.messages;
+        if (!cacheInsertedIntoChatMessages) {
+            // Find the correct position to insert the message based on timestamp
+            const messages = chat.messages;
 
-        // Check if the array is empty or the new message is newer than (or equal to) the newest message
-        if (messages.length === 0 || newMessage.at >= messages[messages.length - 1].at) {
-            // Insert at the end (newest)
-            messages.push(newMessage);
-
-            // Sort chats by most recent activity (message or metadata fallback)
-            arrChats.sort((a, b) => getChatSortTimestamp(b) - getChatSortTimestamp(a));
-        }
-        // Check if the new message is older than the oldest message
-        else if (newMessage.at < messages[0].at) {
-            // Insert at the beginning (oldest)
-            messages.unshift(newMessage);
-        }
-        // Otherwise, find the correct position in the middle
-        else {
-            // Binary search for better performance with large message arrays
-            let low = 0;
-            let high = messages.length - 1;
-
-            while (low <= high) {
-                const mid = Math.floor((low + high) / 2);
-
-                if (messages[mid].at < newMessage.at) {
-                    low = mid + 1;
-                } else {
-                    high = mid - 1;
-                }
+            // Check if the array is empty or the new message is newer than (or equal to) the newest message
+            if (messages.length === 0 || newMessage.at >= messages[messages.length - 1].at) {
+                // Insert at the end (newest)
+                messages.push(newMessage);
             }
+            // Check if the new message is older than the oldest message
+            else if (newMessage.at < messages[0].at) {
+                // Insert at the beginning (oldest)
+                messages.unshift(newMessage);
+            }
+            // Otherwise, find the correct position in the middle
+            else {
+                // Binary search for better performance with large message arrays
+                let low = 0;
+                let high = messages.length - 1;
 
-            // Insert the message at the correct position (low is now the index where it should go)
-            messages.splice(low, 0, newMessage);
+                while (low <= high) {
+                    const mid = Math.floor((low + high) / 2);
+
+                    if (messages[mid].at < newMessage.at) {
+                        low = mid + 1;
+                    } else {
+                        high = mid - 1;
+                    }
+                }
+
+                // Insert the message at the correct position (low is now the index where it should go)
+                messages.splice(low, 0, newMessage);
+            }
+        }
+
+        // Newest-first chat list sort (independent of how the message landed
+        // in chat.messages).
+        if (newMessage.at >= (chat.messages[chat.messages.length - 1]?.at ?? 0)) {
+            arrChats.sort((a, b) => getChatSortTimestamp(b) - getChatSortTimestamp(a));
         }
 
         // If this user has the open chat, then update the chat too
@@ -2894,9 +2917,14 @@ async function setupRustListeners() {
             // Increment rendered count since we're adding a new message
             proceduralScrollState.renderedMessageCount++;
             proceduralScrollState.totalMessageCount++;
-            // Mark on own-send: updateChat's auto-mark is focus-gated and
-            // won't fire for messages that arrived while Vector was
-            // backgrounded.
+            // Open chat + pinned = user saw it land. Mark and drop the
+            // divider: receiving the message in real-time is the same
+            // "caught up" signal as closing and reopening.
+            if (!newMessage.mine && chatPinnedToBottom) {
+                markAsRead(chat, newMessage);
+                clearUnreadDivider();
+            }
+            // Own-send catches up to the latest non-mine message.
             if (newMessage.mine) {
                 let lastContactMsg = null;
                 for (let i = chat.messages.length - 1; i >= 0; i--) {
@@ -5256,29 +5284,10 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
 
     if (chat?.messages.length || arrMessages.length) {
 
-        // Auto-mark messages as read when chat is opened AND window is focused.
-        // Resolved without awaiting so the message render is not blocked by an
-        // IPC roundtrip — the same race that used to swallow the first
-        // attachment_upload_progress events.
-        if (chat?.messages?.length) {
-            const focusPromise = (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios')
-                ? getCurrentWindow().isFocused()
-                : Promise.resolve(true);
-            focusPromise.then(isWindowFocused => {
-                if (!isWindowFocused) return;
-                // Find the latest message from the other person (not from current user)
-                let lastContactMsg = null;
-                for (let i = chat.messages.length - 1; i >= 0; i--) {
-                    if (!chat.messages[i].mine) {
-                        lastContactMsg = chat.messages[i];
-                        break;
-                    }
-                }
-                if (lastContactMsg && chat.last_read !== lastContactMsg.id) {
-                    markAsRead(chat, lastContactMsg);
-                }
-            });
-        }
+        // markAsRead is handled by callers (openChat synchronously, message_new
+        // handlers for real-time arrivals, closeChat on exit, onFocusChanged on
+        // window refocus). An async focus-gated markAsRead used to live here,
+        // but the IPC could hang/fail and leave chat.last_read stuck behind.
 
         if (!arrMessages.length) return;
 
@@ -6305,10 +6314,17 @@ async function openChat(contact) {
     const isGroup = chat?.chat_type === 'MlsGroup';
     const profile = !isGroup ? getProfile(contact) : null;
     strOpenChat = contact;
-    // Snapshot last_read BEFORE any updateChat call — updateChat queues
-    // an async markAsRead that races ahead and would erase the boundary
-    // we need to find the first unread message.
+    // Snapshot last_read BEFORE the open-time markAsRead — the divider needs
+    // the stale value to find the boundary, but we still want to advance
+    // chat.last_read so the OS badge clears immediately on entering the chat.
     const lastReadOnOpen = chat?.last_read || '';
+    if (chat?.messages?.length) {
+        let latestNonMine = null;
+        for (let i = chat.messages.length - 1; i >= 0; i--) {
+            if (!chat.messages[i].mine) { latestNonMine = chat.messages[i]; break; }
+        }
+        if (latestNonMine) markAsRead(chat, latestNonMine);
+    }
 
     // Render the header SYNCHRONOUSLY using whatever in-memory data we have,
     // so the user sees the contact name + avatar the instant the chat panel
@@ -6459,20 +6475,9 @@ async function openChat(contact) {
         domChatMessageInputEmoji.style.display = '';
     }
 
-    // Mark as read on open (needed for Windows where is_focused may not work)
-    // Only mark the last contact message, not our own messages
-    if (initialMessages?.length) {
-        let lastContactMsg = null;
-        for (let i = initialMessages.length - 1; i >= 0; i--) {
-            if (!initialMessages[i].mine) {
-                lastContactMsg = initialMessages[i];
-                break;
-            }
-        }
-        if (lastContactMsg) {
-            markAsRead(chat, lastContactMsg);
-        }
-    }
+    // last_read is not advanced on open — the divider needs the stale value
+    // to anchor above the first missed message. closeChat / msg-while-pinned
+    // / onFocusChanged are the catch-up signals.
 
     // Update the back button notification dot
     updateChatBackNotification();
@@ -6535,11 +6540,12 @@ async function closeChat() {
         domChild.remove();
     }
 
-    // If the chat had any messages, mark the last contact message as read before leaving
-    if (strOpenChat) {
+    // Only catch up last_read on close when the user is actually at the
+    // bottom. Marking on close while scrolled up would lie about messages the
+    // user never scrolled down to see — the OS badge has to stay accurate.
+    if (strOpenChat && chatPinnedToBottom) {
         const closedChat = arrChats.find(c => c.id === strOpenChat);
         if (closedChat?.messages?.length) {
-            // Find the last non-mine message (same logic as updateChat)
             let lastContactMsg = null;
             for (let i = closedChat.messages.length - 1; i >= 0; i--) {
                 if (!closedChat.messages[i].mine) {
@@ -6552,6 +6558,9 @@ async function closeChat() {
             }
         }
     }
+
+    // Drop the divider ref so the next openChat starts from a clean slate.
+    clearUnreadDivider();
 
     // Trim the event cache for this chat to free memory
     // (keeps max 100 events, removes older ones loaded during scroll)
@@ -9854,9 +9863,20 @@ function handleChatScrollIntent() {
     const pxFromBottom = domChatMessages.scrollHeight - domChatMessages.scrollTop - domChatMessages.clientHeight;
     const wasPinned = chatPinnedToBottom;
     chatPinnedToBottom = pxFromBottom < PIN_THRESHOLD_PX;
-    // User scrolled themselves back into pin range — clear the unread badge
-    // since they're effectively caught up.
-    if (!wasPinned && chatPinnedToBottom) clearUnreadBelow();
+    // User scrolled themselves back into pin range — clear the badge and
+    // advance last_read so the OS unread indicator reflects reality. The
+    // divider stays put until the chat is closed.
+    if (!wasPinned && chatPinnedToBottom) {
+        clearUnreadBelow();
+        const currentChat = getChat(strOpenChat);
+        if (currentChat?.messages?.length) {
+            let latestNonMine = null;
+            for (let i = currentChat.messages.length - 1; i >= 0; i--) {
+                if (!currentChat.messages[i].mine) { latestNonMine = currentChat.messages[i]; break; }
+            }
+            if (latestNonMine) markAsRead(currentChat, latestNonMine);
+        }
+    }
 }
 
 function softChatScroll() {

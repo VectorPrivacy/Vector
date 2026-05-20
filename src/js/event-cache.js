@@ -394,6 +394,15 @@ class EventCache {
     }
 
     /**
+     * Get the underlying events array reference for a conversation. Used by
+     * callers that want to detect whether their `chat.messages` is the same
+     * array (post-openChat aliases the two; addEvent then mutates both).
+     */
+    getEventsRef(conversationId) {
+        return this.cache.get(conversationId)?.events ?? null;
+    }
+
+    /**
      * Update the total event count for a conversation (e.g., after sync)
      * @param {string} conversationId - The conversation identifier
      * @param {number} count - The new total count
