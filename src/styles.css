@@ -3293,7 +3293,7 @@ body.chat-bg-disabled .chat-messages::before {
 }
 
 .emoji-main {
-  margin-top: -10px;
+  margin-top: 0px;
   flex: 1;
   padding: 8px;
   padding-right: 5px;
