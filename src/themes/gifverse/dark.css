@@ -55,6 +55,9 @@
   20%, 80% { background-color: rgba(255, 174, 206, 0.18); }
 }
 
+.image-viewer-close {
+  border: 1px solid var(--primary-color);
+}
 
 .attachment-panel {
   background: #161616;
@@ -320,7 +323,8 @@ select:disabled {
 
 /* File Preview Overlay Theme */
 .file-preview-container {
-  border-color: #474747;
+  border-color: var(--primary-color);
+  background: #0A0A0A;
 }
 
 .file-preview-icon-container {
@@ -333,8 +337,8 @@ select:disabled {
 }
 
 .file-preview-option {
-  background: rgba(177, 136, 226, 0.05);
-  border: 1px solid #474747;
+  background: #171717;
+  border: 1px solid #47474750;
 }
 
 .file-preview-btn-send {
