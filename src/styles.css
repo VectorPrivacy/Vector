@@ -580,7 +580,10 @@ html, body {
 .pack-details-thumb img {
   width: 100%;
   height: 100%;
-  object-fit: fill;
+  /* `contain` (not `fill`) — preserves the emoji's natural aspect
+     ratio so square sources stay square and foreign-client non-square
+     emojis letterbox cleanly instead of distorting. */
+  object-fit: contain;
 }
 .pack-details-empty {
   grid-column: 1 / -1;
@@ -3238,6 +3241,11 @@ body.chat-bg-disabled .chat-messages::before {
   border-top: 4px solid var(--icon-color-primary);
 }
 
+/* `display: flex` below outranks the UA's `[hidden]` rule on its own,
+   so `<button … hidden>` would still render. This explicit reinstates
+   the hide. */
+.emoji-category-btn[hidden] { display: none; }
+
 .emoji-category-btn {
   position: relative;
   width: 30px;
@@ -3295,8 +3303,10 @@ body.chat-bg-disabled .chat-messages::before {
   box-sizing: border-box;
 }
 
+.emoji-section[hidden] { display: none; }
+
 .emoji-section {
-  margin-bottom: 3px; 
+  margin-bottom: 3px;
 }
 
 .emoji-section-header {
@@ -3397,8 +3407,8 @@ body.chat-bg-disabled .chat-messages::before {
 }
 
 .emoji-grid span:hover {
-  background-color: rgba(89, 252, 179, 0.2);
-  transform: scale(1.1);
+  background-color: rgba(89, 252, 179, 0.15);
+  transform: scale(1.125);
 }
 
 .emoji-grid span img {
@@ -4616,7 +4626,11 @@ img.emoji-img-loading {
 .emoji-pack-preview-thumb {
   width: 100%;
   height: 100%;
-  object-fit: fill;
+  /* `contain` (not `fill`) — preview-grid cells are wider than tall
+     (6 × 1fr columns × 28px rows), so `fill` would horizontally squash
+     every square emoji. Letterboxing inside each cell preserves the
+     emoji's true aspect ratio at preview scale. */
+  object-fit: contain;
 }
 
 .emoji-pack-preview-empty {

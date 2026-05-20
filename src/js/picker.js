@@ -24,6 +24,18 @@
  */
 
 const picker = document.querySelector('.emoji-picker');
+
+// Dismiss the shared emoji tooltip whenever the picker leaves the
+// `visible` state — handles keyboard-driven closes (Enter / Esc),
+// where the mouse never moves so the usual mouseleave path doesn't
+// fire. One observer covers every close site without sprinkling
+// `hideEmojiTooltip()` calls throughout.
+if (picker) {
+    new MutationObserver(() => {
+        if (!picker.classList.contains('visible')) hideEmojiTooltip();
+    }).observe(picker, { attributes: true, attributeFilter: ['class'] });
+}
+
 /** @type {HTMLInputElement} */
 const emojiSearch = document.getElementById('emoji-search-input');
 /**
@@ -1241,9 +1253,9 @@ const PACK_CANVAS_BOX_PX = 34;
  *  and the first-column thumb visibly drifts right of stock's first emoji. */
 const PACK_CANVAS_GAP_PX = 4;
 /** Hover scale + animation duration — mirrors stock CSS
- *  `transition: all 0.2s ease; .emoji-grid span:hover { transform: scale(1.1) }`.
+ *  `transition: all 0.2s ease; .emoji-grid span:hover { transform: scale(1.125) }`.
  *  Each cell tweens independently so quick mouse-overs don't snap. */
-const PACK_CANVAS_HOVER_SCALE = 1.1;
+const PACK_CANVAS_HOVER_SCALE = 1.125;
 const PACK_CANVAS_HOVER_MS = 200;
 const PACK_CANVAS_TOOLTIP_DELAY_MS = 350;
 
@@ -1710,7 +1722,7 @@ class PackCanvasGrid {
             if (bgProgress > 0.01) {
                 const boxX = x + (this.cellW - PACK_CANVAS_BOX_PX) / 2;
                 const boxY = y + (this.cellH - PACK_CANVAS_BOX_PX) / 2;
-                ctx.fillStyle = `rgba(89, 252, 179, ${0.18 * bgProgress})`;
+                ctx.fillStyle = `rgba(89, 252, 179, ${0.135 * bgProgress})`;
                 _drawRoundedRect(ctx, boxX, boxY, PACK_CANVAS_BOX_PX, PACK_CANVAS_BOX_PX, 6);
                 ctx.fill();
             }
@@ -3610,8 +3622,12 @@ function resetEmojiPicker() {
     // Clear search input
     emojiSearch.value = '';
 
-    // Show all sections
+    // Show all sections — but don't override `hidden` attributes;
+    // inline display beats the UA `[hidden]` rule, so sections we
+    // deliberately hide (e.g. favorites while unimplemented) would
+    // reappear after a search clear.
     document.querySelectorAll('.emoji-section').forEach(section => {
+        if (section.hidden) return;
         section.style.display = 'block';
     });
 
