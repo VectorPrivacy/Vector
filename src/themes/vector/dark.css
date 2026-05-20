@@ -51,6 +51,9 @@
   20%, 80% { background-color: rgba(90, 252, 180, 0.18); }
 }
 
+.image-viewer-close {
+  border: 1px solid var(--primary-color);
+}
 
 .attachment-panel {
   background: #0a0a0a;
@@ -285,7 +288,8 @@ select:disabled {
 
 /* File Preview Overlay Theme */
 .file-preview-container {
-  border-color: rgba(89, 252, 179, 0.2);
+  border-color: var(--primary-color);
+  background: #0A0A0A;
 }
 
 .file-preview-icon-container {
@@ -298,8 +302,8 @@ select:disabled {
 }
 
 .file-preview-option {
-  background: rgba(89, 252, 179, 0.05);
-  border: 1px solid rgba(89, 252, 179, 0.1);
+  background: #171717;
+  border: 1px solid #47474750;
 }
 
 .file-preview-btn-send {
