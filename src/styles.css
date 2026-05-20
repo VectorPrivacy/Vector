@@ -3257,13 +3257,17 @@ body.chat-bg-disabled .chat-messages::before {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  opacity: 0.7;
+  opacity: 1;
   transition: opacity 0.2s ease;
   background: none;
   border: none;
   color: inherit;
   font-size: 16px;
   box-sizing: border-box;
+}
+
+.emoji-category-btn:hover {
+  opacity:0.7;
 }
 
 .emoji-category-btn.active {
@@ -3289,7 +3293,7 @@ body.chat-bg-disabled .chat-messages::before {
 }
 
 .emoji-main {
-  margin-top: -10px;
+  margin-top: 0px;
   flex: 1;
   padding: 8px;
   padding-right: 5px;
