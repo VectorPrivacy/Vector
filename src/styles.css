@@ -3705,8 +3705,8 @@ img.emoji-img-loading {
   right: auto;
   bottom: auto;
   margin: 0;
-  width: 14px;
-  height: 14px;
+  width: 20px;
+  height: 20px;
 }
 .emoji-picker .emoji-creator-dropzone-label {
   white-space: nowrap;
@@ -3999,7 +3999,7 @@ img.emoji-img-loading {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 10px;
+  gap: 4px;
   cursor: pointer;
   transition: border-color 0.15s ease, background-color 0.15s ease;
   font-size: 13px;
