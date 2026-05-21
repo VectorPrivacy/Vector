@@ -3389,7 +3389,7 @@ function renderEmojiPackSections() {
         const header = document.createElement('div');
         header.className = 'emoji-section-header';
         const editPencil = pack.is_own
-            ? `<button type="button" class="emoji-pack-edit-pencil" data-pack-id="${_escapeAttr(pack.id)}" aria-label="Edit pack"><span class="icon icon-edit"></span></button>`
+            ? `<button type="button" class="emoji-pack-edit-pencil" data-pack-id="${_escapeAttr(pack.id)}" aria-label="Edit pack" title="Edit Pack"><span class="icon icon-edit"></span></button>`
             : '';
         // Order: [logo][title][count][collapse-arrow] ... [edit-if-own].
         // The pencil uses `margin-left: auto` (in CSS) to float right;
