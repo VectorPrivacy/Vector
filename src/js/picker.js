@@ -88,6 +88,7 @@ function openEmojiPanel(e) {
 
         // Load emoji sections with optimized rendering
         renderEmojiPanel();
+        initCollapsibleSections();
 
         // Display the picker - use class instead of inline style
         picker.classList.add('visible');
@@ -3601,17 +3602,13 @@ function loadEmojiSections() {
 let collapsiblesInitialized = false;
 
 function initCollapsibleSections() {
-    if (collapsiblesInitialized) return; // Prevent duplicate initialization
-
-    document.querySelectorAll('.emoji-section-header').forEach(header => {
-        header.addEventListener('click', (e) => {
-            e.stopPropagation(); // Prevent closing the picker
-            const section = header.parentElement;
-            section.classList.toggle('collapsed');
-        });
+    document.querySelector('.emoji-main').addEventListener('click', (e) => {
+        const header = e.target.closest('.emoji-section-header');
+        if (!header) return;
+        e.stopPropagation();
+        const section = header.parentElement;
+        section.classList.toggle('collapsed');
     });
-
-    collapsiblesInitialized = true;
 }
 
 // Function to reset emoji picker state

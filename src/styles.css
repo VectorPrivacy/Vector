@@ -3391,6 +3391,11 @@ body.chat-bg-disabled .chat-messages::before {
   display: none;
 }
 
+.emoji-section.collapsed .emoji-pack-canvas,
+.emoji-section.collapsed canvas {
+  display: none !important;
+}
+
 .emoji-grid {
   display: grid;
   grid-template-columns: repeat(6, 1fr);
@@ -3484,6 +3489,9 @@ body.chat-bg-disabled .chat-messages::before {
 }
 .emoji-pack-section .emoji-section-header .emoji-pack-edit-pencil {
   margin-left: auto;
+}
+.emoji-pack-section .emoji-section-header .icon-chevron-down {
+  margin-left: -2px;
 }
 
 /* Count chip — `.emoji-picker .…` prefix outranks the legacy
