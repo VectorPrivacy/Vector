@@ -3729,8 +3729,8 @@ img.emoji-img-loading {
 .emoji-creator-head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 4px 0 10px;
+  gap: 6px;
+  padding: 4px 6px 10px 0;
   position: sticky;
   top: 0;
   background-color: #0a0a0a;
@@ -3800,6 +3800,7 @@ img.emoji-img-loading {
   display: flex;
   align-items: center;
   justify-content: center;
+  margin-left: 4px;
 }
 .emoji-creator-done:hover { background-color: rgba(255, 255, 255, 0.06); }
 .emoji-creator-done .icon {
@@ -4029,17 +4030,38 @@ img.emoji-img-loading {
   justify-content: flex-end;
   padding-top: 12px;
 }
+
 .emoji-creator-delete {
-  background-color: rgba(255, 74, 138, 0.15);
-  color: #ff4a8a;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  background: none;
   border: none;
-  padding: 6px 12px;
-  border-radius: 8px;
-  font-size: 12px;
-  font-weight: 600;
+  padding: 0;
   cursor: pointer;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
-.emoji-creator-delete:hover { background-color: rgba(255, 74, 138, 0.3); }
+
+.emoji-creator-delete:hover {
+  background-color: rgba(255, 255, 255, 0.06);
+}
+
+.emoji-creator-delete.btn:hover {
+  opacity: 1;
+}
+
+.emoji-creator-delete .icon {
+  width: 16px;
+  height: 16px;
+  background-color: #FF2EA9;
+}
+
+.emoji-creator-delete:hover .icon {
+  background-color: #FF2EA9;
+}
 
 /* Confirm overlay — generalised question modal. Same in-panel chrome
    as error/naming/progress (lives inside .emoji-picker so clicks can't

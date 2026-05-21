@@ -224,6 +224,9 @@
           <button type="button" class="emoji-creator-done" id="emoji-creator-done" aria-label="Save and exit">
             <span class="icon icon-edit"></span>
           </button>
+          <button type="button" class="emoji-creator-delete btn" id="emoji-creator-delete" aria-label="Delete pack" title="Remove Pack" hidden>
+            <span class="icon icon-trash"></span>
+          </button>
         </div>
         <div class="emoji-creator-grid" id="emoji-creator-grid"></div>
         <button type="button" class="emoji-creator-dropzone" id="emoji-creator-dropzone">
@@ -231,12 +234,10 @@
           <span class="emoji-creator-dropzone-label">Upload Emoji</span>
         </button>
         <input type="file" id="emoji-creator-files" accept="image/*" multiple hidden>
-        <div class="emoji-creator-footer">
-          <button type="button" class="emoji-creator-delete btn" id="emoji-creator-delete" hidden>Delete Pack</button>
-        </div>
       </div>
     </div>
   </div>
+
   <!-- GIF Panel (hidden by default) -->
   <div class="gif-picker-content" style="display: none;">
     <div class="gif-grid" id="gif-grid"></div>
