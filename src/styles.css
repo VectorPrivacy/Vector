@@ -4071,7 +4071,7 @@ img.emoji-img-loading {
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  background: rgba(8, 8, 8, 0.82);
+  background: rgba(8, 8, 8, 0.85);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
   border: 2px solid rgba(255, 255, 255, 0.12);
@@ -4097,8 +4097,8 @@ img.emoji-img-loading {
 .emoji-picker .emoji-pack-creator-confirm-icon {
   display: block;
   margin: 0 auto 10px;
-  width: 56px;
-  height: 56px;
+  width: 100px;
+  height: 100px;
   padding: 0;
   border-radius: 0;
   background: none;
@@ -4115,7 +4115,7 @@ img.emoji-img-loading {
   color: #ff4a8a;
 }
 .emoji-pack-creator-confirm-detail {
-  color: rgba(255, 255, 255, 0.65);
+  color: #fff;
   font-size: 12px;
   line-height: 1.5;
   margin: 0 0 18px;
@@ -4128,26 +4128,33 @@ img.emoji-img-loading {
 }
 .emoji-pack-creator-confirm-cancel,
 .emoji-pack-creator-confirm-ok {
-  background-color: rgba(20, 20, 20, 0.85);
+  background-color: #171717;
   color: #fff;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  padding: 10px 24px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  padding: 12px 28px;
   border-radius: 10px;
   font-weight: 700;
   letter-spacing: 0.08em;
-  font-size: 12px;
+  font-size: 14px;
   cursor: pointer;
   transition: border-color 0.15s ease, background-color 0.15s ease;
 }
+
 .emoji-pack-creator-confirm-ok {
-  background-color: rgba(89, 252, 179, 0.18);
-  border-color: var(--icon-color-primary);
-  color: var(--icon-color-primary);
+  background-color: #58fcb3;
+  border-color: #58fcb3;
+  color: #000;
 }
+
 .emoji-pack-creator-confirm[data-tone="danger"] .emoji-pack-creator-confirm-ok {
-  background-color: rgba(255, 74, 138, 0.18);
-  border-color: #ff4a8a;
-  color: #ff4a8a;
+  background-color: #ff2ea9;
+  border-color: #ff2ea9;
+  color: #000;
+}
+
+.emoji-pack-creator-confirm-cancel {
+  border-color: #ff2ea9;
+  background-color: #03030390;
 }
 /* Pack creator cropper overlay — square-crop UX for non-square static
    uploads. Mirrors the confirm overlay's chrome (backdrop, body, action
@@ -4291,10 +4298,9 @@ img.emoji-img-loading {
   cursor: not-allowed;
 }
 
-.emoji-pack-creator-confirm-cancel:hover { border-color: rgba(255, 255, 255, 0.28); background-color: #2a2a2a; }
-.emoji-pack-creator-confirm-ok:hover     { background-color: rgba(89, 252, 179, 0.30); }
-.emoji-pack-creator-confirm[data-tone="danger"] .emoji-pack-creator-confirm-ok:hover {
-  background-color: rgba(255, 74, 138, 0.30);
+.emoji-pack-creator-confirm-cancel:active,
+.emoji-pack-creator-confirm-ok:active {
+  opacity: 0.8;
 }
 
 /* Progress overlay — in-panel chrome for long async ops (pack delete:

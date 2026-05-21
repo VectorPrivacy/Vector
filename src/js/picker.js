@@ -3102,8 +3102,8 @@ async function _pcDelete() {
     // any click on it would trip the outside-close handler, snapping
     // the picker shut mid-flow.
     const ok = await _pcShowConfirm({
-        title: 'Delete pack?',
-        detail: 'This removes the emoji files from your media servers and the pack from Nostr. This action cannot be undone.',
+        title: 'Delete This Pack?',
+        detail: 'This action permanently removes the emoji files from your media servers and the pack from Nostr. This action cannot be undone.',
         icon: 'vector_warning.svg',
         tone: 'danger',
         confirmText: 'DELETE',
