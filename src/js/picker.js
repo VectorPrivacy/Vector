@@ -2031,22 +2031,6 @@ function _pcRenderGrid() {
         grid.appendChild(cell);
     });
 
-    // Trailing "+" upload affordance — placed after the emojis so the
-    // editor's reading order matches the picker's actual render order.
-    // Hidden when the pack is empty (the big bottom dropzone is the
-    // only entry point in that case) and when the cap is hit.
-    if (_pc.emojis.length > 0 && _pc.emojis.length < PC_MAX_EMOJIS) {
-        const addCell = document.createElement('button');
-        addCell.type = 'button';
-        addCell.className = 'emoji-creator-cell-add';
-        addCell.setAttribute('aria-label', 'Upload emoji');
-        addCell.innerHTML = '<span class="icon icon-plus-circle"></span>';
-        addCell.addEventListener('click', () => {
-            document.getElementById('emoji-creator-files').click();
-        });
-        grid.appendChild(addCell);
-    }
-
     // Bottom dropzone label adapts: first-emoji onboarding tone, normal,
     // or cap-reached.
     const dz = document.getElementById('emoji-creator-dropzone');

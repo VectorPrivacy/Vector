@@ -3850,8 +3850,7 @@ img.emoji-img-loading {
   padding-top: 8px;
   margin-bottom: 12px;
 }
-.emoji-creator-cell,
-.emoji-creator-cell-add {
+.emoji-creator-cell {
   position: relative;
   aspect-ratio: 1 / 1;
   border-radius: 8px;
@@ -3863,10 +3862,6 @@ img.emoji-img-loading {
   padding: 0;
   cursor: pointer;
   transition: border-color 0.15s ease, background-color 0.15s ease;
-  /* Block the WebView's default touch-handling (vertical scroll,
-     pull-to-refresh, tap-to-zoom) so our pointer-driven drag-to-
-     reorder gets the gesture instead. The `+` add-cell shares this
-     selector but never receives a drag start, so it's harmless. */
   touch-action: none;
 }
 .emoji-creator-cell.is-hovered { border-color: rgba(255, 255, 255, 0.18); }
@@ -3941,26 +3936,6 @@ img.emoji-img-loading {
   height: 70%;
   object-fit: fill;
   pointer-events: none;
-}
-.emoji-creator-cell-add {
-  border-style: dashed;
-  border-color: rgba(255, 255, 255, 0.22);
-  color: rgba(255, 255, 255, 0.7);
-}
-.emoji-creator-cell-add:hover {
-  border-color: var(--icon-color-primary);
-  color: var(--icon-color-primary);
-}
-.emoji-creator-cell-add.is-disabled {
-  opacity: 0.35;
-  pointer-events: none;
-}
-.emoji-creator-cell-add .icon {
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border-radius: 0;
-  background-color: currentColor;
 }
 
 .emoji-creator-cell-remove {
