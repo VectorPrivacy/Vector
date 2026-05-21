@@ -3753,8 +3753,7 @@ img.emoji-img-loading {
 }
 .emoji-creator-logo:hover { border-color: var(--icon-color-primary); }
 .emoji-creator-logo.has-image {
-  border-style: solid;
-  border-color: rgba(255, 255, 255, 0.08);
+  border: none;
 }
 .emoji-creator-logo img {
   width: 100%;
