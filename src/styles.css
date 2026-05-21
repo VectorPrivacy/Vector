@@ -1648,8 +1648,8 @@ html, body {
 .context-menu-item .icon {
   position: relative;
   flex-shrink: 0;
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   margin: 0;
   padding: 0;
   border-radius: 0;
@@ -4347,7 +4347,7 @@ img.emoji-img-loading {
   border-radius: inherit;
   background:
     linear-gradient(to top, rgba(89, 252, 179, 0.18) 0%, rgba(89, 252, 179, 0) 38%),
-    rgba(8, 8, 8, 0.82);
+    rgba(8, 8, 8, 0.9);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
   border: 2px solid var(--icon-color-primary);
@@ -4364,6 +4364,9 @@ img.emoji-img-loading {
   text-align: center;
   max-width: 320px;
   width: 100%;
+}
+.emoji-picker:has(.emoji-pack-creator-naming:not([hidden])) {
+  border: none;
 }
 .emoji-pack-creator-naming-batch {
   font-size: 11px;
@@ -4415,7 +4418,7 @@ img.emoji-img-loading {
   cursor: default;
 }
 .emoji-pack-creator-naming-input {
-  background-color: rgba(255, 255, 255, 0.06);
+  background-color: #03030390;
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 8px;
   color: #fff;
@@ -4429,7 +4432,7 @@ img.emoji-img-loading {
 }
 .emoji-pack-creator-naming-input:focus {
   border-color: var(--icon-color-primary);
-  background-color: rgba(89, 252, 179, 0.06);
+  background-color: #030303;
 }
 .emoji-pack-creator-naming-input.is-invalid {
   border-color: #ff4a8a;
@@ -4451,26 +4454,30 @@ img.emoji-img-loading {
 }
 .emoji-pack-creator-naming-skip,
 .emoji-pack-creator-naming-save {
-  background-color: rgba(20, 20, 20, 0.85);
+  background-color: #171717;
   color: #fff;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  padding: 10px 24px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  padding: 12px 28px;
   border-radius: 10px;
   font-weight: 700;
   letter-spacing: 0.08em;
-  font-size: 12px;
+  font-size: 14px;
   cursor: pointer;
-  transition: border-color 0.15s ease, background-color 0.15s ease;
+  transition: opacity 0.15s ease;
 }
 .emoji-pack-creator-naming-save {
-  background-color: rgba(89, 252, 179, 0.16);
-  border-color: var(--icon-color-primary);
-  color: var(--icon-color-primary);
+  background-color: var(--primary-color);
+  border-color: var(--primary-color);
+  color: #000;
 }
-.emoji-pack-creator-naming-skip:hover  { border-color: rgba(255, 255, 255, 0.28); background-color: #2a2a2a; }
-.emoji-pack-creator-naming-save:hover  { background-color: rgba(89, 252, 179, 0.28); }
+.emoji-pack-creator-naming-skip {
+  border-color: rgba(255, 255, 255, 0.2);
+  background-color: #03030390;
+}
+.emoji-pack-creator-naming-skip:active,
+.emoji-pack-creator-naming-save:active { opacity: 0.8; }
 .emoji-pack-creator-naming-save:disabled,
-.emoji-pack-creator-naming-skip:disabled { opacity: 0.5; cursor: not-allowed; }
+.emoji-pack-creator-naming-skip:disabled { opacity: 0.5; cursor: not-allowed; }not-allowed; }
 
 /* Size-error overlay — `position: absolute` keeps it inside the picker
    so it covers the panel (sidebar + main) instead of the whole window,

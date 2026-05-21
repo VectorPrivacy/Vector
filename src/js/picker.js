@@ -2460,7 +2460,7 @@ function _pcShowNaming({ src, initial, batch }, mode = 'create') {
         errEl.hidden = true;
         errEl.textContent = '';
         skipBtn.textContent = mode === 'edit' ? 'CANCEL' : 'SKIP';
-        titleEl.textContent = mode === 'edit' ? 'Rename emoji' : 'Name this emoji';
+        titleEl.textContent = mode === 'edit' ? 'Rename Emoji' : 'Name This Emoji';
         if (batch && batch.total > 1) {
             batchEl.textContent = `${batch.current} of ${batch.total}`;
             batchEl.hidden = false;
