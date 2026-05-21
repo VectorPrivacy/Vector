@@ -3198,6 +3198,10 @@ body.chat-bg-disabled .chat-messages::before {
   opacity: 1;
 }
 
+.emoji-picker:has(.emoji-pack-creator-error:not([hidden])) {
+  border: none;
+}
+
 /* Wide screens: anchor the picker to the right edge of the viewport, Discord-style.
  * Narrow screens stay centered (the centered position above) so the panel still
  * fits comfortably without crowding the input. */
@@ -3676,9 +3680,12 @@ img.emoji-img-loading {
    ============================================================================ */
 
 .emoji-creator {
-  padding: 4px 0 12px;
+  padding: 4px 0 0;
   color: #fff;
   position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
 }
 .emoji-creator[hidden] { display: none; }
 
@@ -3966,22 +3973,26 @@ img.emoji-img-loading {
 /* Bottom dropzone — second affordance for uploading (mirrors mockup). */
 .emoji-creator-dropzone {
   width: 100%;
-  padding: 28px 12px;
+  flex: 1;
+  min-height: 78px;
+  padding: 0;
+  margin-bottom: 12px;
   background-color: rgba(255, 255, 255, 0.02);
   border: 1.5px dashed rgba(255, 255, 255, 0.18);
   border-radius: 10px;
   color: rgba(255, 255, 255, 0.7);
   display: flex;
+  flex-direction: row;
   align-items: center;
   justify-content: center;
   gap: 4px;
   cursor: pointer;
-  transition: border-color 0.15s ease, background-color 0.15s ease;
+  transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
   font-size: 13px;
   font-weight: 500;
 }
-.emoji-creator-dropzone:hover,
-.emoji-creator-dropzone.is-dragover {
+.emoji-picker .emoji-creator-dropzone:hover,
+.emoji-picker .emoji-creator-dropzone.is-dragover {
   border-color: var(--icon-color-primary);
   color: var(--icon-color-primary);
   background-color: rgba(89, 252, 179, 0.06);
@@ -4468,11 +4479,9 @@ img.emoji-img-loading {
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  /* Theme warning pink (#ff4a8a) glows from the bottom edge upward,
-     layered on top of the dark scrim. */
   background:
     linear-gradient(to top, rgba(255, 74, 138, 0.32) 0%, rgba(255, 74, 138, 0) 38%),
-    rgba(8, 8, 8, 0.78);
+    rgba(8, 8, 8, 0.85);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
   border: 2px solid #ff4a8a;
@@ -4485,6 +4494,9 @@ img.emoji-img-loading {
   box-sizing: border-box;
 }
 .emoji-pack-creator-error[hidden] { display: none; }
+.emoji-picker:has(.emoji-pack-creator-error:not([hidden])) {
+  border-color: transparent;
+}
 .emoji-pack-creator-error-body {
   text-align: center;
   max-width: 320px;
@@ -4521,20 +4533,20 @@ img.emoji-img-loading {
   margin: 0 0 16px;
 }
 .emoji-pack-creator-error-retry {
-  background-color: rgba(20, 20, 20, 0.85);
-  color: #fff;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  background-color: #ff2ea9;
+  color: #000;
+  border: none;
   padding: 12px 28px;
   border-radius: 10px;
   font-weight: 700;
   letter-spacing: 0.08em;
-  font-size: 12px;
+  font-size: 14px;
   cursor: pointer;
-  transition: border-color 0.15s ease, background-color 0.15s ease;
+  transition: opacity 0.15s ease;
 }
-.emoji-pack-creator-error-retry:hover {
-  background-color: #2a2a2a;
-  border-color: rgba(255, 255, 255, 0.28);
+
+.emoji-pack-creator-error-retry:active {
+  opacity: 0.8;
 }
 
 /* ============================================================================
