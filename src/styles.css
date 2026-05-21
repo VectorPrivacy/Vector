@@ -4477,7 +4477,7 @@ img.emoji-img-loading {
 .emoji-pack-creator-naming-skip:active,
 .emoji-pack-creator-naming-save:active { opacity: 0.8; }
 .emoji-pack-creator-naming-save:disabled,
-.emoji-pack-creator-naming-skip:disabled { opacity: 0.5; cursor: not-allowed; }not-allowed; }
+.emoji-pack-creator-naming-skip:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* Size-error overlay — `position: absolute` keeps it inside the picker
    so it covers the panel (sidebar + main) instead of the whole window,
