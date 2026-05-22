@@ -88,6 +88,7 @@ function openEmojiPanel(e) {
 
         // Load emoji sections with optimized rendering
         renderEmojiPanel();
+        initCollapsibleSections();
 
         // Display the picker - use class instead of inline style
         picker.classList.add('visible');
@@ -2031,22 +2032,6 @@ function _pcRenderGrid() {
         grid.appendChild(cell);
     });
 
-    // Trailing "+" upload affordance — placed after the emojis so the
-    // editor's reading order matches the picker's actual render order.
-    // Hidden when the pack is empty (the big bottom dropzone is the
-    // only entry point in that case) and when the cap is hit.
-    if (_pc.emojis.length > 0 && _pc.emojis.length < PC_MAX_EMOJIS) {
-        const addCell = document.createElement('button');
-        addCell.type = 'button';
-        addCell.className = 'emoji-creator-cell-add';
-        addCell.setAttribute('aria-label', 'Upload emoji');
-        addCell.innerHTML = '<span class="icon icon-plus-circle"></span>';
-        addCell.addEventListener('click', () => {
-            document.getElementById('emoji-creator-files').click();
-        });
-        grid.appendChild(addCell);
-    }
-
     // Bottom dropzone label adapts: first-emoji onboarding tone, normal,
     // or cap-reached.
     const dz = document.getElementById('emoji-creator-dropzone');
@@ -2476,7 +2461,7 @@ function _pcShowNaming({ src, initial, batch }, mode = 'create') {
         errEl.hidden = true;
         errEl.textContent = '';
         skipBtn.textContent = mode === 'edit' ? 'CANCEL' : 'SKIP';
-        titleEl.textContent = mode === 'edit' ? 'Rename emoji' : 'Name this emoji';
+        titleEl.textContent = mode === 'edit' ? 'Rename Emoji' : 'Name This Emoji';
         if (batch && batch.total > 1) {
             batchEl.textContent = `${batch.current} of ${batch.total}`;
             batchEl.hidden = false;
@@ -3102,8 +3087,8 @@ async function _pcDelete() {
     // any click on it would trip the outside-close handler, snapping
     // the picker shut mid-flow.
     const ok = await _pcShowConfirm({
-        title: 'Delete pack?',
-        detail: 'This removes the emoji files from your media servers and the pack from Nostr. This action cannot be undone.',
+        title: 'Delete This Pack?',
+        detail: 'This action permanently removes the emoji files from your media servers and the pack from Nostr. This action cannot be undone.',
         icon: 'vector_warning.svg',
         tone: 'danger',
         confirmText: 'DELETE',
@@ -3389,7 +3374,7 @@ function renderEmojiPackSections() {
         const header = document.createElement('div');
         header.className = 'emoji-section-header';
         const editPencil = pack.is_own
-            ? `<button type="button" class="emoji-pack-edit-pencil" data-pack-id="${_escapeAttr(pack.id)}" aria-label="Edit pack"><span class="icon icon-edit"></span></button>`
+            ? `<button type="button" class="emoji-pack-edit-pencil" data-pack-id="${_escapeAttr(pack.id)}" aria-label="Edit pack" title="Edit Pack"><span class="icon icon-edit"></span></button>`
             : '';
         // Order: [logo][title][count][collapse-arrow] ... [edit-if-own].
         // The pencil uses `margin-left: auto` (in CSS) to float right;
@@ -3617,17 +3602,13 @@ function loadEmojiSections() {
 let collapsiblesInitialized = false;
 
 function initCollapsibleSections() {
-    if (collapsiblesInitialized) return; // Prevent duplicate initialization
-
-    document.querySelectorAll('.emoji-section-header').forEach(header => {
-        header.addEventListener('click', (e) => {
-            e.stopPropagation(); // Prevent closing the picker
-            const section = header.parentElement;
-            section.classList.toggle('collapsed');
-        });
+    document.querySelector('.emoji-main').addEventListener('click', (e) => {
+        const header = e.target.closest('.emoji-section-header');
+        if (!header) return;
+        e.stopPropagation();
+        const section = header.parentElement;
+        section.classList.toggle('collapsed');
     });
-
-    collapsiblesInitialized = true;
 }
 
 // Function to reset emoji picker state
