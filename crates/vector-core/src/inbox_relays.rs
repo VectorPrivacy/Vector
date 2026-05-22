@@ -619,7 +619,7 @@ pub async fn send_gift_wrap_retained(
             relay.clone(),
         ))
         .collect();
-    let resolved: Vec<(RelayUrl, Relay)> = targeted_strs
+    let mut resolved: Vec<(RelayUrl, Relay)> = targeted_strs
         .iter()
         .filter_map(|s| {
             let norm = normalize_url_for_match(s);
@@ -628,26 +628,41 @@ pub async fn send_gift_wrap_retained(
                 .map(|(_, url, relay)| (url.clone(), relay.clone()))
         })
         .collect();
-    // Surface any inbox URLs that DIDN'T match so we can spot future
-    // canonicalisation drift in the logs without guessing.
-    if resolved.len() < targeted_strs.len() {
-        let unresolved: Vec<&String> = targeted_strs.iter()
-            .filter(|s| {
-                let norm = normalize_url_for_match(s);
-                !pool_norm.iter().any(|(p, _, _)| p == &norm)
-            })
-            .collect();
-        if !unresolved.is_empty() {
-            crate::log_warn!(
-                "[InboxRelays] {} of {} inbox URLs for {} not in local pool: {}",
-                unresolved.len(),
-                targeted_strs.len(),
+
+    // On-demand connect: inbox relays not already in the pool are added +
+    // connected just for this send, then removed afterwards (transient_added).
+    // The recipient's inbox relays are theirs, not ours — keeping them would
+    // pollute the pool, which the reconcile loop owns. Only for real inbox
+    // relays; the pool-write fallback already targets live pool members.
+    let mut transient_added: Vec<RelayUrl> = Vec::new();
+    if !inbox_strs.is_empty() {
+        for s in &targeted_strs {
+            let norm = normalize_url_for_match(s);
+            let in_pool = pool_norm.iter().any(|(p, _, _)| p == &norm);
+            let already_added = transient_added.iter()
+                .any(|u| normalize_url_for_match(&u.to_string()) == norm);
+            if in_pool || already_added { continue; }
+
+            let opts = crate::tor_aware_relay_options(RelayOptions::new().reconnect(false));
+            if pool.add_relay(s.as_str(), opts).await.is_ok() {
+                if let Ok(relay) = pool.relay(s.as_str()).await {
+                    let _ = relay.try_connect(std::time::Duration::from_secs(6)).await;
+                    transient_added.push(relay.url().clone());
+                    resolved.push((relay.url().clone(), relay));
+                }
+            }
+        }
+        if !transient_added.is_empty() {
+            crate::log_info!(
+                "[InboxRelays] on-demand connected {} inbox relay(s) for {} (transient)",
+                transient_added.len(),
                 recipient,
-                unresolved.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
             );
         }
     }
 
+    // `resolved.is_empty()` implies no transient add succeeded (each success
+    // pushes onto `resolved`), so this branch can't leak a transient relay.
     if resolved.is_empty() {
         // No matching relays in the pool — last-ditch broadcast via
         // client.send_event(). No tracker (no per-relay machinery).
@@ -705,6 +720,14 @@ pub async fn send_gift_wrap_retained(
                 }
             }
         }
+    }
+
+    // Tear down transiently-added inbox relays — they belong to the
+    // recipient, not us. Delivery has already raced to first-ok; one
+    // confirmed inbox relay satisfies NIP-17, so cutting any still-in-flight
+    // background publishes to the others is acceptable.
+    for url in &transient_added {
+        let _ = pool.remove_relay(url).await;
     }
 
     Ok(GiftWrapSendOutcome {

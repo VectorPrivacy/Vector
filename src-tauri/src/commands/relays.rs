@@ -227,6 +227,29 @@ pub fn relay_options_for_mode(mode: &str) -> RelayOptions {
     vector_core::tor_aware_relay_options(opts)
 }
 
+/// Resolve the desired *enabled* relay set — the "north star" the reconcile
+/// loop drives the live pool toward. Precedence is already baked into the DB:
+/// the user's Nostr-synced relay list and manual edits persist into the
+/// custom-relay and disabled-default tables, so this returns the hardcoded
+/// defaults (minus any the user disabled) plus every enabled custom relay.
+/// Never empty — the defaults are the floor, so there is always somewhere to
+/// connect. Returns (url, mode) pairs.
+async fn desired_enabled_relays<R: Runtime>(handle: &AppHandle<R>) -> Vec<(String, String)> {
+    let disabled = get_disabled_default_relays(handle).await.unwrap_or_default();
+    let customs = load_custom_relays(handle).await.unwrap_or_default();
+    let mut out: Vec<(String, String)> = Vec::new();
+    for d in DEFAULT_RELAYS {
+        if disabled.iter().any(|x| x.eq_ignore_ascii_case(d)) { continue; }
+        out.push(((*d).to_string(), "both".to_string()));
+    }
+    for c in customs {
+        if c.enabled {
+            out.push((c.url, c.mode));
+        }
+    }
+    out
+}
+
 // ============================================================================
 // Database Helpers
 // ============================================================================
@@ -901,7 +924,7 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
     let client_health = client.clone();
     let handle_health = handle.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
 
         loop {
             let relays = client_health.relays().await;
@@ -980,21 +1003,52 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
         }
     });
 
-    // Spawn periodic terminated relay check
+    // Pool reconcile: nostr-sdk auto-reconnect is off by design, so a relay
+    // that drops can leave the pool entirely and never return on its own.
+    // Every 10s, re-add any enabled relay missing from the pool and reconnect
+    // dead ones; the short warmup covers the startup window. Re-resolves the
+    // active client each pass so an account swap can't reconcile a stale pool.
+    let handle_recon = handle.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        let norm = |u: &str| u.trim_end_matches('/').to_ascii_lowercase();
+        tokio::time::sleep(std::time::Duration::from_secs(8)).await;
 
         loop {
-            let relays = client.relays().await;
+            if let Some(client) = nostr_client() {
+                let desired = desired_enabled_relays(&handle_recon).await;
+                let pool = client.pool();
+                let pool_keys: Vec<String> = client.relays().await.keys()
+                    .map(|k| norm(&k.to_string()))
+                    .collect();
 
-            for (_url, relay) in relays {
-                let status = relay.status();
-                if status == RelayStatus::Terminated {
-                    let _ = relay.try_connect(std::time::Duration::from_secs(5)).await;
+                // Re-add anything in the desired set that's missing entirely.
+                for (url, mode) in &desired {
+                    if !pool_keys.iter().any(|k| k == &norm(url)) {
+                        if pool.add_relay(url.as_str(), relay_options_for_mode(mode)).await.is_ok() {
+                            println!("[Reconcile] re-added missing relay {}; connecting...", url);
+                            add_relay_log(url.as_str(), "info", "Reconcile: re-added missing relay; connecting...");
+                            if let Ok(relay) = pool.relay(url.as_str()).await {
+                                let _ = relay.try_connect(std::time::Duration::from_secs(8)).await;
+                            }
+                        }
+                    }
+                }
+
+                // Reconnect present-but-dead relays — the manual replacement
+                // for nostr-sdk's disabled auto-reconnect.
+                for (_url, relay) in client.relays().await {
+                    match relay.status() {
+                        RelayStatus::Terminated
+                        | RelayStatus::Disconnected
+                        | RelayStatus::Sleeping => {
+                            let _ = relay.try_connect(std::time::Duration::from_secs(5)).await;
+                        }
+                        _ => {}
+                    }
                 }
             }
 
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         }
     });
 
