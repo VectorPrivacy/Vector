@@ -60,20 +60,21 @@ function generateTypingText(chat) {
 function generateChatPreviewText(chat) {
     const isGroup = chat.chat_type === 'MlsGroup';
 
-    // In group chats, skip messages from blocked users for the preview
+    // Walk back to find the latest actual conversation message. System
+    // events (wallpaper changes, member joined/left) and — in group chats —
+    // messages from blocked users are skipped so they don't hijack the
+    // preview line. Mirrors `findLatestContactMessage` but keeps own
+    // messages eligible since the preview shows "You: …" outgoing context.
     let cLastMsg = null;
-    if (isGroup) {
-        for (let i = chat.messages.length - 1; i >= 0; i--) {
-            const m = chat.messages[i];
-            if (m.npub && !m.mine) {
-                const authorProfile = getProfile(m.npub);
-                if (authorProfile?.is_blocked) continue;
-            }
-            cLastMsg = m;
-            break;
+    for (let i = chat.messages.length - 1; i >= 0; i--) {
+        const m = chat.messages[i];
+        if (m.system_event) continue;
+        if (isGroup && m.npub && !m.mine) {
+            const authorProfile = getProfile(m.npub);
+            if (authorProfile?.is_blocked) continue;
         }
-    } else {
-        cLastMsg = chat.messages[chat.messages.length - 1];
+        cLastMsg = m;
+        break;
     }
 
     // Handle typing indicators

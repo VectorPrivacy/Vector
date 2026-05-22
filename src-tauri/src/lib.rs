@@ -547,6 +547,7 @@ pub fn run() {
             commands::media::transcribe,
             commands::media::download_whisper_model,
             commands::messaging::update_unread_counter,
+            commands::messaging::set_active_chat,
             commands::system::get_platform_features,
             commands::system::get_device_memory,
             // Invite and badge commands (commands/invites.rs)
@@ -719,6 +720,10 @@ pub fn run() {
             commands::emoji_packs::emoji_pack_delete_blob,
             commands::emoji_packs::emoji_pack_upload_image,
             commands::emoji_packs::emoji_crop_and_reencode,
+            // Per-DM wallpapers (commands/wallpaper.rs)
+            commands::wallpaper::preview_wallpaper,
+            commands::wallpaper::publish_wallpaper,
+            commands::wallpaper::cancel_wallpaper_preview,
             #[cfg(debug_assertions)]
             commands::account::debug_hot_reload_sync,
             commands::account::logout,

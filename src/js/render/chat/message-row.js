@@ -98,7 +98,12 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
 
     // ---- System event (centered timestamp-style line) -----------------------
     if (msg.system_event) {
-        return insertSystemEvent(msg.content);
+        const el = insertSystemEvent(msg.content);
+        // Tag with msg.id so updateChat's `document.getElementById(msg.id)`
+        // dedup guard skips re-rendering it on the openChat pre-paint pass.
+        // Without this, system events rendered twice on every chat reopen.
+        el.id = msg.id;
+        return el;
     }
 
     // ---- Chat / group context -----------------------------------------------
@@ -809,6 +814,13 @@ function _dmsgAttachUploadProgress(target, msg) {
         if (container === target) {
             const wrapper = document.createElement('div');
             wrapper.style.position = 'relative';
+            // Shrink-wrap the wrapper to the media's actual rendered size so the
+            // absolutely-positioned progress overlay centers on the video, not
+            // on the wider message body. Portrait videos clamp to max-height
+            // and render narrower than the bubble — without fit-content the
+            // wrapper stays bubble-width and the spinner drifts to the side.
+            wrapper.style.width = 'fit-content';
+            wrapper.style.maxWidth = '100%';
             target.replaceChild(wrapper, mediaEl);
             wrapper.appendChild(mediaEl);
             container = wrapper;

@@ -309,6 +309,21 @@ pub async fn commit_prepared_event(
                     // WebXDC is platform-specific — handled by src-tauri directly
                     false
                 }
+                RumorProcessingResult::WallpaperChanged {
+                    sender_npub, created_at, url, decryption_key, decryption_nonce,
+                    plaintext_hash, mime, blur, dim, event_id,
+                } => {
+                    let _ = crate::wallpaper::apply_received_wallpaper(
+                        &contact, &sender_npub, created_at, &url,
+                        &decryption_key, &decryption_nonce,
+                        plaintext_hash.as_deref(), mime.as_deref(),
+                        blur, dim,
+                        &event_id,
+                    ).await;
+                    // System event is saved inside apply_received_wallpaper.
+                    // Return true so the caller treats this as a stored event.
+                    true
+                }
                 RumorProcessingResult::DeletionRequest { target_event_id } => {
                     commit_deletion(&target_event_id, &contact, &sender, handler).await
                 }

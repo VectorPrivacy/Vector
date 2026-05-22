@@ -639,6 +639,9 @@ pub async fn reset_session() {
     { crate::WRAPPER_ID_CACHE.lock().await.clear(); }
     { crate::NOTIFIED_WELCOMES.lock().await.clear(); }
     { crate::state::PENDING_EVENTS.lock().await.clear(); }
+    // Active-chat marker is an npub; a shared contact across accounts would
+    // otherwise let account A's open chat auto-mark account B's messages.
+    vector_core::state::set_active_chat(None);
 
     // Profile sync queue (long-lived processor loop services this queue
     // forever, so we drain it instead of cancelling the task).

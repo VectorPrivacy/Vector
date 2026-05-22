@@ -251,6 +251,15 @@ pub async fn update_unread_counter<R: Runtime>(handle: AppHandle<R>) -> u32 {
     unread_count
 }
 
+/// Tell the backend which chat the user is actively watching, so inbound
+/// messages in that chat auto-mark as read on arrival (no dock-badge bump,
+/// no race with the FE's own `markAsRead`). Frontend sends `chat_id=None`
+/// when the chat closes, the window blurs, or the user scrolls off-bottom.
+#[tauri::command]
+pub fn set_active_chat(chat_id: Option<String>) {
+    vector_core::state::set_active_chat(chat_id);
+}
+
 // Handler list for this module (for reference):
 // - get_chat_messages_paginated
 // - get_chat_message_count
@@ -259,3 +268,4 @@ pub async fn update_unread_counter<R: Runtime>(handle: AppHandle<R>) -> u32 {
 // - get_system_events
 // - evict_chat_messages
 // - update_unread_counter
+// - set_active_chat

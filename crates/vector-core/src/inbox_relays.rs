@@ -601,19 +601,52 @@ pub async fn send_gift_wrap_retained(
             .map(|(url, _)| url.to_string())
             .collect()
     };
-    let target_urls: Vec<RelayUrl> = targeted_strs
-        .iter()
-        .filter_map(|s| RelayUrl::parse(s).ok())
-        .collect();
-
-    // Resolve to live Relay handles in the pool. Anything not in the
-    // pool gets silently skipped (consistent with prior behaviour).
+    // Resolve to live Relay handles in the pool. Strict HashMap lookup by
+    // `RelayUrl` was missing visually-identical URLs because nostr-sdk
+    // canonicalises differently between published-10050 strings and pool
+    // keys (trailing slashes, default ports, case). Normalise both sides
+    // and match on the canonical string form so e.g. `wss://relay.damus.io`
+    // and `wss://relay.damus.io/` count as the same relay.
+    fn normalize_url_for_match(s: &str) -> String {
+        s.trim_end_matches('/').to_ascii_lowercase()
+    }
     let pool = client.pool();
     let pool_relays = pool.relays().await;
-    let resolved: Vec<(RelayUrl, Relay)> = target_urls
-        .iter()
-        .filter_map(|url| pool_relays.get(url).map(|r| (url.clone(), r.clone())))
+    let pool_norm: Vec<(String, RelayUrl, Relay)> = pool_relays.iter()
+        .map(|(url, relay)| (
+            normalize_url_for_match(&url.to_string()),
+            url.clone(),
+            relay.clone(),
+        ))
         .collect();
+    let resolved: Vec<(RelayUrl, Relay)> = targeted_strs
+        .iter()
+        .filter_map(|s| {
+            let norm = normalize_url_for_match(s);
+            pool_norm.iter()
+                .find(|(pnorm, _, _)| pnorm == &norm)
+                .map(|(_, url, relay)| (url.clone(), relay.clone()))
+        })
+        .collect();
+    // Surface any inbox URLs that DIDN'T match so we can spot future
+    // canonicalisation drift in the logs without guessing.
+    if resolved.len() < targeted_strs.len() {
+        let unresolved: Vec<&String> = targeted_strs.iter()
+            .filter(|s| {
+                let norm = normalize_url_for_match(s);
+                !pool_norm.iter().any(|(p, _, _)| p == &norm)
+            })
+            .collect();
+        if !unresolved.is_empty() {
+            crate::log_warn!(
+                "[InboxRelays] {} of {} inbox URLs for {} not in local pool: {}",
+                unresolved.len(),
+                targeted_strs.len(),
+                recipient,
+                unresolved.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
+            );
+        }
+    }
 
     if resolved.is_empty() {
         // No matching relays in the pool — last-ditch broadcast via

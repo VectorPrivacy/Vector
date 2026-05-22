@@ -19,6 +19,39 @@ use crate::{
     state::{is_processing_allowed, PENDING_EVENTS},
 };
 
+/// If the inbound message lands in the chat the user is actively watching
+/// (FE marks open + pinned + focused via `set_active_chat`), advance
+/// `chat.last_read` BEFORE the badge recount so the unread count stays at
+/// zero and the dock badge never bumps. Also pushes a `chat_mark_read`
+/// event so the FE state and DB persistence catch up — the FE's own
+/// `message_new` markAsRead still runs as a belt-and-braces second hop.
+async fn auto_mark_if_active(chat_id: &str, msg_id: &str) {
+    let active = vector_core::state::get_active_chat();
+    if active.as_deref() != Some(chat_id) { return; }
+
+    let slim = {
+        let mut state = STATE.lock().await;
+        if let Some(chat) = state.chats.iter_mut().find(|c| c.id == chat_id) {
+            chat.last_read = vector_core::compact::encode_message_id(msg_id);
+            state.get_chat(chat_id).map(|c| {
+                vector_core::db::chats::SlimChatDB::from_chat(c, &state.interner)
+            })
+        } else {
+            None
+        }
+    };
+    if let Some(slim) = slim {
+        let _ = vector_core::db::chats::save_slim_chat(&slim);
+    }
+
+    if let Some(app) = TAURI_APP.get() {
+        let _ = app.emit("chat_mark_read", serde_json::json!({
+            "chat_id": chat_id,
+            "last_read": msg_id,
+        }));
+    }
+}
+
 // ============================================================================
 // TauriEventHandler — OS notifications + badge updates
 // ============================================================================
@@ -32,7 +65,13 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
         if msg.mine || !is_new { return; }
         let chat_id = chat_id.to_string();
         let content = msg.content.clone();
+        let msg_id = msg.id.clone();
         tokio::spawn(async move {
+            // If the user is actively watching this chat, advance last_read
+            // before the badge recount so the message never counts as unread.
+            // The FE's own markAsRead still runs on the message_new event for
+            // DB persistence, but this avoids the racey badge bump in between.
+            auto_mark_if_active(&chat_id, &msg_id).await;
             // Check muted
             let is_muted = {
                 let state = STATE.lock().await;
@@ -61,7 +100,9 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
         let extension = msg.attachments.first()
             .map(|att| att.extension.clone())
             .unwrap_or_else(|| String::from("file"));
+        let msg_id = msg.id.clone();
         tokio::spawn(async move {
+            auto_mark_if_active(&chat_id, &msg_id).await;
             // Check muted
             let is_muted = {
                 let state = STATE.lock().await;

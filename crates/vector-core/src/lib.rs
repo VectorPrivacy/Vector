@@ -137,6 +137,9 @@ pub mod rumor;
 // === Messaging ===
 pub mod sending;
 
+// === Per-DM Wallpapers ===
+pub mod wallpaper;
+
 // === Message Deletion (NIP-09 against retained gift-wraps) ===
 pub mod deletion;
 

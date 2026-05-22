@@ -150,7 +150,46 @@ async fn retry_send_gift_wrap(
 
     for attempt in 0..config.max_send_attempts {
         match crate::inbox_relays::send_gift_wrap_retained(client, receiver, rumor.clone(), []).await {
-            Ok(outcome) if !outcome.output.success.is_empty() => {
+            Ok(outcome) if outcome.output.success.is_empty() => {
+                // The publish round-trip succeeded but every targeted relay
+                // rejected the wrap (auth required, kind filter, rate-limit,
+                // timed-out OK, etc.). Surface the per-relay failure reasons
+                // so the user can see WHY their DMs aren't being accepted.
+                let failures: Vec<String> = outcome.output.failed.iter()
+                    .map(|(url, err)| format!("{}: {}", url, err))
+                    .collect();
+                let targeted_count = outcome.targeted_relays.len();
+                crate::log_warn!(
+                    "[Send] attempt {}/{} — 0 of {} relays accepted (targeted: {}). Per-relay errors: {}",
+                    attempt + 1,
+                    config.max_send_attempts,
+                    targeted_count,
+                    outcome.targeted_relays.join(", "),
+                    if failures.is_empty() {
+                        "(none reported — likely all timed out before responding)".to_string()
+                    } else {
+                        failures.join(" | ")
+                    },
+                );
+                if attempt + 1 >= config.max_send_attempts {
+                    // All attempts exhausted — mark failed
+                    let failed_msg = {
+                        let mut state = STATE.lock().await;
+                        state.update_message(pending_id, |msg| {
+                            msg.set_failed(true);
+                            msg.set_pending(false);
+                        })
+                    };
+                    if let Some((_chat_id, ref msg)) = failed_msg {
+                        callback.on_failed(receiver_npub, pending_id, msg);
+                        callback.on_persist(receiver_npub, msg);
+                    }
+                    return Err(format!("Failed to send DM after {} attempts (no relays accepted the gift-wrap)", config.max_send_attempts));
+                }
+                tokio::time::sleep(config.retry_delay).await;
+                continue;
+            }
+            Ok(outcome) => {
                 // At least one relay accepted — success.
                 // Persist the retained ephemeral key so the user can
                 // later issue NIP-09 deletion against this wrap.
@@ -224,10 +263,18 @@ async fn retry_send_gift_wrap(
                     chat_id: receiver_npub.to_string(),
                 });
             }
-            Ok(_) | Err(_) => {
-                // No relay accepted or error
+            Err(e) => {
+                // send_gift_wrap_retained itself errored before even
+                // attempting a publish (seal/wrap failure, signer issue,
+                // pool resolution problem). Log so we can tell this apart
+                // from "publishes ran but all relays rejected".
+                crate::log_warn!(
+                    "[Send] attempt {}/{} — send_gift_wrap_retained errored: {}",
+                    attempt + 1,
+                    config.max_send_attempts,
+                    e,
+                );
                 if attempt + 1 >= config.max_send_attempts {
-                    // All attempts exhausted — mark failed
                     let failed_msg = {
                         let mut state = STATE.lock().await;
                         state.update_message(pending_id, |msg| {
@@ -235,16 +282,12 @@ async fn retry_send_gift_wrap(
                             msg.set_pending(false);
                         })
                     };
-
                     if let Some((_chat_id, ref msg)) = failed_msg {
                         callback.on_failed(receiver_npub, pending_id, msg);
                         callback.on_persist(receiver_npub, msg);
                     }
-
-                    return Err(format!("Failed to send DM after {} attempts", config.max_send_attempts));
+                    return Err(format!("Failed to send DM after {} attempts: {}", config.max_send_attempts, e));
                 }
-
-                // Retry after delay
                 tokio::time::sleep(config.retry_delay).await;
             }
         }

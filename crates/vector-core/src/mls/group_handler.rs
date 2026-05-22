@@ -270,6 +270,10 @@ pub async fn handle_mls_group_message_with_handler(
                                             ).await;
                                             None
                                         }
+                                        RumorProcessingResult::WallpaperChanged { .. } => {
+                                            // Wallpapers are DM-only; ignore in groups.
+                                            None
+                                        }
                                         RumorProcessingResult::Ignored => None,
                                     }
                                 }

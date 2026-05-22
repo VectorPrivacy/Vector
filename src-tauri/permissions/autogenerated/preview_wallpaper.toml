@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-preview-wallpaper"
+description = "Enables the preview_wallpaper command without any pre-configured scope."
+commands.allow = ["preview_wallpaper"]
+
+[[permission]]
+identifier = "deny-preview-wallpaper"
+description = "Denies the preview_wallpaper command without any pre-configured scope."
+commands.deny = ["preview_wallpaper"]

@@ -127,6 +127,32 @@ pub enum RumorProcessingResult {
         /// The stored event for persistence
         event: StoredEvent,
     },
+    /// A per-DM wallpaper change. The encrypted Blossom file is referenced
+    /// by URL + decryption key in the tags; the caller is responsible for
+    /// the timestamp comparison (latest-write-wins against
+    /// `chat.wallpaper_ts`) and the download + decrypt step.
+    WallpaperChanged {
+        /// Sender's npub (whoever set the wallpaper).
+        sender_npub: String,
+        /// Rumor `created_at` (Unix seconds) — drives latest-write-wins.
+        created_at: u64,
+        /// Encrypted file URL on Blossom.
+        url: String,
+        /// Hex-encoded AES key.
+        decryption_key: String,
+        /// Hex-encoded AES nonce.
+        decryption_nonce: String,
+        /// Optional plaintext SHA-256 (for caller integrity check).
+        plaintext_hash: Option<String>,
+        /// Optional MIME hint (e.g. "image/png") — informs cache extension.
+        mime: Option<String>,
+        /// Blur (px, 0..=30). `None` falls back to the receiver's default.
+        blur: Option<u8>,
+        /// Brightness percent (0..=100). `None` falls back to default.
+        dim: Option<u8>,
+        /// The rumor ID, used as the system-event row id.
+        event_id: String,
+    },
     /// Event was ignored (invalid, expired, or should not be stored)
     Ignored,
     /// A NIP-09 deletion request — sender asks live clients to drop a
@@ -683,6 +709,58 @@ fn process_app_specific(
         });
     }
 
+    // Check if this is a wallpaper change. Tags carry the encrypted file
+    // ref; the caller decides whether this beats the chat's current
+    // `wallpaper_ts` and runs the download+decrypt step.
+    if is_wallpaper_change(&rumor) {
+        let url = rumor.tags
+            .find(TagKind::Custom(Cow::Borrowed("url")))
+            .and_then(|tag| tag.content())
+            .ok_or("Wallpaper rumor missing url tag")?
+            .to_string();
+        let decryption_key = rumor.tags
+            .find(TagKind::Custom(Cow::Borrowed("decryption-key")))
+            .and_then(|tag| tag.content())
+            .ok_or("Wallpaper rumor missing decryption-key tag")?
+            .to_string();
+        let decryption_nonce = rumor.tags
+            .find(TagKind::Custom(Cow::Borrowed("decryption-nonce")))
+            .and_then(|tag| tag.content())
+            .ok_or("Wallpaper rumor missing decryption-nonce tag")?
+            .to_string();
+        let plaintext_hash = rumor.tags
+            .find(TagKind::Custom(Cow::Borrowed("x")))
+            .and_then(|tag| tag.content())
+            .map(|s| s.to_string());
+        let mime = rumor.tags
+            .find(TagKind::Custom(Cow::Borrowed("m")))
+            .and_then(|tag| tag.content())
+            .map(|s| s.to_string());
+        let blur = rumor.tags
+            .find(TagKind::Custom(Cow::Borrowed("blur")))
+            .and_then(|tag| tag.content())
+            .and_then(|s| s.parse::<u32>().ok())
+            .map(|n| n.min(30) as u8);
+        let dim = rumor.tags
+            .find(TagKind::Custom(Cow::Borrowed("dim")))
+            .and_then(|tag| tag.content())
+            .and_then(|s| s.parse::<u32>().ok())
+            .map(|n| n.min(100) as u8);
+
+        return Ok(RumorProcessingResult::WallpaperChanged {
+            sender_npub: rumor.pubkey.to_bech32().unwrap_or_default(),
+            created_at: rumor.created_at.as_secs(),
+            url,
+            decryption_key,
+            decryption_nonce,
+            plaintext_hash,
+            mime,
+            blur,
+            dim,
+            event_id: rumor.id.to_hex(),
+        });
+    }
+
     // Check if this is a WebXDC peer advertisement
     if is_webxdc_peer_advertisement(&rumor) {
         log_info!("[WEBXDC] Found peer advertisement rumor, is_mine={}, sender={}",
@@ -827,6 +905,15 @@ fn is_typing_indicator(rumor: &RumorEvent) -> bool {
     let is_typing_content = rumor.content == "typing";
 
     has_vector_tag && is_typing_content
+}
+
+/// Check if rumor is a wallpaper-change application-data event.
+fn is_wallpaper_change(rumor: &RumorEvent) -> bool {
+    rumor.tags
+        .find(TagKind::d())
+        .and_then(|tag| tag.content())
+        .map(|content| content == "vector-wallpaper")
+        .unwrap_or(false)
 }
 
 /// Check if rumor is a leave request

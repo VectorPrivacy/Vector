@@ -211,6 +211,14 @@ function countUnreadMessages(chat) {
     for (let i = chat.messages.length - 1; i >= 0; i--) {
         const msg = chat.messages[i];
 
+        // System events (wallpaper changes, member joined/left, etc.) are
+        // state notifications, not conversation — skip them entirely so they
+        // can't drive the unread badge or block the walk-back from hitting a
+        // real read marker.
+        if (msg.system_event) {
+            continue;
+        }
+
         // If we hit our own message, stop - we clearly read everything before it
         if (msg.mine) {
             break;
@@ -261,6 +269,7 @@ function countPingMessages(chat) {
     let pings = 0;
     for (let i = chat.messages.length - 1; i >= 0; i--) {
         const msg = chat.messages[i];
+        if (msg.system_event) continue; // not a conversation message
         if (msg.mine) break;
         if (chat.last_read && msg.id === chat.last_read) break;
         if (isGroup && msg.npub) {

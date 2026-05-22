@@ -15,7 +15,21 @@ pub struct SlimChatDB {
     pub created_at: u64,
     pub metadata: ChatMetadata,
     pub muted: bool,
+    #[serde(default)]
+    pub wallpaper_path: String,
+    #[serde(default)]
+    pub wallpaper_ts: u64,
+    #[serde(default)]
+    pub wallpaper_blur: u8,
+    #[serde(default = "default_wallpaper_dim_slim")]
+    pub wallpaper_dim: u8,
+    #[serde(default)]
+    pub wallpaper_url: String,
+    #[serde(default)]
+    pub wallpaper_uploader: String,
 }
+
+fn default_wallpaper_dim_slim() -> u8 { 50 }
 
 impl SlimChatDB {
     /// Create from a Chat, resolving interned handles to strings for DB storage.
@@ -34,6 +48,12 @@ impl SlimChatDB {
             created_at: chat.created_at(),
             metadata: chat.metadata().clone(),
             muted: chat.muted(),
+            wallpaper_path: chat.wallpaper_path.clone(),
+            wallpaper_ts: chat.wallpaper_ts,
+            wallpaper_blur: chat.wallpaper_blur,
+            wallpaper_dim: chat.wallpaper_dim,
+            wallpaper_url: chat.wallpaper_url.clone(),
+            wallpaper_uploader: chat.wallpaper_uploader.clone(),
         }
     }
 
@@ -49,6 +69,12 @@ impl SlimChatDB {
         chat.created_at = self.created_at;
         chat.metadata = self.metadata.clone();
         chat.muted = self.muted;
+        chat.wallpaper_path = self.wallpaper_path.clone();
+        chat.wallpaper_ts = self.wallpaper_ts;
+        chat.wallpaper_blur = self.wallpaper_blur;
+        chat.wallpaper_dim = self.wallpaper_dim;
+        chat.wallpaper_url = self.wallpaper_url.clone();
+        chat.wallpaper_uploader = self.wallpaper_uploader.clone();
         chat
     }
 }
@@ -58,7 +84,9 @@ pub fn get_all_chats() -> Result<Vec<SlimChatDB>, String> {
     let conn = super::get_db_connection_guard_static()?;
 
     let mut stmt = conn.prepare(
-        "SELECT chat_identifier, chat_type, participants, last_read, created_at, metadata, muted \
+        "SELECT chat_identifier, chat_type, participants, last_read, created_at, metadata, muted, \
+                wallpaper_path, wallpaper_ts, wallpaper_blur, wallpaper_dim, \
+                wallpaper_url, wallpaper_uploader \
          FROM chats ORDER BY created_at DESC"
     ).map_err(|e| format!("Failed to prepare statement: {}", e))?;
 
@@ -80,6 +108,12 @@ pub fn get_all_chats() -> Result<Vec<SlimChatDB>, String> {
             created_at: row.get::<_, i64>(4)? as u64,
             metadata,
             muted: row.get::<_, i32>(6)? != 0,
+            wallpaper_path: row.get(7)?,
+            wallpaper_ts: row.get::<_, i64>(8)? as u64,
+            wallpaper_blur: row.get::<_, i32>(9)?.clamp(0, 30) as u8,
+            wallpaper_dim: row.get::<_, i32>(10)?.clamp(0, 100) as u8,
+            wallpaper_url: row.get(11)?,
+            wallpaper_uploader: row.get(12)?,
         })
     }).map_err(|e| format!("Failed to query chats: {}", e))?;
 
@@ -98,11 +132,14 @@ pub fn save_slim_chat(slim_chat: &SlimChatDB) -> Result<(), String> {
         .unwrap_or_else(|_| "{}".to_string());
 
     conn.execute(
-        "INSERT INTO chats (chat_identifier, chat_type, participants, last_read, created_at, metadata, muted) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+        "INSERT INTO chats (chat_identifier, chat_type, participants, last_read, created_at, metadata, muted, wallpaper_path, wallpaper_ts, wallpaper_blur, wallpaper_dim, wallpaper_url, wallpaper_uploader) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
          ON CONFLICT(chat_identifier) DO UPDATE SET \
             chat_type = excluded.chat_type, participants = excluded.participants, \
-            last_read = excluded.last_read, metadata = excluded.metadata, muted = excluded.muted",
+            last_read = excluded.last_read, metadata = excluded.metadata, muted = excluded.muted, \
+            wallpaper_path = excluded.wallpaper_path, wallpaper_ts = excluded.wallpaper_ts, \
+            wallpaper_blur = excluded.wallpaper_blur, wallpaper_dim = excluded.wallpaper_dim, \
+            wallpaper_url = excluded.wallpaper_url, wallpaper_uploader = excluded.wallpaper_uploader",
         rusqlite::params![
             slim_chat.id,
             chat_type_int,
@@ -111,6 +148,12 @@ pub fn save_slim_chat(slim_chat: &SlimChatDB) -> Result<(), String> {
             slim_chat.created_at as i64,
             metadata_json,
             slim_chat.muted as i32,
+            slim_chat.wallpaper_path,
+            slim_chat.wallpaper_ts as i64,
+            slim_chat.wallpaper_blur as i32,
+            slim_chat.wallpaper_dim as i32,
+            slim_chat.wallpaper_url,
+            slim_chat.wallpaper_uploader,
         ],
     ).map_err(|e| format!("Failed to upsert chat: {}", e))?;
 

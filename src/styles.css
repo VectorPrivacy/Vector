@@ -2317,8 +2317,10 @@ html, body {
   overscroll-behavior-y: contain;
 }
 
-.chat-messages > div:last-child {
-  /* The last message should have extra margin from the bottom */
+.chat-messages > *:last-child {
+  /* The last child should have extra margin from the bottom — covers
+     both `.dmsg` divs and `.msg-inline-timestamp` paragraphs (system
+     events, date dividers, unread marker). */
   margin-bottom: 20px;
 }
 
@@ -7383,6 +7385,18 @@ select:disabled:hover {
   top: 10px;
   left: 0;
   margin-left: 5px;
+  padding: 5px;
+}
+
+/* Mirror of nav-back-btn on the right side of the chat header — anchors
+   the chat-options dropdown trigger. */
+.nav-menu-btn {
+  display: flex;
+  align-items: center;
+  position: absolute;
+  top: 10px;
+  right: 0;
+  margin-right: 5px;
   padding: 5px;
 }
 
@@ -14474,6 +14488,211 @@ hr {
 
 /* Anchor for #dmsg-toolbar absolute positioning so it scrolls with content. */
 .chat-messages { position: relative; }
+
+/* ============================================================================
+   Per-DM Wallpaper
+   ============================================================================
+   The wallpaper is a dedicated layer behind the rest of the chat surface, so
+   the `filter: blur()` / `filter: brightness()` only affect the image — not
+   the message bubbles, header text, or the composer.
+
+   The wallpaper layer is absolute-inset:0 against `#chat`, sized to the
+   visible chat panel rather than the scrollable content (which was the bug
+   in the previous implementation: a `::before` on `.chat-messages` only
+   covered the top of scrolled content).
+
+   Three CSS variables drive the look, set inline by JS as the user moves
+   the preview sliders or when an inbound rumor lands:
+     --wp-image      url("…")  (or `none` when no wallpaper)
+     --wp-blur-px    px        (0..30)
+     --wp-brightness number    (0..1, where 1 = no dim)
+*/
+/* `isolation: isolate` makes #chat a stacking context root so the
+   wallpaper layer's negative z-index is contained — it paints behind
+   every other child without us having to add z-index rules to (and
+   accidentally clobber the `position:` of) the header, composer, and
+   the floating scroll-return button. */
+#chat { position: relative; isolation: isolate; }
+
+.chat-wallpaper-layer {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image: var(--wp-image, none);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-color: transparent;
+  filter:
+    blur(var(--wp-blur-px, 0px))
+    brightness(var(--wp-brightness, 1));
+  /* Blur leaks past the image edge by default; clip + scale slightly so the
+     softened edge stays inside the visible chat area. */
+  overflow: hidden;
+  transform: scale(1.02);
+  transform-origin: center;
+}
+#chat[data-wallpaper="true"] .chat-header {
+  background-color: rgba(22, 22, 22, 0.55);
+}
+/* Override theme-defined chat-messages backgrounds so the wallpaper layer
+   actually shows through. Themes (cyberpunk/monero/pivx) paint .chat-messages
+   solid + add their own ::before overlay; both compete with our wallpaper. */
+#chat[data-wallpaper="true"] .chat-messages {
+  background-color: transparent;
+  border-top: none;
+}
+#chat[data-wallpaper="true"] .chat-messages::before {
+  display: none;
+}
+
+/* Scroll-to-bottom button collides with the wallpaper Set/Cancel buttons —
+   suppress it while the preview bar is up. */
+#chat[data-wallpaper-previewing="true"] > #chat-scroll-return {
+  display: none;
+}
+
+.wallpaper-preview-bar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: rgba(10, 10, 10, 0.92);
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  animation: popupFadeIn 0.18s ease-out;
+}
+.wallpaper-preview-sliders {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.wallpaper-slider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #f7f4f4;
+  font-size: 12px;
+}
+.wallpaper-slider-label {
+  flex: 0 0 72px;
+  opacity: 0.75;
+}
+/* Custom slider — track gradient is driven by the JS-set --slider-pct so
+ * fill and thumb stay perfectly aligned (WebKit's `accent-color` was
+ * drifting). The track lives on the pseudo-element so the input itself
+ * can stay as a 16px hit target while the visible track is only 4px. */
+.wallpaper-slider input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  cursor: pointer;
+  outline: none;
+}
+.wallpaper-slider input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(
+    to right,
+    var(--icon-color-primary, #59fcb3) 0%,
+    var(--icon-color-primary, #59fcb3) var(--slider-pct, 0%),
+    rgba(255, 255, 255, 0.15) var(--slider-pct, 0%),
+    rgba(255, 255, 255, 0.15) 100%
+  );
+}
+.wallpaper-slider input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px; /* center on the 4px track: (14 - 4) / 2 = 5 */
+  border-radius: 50%;
+  background: #ffffff;
+  border: 2px solid var(--icon-color-primary, #59fcb3);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+}
+.wallpaper-slider input[type="range"]::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(
+    to right,
+    var(--icon-color-primary, #59fcb3) 0%,
+    var(--icon-color-primary, #59fcb3) var(--slider-pct, 0%),
+    rgba(255, 255, 255, 0.15) var(--slider-pct, 0%),
+    rgba(255, 255, 255, 0.15) 100%
+  );
+  border: none;
+}
+.wallpaper-slider input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: 2px solid var(--icon-color-primary, #59fcb3);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+}
+.wallpaper-slider-value {
+  flex: 0 0 28px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+}
+.wallpaper-preview-actions {
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.wallpaper-preview-btn {
+  border: none;
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.wallpaper-preview-btn-cancel {
+  background: rgba(255, 255, 255, 0.08);
+  color: #f7f4f4;
+}
+.wallpaper-preview-btn-confirm {
+  background: var(--icon-color-primary, #59fcb3);
+  color: #0a0a0a;
+}
+.wallpaper-preview-btn[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Upload-in-progress button — keep the normal accent fill so the button
+   stays visually intact; a thin progress bar grows along the bottom edge
+   from left to right as the encrypted blob streams to Blossom. */
+.wallpaper-preview-btn.wallpaper-uploading {
+  position: relative;
+  opacity: 0.85;
+  cursor: progress;
+  overflow: hidden;
+}
+.wallpaper-preview-btn.wallpaper-uploading::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 3px;
+  width: calc(var(--wp-upload-progress, 0) * 100%);
+  background: rgba(0, 0, 0, 0.55);
+  transition: width 0.15s ease-out;
+  pointer-events: none;
+}
 
 /* Floating hover toolbar (singleton inside .chat-messages, position: absolute
  * so it scrolls naturally with the messages — no per-frame JS reposition). */

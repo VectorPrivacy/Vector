@@ -488,6 +488,24 @@ pub static WRAPPER_ID_CACHE: LazyLock<Mutex<WrapperIdCache>> = LazyLock::new(|| 
 
 pub static STATE: LazyLock<Mutex<ChatState>> = LazyLock::new(|| Mutex::new(ChatState::new()));
 
+/// Chat id currently visible to the user with auto-mark eligibility — set by
+/// the frontend when the chat is open AND pinned to bottom AND the window is
+/// active. Used by the inbound event handler to mark new messages read on
+/// arrival, so the dock badge never bumps for messages the user is actively
+/// watching. Cleared when any of those conditions flips.
+pub static ACTIVE_CHAT: LazyLock<RwLock<Option<String>>> =
+    LazyLock::new(|| RwLock::new(None));
+
+pub fn set_active_chat(chat_id: Option<String>) {
+    if let Ok(mut guard) = ACTIVE_CHAT.write() {
+        *guard = chat_id;
+    }
+}
+
+pub fn get_active_chat() -> Option<String> {
+    ACTIVE_CHAT.read().ok().and_then(|g| g.clone())
+}
+
 // ============================================================================
 // Processing Gate — Controls event processing during encryption migration
 // ============================================================================

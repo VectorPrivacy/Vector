@@ -943,6 +943,7 @@ pub enum SystemEventType {
     MemberLeft = 0,
     MemberJoined = 1,
     MemberRemoved = 2,
+    WallpaperChanged = 3,
 }
 
 impl SystemEventType {
@@ -951,6 +952,7 @@ impl SystemEventType {
             SystemEventType::MemberLeft => format!("{} has left", display_name),
             SystemEventType::MemberJoined => format!("{} has joined", display_name),
             SystemEventType::MemberRemoved => format!("{} was removed", display_name),
+            SystemEventType::WallpaperChanged => format!("{} changed the wallpaper", display_name),
         }
     }
 

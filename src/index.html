@@ -921,6 +921,10 @@
       </div>
 
       <div id="chat" class="chat" style="display: none;">
+        <!-- Wallpaper background layer. Sits behind every other chat surface
+             and absorbs the blur + brightness filter so messages stay crisp.
+             Driven by CSS variables that JS updates live during preview. -->
+        <div id="chat-wallpaper-layer" class="chat-wallpaper-layer"></div>
         <div class="chat-header">
           <div id="chat-back-btn" class="btn nav-back-btn">
             <span class="icon icon-chevron-double-left nav-icon"></span>
@@ -933,12 +937,37 @@
             </div>
             <span class="cutoff chat-contact-status status-hidden btn" id="chat-contact-status"></span>
           </div>
+          <div id="chat-menu-btn" class="btn nav-menu-btn" title="Chat options">
+            <span class="icon icon-dots-horizontal nav-icon"></span>
+          </div>
         </div>
         <div id="msg-top-fade" class="fadeout-top-msgs" style="top: 60px;"></div>
         <div id="chat-messages" class="chat-messages">
 
         </div>
         <button id="chat-scroll-return" class="corner-float scroll-return-btn"><span class="icon icon-chevron-down"></span><span id="chat-scroll-return-badge" class="scroll-return-badge"></span></button>
+
+        <!-- Wallpaper preview bar — sits in the chat's flex flow, directly
+             above #chat-box so the composer stays visible while the user
+             tunes the blur + brightness sliders. -->
+        <div id="wallpaper-preview-bar" class="wallpaper-preview-bar" style="display: none;">
+          <div class="wallpaper-preview-sliders">
+            <label class="wallpaper-slider">
+              <span class="wallpaper-slider-label">Blur</span>
+              <input type="range" id="wallpaper-blur-slider" min="0" max="30" step="1" value="0">
+              <span class="wallpaper-slider-value" id="wallpaper-blur-value">0</span>
+            </label>
+            <label class="wallpaper-slider">
+              <span class="wallpaper-slider-label">Brightness</span>
+              <input type="range" id="wallpaper-dim-slider" min="10" max="100" step="1" value="50">
+              <span class="wallpaper-slider-value" id="wallpaper-dim-value">50</span>
+            </label>
+          </div>
+          <div class="wallpaper-preview-actions">
+            <button id="wallpaper-preview-cancel" class="wallpaper-preview-btn wallpaper-preview-btn-cancel">Cancel</button>
+            <button id="wallpaper-preview-confirm" class="wallpaper-preview-btn wallpaper-preview-btn-confirm">Set Wallpaper</button>
+          </div>
+        </div>
 
         <div class="row input-box" id="chat-box">
           <div id="msg-bottom-fade" class="fadeout-bottom-msgs"></div>

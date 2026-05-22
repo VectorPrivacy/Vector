@@ -24,6 +24,29 @@ pub struct Chat {
     pub metadata: ChatMetadata,
     pub muted: bool,
     pub typing_participants: Vec<(u16, u64)>,
+    /// Local cached file path for the per-DM wallpaper, or empty when unset.
+    /// Populated from the most recent kind-30078 d=vector-wallpaper rumor
+    /// received for this chat (the encrypted Blossom file is fetched and
+    /// decrypted to this path).
+    pub wallpaper_path: String,
+    /// Rumor created_at (Unix seconds) that produced the current wallpaper.
+    /// Used as the latest-write-wins tiebreaker on concurrent sets.
+    pub wallpaper_ts: u64,
+    /// Blur amount in pixels applied to the wallpaper background layer
+    /// (0..=30, clamped on read). 0 means no blur.
+    pub wallpaper_blur: u8,
+    /// Brightness percent applied to the wallpaper background layer
+    /// (0..=100, clamped on read). 100 means no darkening; 0 is fully
+    /// dim. Default 70 keeps text readable on photographic wallpapers.
+    pub wallpaper_dim: u8,
+    /// Blossom URL of the encrypted wallpaper blob currently in effect.
+    /// Used to DELETE the previous blob when we (or our other device)
+    /// replace the wallpaper, so stale uploads don't linger on servers.
+    pub wallpaper_url: String,
+    /// npub (bech32) of whichever account uploaded the current wallpaper.
+    /// Gate on this before issuing the Blossom DELETE — only the original
+    /// uploader's signature satisfies the server's auth challenge.
+    pub wallpaper_uploader: String,
 }
 
 impl Chat {
@@ -41,6 +64,12 @@ impl Chat {
             metadata: ChatMetadata::new(),
             muted: false,
             typing_participants: Vec::new(),
+            wallpaper_path: String::new(),
+            wallpaper_ts: 0,
+            wallpaper_blur: 0,
+            wallpaper_dim: 50,
+            wallpaper_url: String::new(),
+            wallpaper_uploader: String::new(),
         }
     }
 
@@ -152,6 +181,12 @@ impl Chat {
             created_at: self.created_at,
             metadata: self.metadata.clone(),
             muted: self.muted,
+            wallpaper_path: self.wallpaper_path.clone(),
+            wallpaper_ts: self.wallpaper_ts,
+            wallpaper_blur: self.wallpaper_blur,
+            wallpaper_dim: self.wallpaper_dim,
+            wallpaper_url: self.wallpaper_url.clone(),
+            wallpaper_uploader: self.wallpaper_uploader.clone(),
         }
     }
 
@@ -165,6 +200,12 @@ impl Chat {
             created_at: self.created_at,
             metadata: self.metadata.clone(),
             muted: self.muted,
+            wallpaper_path: self.wallpaper_path.clone(),
+            wallpaper_ts: self.wallpaper_ts,
+            wallpaper_blur: self.wallpaper_blur,
+            wallpaper_dim: self.wallpaper_dim,
+            wallpaper_url: self.wallpaper_url.clone(),
+            wallpaper_uploader: self.wallpaper_uploader.clone(),
         }
     }
 
@@ -238,7 +279,21 @@ pub struct SerializableChat {
     pub created_at: u64,
     pub metadata: ChatMetadata,
     pub muted: bool,
+    #[serde(default)]
+    pub wallpaper_path: String,
+    #[serde(default)]
+    pub wallpaper_ts: u64,
+    #[serde(default)]
+    pub wallpaper_blur: u8,
+    #[serde(default = "default_wallpaper_dim")]
+    pub wallpaper_dim: u8,
+    #[serde(default)]
+    pub wallpaper_url: String,
+    #[serde(default)]
+    pub wallpaper_uploader: String,
 }
+
+fn default_wallpaper_dim() -> u8 { 50 }
 
 impl SerializableChat {
     pub fn to_chat(self, interner: &mut NpubInterner) -> Chat {
@@ -248,6 +303,12 @@ impl SerializableChat {
         chat.created_at = self.created_at;
         chat.metadata = self.metadata;
         chat.muted = self.muted;
+        chat.wallpaper_path = self.wallpaper_path;
+        chat.wallpaper_ts = self.wallpaper_ts;
+        chat.wallpaper_blur = self.wallpaper_blur;
+        chat.wallpaper_dim = self.wallpaper_dim;
+        chat.wallpaper_url = self.wallpaper_url;
+        chat.wallpaper_uploader = self.wallpaper_uploader;
         for msg in self.messages {
             chat.add_message(msg, interner);
         }

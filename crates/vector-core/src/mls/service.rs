@@ -2403,6 +2403,9 @@ impl MlsService {
                                     &gid_for_fetch,
                                 ).await;
                             }
+                            RumorProcessingResult::WallpaperChanged { .. } => {
+                                // Wallpapers are a DM-only feature. Ignore in MLS groups.
+                            }
                             RumorProcessingResult::Ignored => {}
                         }
                     }

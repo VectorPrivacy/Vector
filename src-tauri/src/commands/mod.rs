@@ -29,3 +29,4 @@ pub mod encryption;
 pub mod audio;
 pub mod tor;
 pub mod emoji_packs;
+pub mod wallpaper;

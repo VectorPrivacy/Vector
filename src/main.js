@@ -10,6 +10,7 @@ const SystemEventType = {
     MemberLeft: 0,
     MemberJoined: 1,
     MemberRemoved: 2,
+    WallpaperChanged: 3,
 };
 
 /**
@@ -1513,7 +1514,17 @@ function finalizePendingMessage(chatId, pendingId, eventId) {
  * @returns {number}
  */
 function getChatSortTimestamp(chat) {
-    const lastMessage = chat.messages?.length ? chat.messages[chat.messages.length - 1] : null;
+    // Find the latest actual conversation message — skip system events so a
+    // wallpaper change doesn't bubble the chat to the top of the chatlist.
+    let lastMessage = null;
+    if (chat.messages?.length) {
+        for (let i = chat.messages.length - 1; i >= 0; i--) {
+            const m = chat.messages[i];
+            if (m.system_event) continue;
+            lastMessage = m;
+            break;
+        }
+    }
     let lastActivity = lastMessage?.at || 0;
 
     if (chat.chat_type === 'MlsGroup') {
@@ -2044,6 +2055,21 @@ function updateChatBackNotification() {
  * @param {Chat} chat - The Chat to update
  * @param {Message|string} message - The Message to set as last read
  */
+/** Walk a messages array backward and return the latest "contact" message —
+ *  non-mine AND not a system event. System events are status notifications,
+ *  not conversation, so they must not be picked as the markAsRead anchor —
+ *  otherwise `last_read` lands on the system event itself and prior contact
+ *  messages re-surface as unread on the next walk. */
+function findLatestContactMessage(messages) {
+    if (!messages?.length) return null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const m = messages[i];
+        if (m.system_event) continue;
+        if (!m.mine) return m;
+    }
+    return null;
+}
+
 function markAsRead(chat, message) {
     // If we have a chat, and we haven't already marked as read, update its last_read and notify backend
     if (chat && message.id !== chat.last_read) {
@@ -2240,13 +2266,7 @@ async function setupRustListeners() {
             }
             // Own-send catches up to the latest non-mine message.
             if (message.mine) {
-                let lastContactMsg = null;
-                for (let i = chat.messages.length - 1; i >= 0; i--) {
-                    if (!chat.messages[i].mine) {
-                        lastContactMsg = chat.messages[i];
-                        break;
-                    }
-                }
+                const lastContactMsg = findLatestContactMessage(chat.messages);
                 if (lastContactMsg) markAsRead(chat, lastContactMsg);
             }
         } else {
@@ -2254,13 +2274,7 @@ async function setupRustListeners() {
             // Own message synced from another device — mark chat as read
             // since we clearly saw the conversation before replying
             if (message.mine) {
-                let lastContactMsg = null;
-                for (let i = chat.messages.length - 1; i >= 0; i--) {
-                    if (!chat.messages[i].mine) {
-                        lastContactMsg = chat.messages[i];
-                        break;
-                    }
-                }
+                const lastContactMsg = findLatestContactMessage(chat.messages);
                 if (lastContactMsg) markAsRead(chat, lastContactMsg);
             }
         }
@@ -2437,6 +2451,9 @@ async function setupRustListeners() {
                     break;
                 case SystemEventType.MemberRemoved:
                     content = `${displayName} was removed`;
+                    break;
+                case SystemEventType.WallpaperChanged:
+                    content = `${displayName} changed the wallpaper`;
                     break;
                 default:
                     content = `System event ${event_type}: ${displayName}`;
@@ -2940,25 +2957,13 @@ async function setupRustListeners() {
             }
             // Own-send catches up to the latest non-mine message.
             if (newMessage.mine) {
-                let lastContactMsg = null;
-                for (let i = chat.messages.length - 1; i >= 0; i--) {
-                    if (!chat.messages[i].mine) {
-                        lastContactMsg = chat.messages[i];
-                        break;
-                    }
-                }
+                const lastContactMsg = findLatestContactMessage(chat.messages);
                 if (lastContactMsg) markAsRead(chat, lastContactMsg);
             }
         } else if (newMessage.mine) {
             // Own message synced from another device — mark chat as read
             // since we clearly saw the conversation before replying
-            let lastContactMsg = null;
-            for (let i = chat.messages.length - 1; i >= 0; i--) {
-                if (!chat.messages[i].mine) {
-                    lastContactMsg = chat.messages[i];
-                    break;
-                }
-            }
+            const lastContactMsg = findLatestContactMessage(chat.messages);
             if (lastContactMsg) markAsRead(chat, lastContactMsg);
         }
 
@@ -3148,6 +3153,38 @@ async function setupRustListeners() {
     });
 
     // Listen for attachment URL updates (for file uploads and reuse)
+    // Live wallpaper upload progress — drives the conic-gradient ring on
+    // the Set Wallpaper button during the encrypt+upload step.
+    _on('wallpaper_upload_progress', (evt) => {
+        const { chat_id, progress } = evt.payload || {};
+        if (!chat_id || strOpenChat !== chat_id) return;
+        if (!wallpaperPreviewState || wallpaperPreviewState.chatId !== chat_id) return;
+        const confirmBtn = document.getElementById('wallpaper-preview-confirm');
+        setWallpaperUploadProgress(confirmBtn, progress || 0);
+    });
+
+    // Per-DM wallpaper changes. Both directions land here: our own publish
+    // emits this with the new active path + slider values, and inbound
+    // rumors from the counterparty (or another of our devices) do too.
+    _on('wallpaper_updated', (evt) => {
+        const { chat_id, path, ts, blur, dim } = evt.payload || {};
+        if (!chat_id) return;
+        const cChat = getChat(chat_id);
+        if (cChat) {
+            cChat.wallpaper_path = path || '';
+            cChat.wallpaper_ts = ts || 0;
+            if (typeof blur === 'number') cChat.wallpaper_blur = blur;
+            if (typeof dim === 'number') cChat.wallpaper_dim = dim;
+        }
+        if (strOpenChat === chat_id) {
+            // Ignore if a preview is currently up for this chat — the user
+            // is mid-decision and we already swapped the layer to the
+            // staged file. The next openChat will hydrate from chat.* fields.
+            if (wallpaperPreviewState && wallpaperPreviewState.chatId === chat_id) return;
+            applyChatWallpaper(chat_id, path || '', blur, dim, ts);
+        }
+    });
+
     _on('attachment_update', (evt) => {
         const { chat_id, message_id, attachment_id, url } = evt.payload;
         const cChat = getChat(chat_id);
@@ -5646,6 +5683,277 @@ function insertSystemEvent(content, parent = null) {
     return pSystemEvent;
 }
 
+// ============================================================================
+// Per-DM Wallpaper
+// ============================================================================
+// Three states the chat can be in:
+//   • No wallpaper — empty `chat.wallpaper_path`, default chat background.
+//   • Active wallpaper — `chat.wallpaper_path` set, layer renders that file.
+//   • Previewing — user picked an image but hasn't confirmed yet. The layer
+//     is swapped to the staged preview file and the slider bar appears
+//     above the composer. The bar's lifecycle is tracked by
+//     `wallpaperPreviewState`.
+//
+// Visual settings (blur + brightness) are driven by CSS variables on
+// `#chat-wallpaper-layer` so live slider drags are GPU-friendly and don't
+// hit the rumor pipeline. The values are persisted alongside the image on
+// confirm.
+
+/** {chatId, previewPath, blur, dim} while a preview is active, else null. */
+let wallpaperPreviewState = null;
+
+const WALLPAPER_DEFAULT_BLUR = 5;
+const WALLPAPER_DEFAULT_DIM = 50;
+
+/** Cache key (`path|ts`) for the wallpaper currently on `--wp-image`.
+ *  Slider drags reuse the same key so the image URL isn't re-issued
+ *  (which would cache-bust + flicker). A new rumor advances `ts`, which
+ *  changes the key and forces a fresh fetch even when the on-disk
+ *  filename is identical (deterministic `<chat_npub>.<ext>` path). */
+let _lastAppliedWallpaperKey = null;
+
+/** Apply a wallpaper file path + visual settings to the open chat. The
+ *  image URL is only re-set when the path actually changes — slider
+ *  drags reuse the loaded image and only touch the blur/brightness vars. */
+function applyChatWallpaper(chatId, path, blur, dim, ts) {
+    if (strOpenChat !== chatId) return;
+    const chatEl = document.getElementById('chat');
+    const layer = document.getElementById('chat-wallpaper-layer');
+    if (!chatEl || !layer) return;
+    const newPath = path || '';
+    // The on-disk filename is deterministic per chat, so an inbound rumor
+    // overwrites bytes at the same path. Include `ts` in the cache key
+    // so a new wallpaper forces a re-fetch even when the path is unchanged.
+    const newKey = newPath + '|' + (ts || 0);
+    if (newKey !== _lastAppliedWallpaperKey) {
+        if (newPath) {
+            const url = convertFileSrc(newPath);
+            const busted = url + (url.includes('?') ? '&' : '?') + 't=' + (ts || Date.now());
+            layer.style.setProperty('--wp-image', `url("${busted}")`);
+            chatEl.setAttribute('data-wallpaper', 'true');
+        } else {
+            layer.style.removeProperty('--wp-image');
+            chatEl.removeAttribute('data-wallpaper');
+        }
+        _lastAppliedWallpaperKey = newKey;
+    }
+    const blurPx = Math.max(0, Math.min(30, blur ?? WALLPAPER_DEFAULT_BLUR));
+    const brightness = Math.max(0, Math.min(100, dim ?? WALLPAPER_DEFAULT_DIM)) / 100;
+    layer.style.setProperty('--wp-blur-px', `${blurPx}px`);
+    layer.style.setProperty('--wp-brightness', String(brightness));
+}
+
+/** Refresh the wallpaper layer from the open chat's persisted state. */
+function refreshChatWallpaper() {
+    const chat = getChat(strOpenChat);
+    applyChatWallpaper(
+        strOpenChat,
+        chat?.wallpaper_path || '',
+        chat?.wallpaper_blur,
+        chat?.wallpaper_dim,
+        chat?.wallpaper_ts,
+    );
+}
+
+/** Show or hide the bottom slider/confirm bar. Also flags the chat so the
+ *  scroll-return button can be hidden via CSS while the preview is up. */
+function setWallpaperPreviewBarVisible(visible) {
+    const bar = document.getElementById('wallpaper-preview-bar');
+    if (!bar) return;
+    bar.style.display = visible ? '' : 'none';
+    const chatEl = document.getElementById('chat');
+    if (chatEl) {
+        if (visible) chatEl.setAttribute('data-wallpaper-previewing', 'true');
+        else chatEl.removeAttribute('data-wallpaper-previewing');
+    }
+}
+
+/** Read the current slider values from the preview bar. */
+function readWallpaperSliders() {
+    const blurEl = document.getElementById('wallpaper-blur-slider');
+    const dimEl = document.getElementById('wallpaper-dim-slider');
+    const blur = blurEl ? parseInt(blurEl.value, 10) : WALLPAPER_DEFAULT_BLUR;
+    const dim = dimEl ? parseInt(dimEl.value, 10) : WALLPAPER_DEFAULT_DIM;
+    return {
+        blur: Number.isFinite(blur) ? blur : WALLPAPER_DEFAULT_BLUR,
+        dim: Number.isFinite(dim) ? dim : WALLPAPER_DEFAULT_DIM,
+    };
+}
+
+/** Compute the 0..100% the slider's value occupies of its range. */
+function _wallpaperSliderPct(el) {
+    if (!el) return 0;
+    const min = parseFloat(el.min) || 0;
+    const max = parseFloat(el.max) || 100;
+    const val = parseFloat(el.value) || 0;
+    if (max === min) return 0;
+    return Math.max(0, Math.min(100, ((val - min) / (max - min)) * 100));
+}
+
+/** Set the slider values + sync the CSS variable that drives the track fill
+ *  gradient. Without this the WebKit `accent-color` fill drifts away from
+ *  the thumb position. */
+function writeWallpaperSliders(blur, dim) {
+    const blurEl = document.getElementById('wallpaper-blur-slider');
+    const dimEl = document.getElementById('wallpaper-dim-slider');
+    const blurVal = document.getElementById('wallpaper-blur-value');
+    const dimVal = document.getElementById('wallpaper-dim-value');
+    if (blurEl) blurEl.value = String(blur);
+    if (dimEl) dimEl.value = String(dim);
+    if (blurVal) blurVal.textContent = String(blur);
+    if (dimVal) dimVal.textContent = String(dim);
+    if (blurEl) blurEl.style.setProperty('--slider-pct', `${_wallpaperSliderPct(blurEl)}%`);
+    if (dimEl) dimEl.style.setProperty('--slider-pct', `${_wallpaperSliderPct(dimEl)}%`);
+}
+
+/**
+ * Open the image picker, hand the result to the backend, and switch the
+ * chat into preview mode. Animated sources are converted to a static
+ * first-frame server-side; we surface a friendly notice when that happens.
+ */
+async function startWallpaperChange(chatId) {
+    if (!chatId) return;
+    const chat = getChat(chatId);
+    if (!chat || chat.chat_type !== 'DirectMessage') return;
+
+    try {
+        if (platformFeatures.os === 'android') {
+            // The Android picker is async (file input -> change event), and
+            // its onchange handler calls applyWallpaperPreview directly.
+            window.__wallpaperFileInput?.click();
+            return;
+        }
+        // Desktop: Tauri open dialog with image filter.
+        const { open } = window.__TAURI__.dialog;
+        const filePath = await open({
+            multiple: false,
+            directory: false,
+            filters: [
+                { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif'] },
+            ],
+        });
+        if (!filePath) return;
+        const previewResult = await invoke('preview_wallpaper', {
+            chatId,
+            filePath,
+            bytes: null,
+            filename: null,
+        });
+        await applyWallpaperPreview(chatId, previewResult);
+    } catch (err) {
+        popupConfirm('Couldn’t use that image', String(err), true);
+    }
+}
+
+/** Apply the staged preview file to the chat + open the slider bar. */
+async function applyWallpaperPreview(chatId, previewResult) {
+    if (!previewResult?.path) return;
+    if (previewResult.was_animated) {
+        await popupConfirm(
+            'Static wallpapers only',
+            'Vector wallpapers don’t animate. We grabbed the first frame of your image to use instead.',
+            true,
+        );
+    }
+    // Pick the slider's initial values. If the chat already has a wallpaper,
+    // re-picking preserves the user's previous customisation. For first-time
+    // picks, fall back to the backend's per-image suggested brightness so
+    // photos that are very bright don't ship with text-killing contrast.
+    const chat = getChat(chatId);
+    const hadWallpaper = !!chat?.wallpaper_path;
+    const blur = hadWallpaper ? (chat.wallpaper_blur ?? WALLPAPER_DEFAULT_BLUR) : WALLPAPER_DEFAULT_BLUR;
+    const dim = hadWallpaper
+        ? (chat.wallpaper_dim ?? WALLPAPER_DEFAULT_DIM)
+        : (previewResult.recommended_dim ?? WALLPAPER_DEFAULT_DIM);
+    writeWallpaperSliders(blur, dim);
+    // Use Date.now() as the cache key so picking a second image with the
+    // same extension (same on-disk preview path) forces a refetch.
+    const previewTs = Date.now();
+    wallpaperPreviewState = { chatId, previewPath: previewResult.path, blur, dim, ts: previewTs };
+    applyChatWallpaper(chatId, previewResult.path, blur, dim, previewTs);
+    setWallpaperPreviewBarVisible(true);
+}
+
+/** Slider input → live-update the layer's CSS variables and preview state. */
+function onWallpaperSliderInput() {
+    if (!wallpaperPreviewState) return;
+    const { blur, dim } = readWallpaperSliders();
+    wallpaperPreviewState.blur = blur;
+    wallpaperPreviewState.dim = dim;
+    const blurEl = document.getElementById('wallpaper-blur-slider');
+    const dimEl = document.getElementById('wallpaper-dim-slider');
+    const blurVal = document.getElementById('wallpaper-blur-value');
+    const dimVal = document.getElementById('wallpaper-dim-value');
+    if (blurVal) blurVal.textContent = String(blur);
+    if (dimVal) dimVal.textContent = String(dim);
+    if (blurEl) blurEl.style.setProperty('--slider-pct', `${_wallpaperSliderPct(blurEl)}%`);
+    if (dimEl) dimEl.style.setProperty('--slider-pct', `${_wallpaperSliderPct(dimEl)}%`);
+    applyChatWallpaper(wallpaperPreviewState.chatId, wallpaperPreviewState.previewPath, blur, dim, wallpaperPreviewState.ts);
+}
+
+/** Publish the preview as the chat's wallpaper (with current slider values). */
+async function confirmWallpaperChange() {
+    if (!wallpaperPreviewState) return;
+    const { chatId, blur, dim } = wallpaperPreviewState;
+    const confirmBtn = document.getElementById('wallpaper-preview-confirm');
+    const cancelBtn = document.getElementById('wallpaper-preview-cancel');
+    if (confirmBtn) confirmBtn.disabled = true;
+    if (cancelBtn) cancelBtn.disabled = true;
+    setWallpaperUploadProgress(confirmBtn, 0);
+    try {
+        await invoke('publish_wallpaper', { chatId, blur, dim });
+        wallpaperPreviewState = null;
+        setWallpaperPreviewBarVisible(false);
+        clearWallpaperUploadProgress(confirmBtn);
+        // The wallpaper_updated event will land momentarily with the final
+        // cached path; nothing else to do here.
+    } catch (err) {
+        clearWallpaperUploadProgress(confirmBtn);
+        popupConfirm('Wallpaper not sent', String(err), true);
+    } finally {
+        if (confirmBtn) confirmBtn.disabled = false;
+        if (cancelBtn) cancelBtn.disabled = false;
+    }
+}
+
+/** Telegram-style thin progress bar along the bottom of the Set Wallpaper
+ *  button + a label swap so the user knows something is happening even
+ *  before the first chunk lands. */
+function setWallpaperUploadProgress(btn, percentage) {
+    if (!btn) return;
+    if (!btn.classList.contains('wallpaper-uploading')) {
+        btn.dataset.originalLabel = btn.textContent;
+        btn.textContent = 'Uploading…';
+        btn.classList.add('wallpaper-uploading');
+    }
+    const pct = Math.max(0, Math.min(100, percentage)) / 100;
+    btn.style.setProperty('--wp-upload-progress', pct.toFixed(3));
+}
+
+function clearWallpaperUploadProgress(btn) {
+    if (!btn) return;
+    if (btn.dataset.originalLabel) {
+        btn.textContent = btn.dataset.originalLabel;
+        delete btn.dataset.originalLabel;
+    }
+    btn.classList.remove('wallpaper-uploading');
+    btn.style.removeProperty('--wp-upload-progress');
+}
+
+/** Discard the staged preview and revert the chat background. */
+async function cancelWallpaperChange() {
+    if (!wallpaperPreviewState) return;
+    const { chatId } = wallpaperPreviewState;
+    wallpaperPreviewState = null;
+    setWallpaperPreviewBarVisible(false);
+    refreshChatWallpaper();
+    try {
+        await invoke('cancel_wallpaper_preview', { chatId });
+    } catch (err) {
+        console.warn('[wallpaper] cancel cleanup failed:', err);
+    }
+}
+
 /**
  * Creates a file attachment box (the .custom-audio-player styled div) for all download states.
  * @param {Object} cAttachment - the attachment object
@@ -6338,12 +6646,13 @@ async function openChat(contact) {
     // chat.last_read so the OS badge clears immediately on entering the chat.
     const lastReadOnOpen = chat?.last_read || '';
     if (chat?.messages?.length) {
-        let latestNonMine = null;
-        for (let i = chat.messages.length - 1; i >= 0; i--) {
-            if (!chat.messages[i].mine) { latestNonMine = chat.messages[i]; break; }
-        }
+        const latestNonMine = findLatestContactMessage(chat.messages);
         if (latestNonMine) markAsRead(chat, latestNonMine);
     }
+
+    // Apply the chat's wallpaper to the layer before any messages render,
+    // so the first paint already shows the bg + filter.
+    applyChatWallpaper(contact, chat?.wallpaper_path || '', chat?.wallpaper_blur, chat?.wallpaper_dim, chat?.wallpaper_ts);
 
     // Render the header SYNCHRONOUSLY using whatever in-memory data we have,
     // so the user sees the contact name + avatar the instant the chat panel
@@ -6388,6 +6697,7 @@ async function openChat(contact) {
     chatPinnedToBottom = true;
     clearUnreadBelow();
     clearUnreadDivider();
+    syncBackendActiveChat();
 
     // After 100ms, stop auto-scrolling on media loads
     chatOpenAutoScrollTimer = setTimeout(() => {
@@ -6460,7 +6770,9 @@ async function openChat(contact) {
         if (idx >= 0) {
             let firstUnread = null;
             for (let i = idx + 1; i < initialMessages.length; i++) {
-                if (!initialMessages[i].mine) { firstUnread = initialMessages[i]; break; }
+                const m = initialMessages[i];
+                if (m.system_event) continue;
+                if (!m.mine) { firstUnread = m; break; }
             }
             if (firstUnread) {
                 const node = document.getElementById(firstUnread.id);
@@ -6568,13 +6880,7 @@ async function closeChat() {
     if (strOpenChat && chatPinnedToBottom) {
         const closedChat = arrChats.find(c => c.id === strOpenChat);
         if (closedChat?.messages?.length) {
-            let lastContactMsg = null;
-            for (let i = closedChat.messages.length - 1; i >= 0; i--) {
-                if (!closedChat.messages[i].mine) {
-                    lastContactMsg = closedChat.messages[i];
-                    break;
-                }
-            }
+            const lastContactMsg = findLatestContactMessage(closedChat.messages);
             if (lastContactMsg) {
                 markAsRead(closedChat, lastContactMsg);
             }
@@ -6583,6 +6889,19 @@ async function closeChat() {
 
     // Drop the divider ref so the next openChat starts from a clean slate.
     clearUnreadDivider();
+
+    // Drop any in-flight wallpaper preview so the new chat doesn't inherit
+    // a stale confirm bar or a foreign preview file on the background.
+    if (wallpaperPreviewState) {
+        const stalePreview = wallpaperPreviewState;
+        wallpaperPreviewState = null;
+        setWallpaperPreviewBarVisible(false);
+        invoke('cancel_wallpaper_preview', { chatId: stalePreview.chatId })
+            .catch(() => { /* best-effort cleanup */ });
+    }
+    // Strip the wallpaper from the layer so it doesn't flash through
+    // during the chat list re-render.
+    applyChatWallpaper(strOpenChat, '', 0, 100);
 
     // Trim the event cache for this chat to free memory
     // (keeps max 100 events, removes older ones loaded during scroll)
@@ -6600,6 +6919,7 @@ async function closeChat() {
     strOpenChat = "";
     previousChatBeforeProfile = ""; // Clear when closing chat
     nLastTypingIndicator = 0;
+    syncBackendActiveChat();
     
     // Clear the chat header to prevent flicker when opening next chat
     domChatContact.textContent = '';
@@ -8794,6 +9114,73 @@ window.addEventListener("DOMContentLoaded", async () => {
         openChat(strPubkey);
     };
     domChatNewBackBtn.onclick = closeChat;
+
+    // Chat-header overflow menu — dropdown of chat-scoped actions. Currently
+    // hosts "Change Wallpaper" for DM chats. Group chats don't get wallpapers
+    // by design, so the option only renders when the open chat is a DM.
+    const domChatMenuBtn = document.getElementById('chat-menu-btn');
+    if (domChatMenuBtn) {
+        domChatMenuBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const rect = domChatMenuBtn.getBoundingClientRect();
+            const currentChat = getChat(strOpenChat);
+            const isDM = currentChat?.chat_type === 'DirectMessage';
+            const items = [];
+            if (isDM) {
+                items.push({
+                    label: 'Change Wallpaper',
+                    icon: 'image',
+                    onClick: () => startWallpaperChange(strOpenChat),
+                });
+            }
+            if (!items.length) return;
+            showContextMenu({ x: rect.right, y: rect.bottom + 4, items });
+        });
+    }
+
+    // Wallpaper preview bar — wire confirm/cancel + slider live preview.
+    const wallpaperPreviewConfirm = document.getElementById('wallpaper-preview-confirm');
+    const wallpaperPreviewCancel = document.getElementById('wallpaper-preview-cancel');
+    const wallpaperBlurSlider = document.getElementById('wallpaper-blur-slider');
+    const wallpaperDimSlider = document.getElementById('wallpaper-dim-slider');
+    if (wallpaperPreviewConfirm) {
+        wallpaperPreviewConfirm.onclick = () => confirmWallpaperChange();
+    }
+    if (wallpaperPreviewCancel) {
+        wallpaperPreviewCancel.onclick = () => cancelWallpaperChange();
+    }
+    if (wallpaperBlurSlider) {
+        wallpaperBlurSlider.addEventListener('input', onWallpaperSliderInput);
+    }
+    if (wallpaperDimSlider) {
+        wallpaperDimSlider.addEventListener('input', onWallpaperSliderInput);
+    }
+
+    // Hidden Android file input for wallpaper picking. The HTML <input
+    // type="file"> hands us a Blob (with content-URI semantics on Android),
+    // which we read into bytes and forward to the backend.
+    const wallpaperFileInput = document.createElement('input');
+    wallpaperFileInput.type = 'file';
+    wallpaperFileInput.accept = 'image/*';
+    wallpaperFileInput.style.display = 'none';
+    document.body.appendChild(wallpaperFileInput);
+    wallpaperFileInput.onchange = async (e) => {
+        const file = e.target.files?.[0];
+        wallpaperFileInput.value = '';
+        if (!file || !strOpenChat) return;
+        try {
+            const buf = new Uint8Array(await file.arrayBuffer());
+            const result = await invoke('preview_wallpaper', {
+                chatId: strOpenChat,
+                bytes: Array.from(buf),
+                filename: file.name,
+            });
+            await applyWallpaperPreview(strOpenChat, result);
+        } catch (err) {
+            popupConfirm('Couldn’t use that image', String(err), true);
+        }
+    };
+    window.__wallpaperFileInput = wallpaperFileInput;
     
     // Add scroll event listener for procedural message loading + intent tracking
     let scrollTimeout;
@@ -8821,6 +9208,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     if (domChatMessagesScrollReturnBtn) {
         domChatMessagesScrollReturnBtn.addEventListener('click', () => {
             chatPinnedToBottom = true;
+            syncBackendActiveChat();
         });
     }
     domChatNewStartBtn.onclick = () => {
@@ -9387,10 +9775,7 @@ domChatMessageInput.oninput = async () => {
             if (!strOpenChat || !chatPinnedToBottom) return;
             const currentChat = getChat(strOpenChat);
             if (!currentChat?.messages?.length) return;
-            let latestNonMine = null;
-            for (let i = currentChat.messages.length - 1; i >= 0; i--) {
-                if (!currentChat.messages[i].mine) { latestNonMine = currentChat.messages[i]; break; }
-            }
+            const latestNonMine = findLatestContactMessage(currentChat.messages);
             if (latestNonMine) markAsRead(currentChat, latestNonMine);
             clearUnreadDivider();
         };
@@ -9399,12 +9784,14 @@ domChatMessageInput.oninput = async () => {
             const wasActive = isWindowActive();
             windowFocused = !!event.payload;
             if (!wasActive && isWindowActive()) onWindowResumed();
+            syncBackendActiveChat();
         });
 
         document.addEventListener('visibilitychange', () => {
             const wasActive = isWindowActive();
             documentVisible = !document.hidden;
             if (!wasActive && isWindowActive()) onWindowResumed();
+            syncBackendActiveChat();
         });
     }
 
@@ -9868,6 +10255,18 @@ let windowFocused = true;
 let documentVisible = typeof document !== 'undefined' ? !document.hidden : true;
 function isWindowActive() { return windowFocused && documentVisible; }
 
+/** Tell the backend which chat the user is actively watching, so inbound
+ *  messages in that chat auto-mark as read on arrival. Bumps badge counts
+ *  in lock-step with our FE markAsRead — without this the on_dm_received
+ *  task can race ahead and tick the dock badge before markAsRead lands. */
+let _lastReportedActiveChat = '__init__';
+function syncBackendActiveChat() {
+    const id = (strOpenChat && chatPinnedToBottom && isWindowActive()) ? strOpenChat : null;
+    if (id === _lastReportedActiveChat) return;
+    _lastReportedActiveChat = id;
+    invoke('set_active_chat', { chatId: id }).catch(() => { /* best-effort */ });
+}
+
 const PIN_THRESHOLD_PX = 80;
 // 500ms covers iOS/Android momentum-scroll: scroll events keep firing
 // after touchend until momentum decays. A shorter window would miss
@@ -9934,13 +10333,11 @@ function handleChatScrollIntent() {
         clearUnreadBelow();
         const currentChat = getChat(strOpenChat);
         if (currentChat?.messages?.length) {
-            let latestNonMine = null;
-            for (let i = currentChat.messages.length - 1; i >= 0; i--) {
-                if (!currentChat.messages[i].mine) { latestNonMine = currentChat.messages[i]; break; }
-            }
+            const latestNonMine = findLatestContactMessage(currentChat.messages);
             if (latestNonMine) markAsRead(currentChat, latestNonMine);
         }
     }
+    if (wasPinned !== chatPinnedToBottom) syncBackendActiveChat();
 }
 
 function softChatScroll() {

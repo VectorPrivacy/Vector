@@ -526,5 +526,51 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // =========================================================================
+    // Migration 29: Add per-DM wallpaper columns to chats
+    // =========================================================================
+    // Wallpaper is the local cached file path (decrypted from the Blossom
+    // attachment carried by the most recent kind-30078 d=vector-wallpaper rumor
+    // for this chat). wallpaper_ts is the rumor created_at that produced it,
+    // used for latest-write-wins on concurrent sets.
+    run_atomic_migration(conn, 29, "Add wallpaper columns to chats", |tx| {
+        tx.execute_batch(
+            "ALTER TABLE chats ADD COLUMN wallpaper_path TEXT NOT NULL DEFAULT '';
+             ALTER TABLE chats ADD COLUMN wallpaper_ts INTEGER NOT NULL DEFAULT 0;"
+        ).map_err(|e| format!("Failed to add wallpaper columns: {}", e))?;
+        Ok(())
+    })?;
+
+    // =========================================================================
+    // Migration 30: Wallpaper customisation knobs (blur + brightness)
+    // =========================================================================
+    // blur: integer pixels, 0..=30 (0 = no blur).
+    // dim:  integer percent, 0..=100 (100 = no darkening, 0 = fully black).
+    // Defaults match the values applied when a rumor arrives without the
+    // optional tags — keeps older clients interoperable.
+    run_atomic_migration(conn, 30, "Add wallpaper blur/dim columns to chats", |tx| {
+        tx.execute_batch(
+            "ALTER TABLE chats ADD COLUMN wallpaper_blur INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE chats ADD COLUMN wallpaper_dim INTEGER NOT NULL DEFAULT 50;"
+        ).map_err(|e| format!("Failed to add wallpaper blur/dim columns: {}", e))?;
+        Ok(())
+    })?;
+
+    // =========================================================================
+    // Migration 31: Track wallpaper Blossom URL + uploader pubkey
+    // =========================================================================
+    // wallpaper_url is the Blossom blob URL of the current wallpaper.
+    // wallpaper_uploader is the npub (bech32) of whoever uploaded it. Together
+    // they let us DELETE the previous blob from Blossom when we (or another
+    // device of ours) replace the wallpaper — only the original uploader's
+    // signature satisfies the server's auth challenge.
+    run_atomic_migration(conn, 31, "Add wallpaper url/uploader columns to chats", |tx| {
+        tx.execute_batch(
+            "ALTER TABLE chats ADD COLUMN wallpaper_url TEXT NOT NULL DEFAULT '';
+             ALTER TABLE chats ADD COLUMN wallpaper_uploader TEXT NOT NULL DEFAULT '';"
+        ).map_err(|e| format!("Failed to add wallpaper url/uploader columns: {}", e))?;
+        Ok(())
+    })?;
+
     Ok(())
 }
