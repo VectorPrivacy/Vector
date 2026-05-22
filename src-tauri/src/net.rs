@@ -231,16 +231,41 @@ async fn download_with_ranges(
             .header("Range", format!("bytes={}-{}", downloaded, end))
             .send()
             .await
-            .map_err(|_| "Failed to download chunk")?;
+            .map_err(|e| {
+                vector_core::log_warn!("[AttachmentDownload] range request failed for {}: {}", url, e);
+                "Failed to download chunk"
+            })?;
 
-        if chunk_res.status().as_u16() != 206 {
+        let status = chunk_res.status().as_u16();
+        if status == 200 {
+            // Server ignored the Range header and returned the full file
+            // (common with media servers that advertise range support but
+            // don't honor it). The body IS the complete attachment — consume
+            // it and finish rather than failing the download.
+            if downloaded > 0 {
+                vector_core::log_warn!("[AttachmentDownload] unexpected HTTP 200 mid-range for {}", url);
+                return Err("Server did not honor range request");
+            }
+            let full = chunk_res.bytes().await.map_err(|e| {
+                vector_core::log_warn!("[AttachmentDownload] full-body read failed for {}: {}", url, e);
+                "Failed to read chunk bytes"
+            })?;
+            result.extend_from_slice(&full);
+            let _ = reporter.report_complete();
+            return Ok(result);
+        }
+        if status != 206 {
+            vector_core::log_warn!("[AttachmentDownload] HTTP {} (expected 206) for {}", status, url);
             return Err("Server did not honor range request");
         }
 
         let chunk = chunk_res
             .bytes()
             .await
-            .map_err(|_| "Failed to read chunk bytes")?;
+            .map_err(|e| {
+                vector_core::log_warn!("[AttachmentDownload] range read failed for {}: {}", url, e);
+                "Failed to read chunk bytes"
+            })?;
 
         let elapsed = chunk_start.elapsed().as_secs_f64();
         result.extend_from_slice(&chunk);
@@ -288,7 +313,18 @@ async fn download_with_streaming(
         .get(url)
         .send()
         .await
-        .map_err(|_| "Failed to download")?;
+        .map_err(|e| {
+            vector_core::log_warn!("[AttachmentDownload] request failed for {}: {}", url, e);
+            "Failed to download"
+        })?;
+
+    // A non-2xx (commonly 404 for a blob deleted/expired on the media server)
+    // still returns Ok from send() and would otherwise stream the error page,
+    // surfacing later as a misleading "file too small" / "decryption failed".
+    if !res.status().is_success() {
+        vector_core::log_warn!("[AttachmentDownload] HTTP {} for {}", res.status().as_u16(), url);
+        return Err("Media server returned an error status");
+    }
 
     // Create a buffer to store all data
     let capacity = total_size.unwrap_or(1024 * 1024) as usize; // 1MB default or known size
@@ -301,7 +337,10 @@ async fn download_with_streaming(
     let mut stream = res.bytes_stream();
 
     while let Some(item) = stream.next().await {
-        let chunk = item.map_err(|_| "Error downloading chunk")?;
+        let chunk = item.map_err(|e| {
+            vector_core::log_warn!("[AttachmentDownload] stream interrupted for {}: {}", url, e);
+            "Error downloading chunk"
+        })?;
 
         result.extend_from_slice(&chunk);
         downloaded += chunk.len() as u64;

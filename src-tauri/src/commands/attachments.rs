@@ -399,6 +399,10 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
     let encrypted_data = match net::download(&*attachment.url, handle, &attachment_hex_id, None).await {
         Ok(data) => data,
         Err(error) => {
+            vector_core::log_warn!(
+                "[AttachmentDownload] failed: {} (msg {}, attachment {}) url {}",
+                error, msg_id, attachment_id, &*attachment.url
+            );
             // Handle download error
             let mut state = STATE.lock().await;
             state.update_attachment(&npub, &msg_id, &attachment_id, |att| {
