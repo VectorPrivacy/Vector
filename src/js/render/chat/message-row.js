@@ -1176,18 +1176,23 @@ function _dmsgBuildReactions(msg) {
 
         if (customUrl) {
             const img = document.createElement('img');
-            // Route reaction emoji bytes through the Rust cache — raw
-            // Blossom URL never lands on <img src>, so Tor traffic stays
-            // contained and repeat renders skip the network entirely.
-            if (typeof bindCachedEmojiImg === 'function') {
-                bindCachedEmojiImg(img, customUrl, 'emoji');
-            } else {
-                img.src = customUrl;
-            }
             img.alt = emoji;
             img.className = 'reaction-custom-emoji';
             span.appendChild(img);
             span.appendChild(document.createTextNode(` ${count}`));
+            // Route reaction emoji bytes through the Rust cache — raw
+            // Blossom URL never lands on <img src>, so Tor traffic stays
+            // contained and repeat renders skip the network entirely.
+            if (typeof bindCachedEmojiImg === 'function') {
+                // Deleted/404 emoji → twemoji'd question mark so the chip
+                // stays a recognisable glyph instead of an empty box.
+                bindCachedEmojiImg(img, customUrl, 'emoji', (el) => {
+                    el.replaceWith(document.createTextNode('❓'));
+                    twemojify(span);
+                });
+            } else {
+                img.src = customUrl;
+            }
         } else {
             span.textContent = `${emoji} ${count}`;
             twemojify(span);

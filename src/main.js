@@ -5250,6 +5250,23 @@ let strCurrentEditOriginalContent = "";
  * @param {boolean} isGroup
  * @param {boolean} fNotes - Self-DM "Notes" mode
  */
+/** Build the chat-header overflow ("hamburger") menu items for a chat.
+ *  Single source of truth for both the click handler and the button's
+ *  visibility — when this returns empty (e.g. group chats, which have no
+ *  per-chat options yet), the button is hidden rather than opening an
+ *  empty menu. */
+function buildChatMenuItems(chat) {
+    const items = [];
+    if (chat?.chat_type === 'DirectMessage') {
+        items.push({
+            label: 'Change Wallpaper',
+            icon: 'image',
+            onClick: () => startWallpaperChange(strOpenChat),
+        });
+    }
+    return items;
+}
+
 function setChatHeader(chat, profile, isGroup, fNotes) {
     domChatHeaderAvatarContainer.innerHTML = '';
     let domChatAvatar;
@@ -5303,6 +5320,12 @@ function setChatHeader(chat, profile, isGroup, fNotes) {
         domChatContactStatus.textContent = '';
         domChatContactStatus.classList.remove('typing-indicator-text');
         domChatContactStatus.classList.add('status-hidden');
+    }
+
+    // Hide the overflow menu button when the chat has no menu options.
+    const domChatMenuBtn = document.getElementById('chat-menu-btn');
+    if (domChatMenuBtn) {
+        domChatMenuBtn.style.display = buildChatMenuItems(chat).length ? '' : 'none';
     }
 }
 
@@ -9123,16 +9146,7 @@ window.addEventListener("DOMContentLoaded", async () => {
         domChatMenuBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             const rect = domChatMenuBtn.getBoundingClientRect();
-            const currentChat = getChat(strOpenChat);
-            const isDM = currentChat?.chat_type === 'DirectMessage';
-            const items = [];
-            if (isDM) {
-                items.push({
-                    label: 'Change Wallpaper',
-                    icon: 'image',
-                    onClick: () => startWallpaperChange(strOpenChat),
-                });
-            }
+            const items = buildChatMenuItems(getChat(strOpenChat));
             if (!items.length) return;
             showContextMenu({ x: rect.right, y: rect.bottom + 4, items });
         });

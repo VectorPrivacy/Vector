@@ -247,14 +247,29 @@ async function cacheEmojiSrc(url, kind = 'emoji') {
     return path ? convertFileSrc(path) : null;
 }
 
-/** Hook an `<img>` to cached bytes. Sets src to '' immediately (no raw
- *  URL ever lands on the element) then swaps to convertFileSrc(path) when
- *  Rust resolves. Memoized hits flip src synchronously next tick. */
-function bindCachedEmojiImg(img, url, kind = 'emoji') {
-    if (!_isCacheableEmojiUrl(url)) {
-        img.removeAttribute('src');
-        delete img.dataset.cacheToken;
+// 1x1 transparent GIF. Used as the placeholder src during the loading
+// phase so the WebView never paints its broken-image glyph behind the
+// shimmer — an <img> with no src renders that glyph on Android WebView.
+const TRANSPARENT_PIXEL = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
+/** Hook an `<img>` to cached bytes. Holds a transparent pixel (never a raw
+ *  URL, never a broken-image glyph) while the shimmer plays, then swaps to
+ *  convertFileSrc(path) when Rust resolves. Memoized hits flip src
+ *  synchronously. `onUnavailable(img)` fires when the bytes can't be had
+ *  (uncacheable URL or a failed/404 download) so the caller can substitute
+ *  a context-appropriate fallback (shortcode text, twemoji glyph, etc.). */
+function bindCachedEmojiImg(img, url, kind = 'emoji', onUnavailable = null) {
+    const unavailable = () => {
         img.classList.remove('emoji-img-loading');
+        if (typeof onUnavailable === 'function') {
+            onUnavailable(img);
+        } else {
+            img.removeAttribute('src');
+        }
+    };
+    if (!_isCacheableEmojiUrl(url)) {
+        delete img.dataset.cacheToken;
+        unavailable();
         return;
     }
     // Token guard against the re-bind race: if this same <img> gets
@@ -269,15 +284,14 @@ function bindCachedEmojiImg(img, url, kind = 'emoji') {
         img.classList.remove('emoji-img-loading');
         return;
     }
-    // No src yet — browsers paint a broken-img glyph in the meantime.
-    // Mark the element so CSS can swap that for a soft mint placeholder
-    // until the cache resolves; the class drops as soon as we have bytes.
-    img.removeAttribute('src');
+    // No bytes yet — transparent placeholder + shimmer until the cache
+    // resolves. The class (and placeholder) drop as soon as we have bytes.
+    img.src = TRANSPARENT_PIXEL;
     img.classList.add('emoji-img-loading');
     cacheEmojiSrc(url, kind).then(src => {
         if (img.dataset.cacheToken !== url) return; // superseded
         if (!src) {
-            img.classList.remove('emoji-img-loading');
+            unavailable();
             return;
         }
         img.src = src;
@@ -604,12 +618,17 @@ function renderCustomEmojiShortcodes(rootEl, emojiTags) {
             if (m.index > lastIndex) {
                 frag.appendChild(document.createTextNode(original.slice(lastIndex, m.index)));
             }
+            const shortcode = m[1];
             const img = document.createElement('img');
             img.className = 'custom-emoji-inline';
-            bindCachedEmojiImg(img, url, 'emoji');
-            img.alt = `:${m[1]}:`;
-            img.dataset.emojiTooltip = `:${m[1]}:`;
+            img.alt = `:${shortcode}:`;
+            img.dataset.emojiTooltip = `:${shortcode}:`;
             frag.appendChild(img);
+            // Deleted/404 emoji → fall back to the literal `:shortcode:`
+            // text so the message still reads coherently.
+            bindCachedEmojiImg(img, url, 'emoji', (el) => {
+                el.replaceWith(document.createTextNode(`:${shortcode}:`));
+            });
             lastIndex = m.index + m[0].length;
         }
         if (lastIndex === 0) continue;
@@ -3338,11 +3357,16 @@ function _sendCustomEmojiReaction(shortcode, url) {
         spanReaction.dataset.msgId = strCurrentReactionReference;
         spanReaction.dataset.reacted = 'true';
         const img = document.createElement('img');
-        bindCachedEmojiImg(img, url, 'emoji');
         img.alt = `:${shortcode}:`;
         img.className = 'reaction-custom-emoji';
         spanReaction.appendChild(img);
         spanReaction.appendChild(document.createTextNode(' 1'));
+        // Deleted/404 custom emoji → fall back to a twemoji'd question mark
+        // so the reaction chip stays a recognisable glyph, not a gap.
+        bindCachedEmojiImg(img, url, 'emoji', (el) => {
+            el.replaceWith(document.createTextNode('❓'));
+            twemojify(spanReaction);
+        });
 
         const divMessage = document.getElementById(cMsg.id);
         _dmsgInjectReaction(divMessage, spanReaction);
