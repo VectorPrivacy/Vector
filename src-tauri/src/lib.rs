@@ -555,6 +555,7 @@ pub fn run() {
             commands::invites::accept_invite_code,
             commands::invites::get_invited_users,
             commands::invites::check_fawkes_badge,
+            commands::invites::get_my_badges,
             commands::system::get_storage_info,
             commands::system::clear_storage,
             commands::system::check_battery_optimized,

@@ -876,6 +876,21 @@ pub async fn fetch_messages<R: Runtime>(
 
             let _ = handle_bg.emit("sync_finished", ());
 
+            // Resolve + cache our own badges in an independent task so it is NOT
+            // serialised behind the (often multi-minute) MLS group sync below.
+            // refresh_own_badges captures its own SessionGuard, so it's safe to
+            // detach. Badge-gated perks (raised emoji-pack limits) apply as soon
+            // as it lands, without waiting for MLS.
+            {
+                let badge_handle = handle_bg.clone();
+                tokio::spawn(async move {
+                    vector_core::badges::refresh_own_badges().await;
+                    let _ = badge_handle.emit("badges_updated", serde_json::json!({
+                        "vector": vector_core::badges::has_vector_badge(),
+                    }));
+                });
+            }
+
             // Post-sync: MLS groups + weekly vacuum
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             if !archive_session.is_valid() { return; }

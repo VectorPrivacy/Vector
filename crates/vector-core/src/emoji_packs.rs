@@ -58,14 +58,44 @@ fn build_pack_addr(pubkey: &str, identifier: &str) -> String {
 /// without making a genuinely-missing pack feel sluggish.
 const FETCH_TIMEOUT_SECS: u64 = 14;
 
-/// Maximum packs a user can have equipped (subscribed + own) at once.
-/// Frontend mirrors this for the create + subscribe gates.
+/// Base in-app cap on packs a user can equip (subscribe + own). This gates
+/// only the in-app add action; packs subscribed via other clients always load
+/// in full and are never sliced. The Vector badge raises it (see
+/// `effective_max_equipped_packs`).
 pub const MAX_EQUIPPED_PACKS: usize = 3;
+
+/// Badge-holder cap on equipped packs. Effectively unlimited for normal use.
+pub const MAX_EQUIPPED_PACKS_BADGE: usize = 100;
 
 /// Maximum emojis per own pack on publish. Shared packs received from
 /// the network may exceed this — the frontend truncates them at display
-/// time. This cap only enforces what *we* author.
+/// time. This cap only enforces what *we* author. The Vector badge raises it
+/// (see `effective_max_emojis_per_pack`).
 pub const MAX_EMOJIS_PER_PACK: usize = 30;
+
+/// Badge-holder cap on emojis per own pack.
+pub const MAX_EMOJIS_PER_PACK_BADGE: usize = 100;
+
+/// In-app equipped-pack cap for the current account, raised when the Vector
+/// badge is held. Gate the in-app subscribe/create action on this — never the
+/// load/display path.
+pub fn effective_max_equipped_packs() -> usize {
+    if crate::badges::has_vector_badge() {
+        MAX_EQUIPPED_PACKS_BADGE
+    } else {
+        MAX_EQUIPPED_PACKS
+    }
+}
+
+/// Per-pack emoji authoring cap for the current account, raised when the
+/// Vector badge is held.
+pub fn effective_max_emojis_per_pack() -> usize {
+    if crate::badges::has_vector_badge() {
+        MAX_EMOJIS_PER_PACK_BADGE
+    } else {
+        MAX_EMOJIS_PER_PACK
+    }
+}
 
 // ============================================================================
 // Types
@@ -805,10 +835,11 @@ pub async fn subscribe_pack(naddr: &str) -> Result<EmojiPack, String> {
     {
         let existing_subs = load_subscriptions()?;
         let is_new = !existing_subs.iter().any(|a| a == &pack_addr);
-        if is_new && existing_subs.len() >= MAX_EQUIPPED_PACKS {
+        let cap = effective_max_equipped_packs();
+        if is_new && existing_subs.len() >= cap {
             return Err(format!(
                 "You can equip at most {} packs. Remove one to add another.",
-                MAX_EQUIPPED_PACKS,
+                cap,
             ));
         }
     }
@@ -883,10 +914,11 @@ pub async fn publish_pack(pack: &EmojiPack) -> Result<EmojiPack, String> {
 
     // Per-pack emoji cap. Applies to own packs only — shared packs the
     // user receives can exceed this, the display layer truncates.
-    if pack.emojis.len() > MAX_EMOJIS_PER_PACK {
+    let emoji_cap = effective_max_emojis_per_pack();
+    if pack.emojis.len() > emoji_cap {
         return Err(format!(
             "A pack can hold at most {} emojis.",
-            MAX_EMOJIS_PER_PACK,
+            emoji_cap,
         ));
     }
 
@@ -905,10 +937,11 @@ pub async fn publish_pack(pack: &EmojiPack) -> Result<EmojiPack, String> {
     {
         let existing_subs = load_subscriptions()?;
         let is_new = !existing_subs.iter().any(|a| a == &raw_addr);
-        if is_new && existing_subs.len() >= MAX_EQUIPPED_PACKS {
+        let cap = effective_max_equipped_packs();
+        if is_new && existing_subs.len() >= cap {
             return Err(format!(
                 "You can equip at most {} packs. Remove one to add another.",
-                MAX_EQUIPPED_PACKS,
+                cap,
             ));
         }
     }

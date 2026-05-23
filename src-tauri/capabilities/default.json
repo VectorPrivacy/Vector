@@ -143,6 +143,7 @@
     "allow-accept-invite-code",
     "allow-get-invited-users",
     "allow-check-fawkes-badge",
+    "allow-get-my-badges",
     "allow-get-storage-info",
     "allow-clear-storage",
     "allow-load-mls-device-id",

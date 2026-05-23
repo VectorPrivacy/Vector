@@ -881,6 +881,34 @@ const domProfileOptionNickname = document.getElementById('profile-option-nicknam
 const domProfileOptionBlock = document.getElementById('profile-option-block');
 const domProfileId = document.getElementById('profile-id');
 
+// Our own cached badge flags (from get_my_badges / badges_updated). Used so
+// the own-profile badge display reads the reliable persisted flag instead of
+// re-querying the (often flaky) holding relay on every open.
+let _myBadges = null;
+// Session cache of other users' Fawkes-badge results, keyed by npub, so
+// re-opening a profile doesn't re-fetch from the relay each time. Badges are
+// permanent, so a session-lifetime cache is safe; next launch re-resolves.
+const _fawkesBadgeCache = new Map();
+
+/** Resolve whether `npub` holds the V for Vector badge, with caching.
+ *  Own profile → the persisted `badge_vector` flag (no network). Others →
+ *  fetched once per session via check_fawkes_badge, then cached. */
+async function resolveFawkesBadge(npub, isMine) {
+    if (isMine) {
+        if (_myBadges) return !!_myBadges.vector;
+        try {
+            _myBadges = await invoke('get_my_badges');
+            return !!_myBadges?.vector;
+        } catch { return false; }
+    }
+    if (_fawkesBadgeCache.has(npub)) return _fawkesBadgeCache.get(npub);
+    try {
+        const has = await invoke('check_fawkes_badge', { npub });
+        _fawkesBadgeCache.set(npub, has);
+        return has;
+    } catch { return false; }
+}
+
 // Close profile "More" dropdown when clicking outside
 document.addEventListener('click', () => {
     if (domProfileMoreDropdown) {
@@ -2493,6 +2521,22 @@ async function setupRustListeners() {
     });
 
     // Listen for Synchronisation Finish updates
+    // Badge cache resolved post-sync — lift emoji-pack limits if we hold the
+    // Vector badge. Pure UI gating; the backend enforces authoritatively.
+    _on('badges_updated', (evt) => {
+        _myBadges = { vector: !!evt.payload?.vector };
+        if (typeof applyBadgeLimits === 'function') applyBadgeLimits(_myBadges.vector);
+        // If our own profile is open, reveal the badge live (no reopen needed).
+        const ownProfileOpen = domProfile.style.display !== 'none'
+            && domProfileId.textContent === strPubkey;
+        if (_myBadges.vector && ownProfileOpen) {
+            domProfileBadgeFawkes.style.display = '';
+            domProfileBadgeFawkes.onclick = () => {
+                popupConfirm('V for Vector Badge', `Acquired by logging in on Guy Fawkes Day&nbsp;(November 5, 2025).<br><br><i style="opacity: 0.5; font-size: 13px;">Remember, remember the 5th of November...</i>`, true, '', 'fawkes_mask.svg');
+            };
+        }
+    });
+
     _on('sync_finished', async (_) => {
         // Mark sync as complete - this allows real-time messages to be cached
         fSyncComplete = true;
@@ -4318,6 +4362,13 @@ async function login(skipAnimations = false) {
             // Setup a subscription for new websocket messages (runs in both animation modes)
             invoke("notifs");
 
+            // Apply badge-gated limits from the cached flag (a prior session's
+            // result), so perks are live before this session's post-sync refresh.
+            invoke("get_my_badges").then(b => {
+                _myBadges = b;
+                if (typeof applyBadgeLimits === 'function') applyBadgeLimits(!!b?.vector);
+            }).catch(() => {});
+
             // Setup our Unread Counters
             await invoke("update_unread_counter");
 
@@ -4497,8 +4548,11 @@ function renderProfileTab(cProfile) {
 
     // Guy Fawkes Day Badge (5th November 2025 - Vector v0.2 Open Beta)
     domProfileBadgeFawkes.style.display = 'none';
-    invoke("check_fawkes_badge", { npub: cProfile.id }).then(hasBadge => {
-        if (hasBadge) {
+    const fawkesNpub = cProfile.id;
+    resolveFawkesBadge(fawkesNpub, !!cProfile.mine).then(hasBadge => {
+        // Guard against the user having navigated to a different profile while
+        // the (first-time, uncached) lookup was in flight.
+        if (hasBadge && domProfileId.textContent === fawkesNpub) {
             domProfileBadgeFawkes.style.display = '';
             domProfileBadgeFawkes.onclick = () => {
                 popupConfirm('V for Vector Badge', `Acquired by logging in on Guy Fawkes Day&nbsp;(November 5, 2025).<br><br><i style="opacity: 0.5; font-size: 13px;">Remember, remember the 5th of November...</i>`, true, '', 'fawkes_mask.svg');

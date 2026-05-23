@@ -64,6 +64,7 @@ pub mod blossom_servers;
 pub mod blossom_capabilities;
 pub mod inbox_relays;
 pub mod emoji_packs;
+pub mod badges;
 #[cfg(feature = "tor")]
 pub mod tor;
 

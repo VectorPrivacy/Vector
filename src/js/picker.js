@@ -180,15 +180,40 @@ const PACK_REFRESH_TTL_MS = 60_000;
 
 /** Max packs a user can have equipped at once. Mirrors vector-core's
  *  `MAX_EQUIPPED_PACKS`. Frontend pre-gates the create + subscribe
- *  buttons so the backend never sees a request it's just going to reject. */
-const MAX_EQUIPPED_PACKS = 3;
+ *  buttons so the backend never sees a request it's just going to reject.
+ *  Raised by the Vector badge (see `applyBadgeLimits`); these are `let` so
+ *  the badge can lift them at runtime. Pure in-app gates — never used to
+ *  slice the loaded/displayed pack list. */
+let MAX_EQUIPPED_PACKS = 3;
 /** Display-side per-pack emoji cap. Mirrors vector-core's
  *  `MAX_EMOJIS_PER_PACK` (which only constrains own packs). Shared packs
  *  with more emojis are truncated to the first N at load so picker,
  *  search index, and recent-used surfaces all see the same set. Old
  *  reactions referencing emojis past the cap still render via the
- *  per-message `emoji` tags — those don't depend on `arrEmojiPacks`. */
-const MAX_DISPLAY_EMOJIS_PER_PACK = 30;
+ *  per-message `emoji` tags — those don't depend on `arrEmojiPacks`.
+ *  Raised by the Vector badge (see `applyBadgeLimits`). */
+let MAX_DISPLAY_EMOJIS_PER_PACK = 30;
+
+/** Lift (or restore) the emoji-pack limits based on whether we hold the
+ *  Vector badge. Called at boot (get_my_badges) and on the `badges_updated`
+ *  event. PC_MAX_EMOJIS is declared later in the file but hoisted, so it's
+ *  safe to assign here. These are in-app gates + the per-pack display cap
+ *  only — the pack-count load/render path is never gated on them. */
+function applyBadgeLimits(hasVectorBadge) {
+    const newDisplayCap = hasVectorBadge ? 100 : 30;
+    const displayCapChanged = MAX_DISPLAY_EMOJIS_PER_PACK !== newDisplayCap;
+    MAX_EQUIPPED_PACKS = hasVectorBadge ? 100 : 3;
+    MAX_DISPLAY_EMOJIS_PER_PACK = newDisplayCap;
+    PC_MAX_EMOJIS = hasVectorBadge ? 100 : 30;
+    // If the display cap changes after packs were already loaded, they were
+    // truncated in place to the old cap and the signature cache would block a
+    // plain reload. Reset the signature and reload so packs re-truncate to the
+    // new cap (the backend still has the full emoji lists locally).
+    if (displayCapChanged && emojiPacksLoaded) {
+        _lastPacksSignature = '';
+        loadEmojiPacks();
+    }
+}
 
 // =============================================================================
 // Emoji & pack-icon URL caching (NEVER load raw Blossom URLs in the webview).
@@ -1811,7 +1836,9 @@ function _destroyAllPackCanvasGrids() {
 // until the user exits the creator (clicks a sidebar tab, hits the close
 // pencil, or closes the picker) so an abandoned edit costs zero network.
 
-const PC_MAX_EMOJIS = 30;
+// Pack-creator per-pack emoji cap. `let` so the Vector badge can raise it
+// at runtime (see `applyBadgeLimits`).
+let PC_MAX_EMOJIS = 30;
 const PC_MAX_FILE_BYTES = 256 * 1024;
 
 const _pc = {
