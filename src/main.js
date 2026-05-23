@@ -8308,6 +8308,7 @@ function exitProfileEditMode(fCancel = false) {
         }
         renderProfileTab(cProfile);
     }
+    document.getElementById('profile-banner-container').classList.remove('avatar-hovered');
     domProfileBanner.onclick = null;
     const _bc = document.getElementById('profile-banner-container');
     if (_bc._editMoveHandler) {
