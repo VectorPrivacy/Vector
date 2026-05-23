@@ -8247,6 +8247,7 @@ function exitProfileEditMode(fCancel = false) {
             cProfile.name = objProfileEditSnapshot.name;
             cProfile.status = objProfileEditSnapshot.status;
             cProfile.about = objProfileEditSnapshot.about;
+            strPendingProfileAvatarPath = null;
         } else {
             const nameInput = document.querySelector('#profile-edit-name input');
             const statusInput = document.querySelector('#profile-edit-status input');
