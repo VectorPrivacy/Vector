@@ -8212,6 +8212,7 @@ function enterProfileEditMode() {
     document.getElementById('profile-edit-fields').style.display = 'flex';
     document.getElementById('profile').classList.add('profile-edit-active');
 
+    domProfileAvatar.classList.add('btn');
     domProfileAvatar.onclick = async () => {
         if (!fProfileEditMode) return;
         const { open } = window.__TAURI__.dialog;
