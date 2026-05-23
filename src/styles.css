@@ -1420,6 +1420,13 @@ html, body {
   -moz-user-select: none;
 }
 
+#profile-edit-cancel-btn,
+#profile-edit-save-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 #profile-edit-mode-label {
   color: rgba(255, 255, 255, 0.6);
   font-size: 12px;
@@ -1430,10 +1437,7 @@ html, body {
 #profile-edit-save-btn .icon,
 #profile-edit-save-btn span {
   position: relative !important;
-  top: 1px !important;
-  left: auto !important;
-  right: auto !important;
-  bottom: auto !important;
+  inset: auto !important;
   margin: 0 !important;
   cursor: pointer !important;
 }
@@ -1453,7 +1457,6 @@ html, body {
 #profile-edit-cancel-btn:hover,
 #profile-edit-save-btn:hover {
   opacity: 0.75;
-  transition: opacity 0.2s ease;
 }
 
 #profile-edit-bar {
