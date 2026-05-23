@@ -857,6 +857,7 @@ const domProfileStatus = document.getElementById('profile-status');
 // Note: these are 'let' due to needing to use `.replaceWith` when hot-swapping profile elements
 let fProfileEditMode = false;
 let objProfileEditSnapshot = {};
+let strPendingProfileAvatarPath = null;
 const domProfileEditBtn = document.getElementById('profile-edit-btn');
 const domProfileEditBar = document.getElementById('profile-edit-bar');
 const domProfileEditCancelBtn = document.getElementById('profile-edit-cancel-btn');
@@ -8199,6 +8200,7 @@ function enterProfileEditMode() {
             filters: [{ name: 'Image', extensions: ['png', 'jpeg', 'jpg', 'gif', 'webp'] }]
         });
         if (!file) return;
+        strPendingProfileAvatarPath = file;
         domProfileAvatar.src = convertFileSrc(file);
     };
 
@@ -8279,6 +8281,23 @@ function exitProfileEditMode(fCancel = false) {
             }
             if (statusChanged) {
                 invoke('update_status', { status: newStatus }).catch(e => popupConfirm('Status Update Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg'));
+            }
+            if (strPendingProfileAvatarPath) {
+                invoke('upload_avatar', { filepath: strPendingProfileAvatarPath, uploadType: 'avatar' })
+                    .then(avatarUrl => {
+                        if (avatarUrl) {
+                            invoke('update_profile', {
+                                name: '',
+                                avatar: avatarUrl,
+                                banner: '',
+                                about: '',
+                            }).then(ok => {
+                                if (!ok) popupConfirm('Avatar Update Failed!', 'Failed to broadcast avatar update to the network.', true, '', 'vector_warning.svg');
+                            }).catch(e => popupConfirm('Avatar Update Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg'));
+                        }
+                    })
+                    .catch(e => popupConfirm('Avatar Upload Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg'));
+                strPendingProfileAvatarPath = null;
             }
 
             showToast('Profile Saved');
