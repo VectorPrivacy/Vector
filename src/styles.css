@@ -1416,6 +1416,11 @@ html, body {
   -moz-user-select: none;
 }
 
+#profile-edit-mode-label {
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 12px;
+}
+
 #profile-edit-cancel-btn .icon,
 #profile-edit-cancel-btn span,
 #profile-edit-save-btn .icon,

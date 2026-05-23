@@ -8131,11 +8131,11 @@ function updateProfileEditLabel() {
     const bannerChanged = strPendingProfileBannerPath !== null;
 
     if (nameChanged || statusChanged || bioChanged || avatarChanged || bannerChanged) {
-        label.textContent = 'Unsaved changes made.';
-        label.style.opacity = '1';
+        label.textContent = 'Unsaved Changes Made';
+        label.style.opacity = '0.8';
     } else {
-        label.textContent = 'Edit Mode is enabled.';
-        label.style.opacity = '0.6';
+        label.textContent = 'Edit Mode is Enabled';
+        label.style.opacity = '0.8';
     }
 }
 
@@ -8270,8 +8270,8 @@ function exitProfileEditMode(fCancel = false) {
     // Reset label back to clean state
     const label = document.getElementById('profile-edit-mode-label');
     if (label) {
-        label.textContent = 'Edit Mode is enabled.';
-        label.style.opacity = '0.6';
+        label.textContent = 'Edit Mode is Enabled';
+        label.style.opacity = '0.8';
     }
 
     const cProfile = arrProfiles.find(a => a.mine);
