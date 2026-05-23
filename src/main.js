@@ -858,6 +858,7 @@ const domProfileStatus = document.getElementById('profile-status');
 let fProfileEditMode = false;
 let objProfileEditSnapshot = {};
 let strPendingProfileAvatarPath = null;
+let strPendingProfileBannerPath = null;
 const domProfileEditBtn = document.getElementById('profile-edit-btn');
 const domProfileEditBar = document.getElementById('profile-edit-bar');
 const domProfileEditCancelBtn = document.getElementById('profile-edit-cancel-btn');
@@ -8131,8 +8132,9 @@ function updateProfileEditLabel() {
     const statusChanged = statusInput?.value.trim() !== (objProfileEditSnapshot.status?.title ?? objProfileEditSnapshot.status ?? '');
     const bioChanged = bioInput?.value.trim() !== (objProfileEditSnapshot.about || '');
     const avatarChanged = strPendingProfileAvatarPath !== null;
+    const bannerChanged = strPendingProfileBannerPath !== null;
 
-    if (nameChanged || statusChanged || bioChanged || avatarChanged) {
+    if (nameChanged || statusChanged || bioChanged || avatarChanged || bannerChanged) {
         label.textContent = 'Unsaved changes made.';
         label.style.opacity = '1';
     } else {
@@ -8147,15 +8149,38 @@ function enterProfileEditMode() {
     objProfileEditSnapshot = {
         name: cProfile.name || '',
         status: cProfile.status || '',
-        about: cProfile.about || ''
+        about: cProfile.about || '',
+        avatar: getProfileAvatarSrc(cProfile) || null,
+        banner: cProfile.banner || null
     };
+    strPendingProfileAvatarPath = null;
+    strPendingProfileBannerPath = null;
     fProfileEditMode = true;
     domProfileEditBar.style.opacity = '0';
     domProfileEditBar.style.display = 'flex';
     setTimeout(() => domProfileEditBar.style.opacity = '1', 10);
     domProfileBackBtn.style.display = 'none';
     document.querySelector('.profile-header-info').style.display = 'none';
-    domProfileBanner.onclick = askForBanner;
+    domProfileBanner.onclick = async () => {
+        if (!fProfileEditMode) return;
+        const { open } = window.__TAURI__.dialog;
+        const file = await open({
+            title: 'Choose Banner Image',
+            multiple: false,
+            directory: false,
+            filters: [{ name: 'Image', extensions: ['png', 'jpeg', 'jpg', 'gif', 'webp'] }]
+        });
+        if (!file) return;
+        strPendingProfileBannerPath = file;
+        updateProfileEditLabel();
+        if (domProfileBanner.tagName === 'DIV') {
+            const newBanner = document.createElement('img');
+            newBanner.className = domProfileBanner.className;
+            domProfileBanner.replaceWith(newBanner);
+            domProfileBanner = newBanner;
+        }
+        domProfileBanner.src = convertFileSrc(file);
+    };
     document.getElementById('profile-edit-btn').style.display = 'none';
     document.getElementById('profile-share-btn').style.display = 'none';
     document.getElementById('profile-npub-label').style.display = 'none';
@@ -8183,9 +8208,7 @@ function enterProfileEditMode() {
     });
     const nameInput = document.querySelector('#profile-edit-name input');
     const statusInput = document.querySelector('#profile-edit-status input');
-
     nameInput?.addEventListener('input', updateProfileEditLabel);
-
     statusInput?.addEventListener('input', updateProfileEditLabel);
     bioTextarea.addEventListener('input', updateProfileEditLabel);
     document.getElementById('profile-edit-fields').style.display = 'flex';
@@ -8206,13 +8229,14 @@ function enterProfileEditMode() {
         domProfileAvatar.src = convertFileSrc(file);
     };
 
+    // Reset label to clean state on entry
+    updateProfileEditLabel();
+
     const bannerContainer = document.getElementById('profile-banner-container');
     const avatarContainer = document.querySelector('.profile-avatar-container');
-
     bannerContainer._editMoveHandler = (e) => {
         const bannerRect = bannerContainer.getBoundingClientRect();
         const avatarRect = avatarContainer.getBoundingClientRect();
-        
         const inBanner = e.clientY <= bannerRect.top + 200;
         const inAvatar = (
             e.clientX >= avatarRect.left &&
@@ -8220,14 +8244,13 @@ function enterProfileEditMode() {
             e.clientY >= avatarRect.top &&
             e.clientY <= avatarRect.bottom
         );
-
-    if (inAvatar || !inBanner) {
-        bannerContainer.classList.add('avatar-hovered');
-    } else {
-        bannerContainer.classList.remove('avatar-hovered');
-    }
-};
-bannerContainer.addEventListener('mousemove', bannerContainer._editMoveHandler);
+        if (inAvatar || !inBanner) {
+            bannerContainer.classList.add('avatar-hovered');
+        } else {
+            bannerContainer.classList.remove('avatar-hovered');
+        }
+    };
+    bannerContainer.addEventListener('mousemove', bannerContainer._editMoveHandler);
 }
 
 function exitProfileEditMode(fCancel = false) {
@@ -8246,13 +8269,56 @@ function exitProfileEditMode(fCancel = false) {
     document.getElementById('profile-secondary-status').style.display = '';
     document.getElementById('profile-description').style.display = '';
     document.getElementById('profile').classList.remove('profile-edit-active');
+
+    // Reset label back to clean state
+    const label = document.getElementById('profile-edit-mode-label');
+    if (label) {
+        label.textContent = 'Edit Mode is enabled.';
+        label.style.opacity = '0.6';
+    }
+
     const cProfile = arrProfiles.find(a => a.mine);
     if (cProfile) {
         if (fCancel) {
             cProfile.name = objProfileEditSnapshot.name;
             cProfile.status = objProfileEditSnapshot.status;
             cProfile.about = objProfileEditSnapshot.about;
-            strPendingProfileAvatarPath = null;
+            // Revert avatar preview
+            if (strPendingProfileAvatarPath) {
+                strPendingProfileAvatarPath = null;
+                const originalSrc = objProfileEditSnapshot.avatar;
+                if (originalSrc) {
+                    if (domProfileAvatar.tagName === 'DIV') {
+                        const newAvatar = document.createElement('img');
+                        newAvatar.className = domProfileAvatar.className;
+                        domProfileAvatar.replaceWith(newAvatar);
+                        domProfileAvatar = newAvatar;
+                    }
+                    domProfileAvatar.src = originalSrc;
+                } else {
+                    const placeholder = createPlaceholderAvatar(false, 175);
+                    placeholder.classList.add('profile-avatar');
+                    domProfileAvatar.replaceWith(placeholder);
+                    domProfileAvatar = placeholder;
+                }
+            }
+            // Revert banner preview
+            if (strPendingProfileBannerPath) {
+                strPendingProfileBannerPath = null;
+                const originalBannerSrc = objProfileEditSnapshot.banner;
+                if (originalBannerSrc) {
+                    if (domProfileBanner.tagName === 'DIV') {
+                        const newBanner = document.createElement('img');
+                        newBanner.className = domProfileBanner.className;
+                        domProfileBanner.replaceWith(newBanner);
+                        domProfileBanner = newBanner;
+                    }
+                    domProfileBanner.src = originalBannerSrc;
+                } else {
+                    domProfileBanner.src = '';
+                    domProfileBanner.style.backgroundColor = 'rgb(27, 27, 27)';
+                }
+            }
         } else {
             const nameInput = document.querySelector('#profile-edit-name input');
             const statusInput = document.querySelector('#profile-edit-status input');
@@ -8264,14 +8330,10 @@ function exitProfileEditMode(fCancel = false) {
             const prevStatus = objProfileEditSnapshot.status?.title ?? objProfileEditSnapshot.status ?? '';
             const prevAbout = objProfileEditSnapshot.about || '';
 
-            // Optimistic update so the UI reflects the save instantly.
             cProfile.name = newName;
             if (cProfile.status) cProfile.status.title = newStatus;
             cProfile.about = newAbout;
 
-            // Persist to the network. Each field maps to its own backend
-            // call; only fire on actual changes to avoid pointless relay
-            // chatter and stray kind-0 / kind-30315 events.
             const nameChanged = newName !== prevName;
             const aboutChanged = newAbout !== prevAbout;
             const statusChanged = newStatus !== prevStatus;
@@ -8305,6 +8367,23 @@ function exitProfileEditMode(fCancel = false) {
                     .catch(e => popupConfirm('Avatar Upload Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg'));
                 strPendingProfileAvatarPath = null;
             }
+            if (strPendingProfileBannerPath) {
+                invoke('upload_avatar', { filepath: strPendingProfileBannerPath, uploadType: 'banner' })
+                    .then(bannerUrl => {
+                        if (bannerUrl) {
+                            invoke('update_profile', {
+                                name: '',
+                                avatar: '',
+                                banner: bannerUrl,
+                                about: '',
+                            }).then(ok => {
+                                if (!ok) popupConfirm('Banner Update Failed!', 'Failed to broadcast banner update to the network.', true, '', 'vector_warning.svg');
+                            }).catch(e => popupConfirm('Banner Update Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg'));
+                        }
+                    })
+                    .catch(e => popupConfirm('Banner Upload Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg'));
+                strPendingProfileBannerPath = null;
+            }
 
             showToast('Profile Saved');
         }
@@ -8316,7 +8395,7 @@ function exitProfileEditMode(fCancel = false) {
     if (_bc._editMoveHandler) {
         _bc.removeEventListener('mousemove', _bc._editMoveHandler);
         _bc._editMoveHandler = null;
-}
+    }
 }
 
 function editProfileDescription() {
