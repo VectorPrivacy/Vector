@@ -31,7 +31,7 @@ function generateChatlistStateHash() {
     // Add chat states (including chat ID to capture order changes)
     for (const chat of arrChats) {
         const isGroup = chat.chat_type === 'MlsGroup';
-        const profile = !isGroup && chat.participants.length === 1 ? getProfile(chat.id) : null;
+        const profile = !isGroup ? getProfile(chat.id) : null;
         const cLastMsg = chat.messages[chat.messages.length - 1];
         const nUnread = computeRowBadgeCount(chat);
         const activeTypers = chat.active_typers || [];

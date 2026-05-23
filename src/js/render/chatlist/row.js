@@ -16,7 +16,7 @@
 function renderChat(chat, primaryColor) {
     // For groups, we don't have a profile, for DMs we do
     const isGroup = chat.chat_type === 'MlsGroup';
-    const profile = !isGroup && chat.participants.length === 1 ? getProfile(chat.id) : null;
+    const profile = !isGroup ? getProfile(chat.id) : null;
 
     // Muted DMs stay silent; muted groups still surface pings (mentions of
     // you / admin @everyone). See `computeRowBadgeCount` for the policy.
