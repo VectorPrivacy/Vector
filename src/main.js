@@ -8207,24 +8207,25 @@ function enterProfileEditMode() {
     const bannerContainer = document.getElementById('profile-banner-container');
     const avatarContainer = document.querySelector('.profile-avatar-container');
 
-    bannerContainer.addEventListener('mousemove', (e) => {
-    const bannerRect = bannerContainer.getBoundingClientRect();
-    const avatarRect = avatarContainer.getBoundingClientRect();
-    
-    const inBanner = e.clientY <= bannerRect.top + 200;
-    const inAvatar = (
-        e.clientX >= avatarRect.left &&
-        e.clientX <= avatarRect.right &&
-        e.clientY >= avatarRect.top &&
-        e.clientY <= avatarRect.bottom
-    );
+    bannerContainer._editMoveHandler = (e) => {
+        const bannerRect = bannerContainer.getBoundingClientRect();
+        const avatarRect = avatarContainer.getBoundingClientRect();
+        
+        const inBanner = e.clientY <= bannerRect.top + 200;
+        const inAvatar = (
+            e.clientX >= avatarRect.left &&
+            e.clientX <= avatarRect.right &&
+            e.clientY >= avatarRect.top &&
+            e.clientY <= avatarRect.bottom
+        );
 
     if (inAvatar || !inBanner) {
         bannerContainer.classList.add('avatar-hovered');
     } else {
         bannerContainer.classList.remove('avatar-hovered');
     }
-});
+};
+bannerContainer.addEventListener('mousemove', bannerContainer._editMoveHandler);
 }
 
 function exitProfileEditMode(fCancel = false) {
@@ -8306,6 +8307,11 @@ function exitProfileEditMode(fCancel = false) {
         renderProfileTab(cProfile);
     }
     domProfileBanner.onclick = null;
+    const _bc = document.getElementById('profile-banner-container');
+    if (_bc._editMoveHandler) {
+        _bc.removeEventListener('mousemove', _bc._editMoveHandler);
+        _bc._editMoveHandler = null;
+}
 }
 
 function editProfileDescription() {
