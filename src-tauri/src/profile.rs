@@ -289,6 +289,20 @@ pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Res
     };
     image_cache::precache_image_bytes(&handle, &upload_url, &bytes_for_cache, image_type);
 
+    // Point our own profile at the just-uploaded image now, rather than
+    // waiting for the kind-0 metadata to echo back and re-cache (a 10-40s
+    // window during which the stale avatar/banner would keep showing). The
+    // bytes are already cached above, so this resolves AlreadyCached and only
+    // updates avatar_cached/banner_cached in STATE+DB + emits profile_update.
+    // On upload failure we return early above, so the old image is kept.
+    if let Ok(my_npub) = crate::account_manager::get_current_account() {
+        if upload_type == "banner" {
+            cache_profile_images(&my_npub, "", &upload_url).await;
+        } else {
+            cache_profile_images(&my_npub, &upload_url, "").await;
+        }
+    }
+
     Ok(upload_url)
 }
 

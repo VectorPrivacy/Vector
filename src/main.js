@@ -8348,7 +8348,13 @@ function exitProfileEditMode(fCancel = false) {
                 invoke('update_status', { status: newStatus }).catch(e => popupConfirm('Status Update Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg'));
             }
             if (strPendingProfileAvatarPath) {
-                invoke('upload_avatar', { filepath: strPendingProfileAvatarPath, uploadType: 'avatar' })
+                const pendingAvatarPath = strPendingProfileAvatarPath;
+                const prevAvatarCached = cProfile.avatar_cached;
+                // Keep the just-picked avatar on screen through save instead of
+                // flashing back to the old one; the backend's upload_avatar
+                // updates avatar_cached authoritatively once the upload lands.
+                cProfile.avatar_cached = pendingAvatarPath;
+                invoke('upload_avatar', { filepath: pendingAvatarPath, uploadType: 'avatar' })
                     .then(avatarUrl => {
                         if (avatarUrl) {
                             invoke('update_profile', {
@@ -8359,13 +8365,27 @@ function exitProfileEditMode(fCancel = false) {
                             }).then(ok => {
                                 if (!ok) popupConfirm('Avatar Update Failed!', 'Failed to broadcast avatar update to the network.', true, '', 'vector_warning.svg');
                             }).catch(e => popupConfirm('Avatar Update Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg'));
+                        } else {
+                            // Upload produced no URL — revert to the prior avatar.
+                            cProfile.avatar_cached = prevAvatarCached;
+                            if (domProfile.style.display !== 'none') renderProfileTab(cProfile);
                         }
                     })
-                    .catch(e => popupConfirm('Avatar Upload Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg'));
+                    .catch(e => {
+                        cProfile.avatar_cached = prevAvatarCached;
+                        if (domProfile.style.display !== 'none') renderProfileTab(cProfile);
+                        popupConfirm('Avatar Upload Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg');
+                    });
                 strPendingProfileAvatarPath = null;
             }
             if (strPendingProfileBannerPath) {
-                invoke('upload_avatar', { filepath: strPendingProfileBannerPath, uploadType: 'banner' })
+                const pendingBannerPath = strPendingProfileBannerPath;
+                const prevBannerCached = cProfile.banner_cached;
+                // Keep the just-picked banner on screen through save instead of
+                // flashing back to the old one; the backend's upload_avatar
+                // updates banner_cached authoritatively once the upload lands.
+                cProfile.banner_cached = pendingBannerPath;
+                invoke('upload_avatar', { filepath: pendingBannerPath, uploadType: 'banner' })
                     .then(bannerUrl => {
                         if (bannerUrl) {
                             invoke('update_profile', {
@@ -8376,9 +8396,17 @@ function exitProfileEditMode(fCancel = false) {
                             }).then(ok => {
                                 if (!ok) popupConfirm('Banner Update Failed!', 'Failed to broadcast banner update to the network.', true, '', 'vector_warning.svg');
                             }).catch(e => popupConfirm('Banner Update Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg'));
+                        } else {
+                            // Upload produced no URL — revert to the prior banner.
+                            cProfile.banner_cached = prevBannerCached;
+                            if (domProfile.style.display !== 'none') renderProfileTab(cProfile);
                         }
                     })
-                    .catch(e => popupConfirm('Banner Upload Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg'));
+                    .catch(e => {
+                        cProfile.banner_cached = prevBannerCached;
+                        if (domProfile.style.display !== 'none') renderProfileTab(cProfile);
+                        popupConfirm('Banner Upload Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg');
+                    });
                 strPendingProfileBannerPath = null;
             }
 
