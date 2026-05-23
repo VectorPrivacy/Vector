@@ -4589,9 +4589,7 @@ function renderProfileTab(cProfile) {
         document.getElementById('profile-status').style.display = 'none';
 
         // Configure other clickables
-        domProfileName.onclick = askForUsername;
         domProfileName.classList.add('btn');
-        domProfileStatus.onclick = askForStatus;
         domProfileStatus.classList.add('btn');
         domProfileName.onclick = () => { if (fProfileEditMode) askForUsername(); };
         domProfileStatus.onclick = () => { if (fProfileEditMode) askForStatus(); };
