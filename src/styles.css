@@ -104,6 +104,10 @@
   mask-image: url("./icons/loading.svg");
 }
 
+.icon-refresh {
+  mask-image: url("./icons/refresh.svg");
+}
+
 .icon-locked {
   mask-image: url("./icons/locked.svg");
 }
