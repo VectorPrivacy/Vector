@@ -1416,6 +1416,11 @@ html, body {
   -moz-user-select: none;
 }
 
+#profile-edit-mode-label {
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 12px;
+}
+
 #profile-edit-cancel-btn .icon,
 #profile-edit-cancel-btn span,
 #profile-edit-save-btn .icon,
@@ -13761,6 +13766,7 @@ hr {
   display: flex;
   align-items: center;
   text-align: center;
+  margin-top: 20px;
   margin-bottom: 10px;
 }
 
@@ -14030,7 +14036,7 @@ hr {
   --dmsg-row-padding-y: 0px;
   --dmsg-row-padding-x: 2px;
   --dmsg-streak-gap: 16px;
-  --dmsg-continuation-gap: 2px;
+  --dmsg-continuation-gap: 3px;
   --dmsg-gutter-width: 56px;
   --dmsg-avatar-size: 40px;
   --dmsg-author-color: #ffffff;

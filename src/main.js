@@ -858,6 +858,7 @@ const domProfileStatus = document.getElementById('profile-status');
 let fProfileEditMode = false;
 let objProfileEditSnapshot = {};
 let strPendingProfileAvatarPath = null;
+let strPendingProfileBannerPath = null;
 const domProfileEditBtn = document.getElementById('profile-edit-btn');
 const domProfileEditBar = document.getElementById('profile-edit-bar');
 const domProfileEditCancelBtn = document.getElementById('profile-edit-cancel-btn');
@@ -4464,8 +4465,6 @@ function renderProfileTab(cProfile) {
         domProfileAvatar.onerror = function() {
             const placeholder = createPlaceholderAvatar(false, 175);
             placeholder.classList.add('profile-avatar');
-            if (cProfile.mine) {
-            }
             domProfileAvatar.replaceWith(placeholder);
             domProfileAvatar = placeholder;
         };
@@ -4588,9 +4587,7 @@ function renderProfileTab(cProfile) {
         document.getElementById('profile-status').style.display = 'none';
 
         // Configure other clickables
-        domProfileName.onclick = askForUsername;
         domProfileName.classList.add('btn');
-        domProfileStatus.onclick = askForStatus;
         domProfileStatus.classList.add('btn');
         domProfileName.onclick = () => { if (fProfileEditMode) askForUsername(); };
         domProfileStatus.onclick = () => { if (fProfileEditMode) askForStatus(); };
@@ -8130,13 +8127,15 @@ function updateProfileEditLabel() {
     const nameChanged = nameInput?.value.trim() !== (objProfileEditSnapshot.name || '');
     const statusChanged = statusInput?.value.trim() !== (objProfileEditSnapshot.status?.title ?? objProfileEditSnapshot.status ?? '');
     const bioChanged = bioInput?.value.trim() !== (objProfileEditSnapshot.about || '');
+    const avatarChanged = strPendingProfileAvatarPath !== null;
+    const bannerChanged = strPendingProfileBannerPath !== null;
 
-    if (nameChanged || statusChanged || bioChanged) {
-        label.textContent = 'Unsaved changes made.';
-        label.style.opacity = '1';
+    if (nameChanged || statusChanged || bioChanged || avatarChanged || bannerChanged) {
+        label.textContent = 'Unsaved Changes Made';
+        label.style.opacity = '0.8';
     } else {
-        label.textContent = 'Edit Mode is enabled.';
-        label.style.opacity = '0.6';
+        label.textContent = 'Edit Mode is Enabled';
+        label.style.opacity = '0.8';
     }
 }
 
@@ -8146,15 +8145,38 @@ function enterProfileEditMode() {
     objProfileEditSnapshot = {
         name: cProfile.name || '',
         status: cProfile.status || '',
-        about: cProfile.about || ''
+        about: cProfile.about || '',
+        avatar: getProfileAvatarSrc(cProfile) || null,
+        banner: cProfile.banner || null
     };
+    strPendingProfileAvatarPath = null;
+    strPendingProfileBannerPath = null;
     fProfileEditMode = true;
     domProfileEditBar.style.opacity = '0';
     domProfileEditBar.style.display = 'flex';
     setTimeout(() => domProfileEditBar.style.opacity = '1', 10);
     domProfileBackBtn.style.display = 'none';
     document.querySelector('.profile-header-info').style.display = 'none';
-    domProfileBanner.onclick = askForBanner;
+    domProfileBanner.onclick = async () => {
+        if (!fProfileEditMode) return;
+        const { open } = window.__TAURI__.dialog;
+        const file = await open({
+            title: 'Choose Banner Image',
+            multiple: false,
+            directory: false,
+            filters: [{ name: 'Image', extensions: ['png', 'jpeg', 'jpg', 'gif', 'webp'] }]
+        });
+        if (!file) return;
+        strPendingProfileBannerPath = file;
+        updateProfileEditLabel();
+        if (domProfileBanner.tagName === 'DIV') {
+            const newBanner = document.createElement('img');
+            newBanner.className = domProfileBanner.className;
+            domProfileBanner.replaceWith(newBanner);
+            domProfileBanner = newBanner;
+        }
+        domProfileBanner.src = convertFileSrc(file);
+    };
     document.getElementById('profile-edit-btn').style.display = 'none';
     document.getElementById('profile-share-btn').style.display = 'none';
     document.getElementById('profile-npub-label').style.display = 'none';
@@ -8182,14 +8204,13 @@ function enterProfileEditMode() {
     });
     const nameInput = document.querySelector('#profile-edit-name input');
     const statusInput = document.querySelector('#profile-edit-status input');
-
     nameInput?.addEventListener('input', updateProfileEditLabel);
-
     statusInput?.addEventListener('input', updateProfileEditLabel);
     bioTextarea.addEventListener('input', updateProfileEditLabel);
     document.getElementById('profile-edit-fields').style.display = 'flex';
     document.getElementById('profile').classList.add('profile-edit-active');
 
+    domProfileAvatar.classList.add('btn');
     domProfileAvatar.onclick = async () => {
         if (!fProfileEditMode) return;
         const { open } = window.__TAURI__.dialog;
@@ -8201,30 +8222,32 @@ function enterProfileEditMode() {
         });
         if (!file) return;
         strPendingProfileAvatarPath = file;
+        updateProfileEditLabel();
         domProfileAvatar.src = convertFileSrc(file);
     };
 
+    // Reset label to clean state on entry
+    updateProfileEditLabel();
+
     const bannerContainer = document.getElementById('profile-banner-container');
     const avatarContainer = document.querySelector('.profile-avatar-container');
-
-    bannerContainer.addEventListener('mousemove', (e) => {
-    const bannerRect = bannerContainer.getBoundingClientRect();
-    const avatarRect = avatarContainer.getBoundingClientRect();
-    
-    const inBanner = e.clientY <= bannerRect.top + 200;
-    const inAvatar = (
-        e.clientX >= avatarRect.left &&
-        e.clientX <= avatarRect.right &&
-        e.clientY >= avatarRect.top &&
-        e.clientY <= avatarRect.bottom
-    );
-
-    if (inAvatar || !inBanner) {
-        bannerContainer.classList.add('avatar-hovered');
-    } else {
-        bannerContainer.classList.remove('avatar-hovered');
-    }
-});
+    bannerContainer._editMoveHandler = (e) => {
+        const bannerRect = bannerContainer.getBoundingClientRect();
+        const avatarRect = avatarContainer.getBoundingClientRect();
+        const inBanner = e.clientY <= bannerRect.top + 200;
+        const inAvatar = (
+            e.clientX >= avatarRect.left &&
+            e.clientX <= avatarRect.right &&
+            e.clientY >= avatarRect.top &&
+            e.clientY <= avatarRect.bottom
+        );
+        if (inAvatar || !inBanner) {
+            bannerContainer.classList.add('avatar-hovered');
+        } else {
+            bannerContainer.classList.remove('avatar-hovered');
+        }
+    };
+    bannerContainer.addEventListener('mousemove', bannerContainer._editMoveHandler);
 }
 
 function exitProfileEditMode(fCancel = false) {
@@ -8237,16 +8260,62 @@ function exitProfileEditMode(fCancel = false) {
     document.getElementById('profile-npub-container').style.display = '';
     document.getElementById('profile-badges').style.display = '';
     document.getElementById('profile-edit-fields').style.display = 'none';
+    document.getElementById('profile-edit-btn').style.display = '';
+    document.getElementById('profile-share-btn').style.display = '';
     document.getElementById('profile-secondary-name').style.display = '';
     document.getElementById('profile-secondary-status').style.display = '';
     document.getElementById('profile-description').style.display = '';
     document.getElementById('profile').classList.remove('profile-edit-active');
+
+    // Reset label back to clean state
+    const label = document.getElementById('profile-edit-mode-label');
+    if (label) {
+        label.textContent = 'Edit Mode is Enabled';
+        label.style.opacity = '0.8';
+    }
+
     const cProfile = arrProfiles.find(a => a.mine);
     if (cProfile) {
         if (fCancel) {
             cProfile.name = objProfileEditSnapshot.name;
             cProfile.status = objProfileEditSnapshot.status;
             cProfile.about = objProfileEditSnapshot.about;
+            // Revert avatar preview
+            if (strPendingProfileAvatarPath) {
+                strPendingProfileAvatarPath = null;
+                const originalSrc = objProfileEditSnapshot.avatar;
+                if (originalSrc) {
+                    if (domProfileAvatar.tagName === 'DIV') {
+                        const newAvatar = document.createElement('img');
+                        newAvatar.className = domProfileAvatar.className;
+                        domProfileAvatar.replaceWith(newAvatar);
+                        domProfileAvatar = newAvatar;
+                    }
+                    domProfileAvatar.src = originalSrc;
+                } else {
+                    const placeholder = createPlaceholderAvatar(false, 175);
+                    placeholder.classList.add('profile-avatar');
+                    domProfileAvatar.replaceWith(placeholder);
+                    domProfileAvatar = placeholder;
+                }
+            }
+            // Revert banner preview
+            if (strPendingProfileBannerPath) {
+                strPendingProfileBannerPath = null;
+                const originalBannerSrc = objProfileEditSnapshot.banner;
+                if (originalBannerSrc) {
+                    if (domProfileBanner.tagName === 'DIV') {
+                        const newBanner = document.createElement('img');
+                        newBanner.className = domProfileBanner.className;
+                        domProfileBanner.replaceWith(newBanner);
+                        domProfileBanner = newBanner;
+                    }
+                    domProfileBanner.src = originalBannerSrc;
+                } else {
+                    domProfileBanner.src = '';
+                    domProfileBanner.style.backgroundColor = 'rgb(27, 27, 27)';
+                }
+            }
         } else {
             const nameInput = document.querySelector('#profile-edit-name input');
             const statusInput = document.querySelector('#profile-edit-status input');
@@ -8258,14 +8327,10 @@ function exitProfileEditMode(fCancel = false) {
             const prevStatus = objProfileEditSnapshot.status?.title ?? objProfileEditSnapshot.status ?? '';
             const prevAbout = objProfileEditSnapshot.about || '';
 
-            // Optimistic update so the UI reflects the save instantly.
             cProfile.name = newName;
             if (cProfile.status) cProfile.status.title = newStatus;
             cProfile.about = newAbout;
 
-            // Persist to the network. Each field maps to its own backend
-            // call; only fire on actual changes to avoid pointless relay
-            // chatter and stray kind-0 / kind-30315 events.
             const nameChanged = newName !== prevName;
             const aboutChanged = newAbout !== prevAbout;
             const statusChanged = newStatus !== prevStatus;
@@ -8274,7 +8339,7 @@ function exitProfileEditMode(fCancel = false) {
                     name: nameChanged ? newName : '',
                     avatar: '',
                     banner: '',
-                    about: aboutChanged ? newAbout : '',
+                    about: aboutChanged ? (newAbout.length > 0 ? newAbout : ' ') : '',
                 }).then(ok => {
                     if (!ok) popupConfirm('Profile Update Failed!', 'Failed to broadcast profile update to the network.', true, '', 'vector_warning.svg');
                 }).catch(e => popupConfirm('Profile Update Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg'));
@@ -8299,12 +8364,35 @@ function exitProfileEditMode(fCancel = false) {
                     .catch(e => popupConfirm('Avatar Upload Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg'));
                 strPendingProfileAvatarPath = null;
             }
+            if (strPendingProfileBannerPath) {
+                invoke('upload_avatar', { filepath: strPendingProfileBannerPath, uploadType: 'banner' })
+                    .then(bannerUrl => {
+                        if (bannerUrl) {
+                            invoke('update_profile', {
+                                name: '',
+                                avatar: '',
+                                banner: bannerUrl,
+                                about: '',
+                            }).then(ok => {
+                                if (!ok) popupConfirm('Banner Update Failed!', 'Failed to broadcast banner update to the network.', true, '', 'vector_warning.svg');
+                            }).catch(e => popupConfirm('Banner Update Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg'));
+                        }
+                    })
+                    .catch(e => popupConfirm('Banner Upload Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg'));
+                strPendingProfileBannerPath = null;
+            }
 
             showToast('Profile Saved');
         }
         renderProfileTab(cProfile);
     }
+    document.getElementById('profile-banner-container').classList.remove('avatar-hovered');
     domProfileBanner.onclick = null;
+    const _bc = document.getElementById('profile-banner-container');
+    if (_bc._editMoveHandler) {
+        _bc.removeEventListener('mousemove', _bc._editMoveHandler);
+        _bc._editMoveHandler = null;
+    }
 }
 
 function editProfileDescription() {
@@ -8332,9 +8420,7 @@ function editProfileDescription() {
         domProfileDescriptionEditor.onblur = null;
 
         // If nothing was edited, don't change anything
-        if (!domProfileDescriptionEditor.value ||
-            domProfileDescriptionEditor.value === cProfile.about
-        ) return;
+        if (domProfileDescriptionEditor.value === cProfile.about) return;
 
         // Update the profile's about property
         cProfile.about = domProfileDescriptionEditor.value;
@@ -8344,7 +8430,14 @@ function editProfileDescription() {
         twemojify(domProfileDescription);
 
         // Upload new About Me to Nostr
-        setAboutMe(cProfile.about);
+        invoke('update_profile', {
+            name: '',
+            avatar: '',
+            banner: '',
+            about: cProfile.about,
+        }).then(ok => {
+            if (!ok) popupConfirm('Bio Update Failed!', 'Failed to broadcast bio update to the network.', true, '', 'vector_warning.svg');
+        }).catch(e => popupConfirm('Bio Update Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg'));
     };
 
     // Resize it to match the content size (CSS cannot scale textareas based on content)
