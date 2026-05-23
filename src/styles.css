@@ -1871,9 +1871,27 @@ html, body {
   max-width: 100%;
 }
 
-.account #account-status {
+#account .profile-header-info {
+  min-width: 0;
   width: 100%;
-  text-align: center;
+  overflow: hidden;
+}
+
+#account #account-status {
+  display: block;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-break: break-all;
+}
+
+#account #account-status.chat-contact-status {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
 }
 
 .account .placeholder-avatar span {
@@ -2270,7 +2288,9 @@ html, body {
   margin-top: -1px;
   transition: opacity 0.25s cubic-bezier(0.22, 1, 0.36, 1), max-height 0.3s cubic-bezier(0.34, 1, 0.64, 1), margin-bottom 0.3s cubic-bezier(0.34, 1, 0.64, 1);
   max-height: none;
-  overflow: visible;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .chat-contact-status.status-hidden {
