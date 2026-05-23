@@ -4465,8 +4465,6 @@ function renderProfileTab(cProfile) {
         domProfileAvatar.onerror = function() {
             const placeholder = createPlaceholderAvatar(false, 175);
             placeholder.classList.add('profile-avatar');
-            if (cProfile.mine) {
-            }
             domProfileAvatar.replaceWith(placeholder);
             domProfileAvatar = placeholder;
         };
