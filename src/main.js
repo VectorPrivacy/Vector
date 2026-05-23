@@ -8339,7 +8339,7 @@ function exitProfileEditMode(fCancel = false) {
                     name: nameChanged ? newName : '',
                     avatar: '',
                     banner: '',
-                    about: aboutChanged ? newAbout : '',
+                    about: aboutChanged ? (newAbout.length > 0 ? newAbout : ' ') : '',
                 }).then(ok => {
                     if (!ok) popupConfirm('Profile Update Failed!', 'Failed to broadcast profile update to the network.', true, '', 'vector_warning.svg');
                 }).catch(e => popupConfirm('Profile Update Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg'));
@@ -8420,9 +8420,7 @@ function editProfileDescription() {
         domProfileDescriptionEditor.onblur = null;
 
         // If nothing was edited, don't change anything
-        if (!domProfileDescriptionEditor.value ||
-            domProfileDescriptionEditor.value === cProfile.about
-        ) return;
+        if (domProfileDescriptionEditor.value === cProfile.about) return;
 
         // Update the profile's about property
         cProfile.about = domProfileDescriptionEditor.value;
@@ -8432,7 +8430,14 @@ function editProfileDescription() {
         twemojify(domProfileDescription);
 
         // Upload new About Me to Nostr
-        setAboutMe(cProfile.about);
+        invoke('update_profile', {
+            name: '',
+            avatar: '',
+            banner: '',
+            about: cProfile.about,
+        }).then(ok => {
+            if (!ok) popupConfirm('Bio Update Failed!', 'Failed to broadcast bio update to the network.', true, '', 'vector_warning.svg');
+        }).catch(e => popupConfirm('Bio Update Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg'));
     };
 
     // Resize it to match the content size (CSS cannot scale textareas based on content)
