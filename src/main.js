@@ -8130,8 +8130,9 @@ function updateProfileEditLabel() {
     const nameChanged = nameInput?.value.trim() !== (objProfileEditSnapshot.name || '');
     const statusChanged = statusInput?.value.trim() !== (objProfileEditSnapshot.status?.title ?? objProfileEditSnapshot.status ?? '');
     const bioChanged = bioInput?.value.trim() !== (objProfileEditSnapshot.about || '');
+    const avatarChanged = strPendingProfileAvatarPath !== null;
 
-    if (nameChanged || statusChanged || bioChanged) {
+    if (nameChanged || statusChanged || bioChanged || avatarChanged) {
         label.textContent = 'Unsaved changes made.';
         label.style.opacity = '1';
     } else {
@@ -8201,6 +8202,7 @@ function enterProfileEditMode() {
         });
         if (!file) return;
         strPendingProfileAvatarPath = file;
+        updateProfileEditLabel();
         domProfileAvatar.src = convertFileSrc(file);
     };
 
