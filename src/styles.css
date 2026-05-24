@@ -5758,6 +5758,7 @@ select {
 button {
   backdrop-filter: blur(6px);
   cursor: pointer;
+  font-weight: 600;
 }
 
 button:active {
@@ -7494,6 +7495,8 @@ select:focus::-ms-value {
 
 .icon-dots-horizontal {
   mask-image: url("./icons/dots-horizontal.svg");
+  transform: scale(1.1);
+  filter: blur(0.5px);
 }
 
 /* For downloaded models - make it more prominent */
@@ -7586,8 +7589,12 @@ select:disabled:hover {
   position: absolute;
   top: 10px;
   right: 0;
-  margin-right: 5px;
+  margin-right: 10px;
   padding: 5px;
+}
+
+.nav-menu-btn .icon-dots-horizontal {
+  background-color: #b2b2b2;
 }
 
 /* Text-accompanied "Back" Navigation button */
@@ -15095,6 +15102,8 @@ hr {
 }
 .profile-switcher-trash-toggle svg {
   transition: color 160ms ease;
+  width: 24px;
+  height: 24px;
 }
 body.profile-switcher-editing .profile-switcher-trash-toggle {
   color: #e84545;
@@ -15217,6 +15226,8 @@ body.profile-switcher-editing .profile-switcher-row.active {
 }
 .profile-switcher-add svg {
   flex-shrink: 0;
+  width: 24px;
+  height: 24px;
 }
 .profile-switcher-add.disabled {
   color: rgba(255, 255, 255, 0.35);
