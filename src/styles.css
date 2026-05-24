@@ -3620,18 +3620,16 @@ body.chat-bg-disabled .chat-messages::before {
   transform: none !important;
 }
 
-/* Inline custom emoji rendered inside a message body. Sized to match line
-   height so they sit cleanly next to text without breaking baseline rhythm. */
+/* Inline custom emoji. Carries the shared `emoji` class for sizing, so this
+   rule only adds the custom-specific behaviour. */
 .custom-emoji-inline {
-  display: inline-block;
-  vertical-align: -0.25em;
-  width: 1.4em;
-  height: 1.4em;
+  /* Sizing + vertical-align come from the shared `.emoji` rules so custom
+     emojis render identically to twemoji in every context (chat, chat list,
+     reply previews, headers, profile, etc.). Only the fill behaviour is
+     custom: foreign clients may publish non-square images; `fill` stretches
+     them into the square emoji box rather than letting them break layout.
+     Our own uploads are validated as square. */
   margin: 0;
-  /* `fill` stretches non-square emojis into the square box so they
-     match the picker canvas's behaviour. Foreign clients may publish
-     non-square images; we render uniformly rather than letting them
-     break our layout. Our own uploads are validated as square. */
   object-fit: fill;
 }
 
@@ -14277,15 +14275,10 @@ hr {
  * immediately to the right of the emoji rather than stretching far across to
  * the body edge. Higher specificity + !important on .emoji wins over baseline. */
 .dmsg-text.dmsg-emoji-only          { display: inline-block; padding: 4px 0; vertical-align: bottom; }
+/* Custom emojis share the `emoji` class, so this sizes both. Base
+   `.custom-emoji-inline { margin: 0 }` keeps chained multi-cell artwork
+   stitching pixel-perfectly. */
 .dmsg-text.dmsg-emoji-only .emoji   { width: 50px !important; height: 50px !important; vertical-align: middle; }
-.dmsg-text.dmsg-emoji-only .custom-emoji-inline {
-  width: 50px;
-  height: 50px;
-  vertical-align: middle;
-  /* Zero margin so chainable emojis (multi-cell artwork) stitch
-     pixel-perfectly when sent as adjacent shortcodes. */
-  margin: 0;
-}
 /* Sent indicator next to an emoji-only message — anchor to the emoji's floor
  * (line box bottom) rather than text baseline so it visually rests at the
  * bottom of the big glyph instead of floating up near its middle. */

@@ -645,7 +645,10 @@ function renderCustomEmojiShortcodes(rootEl, emojiTags) {
             }
             const shortcode = m[1];
             const img = document.createElement('img');
-            img.className = 'custom-emoji-inline';
+            // Share twemoji's `emoji` class so custom emojis inherit the exact
+            // same per-context sizing rules; `custom-emoji-inline` adds only the
+            // custom-specific bits (fill for non-square images).
+            img.className = 'emoji custom-emoji-inline';
             img.alt = `:${shortcode}:`;
             img.dataset.emojiTooltip = `:${shortcode}:`;
             frag.appendChild(img);

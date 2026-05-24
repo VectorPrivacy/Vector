@@ -158,6 +158,9 @@ function renderChat(chat, primaryColor) {
         pChatPreview.textContent = preview.text;
     }
     if (preview.needsTwemoji) twemojify(pChatPreview);
+    if (preview.emojiTags && typeof renderCustomEmojiShortcodes === 'function') {
+        renderCustomEmojiShortcodes(pChatPreview, preview.emojiTags);
+    }
 
     divPreviewContainer.appendChild(pChatPreview);
 

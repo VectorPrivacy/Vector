@@ -186,6 +186,9 @@ function updateChatlistPreview(chatId) {
             pChatPreview.textContent = preview.text;
         }
         if (preview.needsTwemoji) twemojify(pChatPreview, { layoutHint: true });
+        if (preview.emojiTags && typeof renderCustomEmojiShortcodes === 'function') {
+            renderCustomEmojiShortcodes(pChatPreview, preview.emojiTags);
+        }
     }
 
     // Update timestamp

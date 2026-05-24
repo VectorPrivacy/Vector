@@ -450,6 +450,11 @@ function _dmsgBuildReplyContext(msg, sender) {
         spanRef.style.color = `rgba(255, 255, 255, 0.45)`;
         spanRef.innerHTML = buildReplyPreviewHtml(replyContent);
         twemojify(spanRef);
+        // Inline custom emojis in the quoted reply, matching in-chat rendering.
+        const replyEmojiTags = cMsg?.emoji_tags || msg.replied_to_emoji_tags;
+        if (replyEmojiTags && replyEmojiTags.length && typeof renderCustomEmojiShortcodes === 'function') {
+            renderCustomEmojiShortcodes(spanRef, replyEmojiTags);
+        }
     } else if (hasAttachment) {
         spanRef = document.createElement('div');
         spanRef.style.display = 'flex';

@@ -3083,6 +3083,10 @@ async function setupRustListeners() {
                 if (replyTextSpan && newContent) {
                     replyTextSpan.innerHTML = buildReplyPreviewHtml(newContent);
                     twemojify(replyTextSpan);
+                    const editedTags = evt.payload.message.emoji_tags;
+                    if (editedTags && editedTags.length && typeof renderCustomEmojiShortcodes === 'function') {
+                        renderCustomEmojiShortcodes(replyTextSpan, editedTags);
+                    }
                 }
             }
 

@@ -131,6 +131,7 @@ function generateChatPreviewText(chat) {
         return { text: cLastMsg.content, isTyping: false, needsTwemoji: false };
     }
 
-    // Regular text message — strip HTML/markdown, render inline formatting, resolve @npub mentions
-    return { text: escapeHtml(senderPrefix) + contentToPreviewHtml(resolveMentionText(cLastMsg.content)), isTyping: false, needsTwemoji: true, isHtml: true };
+    // Regular text message — strip HTML/markdown, render inline formatting, resolve @npub mentions.
+    // emojiTags lets the renderer swap :shortcode: for inline custom emojis (like in-chat).
+    return { text: escapeHtml(senderPrefix) + contentToPreviewHtml(resolveMentionText(cLastMsg.content)), isTyping: false, needsTwemoji: true, isHtml: true, emojiTags: cLastMsg.emoji_tags };
 }
