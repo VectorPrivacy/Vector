@@ -6067,8 +6067,8 @@ async function removeWallpaper(chatId) {
     if (!chatId) return;
     const ok = await popupConfirm(
         'Remove wallpaper?',
-        'This chat returns to the default Vector theme. The change syncs to your contact and your other devices.',
-        false,
+        'This will remove the wallpaper and revert to the default theme. This change syncs to your contact and your other devices.',
+        false, '', 'vector_warning.svg'
     );
     if (!ok) return;
     try {
