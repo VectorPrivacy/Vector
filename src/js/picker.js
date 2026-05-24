@@ -1079,7 +1079,11 @@ function _fillPackPreviewCard(card, result) {
 function _onPackPreviewCopyClick(btn, card) {
     const naddr = card.dataset.naddr;
     if (!naddr) return;
-    navigator.clipboard.writeText(naddr).then(() => {
+    // Copy the shareable vectorapp.io URL (matches the "Share Pack" action),
+    // not the bare naddr — the URL gives a web preview on other platforms and
+    // the OS deep-link interception for Vector users.
+    const shareUrl = `https://vectorapp.io/emojis/pack/${naddr}`;
+    navigator.clipboard.writeText(shareUrl).then(() => {
         const icon = btn.querySelector('.icon');
         if (!icon) return;
         icon.classList.remove('icon-copy');
@@ -1089,7 +1093,7 @@ function _onPackPreviewCopyClick(btn, card) {
             icon.classList.add('icon-copy');
         }, 1500);
     }).catch(err => {
-        console.warn('[emoji-packs] copy naddr failed:', err);
+        console.warn('[emoji-packs] copy share link failed:', err);
     });
 }
 

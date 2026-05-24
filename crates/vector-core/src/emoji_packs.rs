@@ -54,9 +54,9 @@ fn build_pack_addr(pubkey: &str, identifier: &str) -> String {
 /// Network fetch budget for resolving the user's pack list + each pack.
 /// 8s was too tight in practice — a single slow relay handshake would
 /// flash "Pack Unavailable" at the user when the event was still on its
-/// way. 14s comfortably covers a cold Tor circuit / sleepy relay
+/// way. 20s comfortably covers a cold Tor circuit / sleepy relay
 /// without making a genuinely-missing pack feel sluggish.
-const FETCH_TIMEOUT_SECS: u64 = 14;
+const FETCH_TIMEOUT_SECS: u64 = 20;
 
 /// Base in-app cap on packs a user can equip (subscribe + own). This gates
 /// only the in-app add action; packs subscribed via other clients always load
