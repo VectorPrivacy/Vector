@@ -568,6 +568,37 @@ pub async fn apply_received_wallpaper(
         }
     }
 
+    // Removal tombstone — sender cleared their wallpaper. No blob to fetch;
+    // wipe the local active file + STATE/DB so the default theme returns.
+    if url.is_empty() {
+        clean_chat_files(chat_npub, FileKind::Active, None)?;
+        let (slim, prev_url, prev_uploader) = {
+            let mut state = crate::state::STATE.lock().await;
+            let prev = state.get_chat(chat_npub).map(|c| {
+                (c.wallpaper_url.clone(), c.wallpaper_uploader.clone())
+            });
+            if let Some(chat) = state.get_chat_mut(chat_npub) {
+                chat.wallpaper_path = String::new();
+                chat.wallpaper_url = String::new();
+                chat.wallpaper_uploader = String::new();
+                chat.wallpaper_ts = created_at;
+                chat.wallpaper_blur = blur;
+                chat.wallpaper_dim = dim;
+            }
+            let slim = state
+                .get_chat(chat_npub)
+                .map(|c| crate::db::chats::SlimChatDB::from_chat(c, &state.interner));
+            let (pu, puploader) = prev.unwrap_or_default();
+            (slim, pu, puploader)
+        };
+        if let Some(slim) = slim {
+            let _ = crate::db::chats::save_slim_chat(&slim);
+        }
+        delete_prior_blob_if_ours(&prev_url, &prev_uploader).await;
+        emit_wallpaper_removed(chat_npub, sender_npub, created_at, rumor_event_id).await;
+        return Ok(());
+    }
+
     let mime_str = mime.unwrap_or("image/png").to_string();
     let extension = crypto::extension_from_mime(&mime_str);
 
@@ -725,6 +756,171 @@ pub async fn apply_received_wallpaper(
             "event_id": rumor_event_id,
         }),
     );
+
+    Ok(())
+}
+
+/// Fire-and-forget DELETE of a prior Blossom blob, but only if WE uploaded
+/// it (the server's auth challenge rejects deletes from anyone else). The
+/// uploader check is on the npub, so multi-device replaces still fire.
+async fn delete_prior_blob_if_ours(prev_url: &str, prev_uploader: &str) {
+    if prev_url.is_empty() {
+        return;
+    }
+    let me_npub = crate::state::my_public_key()
+        .and_then(|pk| pk.to_bech32().ok())
+        .unwrap_or_default();
+    if me_npub.is_empty() || prev_uploader != me_npub {
+        return;
+    }
+    if let Some(client) = crate::state::nostr_client() {
+        if let Ok(signer) = client.signer().await {
+            let prev_url = prev_url.to_string();
+            tokio::spawn(async move {
+                if let Err(e) = crate::blossom::delete_blob_by_url(signer, &prev_url).await {
+                    log_warn!("[Wallpaper] DELETE prev blob {} failed: {}", prev_url, e);
+                }
+            });
+        }
+    }
+}
+
+/// Save the WallpaperChanged system event for a removal + emit the frontend
+/// events that revert the chat to the default theme.
+async fn emit_wallpaper_removed(
+    chat_npub: &str,
+    by_npub: &str,
+    created_at: u64,
+    event_id: &str,
+) {
+    let me_npub = crate::state::my_public_key()
+        .and_then(|pk| pk.to_bech32().ok())
+        .unwrap_or_default();
+    let display = if by_npub == me_npub {
+        "You".to_string()
+    } else {
+        let state = crate::state::STATE.lock().await;
+        state
+            .get_profile(by_npub)
+            .and_then(|p| {
+                if !p.nickname.is_empty() {
+                    Some(p.nickname.to_string())
+                } else if !p.name.is_empty() {
+                    Some(p.name.to_string())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| by_npub.to_string())
+    };
+    let inserted = crate::db::events::save_system_event_by_id(
+        event_id,
+        chat_npub,
+        crate::stored_event::SystemEventType::WallpaperRemoved,
+        by_npub,
+        Some(&display),
+    )
+    .await
+    .unwrap_or(false);
+    if inserted {
+        crate::traits::emit_event("system_event", &serde_json::json!({
+            "conversation_id": chat_npub,
+            "event_id": event_id,
+            "event_type": crate::stored_event::SystemEventType::WallpaperRemoved.as_u8(),
+            "member_pubkey": by_npub,
+            "member_name": display,
+        }));
+    }
+    crate::traits::emit_event(
+        "wallpaper_updated",
+        &serde_json::json!({
+            "chat_id": chat_npub,
+            "path": "",
+            "ts": created_at,
+            "blur": 0,
+            "dim": 50,
+            "by_npub": by_npub,
+            "event_id": event_id,
+        }),
+    );
+}
+
+/// Remove the chat's wallpaper, reverting both sides to the default theme.
+/// Publishes a kind-30078 `vector-wallpaper` tombstone (no `url` tag) so the
+/// recipient and our other devices clear it too (latest-write-wins by
+/// `created_at`), then DELETEs our blob and wipes local STATE/DB.
+pub async fn remove_wallpaper(chat_npub: &str) -> Result<(), String> {
+    let session = crate::state::SessionGuard::capture();
+
+    let my_pk = crate::state::my_public_key().ok_or("Public key not set")?;
+    let recipient_pk = PublicKey::from_bech32(chat_npub)
+        .map_err(|e| format!("Invalid chat npub: {}", e))?;
+
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    // Tombstone: same d-tag + recipient p-tag as a set, but no url/key/nonce.
+    let rumor = EventBuilder::new(Kind::Custom(event_kind::APPLICATION_SPECIFIC), "")
+        .tag(Tag::identifier(WALLPAPER_DTAG_VALUE))
+        .tag(Tag::public_key(recipient_pk))
+        .custom_created_at(Timestamp::from(created_at))
+        .build(my_pk);
+
+    let pending_id = format!("pending-wallpaper-rm-{}", created_at);
+    let send_config = crate::sending::SendConfig {
+        max_send_attempts: 3,
+        retry_delay: std::time::Duration::from_secs(2),
+        self_send: true,
+        ..Default::default()
+    };
+    let send_callback: Arc<dyn crate::sending::SendCallback> =
+        Arc::new(crate::sending::NoOpSendCallback);
+    if let Err(e) = crate::sending::send_rumor_dm(
+        chat_npub, &pending_id, rumor.clone(), &send_config, send_callback,
+    ).await {
+        log_warn!("[Wallpaper] removal send to {} failed: {}", chat_npub, e);
+        return Err(format!(
+            "Couldn't remove the wallpaper. Check that the relays you and your contact share are reachable, then try again. ({})",
+            e
+        ));
+    }
+
+    // Account swapped mid-send — the tombstone already went out, but the
+    // local commit below would land in the new account's storage. Skip it.
+    if !session.is_valid() {
+        return Ok(());
+    }
+
+    clean_chat_files(chat_npub, FileKind::Active, None)?;
+    let me_npub = my_pk.to_bech32().unwrap_or_default();
+    let (slim, prev_url, prev_uploader) = {
+        let mut state = crate::state::STATE.lock().await;
+        let prev = state.get_chat(chat_npub).map(|c| {
+            (c.wallpaper_url.clone(), c.wallpaper_uploader.clone())
+        });
+        if let Some(chat) = state.get_chat_mut(chat_npub) {
+            chat.wallpaper_path = String::new();
+            chat.wallpaper_url = String::new();
+            chat.wallpaper_uploader = String::new();
+            chat.wallpaper_ts = created_at;
+        }
+        let slim = state
+            .get_chat(chat_npub)
+            .map(|c| crate::db::chats::SlimChatDB::from_chat(c, &state.interner));
+        let (pu, puploader) = prev.unwrap_or_default();
+        (slim, pu, puploader)
+    };
+    if let Some(slim) = slim {
+        if let Err(e) = crate::db::chats::save_slim_chat(&slim) {
+            log_warn!("[Wallpaper] save_slim_chat (removal) failed for {}: {}", chat_npub, e);
+        }
+    }
+
+    delete_prior_blob_if_ours(&prev_url, &prev_uploader).await;
+
+    let event_id = rumor.id.ok_or("Rumor missing id")?.to_hex();
+    emit_wallpaper_removed(chat_npub, &me_npub, created_at, &event_id).await;
 
     Ok(())
 }

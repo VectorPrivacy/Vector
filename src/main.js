@@ -11,6 +11,7 @@ const SystemEventType = {
     MemberJoined: 1,
     MemberRemoved: 2,
     WallpaperChanged: 3,
+    WallpaperRemoved: 4,
 };
 
 /**
@@ -2485,6 +2486,9 @@ async function setupRustListeners() {
                 case SystemEventType.WallpaperChanged:
                     content = `${displayName} changed the wallpaper`;
                     break;
+                case SystemEventType.WallpaperRemoved:
+                    content = `${displayName} removed the wallpaper`;
+                    break;
                 default:
                     content = `System event ${event_type}: ${displayName}`;
             }
@@ -3209,8 +3213,7 @@ async function setupRustListeners() {
         const { chat_id, progress } = evt.payload || {};
         if (!chat_id || strOpenChat !== chat_id) return;
         if (!wallpaperPreviewState || wallpaperPreviewState.chatId !== chat_id) return;
-        const confirmBtn = document.getElementById('wallpaper-preview-confirm');
-        setWallpaperUploadProgress(confirmBtn, progress || 0);
+        setWallpaperUploadProgress(progress || 0);
     });
 
     // Per-DM wallpaper changes. Both directions land here: our own publish
@@ -5319,6 +5322,13 @@ function buildChatMenuItems(chat) {
             icon: 'image',
             onClick: () => startWallpaperChange(strOpenChat),
         });
+        if (chat?.wallpaper_path) {
+            items.push({
+                label: 'Remove Wallpaper',
+                icon: 'trash',
+                onClick: () => removeWallpaper(strOpenChat),
+            });
+        }
     }
     return items;
 }
@@ -5799,7 +5809,13 @@ function applyChatWallpaper(chatId, path, blur, dim, ts) {
     const chatEl = document.getElementById('chat');
     const layer = document.getElementById('chat-wallpaper-layer');
     if (!chatEl || !layer) return;
-    const newPath = path || '';
+    // Honor the global "Background Wallpaper" display toggle: when it's off,
+    // suppress the committed wallpaper so the default theme shows through.
+    // A live preview still renders (the user may be setting it for their
+    // chat partner and needs to see what they're picking).
+    const previewing = chatEl.getAttribute('data-wallpaper-previewing') === 'true';
+    const bgDisabled = document.body.classList.contains('chat-bg-disabled');
+    const newPath = (bgDisabled && !previewing) ? '' : (path || '');
     // The on-disk filename is deterministic per chat, so an inbound rumor
     // overwrites bytes at the same path. Include `ts` in the cache key
     // so a new wallpaper forces a re-fetch even when the path is unchanged.
@@ -5818,8 +5834,12 @@ function applyChatWallpaper(chatId, path, blur, dim, ts) {
     }
     const blurPx = Math.max(0, Math.min(30, blur ?? WALLPAPER_DEFAULT_BLUR));
     const brightness = Math.max(0, Math.min(100, dim ?? WALLPAPER_DEFAULT_DIM)) / 100;
-    layer.style.setProperty('--wp-blur-px', `${blurPx}px`);
-    layer.style.setProperty('--wp-brightness', String(brightness));
+    // Build the filter directly. `blur(0px)` clashes with brightness() in
+    // WebKit (the layer washes out to solid white), so omit blur entirely at
+    // zero rather than passing a 0px radius.
+    layer.style.filter = blurPx > 0
+        ? `blur(${blurPx}px) brightness(${brightness})`
+        : `brightness(${brightness})`;
 }
 
 /** Refresh the wallpaper layer from the open chat's persisted state. */
@@ -5834,16 +5854,37 @@ function refreshChatWallpaper() {
     );
 }
 
-/** Show or hide the bottom slider/confirm bar. Also flags the chat so the
+/** Show or hide the wallpaper edit UI: the bottom slider/trash bar plus the
+ *  Cancel/Save overlay on the chat header. Also flags the chat so the
  *  scroll-return button can be hidden via CSS while the preview is up. */
 function setWallpaperPreviewBarVisible(visible) {
     const bar = document.getElementById('wallpaper-preview-bar');
-    if (!bar) return;
-    bar.style.display = visible ? '' : 'none';
+    if (bar) bar.style.display = visible ? '' : 'none';
+    const editBar = document.getElementById('wallpaper-edit-bar');
+    if (editBar) {
+        if (visible) {
+            editBar.style.opacity = '0';
+            editBar.style.display = 'flex';
+            setTimeout(() => { editBar.style.opacity = '1'; }, 10);
+        } else {
+            editBar.style.opacity = '0';
+            setTimeout(() => { editBar.style.display = 'none'; }, 250);
+        }
+    }
     const chatEl = document.getElementById('chat');
     if (chatEl) {
         if (visible) chatEl.setAttribute('data-wallpaper-previewing', 'true');
         else chatEl.removeAttribute('data-wallpaper-previewing');
+    }
+}
+
+/** Lock the edit-bar buttons while a publish/removal is in flight. */
+function setWallpaperEditBusy(busy) {
+    for (const id of ['wallpaper-edit-save-btn', 'wallpaper-edit-cancel-btn', 'wallpaper-remove-btn']) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        el.style.pointerEvents = busy ? 'none' : '';
+        el.style.opacity = busy ? '0.5' : '';
     }
 }
 
@@ -5875,12 +5916,8 @@ function _wallpaperSliderPct(el) {
 function writeWallpaperSliders(blur, dim) {
     const blurEl = document.getElementById('wallpaper-blur-slider');
     const dimEl = document.getElementById('wallpaper-dim-slider');
-    const blurVal = document.getElementById('wallpaper-blur-value');
-    const dimVal = document.getElementById('wallpaper-dim-value');
     if (blurEl) blurEl.value = String(blur);
     if (dimEl) dimEl.value = String(dim);
-    if (blurVal) blurVal.textContent = String(blur);
-    if (dimVal) dimVal.textContent = String(dim);
     if (blurEl) blurEl.style.setProperty('--slider-pct', `${_wallpaperSliderPct(blurEl)}%`);
     if (dimEl) dimEl.style.setProperty('--slider-pct', `${_wallpaperSliderPct(dimEl)}%`);
 }
@@ -5949,8 +5986,12 @@ async function applyWallpaperPreview(chatId, previewResult) {
     // same extension (same on-disk preview path) forces a refetch.
     const previewTs = Date.now();
     wallpaperPreviewState = { chatId, previewPath: previewResult.path, blur, dim, ts: previewTs };
-    applyChatWallpaper(chatId, previewResult.path, blur, dim, previewTs);
+    clearWallpaperUploadProgress();
+    setWallpaperEditBusy(false);
+    // Flag previewing FIRST so applyChatWallpaper renders the staged image
+    // even when the global "Background Wallpaper" toggle is off.
     setWallpaperPreviewBarVisible(true);
+    applyChatWallpaper(chatId, previewResult.path, blur, dim, previewTs);
 }
 
 /** Slider input → live-update the layer's CSS variables and preview state. */
@@ -5961,10 +6002,6 @@ function onWallpaperSliderInput() {
     wallpaperPreviewState.dim = dim;
     const blurEl = document.getElementById('wallpaper-blur-slider');
     const dimEl = document.getElementById('wallpaper-dim-slider');
-    const blurVal = document.getElementById('wallpaper-blur-value');
-    const dimVal = document.getElementById('wallpaper-dim-value');
-    if (blurVal) blurVal.textContent = String(blur);
-    if (dimVal) dimVal.textContent = String(dim);
     if (blurEl) blurEl.style.setProperty('--slider-pct', `${_wallpaperSliderPct(blurEl)}%`);
     if (dimEl) dimEl.style.setProperty('--slider-pct', `${_wallpaperSliderPct(dimEl)}%`);
     applyChatWallpaper(wallpaperPreviewState.chatId, wallpaperPreviewState.previewPath, blur, dim, wallpaperPreviewState.ts);
@@ -5974,49 +6011,63 @@ function onWallpaperSliderInput() {
 async function confirmWallpaperChange() {
     if (!wallpaperPreviewState) return;
     const { chatId, blur, dim } = wallpaperPreviewState;
-    const confirmBtn = document.getElementById('wallpaper-preview-confirm');
-    const cancelBtn = document.getElementById('wallpaper-preview-cancel');
-    if (confirmBtn) confirmBtn.disabled = true;
-    if (cancelBtn) cancelBtn.disabled = true;
-    setWallpaperUploadProgress(confirmBtn, 0);
+    setWallpaperEditBusy(true);
+    setWallpaperUploadProgress(0);
     try {
         await invoke('publish_wallpaper', { chatId, blur, dim });
         wallpaperPreviewState = null;
         setWallpaperPreviewBarVisible(false);
-        clearWallpaperUploadProgress(confirmBtn);
         // The wallpaper_updated event will land momentarily with the final
         // cached path; nothing else to do here.
+        if (document.body.classList.contains('chat-bg-disabled')) {
+            // Setting is off — clear the just-previewed image and let them know
+            // it's hidden on their end (their chat partner still sees it).
+            applyChatWallpaper(chatId, '', 0, WALLPAPER_DEFAULT_DIM, Date.now());
+            popupConfirm(
+                'Background Wallpaper',
+                'Your wallpaper is set. If you want to be able to see it, please enable <b>Settings → Display → Background Wallpaper</b>.',
+                true,
+            );
+        }
     } catch (err) {
-        clearWallpaperUploadProgress(confirmBtn);
         popupConfirm('Wallpaper not sent', String(err), true);
     } finally {
-        if (confirmBtn) confirmBtn.disabled = false;
-        if (cancelBtn) cancelBtn.disabled = false;
+        clearWallpaperUploadProgress();
+        setWallpaperEditBusy(false);
     }
 }
 
-/** Telegram-style thin progress bar along the bottom of the Set Wallpaper
- *  button + a label swap so the user knows something is happening even
- *  before the first chunk lands. */
-function setWallpaperUploadProgress(btn, percentage) {
-    if (!btn) return;
-    if (!btn.classList.contains('wallpaper-uploading')) {
-        btn.dataset.originalLabel = btn.textContent;
-        btn.textContent = 'Uploading…';
-        btn.classList.add('wallpaper-uploading');
-    }
-    const pct = Math.max(0, Math.min(100, percentage)) / 100;
-    btn.style.setProperty('--wp-upload-progress', pct.toFixed(3));
+/** Drive the header label as the encrypted blob streams to Blossom, so the
+ *  user knows something is happening even before the first chunk lands. */
+function setWallpaperUploadProgress(percentage) {
+    const label = document.getElementById('wallpaper-edit-mode-label');
+    if (!label) return;
+    const pct = Math.max(0, Math.min(100, Math.round(percentage || 0)));
+    label.textContent = pct > 0 ? `Uploading… ${pct}%` : 'Uploading…';
 }
 
-function clearWallpaperUploadProgress(btn) {
-    if (!btn) return;
-    if (btn.dataset.originalLabel) {
-        btn.textContent = btn.dataset.originalLabel;
-        delete btn.dataset.originalLabel;
+function clearWallpaperUploadProgress() {
+    const label = document.getElementById('wallpaper-edit-mode-label');
+    if (label) label.textContent = 'Edit Mode is enabled.';
+}
+
+/** Remove the chat's wallpaper, reverting both sides to the default theme.
+ *  Reached from the "Remove Wallpaper" chat-menu item (the edit overlay
+ *  covers the menu button, so this never fires mid-preview). */
+async function removeWallpaper(chatId) {
+    if (!chatId) return;
+    const ok = await popupConfirm(
+        'Remove wallpaper?',
+        'This chat returns to the default Vector theme. The change syncs to your contact and your other devices.',
+        false,
+    );
+    if (!ok) return;
+    try {
+        await invoke('remove_wallpaper', { chatId });
+        applyChatWallpaper(chatId, '', 0, 50, Date.now());
+    } catch (err) {
+        popupConfirm('Wallpaper not removed', String(err), true, '', 'vector_warning.svg');
     }
-    btn.classList.remove('wallpaper-uploading');
-    btn.style.removeProperty('--wp-upload-progress');
 }
 
 /** Discard the staged preview and revert the chat background. */
@@ -6691,6 +6742,14 @@ function hideEditHistory() {
  */
 async function openChat(contact) {
     pushBack('chat', closeChat);
+    // Abandon a wallpaper preview staged in a different chat so its edit
+    // overlay doesn't leak onto this header.
+    if (wallpaperPreviewState && wallpaperPreviewState.chatId !== contact) {
+        const stale = wallpaperPreviewState;
+        wallpaperPreviewState = null;
+        setWallpaperPreviewBarVisible(false);
+        invoke('cancel_wallpaper_preview', { chatId: stale.chatId }).catch(() => {});
+    }
     // Display the Chat UI
     navbarSelect('chat-btn');
     if (fProfileEditMode) exitProfileEditMode(true);
@@ -9350,16 +9409,20 @@ window.addEventListener("DOMContentLoaded", async () => {
         });
     }
 
-    // Wallpaper preview bar — wire confirm/cancel + slider live preview.
-    const wallpaperPreviewConfirm = document.getElementById('wallpaper-preview-confirm');
-    const wallpaperPreviewCancel = document.getElementById('wallpaper-preview-cancel');
+    // Wallpaper edit UI — header Cancel/Save overlay, bottom sliders + trash.
+    const wallpaperEditSave = document.getElementById('wallpaper-edit-save-btn');
+    const wallpaperEditCancel = document.getElementById('wallpaper-edit-cancel-btn');
+    const wallpaperRemoveBtn = document.getElementById('wallpaper-remove-btn');
     const wallpaperBlurSlider = document.getElementById('wallpaper-blur-slider');
     const wallpaperDimSlider = document.getElementById('wallpaper-dim-slider');
-    if (wallpaperPreviewConfirm) {
-        wallpaperPreviewConfirm.onclick = () => confirmWallpaperChange();
+    if (wallpaperEditSave) {
+        wallpaperEditSave.onclick = () => confirmWallpaperChange();
     }
-    if (wallpaperPreviewCancel) {
-        wallpaperPreviewCancel.onclick = () => cancelWallpaperChange();
+    if (wallpaperEditCancel) {
+        wallpaperEditCancel.onclick = () => cancelWallpaperChange();
+    }
+    if (wallpaperRemoveBtn) {
+        wallpaperRemoveBtn.onclick = () => cancelWallpaperChange();
     }
     if (wallpaperBlurSlider) {
         wallpaperBlurSlider.addEventListener('input', onWallpaperSliderInput);

@@ -128,6 +128,10 @@
   mask-image: url("./icons/eye-off.svg");
 }
 
+.icon-bulb {
+  mask-image: url("./icons/bulb.svg");
+}
+
 .icon-video {
   mask-image: url("./icons/video.svg");
 }
@@ -1414,20 +1418,26 @@ html, body {
 
 #profile-edit-cancel-btn,
 #profile-edit-save-btn,
-#profile-edit-mode-label {
+#profile-edit-mode-label,
+#wallpaper-edit-cancel-btn,
+#wallpaper-edit-save-btn,
+#wallpaper-edit-mode-label {
   user-select: none;
   -webkit-user-select: none;
   -moz-user-select: none;
 }
 
 #profile-edit-cancel-btn,
-#profile-edit-save-btn {
+#profile-edit-save-btn,
+#wallpaper-edit-cancel-btn,
+#wallpaper-edit-save-btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
 }
 
-#profile-edit-mode-label {
+#profile-edit-mode-label,
+#wallpaper-edit-mode-label {
   color: rgba(255, 255, 255, 0.6);
   font-size: 12px;
 }
@@ -1435,32 +1445,58 @@ html, body {
 #profile-edit-cancel-btn .icon,
 #profile-edit-cancel-btn span,
 #profile-edit-save-btn .icon,
-#profile-edit-save-btn span {
+#profile-edit-save-btn span,
+#wallpaper-edit-cancel-btn .icon,
+#wallpaper-edit-cancel-btn span,
+#wallpaper-edit-save-btn .icon,
+#wallpaper-edit-save-btn span {
   position: relative !important;
   inset: auto !important;
   margin: 0 !important;
   cursor: pointer !important;
 }
 
-#profile-edit-cancel-btn .icon-edit-x {
+#profile-edit-cancel-btn .icon-edit-x,
+#wallpaper-edit-cancel-btn .icon-edit-x {
   background-color: #FC595C !important;
   width: 14px !important;
   height: 14px !important;
 }
 
-#profile-edit-save-btn .icon-save {
+#profile-edit-save-btn .icon-save,
+#wallpaper-edit-save-btn .icon-save {
   background-color: #33DB98 !important;
   width: 16px !important;
   height: 16px !important;
 }
 
 #profile-edit-cancel-btn:hover,
-#profile-edit-save-btn:hover {
+#profile-edit-save-btn:hover,
+#wallpaper-edit-cancel-btn:hover,
+#wallpaper-edit-save-btn:hover {
   opacity: 0.75;
 }
 
 #profile-edit-bar {
   transition: opacity 0.25s ease;
+}
+
+/* Wallpaper edit-mode overlay — same chrome as the profile edit bar, layered
+   over the chat header while a preview is staged. */
+#wallpaper-edit-bar {
+  position: absolute;
+  inset: 0;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  background-color: rgb(22, 22, 22);
+  z-index: 2;
+  transition: opacity 0.25s ease;
+}
+#wallpaper-edit-mode-label {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
 }
 
 #profile-edit-fields {
@@ -14533,11 +14569,10 @@ hr {
    in the previous implementation: a `::before` on `.chat-messages` only
    covered the top of scrolled content).
 
-   Three CSS variables drive the look, set inline by JS as the user moves
-   the preview sliders or when an inbound rumor lands:
-     --wp-image      url("…")  (or `none` when no wallpaper)
-     --wp-blur-px    px        (0..30)
-     --wp-brightness number    (0..1, where 1 = no dim)
+   The image is set via the `--wp-image` CSS variable, and the blur +
+   brightness `filter` is written inline by JS as the user moves the preview
+   sliders or when an inbound rumor lands. (The filter is built in JS rather
+   than from vars because `blur(0px)` clashes with brightness() in WebKit.)
 */
 /* `isolation: isolate` makes #chat a stacking context root so the
    wallpaper layer's negative z-index is contained — it paints behind
@@ -14556,9 +14591,7 @@ hr {
   background-position: center;
   background-repeat: no-repeat;
   background-color: transparent;
-  filter:
-    blur(var(--wp-blur-px, 0px))
-    brightness(var(--wp-brightness, 1));
+  /* `filter` (blur + brightness) is set inline by JS — see applyChatWallpaper. */
   /* Blur leaks past the image edge by default; clip + scale slightly so the
      softened edge stays inside the visible chat area. */
   overflow: hidden;
@@ -14590,33 +14623,47 @@ hr {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 14px;
-  background: rgba(10, 10, 10, 0.92);
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 14px 16px;
+  /* Solid dark surface with a subtle grey border curved over the top,
+     lifted by a soft shadow. Flush at the bottom where it meets the
+     composer. */
+  background: #171717;
+  border: 1px solid #474747;
+  border-bottom: none;
+  border-radius: 12px 12px 0 0;
+  box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   animation: popupFadeIn 0.18s ease-out;
 }
 .wallpaper-preview-sliders {
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 12px;
   min-width: 0;
 }
 .wallpaper-slider {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
   color: #f7f4f4;
   font-size: 12px;
 }
-.wallpaper-slider-label {
-  flex: 0 0 72px;
-  opacity: 0.75;
+/* Blur / brightness glyph at the head of each slider row. The base `.icon`
+   is absolute-fill; pin it to a fixed inline box instead. */
+.wallpaper-slider-icon {
+  position: relative !important;
+  inset: auto !important;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  background-color: rgba(255, 255, 255, 0.72);
 }
-/* Custom slider — track gradient is driven by the JS-set --slider-pct so
- * fill and thumb stay perfectly aligned (WebKit's `accent-color` was
- * drifting). The track lives on the pseudo-element so the input itself
- * can stay as a 16px hit target while the visible track is only 4px. */
+/* Slider styled to match the voice-message preview seek bar: a thick rounded
+   track with a gradient fill (driven by the JS-set --slider-pct so fill and
+   thumb stay aligned) and a plain white circular handle. */
 .wallpaper-slider input[type="range"] {
   flex: 1 1 auto;
   min-width: 0;
@@ -14630,14 +14677,14 @@ hr {
   outline: none;
 }
 .wallpaper-slider input[type="range"]::-webkit-slider-runnable-track {
-  height: 4px;
-  border-radius: 2px;
+  height: 10px;
+  border-radius: 5px;
   background: linear-gradient(
     to right,
     var(--icon-color-primary, #59fcb3) 0%,
-    var(--icon-color-primary, #59fcb3) var(--slider-pct, 0%),
-    rgba(255, 255, 255, 0.15) var(--slider-pct, 0%),
-    rgba(255, 255, 255, 0.15) 100%
+    var(--voice-progress-secondary, rgba(89, 252, 179, 0.4)) var(--slider-pct, 0%),
+    rgba(255, 255, 255, 0.08) var(--slider-pct, 0%),
+    rgba(255, 255, 255, 0.08) 100%
   );
 }
 .wallpaper-slider input[type="range"]::-webkit-slider-thumb {
@@ -14645,22 +14692,22 @@ hr {
   -webkit-appearance: none;
   width: 14px;
   height: 14px;
-  margin-top: -5px; /* center on the 4px track: (14 - 4) / 2 = 5 */
+  margin-top: -2px; /* center on the 10px track: (14 - 10) / 2 = 2 */
   border-radius: 50%;
   background: #ffffff;
-  border: 2px solid var(--icon-color-primary, #59fcb3);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  border: none;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
   cursor: pointer;
 }
 .wallpaper-slider input[type="range"]::-moz-range-track {
-  height: 4px;
-  border-radius: 2px;
+  height: 10px;
+  border-radius: 5px;
   background: linear-gradient(
     to right,
     var(--icon-color-primary, #59fcb3) 0%,
-    var(--icon-color-primary, #59fcb3) var(--slider-pct, 0%),
-    rgba(255, 255, 255, 0.15) var(--slider-pct, 0%),
-    rgba(255, 255, 255, 0.15) 100%
+    var(--voice-progress-secondary, rgba(89, 252, 179, 0.4)) var(--slider-pct, 0%),
+    rgba(255, 255, 255, 0.08) var(--slider-pct, 0%),
+    rgba(255, 255, 255, 0.08) 100%
   );
   border: none;
 }
@@ -14669,61 +14716,37 @@ hr {
   height: 14px;
   border-radius: 50%;
   background: #ffffff;
-  border: 2px solid var(--icon-color-primary, #59fcb3);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
-  cursor: pointer;
-}
-.wallpaper-slider-value {
-  flex: 0 0 28px;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-  opacity: 0.75;
-}
-.wallpaper-preview-actions {
-  display: flex;
-  gap: 8px;
-  flex: 0 0 auto;
-}
-.wallpaper-preview-btn {
   border: none;
-  border-radius: 8px;
-  padding: 8px 14px;
-  font-size: 14px;
-  font-weight: 500;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
   cursor: pointer;
-}
-.wallpaper-preview-btn-cancel {
-  background: rgba(255, 255, 255, 0.08);
-  color: #f7f4f4;
-}
-.wallpaper-preview-btn-confirm {
-  background: var(--icon-color-primary, #59fcb3);
-  color: #0a0a0a;
-}
-.wallpaper-preview-btn[disabled] {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
-/* Upload-in-progress button — keep the normal accent fill so the button
-   stays visually intact; a thin progress bar grows along the bottom edge
-   from left to right as the encrypted blob streams to Blossom. */
-.wallpaper-preview-btn.wallpaper-uploading {
+/* Trash — discards the staged edits and exits edit mode (same as Cancel). */
+.wallpaper-remove-btn {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  border: none;
+  background: transparent;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   position: relative;
-  opacity: 0.85;
-  cursor: progress;
-  overflow: hidden;
 }
-.wallpaper-preview-btn.wallpaper-uploading::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  bottom: 0;
-  height: 3px;
-  width: calc(var(--wp-upload-progress, 0) * 100%);
-  background: rgba(0, 0, 0, 0.55);
-  transition: width 0.15s ease-out;
-  pointer-events: none;
+.wallpaper-remove-btn .icon {
+  width: 20px;
+  height: 20px;
+  background-color: #ff4444;
+  transition: opacity 0.15s ease;
+}
+.wallpaper-remove-btn:hover .icon {
+  opacity: 0.7;
+}
+.wallpaper-remove-btn[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* Floating hover toolbar (singleton inside .chat-messages, position: absolute

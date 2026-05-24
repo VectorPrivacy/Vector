@@ -65,3 +65,11 @@ pub async fn publish_wallpaper(
 pub async fn cancel_wallpaper_preview(chat_id: String) -> Result<(), String> {
     wallpaper::cancel_wallpaper_preview(&chat_id)
 }
+
+/// Remove the chat's wallpaper, reverting both sides to the default theme.
+/// Publishes a removal tombstone so the recipient + our other devices clear
+/// it too, then DELETEs our blob and wipes local state.
+#[tauri::command]
+pub async fn remove_wallpaper(chat_id: String) -> Result<(), String> {
+    wallpaper::remove_wallpaper(&chat_id).await
+}

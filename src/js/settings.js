@@ -2429,6 +2429,8 @@ async function initSettings() {
                 document.body.classList.add('chat-bg-disabled');
                 await saveChatBgEnabled(false);
             }
+            // Re-evaluate the open chat's wallpaper against the new toggle state.
+            refreshChatWallpaper();
         });
     }
 

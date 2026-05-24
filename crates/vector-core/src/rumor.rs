@@ -713,20 +713,24 @@ fn process_app_specific(
     // ref; the caller decides whether this beats the chat's current
     // `wallpaper_ts` and runs the download+decrypt step.
     if is_wallpaper_change(&rumor) {
+        // A wallpaper rumor with no `url` is a removal tombstone — the sender
+        // cleared their wallpaper. The url/key/nonce are absent in that case,
+        // so they're optional here; the apply step treats an empty url as
+        // "revert to default theme".
         let url = rumor.tags
             .find(TagKind::Custom(Cow::Borrowed("url")))
             .and_then(|tag| tag.content())
-            .ok_or("Wallpaper rumor missing url tag")?
+            .unwrap_or_default()
             .to_string();
         let decryption_key = rumor.tags
             .find(TagKind::Custom(Cow::Borrowed("decryption-key")))
             .and_then(|tag| tag.content())
-            .ok_or("Wallpaper rumor missing decryption-key tag")?
+            .unwrap_or_default()
             .to_string();
         let decryption_nonce = rumor.tags
             .find(TagKind::Custom(Cow::Borrowed("decryption-nonce")))
             .and_then(|tag| tag.content())
-            .ok_or("Wallpaper rumor missing decryption-nonce tag")?
+            .unwrap_or_default()
             .to_string();
         let plaintext_hash = rumor.tags
             .find(TagKind::Custom(Cow::Borrowed("x")))

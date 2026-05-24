@@ -940,6 +940,19 @@
           <div id="chat-menu-btn" class="btn nav-menu-btn" title="Chat options">
             <span class="icon icon-dots-horizontal nav-icon"></span>
           </div>
+          <!-- Wallpaper edit-mode overlay — mirrors the Profile edit bar,
+               sits over the chat header while a wallpaper preview is staged. -->
+          <div id="wallpaper-edit-bar" style="display: none;">
+            <div id="wallpaper-edit-cancel-btn">
+              <span class="icon icon-edit-x"></span>
+              <span>Cancel</span>
+            </div>
+            <span id="wallpaper-edit-mode-label">Edit Mode is enabled.</span>
+            <div id="wallpaper-edit-save-btn">
+              <span class="icon icon-save"></span>
+              <span>Save</span>
+            </div>
+          </div>
         </div>
         <div id="msg-top-fade" class="fadeout-top-msgs" style="top: 60px;"></div>
         <div id="chat-messages" class="chat-messages">
@@ -952,21 +965,18 @@
              tunes the blur + brightness sliders. -->
         <div id="wallpaper-preview-bar" class="wallpaper-preview-bar" style="display: none;">
           <div class="wallpaper-preview-sliders">
-            <label class="wallpaper-slider">
-              <span class="wallpaper-slider-label">Blur</span>
+            <label class="wallpaper-slider" title="Blur">
+              <span class="icon icon-eye-off wallpaper-slider-icon"></span>
               <input type="range" id="wallpaper-blur-slider" min="0" max="30" step="1" value="0">
-              <span class="wallpaper-slider-value" id="wallpaper-blur-value">0</span>
             </label>
-            <label class="wallpaper-slider">
-              <span class="wallpaper-slider-label">Brightness</span>
+            <label class="wallpaper-slider" title="Brightness">
+              <span class="icon icon-bulb wallpaper-slider-icon"></span>
               <input type="range" id="wallpaper-dim-slider" min="10" max="100" step="1" value="50">
-              <span class="wallpaper-slider-value" id="wallpaper-dim-value">50</span>
             </label>
           </div>
-          <div class="wallpaper-preview-actions">
-            <button id="wallpaper-preview-cancel" class="wallpaper-preview-btn wallpaper-preview-btn-cancel">Cancel</button>
-            <button id="wallpaper-preview-confirm" class="wallpaper-preview-btn wallpaper-preview-btn-confirm">Set Wallpaper</button>
-          </div>
+          <button id="wallpaper-remove-btn" class="wallpaper-remove-btn" title="Discard edits">
+            <span class="icon icon-trash"></span>
+          </button>
         </div>
 
         <div class="row input-box" id="chat-box">
