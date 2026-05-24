@@ -15102,6 +15102,8 @@ hr {
 }
 .profile-switcher-trash-toggle svg {
   transition: color 160ms ease;
+  width: 24px;
+  height: 24px;
 }
 body.profile-switcher-editing .profile-switcher-trash-toggle {
   color: #e84545;
@@ -15224,6 +15226,8 @@ body.profile-switcher-editing .profile-switcher-row.active {
 }
 .profile-switcher-add svg {
   flex-shrink: 0;
+  width: 24px;
+  height: 24px;
 }
 .profile-switcher-add.disabled {
   color: rgba(255, 255, 255, 0.35);
