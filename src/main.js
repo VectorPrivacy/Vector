@@ -5510,11 +5510,15 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
                 continue;
             }
 
-            // Get the oldest message in the DOM
+            // Get the oldest message in the DOM. Match any rendered element
+            // that maps to a message — including system events (which render
+            // as .msg-inline-timestamp, not .dmsg). Anchoring only to .dmsg
+            // would let older prepended messages slip BELOW a system event
+            // stranded at the top, pinning it there out of chronological order.
             let oldestMsgElement = null;
             for (let i = 0; i < domChatMessages.children.length; i++) {
                 const child = domChatMessages.children[i];
-                if (child.classList && child.classList.contains('dmsg')) {
+                if (child.id && chat.messages.some(m => m.id === child.id)) {
                     oldestMsgElement = child;
                     break;
                 }
@@ -5553,11 +5557,14 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             // This is a less common case, so we'll do a linear scan
             let inserted = false;
 
-            // Get the message elements sorted by time (oldest to newest)
+            // Get the message elements sorted by time (oldest to newest).
+            // Include system events (.msg-inline-timestamp with an id) so a
+            // mid-list insert lands in true chronological order relative to
+            // them, not just relative to .dmsg rows.
             let messageNodes = [];
             for (let i = 0; i < domChatMessages.children.length; i++) {
                 const child = domChatMessages.children[i];
-                if (child.id && child.classList && child.classList.contains('dmsg')) {
+                if (child.id) {
                     const childMsg = chat.messages.find(m => m.id === child.id);
                     if (childMsg) {
                         messageNodes.push({ element: child, message: childMsg });
@@ -5710,12 +5717,14 @@ function _dedupeAdjacentDaySeparators() {
     }
     for (const sep of stale) sep.remove();
 
-    // Re-insert one date divider above each `.dmsg` that starts a new day.
+    // Re-insert one date divider above the first day-content element (a
+    // `.dmsg` row OR a system event — both carry `dataset.at`) that starts a
+    // new day. The "New" divider and stale separators have no `at`, so the
+    // Number.isFinite guard skips them.
     let prevAt = null;
     const inserts = [];
     for (const child of domChatMessages.children) {
-        if (!child.classList?.contains('dmsg')) continue;
-        const at = parseInt(child.dataset.at, 10);
+        const at = parseInt(child.dataset?.at, 10);
         if (!Number.isFinite(at)) continue;
         if (prevAt === null || _dmsgIsDifferentDay(prevAt, at)) {
             inserts.push({ before: child, at });
@@ -6740,6 +6749,46 @@ function hideEditHistory() {
  * Open a chat with a particular contact
  * @param {string} contact
  */
+// System events (wallpaper/membership changes) are synthesized app-data
+// events stored apart from the message-views pagination (kind 30078,
+// distinguished by a `d` tag, so the kind-filtered message window skips them).
+// To give them the SAME on-demand windowing as messages, the full set is
+// fetched once into this side buffer, then revealed into the message cache
+// only as far back as the loaded message window reaches — and progressively
+// as the user scrolls older messages into view.
+const _systemEventBuffer = new Map(); // chatId -> sorted array of system-event msg objects
+
+/** Reveal buffered system events that fall within the currently-loaded
+ *  message window into the event cache. Returns the newly-revealed ones so
+ *  the caller can hand them to updateChat. Dedup-safe via cache.addEvent. */
+function revealSystemEventsInWindow(chatId) {
+    const buffer = _systemEventBuffer.get(chatId);
+    if (!buffer || !buffer.length) return [];
+
+    // Lower bound of the loaded window = oldest real (non-system) message in
+    // the cache. Below that, messages haven't been paged in yet, so their
+    // system events stay hidden. Once every message is loaded, the bound drops
+    // away and the remaining (oldest) system events reveal too.
+    const stats = eventCache.getStats(chatId);
+    let bound = -Infinity;
+    if (!stats?.isFullyLoaded) {
+        const loaded = eventCache.getEvents(chatId) || [];
+        let oldestReal = Infinity;
+        for (const m of loaded) {
+            if (!m.system_event && m.at < oldestReal) oldestReal = m.at;
+        }
+        if (oldestReal !== Infinity) bound = oldestReal;
+    }
+
+    const revealed = [];
+    for (const sm of buffer) {
+        if (sm.at >= bound && eventCache.addEvent(chatId, sm)) {
+            revealed.push(sm);
+        }
+    }
+    return revealed;
+}
+
 async function openChat(contact) {
     pushBack('chat', closeChat);
     // Abandon a wallpaper preview staged in a different chat so its edit
@@ -6854,30 +6903,31 @@ async function openChat(contact) {
     // Merge any historical PIVX payments — helper in pivx.js
     await mergePivxPaymentsIntoChat(contact, initialMessages);
 
-    // Load system events (member joined/left, etc.) for this chat and merge them
+    // Load system events (wallpaper/membership changes). They're fetched in
+    // full but buffered — only the ones inside the initially-loaded message
+    // window are revealed now; the rest surface as the user scrolls older
+    // messages into view (same on-demand windowing as messages).
     try {
         const systemEvents = await invoke('get_system_events', { conversationId: contact });
-        if (systemEvents && systemEvents.length > 0) {
-            for (const event of systemEvents) {
-                // Check if this event already exists in messages
-                const existing = initialMessages.find(m => m.id === event.id);
-                if (!existing) {
-                    const systemMsg = {
-                        id: event.id,
-                        at: event.at,
-                        content: event.content,
-                        mine: false,
-                        attachments: [],
-                        system_event: {
-                            event_type: event.event_type,
-                            member_npub: event.member_npub,
-                        }
-                    };
-                    // Add to cache (which also adds to initialMessages since they share the same array reference)
-                    eventCache.addEvent(contact, systemMsg);
-                }
-            }
-            // Re-sort by timestamp after adding system events
+        const buffer = (systemEvents || [])
+            .filter(event => !initialMessages.find(m => m.id === event.id))
+            .map(event => ({
+                id: event.id,
+                at: event.at,
+                content: event.content,
+                mine: false,
+                attachments: [],
+                system_event: {
+                    event_type: event.event_type,
+                    member_npub: event.member_npub,
+                },
+            }))
+            .sort((a, b) => a.at - b.at);
+        _systemEventBuffer.set(contact, buffer);
+        // revealSystemEventsInWindow adds into the cache array, which is
+        // aliased to initialMessages — re-sort so the pre-paint renders them
+        // in chronological order.
+        if (revealSystemEventsInWindow(contact).length > 0) {
             initialMessages.sort((a, b) => a.at - b.at);
         }
     } catch (e) {

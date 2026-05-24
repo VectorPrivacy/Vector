@@ -103,6 +103,9 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         // dedup guard skips re-rendering it on the openChat pre-paint pass.
         // Without this, system events rendered twice on every chat reopen.
         el.id = msg.id;
+        // Carry `at` so the date-divider rebuild treats a system event as
+        // day content (a divider should head it, not float below it).
+        el.dataset.at = msg.at;
         return el;
     }
 

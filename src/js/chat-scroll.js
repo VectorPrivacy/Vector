@@ -108,6 +108,10 @@ async function loadMoreMessages() {
             return;
         }
 
+        // Reveal any buffered system events now inside the expanded window so
+        // they prepend in chronological order alongside the older messages.
+        const revealedSys = revealSystemEventsInWindow(strOpenChat);
+
         // Update the chat object's messages array for compatibility
         chat.messages = eventCache.getEvents(strOpenChat) || [];
 
@@ -115,8 +119,8 @@ async function loadMoreMessages() {
         const isGroup = chat?.chat_type === 'MlsGroup';
         const profile = !isGroup ? getProfile(chat.id) : null;
 
-        // Render the older events (prepend)
-        await updateChat(chat, olderMessages, profile, false);
+        // Render the older events + newly-revealed system events (prepend)
+        await updateChat(chat, [...olderMessages, ...revealedSys], profile, false);
 
         // Update rendered count
         proceduralScrollState.renderedMessageCount += olderMessages.length;
