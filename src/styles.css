@@ -456,8 +456,8 @@ html, body {
 .pack-details-close .icon {
   position: static;
   margin: 0;
-  width: 11px;
-  height: 11px;
+  width: 14px;
+  height: 14px;
   padding: 0;
   border-radius: 0;
   background-color: #fff;
@@ -3262,7 +3262,7 @@ body.chat-bg-disabled .chat-messages::before {
   overflow: hidden;
   position: relative;
   height: calc(100% - 50px);
-  background-color: transparent;
+  background-color: #0a0a0a;
 }
 
 .emoji-sidebar {
@@ -3336,12 +3336,12 @@ body.chat-bg-disabled .chat-messages::before {
   padding: 8px;
   padding-right: 5px;
   margin-left: 50px; 
-  height: 300px;
+  height: 280px;
   overflow-y: auto; 
   overflow-x: hidden;
   background-color: #0a0a0a;
   border-top-right-radius: 12px;
-  border-bottom-right-radius: 12px;
+  border-bottom-right-radius: 0px;
   box-sizing: border-box;
 }
 
@@ -3450,11 +3450,11 @@ body.chat-bg-disabled .chat-messages::before {
   text-align: center;
   padding: 5px;
   border-radius: 6px;
-  transition: all 0.2s ease;
+  transition: background-color 0.15s ease;
 }
 
 .emoji-grid span:hover {
-  background-color: rgba(89, 252, 179, 0.15);
+  background-color: rgba(255, 255, 255, 0.10);
   transform: scale(1.125);
 }
 
@@ -3601,7 +3601,8 @@ body.chat-bg-disabled .chat-messages::before {
   align-items: center;
   justify-content: center;
   padding: 4px !important;
-  background-color: rgba(255, 255, 255, 0.02);
+  border-radius: 6px;
+  background-color: transparent;
   transition: background-color 0.15s ease !important;
 }
 
@@ -3616,8 +3617,13 @@ body.chat-bg-disabled .chat-messages::before {
    re-rasterise during transform: scale, so dropping the hover-scale that
    stock emoji grids use here saves significant paint on hover-over. */
 .emoji-pack-emoji:hover {
-  background-color: rgba(89, 252, 179, 0.18) !important;
+  background-color: rgba(255, 255, 255, 0.08) !important;
+  border-radius: 6px !important;
   transform: none !important;
+}
+
+#emoji-recents-grid .emoji-pack-emoji:hover {
+  transform: scale(1.125) !important;
 }
 
 /* Inline custom emoji. Carries the shared `emoji` class for sizing, so this
@@ -3639,14 +3645,14 @@ body.chat-bg-disabled .chat-messages::before {
    uniformly across every render surface (inline chat emoji, reaction
    chip, preview thumb, pack tab, editor cell, modal, etc.). */
 img.emoji-img-loading {
-  background-color: rgba(89, 252, 179, 0.10);
+  background-color: rgba(255, 255, 255, 0.05);
   border-radius: 4px;
   animation: emoji-img-loading-pulse 1.4s ease-in-out infinite;
 }
 
 @keyframes emoji-img-loading-pulse {
-  0%, 100% { background-color: rgba(89, 252, 179, 0.08); }
-  50%      { background-color: rgba(89, 252, 179, 0.20); }
+  0%, 100% { background-color: rgba(255, 255, 255, 0.04); }
+  50%      { background-color: rgba(255, 255, 255, 0.10); }
 }
 
 /* NIP-30 custom emoji inside a reaction chip — small enough to sit
@@ -4928,7 +4934,7 @@ img.emoji-img-loading {
   padding: 6px;
   width: 30px;
   height: 30px;
-  border-radius: 100%;
+  border-radius: 6px;
   display: inline-block;
 }
 

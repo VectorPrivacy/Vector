@@ -876,7 +876,7 @@ function _renderPackDetails(naddr, pack) {
             <div class="pack-details-title-block">
                 <h3 class="pack-details-title">${title}</h3>
                 <div class="pack-details-meta">
-                    <span class="emoji-count">${emojis.length}</span> emoji${emojis.length === 1 ? '' : 's'}
+                    <span class="emoji-count">${emojis.length}</span> Emoji${emojis.length === 1 ? '' : 's'}
                 </div>
             </div>
         </div>
@@ -895,7 +895,10 @@ function _renderPackDetails(naddr, pack) {
         const img = document.createElement('img');
         img.alt = '';
         bindCachedEmojiImg(img, pack.image_url, 'emoji_pack_icon');
-        img.addEventListener('load', () => fallback && fallback.remove(), { once: true });
+        img.addEventListener('load', () => {
+            fallback && fallback.remove();
+            logo.style.backgroundColor = 'transparent';
+        }, { once: true });
         logo.appendChild(img);
     }
 
@@ -1767,7 +1770,7 @@ class PackCanvasGrid {
             const cx = x + this.cellW / 2;
             const cy = y + this.cellH / 2;
 
-            ctx.clearRect(x, y, this.cellW, this.cellH);
+            ctx.clearRect(x, y, this.cellW + PACK_CANVAS_GAP_PX, this.cellH + PACK_CANVAS_GAP_PX);
 
             // Scale around the cell centre so the thumb grows in place
             // instead of drifting toward a corner.
@@ -1787,7 +1790,7 @@ class PackCanvasGrid {
             if (bgProgress > 0.01) {
                 const boxX = x + (this.cellW - PACK_CANVAS_BOX_PX) / 2;
                 const boxY = y + (this.cellH - PACK_CANVAS_BOX_PX) / 2;
-                ctx.fillStyle = `rgba(89, 252, 179, ${0.135 * bgProgress})`;
+                ctx.fillStyle = `rgba(255, 255, 255, ${0.10 * bgProgress})`;
                 _drawRoundedRect(ctx, boxX, boxY, PACK_CANVAS_BOX_PX, PACK_CANVAS_BOX_PX, 6);
                 ctx.fill();
             }
