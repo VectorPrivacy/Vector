@@ -471,8 +471,46 @@ function addClassesToMarkdownElements(html) {
             el.parentElement.classList.add('spoiler-wrapper');
         }
     });
-    
+
+    // Tag inline code (not fenced blocks, which live inside <pre>) so it can be
+    // styled as tappable + wired for tap-to-copy. Done post-sanitize, so the
+    // class survives DOMPurify.
+    temp.querySelectorAll('code').forEach(el => {
+        if (!el.closest('pre')) el.classList.add('inline-code');
+    });
+
     return temp.innerHTML;
+}
+
+/**
+ * Strip markdown formatting to plain text, preserving line breaks and inner
+ * text (and emoji shortcodes). Counterpart to copying the raw markdown — used
+ * by the mobile long-press "Copy (plain)" action. Deliberately operates on the
+ * raw source (not the rendered DOM) so the result is independent of render
+ * state (revealed spoilers, custom-emoji images, truncation). Not a full
+ * CommonMark parser; covers the syntax Vector renders.
+ */
+function stripMarkdownToPlain(content) {
+    if (!content) return '';
+    let t = content;
+    // Emphasis spans require non-space flanking (`\S(?:[^x]*\S)?`) to match
+    // CommonMark, so "2 * 3 * 4" and the like aren't mistaken for italics.
+    t = t.replace(/```[^\n]*\n([\s\S]*?)\n?```/g, '$1'); // fenced code: keep inner
+    t = t.replace(/`([^`]+)`/g, '$1');                   // inline code: keep inner
+    t = t.replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1');      // image: alt
+    t = t.replace(/\[([^\]]+)\]\([^)]*\)/g, '$1');       // link: text
+    t = t.replace(/\*\*(\S(?:[^*]*\S)?)\*\*/g, '$1');    // bold
+    t = t.replace(/\*(\S(?:[^*]*\S)?)\*/g, '$1');        // italic
+    // Underscore emphasis additionally needs word boundaries (no intraword),
+    // so snake_case / a_b_c survive untouched.
+    t = t.replace(/(^|[^A-Za-z0-9_])__(\S(?:[^_]*\S)?)__(?![A-Za-z0-9_])/g, '$1$2'); // bold
+    t = t.replace(/(^|[^A-Za-z0-9_])_(\S(?:[^_]*\S)?)_(?![A-Za-z0-9_])/g, '$1$2');   // italic
+    t = t.replace(/~~(\S(?:[^~]*\S)?)~~/g, '$1');        // strikethrough
+    t = t.replace(/\|\|(\S(?:[^|]*\S)?)\|\|/g, '$1');    // spoiler
+    t = t.replace(/^[ \t]*#{1,6}[ \t]+/gm, '');          // headers
+    t = t.replace(/^[ \t]*>[ \t]?/gm, '');               // blockquotes
+    t = t.replace(/^[ \t]*([-*_])(?:[ \t]*\1){2,}[ \t]*$/gm, ''); // horizontal rules
+    return t.trim();
 }
 
 /**
@@ -496,7 +534,7 @@ document.addEventListener('click', (e) => {
         const originalHTML = copyBtn.innerHTML;
         copyBtn.innerHTML = '<span class="icon icon-check"></span>';
         copyBtn.classList.add('copied');
-        
+
         setTimeout(() => {
             copyBtn.innerHTML = originalHTML;
             copyBtn.classList.remove('copied');
@@ -504,6 +542,21 @@ document.addEventListener('click', (e) => {
     }).catch(err => {
         console.error('Failed to copy code:', err);
     });
+});
+
+/**
+ * Tap/click an inline code span in a message to copy its contents. With text
+ * selection disabled on mobile (long-press drives the action menu), this is the
+ * copy path for promo codes, keys, etc.
+ */
+document.addEventListener('click', (e) => {
+    const code = e.target.closest('.inline-code');
+    if (!code || !code.closest('.dmsg-text')) return;
+    const text = code.textContent;
+    if (!text) return;
+    navigator.clipboard.writeText(text)
+        .then(() => showToast('Copied to Clipboard'))
+        .catch(() => showToast('Failed to Copy'));
 });
 
 /**

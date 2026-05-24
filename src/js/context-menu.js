@@ -28,6 +28,11 @@ function _ensureContextMenu() {
     // Prevent clicks inside from bubbling out and dismissing the menu
     // before our item handlers run.
     el.addEventListener('mousedown', (e) => e.stopPropagation());
+    // Android back closes an open menu instead of leaving the screen.
+    new MutationObserver(() => {
+        if (el.classList.contains('is-visible')) pushBack('context-menu', hideContextMenu);
+        else popBack('context-menu');
+    }).observe(el, { attributes: true, attributeFilter: ['class'] });
     return el;
 }
 
@@ -56,6 +61,13 @@ function showContextMenu({ x, y, items }) {
         row.setAttribute('role', 'menuitem');
         const label = document.createElement('span');
         label.textContent = item.label;
+        // Optional dimmed qualifier, e.g. Copy (plain) / Copy (with markdown).
+        if (item.hint) {
+            const hint = document.createElement('span');
+            hint.className = 'context-menu-item-hint';
+            hint.textContent = item.hint;
+            label.appendChild(hint);
+        }
         row.appendChild(label);
         if (item.icon) {
             const icon = document.createElement('span');

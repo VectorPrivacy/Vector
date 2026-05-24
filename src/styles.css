@@ -75,6 +75,9 @@
 .icon-file-search {
   mask-image: url("./icons/file-search.svg");
 }
+.icon-file-code {
+  mask-image: url("./icons/file-code.svg");
+}
 
 .icon-file-unknown {
   mask-image: url("./icons/file-unknown.svg");
@@ -1709,6 +1712,109 @@ html, body {
   margin: 4px 0;
 }
 
+/* Touch: no hover, so give press feedback + comfortable hit targets. */
+.mobile .context-menu { min-width: 200px; }
+.mobile .context-menu-item {
+  padding: 13px 16px;
+  font-size: 15px;
+}
+.context-menu-item:active { background: #2a2a2a; color: #fff; }
+.context-menu-item.is-danger:active { background: rgba(255, 74, 138, 0.12); color: #ff4a8a; }
+
+/* Dimmed qualifier after an item label, e.g. Copy (plain). */
+.context-menu-item-hint {
+  margin-left: 6px;
+  opacity: 0.5;
+  font-size: 0.85em;
+}
+
+/* Swipe-to-reply affordance — a reply glyph in a glassy circular chip,
+   revealed from under a row's right edge as it slides left. Scales + fades in
+   with the drag (transform/opacity driven per-frame from JS), then IGNITES to
+   the theme accent past the commit threshold: border + glow snap on, the glyph
+   pops, and a ring pulse radiates out. All commit motion is one-shot, so the
+   per-frame path stays compositor-only (60fps on budget devices). */
+.dmsg-swipe-reply {
+  position: absolute;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background-color: rgba(18, 18, 18, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  z-index: 1;
+  opacity: 0;
+  transform: scale(0.4);
+  /* Only the ignite (glow/border) eases; transform + opacity are set inline
+     per-frame and deliberately omitted here so the drag tracks 1:1. */
+  transition: box-shadow 0.16s ease, border-color 0.16s ease, background-color 0.16s ease;
+}
+/* Themed chats paint a bg image via `.chat-messages::before` and lift content
+   with `.chat-messages > * { position: relative; z-index: 1 }`. That ties our
+   base rule's specificity and would knock the chip out of absolute positioning
+   (and behind messages). Re-assert with matching specificity + a higher layer. */
+.chat-messages > .dmsg-swipe-reply {
+  position: absolute;
+  z-index: 2;
+}
+.dmsg-swipe-reply__icon {
+  background-color: rgba(255, 255, 255, 0.88);
+  transition: background-color 0.16s ease;
+}
+
+/* Past threshold: ignite. */
+.dmsg-swipe-reply.past {
+  background-color: rgba(10, 10, 10, 0.9);
+  border-color: var(--accent-color, #59fcb3);
+  box-shadow:
+    0 0 0 2px var(--accent-color, #59fcb3),
+    0 0 18px 3px color-mix(in srgb, var(--accent-color, #59fcb3) 55%, transparent),
+    0 3px 10px rgba(0, 0, 0, 0.4);
+}
+.dmsg-swipe-reply.past .dmsg-swipe-reply__icon {
+  background-color: var(--accent-color, #59fcb3);
+  animation: dmsg-swipe-pop 0.34s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+/* Ring pulse on commit — a thin accent ring expanding outward, re-fired each
+   time the gesture (re)crosses the threshold. */
+.dmsg-swipe-reply.past::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: 50%;
+  border: 2px solid var(--accent-color, #59fcb3);
+  animation: dmsg-swipe-ring 0.52s ease-out forwards;
+}
+@keyframes dmsg-swipe-pop {
+  0%   { transform: scale(1); }
+  45%  { transform: scale(1.38); }
+  100% { transform: scale(1); }
+}
+@keyframes dmsg-swipe-ring {
+  0%   { opacity: 0.22; transform: scale(1); }
+  100% { opacity: 0; transform: scale(1.95); }
+}
+
+/* On touch, press-and-hold drives the action menu, so suppress the WebView's
+   native text-selection / callout on message rows (it would hijack the
+   gesture). Inputs keep selection via their own rules. */
+.mobile .dmsg,
+.mobile .dmsg * {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+/* Media additionally exposes the OS image grab/save handler on long-press —
+   kill the drag + callout so only our context menu fires (tap-to-open still
+   works; that's a click, not a drag). */
+.mobile .dmsg img,
+.mobile .dmsg video {
+  -webkit-user-drag: none;
+  -webkit-touch-callout: none;
+}
+
 .profile-more-dropdown {
   position: absolute;
   bottom: calc(100% + 8px);
@@ -2391,6 +2497,18 @@ html, body {
      events, date dividers, unread marker). */
   margin-bottom: 20px;
 }
+
+/* CONTRACT for any OVERLAY added as a direct child of `.chat-messages`
+   (hover toolbar, swipe-reply chip, future jump-to-bottom, typing dot, …):
+     1. Insert it FIRST (prepend / before the first row), never append — an
+        out-of-flow overlay landing as `:last-child` steals the 20px above
+        from the real last message.
+     2. Out-specify `.chat-messages > *` (the themed-bg layering rule sets
+        `position: relative; z-index: 1` on every child). Use an id
+        (`#dmsg-toolbar`) or `.chat-messages > .your-class`, and a z-index
+        above 1, or themes knock the overlay out of position and behind rows.
+   In-flow CONTENT (rows, separators, system events) wants the default
+   `.chat-messages > *` treatment and is exempt. */
 
 /* Chat background toggle */
 body.chat-bg-disabled .chat-messages::before {
@@ -10281,6 +10399,20 @@ code {
   font-size: 0.9em;
 }
 
+/* Inline code in messages is tap/click-to-copy (the mobile copy path now that
+   row text selection is off). Signal it's interactive + give press feedback. */
+.dmsg-text .inline-code {
+  cursor: pointer;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+.dmsg-text .inline-code:hover {
+  background: color-mix(in srgb, var(--icon-color-primary, #59fcb3) 12%, transparent);
+  border-color: color-mix(in srgb, var(--icon-color-primary, #59fcb3) 70%, transparent);
+}
+.dmsg-text .inline-code:active {
+  background: color-mix(in srgb, var(--icon-color-primary, #59fcb3) 22%, transparent);
+}
+
 /* Thinner scrollbars for code blocks */
 pre::-webkit-scrollbar,
 details pre::-webkit-scrollbar,
@@ -14124,7 +14256,8 @@ hr {
 
 .dmsg[data-streak="first"]        { margin-top: var(--dmsg-streak-gap); }
 .dmsg[data-streak="continuation"] { margin-top: var(--dmsg-continuation-gap); }
-.dmsg:last-child                  { margin-bottom: 10px; }
+/* Last-child bottom clearance is unified on `.chat-messages > *:last-child`
+ * (covers dmsg rows + system-event paragraphs alike) — see that rule. */
 /* Top clearance for the fixed chat-header is handled by `.chat-messages`'s
  * padding-top — see that rule. Putting it on the container instead of on
  * `:first-child` means whatever ends up at the top of the list (date

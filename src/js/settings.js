@@ -542,6 +542,9 @@ function mediaUrl(filePath) {
  */
 async function fetchPlatformFeatures() {
     platformFeatures = await invoke("get_platform_features");
+    // Touch surfaces key off `.mobile` for gesture-driven affordances
+    // (long-press menus, swipe-to-reply, bigger hit targets).
+    document.body.classList.toggle('mobile', !!platformFeatures.is_mobile);
 }
 
 /**

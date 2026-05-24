@@ -103,10 +103,15 @@ function initMessageToolbar() {
         }
     }, { passive: true });
 
+    _dmsgInitGestures();
+
     _dmsgToolbarListenersAttached = true;
 }
 
 function showMessageToolbar(rowEl) {
+    // Mobile has no hover — taps would otherwise pop this corner toolbar.
+    // Touch surfaces use press-and-hold (context menu) + swipe (reply) instead.
+    if (platformFeatures?.is_mobile) return;
     // Idempotent — re-creates the element if it was detached on a chat switch.
     initMessageToolbar();
     if (!_dmsgToolbarEl) return;
@@ -452,4 +457,303 @@ function _dmsgSelectReply(targetMsgId) {
 
     const target = document.getElementById(targetMsgId);
     if (target) applyHighlight(target, 'replying');
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Chat gestures / context menu
+   - Mobile: press-and-hold a row → menu; swipe a row left → reply. The hover
+     toolbar is suppressed on mobile (see showMessageToolbar).
+   - Desktop: right-click a row → the same menu (hover toolbar stays too).
+   All delegated on domChatMessages.
+   ────────────────────────────────────────────────────────────────────────── */
+
+const _G_MOVE_TOL = 10;       // px before a touch counts as a drag, not a tap
+const _G_SWIPE_MAX = 102;     // max leftward travel (rubber-banded past this)
+const _G_SWIPE_TRIGGER = 60;  // travel needed to commit the reply
+const _G_LONGPRESS_MS = 500;
+
+let _gTouchRow = null;
+let _gStartX = 0, _gStartY = 0;
+let _gLastDX = 0;
+let _gAxis = null;            // null until locked, then 'h' | 'v'
+let _gLongTimer = null;
+let _gLongFired = false;
+let _gSwipeIcon = null;
+let _dmsgRightClickHadSelection = false;
+
+function _dmsgClearLongTimer() {
+    if (_gLongTimer) { clearTimeout(_gLongTimer); _gLongTimer = null; }
+}
+
+function _dmsgCopyText(text) {
+    if (!text) return;
+    navigator.clipboard.writeText(text)
+        .then(() => showToast('Copied to Clipboard'))
+        .catch(() => showToast('Failed to Copy'));
+}
+
+function _dmsgEnsureSwipeIcon() {
+    // Shared, content-space child of domChatMessages (like the toolbar) so it
+    // tracks scroll for free. domChatMessages is wiped on chat switch, so
+    // rebuild when detached.
+    if (_gSwipeIcon && _gSwipeIcon.isConnected) return _gSwipeIcon;
+    const el = document.createElement('div');
+    el.className = 'dmsg-swipe-reply';
+    el.hidden = true;
+    const glyph = document.createElement('span');
+    glyph.className = 'dmsg-swipe-reply__icon icon icon-reply';
+    el.appendChild(glyph);
+    // Prepend, never append: the chip is positioned by computed coords, so DOM
+    // order is irrelevant to where it renders — but appending would make it the
+    // container's :last-child and steal the trailing margin from the last row.
+    domChatMessages.prepend(el);
+    _gSwipeIcon = el;
+    return el;
+}
+
+function _dmsgBeginSwipeVisual(rowEl) {
+    rowEl.style.transition = 'none';
+    const icon = _dmsgEnsureSwipeIcon();
+    icon.hidden = false;
+    icon.classList.remove('past');
+    // Revert to the CSS transition (glow/border ease; transform + opacity are
+    // driven per-frame below, so they stay instant by not being listed there).
+    icon.style.transition = '';
+    icon.style.opacity = '0';
+    icon.style.transform = 'scale(0.4)';
+    icon.style.top = `${rowEl.offsetTop + (rowEl.offsetHeight / 2) - 18}px`;
+    // Pulled in from the right edge so the chip + accent glow clear the scrollbar.
+    icon.style.left = `${rowEl.offsetLeft + rowEl.offsetWidth - 58}px`;
+}
+
+function _dmsgUpdateSwipeVisual(rowEl, offset, past) {
+    rowEl.style.transform = `translateX(${offset}px)`;
+    if (_gSwipeIcon) {
+        const p = Math.min(1, Math.abs(offset) / _G_SWIPE_TRIGGER);
+        _gSwipeIcon.style.opacity = String(p);
+        // Scale up as the gesture nears commit; the pop past threshold is a
+        // one-shot keyframe on the inner glyph (see CSS), so no conflict here.
+        _gSwipeIcon.style.transform = `scale(${(0.4 + 0.6 * p).toFixed(3)})`;
+        _gSwipeIcon.classList.toggle('past', past);
+    }
+}
+
+function _dmsgResetSwipe(animate, rowEl, spring) {
+    if (rowEl) {
+        // Non-committed let-go gets a small springy overshoot; a committed
+        // swipe returns flat (it's handing off to reply mode).
+        if (!animate) rowEl.style.transition = 'none';
+        else if (spring) rowEl.style.transition = 'transform 0.3s cubic-bezier(0.34, 1.4, 0.7, 1)';
+        else rowEl.style.transition = 'transform 0.18s ease';
+        rowEl.style.transform = '';
+    }
+    if (_gSwipeIcon) {
+        _gSwipeIcon.style.transition = animate ? 'opacity 0.2s ease, transform 0.2s ease' : 'none';
+        _gSwipeIcon.style.opacity = '0';
+        _gSwipeIcon.style.transform = 'scale(0.4)';
+        _gSwipeIcon.classList.remove('past');
+    }
+}
+
+function _dmsgInitGestures() {
+    // Desktop: right-click a row opens the same menu (mobile uses press-and-hold
+    // below). Reaction chips keep their own right-click handler.
+    //
+    // The browser auto-selects the word under a right-click on `mousedown`
+    // (before `contextmenu`), so suppressing it there is too late. We instead
+    // block that auto-select on the right mousedown — UNLESS the user already
+    // had text highlighted, in which case we leave the selection alone and
+    // defer to the native menu so they can act on their snippet.
+    domChatMessages.addEventListener('mousedown', (e) => {
+        if (e.button !== 2 || platformFeatures?.is_mobile) return;
+        const sel = window.getSelection();
+        _dmsgRightClickHadSelection = !!(sel && !sel.isCollapsed && sel.toString().trim());
+        if (_dmsgRightClickHadSelection) return;
+        const row = e.target.closest('.dmsg');
+        if (!row || !domChatMessages.contains(row) || e.target.closest('.reaction, .dmsg-avatar, .dmsg-author')) return;
+        e.preventDefault();
+    });
+    domChatMessages.addEventListener('contextmenu', (e) => {
+        if (platformFeatures?.is_mobile) return;
+        const row = e.target.closest('.dmsg');
+        if (!row || !domChatMessages.contains(row)) return;
+        if (row.style.opacity === '0') return;
+        if (e.target.closest('.reaction')) return;
+        // Avatar / username act like a left-click (open the mini-profile), not
+        // the message menu.
+        const profileBtn = e.target.closest('.dmsg-avatar, .dmsg-author');
+        if (profileBtn) {
+            if (profileBtn.dataset.npub) {
+                e.preventDefault();
+                showMiniProfile(profileBtn.dataset.npub, profileBtn);
+            }
+            return;
+        }
+        if (_dmsgRightClickHadSelection) return;          // had a highlight → native menu
+        const sel = window.getSelection();
+        if (sel) sel.removeAllRanges();                   // drop any word the right-click grabbed
+        e.preventDefault();
+        _dmsgOpenMessageMenu(row, e.clientX, e.clientY);
+    });
+
+    domChatMessages.addEventListener('touchstart', (e) => {
+        if (!platformFeatures?.is_mobile) return;
+        if (e.touches.length !== 1) return;           // ignore pinch/multi-touch
+        const row = e.target.closest('.dmsg');
+        if (!row || !domChatMessages.contains(row)) return;
+        if (row.style.opacity === '0') return;        // mid fade-out
+        // Reaction chips own their own long-press (details popup) — yield the
+        // whole gesture so we don't stack the message menu on top of it.
+        if (e.target.closest('.reaction')) return;
+        // Avatar / username act like a tap (open the mini-profile), never the
+        // message menu — captured here so a hold still resolves to the profile.
+        const profileBtn = e.target.closest('.dmsg-avatar, .dmsg-author');
+        _gTouchRow = row;
+        const t = e.touches[0];
+        _gStartX = t.clientX; _gStartY = t.clientY;
+        _gLastDX = 0; _gAxis = null; _gLongFired = false;
+        _dmsgClearLongTimer();
+        _gLongTimer = setTimeout(() => {
+            _gLongTimer = null;
+            _gLongFired = true;
+            // Suppress the WebView's synthetic mouse events / selection callout
+            // for this gesture so they don't immediately dismiss the menu.
+            try { e.preventDefault(); } catch (_e) {}
+            if (profileBtn && profileBtn.dataset.npub) {
+                showMiniProfile(profileBtn.dataset.npub, profileBtn);
+            } else {
+                _dmsgOpenMessageMenu(row, _gStartX, _gStartY);
+            }
+        }, _G_LONGPRESS_MS);
+    }, { passive: false });
+
+    domChatMessages.addEventListener('touchmove', (e) => {
+        if (!_gTouchRow || _gLongFired) return;
+        const t = e.touches[0];
+        const dx = t.clientX - _gStartX;
+        const dy = t.clientY - _gStartY;
+        if (_gAxis === null) {
+            if (Math.abs(dx) < _G_MOVE_TOL && Math.abs(dy) < _G_MOVE_TOL) return;
+            // Past tap tolerance: it's a drag, not a press. Lock the axis.
+            _dmsgClearLongTimer();
+            _gAxis = Math.abs(dx) > Math.abs(dy) ? 'h' : 'v';
+            if (_gAxis === 'v') { _gTouchRow = null; return; }  // vertical = scroll
+            _dmsgBeginSwipeVisual(_gTouchRow);
+        }
+        if (_gAxis !== 'h') return;
+        // Claim the gesture from the scroller and render leftward travel only,
+        // rubber-banding both an accidental rightward pull and past the cap.
+        e.preventDefault();
+        let off = Math.min(0, dx);
+        if (off < -_G_SWIPE_MAX) off = -_G_SWIPE_MAX + (off + _G_SWIPE_MAX) * 0.2;
+        _gLastDX = dx;
+        _dmsgUpdateSwipeVisual(_gTouchRow, off, off <= -_G_SWIPE_TRIGGER);
+    }, { passive: false });
+
+    const onEnd = () => {
+        _dmsgClearLongTimer();
+        const row = _gTouchRow, axis = _gAxis, dx = _gLastDX, longFired = _gLongFired;
+        _gTouchRow = null; _gAxis = null; _gLastDX = 0; _gLongFired = false;
+        if (longFired || !row) return;
+        if (axis === 'h') {
+            // Reply commits on a leftward swipe only — a rightward drag never
+            // moves the row, so it must never fire either.
+            const status = row.dataset.status;
+            const willReply = dx <= -_G_SWIPE_TRIGGER && status !== 'pending' && status !== 'failed';
+            // Spring-back only on a non-committed let-go; a committed swipe
+            // returns flat (it's handing off to reply mode, not bouncing).
+            _dmsgResetSwipe(true, row, !willReply);
+            if (willReply) _dmsgSelectReply(row.id);
+        }
+    };
+    domChatMessages.addEventListener('touchend', onEnd);
+    domChatMessages.addEventListener('touchcancel', () => {
+        _dmsgClearLongTimer();
+        if (_gTouchRow) _dmsgResetSwipe(true, _gTouchRow, true);  // abandoned: spring back
+        _gTouchRow = null; _gAxis = null; _gLastDX = 0; _gLongFired = false;
+    });
+}
+
+/**
+ * Build and show the message action menu for a row (mobile long-press / desktop
+ * right-click). Mirrors the hover toolbar's visibility logic 1:1, including the
+ * backend round-trip that decides delete vs. limited-delete vs. admin-hide.
+ * Reveal-in-folder is desktop-only (no Android filesystem equivalent).
+ */
+async function _dmsgOpenMessageMenu(rowEl, x, y) {
+    if (!rowEl) return;
+    const targetId = rowEl.id;
+    const status = rowEl.dataset.status;
+    const mine = rowEl.dataset.mine === 'true';
+    const msg = _dmsgLookupMessage(rowEl);
+    const items = [];
+
+    // Failed sends: local retry / delete only (not on the wire yet).
+    if (status === 'failed') {
+        items.push({ label: 'Retry send', icon: 'refresh', onClick: () => { if (msg) retryFailedMessage(msg); } });
+        items.push({ label: 'Delete', icon: 'trash', danger: true, onClick: () => deleteFailedMessage(targetId) });
+        showContextMenu({ x, y, items });
+        return;
+    }
+    // Pending: nothing actionable (cancel-send lives on the upload spinner).
+    if (status === 'pending') return;
+
+    const hasContent = !!(msg && msg.content);
+    const hasAttachments = !!(msg && msg.attachments && msg.attachments.length);
+    const uniqueEmojiCount = msg && msg.reactions ? new Set(msg.reactions.map(r => r.emoji)).size : 0;
+
+    if (uniqueEmojiCount < 8) {
+        items.push({ label: 'React', icon: 'smile-face', onClick: () => _dmsgOpenReactionPicker(targetId) });
+    }
+    items.push({ label: 'Reply', icon: 'reply', onClick: () => _dmsgSelectReply(targetId) });
+    if (mine && hasContent && !hasAttachments) {
+        items.push({ label: 'Edit', icon: 'edit', onClick: () => { if (msg) startEditMessage(targetId, msg.content); } });
+    }
+    // Reveal-in-folder: desktop only (no Android equivalent), any downloaded attachment.
+    if (!platformFeatures?.is_mobile) {
+        const downloadedPath = (msg && msg.attachments)
+            ? (msg.attachments.find(a => a.downloaded) || {}).path
+            : null;
+        if (downloadedPath) {
+            items.push({ label: 'Reveal in folder', icon: 'file-search', onClick: () => revealItemInDir(downloadedPath) });
+        }
+    }
+    // Copy — text selection is off on mobile. If the message carries markdown,
+    // offer both flavours (plain vs as-sent); if it's provably plaintext
+    // (stripping is a no-op), a single plain Copy is all that's needed.
+    if (hasContent) {
+        const raw = msg.content;
+        const plain = stripMarkdownToPlain(raw);
+        if (plain === raw.trim()) {
+            items.push({ label: 'Copy', icon: 'copy', onClick: () => _dmsgCopyText(raw) });
+        } else {
+            items.push({ label: 'Copy', hint: '(plain)', icon: 'copy', onClick: () => _dmsgCopyText(plain) });
+            items.push({ label: 'Copy', hint: '(markdown)', icon: 'file-code', onClick: () => _dmsgCopyText(raw) });
+        }
+    }
+
+    // Delete / Hide: same backend probe the desktop toolbar uses.
+    let deleteItem = null;
+    try {
+        const opts = await invoke('get_message_delete_options', { messageId: targetId });
+        if (opts.mine) {
+            const partial = !opts.has_retained_keys;
+            deleteItem = {
+                label: partial ? 'Delete (limited)' : 'Delete',
+                icon: 'trash', danger: true,
+                onClick: () => _dmsgConfirmAndDelete(targetId, 'delete', { partial, hasAttachments: !!opts.has_attachments }),
+            };
+        } else if (opts.can_admin_hide) {
+            deleteItem = {
+                label: 'Hide', icon: 'trash', danger: true,
+                onClick: () => _dmsgConfirmAndDelete(targetId, 'hide', {}),
+            };
+        }
+    } catch (_e) { /* no delete option for this row */ }
+    if (deleteItem) {
+        items.push({ divider: true });
+        items.push(deleteItem);
+    }
+
+    showContextMenu({ x, y, items });
 }
