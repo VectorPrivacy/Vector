@@ -314,6 +314,12 @@ pub async fn publish_wallpaper(chat_npub: &str, blur: u8, dim: u8) -> Result<(),
         .await
         .map_err(|e| format!("Signer: {}", e))?;
     let my_pk = crate::state::my_public_key().ok_or("Public key not set")?;
+    // The chat the wallpaper belongs to, tagged on the rumor below. Without it,
+    // the self-send copy (for multi-device sync) has no recipient, so the
+    // inbound handler attributes it to our self-chat (Notes) instead of this
+    // chat — a wallpaper set in any chat would also reskin Notes.
+    let recipient_pk = PublicKey::from_bech32(chat_npub)
+        .map_err(|e| format!("Invalid chat npub: {}", e))?;
 
     let servers = crate::state::get_blossom_servers();
 
@@ -352,6 +358,10 @@ pub async fn publish_wallpaper(chat_npub: &str, blur: u8, dim: u8) -> Result<(),
         .as_secs();
     let rumor = EventBuilder::new(Kind::Custom(event_kind::APPLICATION_SPECIFIC), "")
         .tag(Tag::identifier(WALLPAPER_DTAG_VALUE))
+        // Recipient tag — identifies which chat this wallpaper is for. The
+        // inbound handler reads it to attribute self-sent (multi-device) copies
+        // to the correct chat rather than defaulting to our self-chat.
+        .tag(Tag::public_key(recipient_pk))
         .tag(Tag::custom(
             TagKind::Custom("url".into()),
             vec![upload_url.clone()],

@@ -4606,7 +4606,7 @@ img.emoji-img-loading {
   gap: 12px;
   margin-top: 8px;
   padding: 10px;
-  background-color: rgba(255, 255, 255, 0.04);
+  background-color: rgba(10, 10, 10, 0.85);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 10px;
   max-width: 420px;
@@ -14560,7 +14560,7 @@ hr {
   transform-origin: center;
 }
 #chat[data-wallpaper="true"] .chat-header {
-  background-color: rgba(22, 22, 22, 0.55);
+  background-color: rgba(22, 22, 22, 0.9);
 }
 /* Override theme-defined chat-messages backgrounds so the wallpaper layer
    actually shows through. Themes (cyberpunk/monero/pivx) paint .chat-messages
