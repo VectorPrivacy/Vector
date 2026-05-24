@@ -167,16 +167,144 @@ let emojiLazyLoadObserver = null;
 const EMOJI_CHUNK_SIZE = 36; // 6 columns x 6 rows
 
 /**
- * Subscribed + owned NIP-30 emoji packs hydrated from vector-core.
+ * Subscribed + owned NIP-30 emoji packs hydrated from vector-core, plus the
+ * active theme's pinned pack at index 0 (see `_composeAndRenderPacks`).
  * Populated by `loadEmojiPacks()` on first picker open; subsequent
  * opens reuse the cached array while a background refresh updates it.
- * @type {Array<{addr:string,title:string,image_url:string,description:string,emojis:Array<{shortcode:string,url:string}>,is_own:boolean}>}
+ * `id` is the canonical naddr (no relay hints); there is NO `addr` field.
+ * @type {Array<{id:string,title:string,image_url:string,description:string,emojis:Array<{shortcode:string,url:string}>,is_own:boolean,is_theme?:boolean,updated_at:number}>}
  */
 let arrEmojiPacks = [];
 let emojiPacksLoaded = false;
 let _lastPacksSignature = '';
 let _lastRefreshAt = 0;
 const PACK_REFRESH_TTL_MS = 60_000;
+
+// ----- Theme emoji packs ------------------------------------------------------
+// Hardcoded per-theme "pinned" packs. The active theme's pack (if any) renders
+// FIRST in the picker, ahead of the user's own/subscribed packs. It's injected
+// at render time only — never written to the user's kind-10030 subscription
+// list, and it doesn't occupy an equip slot. Add naddrs here as theme packs
+// ship; themes absent from this map simply have no pinned pack.
+const THEME_EMOJI_PACKS = {
+    vector: 'naddr1qqxx7mt2f945yvj0fdg8x3czyzu0jtnpuuw5tp4wdlnfwrmnm58ahzgpp9vfut6p00h5gkam4ykg6qcyqqq82nsstfm4j',
+};
+let _userEmojiPacks = [];          // backend (own + subscribed) packs, pre-theme-merge
+const _themePackCache = {};        // naddr -> pack | null (fetched; null = none/failed)
+const _themePackFetching = {};     // naddr -> in-flight Promise (dedupe concurrent fetches)
+
+function _currentThemeName() {
+    // applyTheme() sets exactly one `<name>-theme` class on <body>.
+    const cls = Array.from(document.body.classList).find(c => c.endsWith('-theme'));
+    return cls ? cls.slice(0, -'-theme'.length) : 'vector';
+}
+
+// Count packs that occupy a user equip slot (theme packs are free/pinned).
+function _userPackCount() {
+    return Array.isArray(arrEmojiPacks) ? arrEmojiPacks.filter(p => !p.is_theme).length : 0;
+}
+
+function _cachedThemePack() {
+    const naddr = THEME_EMOJI_PACKS[_currentThemeName()];
+    if (!naddr) return null;
+    return _themePackCache[naddr] || null;
+}
+
+async function _fetchThemePack(naddr, force = false) {
+    if (!force && _themePackCache[naddr]) return _themePackCache[naddr];   // cached success
+    if (_themePackFetching[naddr]) return _themePackFetching[naddr];
+    const p = (async () => {
+        try {
+            const pack = await invoke('fetch_emoji_pack_by_naddr', { naddr });
+            if (pack && Array.isArray(pack.emojis) && pack.emojis.length) {
+                if (pack.emojis.length > MAX_DISPLAY_EMOJIS_PER_PACK) {
+                    pack.emojis = pack.emojis.slice(0, MAX_DISPLAY_EMOJIS_PER_PACK);
+                }
+                pack.is_theme = true;
+                _themePackCache[naddr] = pack;   // only successes are cached
+                return pack;
+            }
+            return null;
+        } catch (e) {
+            // Don't cache the failure — a transient miss (e.g. relays not
+            // connected on first open) should retry on the next open.
+            console.warn('[theme-pack] fetch failed:', e);
+            return null;
+        } finally {
+            delete _themePackFetching[naddr];
+        }
+    })();
+    _themePackFetching[naddr] = p;
+    return p;
+}
+
+// Merge the active theme's pinned pack (pinned first, de-duped against the
+// user's list) and repaint. Idempotent via the packs signature.
+function _composeAndRenderPacks() {
+    const themeNaddr = THEME_EMOJI_PACKS[_currentThemeName()];
+    let combined;
+    if (!themeNaddr) {
+        combined = _userEmojiPacks.slice();
+    } else {
+        // The theme naddr is canonical (no relay hints), so it equals the
+        // backend's `pack.id`. If the user is already subscribed to that pack we
+        // can pin THEIR copy immediately — no fetch needed, so the picker opens
+        // already-pinned instead of reordering after the network lands. The
+        // pinned copy keeps Remove + counts as a real subscription; we never add
+        // a separate theme entry, so it can't double up.
+        const subIdx = _userEmojiPacks.findIndex(p => p.id === themeNaddr);
+        if (subIdx !== -1) {
+            const rest = _userEmojiPacks.filter((_, i) => i !== subIdx);
+            combined = [_userEmojiPacks[subIdx], ...rest];
+        } else {
+            // Not subscribed → pin the fetched theme pack once we have it (no
+            // Remove, doesn't use a slot). Until the fetch lands, just the user
+            // packs render and the pack appears at the top when ready.
+            const themePack = _cachedThemePack();
+            combined = themePack ? [themePack, ..._userEmojiPacks] : _userEmojiPacks.slice();
+        }
+    }
+    const sig = _packsSignature(combined);
+    if (sig === _lastPacksSignature && emojiPacksLoaded) return;
+    _lastPacksSignature = sig;
+    arrEmojiPacks = combined;
+    emojiPacksLoaded = true;
+    const activeAddr = document.querySelector('.emoji-pack-tab.active')?.dataset.packId;
+    renderEmojiPackSidebar();
+    renderEmojiPackSections();
+    if (activeAddr) {
+        const tab = document.querySelector(`.emoji-pack-tab[data-pack-id="${CSS.escape(activeAddr)}"]`);
+        if (tab) tab.classList.add('active');
+    }
+    _refreshPackPreviewButtons();
+}
+
+// Ensure the active theme's pack is fetched, then recompose so it appears.
+async function _ensureThemePack(refresh = false) {
+    const naddr = THEME_EMOJI_PACKS[_currentThemeName()];
+    if (!naddr) return;
+    // Subscribed → the user's own copy is pinned and `refresh_emoji_packs`
+    // already pulls its edits/deletions; nothing to fetch here.
+    if (_userEmojiPacks.some(p => p.id === naddr)) return;
+    // Cold path: fetch only if we don't have it. Refresh path: re-fetch to pick
+    // up pack edits / removal (debounced by loadEmojiPacks' PACK_REFRESH_TTL_MS).
+    if (!refresh && _themePackCache[naddr]) return;
+    const fresh = await _fetchThemePack(naddr, refresh);
+    if (refresh && !fresh && _themePackCache[naddr]) {
+        // A refresh came back empty for a pack we had — edited-to-empty or
+        // removed; drop the cached copy so it stops showing. (Self-healing: a
+        // later cold/refresh fetch re-adds it if it was only a transient miss.)
+        delete _themePackCache[naddr];
+    }
+    _composeAndRenderPacks();
+}
+
+// Called when the user switches theme (see settings.js setTheme).
+function refreshEmojiPacksForTheme() {
+    if (!emojiPacksLoaded) return;   // picker not opened yet — next open handles it
+    _composeAndRenderPacks();        // swap to the new theme's cached pack (or none)
+    _ensureThemePack();              // fetch the new theme's pack if not cached yet
+}
 
 /** Max packs a user can have equipped at once. Mirrors vector-core's
  *  `MAX_EQUIPPED_PACKS`. Frontend pre-gates the create + subscribe
@@ -211,6 +339,9 @@ function applyBadgeLimits(hasVectorBadge) {
     // new cap (the backend still has the full emoji lists locally).
     if (displayCapChanged && emojiPacksLoaded) {
         _lastPacksSignature = '';
+        // The theme pack was truncated + cached at the old cap; drop it so it
+        // re-fetches at the new cap alongside the user packs.
+        for (const k of Object.keys(_themePackCache)) delete _themePackCache[k];
         loadEmojiPacks();
     }
 }
@@ -325,7 +456,11 @@ function bindCachedEmojiImg(img, url, kind = 'emoji', onUnavailable = null) {
 }
 
 function _packsSignature(packs) {
-    return packs.map(p => `${p.id}@${p.updated_at}#${p.emojis.length}`).join('|');
+    // The trailing `T` marks a theme-pinned entry vs. the user's own subscribed
+    // copy of the same pack (identical id/updated_at/length), so toggling a
+    // subscription to the active theme's pack actually repaints instead of being
+    // skipped as "unchanged".
+    return packs.map(p => `${p.id}@${p.updated_at}#${p.emojis ? p.emojis.length : 0}${p.is_theme ? 'T' : ''}`).join('|');
 }
 
 async function loadEmojiPacks({ refresh = false } = {}) {
@@ -347,30 +482,16 @@ async function loadEmojiPacks({ refresh = false } = {}) {
                 p.emojis = p.emojis.slice(0, MAX_DISPLAY_EMOJIS_PER_PACK);
             }
         }
-        const sig = _packsSignature(arr);
-        if (sig === _lastPacksSignature && emojiPacksLoaded) {
-            // Same packs, same versions — repainting the sidebar would
-            // just drop the user's active highlight for nothing.
-            return;
-        }
-        _lastPacksSignature = sig;
-        arrEmojiPacks = arr;
-        emojiPacksLoaded = true;
-        const activeAddr = document
-            .querySelector('.emoji-pack-tab.active')?.dataset.packId;
-        renderEmojiPackSidebar();
-        renderEmojiPackSections();
-        if (activeAddr) {
-            const tab = document.querySelector(
-                `.emoji-pack-tab[data-pack-id="${CSS.escape(activeAddr)}"]`,
-            );
-            if (tab) tab.classList.add('active');
-        }
-        // In-chat pack preview cards aren't owned by the picker, so we
-        // sweep all of them after a load. Each Add/Remove button carries
-        // the pack id on a dataset attribute, so the refresh is local +
-        // cheap.
-        _refreshPackPreviewButtons();
+        _userEmojiPacks = arr;
+        // Render now (theme pack prepended if already cached); the signature
+        // check inside guards against needless repaints. In-chat pack preview
+        // cards are swept by the composer too (each Add/Remove button carries
+        // its pack id, so the refresh is local + cheap).
+        _composeAndRenderPacks();
+        // Pinned theme pack: fetch on cold open, re-fetch on the (rate-limited)
+        // refresh path so edits/removals reflect. Skipped entirely when the user
+        // is subscribed — `refresh_emoji_packs` covers that copy.
+        _ensureThemePack(refresh);
     } catch (e) {
         console.warn('[emoji-packs] load failed:', e);
     }
@@ -525,14 +646,17 @@ async function _unsubscribePackFromMenu(pack) {
 }
 
 function _showPackTabMenu(pack, x, y) {
-    if (typeof showContextMenu !== 'function') return;
     const items = [
         {
             label: 'Share Pack',
             icon: 'share',
             onClick: () => _sharePackToClipboard(pack),
         },
-        {
+    ];
+    // Theme packs are pinned by the active theme, not user subscriptions —
+    // there's nothing to "remove". Sharing still applies (real pack + naddr).
+    if (!pack.is_theme) {
+        items.push({
             // "Remove" is a soft action on every pack — unsubscribes
             // locally + republishes kind 10030 without it. For own packs
             // the file + Nostr event stay in place so re-subscribing
@@ -543,8 +667,8 @@ function _showPackTabMenu(pack, x, y) {
             icon: 'x-user',
             danger: true,
             onClick: () => _unsubscribePackFromMenu(pack),
-        },
-    ];
+        });
+    }
     showContextMenu({ x, y, items });
 }
 
@@ -805,7 +929,8 @@ async function _resolvePackPreview(naddr) {
 }
 
 function _isPackSubscribed(id) {
-    return Array.isArray(arrEmojiPacks) && arrEmojiPacks.some(p => p.id === id);
+    // Theme packs are pinned, not user subscriptions — don't report them here.
+    return Array.isArray(arrEmojiPacks) && arrEmojiPacks.some(p => p.id === id && !p.is_theme);
 }
 
 // ============================================================================
@@ -934,7 +1059,7 @@ async function _onPackDetailsAction(pack) {
     if (!btn) return;
     const isSub = _isPackSubscribed(pack.id);
 
-    if (!isSub && arrEmojiPacks.length >= MAX_EQUIPPED_PACKS) {
+    if (!isSub && _userPackCount() >= MAX_EQUIPPED_PACKS) {
         _pcShowSlotFullError();
         return;
     }
@@ -1136,7 +1261,7 @@ async function _onPackPreviewButtonClick(btn, card) {
     // backend's raw error. Subscribing to a pack we already have
     // (idempotent) doesn't count, but that path goes through the
     // "Remove" branch anyway.
-    if (!isSubscribed && arrEmojiPacks.length >= MAX_EQUIPPED_PACKS) {
+    if (!isSubscribed && _userPackCount() >= MAX_EQUIPPED_PACKS) {
         _pcShowSlotFullError();
         return;
     }
@@ -1876,7 +2001,7 @@ function openEmojiPackCreator(id) {
     // rejected by the backend — surface the same overlay we use for
     // other publish failures so the user gets actionable feedback.
     // Editing an existing own pack is always fine (no slot change).
-    if (!editingPack && arrEmojiPacks.length >= MAX_EQUIPPED_PACKS) {
+    if (!editingPack && _userPackCount() >= MAX_EQUIPPED_PACKS) {
         _pcShowSlotFullError();
         return;
     }

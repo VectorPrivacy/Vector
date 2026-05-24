@@ -1394,6 +1394,8 @@ function applyTheme(theme = 'vector', mode = 'dark') {
 async function setTheme(theme = 'vector', mode = 'dark') {
   applyTheme(theme, mode);
   await saveTheme(theme);
+  // Swap the pinned theme emoji pack to match the new theme.
+  refreshEmojiPacksForTheme();
 }
 
 // Apply Theme changes in real-time
