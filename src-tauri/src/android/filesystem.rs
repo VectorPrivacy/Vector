@@ -4,32 +4,6 @@ use jni::objects::{JObject, JValue, JString};
 use crate::message::{AttachmentFile, FileInfo};
 use super::utils::{with_android_context, get_content_resolver, STREAM_BUFFER_SIZE};
 
-/// Simple percent-decoding for URIs (e.g., %3A -> :)
-fn percent_decode(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            // Try to read two hex digits
-            let hex: String = chars.by_ref().take(2).collect();
-            if hex.len() == 2 {
-                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                    result.push(byte as char);
-                    continue;
-                }
-            }
-            // If decoding failed, keep the original
-            result.push('%');
-            result.push_str(&hex);
-        } else {
-            result.push(c);
-        }
-    }
-    
-    result
-}
-
 /// Get file info from an Android content URI
 pub fn get_android_uri_info(uri: String) -> Result<FileInfo, String> {
     with_android_context(|env, activity| {
@@ -44,8 +18,10 @@ fn get_android_uri_info_internal(
     content_resolver: &JObject,
     uri: &str,
 ) -> Result<FileInfo, Box<dyn std::error::Error>> {
-    // URL decode the URI in case it's encoded (e.g., %3A -> :)
-    let decoded_uri = percent_decode(uri);
+    // Use the URI as-is. Android delivers canonically-encoded URIs; decoding
+    // here would corrupt nested-encoded URIs (e.g. Google Photos provider URIs
+    // that wrap a percent-encoded content:// MediaStore URI), breaking the read.
+    let decoded_uri = uri.to_string();
     
     // Parse URI
     let uri_string = env.new_string(&decoded_uri)?;
@@ -188,8 +164,12 @@ fn try_take_persistable_permission(
     content_resolver: &JObject,
     uri_object: &JObject,
 ) {
-    // Try to take persistable read permission
-    // This may fail if the URI doesn't support it, which is fine
+    // Try to take persistable read permission. SAF picks (ACTION_OPEN_DOCUMENT)
+    // support this; share grants (ACTION_SEND) do NOT and throw a
+    // SecurityException. We don't care either way — but we MUST clear the
+    // pending JNI exception afterward, or the next JNI call (query /
+    // openInputStream) inherits it and fails, which silently breaks reading
+    // every shared content:// URI.
     let flag_read = 1i32; // Intent.FLAG_GRANT_READ_URI_PERMISSION
     let _ = env.call_method(
         content_resolver,
@@ -197,6 +177,7 @@ fn try_take_persistable_permission(
         "(Landroid/net/Uri;I)V",
         &[JValue::Object(uri_object), JValue::Int(flag_read)],
     );
+    let _ = env.exception_clear();
 }
 
 /// Read raw bytes from an Android content URI (for compression)
@@ -213,8 +194,9 @@ fn read_android_uri_bytes_internal(
     content_resolver: &JObject,
     uri: &str,
 ) -> Result<(Vec<u8>, String), Box<dyn std::error::Error>> {
-    // URL decode the URI in case it's encoded
-    let decoded_uri = percent_decode(uri);
+    // Use the URI as-is (see note in get_android_uri_info_internal): decoding
+    // would corrupt nested-encoded URIs like Google Photos provider URIs.
+    let decoded_uri = uri.to_string();
     
     // Parse URI
     let uri_string = env.new_string(&decoded_uri)?;
@@ -339,8 +321,9 @@ fn read_from_android_uri_internal(
     content_resolver: &JObject,
     uri: &str,
 ) -> Result<AttachmentFile, Box<dyn std::error::Error>> {
-    // URL decode the URI in case it's encoded
-    let decoded_uri = percent_decode(uri);
+    // Use the URI as-is (see note in get_android_uri_info_internal): decoding
+    // would corrupt nested-encoded URIs like Google Photos provider URIs.
+    let decoded_uri = uri.to_string();
 
     // Parse URI
     let uri_string = env.new_string(&decoded_uri)?;

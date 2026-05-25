@@ -643,12 +643,22 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
             appendSpoilerToggle(imgCont, shouldAutoSpoiler);
         }
     } else if (isVideo) {
-        const videoSrc = mediaUrl(filepath);
-        contentArea.innerHTML = `
-            <div class="file-preview-video-container">
-                <video src="${videoSrc}" class="file-preview-video" controls muted></video>
-            </div>
-        `;
+        if (isAndroid) {
+            // Video preview is unreliable on Android; show a generic film icon
+            // (matches openFilePreviewWithFile, the in-app attach path).
+            contentArea.innerHTML = `
+                <div class="file-preview-icon-container">
+                    <div class="icon icon-film file-preview-icon"></div>
+                </div>
+            `;
+        } else {
+            const videoSrc = mediaUrl(filepath);
+            contentArea.innerHTML = `
+                <div class="file-preview-video-container">
+                    <video src="${videoSrc}" class="file-preview-video" controls muted></video>
+                </div>
+            `;
+        }
     } else {
         // Show file icon
         const iconClass = getFileIcon(filepath);

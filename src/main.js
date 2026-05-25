@@ -4415,6 +4415,15 @@ async function login(skipAnimations = false) {
             } catch (e) {
                 console.error('Failed to check for pending deep link:', e);
             }
+
+            // Handle a share (file/text from another app) that arrived on a cold
+            // start before the live listener was attached.
+            try {
+                const pendingShare = await invoke('get_pending_share');
+                if (pendingShare) await handleIncomingShare(pendingShare);
+            } catch (e) {
+                console.error('Failed to check for pending share:', e);
+            }
         });
 
         // Wait for connect + all listener registrations to complete
@@ -7018,6 +7027,45 @@ async function openChat(contact) {
     if (!platformFeatures.is_mobile && !isBlockedChat) {
         domChatMessageInput.focus();
     }
+
+    // Inbound share: if the user picked this chat to share into, attach now.
+    if (pendingShareToSend) {
+        const share = pendingShareToSend;
+        pendingShareToSend = null;
+        if (share.uris && share.uris.length) {
+            if (share.uris.length > 1) {
+                console.warn(`[Share] ${share.uris.length} files shared; sending the first (multi-file is a follow-up)`);
+            }
+            // content:// URIs are read + cached immediately by openFilePreview,
+            // then the user captions/confirms the send in the preview UI.
+            openFilePreview(share.uris[0], contact, '').catch(e => console.error('[Share] preview failed:', e));
+        } else if (share.text) {
+            domChatMessageInput.value = share.text;
+            domChatMessageInput.focus();
+        }
+    }
+}
+
+/** Inbound share awaiting a chat selection (set when another app shares into Vector). */
+let pendingShareToSend = null;
+
+/**
+ * Handle a file/text share received from another app. Drops the user into the
+ * chat list; opening a chat then attaches the share (see openChat tail).
+ */
+async function handleIncomingShare(payload) {
+    if (!payload || ((!payload.uris || !payload.uris.length) && !payload.text)) return;
+    pendingShareToSend = payload;
+    // If a chat was left open (e.g. the app was backgrounded mid-chat, then
+    // foregrounded by the share), tear it down — closeChat() returns to the
+    // list. Otherwise just show the list. Either way we land on a clean chat
+    // list for picking a destination.
+    if (strOpenChat) {
+        await closeChat();
+    } else {
+        await openChatlist();
+    }
+    showToast('Choose a chat to forward to');
 }
 
 /**
@@ -8763,6 +8811,13 @@ window.addEventListener("DOMContentLoaded", async () => {
         
         // User is logged in, execute the action immediately
         await executeDeepLinkAction(evt.payload);
+    });
+
+    // Inbound share from another app (Android share sheet). If not logged in yet,
+    // Rust has stored it pending and the post-login poll will pick it up.
+    await listen('share_received', async (evt) => {
+        if (fInit) return;
+        await handleIncomingShare(evt.payload);
     });
 
     // Listen for critical loading errors from the backend (database, migrations, etc.)

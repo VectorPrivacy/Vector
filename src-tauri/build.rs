@@ -131,6 +131,7 @@ fn main() {
             "sync_all_profiles",
             // Deep link commands
             "get_pending_deep_link",
+            "get_pending_share",
             // Account manager commands
             "get_current_account",
             "list_all_accounts",

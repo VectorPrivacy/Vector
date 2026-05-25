@@ -2,6 +2,7 @@ package io.vectorapp
 
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -26,6 +27,8 @@ class MainActivity : TauriActivity() {
         external fun nativeOnPause()
         @JvmStatic
         external fun nativeOnNotificationTap(chatId: String)
+        @JvmStatic
+        external fun nativeOnShareReceived(uris: Array<String>, text: String)
     }
 
     private var managedWebView: WebView? = null
@@ -51,12 +54,16 @@ class MainActivity : TauriActivity() {
 
         // Handle notification tap that launched the app
         handleNotificationIntent(intent)
+        // Handle a file/text share that launched the app
+        handleSendIntent(intent)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         // Handle notification tap when app is already running
         handleNotificationIntent(intent)
+        // Handle a share that arrived while the app was running
+        handleSendIntent(intent)
     }
 
     override fun onResume() {
@@ -79,6 +86,48 @@ class MainActivity : TauriActivity() {
             try { nativeOnNotificationTap(chatId) } catch (_: Exception) {}
         }
     }
+
+    /**
+     * Handle another app sharing files/text into Vector via the share sheet.
+     * Extracts content:// URIs (single or multiple) plus any plain text and
+     * hands them to native; the frontend then lets the user pick a chat.
+     */
+    private fun handleSendIntent(intent: Intent?) {
+        if (intent == null) return
+        val action = intent.action ?: return
+        if (action != Intent.ACTION_SEND && action != Intent.ACTION_SEND_MULTIPLE) return
+
+        val uris = ArrayList<String>()
+        var text = ""
+        if (action == Intent.ACTION_SEND) {
+            streamUri(intent)?.let { uris.add(it.toString()) }
+            intent.getStringExtra(Intent.EXTRA_TEXT)?.let { text = it }
+        } else {
+            streamUris(intent)?.forEach { uris.add(it.toString()) }
+        }
+
+        // Consume so a rotation/relaunch doesn't re-share the same payload.
+        intent.action = null
+        intent.removeExtra(Intent.EXTRA_STREAM)
+        intent.removeExtra(Intent.EXTRA_TEXT)
+
+        if (uris.isEmpty() && text.isEmpty()) return
+        try { nativeOnShareReceived(uris.toTypedArray(), text) } catch (_: Throwable) {}
+    }
+
+    @Suppress("DEPRECATION")
+    private fun streamUri(intent: Intent): Uri? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+            intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+        else
+            intent.getParcelableExtra(Intent.EXTRA_STREAM)
+
+    @Suppress("DEPRECATION")
+    private fun streamUris(intent: Intent): ArrayList<Uri>? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+            intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)
+        else
+            intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
 
     private fun requestNotificationPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {

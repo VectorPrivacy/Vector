@@ -9,7 +9,7 @@
 //!   onPause starts standalone sync when the app is backgrounded.
 //!   onResume stops it when the app returns to foreground.
 
-use jni::objects::{GlobalRef, JClass, JObject, JString};
+use jni::objects::{GlobalRef, JClass, JObject, JObjectArray, JString};
 use jni::{JavaVM, JNIEnv};
 use nostr_sdk::prelude::*;
 use std::collections::HashSet;
@@ -147,6 +147,47 @@ pub extern "C" fn Java_io_vectorapp_MainActivity_nativeOnNotificationTap(
         };
         let _ = handle.emit("deep_link_action", &action);
     }
+}
+
+/// Called from MainActivity when another app shares files/text *into* Vector
+/// (ACTION_SEND / ACTION_SEND_MULTIPLE). Forwards the content:// URIs and any
+/// text to the share handler, which stores it pending + emits to the frontend.
+#[no_mangle]
+pub extern "C" fn Java_io_vectorapp_MainActivity_nativeOnShareReceived(
+    mut env: JNIEnv,
+    _class: JClass,
+    uris: JObjectArray<'_>,
+    text: JString<'_>,
+) {
+    let mut uri_vec: Vec<String> = Vec::new();
+    if let Ok(len) = env.get_array_length(&uris) {
+        for i in 0..len {
+            if let Ok(obj) = env.get_object_array_element(&uris, i) {
+                let js = JString::from(obj);
+                // Convert into an owned String in a single statement so the
+                // JavaStr/Result temporaries (which borrow `js`) are dropped at
+                // the `;`, before `js` itself drops at the end of the block.
+                let owned: Option<String> = env.get_string(&js).ok().map(|s| s.into());
+                if let Some(s) = owned {
+                    // Only accept content:// URIs. Legitimate cross-app shares
+                    // are always content:// (Android blocks file:// in
+                    // EXTRA_STREAM); rejecting other schemes stops a crafted
+                    // share from coaxing us into reading our own private files
+                    // (e.g. file:///data/data/<pkg>/...) and sending them.
+                    if s.starts_with("content://") {
+                        uri_vec.push(s);
+                    } else if !s.is_empty() {
+                        logcat(&format!("Share: rejected non-content URI scheme: {}",
+                            s.split(':').next().unwrap_or("?")));
+                    }
+                }
+            }
+        }
+    }
+    let text: String = env.get_string(&text).map(|s| s.into()).unwrap_or_default();
+
+    logcat(&format!("Share received: {} file(s), {} text chars", uri_vec.len(), text.len()));
+    crate::share::set_pending_share(uri_vec, text);
 }
 
 /// Called by VectorNotificationService when the foreground service starts.

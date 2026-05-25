@@ -62,6 +62,7 @@ pub mod stored_event {
 pub use vector_core::{StoredEvent, StoredEventBuilder};
 
 mod deep_link;
+mod share;
 
 // Mini Apps (WebXDC-compatible) support
 mod miniapps;
@@ -599,6 +600,7 @@ pub fn run() {
             commands::mls::accept_mls_welcome,
             // Deep link commands
             deep_link::get_pending_deep_link,
+            share::get_pending_share,
             // Account manager commands
             account_manager::get_current_account,
             account_manager::list_all_accounts,
