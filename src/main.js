@@ -4219,6 +4219,19 @@ async function login(skipAnimations = false) {
             console.time('[Boot] hydrateMLSGroupMetadata (bg)');
             hydrateMLSGroupMetadata().then(() => console.timeEnd('[Boot] hydrateMLSGroupMetadata (bg)'));
 
+            // Warm the active theme's emoji pack in the background so it's pinned
+            // instantly on the first picker open (it's runtime-injected, not in
+            // the subscription DB, so it would otherwise fetch on open). Also
+            // registers it with the send resolver, so `:shortcode:` posts as a
+            // real emoji even before the picker is ever opened. The fetch's own
+            // timeout absorbs relay-connect latency, so firing it here is safe.
+            const _themeNaddr = THEME_EMOJI_PACKS[_currentThemeName()];
+            if (_themeNaddr) {
+                _fetchThemePack(_themeNaddr)
+                    .then(() => _registerThemeEmoji(_cachedThemePack()))
+                    .catch(() => {});
+            }
+
             // Helper to show the main UI after login
             const showMainUI = async () => {
                 console.time('[Boot] showMainUI:dom');

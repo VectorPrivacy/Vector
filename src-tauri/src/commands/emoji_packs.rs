@@ -52,6 +52,18 @@ pub async fn unsubscribe_emoji_pack(id: String) -> Result<(), String> {
     emoji_packs::unsubscribe_pack(&id).await
 }
 
+/// Register the active theme pack's emoji (shortcode + url) with the send
+/// resolver so its shortcodes get NIP-30 tags even though it isn't a real
+/// subscription. Pass an empty list to clear (e.g. on a theme with no pack,
+/// or when the user is genuinely subscribed and the DB already covers it).
+#[tauri::command]
+pub fn set_theme_emoji_pack(emojis: Vec<emoji_packs::PackEmoji>) -> Result<(), String> {
+    emoji_packs::set_theme_emoji_tags(
+        emojis.into_iter().map(|e| (e.shortcode, e.url)).collect(),
+    );
+    Ok(())
+}
+
 // ============================================================================
 // Pack creator (own packs)
 // ============================================================================

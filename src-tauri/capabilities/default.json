@@ -92,6 +92,7 @@
     "allow-fetch-emoji-pack-by-naddr",
     "allow-subscribe-emoji-pack",
     "allow-unsubscribe-emoji-pack",
+    "allow-set-theme-emoji-pack",
     "allow-decode-animated-emoji",
     "allow-emoji-pack-create",
     "allow-emoji-pack-delete",

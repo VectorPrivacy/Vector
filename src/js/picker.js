@@ -209,6 +209,19 @@ function _cachedThemePack() {
     return _themePackCache[naddr] || null;
 }
 
+// Register the active theme pack's emoji with the send resolver so its
+// shortcodes get NIP-30 tags even when the pack isn't a real subscription.
+// (Subscribed packs already resolve via the DB; the theme pack doesn't, so it
+// would otherwise post as literal `:shortcode:`.) Pass the cached theme pack,
+// or null to clear. Guarded so we only invoke when the pack actually changes.
+let _registeredThemeEmojiId = null;
+function _registerThemeEmoji(pack) {
+    const id = pack ? pack.id : '';
+    if (id === _registeredThemeEmojiId) return;
+    _registeredThemeEmojiId = id;
+    invoke('set_theme_emoji_pack', { emojis: pack ? pack.emojis : [] }).catch(() => {});
+}
+
 async function _fetchThemePack(naddr, force = false) {
     if (!force && _themePackCache[naddr]) return _themePackCache[naddr];   // cached success
     if (_themePackFetching[naddr]) return _themePackFetching[naddr];
@@ -263,6 +276,9 @@ function _composeAndRenderPacks() {
             combined = themePack ? [themePack, ..._userEmojiPacks] : _userEmojiPacks.slice();
         }
     }
+    // Keep the send resolver in sync with the (non-subscribed) theme pack so
+    // its emoji post as real custom emoji, not plaintext. Cheap + guarded.
+    _registerThemeEmoji(_cachedThemePack());
     const sig = _packsSignature(combined);
     if (sig === _lastPacksSignature && emojiPacksLoaded) return;
     _lastPacksSignature = sig;
@@ -637,6 +653,13 @@ async function _sharePackToClipboard(pack) {
 
 async function _unsubscribePackFromMenu(pack) {
     try {
+        // If this is the active theme's pack, seed the theme cache with the copy
+        // we already have so it stays pinned with no fetch gap after unsubscribe
+        // — it just flips from a subscribed pin to a theme pin, you keep the pack.
+        const themeNaddr = THEME_EMOJI_PACKS[_currentThemeName()];
+        if (themeNaddr && pack.id === themeNaddr && !_themePackCache[themeNaddr]) {
+            _themePackCache[themeNaddr] = { ...pack, is_theme: true };
+        }
         await invoke('unsubscribe_emoji_pack', { id: pack.id });
         await loadEmojiPacks();
     } catch (e) {

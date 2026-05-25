@@ -155,49 +155,69 @@ fn is_valid_shortcode(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+/// Active theme pack's `(shortcode, url)` pairs, registered from the frontend.
+/// The theme pack is shown in the picker without being a real subscription, so
+/// its shortcodes never land in `emoji_pack_items`; this lets the send resolver
+/// still attach NIP-30 tags for them. Replaced wholesale on theme change.
+static THEME_EMOJI_TAGS: std::sync::OnceLock<std::sync::Mutex<Vec<(String, String)>>> =
+    std::sync::OnceLock::new();
+
+fn theme_emoji_tags() -> &'static std::sync::Mutex<Vec<(String, String)>> {
+    THEME_EMOJI_TAGS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// Register (or clear, with an empty vec) the active theme pack's emoji so the
+/// send resolver can tag them even though they aren't a DB subscription.
+pub fn set_theme_emoji_tags(tags: Vec<(String, String)>) {
+    if let Ok(mut g) = theme_emoji_tags().lock() {
+        *g = tags;
+    }
+}
+
 /// Scan `content` for `:shortcode:` patterns and resolve them against
-/// the user's currently-subscribed packs. Returns deduped emoji tags
-/// in first-match order. Used by the send pipeline to attach NIP-30
-/// emoji tags so recipients without the pack subscribed still render.
+/// the user's currently-subscribed packs (plus the active theme pack).
+/// Returns deduped emoji tags in first-match order. Used by the send pipeline
+/// to attach NIP-30 emoji tags so recipients without the pack subscribed still
+/// render.
 pub fn resolve_outbound_emoji_tags(content: &str) -> Vec<crate::types::EmojiTag> {
     if content.is_empty() || !content.contains(':') {
         return Vec::new();
     }
 
-    let conn = match crate::db::get_db_connection_guard_static() {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-
-    // INNER JOIN matches `load_all_packs` — soft-removed own packs
-    // should not leak their Blossom URLs through outbound emoji tags
-    // when the user types a shortcode they thought was hidden.
-    let mut stmt = match conn.prepare(
-        "SELECT i.shortcode, i.url
-         FROM emoji_pack_items i
-         INNER JOIN emoji_packs p ON p.addr = i.pack_addr
-         INNER JOIN emoji_pack_subscriptions s ON s.addr = p.addr
-         ORDER BY p.is_own DESC, p.updated_at DESC, i.position ASC"
-    ) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-
-    let rows = match stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    }) {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
-
     // Own pack wins shortcode collisions, then subscribed pack order
     // (mirrors the picker resolution rule documented in the plan).
     let mut by_code: HashMap<String, String> = HashMap::new();
-    for row in rows {
-        if let Ok((code, url)) = row {
-            by_code.entry(code).or_insert(url);
+
+    // Subscribed packs (highest priority). INNER JOIN matches `load_all_packs`
+    // — soft-removed own packs shouldn't leak their Blossom URLs through
+    // outbound tags when the user types a shortcode they thought was hidden.
+    if let Ok(conn) = crate::db::get_db_connection_guard_static() {
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT i.shortcode, i.url
+             FROM emoji_pack_items i
+             INNER JOIN emoji_packs p ON p.addr = i.pack_addr
+             INNER JOIN emoji_pack_subscriptions s ON s.addr = p.addr
+             ORDER BY p.is_own DESC, p.updated_at DESC, i.position ASC"
+        ) {
+            if let Ok(rows) = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            }) {
+                for row in rows.flatten() {
+                    by_code.entry(row.0).or_insert(row.1);
+                }
+            }
         }
     }
+
+    // Active theme pack fills any gaps. It's shown in the picker without being
+    // a real subscription, so its shortcodes aren't in the DB — registered
+    // from the frontend via `set_theme_emoji_tags`. Subscribed packs win.
+    if let Ok(theme) = theme_emoji_tags().lock() {
+        for (code, url) in theme.iter() {
+            by_code.entry(code.clone()).or_insert_with(|| url.clone());
+        }
+    }
+
     if by_code.is_empty() {
         return Vec::new();
     }

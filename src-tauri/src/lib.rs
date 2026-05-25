@@ -715,6 +715,7 @@ pub fn run() {
             commands::emoji_packs::fetch_emoji_pack_by_naddr,
             commands::emoji_packs::subscribe_emoji_pack,
             commands::emoji_packs::unsubscribe_emoji_pack,
+            commands::emoji_packs::set_theme_emoji_pack,
             commands::emoji_packs::decode_animated_emoji,
             commands::emoji_packs::emoji_pack_create,
             commands::emoji_packs::emoji_pack_delete,
