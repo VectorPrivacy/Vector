@@ -376,8 +376,14 @@ fn process_file_attachment(
 
     // Extract image metadata if provided
     let img_meta: Option<ImageMetadata> = {
+        // The sender emits the thumbhash under the `thumb` tag (see
+        // sending.rs); accept `thumbhash` too for forward-compat. These names
+        // had diverged (send `thumb` / receive `thumbhash`), which silently
+        // dropped img_meta on every received image — so they rendered as
+        // generic file boxes with no thumbhash preview.
         let thumbhash_opt = rumor.tags
-            .find(TagKind::Custom(Cow::Borrowed("thumbhash")))
+            .find(TagKind::Custom(Cow::Borrowed("thumb")))
+            .or_else(|| rumor.tags.find(TagKind::Custom(Cow::Borrowed("thumbhash"))))
             .and_then(|tag| tag.content())
             .map(|s| s.to_string());
 
@@ -1375,6 +1381,40 @@ mod tests {
                 assert_eq!(meta.width, 1920);
                 assert_eq!(meta.height, 1080);
                 assert_eq!(meta.thumbhash, "base64data");
+            }
+            _ => panic!("Expected FileAttachment"),
+        }
+    }
+
+    /// Guards the send/receive tag-name contract: the sender emits the
+    /// thumbhash under `thumb` (sending.rs), so the receiver MUST read it from
+    /// `thumb`. These had diverged (`thumb` vs `thumbhash`), silently dropping
+    /// img_meta on every received image. The test above uses the `thumbhash`
+    /// alias; this one uses the real wire tag.
+    #[test]
+    fn test_file_attachment_thumb_tag_is_read() {
+        let keys = test_keypair();
+        let ox_hash = "b".repeat(64);
+        let t = tags(vec![
+            custom_tag("decryption-key", &["aabbccdd"]),
+            custom_tag("decryption-nonce", &["11223344"]),
+            custom_tag("ox", &[&ox_hash]),
+            custom_tag("file-type", &["image/png"]),
+            custom_tag("thumb", &["realwiretag"]),
+            custom_tag("dim", &["800x600"]),
+            custom_tag("size", &["5000"]),
+        ]);
+        let rumor = make_rumor(&keys, Kind::from_u16(15), "https://blossom.example/bbb.png", t);
+        let ctx = dm_context(&keys);
+        let result = process_rumor(rumor, ctx, &temp_dir()).unwrap();
+
+        match result {
+            RumorProcessingResult::FileAttachment(msg) => {
+                let meta = msg.attachments[0].img_meta.as_ref()
+                    .expect("img_meta must be populated from the `thumb` tag");
+                assert_eq!(meta.thumbhash, "realwiretag");
+                assert_eq!(meta.width, 800);
+                assert_eq!(meta.height, 600);
             }
             _ => panic!("Expected FileAttachment"),
         }
