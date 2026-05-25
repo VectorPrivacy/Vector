@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 use std::sync::LazyLock;
 use tokio::sync::Mutex;
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Runtime};
 
 use crate::{STATE, TAURI_APP, ChatType, Attachment};
 use crate::{util, net, db, mls};
@@ -272,6 +272,60 @@ pub fn decode_thumbhash(thumbhash: String) -> String {
     util::decode_thumbhash_to_base64(&thumbhash)
 }
 
+/// Open a downloaded file with the user's chosen app.
+///
+/// Android has no "reveal in folder", so this launches an ACTION_VIEW chooser
+/// via the FileProvider (the idiomatic equivalent). Desktop continues to use
+/// the opener plugin's `revealItemInDir` from the frontend, so this is a no-op
+/// fallback there. Returns true if an app was launched.
+#[tauri::command]
+pub async fn open_attachment(path: String) -> Result<bool, String> {
+    #[cfg(target_os = "android")]
+    {
+        ensure_path_in_download_dir(&path)?;
+        crate::android::storage::open_file(&path)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = path;
+        Ok(false)
+    }
+}
+
+/// Share a downloaded file via Android's share sheet (ACTION_SEND).
+/// No-op on non-Android (desktop shares are handled elsewhere). Returns true
+/// if the share sheet was launched.
+#[tauri::command]
+pub async fn share_attachment(path: String) -> Result<bool, String> {
+    #[cfg(target_os = "android")]
+    {
+        ensure_path_in_download_dir(&path)?;
+        crate::android::storage::share_file(&path)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = path;
+        Ok(false)
+    }
+}
+
+/// Reject any path that doesn't resolve to a real file inside Vector's download
+/// dir. Hardening: the open/share intents hand a content:// URI to other apps
+/// via the FileProvider (which is scoped to all external storage), so a
+/// compromised webview must not be able to surface arbitrary files. Canonical
+/// comparison defeats `..` traversal and symlinks.
+#[cfg(target_os = "android")]
+fn ensure_path_in_download_dir(path: &str) -> Result<(), String> {
+    let dl = std::fs::canonicalize(vector_core::db::get_download_dir())
+        .map_err(|_| "download dir unavailable".to_string())?;
+    let target = std::fs::canonicalize(path).map_err(|_| "file not found".to_string())?;
+    if target.starts_with(&dl) {
+        Ok(())
+    } else {
+        Err("path is outside the download directory".to_string())
+    }
+}
+
 /// Download and decrypt an attachment
 #[tauri::command]
 pub async fn download_attachment(npub: String, msg_id: String, attachment_id: String) -> bool {
@@ -304,14 +358,12 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                             return false;
                         }
 
-                        // Check if file already exists on disk (downloaded but flag was wrong)
-                        let base_directory = if cfg!(target_os = "ios") {
-                            tauri::path::BaseDirectory::Document
-                        } else {
-                            tauri::path::BaseDirectory::Download
-                        };
-
-                        if let Ok(vector_dir) = handle.path().resolve("vector", base_directory) {
+                        // Check if file already exists on disk (downloaded but flag was wrong).
+                        // Use the same canonical dir the write path uses
+                        // (vector-core download dir) so dedup looks where files
+                        // actually land — not a divergent Tauri-resolved path.
+                        {
+                            let vector_dir = vector_core::db::get_download_dir();
                             // Check both hash-based and human-readable filenames
                             let hash_path = vector_dir.join(format!("{}.{}", util::bytes_to_hex_32(&attachment.id), &*attachment.extension));
                             let name_path = if !attachment.name.is_empty() {
@@ -489,6 +541,11 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
 
             // Update state with successful download
             let path_str = hash_file_path.to_string_lossy().to_string();
+
+            // Index the file so it appears in the gallery / file managers now.
+            #[cfg(target_os = "android")]
+            crate::android::storage::scan_file(&path_str);
+
             {
                 let mut state = STATE.lock().await;
                 state.update_attachment(&npub, &msg_id, &attachment_id, |att| {

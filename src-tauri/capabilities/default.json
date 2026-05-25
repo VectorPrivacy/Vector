@@ -79,6 +79,8 @@
     "allow-generate-thumbhash-preview",
     "allow-decode-thumbhash",
     "allow-download-attachment",
+    "allow-open-attachment",
+    "allow-share-attachment",
     "allow-login",
     "allow-login-from-stored-key",
     "allow-connect-bunker",

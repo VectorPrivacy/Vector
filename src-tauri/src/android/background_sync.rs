@@ -728,12 +728,15 @@ fn bootstrap_pipeline(data_dir: &str) -> Result<String, String> {
     // Set APP_DATA_DIR so static path helpers work
     crate::account_manager::set_app_data_dir(data_path.clone());
 
-    // Install the download dir override before any inbound event
-    // handler persists an attachment. Must match `lib.rs` setup hook
-    // (OnceLock::set is winner-takes-all and the two race depending
-    // on bg-sync vs Activity start order); both compute the same
-    // `<app_data>/vector_downloads` deterministically.
-    vector_core::db::set_download_dir(data_path.join("vector_downloads"));
+    // Install the download dir override before any inbound event handler
+    // persists an attachment. Must match the `lib.rs` setup hook (OnceLock::set
+    // is winner-takes-all and the two race depending on bg-sync vs Activity
+    // start order); both resolve the same external media dir
+    // (/Android/media/<pkg>/Vector). The service is itself a Context, so the
+    // JNI call works here.
+    if let Some(dir) = crate::android::storage::external_media_dir().map(std::path::PathBuf::from) {
+        vector_core::db::set_download_dir(dir);
+    }
 
     // Prefer the active-account marker so background sync stays aligned with
     // whichever account the user last picked in the GUI. Fall back to the

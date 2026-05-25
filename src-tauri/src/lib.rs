@@ -370,8 +370,15 @@ pub fn run() {
             {
                 #[cfg(target_os = "android")]
                 {
-                    if let Ok(data_dir) = handle.path().app_data_dir() {
-                        vector_core::db::set_download_dir(data_dir.join("vector_downloads"));
+                    // Public, user-accessible downloads: external media storage
+                    // (/Android/media/<pkg>/Vector). Browsable in file managers
+                    // and gallery-indexable, no runtime permission.
+                    if let Some(dir) = android::storage::external_media_dir().map(std::path::PathBuf::from) {
+                        // Asset protocol (image display via convertFileSrc) is
+                        // scoped statically in tauri.conf.json and can't name the
+                        // device-specific media path, so allow it at runtime.
+                        let _ = handle.asset_protocol_scope().allow_directory(&dir, true);
+                        vector_core::db::set_download_dir(dir);
                     }
                 }
                 #[cfg(not(target_os = "android"))]
@@ -427,6 +434,10 @@ pub fn run() {
             #[cfg(target_os = "android")]
             {
                 let mut allowed_dirs = Vec::new();
+                // Current (public) download dir — external media storage.
+                allowed_dirs.push(vector_core::db::get_download_dir());
+                // Legacy locations, kept readable so attachments downloaded
+                // before the migration still play until their paths are moved.
                 if let Ok(dir) = handle.path().download_dir() {
                     allowed_dirs.push(dir.join("vector"));
                 }
@@ -755,6 +766,8 @@ pub fn run() {
             commands::attachments::generate_thumbhash_preview,
             commands::attachments::decode_thumbhash,
             commands::attachments::download_attachment,
+            commands::attachments::open_attachment,
+            commands::attachments::share_attachment,
             // Sync commands (commands/sync.rs)
             commands::sync::queue_profile_sync,
             commands::sync::queue_chat_profiles_sync,

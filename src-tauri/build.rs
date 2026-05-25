@@ -71,6 +71,8 @@ fn main() {
             "generate_thumbhash_preview",
             "decode_thumbhash",
             "download_attachment",
+            "open_attachment",
+            "share_attachment",
             "login",
             "login_from_stored_key",
             "setup_encryption",

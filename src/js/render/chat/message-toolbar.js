@@ -709,13 +709,20 @@ async function _dmsgOpenMessageMenu(rowEl, x, y) {
     if (mine && hasContent && !hasAttachments) {
         items.push({ label: 'Edit', icon: 'edit', onClick: () => { if (msg) startEditMessage(targetId, msg.content); } });
     }
-    // Reveal-in-folder: desktop only (no Android equivalent), any downloaded attachment.
-    if (!platformFeatures?.is_mobile) {
+    // Reveal/Open a downloaded attachment. Desktop reveals it in the file
+    // manager; Android has no "reveal in folder", so open it with the user's
+    // chosen app (ACTION_VIEW chooser via the backend).
+    {
         const downloadedPath = (msg && msg.attachments)
             ? (msg.attachments.find(a => a.downloaded) || {}).path
             : null;
         if (downloadedPath) {
-            items.push({ label: 'Reveal in folder', icon: 'file-search', onClick: () => revealItemInDir(downloadedPath) });
+            if (platformFeatures?.os === 'android') {
+                items.push({ label: 'Open', icon: 'file-search', onClick: () => invoke('open_attachment', { path: downloadedPath }) });
+                items.push({ label: 'Share', icon: 'share', onClick: () => invoke('share_attachment', { path: downloadedPath }) });
+            } else if (!platformFeatures?.is_mobile) {
+                items.push({ label: 'Reveal in folder', icon: 'file-search', onClick: () => revealItemInDir(downloadedPath) });
+            }
         }
     }
     // Copy — text selection is off on mobile. If the message carries markdown,

@@ -5,6 +5,7 @@ pub mod media_server;
 pub mod miniapp;
 pub mod miniapp_jni;
 pub mod permissions;
+pub mod storage;
 pub mod utils;
 
 // Re-exports for common Android utilities

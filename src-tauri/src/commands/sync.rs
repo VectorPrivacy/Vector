@@ -91,6 +91,17 @@ pub async fn fetch_messages<R: Runtime>(
         return;
     };
 
+    // One-time (per-account) migration of legacy app-private downloads into the
+    // public "Vector" media dir. Runs here — after account selection so the DB
+    // is the active account's, before the frontend loads messages for display.
+    // Blocking file I/O (potentially thousands of files) goes on a blocking
+    // thread; awaited so display gates on it. It emits "download_migration"
+    // progress events for the boot overlay.
+    #[cfg(target_os = "android")]
+    {
+        let _ = tokio::task::spawn_blocking(crate::android::storage::migrate_old_downloads).await;
+    }
+
     // Single-relay reconnection sync — uses negentropy just like the main sync
     if let Some(url) = relay_url {
         let recon_start = std::time::Instant::now();
