@@ -21,7 +21,7 @@ jobs:
             args: '--target x86_64-apple-darwin'
           - platform: 'ubuntu-22.04'
             args: ''
-          - platform: 'windows-latest'
+          - platform: 'windows-2022'
             args: ''
 
     runs-on: ${{ matrix.platform }}
@@ -51,7 +51,7 @@ jobs:
           sudo apt-get install -y vulkan-sdk
 
       - name: Install Vulkan SDK and OpenSSL (Windows)
-        if: matrix.platform == 'windows-latest'
+        if: matrix.platform == 'windows-2022'
         run: |
           Write-Host "Installing Vulkan components..."
 
@@ -85,7 +85,7 @@ jobs:
           & "$vcpkgBin\glslc.exe" --version
 
       - name: Shorten cargo target dir (Windows)
-        if: matrix.platform == 'windows-latest'
+        if: matrix.platform == 'windows-2022'
         shell: pwsh
         run: echo "CARGO_TARGET_DIR=C:\cargo-target" >> $env:GITHUB_ENV
 
