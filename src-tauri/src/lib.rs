@@ -569,7 +569,6 @@ pub fn run() {
             commands::mls::load_mls_keypackages,
             commands::mls::list_mls_groups,
             commands::mls::get_mls_group_metadata,
-            commands::mls::list_group_cursors,
             commands::mls::create_mls_group,
             commands::mls::create_group_chat,
             commands::mls::upload_group_avatar,

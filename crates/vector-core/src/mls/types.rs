@@ -86,13 +86,6 @@ pub struct KeyPackageIndexEntry {
     pub expires_at: u64,
 }
 
-/// Event cursor tracking for a group stored in "mls_event_cursors"
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EventCursor {
-    pub last_seen_event_id: String,
-    pub last_seen_at: u64,
-}
-
 // ============================================================================
 // MLS Error
 // ============================================================================
@@ -320,18 +313,6 @@ mod tests {
         assert!(full.evicted);
         // Profile fields via .profile
         assert_eq!(full.profile.name, "My Group");
-    }
-
-    #[test]
-    fn event_cursor_serde() {
-        let cursor = EventCursor {
-            last_seen_event_id: "abc123".into(),
-            last_seen_at: 1700000000,
-        };
-        let json = serde_json::to_string(&cursor).unwrap();
-        let decoded: EventCursor = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.last_seen_event_id, "abc123");
-        assert_eq!(decoded.last_seen_at, 1700000000);
     }
 
     #[test]

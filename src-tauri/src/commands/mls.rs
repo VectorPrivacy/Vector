@@ -11,7 +11,7 @@ use tauri::Emitter;
 use std::sync::Arc;
 #[cfg(not(target_os = "android"))]
 use tauri_plugin_fs::FsExt;
-use crate::{db, mls, MlsService, NotificationData, show_notification_generic, nostr_client, NOTIFIED_WELCOMES, STATE, TAURI_APP, active_trusted_relays};
+use crate::{db, mls, MlsService, NotificationData, show_notification_generic, NOTIFIED_WELCOMES, STATE, TAURI_APP};
 use crate::util::{bytes_to_hex_string, hex_string_to_bytes};
 
 // ============================================================================
@@ -85,20 +85,6 @@ pub async fn get_mls_group_metadata() -> Result<Vec<serde_json::Value>, String> 
         .collect())
 }
 
-/// List cursors for all MLS groups (for debugging/QA)
-#[tauri::command]
-pub async fn list_group_cursors() -> Result<serde_json::Value, String> {
-    tokio::task::spawn_blocking(move || {
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async move {
-            let mls = MlsService::new_persistent_static().map_err(|e| e.to_string())?;
-            let cursors = mls.read_event_cursors().map_err(|e| e.to_string())?;
-            serde_json::to_value(&cursors).map_err(|e| e.to_string())
-        })
-    })
-    .await
-    .map_err(|e| format!("Task join error: {}", e))?
-}
 
 // ============================================================================
 // Group Management Commands
@@ -866,413 +852,60 @@ pub async fn update_group_metadata(
     .map_err(|e| format!("Task join error: {}", e))?
 }
 
-/// Sync MLS groups with the network
-/// If group_id is provided, sync only that group
-/// If None, sync all groups
+/// Sync MLS groups with the network via NIP-77 negentropy.
+/// If `group_id` is provided, sync only that group; otherwise sync all groups.
+/// Full-set reconciliation (no recency window) — the catch-up / archive path.
 #[tauri::command]
 pub async fn sync_mls_groups_now(
     group_id: Option<String>,
 ) -> Result<(u32, u32), String> {
-    // Pin this multi-group sync to the session that requested it. The
-    // `mls` instance captures `db_path` at construction; if a swap
-    // happens mid-loop it would otherwise keep decrypting account A's
-    // messages and (via `sync_group_since_cursor`) try to write them
-    // into account B's STATE. The inner per-group function is also
-    // session-gated, but bailing here saves the wasted network fetch.
-    let session = vector_core::state::SessionGuard::capture();
-    // Run non-Send MLS engine work on blocking thread; drive async via current runtime
-    tokio::task::spawn_blocking(move || {
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async move {
-            if !session.is_valid() {
-                return Ok((0u32, 0u32));
-            }
-            let mls = MlsService::new_persistent_static().map_err(|e| e.to_string())?;
-
-            if let Some(id) = group_id {
-                // Sync specific group since last cursor
-                mls.sync_group_since_cursor(&id, None)
-                    .await
-                    .map_err(|e| e.to_string())
-            } else {
-                // Multi-group sync: load MLS groups from SQL and sync each
-                let group_ids: Vec<String> = match db::load_mls_groups().await {
-                    Ok(groups) => {
-                        groups.into_iter()
-                            .filter(|g| !g.evicted)
-                            .map(|g| g.group.group_id)
-                            .collect()
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to load MLS groups: {}", e);
-                        Vec::new()
-                    }
-                };
-
-                let mut total_processed: u32 = 0;
-                let mut total_new: u32 = 0;
-
-                for gid in group_ids {
-                    if !session.is_valid() {
-                        return Ok((total_processed, total_new));
-                    }
-                    match mls.sync_group_since_cursor(&gid, None).await {
-                        Ok((processed, new_msgs)) => {
-                            total_processed = total_processed.saturating_add(processed);
-                            total_new = total_new.saturating_add(new_msgs);
-                        }
-                        Err(e) => {
-                            eprintln!("[MLS] sync_group_since_cursor failed for {}: {}", gid, e);
-                        }
-                    }
-
-                    // Sync participants array to ensure it matches actual group members
-                    if let Err(e) = sync_mls_group_participants(gid.clone()).await {
-                        eprintln!("[MLS] Failed to sync participants for group {}: {}", gid, e);
-                    }
-                }
-
-                Ok((total_processed, total_new))
-            }
-        })
-    })
-    .await
-    .map_err(|e| format!("Task join error: {}", e))?
+    reconcile_and_apply_mls(group_id, None).await
 }
 
-/// Quick MLS group sync using NIP-77 negentropy set reconciliation.
-/// Exchanges fingerprints with relays to identify only missing events, then fetches
-/// the delta — near-instant when already up to date. Only syncs groups active within 7 days.
+/// Quick MLS group sync — negentropy reconciliation over the last 7 days.
+/// Near-instant when already up to date; dormant groups simply have no
+/// in-window delta and are caught up by the archive path instead.
 pub async fn sync_mls_groups_quick() -> Result<(u32, u32), String> {
-    use futures_util::StreamExt;
+    let since = Timestamp::now().as_secs().saturating_sub(7 * 24 * 3600);
+    reconcile_and_apply_mls(None, Some(since)).await
+}
 
-    // Session pinning — see `sync_mls_groups_now` for the rationale.
+/// Archive MLS group sync — full-set negentropy reconciliation across all
+/// non-evicted groups. This is the long-offline recovery path: negentropy
+/// finds every event we're missing regardless of age, and the per-group
+/// apply ratchets them in order.
+pub async fn sync_mls_groups_archive() -> Result<(u32, u32), String> {
+    reconcile_and_apply_mls(None, None).await
+}
+
+/// Reconcile MLS group messages via NIP-77 negentropy and apply them in order.
+///
+/// Thin Tauri-side wrapper: the engine is non-Send, so the work runs on a
+/// blocking thread. All logic lives in vector-core's `reconcile_and_apply`.
+///
+/// - `only_group`: restrict to one group (`None` = all non-evicted).
+/// - `since`: `Some(ts)` bounds the reconcile window (quick); `None` floors at
+///   the oldest group's `created_at` for a full catch-up.
+async fn reconcile_and_apply_mls(
+    only_group: Option<String>,
+    since: Option<u64>,
+) -> Result<(u32, u32), String> {
+    // Pin to the session that requested this sync. The fetched events belong to
+    // the account active now; a mid-flight swap would otherwise apply account
+    // A's messages into account B's storage. (reconcile_and_apply re-checks too.)
     let session = vector_core::state::SessionGuard::capture();
     tokio::task::spawn_blocking(move || {
         let rt = tokio::runtime::Handle::current();
         rt.block_on(async move {
-            if !session.is_valid() {
-                return Ok((0u32, 0u32));
-            }
+            if !session.is_valid() { return Ok((0u32, 0u32)); }
             let mls = MlsService::new_persistent_static().map_err(|e| e.to_string())?;
-
-            // Load all non-evicted groups
-            let groups = db::load_mls_groups().await.unwrap_or_default();
-            let active_groups: Vec<_> = groups.into_iter()
-                .filter(|g| !g.evicted)
-                .collect();
-
-            if active_groups.is_empty() {
-                println!("[MLS] Quick sync: no groups to sync");
-                return Ok((0, 0));
-            }
-
-            // Load cursors to determine which groups are recently active
-            let cursors = mls.read_event_cursors().unwrap_or_default();
-            let now_secs = Timestamp::now().as_secs();
-            let seven_days_ago = now_secs.saturating_sub(7 * 24 * 3600);
-
-            // Filter to recently-active groups:
-            // - Groups with a cursor last_seen_at within 7 days (had recent messages)
-            // - Groups created within 7 days (newly joined, need initial sync)
-            let recent_groups: Vec<_> = active_groups.into_iter()
-                .filter(|g| {
-                    let cursor_recent = cursors.get(&g.group_id)
-                        .map(|c| c.last_seen_at >= seven_days_ago)
-                        .unwrap_or(false);
-                    let created_recent = g.created_at >= seven_days_ago;
-                    cursor_recent || created_recent
-                })
-                .collect();
-
-            if recent_groups.is_empty() {
-                println!("[MLS] Quick sync: no recently-active groups (within 7d)");
-                return Ok((0, 0));
-            }
-
-            // Compute earliest cursor across all recent groups for the `since` filter
-            let min_since = recent_groups.iter()
-                .map(|g| {
-                    cursors.get(&g.group_id)
-                        .map(|c| c.last_seen_at)
-                        .unwrap_or_else(|| {
-                            if g.created_at > 0 { g.created_at } else { seven_days_ago }
-                        })
-                })
-                .min()
-                .unwrap_or(seven_days_ago);
-
-            let group_ids: Vec<String> = recent_groups.iter()
-                .map(|g| g.group_id.clone())
-                .collect();
-
-            // Load known MLS event IDs for negentropy fingerprinting (SQL-filtered)
-            let neg_items = db::load_mls_negentropy_items(Some(min_since)).unwrap_or_default();
-
-            println!("[MLS] Quick sync (negentropy): {} groups, {} known items, since={}",
-                recent_groups.len(), neg_items.len(), min_since);
-
-            // Build filter for negentropy reconciliation
-            let filter = Filter::new()
-                .kind(Kind::MlsGroupMessage)
-                .since(Timestamp::from_secs(min_since))
-                .custom_tags(
-                    SingleLetterTag::lowercase(Alphabet::H),
-                    group_ids.iter().map(|s| s.as_str()),
-                );
-
-            // Negentropy dry-run: exchange fingerprints to find missing events
-            let sync_opts = nostr_sdk::SyncOptions::new()
-                .direction(nostr_sdk::SyncDirection::Down)
-                .initial_timeout(std::time::Duration::from_secs(10))
-                .dry_run();
-
-            let client = nostr_client().ok_or("Nostr client not initialized")?;
-
-            // Get Relay objects for trusted relays
-            let relay_map = client.relays().await;
-            let trusted_urls = active_trusted_relays().await;
-            let trusted_relays: Vec<(String, nostr_sdk::Relay)> = trusted_urls.iter()
-                .filter_map(|url| {
-                    let normalized = url.trim_end_matches('/');
-                    relay_map.iter()
-                        .find(|(u, _)| u.as_str().trim_end_matches('/') == normalized)
-                        .map(|(_, r)| (url.to_string(), r.clone()))
-                })
-                .collect();
-            drop(relay_map);
-
-            if trusted_relays.is_empty() {
-                println!("[MLS] Quick sync: no trusted relays available");
-                return Ok((0, 0));
-            }
-
-            // Race all trusted relays — first to reconcile drives sync
-            let mut relay_futs = futures_util::stream::FuturesUnordered::new();
-            for (url, relay) in &trusted_relays {
-                let url = url.clone();
-                let relay = relay.clone();
-                let f = filter.clone();
-                let items = neg_items.clone();
-                let opts = sync_opts.clone();
-                relay_futs.push(async move {
-                    let result = tokio::time::timeout(
-                        std::time::Duration::from_secs(10),
-                        relay.sync_with_items(f, items, &opts),
-                    ).await;
-                    (url, result)
-                });
-            }
-
-            // Drain until first successful reconciliation
-            let mut missing_ids: Vec<EventId> = Vec::new();
-            let mut primary_succeeded = false;
-            while let Some((url, result)) = relay_futs.next().await {
-                match result {
-                    Ok(Ok(recon)) => {
-                        missing_ids = recon.remote.into_iter().collect();
-                        println!("[MLS] Quick sync: {} reconciled, {} missing events",
-                            url, missing_ids.len());
-                        primary_succeeded = true;
-                        break;
-                    }
-                    Ok(Err(e)) => eprintln!("[MLS] Quick sync: {} negentropy failed: {}", url, e),
-                    Err(_) => eprintln!("[MLS] Quick sync: {} negentropy timed out (10s)", url),
-                }
-            }
-
-            // Spawn background task for remaining relays — they fill gaps silently
-            if primary_succeeded && !relay_futs.is_empty() {
-                let primary_set: std::collections::HashSet<EventId> = missing_ids.iter().copied().collect();
-                let bg_client = client.clone();
-                let bg_group_ids: Vec<String> = recent_groups.iter().map(|g| g.group_id.clone()).collect();
-                // SessionGuard: bg-fetch writes to per-account MLS
-                // storage. After swap the captured group_ids belong to
-                // account A but storage targets account B — bail.
-                let session = vector_core::state::SessionGuard::capture();
-                tokio::spawn(async move {
-                    if !session.is_valid() { return; }
-                    let mut extra_ids: Vec<EventId> = Vec::new();
-                    while let Some((url, result)) = relay_futs.next().await {
-                        match result {
-                            Ok(Ok(recon)) => {
-                                let new: Vec<EventId> = recon.remote.into_iter()
-                                    .filter(|id| !primary_set.contains(id))
-                                    .collect();
-                                if !new.is_empty() {
-                                    println!("[MLS][BG] {} reconciled: {} additional missing events", url, new.len());
-                                    extra_ids.extend(new);
-                                } else {
-                                    println!("[MLS][BG] {} reconciled: 0 additional", url);
-                                }
-                            }
-                            Ok(Err(e)) => eprintln!("[MLS][BG] {} negentropy failed: {}", url, e),
-                            Err(_) => eprintln!("[MLS][BG] {} timed out (10s)", url),
-                        }
-                    }
-
-                    // Fetch + process extra events found by background relays
-                    if !extra_ids.is_empty() {
-                        if !session.is_valid() { return; }
-                        println!("[MLS][BG] Fetching {} additional events from background relays", extra_ids.len());
-                        match bg_client.fetch_events_from(
-                            active_trusted_relays().await,
-                            Filter::new().ids(extra_ids).kind(Kind::MlsGroupMessage),
-                            std::time::Duration::from_secs(15),
-                        ).await {
-                            Ok(events) => {
-                                if !session.is_valid() { return; }
-                                // Group by h-tag and process per group
-                                let mut by_group: std::collections::HashMap<String, Vec<nostr_sdk::Event>> =
-                                    std::collections::HashMap::new();
-                                for event in events {
-                                    if let Some(h_tag) = event.tags.find(TagKind::SingleLetter(
-                                        SingleLetterTag::lowercase(Alphabet::H),
-                                    )) {
-                                        if let Some(gid) = h_tag.content() {
-                                            by_group.entry(gid.to_string()).or_default().push(event);
-                                        }
-                                    }
-                                }
-                                if let Ok(mls) = MlsService::new_persistent_static() {
-                                    for gid in &bg_group_ids {
-                                        if let Some(group_events) = by_group.remove(gid) {
-                                            match mls.sync_group_since_cursor(gid, Some(group_events)).await {
-                                                Ok((_, new)) if new > 0 => {
-                                                    println!("[MLS][BG] {} new messages for group {}", new, &gid[..8.min(gid.len())]);
-                                                }
-                                                Err(e) => eprintln!("[MLS][BG] sync failed for {}: {}", &gid[..8.min(gid.len())], e),
-                                                _ => {}
-                                            }
-                                        }
-                                    }
-                                }
-                                println!("[MLS][BG] Background relay sync complete");
-                            }
-                            Err(e) => eprintln!("[MLS][BG] Fetch error: {}", e),
-                        }
-                    }
-                });
-            }
-
-            if missing_ids.is_empty() {
-                println!("[MLS] Quick sync: no missing events (already up to date)");
-                return Ok((0, 0));
-            }
-
-            // Fetch only the missing events
-            let events = client
-                .fetch_events_from(
-                    active_trusted_relays().await,
-                    Filter::new()
-                        .ids(missing_ids)
-                        .kind(Kind::MlsGroupMessage),
-                    std::time::Duration::from_secs(15),
-                )
+            mls.reconcile_and_apply(only_group.as_deref(), since)
                 .await
-                .map_err(|e| format!("MLS negentropy fetch failed: {}", e))?;
-
-            println!("[MLS] Quick sync: fetched {} missing events for {} groups",
-                events.len(), recent_groups.len());
-
-            // Group events by h-tag value
-            let mut events_by_group: std::collections::HashMap<String, Vec<nostr_sdk::Event>> =
-                std::collections::HashMap::new();
-            for event in events {
-                if let Some(h_tag) = event.tags.find(TagKind::SingleLetter(
-                    SingleLetterTag::lowercase(Alphabet::H),
-                )) {
-                    if let Some(gid) = h_tag.content() {
-                        events_by_group
-                            .entry(gid.to_string())
-                            .or_default()
-                            .push(event);
-                    }
-                }
-            }
-
-            // Process each group's events through the engine (with pre-fetched events)
-            let mut total_processed: u32 = 0;
-            let mut total_new: u32 = 0;
-
-            for group in &recent_groups {
-                if !session.is_valid() {
-                    return Ok((total_processed, total_new));
-                }
-                let group_events = events_by_group.remove(&group.group_id).unwrap_or_default();
-                if group_events.is_empty() {
-                    continue;
-                }
-
-                match mls.sync_group_since_cursor(&group.group_id, Some(group_events)).await {
-                    Ok((processed, new_msgs)) => {
-                        total_processed = total_processed.saturating_add(processed);
-                        total_new = total_new.saturating_add(new_msgs);
-                    }
-                    Err(e) => {
-                        eprintln!("[MLS] Quick sync failed for group {}: {}", group.group_id, e);
-                    }
-                }
-
-                if let Err(e) = sync_mls_group_participants(group.group_id.clone()).await {
-                    eprintln!("[MLS] Failed to sync participants for group {}: {}", group.group_id, e);
-                }
-            }
-
-            println!("[MLS] Quick sync complete (negentropy): {} processed, {} new messages",
-                total_processed, total_new);
-            Ok((total_processed, total_new))
+                .map_err(|e| e.to_string())
         })
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?
-}
-
-/// Sync the participants array for an MLS group chat with the actual members from the engine
-/// This ensures chat.participants is always up-to-date
-/// (Internal helper - not a Tauri command)
-pub async fn sync_mls_group_participants(group_id: String) -> Result<(), String> {
-    // Get actual members from the engine
-    let group_members = get_mls_group_members(group_id.clone()).await?;
-
-    // Update the chat's participants array
-    let mut state = STATE.lock().await;
-    if let Some(chat_idx) = state.chats.iter().position(|c| c.id == group_id) {
-        let old_count = state.chats[chat_idx].participants.len();
-        // Intern all member npubs, then assign (split borrow: interner + chats[idx])
-        let new_handles: Vec<u16> = group_members.members.iter().map(|p| state.interner.intern(p)).collect();
-        state.chats[chat_idx].participants = new_handles;
-        let new_count = state.chats[chat_idx].participants.len();
-
-        if old_count != new_count {
-            eprintln!(
-                "[MLS] Synced participants for group {}: {} -> {} members",
-                &group_id[..8.min(group_id.len())],
-                old_count,
-                new_count
-            );
-        }
-
-        // Save updated chat to disk — build slim while locked (no full chat clone needed)
-        let slim = db::chats::SlimChatDB::from_chat(&state.chats[chat_idx], &state.interner);
-        drop(state);
-
-        if TAURI_APP.get().is_some() {
-            if let Err(e) = db::chats::save_slim_chat(slim).await {
-                eprintln!("[MLS] Failed to save chat after syncing participants: {}", e);
-            }
-        }
-    } else {
-        drop(state);
-        // Expected during eviction: cleanup_evicted_group already removed the
-        // chat from STATE before this participants-sync step ran. Keep at
-        // debug level so it's silent in release but recoverable when
-        // diagnosing welcome-accept ordering bugs in dev.
-        log_debug!("[MLS] sync_mls_group_participants: chat not found for {} (likely post-eviction race)",
-            &group_id[..8.min(group_id.len())]);
-    }
-
-    Ok(())
 }
 
 // ============================================================================

@@ -121,7 +121,6 @@ fn main() {
             "remove_mls_member_device",
             "get_mls_group_members",
             "leave_mls_group",
-            "list_group_cursors",
             "refresh_keypackages_for_contact",
             // Profile sync commands
             "queue_profile_sync",

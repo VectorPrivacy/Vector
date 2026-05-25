@@ -22,10 +22,6 @@ pub async fn load_mls_keypackages() -> Result<Vec<serde_json::Value>, String> {
     vector_core::db::mls::load_mls_keypackages()
 }
 
-pub fn load_mls_negentropy_items(since: Option<u64>) -> Result<Vec<(nostr_sdk::EventId, nostr_sdk::Timestamp)>, String> {
-    vector_core::db::mls::load_mls_negentropy_items(since)
-}
-
 pub async fn load_mls_device_id() -> Result<Option<String>, String> {
     vector_core::db::mls::load_mls_device_id()
 }

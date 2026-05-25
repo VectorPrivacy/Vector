@@ -7,8 +7,7 @@
 //! - Device ID storage
 //! - Negentropy reconciliation items
 
-use std::collections::HashMap;
-use crate::mls::types::{MlsGroupFull, MlsGroup, MlsGroupProfile, EventCursor};
+use crate::mls::types::{MlsGroupFull, MlsGroup, MlsGroupProfile};
 
 // ============================================================================
 // Group Metadata
@@ -202,66 +201,20 @@ pub fn load_mls_keypackages() -> Result<Vec<serde_json::Value>, String> {
 // Event Cursors
 // ============================================================================
 
-/// Save MLS event cursors atomically (sync progress per group).
-///
-/// Syncs the `mls_event_cursors` table to exactly mirror `cursors`: rows for
-/// keys present in the map are upserted; rows for keys NOT in the map are
-/// deleted. This matches caller expectations — the leave/eviction paths do
-/// `cursors.remove(&gid); write_event_cursors(&cursors)` and require the
-/// row to actually go away. The previous INSERT-only impl left orphan rows
-/// after eviction, which were latent (cleaned up next time the group's
-/// cursor was overwritten) but semantically wrong.
-pub fn save_mls_event_cursors(cursors: &HashMap<String, EventCursor>) -> Result<(), String> {
-    let mut conn = super::get_write_connection_guard_static()?;
-    let tx = conn.transaction()
-        .map_err(|e| format!("Failed to start MLS event cursors transaction: {}", e))?;
-
-    // Wipe and rewrite — atomic, simple, correct. Cursor table is small
-    // (one row per joined group, capped in the dozens for any realistic
-    // user) so the cost is negligible.
-    tx.execute("DELETE FROM mls_event_cursors", [])
-        .map_err(|e| format!("Failed to clear MLS event cursors: {}", e))?;
-
-    for (group_id, cursor) in cursors {
-        tx.execute(
-            "INSERT INTO mls_event_cursors (group_id, last_seen_event_id, last_seen_at)
-             VALUES (?1, ?2, ?3)",
-            rusqlite::params![group_id, &cursor.last_seen_event_id, cursor.last_seen_at as i64],
-        ).map_err(|e| format!("Failed to save MLS event cursor: {}", e))?;
-    }
-
-    tx.commit()
-        .map_err(|e| format!("Failed to commit MLS event cursors: {}", e))?;
-    Ok(())
-}
-
-/// Load MLS event cursors.
-pub fn load_mls_event_cursors() -> Result<HashMap<String, EventCursor>, String> {
-    let conn = super::get_db_connection_guard_static()?;
-
-    let mut stmt = conn.prepare(
-        "SELECT group_id, last_seen_event_id, last_seen_at FROM mls_event_cursors"
-    ).map_err(|e| format!("Failed to prepare MLS event cursors query: {}", e))?;
-
-    let rows = stmt.query_map([], |row| {
-        let group_id: String = row.get(0)?;
-        let last_seen_at: i64 = row.get(2)?;
-        let cursor = EventCursor {
-            last_seen_event_id: row.get(1)?,
-            last_seen_at: last_seen_at as u64,
-        };
-        Ok((group_id, cursor))
-    }).map_err(|e| format!("Failed to query MLS event cursors: {}", e))?;
-
-    rows.collect::<Result<HashMap<_, _>, _>>()
-        .map_err(|e| format!("Failed to collect MLS event cursors: {}", e))
-}
 
 // ============================================================================
 // Negentropy Reconciliation
 // ============================================================================
 
-/// Load processed MLS event IDs as (EventId, Timestamp) pairs for NIP-77 negentropy.
+/// Load the MLS fingerprint set as (EventId, Timestamp) pairs for NIP-77 negentropy.
+///
+/// The set is `mls_processed_events ∪ mls_pending_events`: everything we
+/// *possess*, whether or not we can decrypt it yet. Including pending
+/// (Unprocessable) events is what lets negentropy converge — we already hold
+/// those wrappers, so a relay should only ever offer us the genuinely-absent
+/// prerequisite commits (different event IDs), never re-send the events we're
+/// already sitting on. Omitting them makes every reconcile re-fetch the stuck
+/// set forever.
 pub fn load_mls_negentropy_items(since: Option<u64>) -> Result<Vec<(nostr_sdk::EventId, nostr_sdk::Timestamp)>, String> {
     let conn = super::get_db_connection_guard_static()
         .map_err(|_| "No DB connection".to_string())?;
@@ -277,7 +230,7 @@ pub fn load_mls_negentropy_items(since: Option<u64>) -> Result<Vec<(nostr_sdk::E
     let mut stmt = conn.prepare(sql)
         .map_err(|e| format!("Failed to prepare MLS negentropy query: {}", e))?;
 
-    let items: Vec<_> = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+    let mut items: Vec<(nostr_sdk::EventId, nostr_sdk::Timestamp)> = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
         let event_id_hex: String = row.get(0)?;
         let created_at: i64 = row.get(1)?;
         Ok((event_id_hex, created_at))
@@ -289,6 +242,22 @@ pub fn load_mls_negentropy_items(since: Option<u64>) -> Result<Vec<(nostr_sdk::E
         })
     })
     .collect();
+
+    // Union in pending events. Their wire timestamp lives in the stored
+    // event JSON (the table only carries first_seen_at), so parse it out;
+    // pending sets stay small once convergence holds, so this is cheap.
+    let mut pstmt = conn.prepare("SELECT event_json FROM mls_pending_events")
+        .map_err(|e| format!("Failed to prepare pending negentropy query: {}", e))?;
+    let pending = pstmt.query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("Failed to query mls_pending_events: {}", e))?;
+    for row in pending.flatten() {
+        if let Ok(ev) = serde_json::from_str::<nostr_sdk::Event>(&row) {
+            let ts = ev.created_at.as_secs();
+            if since.map_or(true, |s| ts >= s) {
+                items.push((ev.id, ev.created_at));
+            }
+        }
+    }
 
     Ok(items)
 }

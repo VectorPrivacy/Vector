@@ -167,7 +167,6 @@
     "allow-remove-mls-member-device",
     "allow-get-mls-group-members",
     "allow-leave-mls-group",
-    "allow-list-group-cursors",
     "allow-refresh-keypackages-for-contact",
     "allow-queue-profile-sync",
     "allow-queue-chat-profiles-sync",

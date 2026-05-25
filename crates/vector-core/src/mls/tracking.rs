@@ -96,6 +96,22 @@ pub fn load_pending_events(group_id: &str) -> Result<Vec<nostr_sdk::Event>, Stri
     Ok(events)
 }
 
+/// Group IDs that currently hold at least one pending (unprocessable) event.
+///
+/// Lets a reconcile pass retry stuck events for groups that received no new
+/// events this round — their prerequisite commit may have arrived out-of-band
+/// (live subscription) or a prior self-heal may have re-enabled them. Without
+/// this, a pending event in an otherwise-quiet group would wait for the next
+/// new event before being re-attempted.
+pub fn groups_with_pending_events() -> Result<Vec<String>, String> {
+    let conn = crate::db::get_db_connection_guard_static()?;
+    let mut stmt = conn.prepare("SELECT DISTINCT group_id FROM mls_pending_events")
+        .map_err(|e| format!("Failed to prepare groups_with_pending: {}", e))?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("Failed to query mls_pending_events: {}", e))?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("row error: {}", e))
+}
+
 /// Remove a pending event after it's been successfully processed.
 pub fn remove_pending_event(event_id: &str) -> Result<(), String> {
     let conn = crate::db::get_write_connection_guard_static()?;

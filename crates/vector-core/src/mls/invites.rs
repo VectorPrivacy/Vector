@@ -110,7 +110,7 @@ pub async fn list_invites() -> Result<Vec<PendingInvite>, MlsError> {
 /// 2. Persist group metadata to DB
 /// 3. Create chat in STATE
 /// 4. Sync participants from engine
-/// 5. Initial message sync (48h window via sync_group_since_cursor)
+/// 5. Initial message sync (negentropy reconcile via reconcile_and_apply)
 pub async fn accept_invite(welcome_event_id: &str) -> Result<String, MlsError> {
     let welcome_id_str = welcome_event_id.to_string();
 
@@ -181,9 +181,9 @@ pub async fn accept_invite(welcome_event_id: &str) -> Result<String, MlsError> {
                 // Retryable, allowing process_message to attempt decryption
                 // again with the new epoch's keys we just received.
                 //
-                // Note: this front-loads the transition; sync_group_since_cursor
-                // (called in Phase 3 below) ALSO has a self-heal block that
-                // does the same scan on every sync. Running it here means the
+                // Note: this front-loads the transition; apply_group_events
+                // (reached via reconcile_and_apply in Phase 3 below) ALSO has a
+                // self-heal block that does the same scan on every sync. Running it here means the
                 // first post-rejoin batch hits Retryable state on the first
                 // pass instead of a second cycle — cheaper for users with
                 // accumulated Failed entries.
@@ -279,7 +279,7 @@ pub async fn accept_invite(welcome_event_id: &str) -> Result<String, MlsError> {
                 log_warn!("[MLS] Post-accept participant sync failed: {}", e);
             }
 
-            if let Err(e) = mls.sync_group_since_cursor(&nostr_group_id, None).await {
+            if let Err(e) = mls.reconcile_and_apply(Some(&nostr_group_id), None).await {
                 log_warn!("[MLS] Post-accept initial sync failed: {}", e);
             }
 

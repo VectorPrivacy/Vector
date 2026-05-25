@@ -891,11 +891,12 @@ pub async fn fetch_messages<R: Runtime>(
                 });
             }
 
-            // Post-sync: MLS groups + weekly vacuum
+            // Post-sync: MLS archive reconcile (full-set negentropy, the
+            // long-offline catch-up path) + weekly vacuum
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             if !archive_session.is_valid() { return; }
-            if let Err(e) = crate::commands::mls::sync_mls_groups_now(None).await {
-                eprintln!("[MLS] Post-sync MLS group sync failed: {}", e);
+            if let Err(e) = crate::commands::mls::sync_mls_groups_archive().await {
+                eprintln!("[MLS] Post-sync MLS archive reconcile failed: {}", e);
             }
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             if !archive_session.is_valid() { return; }

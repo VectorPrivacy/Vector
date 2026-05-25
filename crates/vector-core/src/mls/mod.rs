@@ -20,13 +20,14 @@ pub mod keypackage;
 
 pub use types::{
     MlsGroup, MlsGroupProfile, MlsGroupFull,
-    MlsError, EventCursor, KeyPackageIndexEntry,
+    MlsError, KeyPackageIndexEntry,
     has_encoding_tag, metadata_to_frontend,
     record_group_failure, record_group_success,
 };
 pub use tracking::{
     is_mls_event_processed, track_mls_event_processed,
     save_pending_event, load_pending_events, remove_pending_event, prune_old_pending_events,
+    groups_with_pending_events,
     remove_processed_events_by_ids,
     wipe_legacy_mls_database,
 };

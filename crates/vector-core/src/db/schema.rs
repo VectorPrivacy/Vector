@@ -94,13 +94,6 @@ CREATE TABLE IF NOT EXISTS mls_keypackages (
 );
 CREATE INDEX IF NOT EXISTS idx_keypackages_owner ON mls_keypackages(owner_pubkey);
 
--- MLS Event Cursors table
-CREATE TABLE IF NOT EXISTS mls_event_cursors (
-    group_id TEXT PRIMARY KEY,
-    last_seen_event_id TEXT NOT NULL,
-    last_seen_at INTEGER NOT NULL
-);
-
 -- Events table: flat, protocol-aligned storage for all Nostr events
 CREATE TABLE IF NOT EXISTS events (
     id TEXT PRIMARY KEY,
@@ -569,6 +562,19 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
             "ALTER TABLE chats ADD COLUMN wallpaper_url TEXT NOT NULL DEFAULT '';
              ALTER TABLE chats ADD COLUMN wallpaper_uploader TEXT NOT NULL DEFAULT '';"
         ).map_err(|e| format!("Failed to add wallpaper url/uploader columns: {}", e))?;
+        Ok(())
+    })?;
+
+    // =========================================================================
+    // Migration 32: Drop mls_event_cursors — superseded by Total Negentropy
+    // =========================================================================
+    // MLS sync no longer tracks a per-group cursor. Possession of an event
+    // (mls_processed_events ∪ mls_pending_events) is the negentropy fingerprint
+    // set, and reconciliation derives the missing set directly. The cursor was
+    // a pre-negentropy resume mechanism that could only disagree with it.
+    run_atomic_migration(conn, 32, "Drop mls_event_cursors table", |tx| {
+        tx.execute_batch("DROP TABLE IF EXISTS mls_event_cursors;")
+            .map_err(|e| format!("Failed to drop mls_event_cursors: {}", e))?;
         Ok(())
     })?;
 

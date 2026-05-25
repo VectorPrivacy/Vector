@@ -25,7 +25,6 @@ pub use mls::{
     load_mls_groups, update_mls_group_avatar, clear_all_mls_group_avatar_cache,
     load_mls_keypackages,
     load_mls_device_id,
-    load_mls_negentropy_items,
     get_mls_engine_group_id,
 };
 // Mini Apps database functions

@@ -59,6 +59,7 @@ pub mod db;
 
 // === Network ===
 pub mod net;
+pub mod negentropy;
 pub mod blossom;
 pub mod blossom_servers;
 pub mod blossom_capabilities;
@@ -760,24 +761,10 @@ impl VectorCore {
         let svc = mls::MlsService::new_persistent_static()
             .map_err(|e| VectorError::Other(e.to_string()))?;
 
-        let groups = svc.read_groups()
-            .map_err(|e| VectorError::Other(e.to_string()))?;
-
-        let mut total_processed = 0u32;
-        let mut total_new = 0u32;
-
-        for group in &groups {
-            if group.evicted { continue; }
-            match svc.sync_group_since_cursor(&group.group_id, None).await {
-                Ok((p, n)) => {
-                    total_processed += p;
-                    total_new += n;
-                }
-                Err(e) => eprintln!("[VectorCore] sync_group {} failed: {}", &group.group_id[..8.min(group.group_id.len())], e),
-            }
-        }
-
-        Ok((total_processed, total_new))
+        // Full-set negentropy reconcile across all non-evicted groups.
+        svc.reconcile_and_apply(None, None)
+            .await
+            .map_err(|e| VectorError::Other(e.to_string()))
     }
 
     /// Sync DM history from relays using NIP-77 negentropy set reconciliation.
