@@ -79,3 +79,9 @@
 
 # Keep VectorBatteryHelper static methods (called from Rust via JNI)
 -keep class io.vectorapp.VectorBatteryHelper { *; }
+
+# Keep VectorFiles static methods (called from Rust via JNI: external media dir,
+# MediaScanner, Open/Share intents). Without this, R8 strips/renames them since
+# they're only referenced from native code — crashing release builds at boot
+# (externalMediaDir is resolved during startup) with NoSuchMethodError.
+-keep class io.vectorapp.VectorFiles { *; }
