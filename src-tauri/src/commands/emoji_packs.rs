@@ -11,6 +11,7 @@ use image::ImageEncoder;
 use serde::{Deserialize, Serialize};
 
 use vector_core::emoji_packs::{self, EmojiPack};
+use tauri::Manager;
 
 /// Return every locally-cached emoji pack. Frontend hits this on
 /// picker open so the sidebar renders instantly off the local mirror;
@@ -266,6 +267,130 @@ pub struct EmojiSpritesheet {
     pub frame_durations_ms: Vec<u32>,
 }
 
+/// Internal decode result before base64/IPC encoding — carries the raw PNG so
+/// it can be written to the on-disk spritesheet cache without a base64 detour.
+struct DecodedSheet {
+    png: Vec<u8>,
+    frame_count: u32,
+    frame_size: u32,
+    durations: Vec<u32>,
+}
+
+// --- On-disk presized-spritesheet cache --------------------------------------
+// One container file per emoji: frames are decoded + resized ONCE, then this
+// file is read on every later open and across app launches (the in-memory LRU
+// sits on top for the hot path). Layout:
+//   ["VSPR"][ver u8][frame_size u32 LE][frame_count u32 LE]
+//   [durations: frame_count × u32 LE][png_len u32 LE][png bytes]
+// Self-healing: a truncated/garbage file fails validation in
+// `deserialize_spritesheet` and is simply treated as a cache miss.
+const VSPR_MAGIC: &[u8; 4] = b"VSPR";
+const VSPR_VERSION: u8 = 1;
+
+fn serialize_spritesheet(frame_size: u32, durations: &[u32], png: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(13 + durations.len() * 4 + 4 + png.len());
+    out.extend_from_slice(VSPR_MAGIC);
+    out.push(VSPR_VERSION);
+    out.extend_from_slice(&frame_size.to_le_bytes());
+    out.extend_from_slice(&(durations.len() as u32).to_le_bytes());
+    for d in durations {
+        out.extend_from_slice(&d.to_le_bytes());
+    }
+    out.extend_from_slice(&(png.len() as u32).to_le_bytes());
+    out.extend_from_slice(png);
+    out
+}
+
+fn deserialize_spritesheet(buf: &[u8]) -> Option<EmojiSpritesheet> {
+    if buf.len() < 13 || &buf[0..4] != VSPR_MAGIC || buf[4] != VSPR_VERSION {
+        return None;
+    }
+    let frame_size = u32::from_le_bytes(buf[5..9].try_into().ok()?);
+    let frame_count = u32::from_le_bytes(buf[9..13].try_into().ok()?);
+    let mut off = 13usize;
+    let dur_bytes = (frame_count as usize).checked_mul(4)?;
+    if buf.len() < off + dur_bytes + 4 {
+        return None;
+    }
+    let mut durations = Vec::with_capacity(frame_count as usize);
+    for _ in 0..frame_count {
+        durations.push(u32::from_le_bytes(buf[off..off + 4].try_into().ok()?));
+        off += 4;
+    }
+    let png_len = u32::from_le_bytes(buf[off..off + 4].try_into().ok()?) as usize;
+    off += 4;
+    if buf.len() < off + png_len {
+        return None;
+    }
+    Some(EmojiSpritesheet {
+        png_base64: base64_simd::STANDARD.encode_to_string(&buf[off..off + png_len]),
+        frame_count,
+        frame_size,
+        frame_durations_ms: durations,
+    })
+}
+
+/// On-disk path for an emoji's presized spritesheet (creates the dir as needed).
+/// Keyed by sha256(url): Blossom URLs embed the content hash, so a content edit
+/// changes the key and auto-reprocesses; non-Blossom URLs use the URL itself as
+/// their (best-effort) identity.
+fn emoji_spritesheet_path<R: tauri::Runtime>(
+    handle: &tauri::AppHandle<R>,
+    url: &str,
+) -> Option<std::path::PathBuf> {
+    let dir = handle
+        .path()
+        .app_data_dir()
+        .ok()?
+        .join("cache")
+        .join("emoji_spritesheets");
+    std::fs::create_dir_all(&dir).ok()?;
+    let key = vector_core::crypto::sha256_hex(url.as_bytes());
+    Some(dir.join(format!("{}.vspr", key)))
+}
+
+/// Soft cap on the on-disk spritesheet cache. Presized 56px sheets are small
+/// (tens of KB), so this holds thousands of distinct emoji.
+const SPRITESHEET_CACHE_MAX_BYTES: u64 = 128 * 1024 * 1024;
+
+/// Size-capped LRU eviction for the spritesheet cache, run after each new
+/// write. Evicts oldest-by-mtime files once the dir exceeds the cap, down to
+/// 80% (hysteresis so we don't re-prune on every subsequent write). This is
+/// what keeps orphans (emoji from edited/removed packs) from accumulating —
+/// reference-based pruning isn't viable since theme-pack URLs live only in the
+/// frontend, so age-based eviction is both safe and self-maintaining.
+fn prune_spritesheet_cache(dir: &std::path::Path) {
+    let rd = match std::fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    let mut entries: Vec<(std::path::PathBuf, std::time::SystemTime, u64)> = Vec::new();
+    let mut total: u64 = 0;
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.extension().and_then(|x| x.to_str()) != Some("vspr") {
+            continue;
+        }
+        if let Ok(m) = e.metadata() {
+            total += m.len();
+            entries.push((p, m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len()));
+        }
+    }
+    if total <= SPRITESHEET_CACHE_MAX_BYTES {
+        return;
+    }
+    let target = SPRITESHEET_CACHE_MAX_BYTES * 4 / 5;
+    entries.sort_by_key(|(_, t, _)| *t); // oldest first
+    for (path, _, len) in entries {
+        if total <= target {
+            break;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            total = total.saturating_sub(len);
+        }
+    }
+}
+
 /// Cache decoded spritesheets in-memory by URL. Picker reopens reuse the
 /// decode — round-tripping a 50-frame WebP through libwebp + PNG encode
 /// is ~50ms; doing that 54× per open is precisely what we're avoiding.
@@ -330,6 +455,17 @@ pub async fn decode_animated_emoji<R: tauri::Runtime>(
         return Ok(cached);
     }
 
+    // Persistent presized-spritesheet cache: a single file read, no decode and
+    // no resize. Populated on first decode below and survives app restarts.
+    if let Some(path) = emoji_spritesheet_path(&handle, &url) {
+        if let Ok(buf) = std::fs::read(&path) {
+            if let Some(sheet) = deserialize_spritesheet(&buf) {
+                spritesheet_cache().lock().unwrap().insert(url.clone(), sheet.clone());
+                return Ok(sheet);
+            }
+        }
+    }
+
     // Try the local filesystem cache before going to the network. We
     // check both Emoji and EmojiPackIcon subdirs because we don't know
     // ahead of time which subdir the URL was originally cached under
@@ -375,15 +511,34 @@ pub async fn decode_animated_emoji<R: tauri::Runtime>(
     };
 
     let url_for_blocking = url.clone();
-    let result = tokio::task::spawn_blocking(move || decode_to_spritesheet(&bytes, &content_type, &url_for_blocking))
+    let decoded = tokio::task::spawn_blocking(move || decode_to_spritesheet(&bytes, &content_type, &url_for_blocking))
         .await
         .map_err(|e| format!("decode join: {}", e))??;
 
-    spritesheet_cache().lock().unwrap().insert(url, result.clone());
-    Ok(result)
+    // Persist the presized spritesheet so future opens / launches skip the
+    // decode + resize entirely. Best-effort: a write failure just means we
+    // decode again next time. Written directly (no temp) — a partial file fails
+    // validation on read and is treated as a miss.
+    if let Some(path) = emoji_spritesheet_path(&handle, &url) {
+        let blob = serialize_spritesheet(decoded.frame_size, &decoded.durations, &decoded.png);
+        if std::fs::write(&path, &blob).is_ok() {
+            if let Some(dir) = path.parent() {
+                prune_spritesheet_cache(dir);
+            }
+        }
+    }
+
+    let sheet = EmojiSpritesheet {
+        png_base64: base64_simd::STANDARD.encode_to_string(&decoded.png),
+        frame_count: decoded.frame_count,
+        frame_size: decoded.frame_size,
+        frame_durations_ms: decoded.durations,
+    };
+    spritesheet_cache().lock().unwrap().insert(url, sheet.clone());
+    Ok(sheet)
 }
 
-fn decode_to_spritesheet(bytes: &[u8], content_type: &str, url: &str) -> Result<EmojiSpritesheet, String> {
+fn decode_to_spritesheet(bytes: &[u8], content_type: &str, url: &str) -> Result<DecodedSheet, String> {
     let inferred = if content_type.contains("webp") || url.ends_with(".webp") {
         "webp"
     } else if content_type.contains("gif") || url.ends_with(".gif") {
@@ -444,13 +599,11 @@ fn decode_to_spritesheet(bytes: &[u8], content_type: &str, url: &str) -> Result<
     )
     .map_err(|e| format!("png encode: {}", e))?;
 
-    let png_base64 = base64_simd::STANDARD.encode_to_string(&png_bytes);
-
-    Ok(EmojiSpritesheet {
-        png_base64,
+    Ok(DecodedSheet {
+        png: png_bytes,
         frame_count: frames.len() as u32,
         frame_size,
-        frame_durations_ms: durations,
+        durations,
     })
 }
 

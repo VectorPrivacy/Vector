@@ -83,70 +83,69 @@ function openEmojiPanel(e) {
             closeAttachmentPanel();
         }
 
-        // Reset the emoji picker state first
-        resetEmojiPicker();
+        // --- Synchronous: kick off the open transition THIS frame. Keep this
+        // block tiny — any heavy work here delays the first "opening" paint, and
+        // the open is a compositor transform/opacity transition. The panel is
+        // always display:flex (hidden via transform), so it animates in
+        // regardless of content, and last session's emoji DOM stays put until the
+        // deferred render refreshes it (no empty flash on re-open). ---
 
-        // Load emoji sections with optimized rendering
-        renderEmojiPanel();
-        initCollapsibleSections();
-
-        // Display the picker - use class instead of inline style
-        picker.classList.add('visible');
-
-        // Always use the same fixed position (bottom-up) for both message input and reactions
-        picker.classList.add('emoji-picker-message-type');
-
-        // Position emoji picker dynamically above the chat-box (for both input and reactions)
+        // Read chat-box height while the layout is still clean (before .visible
+        // and before the deferred render mutates panel DOM) to avoid a reflow.
         const chatBox = document.getElementById('chat-box');
-        if (chatBox) {
-            const chatBoxHeight = chatBox.getBoundingClientRect().height;
-            picker.style.bottom = (chatBoxHeight + 10) + 'px'; // 10px gap above chat-box
-        }
+        const bottomPx = chatBox ? (chatBox.getBoundingClientRect().height + 10) + 'px' : '';
 
-        // Clear any other positioning styles to ensure CSS fixed positioning takes effect
+        picker.classList.add('visible');
+        picker.classList.add('emoji-picker-message-type');
+        if (bottomPx) picker.style.bottom = bottomPx;
         picker.style.top = '';
         picker.style.left = '';
         picker.style.right = '';
 
-        // Change the emoji button to a wink while the panel is open (only for message input)
+        // Swap the emoji button to a wink while open (message input only).
         if (isDefaultPanel) {
             domChatMessageInputEmoji.innerHTML = `<span class="icon icon-wink-face"></span>`;
         }
+        strCurrentReactionReference = strReaction || '';
 
-        // If this is a Reaction, let's cache the Reference ID
-        if (strReaction) {
-            strCurrentReactionReference = strReaction;
-        } else {
-            strCurrentReactionReference = '';
-        }
+        // --- Deferred: the expensive content build (twemoji recents/favorites,
+        // the ~1.8k-span All grid, pack sidebar/sections + canvas loop) runs
+        // AFTER the panel's first visible paint. Double rAF: the outer fires in
+        // the same frame the .visible style lands (transition starts), the inner
+        // fires the frame after (content fills in, ~16ms into the 300ms slide). ---
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+            // Bail if the panel was closed again before this fired.
+            if (!picker.classList.contains('visible')) return;
 
-        // Focus on the emoji search box for easy searching (desktop only - mobile keyboards are disruptive)
-        if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
-            emojiSearch.focus();
-        }
+            resetEmojiPicker();
+            renderEmojiPanel();
+            initCollapsibleSections();
 
-        // Prefetch GIF data in background (non-blocking)
-        prefetchTrendingGifs();
+            // Focus the search box (desktop only — mobile keyboards are disruptive).
+            if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
+                emojiSearch.focus();
+            }
 
-        // Cold-load packs on first open, then keep them fresh in the
-        // background. Render is idempotent — a cached list shows
-        // instantly; the relay refresh overwrites it when it lands.
-        if (!emojiPacksLoaded) {
-            loadEmojiPacks();
-        } else {
-            renderEmojiPackSidebar();
-            renderEmojiPackSections();
-        }
-        loadEmojiPacks({ refresh: true });
-        _attachEmojiPackReveal();
-        // _stopPackCanvasLoop drained the active set on the last close.
-        // IO doesn't re-fire for elements whose intersection state didn't
-        // change while the panel was hidden, so manually re-arm and let
-        // the next scroll prune. Cheap (Set add per grid).
-        for (const grid of _packCanvasGrids.values()) {
-            _activeCanvasSections.add(grid);
-        }
-        if (_packCanvasGrids.size > 0) _startPackCanvasLoop();
+            // Prefetch GIF data in background (non-blocking)
+            prefetchTrendingGifs();
+
+            // Cold-load packs on first open. On reopen the sidebar + sections
+            // (and their canvas grids, with frames already decoded) persist in
+            // the DOM — the picker is never display:none — so we DON'T re-render.
+            // Recreating grids every open was redundant and, worse, spun up fresh
+            // IntersectionObservers that compute intersection mid-open-transition
+            // (panel transformed off-screen) and wrongly mark visible packs as
+            // off-screen. A background refresh re-renders only if packs changed.
+            if (!emojiPacksLoaded) {
+                loadEmojiPacks();
+            }
+            loadEmojiPacks({ refresh: true });
+            _attachEmojiPackReveal();
+            // Re-activate the on-screen pack canvases (the close drained the
+            // active set). Persisted grids keep their frames, so this resumes
+            // animation immediately.
+            _rearmVisiblePackCanvases();
+        }));
     } else {
         // Hide and reset the UI - use class instead of inline style
         emojiSearch.value = '';
@@ -1624,10 +1623,14 @@ let _packCanvasLastTick = 0;
 function _packCanvasTick(now) {
     const dt = _packCanvasLastTick ? Math.min(now - _packCanvasLastTick, 100) : 0;
     _packCanvasLastTick = now;
+    let anyActive = false;
     for (const section of _activeCanvasSections) {
-        section._advance(dt);
+        if (section._advance(dt)) anyActive = true;
     }
-    if (_activeCanvasSections.size === 0) {
+    // Pause when nothing needs animating (all visible packs static + idle).
+    // Sections stay in the active set; hover / frame-load / re-intersect restart
+    // the loop. Avoids a 60fps wakeup while the panel sits open on static packs.
+    if (_activeCanvasSections.size === 0 || !anyActive) {
         _packCanvasRafHandle = null;
         _packCanvasLastTick = 0;
         return;
@@ -1649,6 +1652,30 @@ function _stopPackCanvasLoop() {
         cancelAnimationFrame(_packCanvasRafHandle);
         _packCanvasRafHandle = null;
     }
+}
+
+/** Re-arm the pack canvases currently on-screen in `.emoji-main` after a panel
+ *  reopen: decode their frames (lazily — off-screen packs are left untouched)
+ *  and resume the loop. Uses a direct geometry check instead of leaning on the
+ *  IntersectionObserver, which doesn't reliably re-fire across the panel's
+ *  hide/show (the close drains the active set, but the observed intersection
+ *  state never changed). The IO still handles subsequent scrolling. */
+function _rearmVisiblePackCanvases() {
+    const main = document.querySelector('.emoji-main');
+    if (!main || _packCanvasGrids.size === 0) return;
+    // main + each canvas share the panel's transform, so this viewport-space
+    // overlap test stays correct even mid open-transition.
+    const mainRect = main.getBoundingClientRect();
+    let any = false;
+    for (const grid of _packCanvasGrids.values()) {
+        const r = grid.canvas.getBoundingClientRect();
+        if (r.height > 0 && r.bottom > mainRect.top && r.top < mainRect.bottom) {
+            grid._requestFrames();
+            _activeCanvasSections.add(grid);
+            any = true;
+        }
+    }
+    if (any) _startPackCanvasLoop();
 }
 
 function _drawRoundedRect(ctx, x, y, w, h, r) {
@@ -1701,6 +1728,16 @@ class PackCanvasGrid {
         this._io = null;
         this._ro = null;
 
+        // Animation scheduler. Skip the per-cell scan on ticks where no frame is
+        // due and no hover tween is running; `_nextDue` is ms until the soonest
+        // frame flip across loaded animated cells (Infinity = nothing animated).
+        // `_accumDt` banks elapsed time across skipped ticks so the eventual scan
+        // advances by the real elapsed time. Starts at 0 so the first ticks scan
+        // until frames load + settle.
+        this._nextDue = 0;
+        this._accumDt = 0;
+        this._hasTween = false;
+
         // Tooltip drives the shared singleton (defined at module scope so
         // canvas cells, preview thumbs and inline custom emoji all share
         // one node + one show/hide timer).
@@ -1709,7 +1746,9 @@ class PackCanvasGrid {
         for (let i = 0; i < pack.emojis.length; i++) this.dirty.add(i);
 
         this._installEvents();
-        this._loadFrames();
+        // Frames are decoded lazily on first visibility (see
+        // attachVisibilityObserver) — an off-screen pack decodes nothing.
+        this._framesRequested = false;
     }
 
     _resize() {
@@ -1733,7 +1772,9 @@ class PackCanvasGrid {
         // transform too, but be explicit to avoid surprises).
         this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
         this.ctx.imageSmoothingEnabled = true;
-        this.ctx.imageSmoothingQuality = 'high';
+        // 'low' is visually identical at a 28px thumb (≈1:1 at dpr 2) but far
+        // cheaper than 'high' on the downscale path, which runs every drawn frame.
+        this.ctx.imageSmoothingQuality = 'low';
         for (let i = 0; i < this.pack.emojis.length; i++) this.dirty.add(i);
         this._render();
     }
@@ -1775,7 +1816,10 @@ class PackCanvasGrid {
             this.dirty.add(idx);
         }
         this._scheduleTooltip(idx);
-        // Hover anim ticks live on the shared rAF loop — make sure it's running.
+        // A hover tween needs per-frame ticks — flag it so _advance won't skip,
+        // ensure this section is active, and (re)start the loop if it went idle.
+        this._hasTween = true;
+        _activeCanvasSections.add(this);
         _startPackCanvasLoop();
     }
 
@@ -1809,6 +1853,13 @@ class PackCanvasGrid {
         return idx < this.pack.emojis.length ? idx : -1;
     }
 
+    // Decode this section's frames once, the first time it becomes visible.
+    _requestFrames() {
+        if (this._framesRequested) return;
+        this._framesRequested = true;
+        this._loadFrames();
+    }
+
     _loadFrames() {
         for (let i = 0; i < this.pack.emojis.length; i++) {
             const url = this.pack.emojis[i].url;
@@ -1817,6 +1868,10 @@ class PackCanvasGrid {
                 this.frames[idx] = sheet || null;
                 this.dirty.add(idx);
                 this._render();
+                // A newly-loaded animated emoji needs the scheduler to re-evaluate
+                // and the loop to resume if it had gone idle while static.
+                this._nextDue = 0;
+                if (_activeCanvasSections.has(this)) _startPackCanvasLoop();
             });
         }
     }
@@ -1830,6 +1885,7 @@ class PackCanvasGrid {
             this._ro.observe(this.canvas.parentElement);
         }
         if (typeof IntersectionObserver === 'undefined') {
+            this._requestFrames();   // no IO to gate on — decode now
             _activeCanvasSections.add(this);
             _startPackCanvasLoop();
             return;
@@ -1837,6 +1893,7 @@ class PackCanvasGrid {
         this._io = new IntersectionObserver(entries => {
             for (const entry of entries) {
                 if (entry.isIntersecting) {
+                    this._requestFrames();   // lazy decode: only once the pack is actually on-screen
                     _activeCanvasSections.add(this);
                     _startPackCanvasLoop();
                 } else {
@@ -1847,23 +1904,42 @@ class PackCanvasGrid {
         this._io.observe(this.canvas);
     }
 
+    // Returns whether this section still needs ticking (animated frames pending,
+    // a hover tween in flight, or frames still loading). The shared loop pauses
+    // itself when every active section returns false.
     _advance(dt) {
-        const now = performance.now();
-        const dtPos = Math.max(dt, 0);
-        for (let i = 0; i < this.pack.emojis.length; i++) {
-            const cell = this.cellState[i];
+        // Settled + nothing animated → no work until a hover / frame-load wakes us.
+        if (!this._hasTween && this._nextDue === Infinity) return false;
+        this._accumDt += Math.max(dt, 0);
+        // Nothing due yet and no tween → bank the time and wait (loop stays alive
+        // but this is O(1), not a full per-cell scan).
+        if (!this._hasTween && this._accumDt < this._nextDue) return true;
 
-            // Animated-WebP frame advancement.
+        const effDt = this._accumDt;   // banked elapsed time (per-tick dt already clamped upstream)
+        this._accumDt = 0;
+        const now = performance.now();
+        const n = this.pack.emojis.length;
+        let nextDue = Infinity;
+        let hasTween = false;
+
+        for (let i = 0; i < n; i++) {
+            const cell = this.cellState[i];
             const sheet = this.frames[i];
-            if (sheet && sheet.frameCount >= 2 && dtPos > 0) {
-                cell.elapsed += dtPos;
-                let currentDur = sheet.durations[cell.frame] || 100;
-                while (cell.elapsed >= currentDur) {
-                    cell.elapsed -= currentDur;
+
+            if (sheet === undefined) {
+                // Still loading — re-scan promptly so we start it the moment it lands.
+                nextDue = 0;
+            } else if (sheet && sheet.frameCount >= 2 && effDt > 0) {
+                cell.elapsed += effDt;
+                let dur = sheet.durations[cell.frame] || 100;
+                while (cell.elapsed >= dur) {
+                    cell.elapsed -= dur;
                     cell.frame = (cell.frame + 1) % sheet.frameCount;
-                    currentDur = sheet.durations[cell.frame] || 100;
+                    dur = sheet.durations[cell.frame] || 100;
                     this.dirty.add(i);
                 }
+                const rem = dur - cell.elapsed;
+                if (rem < nextDue) nextDue = rem;
             }
 
             // Hover scale tween. ease-out cubic gives the same "quick
@@ -1875,9 +1951,14 @@ class PackCanvasGrid {
                     ? cell.scaleTarget
                     : cell.scaleFrom + (cell.scaleTarget - cell.scaleFrom) * eased;
                 this.dirty.add(i);
+                if (cell.scale !== cell.scaleTarget) hasTween = true;
             }
         }
+
+        this._nextDue = nextDue;
+        this._hasTween = hasTween;
         this._render();
+        return hasTween || nextDue !== Infinity;
     }
 
     _render() {
@@ -3632,6 +3713,9 @@ function renderEmojiPackSections() {
         for (const grid of _packCanvasGrids.values()) {
             grid.attachVisibilityObserver(main);
         }
+        // Arm the on-screen packs deterministically rather than waiting on the
+        // IO's first callback (unreliable when this runs mid-open-transition).
+        _rearmVisiblePackCanvases();
     }
 }
 
@@ -3788,6 +3872,10 @@ function loadEmojiSections() {
 let collapsiblesInitialized = false;
 
 function initCollapsibleSections() {
+    // `.emoji-main` is static, so this delegated listener only needs attaching
+    // once — without the guard every panel open stacked another copy.
+    if (collapsiblesInitialized) return;
+    collapsiblesInitialized = true;
     document.querySelector('.emoji-main').addEventListener('click', (e) => {
         const header = e.target.closest('.emoji-section-header');
         if (!header) return;
