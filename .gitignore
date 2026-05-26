@@ -33,3 +33,5 @@ src-tauri/android-deps/
 # Emoji build cache
 scripts/.emoji-cache/
 crates/target/
+patches/mdk/target/
+patches/mdk/Cargo.lock

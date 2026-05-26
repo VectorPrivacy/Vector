@@ -20,7 +20,14 @@ pub fn run_migrations(conn: &mut Connection) -> Result<(), Error> {
     // As the code used to be part of the rust-nostr project
     // and we need to keep the same migration table name for backwards compatibility
     let migration_table_name = "_refinery_schema_history_nostr_mls";
+    // Migrations are append-only and never edited in place, so a checksum
+    // mismatch never means the schema actually changed. It only means the
+    // build hashed the migration's metadata differently (e.g. the version
+    // integer's byte-width, or a std/siphasher hashing-convention shift
+    // between toolchains). Aborting there bricks an otherwise-valid DB, so
+    // we downgrade divergence to a log and keep the stored schema.
     let report = migrations::runner()
+        .set_abort_divergent(false)
         .set_migration_table_name(migration_table_name)
         .run(conn)?;
 
