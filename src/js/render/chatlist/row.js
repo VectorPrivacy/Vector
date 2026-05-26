@@ -295,7 +295,7 @@ function renderInviteItem(invite, primaryColor) {
     declineIcon.classList.add('icon', 'icon-x');
     declineIcon.style.width = '16px';
     declineIcon.style.height = '16px';
-    declineIcon.style.backgroundColor = '#ff2ea9';
+    declineIcon.style.backgroundColor = 'var(--danger-pink)';
     btnDecline.appendChild(declineIcon);
 
     divActions.appendChild(btnAccept);

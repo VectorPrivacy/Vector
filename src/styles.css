@@ -192,7 +192,7 @@
 }
 
 #chat-input-cancel .icon-cancel {
-  background-color: #FC595C;
+  background-color: var(--danger-red);
 }
 
 .icon-x {
@@ -204,7 +204,7 @@
   mask: url('./icons/edit-x.svg') no-repeat center;
   -webkit-mask-size: contain;
   mask-size: contain;
-  background-color: #FC595C;
+  background-color: var(--danger-red);
   width: 16px;
   height: 16px;
   display: inline-block;
@@ -305,6 +305,8 @@
 }
 
 :root {
+  --danger-pink: #FF2EA9;
+  --danger-red: #FC595C;
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 16px;
   line-height: 24px;
@@ -1461,7 +1463,7 @@ html, body {
 
 #profile-edit-cancel-btn .icon-edit-x,
 #wallpaper-edit-cancel-btn .icon-edit-x {
-  background-color: #FC595C !important;
+  background-color: var(--danger-red) !important;
   width: 14px !important;
   height: 14px !important;
 }
@@ -4241,11 +4243,11 @@ img.emoji-img-loading {
 .emoji-creator-delete .icon {
   width: 16px;
   height: 16px;
-  background-color: #FF2EA9;
+  background-color: var(--danger-pink);
 }
 
 .emoji-creator-delete:hover .icon {
-  background-color: #FF2EA9;
+  background-color: var(--danger-pink);
 }
 
 /* Confirm overlay — generalised question modal. Same in-panel chrome
@@ -4332,13 +4334,13 @@ img.emoji-img-loading {
 }
 
 .emoji-pack-creator-confirm[data-tone="danger"] .emoji-pack-creator-confirm-ok {
-  background-color: #ff2ea9;
-  border-color: #ff2ea9;
+  background-color: var(--danger-pink);
+  border-color: var(--danger-pink);
   color: #000;
 }
 
 .emoji-pack-creator-confirm-cancel {
-  border-color: #ff2ea9;
+  border-color: var(--danger-pink);
   background-color: #03030390;
 }
 /* Pack creator cropper overlay — square-crop UX for non-square static
@@ -4740,7 +4742,7 @@ img.emoji-img-loading {
   margin: 0 0 16px;
 }
 .emoji-pack-creator-error-retry {
-  background-color: #ff2ea9;
+  background-color: var(--danger-pink);
   color: #000;
   border: none;
   padding: 12px 28px;
@@ -7557,7 +7559,7 @@ select:disabled:hover {
   background-color: #00000000;
   margin-left: 10px;
   backdrop-filter: none;
-  border-color: #ff2ea9;
+  border-color: var(--danger-pink);
   background-color: #171717;
 }
 
@@ -7822,7 +7824,7 @@ select:disabled:hover {
 }
 
 .danger-subtitle {
-  color: #ff2ea9;
+  color: var(--danger-pink);
   font-size: 12px;
   text-align: center;
   margin-top: 5px;
@@ -7838,7 +7840,7 @@ select:disabled:hover {
 
 .danger-btn {
   backdrop-filter: none;
-  border-color: #ff2ea9;
+  border-color: var(--danger-pink);
   background-color: #00000000;
 }
 
@@ -9956,7 +9958,7 @@ select:disabled:hover {
 }
 
 .invite-decline-btn {
-  border: 2px solid #ff2ea9;
+  border: 2px solid var(--danger-pink);
 }
 
 .invite-action-btn:hover {
@@ -14945,10 +14947,10 @@ hr {
    distinctly from the additive ones (react/reply/edit) without
    tinting the whole button. */
 .dmsg-toolbar-btn-danger .icon {
-  background-color: #FC595C;
+  background-color: var(--danger-red);
 }
 .dmsg-toolbar-btn-danger:hover .icon {
-  background-color: #FC595C;
+  background-color: var(--danger-red);
   filter: brightness(1.15);
 }
 

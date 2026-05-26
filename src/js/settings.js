@@ -1580,7 +1580,7 @@ domSettingsExport.onclick = async (evt) => {
 
         let exportContent = `
         <div style="text-align: center; padding: 0 8px;">
-            <p style="color: #ff2ea9; font-weight: bold; font-size: 15px; margin: 0 0 10px 0;">Security Warning. Do Not Lose.</p>
+            <p style="color: var(--danger-pink); font-weight: bold; font-size: 15px; margin: 0 0 10px 0;">
             <p style="opacity: 0.75; font-size: 13px; margin: 0 0 16px 0; word-break: break-word;">These keys are your identity on Vector. There are no recovery options! If lost, your account cannot be restored. Never share them.</p>
         `;
 
