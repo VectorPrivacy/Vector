@@ -958,7 +958,6 @@
         <div id="chat-messages" class="chat-messages">
 
         </div>
-        <button id="chat-scroll-return" class="corner-float scroll-return-btn"><span class="icon icon-chevron-down"></span><span id="chat-scroll-return-badge" class="scroll-return-badge"></span></button>
 
         <!-- Wallpaper preview bar — sits in the chat's flex flow, directly
              above #chat-box so the composer stays visible while the user
@@ -980,6 +979,9 @@
         </div>
 
         <div class="row input-box" id="chat-box">
+          <!-- Anchored to #chat-box's top edge (bottom: calc(100% + …)) so it
+               rides up as the composer grows with a multi-line message. -->
+          <button id="chat-scroll-return" class="corner-float scroll-return-btn"><span class="icon icon-chevron-down"></span><span id="chat-scroll-return-badge" class="scroll-return-badge"></span></button>
           <div id="msg-bottom-fade" class="fadeout-bottom-msgs"></div>
           <div class="row chat-input-container">
             <button id="chat-input-file"><span class="icon icon-plus"></span></button>

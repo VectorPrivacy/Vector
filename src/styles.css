@@ -5825,7 +5825,7 @@ audio {
 }
 
 .corner-float {
-  bottom: 80px;
+  bottom: calc(100% + 16px);
   right: 20px;
   position: absolute;
   padding: 2.5px 12.5px;
@@ -14754,7 +14754,7 @@ hr {
 
 /* Scroll-to-bottom button collides with the wallpaper Set/Cancel buttons —
    suppress it while the preview bar is up. */
-#chat[data-wallpaper-previewing="true"] > #chat-scroll-return {
+#chat[data-wallpaper-previewing="true"] #chat-scroll-return {
   display: none;
 }
 
