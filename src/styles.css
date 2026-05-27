@@ -1047,11 +1047,13 @@ html, body {
 
 /* Profile Content - Scrollable */
 .profile-content {
-  padding-top: 60px;
-  padding-bottom: 60px;
+  position: fixed;
+  top: 60px;
+  bottom: 65px;
+  left: 0;
+  right: 0;
   overflow-x: hidden;
   overflow-y: auto;
-  height: 100%;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: none;
   touch-action: pan-y;
