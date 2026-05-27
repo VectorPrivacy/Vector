@@ -1496,7 +1496,7 @@ let _emojiTooltipCurrentAnchor = null;
  *  `platformFeatures.is_mobile` is Vector's canonical desktop/mobile split
  *  (set up in main.js at boot) and is used by every other hover-only path. */
 function _supportsHoverTooltip() {
-    return typeof platformFeatures !== 'undefined' && !platformFeatures.is_mobile;
+    return typeof platformFeatures !== 'undefined' && platformFeatures !== null && !platformFeatures.is_mobile;
 }
 
 function _ensureEmojiTooltip() {
