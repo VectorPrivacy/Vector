@@ -8737,7 +8737,7 @@ select:disabled:hover {
 .transcribe-progress-fill {
     height: 100%;
     width: 0%;
-    background: linear-gradient(90deg, #59fcb3, #00d4ff);
+    background: linear-gradient(90deg, var(--primary-color), var(--accent-color));
     border-radius: 2px;
     transition: width 0.3s ease;
 }
