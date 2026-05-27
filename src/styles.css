@@ -1048,10 +1048,10 @@ html, body {
 /* Profile Content - Scrollable */
 .profile-content {
   position: fixed;
-  top: 60px;
+  top: 64px;
   bottom: 65px;
   left: 0;
-  right: 0;
+  right: 2px;
   overflow-x: hidden;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
