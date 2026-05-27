@@ -2159,7 +2159,12 @@ html, body {
 }
 
 #chat-list {
-  overflow-y: scroll;
+  position: fixed;
+  top: 120px;
+  bottom: 70px;
+  left: 0;
+  right: 2px;
+  overflow-y: auto;
   padding-left: 15px;
   padding-right: 15px;
 }
