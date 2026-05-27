@@ -5972,7 +5972,7 @@ select {
 #download-model {
   color: #000;
   border: none;
-  padding: 12px 20px;
+  padding: 12px;
   border-radius: 8px;
   font-weight: bold;
   cursor: pointer;
@@ -5981,7 +5981,9 @@ select {
   align-items: center;
   justify-content: center;
   margin-top: 10px;
-  width: 100%;
+  width: 80%;
+  margin-left: auto;
+  margin-right: auto;
 }
 
 #download-model:active {
@@ -5993,6 +5995,23 @@ select {
   margin-top: 15px;
   font-size: 14px;
   min-height: 20px;
+}
+
+#cancel-download {
+  margin-top: 16px;
+}
+
+/* Inline spinner for model download status */
+.spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(255, 255, 255, 0.1);
+  border-top-color: var(--icon-color-primary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  vertical-align: middle;
+  margin-right: 6px;
 }
 
 /* Progress Bar Container */
@@ -8730,6 +8749,24 @@ select:disabled:hover {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+.cancel-download-inline {
+  display: block;
+  margin: 6px auto 0;
+  padding: 3px 12px;
+  font-size: 11px;
+  font-weight: 500;
+  border-radius: 4px;
+  border: 1px solid var(--danger-color);
+  background: none;
+  color: var(--danger-color);
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.cancel-download-inline:hover {
+  background: var(--danger-color-hover);
 }
 
 /* Custom Audio Player Styles */

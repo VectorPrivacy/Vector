@@ -852,28 +852,17 @@ class VoiceSettings {
             // Update button text to include model size
             const sizeInBytes = model.model.size * 1024 * 1024;
             const formattedSize = formatBytes(sizeInBytes);
-            downloadBtn.textContent = `Download Selected Model (${formattedSize})`;
+            downloadBtn.textContent = `Download Model (${formattedSize})`;
         }
     }
 
-    async downloadModel(modelName) {
-        // Find the model in our cached list and validate it's not already downloaded
+        async downloadModel(modelName) {
         const model = this.models.find(m => m.model.name === modelName);
         if (!model || model.downloaded) return;
 
-        // Get UI elements for progress display
         const modelStatus = document.getElementById('model-status');
-        const progressContainer = document.querySelector('.download-progress-container');
-        const progressFill = progressContainer.querySelector('.progress-bar-fill');
-        const progressText = progressContainer.querySelector('.progress-text');
 
-        // Initialize download UI state
-        modelStatus.textContent = `Downloading AI model...`;
-        progressContainer.style.display = 'block';
-        progressFill.style.width = '0%';
-        progressText.textContent = `0 / ${model.model.size} MB`;
-
-        // Disable UI during download to prevent user interference
+        // Disable UI during download
         document.getElementById('download-model').style.display = 'none';
         document.getElementById('delete-model').style.display = 'none';
         document.getElementById('whisper-model').disabled = true;
@@ -886,76 +875,42 @@ class VoiceSettings {
         }
 
         try {
-            // Mark model as downloading and update status display
             model.downloading = true;
-            this.updateModelStatus();
 
-            // Set up Tauri event listener for download progress updates
+            // Set up the download UI once
+            modelStatus.innerHTML = `<div class="alert alert-info"><span class="spinner"></span><span id="download-progress-text"> Downloading... 0%</span></div>`;
+
+            // Set up progress listener — updates text only, not the spinner
             const unlisten = await window.__TAURI__.event.listen(
                 'whisper_download_progress',
                 (event) => {
-                    const { progress, downloaded_bytes, total_bytes, speed_bps } = event.payload;
-                    progressFill.style.width = `${progress}%`;
-
-                    const dlMB = (downloaded_bytes / (1024 * 1024)).toFixed(1);
-                    const totalMB = (total_bytes / (1024 * 1024)).toFixed(1);
-                    const speedMBs = (speed_bps / (1024 * 1024)).toFixed(1);
-                    progressText.textContent = `${dlMB} / ${totalMB} MB \u2014 ${speedMBs} MB/s`;
-
-                    const progressionSpan = document.getElementById('voice-model-download-progression');
-                    if (progressionSpan) progressionSpan.textContent = `(${Math.round(progress)}%)`;
+                    const { progress } = event.payload;
+                    const textEl = document.getElementById('download-progress-text');
+                    if (textEl) textEl.textContent = ` Downloading... ${Math.round(progress)}%`;
                 }
             );
 
-            // Start the actual download via Tauri backend
             await invoke('download_whisper_model', { modelName });
-
-            // Clean up event listener to prevent memory leaks
             unlisten();
 
-            // Update model state to reflect successful download
             model.downloaded = true;
             model.downloading = false;
 
-            modelStatus.textContent = `Successfully downloaded AI model!`;
-
-            // Show success animation with green gradient
-            progressFill.style.width = `100%`;
-            progressText.textContent = `Complete`;
-            progressFill.style.background = 'linear-gradient(90deg, #59fcb3 0%, #2b976c 100%)';
-            progressContainer.style.animation = 'none';
-            void progressContainer.offsetWidth; // Force reflow to reset animation
-            progressContainer.style.animation = 'fadeIn 0.3s ease-out';
-
-            // Refresh the models dropdown and update UI state
+            modelStatus.innerHTML = `<div class="alert alert-success">Vector AI is ready</div>`;
             await this.loadWhisperModels();
             this.updateModelStatus();
+
         } catch (error) {
-            // Handle download failures
             model.downloading = false;
             const isCancelled = String(error).includes('cancelled');
-            modelStatus.textContent = isCancelled ? 'Download cancelled' : `Error downloading model: ${error}`;
+            modelStatus.innerHTML = isCancelled
+                ? `<div class="alert alert-warning">AI model is not downloaded</div>`
+                : `<div class="alert alert-warning">Download failed: ${escapeHtml(String(error))}</div>`;
             if (!isCancelled) console.error('Download failed:', error);
-
-            // Show error/cancelled state
-            progressFill.style.background = isCancelled
-                ? 'linear-gradient(90deg, #888 0%, #555 100%)'
-                : 'linear-gradient(90deg, #ff5e5e 0%, #d40000 100%)';
-            progressText.textContent = isCancelled ? 'Cancelled' : 'Failed';
+            this.updateModelStatus();
         } finally {
-            // Hide cancel button and re-enable model selector
             if (cancelBtn) cancelBtn.style.display = 'none';
             document.getElementById('whisper-model').disabled = false;
-
-            // Clean up progress bar after a delay, regardless of success/failure
-            setTimeout(() => {
-                progressContainer.style.display = 'none';
-                // Reset progress bar styling for next download
-                progressFill.style.width = '0%';
-                progressFill.style.background = 'linear-gradient(90deg, #59fcb3 0%, #00d4ff 100%)';
-                progressText.textContent = '0%';
-                this.updateModelStatus();
-            }, 3000);
         }
     }
 

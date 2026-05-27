@@ -972,7 +972,8 @@ class VoiceTranscriptionUI {
     async ensureModelReady(transcribeBtn) {
         if (this.isSettingUp) return false;
 
-        const selectedModel = window.voiceSettings?.selectedModel || 'small';
+        const selectedModel = window.voiceSettings?.selectedModel;
+        if (!selectedModel) return false;
         const model = window.voiceSettings?.models?.find(m => m.model.name === selectedModel);
         if (model?.downloaded) return true;
 
@@ -1023,6 +1024,13 @@ class VoiceTranscriptionUI {
         progressBar.appendChild(progressFill);
         progressContainer.appendChild(progressText);
         progressContainer.appendChild(progressBar);
+
+        // Allows user to cancel download
+        const cancelBtn = document.createElement('button');
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.classList.add('cancel-download-inline');
+        cancelBtn.onclick = () => invoke('cancel_whisper_download');
+        progressContainer.appendChild(cancelBtn);
 
         // Replace button contents with progress indicator
         transcribeBtn.style.marginLeft = 'auto';
