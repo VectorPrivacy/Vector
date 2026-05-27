@@ -11,6 +11,7 @@
   --primary-color: #59FCF4;
   --secondary-color: #FC59AD;
   --accent-color: #59FCF4;
+  --danger-color: #FC59AD;
 }
 
 .sync-line {
@@ -601,14 +602,14 @@ select:disabled {
 
 /* App Details Uninstall Button */
 .app-details-uninstall-btn {
-  background-color: #FC59AD20;
-  color: #FC59AD;
-  border: 1px solid #FC59AD40;
+  background-color: var(--danger-color-hover);
+  color: var(--danger-color);
+  border: 1px solid color-mix(in srgb, var(--danger-color) 40%, transparent);
 }
 
 .app-details-uninstall-btn:hover {
-  background-color: rgba(255, 100, 100, 0.3);
-  box-shadow: 0 4px 16px rgba(255, 100, 100, 0.2);
+  background-color: color-mix(in srgb, var(--danger-color) 40%, transparent);
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--danger-color) 20%, transparent);
 }
 
 /* App Details Update Button */
@@ -697,4 +698,16 @@ select:disabled {
 
 .relay-metric-value {
   color: #59FCF4;
+}
+
+.aggro-glitch-img {
+  content: url('../../icons/aggro-glitch.gif');
+  width: 64px;
+  height: 64px;
+}
+
+.warning-icon {
+  content: url('../../icons/warning_pink.png');
+  width: 16px;
+  height: 16px;
 }

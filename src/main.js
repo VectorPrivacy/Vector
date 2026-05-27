@@ -4715,9 +4715,8 @@ function renderProfileTab(cProfile) {
         const isBlocked = cProfile.is_blocked || false;
         const blockIcon = domProfileOptionBlock.querySelector('.icon');
         const blockLabel = domProfileOptionBlock.querySelector('span:first-child');
-        blockIcon.style.backgroundColor = '#ff4444';
+        domProfileOptionBlock.classList.add('is-danger');
         if (blockLabel) {
-            blockLabel.style.color = '#ff4444';
             blockLabel.textContent = isBlocked ? 'Unblock' : 'Block';
         }
         domProfileOptionBlock.onclick = async () => {
@@ -7703,24 +7702,7 @@ async function renderGroupOverview(chat) {
             if (iAmGroupAdmin && !isMe) {
                 const kickBtn = document.createElement('button');
                 kickBtn.textContent = 'Kick';
-                kickBtn.style.padding = '4px 12px';
-                kickBtn.style.fontSize = '12px';
-                kickBtn.style.borderRadius = '4px';
-                kickBtn.style.border = 'none';
-                kickBtn.style.background = '#ff4444';
-                kickBtn.style.color = 'white';
-                kickBtn.style.cursor = 'pointer';
-                kickBtn.style.transition = 'background 0.2s ease';
-                kickBtn.style.position = 'relative';
-                kickBtn.style.zIndex = '1';
-                kickBtn.style.marginLeft = '10px';
-                
-                kickBtn.addEventListener('mouseenter', () => {
-                    kickBtn.style.background = '#ff6666';
-                });
-                kickBtn.addEventListener('mouseleave', () => {
-                    kickBtn.style.background = '#ff4444';
-                });
+                kickBtn.classList.add('kick-btn');
                 
                 kickBtn.onclick = async (e) => {
                     e.stopPropagation();

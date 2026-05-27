@@ -192,7 +192,7 @@
 }
 
 #chat-input-cancel .icon-cancel {
-  background-color: var(--danger-red);
+  background-color: var(--danger-color);
 }
 
 .icon-x {
@@ -204,7 +204,7 @@
   mask: url('./icons/edit-x.svg') no-repeat center;
   -webkit-mask-size: contain;
   mask-size: contain;
-  background-color: var(--danger-red);
+  background-color: var(--danger-color);
   width: 16px;
   height: 16px;
   display: inline-block;
@@ -307,6 +307,8 @@
 :root {
   --danger-pink: #FF2EA9;
   --danger-red: #FC595C;
+  --danger-color: #FC595C;  /* default: red for all themes */
+  --danger-color-hover: color-mix(in srgb, var(--danger-color) 10%, transparent);
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 16px;
   line-height: 24px;
@@ -621,9 +623,9 @@ html, body {
   transition: filter 0.15s ease, transform 0.1s ease;
 }
 .pack-details-action.is-subscribed {
-  background-color: rgba(255, 74, 138, 0.18);
-  color: #ff4a8a;
-  border: 1px solid rgba(255, 74, 138, 0.4);
+  background-color: var(--danger-color-hover);
+  color: var(--danger-color);
+  border: 1px solid color-mix(in srgb, var(--danger-color) 40%, transparent);
 }
 .pack-details-action:hover { filter: brightness(1.08); }
 .pack-details-action:active { transform: translateY(1px); }
@@ -641,7 +643,7 @@ html, body {
 .pack-details-error-title {
   font-size: 16px;
   font-weight: 700;
-  color: #ff4a8a;
+  color: var(--danger-color);
   margin: 0 0 8px;
 }
 .pack-details-error-detail {
@@ -1263,6 +1265,12 @@ html, body {
   cursor: pointer;
 }
 
+.aggro-glitch-img {
+  content: url('./icons/aggro-glitch-red.gif');
+  width: 64px;
+  height: 64px;
+}
+
 /* Dangerzone button group styling */
 .danger-buttons {
   display: block;
@@ -1463,7 +1471,7 @@ html, body {
 
 #profile-edit-cancel-btn .icon-edit-x,
 #wallpaper-edit-cancel-btn .icon-edit-x {
-  background-color: var(--danger-red) !important;
+  background-color: var(--danger-color) !important;
   width: 14px !important;
   height: 14px !important;
 }
@@ -1620,7 +1628,7 @@ html, body {
 }
 
 .device-status-dot.not-primary {
-  background-color: #ff5252; /* Red for not primary device */
+  background-color: var(--danger-color); /* Red or Pink for not primary device */
 }
 
 .profile-options {
@@ -1653,6 +1661,25 @@ html, body {
   border-color: #959899;
   color: white;
   opacity: 1;
+}
+
+.profile-option.is-danger span { color: var(--danger-color); }
+.profile-option.is-danger .icon { background-color: var(--danger-color); }
+.is-danger-text { color: var(--danger-color); }
+.is-danger-icon { background-color: var(--danger-color); }
+.profile-more-item.is-danger:hover { background: var(--danger-color-hover); }
+
+.unblock-btn {
+  color: var(--danger-color);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 4px 10px;
+  border: 1px solid var(--danger-color);
+  border-radius: 6px;
+}
+
+.unblock-btn:hover {
+  background-color: var(--danger-color-hover);
 }
 
 /* Profile "More" dropdown menu */
@@ -1696,8 +1723,8 @@ html, body {
   background: #2a2a2a;
   color: #fff;
 }
-.context-menu-item.is-danger        { color: #ff4a8a; }
-.context-menu-item.is-danger:hover  { background: rgba(255, 74, 138, 0.12); color: #ff4a8a; }
+.context-menu-item.is-danger        { color: var(--danger-color); }
+.context-menu-item.is-danger:hover  { background: var(--danger-color-hover); color: var(--danger-color); }
 .context-menu-item .icon {
   position: relative;
   flex-shrink: 0;
@@ -1721,7 +1748,7 @@ html, body {
   font-size: 15px;
 }
 .context-menu-item:active { background: #2a2a2a; color: #fff; }
-.context-menu-item.is-danger:active { background: rgba(255, 74, 138, 0.12); color: #ff4a8a; }
+.context-menu-item.is-danger:active { background: var(--danger-color-hover); color: var(--danger-color); }
 
 /* Dimmed qualifier after an item label, e.g. Copy (plain). */
 .context-menu-item-hint {
@@ -4109,8 +4136,8 @@ img.emoji-img-loading {
 }
 .emoji-creator-cell-busy.is-deleting .emoji-creator-cell-busy-ring {
   background: conic-gradient(
-    #ff4a8a 0% 30%,
-    rgba(255, 74, 138, 0.25) 30% 100%
+    var(--danger-color) 0% 30%,
+    color-mix(in srgb, var(--danger-color) 25%, transparent) 30% 100%
   );
 }
 @keyframes emoji-creator-busy-spin { to { transform: rotate(360deg); } }
@@ -4153,7 +4180,7 @@ img.emoji-img-loading {
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background-color: #ff4a8a;
+  background-color: var(--danger-color);
   border: 2px solid #0a0a0a;
   padding: 0;
   cursor: pointer;
@@ -4243,11 +4270,11 @@ img.emoji-img-loading {
 .emoji-creator-delete .icon {
   width: 16px;
   height: 16px;
-  background-color: var(--danger-pink);
+  background-color: var(--danger-color);
 }
 
 .emoji-creator-delete:hover .icon {
-  background-color: var(--danger-pink);
+  background-color: var(--danger-color);
 }
 
 /* Confirm overlay — generalised question modal. Same in-panel chrome
@@ -4271,9 +4298,9 @@ img.emoji-img-loading {
 }
 .emoji-pack-creator-confirm[data-tone="danger"] {
   background:
-    linear-gradient(to top, rgba(255, 74, 138, 0.22) 0%, rgba(255, 74, 138, 0) 38%),
+    linear-gradient(to top, color-mix(in srgb, var(--danger-color) 22%, transparent) 0%, color-mix(in srgb, var(--danger-color) 0%, transparent) 38%),
     rgba(8, 8, 8, 0.82);
-  border-color: #ff4a8a;
+  border-color: var(--danger-color);
 }
 .emoji-pack-creator-confirm[hidden] { display: none; }
 .emoji-pack-creator-confirm-body {
@@ -4299,7 +4326,7 @@ img.emoji-img-loading {
   color: #fff;
 }
 .emoji-pack-creator-confirm[data-tone="danger"] .emoji-pack-creator-confirm-title {
-  color: #ff4a8a;
+  color: var(--danger-color);
 }
 .emoji-pack-creator-confirm-detail {
   color: #fff;
@@ -4334,13 +4361,13 @@ img.emoji-img-loading {
 }
 
 .emoji-pack-creator-confirm[data-tone="danger"] .emoji-pack-creator-confirm-ok {
-  background-color: var(--danger-pink);
-  border-color: var(--danger-pink);
+  background-color: var(--danger-color);
+  border-color: var(--danger-color);
   color: #000;
 }
 
 .emoji-pack-creator-confirm-cancel {
-  border-color: var(--danger-pink);
+  border-color: var(--danger-color);
   background-color: #03030390;
 }
 /* Pack creator cropper overlay — square-crop UX for non-square static
@@ -4637,11 +4664,11 @@ img.emoji-img-loading {
   background-color: #030303;
 }
 .emoji-pack-creator-naming-input.is-invalid {
-  border-color: #ff4a8a;
-  background-color: rgba(255, 74, 138, 0.06);
+  border-color: var(--danger-color);
+  background-color: var(--danger-color-hover);
 }
 .emoji-pack-creator-naming-error {
-  color: #ff4a8a;
+  color: var(--danger-color);
   font-size: 11px;
   font-weight: 500;
   margin: 4px 0 12px;
@@ -4689,12 +4716,12 @@ img.emoji-img-loading {
   inset: 0;
   border-radius: inherit;
   background:
-    linear-gradient(to top, rgba(255, 74, 138, 0.32) 0%, rgba(255, 74, 138, 0) 38%),
+    linear-gradient(to top, color-mix(in srgb, var(--danger-color) 32%, transparent) 0%, color-mix(in srgb, var(--danger-color) 0%, transparent) 38%),
     rgba(8, 8, 8, 0.85);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
-  border: 2px solid #ff4a8a;
-  box-shadow: 0 0 24px rgba(255, 74, 138, 0.25) inset;
+  border: 2px solid var(--danger-color);
+  box-shadow: 0 0 24px color-mix(in srgb, var(--danger-color) 25%, transparent) inset;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -4723,7 +4750,7 @@ img.emoji-img-loading {
   image-rendering: -webkit-optimize-contrast;
 }
 .emoji-pack-creator-error-pretitle {
-  color: #ff4a8a;
+  color: var(--danger-color);
   font-weight: 700;
   font-size: 13px;
   margin: 4px 0 2px;
@@ -4742,7 +4769,7 @@ img.emoji-img-loading {
   margin: 0 0 16px;
 }
 .emoji-pack-creator-error-retry {
-  background-color: var(--danger-pink);
+  background-color: var(--danger-color);
   color: #000;
   border: none;
   padding: 12px 28px;
@@ -4992,8 +5019,8 @@ img.emoji-img-loading {
 }
 
 .emoji-pack-preview.is-error {
-  border-color: rgba(255, 100, 100, 0.25);
-  background-color: rgba(255, 60, 60, 0.05);
+  border-color: color-mix(in srgb, var(--danger-color) 25%, transparent);
+  background-color: color-mix(in srgb, var(--danger-color) 5%, transparent);
 }
 
 @media (max-width: 480px) {
@@ -6416,7 +6443,7 @@ select {
 }
 
 .voice-preview-delete .icon {
-  background-color: #ff4444;
+  background-color: var(--danger-color);
   transition: opacity 0.15s ease;
 }
 
@@ -7559,7 +7586,7 @@ select:disabled:hover {
   background-color: #00000000;
   margin-left: 10px;
   backdrop-filter: none;
-  border-color: var(--danger-pink);
+  border-color: var(--danger-color);
   background-color: #171717;
 }
 
@@ -7824,7 +7851,7 @@ select:disabled:hover {
 }
 
 .danger-subtitle {
-  color: var(--danger-pink);
+  color: var(--danger-color);
   font-size: 12px;
   text-align: center;
   margin-top: 5px;
@@ -7840,8 +7867,14 @@ select:disabled:hover {
 
 .danger-btn {
   backdrop-filter: none;
-  border-color: var(--danger-pink);
+  border-color: var(--danger-color);
   background-color: #00000000;
+}
+
+.warning-icon {
+  content: url('./icons/warning_red.png');
+  width: 16px;
+  height: 16px;
 }
 
 .navbar {
@@ -9371,7 +9404,7 @@ select:disabled:hover {
 }
 .blossom-cap-accepted { color: #59fcb3; }
 .blossom-cap-limited { color: #ffc107; }
-.blossom-cap-rejected { color: #ff6464; }
+.blossom-cap-rejected { color: var(--danger-color); }
 .blossom-cap-list {
   list-style: none;
   padding: 0;
@@ -9395,7 +9428,7 @@ select:disabled:hover {
   flex-shrink: 0;
 }
 .blossom-cap-marker.blossom-cap-accepted { color: #59fcb3; }
-.blossom-cap-marker.blossom-cap-rejected { color: #ff6464; }
+.blossom-cap-marker.blossom-cap-rejected { color: var(--danger-color); }
 .blossom-cap-mime {
   flex: 1;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -9916,6 +9949,25 @@ select:disabled:hover {
   opacity: 0.7;
 }
 
+.kick-btn {
+  padding: 4px 12px;
+  font-size: 12px;
+  border-radius: 4px;
+  border: 1px solid var(--danger-color);
+  background: none;
+  color: var(--danger-color);
+  cursor: pointer;
+  transition: background 0.2s ease;
+  position: relative;
+  z-index: 1;
+  margin-left: 10px;
+}
+
+.kick-btn:hover {
+  background: var(--danger-color);
+  color: #000;
+}
+
 /* MLS Group Invite Styles */
 .chatlist-invite {
   cursor: default !important;
@@ -9958,7 +10010,7 @@ select:disabled:hover {
 }
 
 .invite-decline-btn {
-  border: 2px solid var(--danger-pink);
+  border: 2px solid var(--danger-color);
 }
 
 .invite-action-btn:hover {
@@ -12751,7 +12803,7 @@ hr {
 }
 
 .marketplace-install-btn.failed {
-  background-color: rgba(255, 100, 100, 0.3);
+  background-color: var(--danger-color-hover);
 }
 
 /* Loading spinner in install/update buttons */
@@ -13536,14 +13588,14 @@ hr {
 /* App Details Uninstall Button */
 .app-details-uninstall-btn {
   flex: 1;
-  background-color: rgba(255, 100, 100, 0.3);
-  color: #ff6464;
-  border: 1px solid rgba(255, 100, 100, 0.5);
+  background-color: var(--danger-color-hover);
+  color: var(--danger-color);
+  border: 1px solid color-mix(in srgb, var(--danger-color) 50%, transparent);
 }
 
 .app-details-uninstall-btn:hover {
-  background-color: rgba(255, 100, 100, 0.4);
-  box-shadow: 0 4px 16px rgba(255, 100, 100, 0.3);
+  background-color: color-mix(in srgb, var(--danger-color) 40%, transparent);
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--danger-color) 30%, transparent);
 }
 
 /* App Details Update Button */
@@ -13826,10 +13878,10 @@ hr {
 .app-details-reset-permissions-btn {
   margin-top: 12px;
   padding: 8px 16px;
-  background: rgba(255, 100, 100, 0.15);
-  border: 1px solid rgba(255, 100, 100, 0.3);
+  background: color-mix(in srgb, var(--danger-color) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger-color) 30%, transparent);
   border-radius: 8px;
-  color: rgba(255, 150, 150, 0.9);
+  color: var(--danger-color);
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
@@ -13838,9 +13890,9 @@ hr {
 }
 
 .app-details-reset-permissions-btn:hover {
-  background: rgba(255, 100, 100, 0.25);
-  border-color: rgba(255, 100, 100, 0.5);
-  color: rgba(255, 180, 180, 1);
+  background: color-mix(in srgb, var(--danger-color) 25%, transparent);
+  border-color: color-mix(in srgb, var(--danger-color) 50%, transparent);
+  color: var(--danger-color);
 }
 
 /* Permission Prompt Overlay */
@@ -14022,8 +14074,8 @@ hr {
 }
 
 .notif-sound-chip-clear:hover {
-  background: rgba(255, 100, 100, 0.3);
-  color: #ff6b6b;
+  background: var(--danger-color-hover);
+  color: var(--danger-color);
 }
 
 /* --- Mention Selector --- */
@@ -14246,8 +14298,8 @@ hr {
   --dmsg-pinged-border: var(--icon-color-primary, #59fcb3);
   --dmsg-replying-bg: rgba(255, 255, 255, 0.05);
   --dmsg-replying-border: rgba(255, 255, 255, 0.5);
-  --dmsg-failed-bg: rgba(255, 100, 100, 0.10);
-  --dmsg-failed-border: #ff6464;
+  --dmsg-failed-bg: color-mix(in srgb, var(--danger-color) 10%, transparent);
+  --dmsg-failed-border: var(--danger-color);
 }
 
 .dmsg {
@@ -14623,8 +14675,8 @@ hr {
   vertical-align: middle;
   position: static;
 }
-.dmsg-status-failed { color: #ff6464; }
-.dmsg-status-failed .icon { background-color: #ff6464; }
+.dmsg-status-failed { color: var(--danger-color); }
+.dmsg-status-failed .icon { background-color: var(--danger-color); }
 .dmsg-status-hidden { display: none !important; }  /* beat the block-right sibling rules above */
 .dmsg-failed-action {
   cursor: pointer;
@@ -14890,7 +14942,7 @@ hr {
 .wallpaper-remove-btn .icon {
   width: 20px;
   height: 20px;
-  background-color: #ff4444;
+  background-color: var(--danger-color);
   transition: opacity 0.15s ease;
 }
 .wallpaper-remove-btn:hover .icon {
@@ -14947,10 +14999,10 @@ hr {
    distinctly from the additive ones (react/reply/edit) without
    tinting the whole button. */
 .dmsg-toolbar-btn-danger .icon {
-  background-color: var(--danger-red);
+  background-color: var(--danger-color);
 }
 .dmsg-toolbar-btn-danger:hover .icon {
-  background-color: var(--danger-red);
+  background-color: var(--danger-color);
   filter: brightness(1.15);
 }
 

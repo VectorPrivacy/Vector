@@ -8,6 +8,7 @@
   --toast-border-color: #33DB98;
   --primary-color: #33DB98;
   --accent-color: #59fcb3;
+  --danger-color: #FF2EA9;
 }
 
 .sync-line {
@@ -601,4 +602,16 @@ select:disabled {
 
 .relay-metric-value {
   color: #59fcb3;
+}
+
+.aggro-glitch-img {
+  content: url('../../icons/aggro-glitch.gif');
+  width: 64px;
+  height: 64px;
+}
+
+.warning-icon {
+  content: url('../../icons/warning_pink.png');
+  width: 16px;
+  height: 16px;
 }

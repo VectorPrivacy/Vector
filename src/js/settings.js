@@ -2242,9 +2242,7 @@ async function loadBlockedUsersList() {
 
             const unblockBtn = document.createElement('span');
             unblockBtn.textContent = 'Unblock';
-            unblockBtn.style.cssText = 'color: #ff4444; font-size: 13px; cursor: pointer; padding: 4px 10px; border: 1px solid #ff4444; border-radius: 6px;';
-            unblockBtn.onmouseenter = () => { unblockBtn.style.backgroundColor = '#ff444420'; };
-            unblockBtn.onmouseleave = () => { unblockBtn.style.backgroundColor = ''; };
+            unblockBtn.classList.add('unblock-btn');
             unblockBtn.onclick = async () => {
                 const confirmed = await popupConfirm('Unblock User', `Are you sure you want to unblock ${escapeHtml(profile.nickname || profile.name || profile.id.substring(0, 16))}?`);
                 if (!confirmed) return;
