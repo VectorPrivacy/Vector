@@ -815,17 +815,10 @@ class VoiceSettings {
             await invoke('delete_whisper_model', { modelName });
             await this.loadWhisperModels();
             this.updateModelStatus();
-
-            // Show toast with fallback info
-            const fallback = this.models.find(m => m.model.name === this.selectedModel && m.downloaded);
-            if (fallback && fallback.model.name !== modelName) {
-                showToast(`Deleted — Now using ${fallback.model.display_name}`);
-            } else {
-                showToast(`Deleted ${modelName} model`);
-            }
+            showToast('Model Deleted');
         } catch (error) {
-            console.error('Failed to delete model:', error);
-            await popupConfirm('Deletion Failed', `Could not delete model: ${escapeHtml(String(error.message))}`, true, '', 'vector_warning.svg');
+            console.error('Failed to Delete Model:', error);
+            await popupConfirm('Deletion Failed', `Could not Delete Model: ${escapeHtml(String(error.message))}`, true, '', 'vector_warning.svg');
         }
     }
 
