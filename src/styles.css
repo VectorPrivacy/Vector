@@ -5914,9 +5914,12 @@ audio {
 }
 
 #settings {
+  position: fixed;
+  top: 10px;
+  bottom: 65px;
+  left: 0;
+  right: 2px;
   overflow-y: auto;
-  height: 100%;
-  padding-bottom: 80px;
   overscroll-behavior: none;
   -webkit-overflow-scrolling: touch;
   touch-action: pan-y;
