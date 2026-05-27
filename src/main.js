@@ -4627,6 +4627,7 @@ function renderProfileTab(cProfile) {
 
     // If this is OUR profile: make the elements clickable, hide the "Contact Options"
     if (cProfile.mine) {
+        document.getElementById('profile').classList.add('is-own-profile');
         // Hide Contact Options
         domProfileOptions.style.display = 'none';
 
@@ -4679,6 +4680,7 @@ function renderProfileTab(cProfile) {
         domProfileDescription.onclick = () => { if (fProfileEditMode) editProfileDescription(); };
         domProfileDescription.classList.add('btn');
     } else {
+        document.getElementById('profile').classList.remove('is-own-profile');
         // Show Contact Options
         domProfileOptions.style.display = '';
         document.getElementById('profile-header-avatar-container').style.display = '';

@@ -1048,16 +1048,20 @@ html, body {
 /* Profile Content - Scrollable */
 .profile-content {
   position: fixed;
-  top: 64px;
+  top: 60px;
   bottom: 65px;
   left: 0;
-  right: 2px;
+  right: 0px;
   overflow-x: hidden;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: none;
   touch-action: pan-y;
   box-sizing: border-box;
+}
+
+#profile:not(.is-own-profile) .profile-content {
+  bottom: 6px;
 }
 
 /* Profile Banner */
@@ -1911,7 +1915,7 @@ html, body {
   align-items: center;
   width: 85%;
   gap: 4px;
-  margin: 8px auto 20px auto;
+  margin: 8px auto 40px auto;
   padding: 4px 4px 4px 8px;
 }
 
@@ -5921,7 +5925,7 @@ audio {
 #settings {
   position: fixed;
   top: 10px;
-  bottom: 65px;
+  bottom: 70px;
   left: 0;
   right: 2px;
   overflow-y: auto;
