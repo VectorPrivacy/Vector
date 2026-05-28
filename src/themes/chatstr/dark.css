@@ -245,11 +245,11 @@ select:disabled {
 }
 
 .transcribe-progress-fill {
-  background: linear-gradient(90deg, #5749E4, #b188e2);
+  background: var(--accent-color);
 }
 
 .transcribe-progress-text {
-  color: #b188e2;
+  color: #fff;
 }
 
 .transcription-section.current {

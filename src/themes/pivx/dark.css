@@ -125,7 +125,7 @@
 input,
 textarea,
 button {
-  background-color: #161616;
+  background-color: #171717;
 }
 
 .corner-float {
@@ -153,11 +153,11 @@ select {
 }
 
 #download-model {
-  background: linear-gradient(135deg, #6202D4 0%, #1D003F 100%);
+  background: var(--primary-color);
 }
 
 #download-model:hover {
-  box-shadow: 0 5px 15px #6202D430;
+  opacity: 0.8;
 }
 
 .model-status {
@@ -239,11 +239,11 @@ select:disabled {
 }
 
 .audio-play-btn {
-  background: linear-gradient(135deg, #B359FC 0%, #6202D4 100%);
+  background: var(--accent-color);
 }
 
 .audio-progress-fill {
-  background: linear-gradient(90deg, #6202D4 0%, #1D003F 100%);
+  background: var(--accent-color);
 }
 
 .audio-progress-handle {
@@ -263,15 +263,15 @@ select:disabled {
 }
 
 .audio-transcribe-btn .icon {
-  background-color: #6202D4;
+  background-color: var(--accent-color);
 }
 
 .transcribe-progress-fill {
-  background: linear-gradient(90deg, #6202D4, #1D003F);
+  background: var(--accent-color);
 }
 
 .transcribe-progress-text {
-  color: #6202D4;
+  color: #fff;
 }
 
 .transcription-section.current {
@@ -381,7 +381,7 @@ select:disabled {
 }
 
 .marketplace-app-card {
-  background-color: #161616;
+  background-color: #171717;
   border-color: rgba(90, 252, 180, 0.15);
 }
 

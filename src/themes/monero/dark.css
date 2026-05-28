@@ -193,7 +193,7 @@ select {
 }
 
 #download-model {
-  background: linear-gradient(135deg, #FF6600 0%, #FF6600 80%);
+  background: var(--primary-color);
 }
 
 #download-model:hover {
@@ -201,7 +201,7 @@ select {
 }
 
 .model-status {
-  color: #FF6600;
+  color: var(--primary-color);
 }
 
 .progress-bar-track {
@@ -223,10 +223,6 @@ select {
 .voice-progress-container {
   border: 1px solid #FF6600;
   box-shadow: 0 0 15px #FF660030;
-}
-
-.voice-progress-fill {
-  background: linear-gradient(90deg, #FF6600, #FF660025);
 }
 
 .voice-progress-text {
@@ -270,13 +266,12 @@ select:disabled {
 /* Default style */
 .custom-audio-player {
   background: #FF660020;
-  backdrop-filter: blur(6px);
   box-shadow: 0 0 12px #00000050, 0 0 24px #00000025;
   border-color: #FF660040;
 }
 
 .custom-audio-player:hover {
-  background: #FF660060;
+  background: #FF660040;
   border-color: #FF660050;
 }
 
@@ -285,7 +280,7 @@ select:disabled {
 }
 
 .audio-progress-fill {
-  background: linear-gradient(90deg, #FF6600 0%, #FF6600 80%);
+  background: var(--primary-color);
 }
 
 .audio-progress-handle {
@@ -305,15 +300,15 @@ select:disabled {
 }
 
 .audio-transcribe-btn .icon {
-  background-color: #FF6600;
+  background-color: var(--primary-color);
 }
 
 .transcribe-progress-fill {
-  background: linear-gradient(90deg, #FF6600, #FF660080);
+  background: var(--primary-color);
 }
 
 .transcribe-progress-text {
-  color: #FF6600;
+  color: #fff;
 }
 
 .transcription-section.current {

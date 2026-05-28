@@ -1070,7 +1070,7 @@ class VoiceTranscriptionUI {
 
             return true;
         } catch (error) {
-            progressText.textContent = `Download failed`;
+            progressText.textContent = `Download Failed`;
             progressFill.style.background = '#ff5e5e';
             setTimeout(() => {
                 transcribeBtn.classList.remove('downloading');
@@ -1536,6 +1536,7 @@ function handleAudioAttachment(cAttachment, pMessage, msg) {
         }
 
         currentTimeEl.textContent = formatTime(posMs / 1000);
+        currentTimeEl.style.color = posMs > 0 ? '#ffffffb3' : '';
 
         // Highlight active transcription section if visible
         const tContainer = audioContainer.querySelector('.transcription-result:not(.hidden)');
@@ -1744,6 +1745,7 @@ function handleAudioAttachment(cAttachment, pMessage, msg) {
 
         // Update visuals immediately (no IPC)
         currentTimeEl.textContent = formatTime(posMs / 1000);
+        currentTimeEl.style.color = posMs > 0 ? '#ffffffb3' : '';
         if (!customPlayer.classList.contains('playing') && durationMs > 0) {
             const currentProgress = posMs / durationMs;
             bars.forEach((bar, i) => {
@@ -1826,6 +1828,7 @@ function handleAudioAttachment(cAttachment, pMessage, msg) {
         playBtn.innerHTML = '<span class="icon icon-play"></span>';
         customPlayer.classList.remove('playing');
         currentTimeEl.textContent = '0:00';
+        currentTimeEl.style.color = '';
 
         // Clear transcription highlighting
         const tContainer = audioContainer.querySelector('.transcription-result');
@@ -1889,6 +1892,7 @@ function handleAudioAttachment(cAttachment, pMessage, msg) {
                     playStartPos = ms;
                 }
                 currentTimeEl.textContent = formatTime(ms / 1000);
+                currentTimeEl.style.color = ms > 0 ? '#ffffffb3' : '';
             }
         };
 

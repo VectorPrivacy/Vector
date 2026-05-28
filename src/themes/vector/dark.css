@@ -36,7 +36,7 @@
 }
 
 .chat {
-  background-color: #161616;
+  background-color: #171717;
 }
 
 .chat-messages {
@@ -109,7 +109,7 @@
 input,
 textarea,
 button {
-  background-color: #161616;
+  background-color: #171717;
 }
 
 .corner-float {
@@ -281,10 +281,6 @@ select:disabled {
   box-shadow: none;
 }
 
-.audio-time-display .current-time {
-  color: #59fcb3;
-}
-
 /* File Preview Overlay Theme */
 .file-preview-container {
   border-color: var(--primary-color);
@@ -340,7 +336,7 @@ select:disabled {
 }
 
 .marketplace-app-card {
-  background-color: #161616;
+  background-color: #171717;
   border-color: rgba(90, 252, 180, 0.15);
 }
 

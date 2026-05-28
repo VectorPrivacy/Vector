@@ -5992,7 +5992,7 @@ select {
 
 /* Model Status Styles */
 .model-status {
-  margin-top: 15px;
+  margin-top: 0px;
   font-size: 14px;
   min-height: 20px;
 }
@@ -6536,7 +6536,7 @@ select {
   top: 0;
   bottom: 0;
   width: 0%;
-  background: linear-gradient(90deg, var(--icon-color-primary), var(--voice-progress-secondary, rgba(89, 252, 179, 0.4)));
+  background: var(--primary-color);
   border-radius: 5px 0 0 5px;
   pointer-events: none;
 }
@@ -7548,6 +7548,10 @@ select:focus::-ms-value {
   display: none; /* Hidden by default */
 }
 
+.btn-delete-model .icon-trash {
+  background-color: var(--danger-color);
+}
+
 .btn-delete-model:hover {
   opacity: 1;
 }
@@ -7595,6 +7599,10 @@ select:focus::-ms-value {
 #whisper-model:focus-visible {
   outline: none !important;
   box-shadow: none !important;
+}
+
+#whisper-model.form-control {
+    text-align: center !important;
 }
 
 /* Disabled select styles for visual feedback */
@@ -8737,7 +8745,7 @@ select:disabled:hover {
 .transcribe-progress-fill {
     height: 100%;
     width: 0%;
-    background: linear-gradient(90deg, var(--primary-color), var(--accent-color));
+    background: var(--primary-color);
     border-radius: 2px;
     transition: width 0.3s ease;
 }
@@ -8773,7 +8781,7 @@ select:disabled:hover {
 .custom-audio-player {
     gap: 12px;
     padding: 12px;
-    background: rgba(22, 22, 22, 0.6);
+    background: #17171750;
     border: 1px solid rgba(89, 252, 179, 0.2);
     border-radius: 12px;
     position: relative;
@@ -8781,6 +8789,7 @@ select:disabled:hover {
     width: min(500px, calc(100vw - 100px));
     box-sizing: border-box;
     transition: all 0.3s ease;
+    margin-bottom: 6px;
 }
 
 .custom-audio-player-inner {
@@ -8975,7 +8984,7 @@ select:disabled:hover {
 }
 
 .audio-time-display .current-time {
-    color: #59fcb3;
+    color: #ffffff66;
     font-weight: bold;
 }
 

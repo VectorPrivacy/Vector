@@ -225,13 +225,13 @@ select:disabled {
 /* Custom Audio Player Theme Overrides */
 /* Default style */
 .custom-audio-player {
-  background: #F7FFAE40;
-  border-color: #F7FFAE;
+  background: #F7FFAE30;
+  border-color: #F7FFAE50;
 }
 
 .custom-audio-player:hover {
-  background: #F7FFAE60;
-  border-color: #F7FFAE50;
+  background: #F7FFAE40;
+  border-color: #F7FFAE70;
 }
 
 .audio-play-btn {
@@ -267,7 +267,7 @@ select:disabled {
 }
 
 .transcribe-progress-text {
-  color: #FFAECE;
+  color: #fff;
 }
 
 .transcription-section.current {

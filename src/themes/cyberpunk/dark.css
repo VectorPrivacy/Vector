@@ -226,14 +226,6 @@ select {
   box-shadow: 0 0 15px #59FCF430;
 }
 
-.voice-progress-fill {
-  background: linear-gradient(90deg, var(--primary-color), var(--secondary-color));
-}
-
-.voice-preview-progress {
-  background: linear-gradient(90deg, var(--primary-color), var(--secondary-color));
-}
-
 .voice-progress-text {
   color: #59FCF4;
 }
@@ -275,7 +267,6 @@ select:disabled {
 /* Default style */
 .custom-audio-player {
   background: #59FCF420;
-  backdrop-filter: blur(6px);
   box-shadow: 0 0 12px #00000050, 0 0 24px #00000025;
   border-color: #59FCF440;
 }
@@ -286,11 +277,11 @@ select:disabled {
 }
 
 .audio-play-btn {
-  background: linear-gradient(135deg, #59FCF4 0%, #59FCF4 100%);
+  background: var(--primary-color);
 }
 
 .audio-progress-fill {
-  background: linear-gradient(90deg, #59FCF4 0%, #59FCF4 80%);
+  background: var(--primary-color);
 }
 
 .audio-progress-handle {
@@ -318,7 +309,7 @@ select:disabled {
 }
 
 .transcribe-progress-text {
-  color: #59FCF4;
+  color: #fff;
 }
 
 .transcription-section.current {
