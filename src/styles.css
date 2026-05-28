@@ -4187,12 +4187,12 @@ img.emoji-img-loading {
 .emoji-creator-cell-remove {
   position: absolute;
   top: -4px;
-  right: -4px;
-  width: 16px;
-  height: 16px;
+  right: -6px;
+  width: 20px;
+  height: 20px;
   border-radius: 50%;
-  background-color: var(--danger-color);
-  border: 2px solid #0a0a0a;
+  background-color: transparent;
+  background: #0a0a0a;
   padding: 0;
   cursor: pointer;
   display: none;
@@ -4205,9 +4205,9 @@ img.emoji-img-loading {
    a drag can never get stuck in an apparent hover state after drop. */
 .emoji-creator-cell.is-hovered .emoji-creator-cell-remove { display: flex; }
 .emoji-creator-cell-remove .icon {
-  width: 7px;
-  height: 7px;
-  background-color: #fff;
+  width: 10px;
+  height: 10px;
+  background-color: var(--danger-color);
 }
 
 /* Bottom dropzone — second affordance for uploading (mirrors mockup). */

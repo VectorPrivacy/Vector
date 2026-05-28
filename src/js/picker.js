@@ -2261,7 +2261,7 @@ function _pcRenderGrid() {
             removeBtn.type = 'button';
             removeBtn.className = 'emoji-creator-cell-remove';
             removeBtn.setAttribute('aria-label', 'Remove emoji');
-            removeBtn.innerHTML = '<span class="icon icon-cancel"></span>';
+            removeBtn.innerHTML = '<span class="icon icon-x"></span>';
             removeBtn.addEventListener('click', (ev) => {
                 ev.stopPropagation();
                 _pcRemoveEmoji(idx);
