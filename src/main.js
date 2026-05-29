@@ -3707,10 +3707,12 @@ async function refreshRelayInfoDialog() {
             statusEl.className = `relay-status ${freshRelay.status}`;
 
             // Update disable button text
-            const disableBtn = document.getElementById('relay-info-disable');
-            if (freshRelay.is_default) {
-                disableBtn.textContent = freshRelay.enabled ? 'Disable Relay' : 'Enable Relay';
-            }
+        const disableBtn = document.getElementById('relay-info-disable');
+        if (freshRelay.is_default) {
+            disableBtn.innerHTML = freshRelay.enabled 
+                ? '<span class="icon icon-disable"></span> Disable'
+                : '<span class="icon icon-disable"></span> Enable';
+        }
         }
     } catch (err) {
         console.error('Failed to refresh relay data:', err);

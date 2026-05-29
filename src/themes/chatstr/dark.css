@@ -196,10 +196,6 @@ input[type="checkbox"]:checked + .neon-toggle:hover {
   background-color: #b188e2;
 }
 
-select:disabled {
-  border-color: rgba(177, 136, 226, 0.3);
-}
-
 .nav-icon {
   background-color: #b188e2;
 }
@@ -602,27 +598,10 @@ select:disabled {
 }
 
 /* Relay Dialog */
-.relay-dialog {
-  border-color: rgba(177, 136, 226, 0.25);
-}
-
-.relay-dialog-header {
-  background: linear-gradient(90deg, #b188e210 0%,#b188e2 75%, #5749E4 100%);
-}
-
-.relay-form-input:focus,
-.relay-form-select:focus {
-  border-color: #b188e2;
-}
 
 .relay-dialog-buttons .primary-btn {
   background-color: #b188e2;
   color: #000;
-}
-
-.relay-dialog-buttons .primary-btn:hover {
-  color: #fff;
-  background-color: #5749E4;
 }
 
 .relay-metric-value {

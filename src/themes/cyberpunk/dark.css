@@ -255,10 +255,6 @@ input[type="checkbox"]:checked + .neon-toggle:hover {
   background-color: #59FCF4;
 }
 
-select:disabled {
-  border-color: #59FCF460;
-}
-
 .nav-icon {
   background-color: #59FCF4;
 }
@@ -661,17 +657,6 @@ select:disabled {
 }
 
 /* Relay Dialog */
-.relay-dialog {
-  border-color: #171717;
-}
-
-.relay-dialog-header {
-  background: linear-gradient(90deg, var(--primary-color), var(--secondary-color));
-}
-
-.relay-dialog-header h3 {
-  color: #000;
-}
 
 .relay-form-input:focus,
 .relay-form-select:focus {
@@ -679,11 +664,7 @@ select:disabled {
 }
 
 .relay-dialog-buttons .primary-btn {
-  background-color: #59FCF4;
-  color: #000;
-}
-
-.relay-dialog-buttons .primary-btn:hover {
+  background-color: var(--primary-color);
   color: #000;
 }
 

@@ -684,34 +684,28 @@
 <div class="relay-dialog-overlay" id="relay-info-overlay">
   <div class="relay-dialog relay-info-dialog">
     <div class="relay-dialog-header">
-      <h3 id="relay-info-url">Relay URL</h3>
-      <button class="relay-dialog-close" id="relay-info-close">&times;</button>
+        <h3>Relay Settings</h3>
+        <button class="relay-dialog-close" id="relay-info-close">&times;</button>
     </div>
     <div class="relay-dialog-content">
-      <div class="relay-form-group">
-        <label class="relay-form-label">Mode</label>
-        <select id="relay-info-mode" class="relay-form-select">
-          <option value="both">Read & Write</option>
-          <option value="read">Read Only</option>
-          <option value="write">Write Only</option>
-        </select>
-      </div>
-      <div class="relay-metrics-section">
-        <div class="relay-metrics-header">
-          <h4>Connection Info</h4>
-          <span class="relay-status relay-status-small" id="relay-info-status">connected</span>
+        <div class="relay-info-header-row">
+            <p id="relay-info-url"></p>
+            <span class="relay-status relay-status-small" id="relay-info-status">connected</span>
         </div>
-        <div class="relay-metrics-grid">
-          <div class="relay-metric">
-            <span class="relay-metric-value" id="relay-info-ping">--</span>
-            <span class="relay-metric-label">Ping</span>
-          </div>
-          <div class="relay-metric">
-            <span class="relay-metric-value" id="relay-info-last-check">--</span>
-            <span class="relay-metric-label">Last Check</span>
-          </div>
+        <div class="relay-metrics-inline">
+            <span class="relay-metric-inline-label">Ping</span>
+            <span class="relay-metric-inline-value" id="relay-info-ping">--</span>
+            <span class="relay-metric-inline-label relay-metric-inline-right">Last Check</span>
+            <span class="relay-metric-inline-value" id="relay-info-last-check">--</span>
         </div>
-      </div>
+        <div class="relay-form-group">
+            <label class="relay-form-label">Mode</label>
+            <select id="relay-info-mode" class="relay-form-select">
+                <option value="both">Read & Write</option>
+                <option value="read">Read Only</option>
+                <option value="write">Write Only</option>
+            </select>
+        </div>
       <div class="relay-logs-section">
         <div class="relay-logs-header">
           <h4>Recent Activity</h4>
@@ -724,8 +718,11 @@
         </ul>
       </div>
       <div class="relay-dialog-buttons">
-        <button class="btn danger-btn" id="relay-info-disable">Disable Relay</button>
-        <button class="btn primary-btn" id="relay-info-done">Done</button>
+          <button class="btn danger-btn" id="relay-info-disable">
+              <span class="icon icon-disable"></span>
+              Disable
+          </button>
+          <button class="btn primary-btn" id="relay-info-done">Close</button>
       </div>
     </div>
   </div>

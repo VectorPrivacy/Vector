@@ -596,13 +596,6 @@ select:disabled {
 }
 
 /* Relay Dialog */
-.relay-dialog {
-  border-color: #171717;
-}
-
-.relay-dialog-header {
-  background: linear-gradient(90deg, #B56C1220, #F7931A);
-}
 
 .relay-form-input:focus,
 .relay-form-select:focus {
@@ -611,11 +604,7 @@ select:disabled {
 
 .relay-dialog-buttons .primary-btn {
   background-color: #F7931A;
-  color: #ffffff;
-}
-
-.relay-dialog-buttons .primary-btn:hover {
-  color: #fff;
+  color: #000;
 }
 
 .relay-metric-value {

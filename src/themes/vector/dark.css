@@ -572,30 +572,18 @@ select:disabled {
 }
 
 /* Relay Dialog */
-.relay-dialog {
-  border-color: #171717;
-}
-
-.relay-dialog-header {
-  background: linear-gradient(90deg, #2b976c00 0%, #2b976c20 40%, #33DB9880 100%);
-}
-
-.relay-form-input:focus,
-.relay-form-select:focus {
-  border-color: #59fcb3;
-}
 
 .relay-dialog-buttons .primary-btn {
   background-color: #59fcb3;
   color: #000;
 }
 
-.relay-dialog-buttons .primary-btn:hover {
-  box-shadow: 0 0 0px #2b976c00;
-}
-
 .relay-metric-value {
   color: #59fcb3;
+}
+
+.relay-metric-inline-value {
+    color: var(--accent-color);
 }
 
 .aggro-glitch-img {

@@ -7565,6 +7565,11 @@ select:focus::-ms-value {
   mask-size: contain;
 }
 
+.icon-disable {
+    mask-image: url("./icons/disable.svg");
+    -webkit-mask-image: url("./icons/disable.svg");
+}
+
 .icon-x-user {
   mask-image: url("./icons/x-user.svg");
 }
@@ -7910,6 +7915,22 @@ select:disabled:hover {
   backdrop-filter: none;
   border-color: var(--danger-color);
   background-color: #00000000;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding-top: 2px;
+}
+
+.danger-btn .icon-disable {
+    position: relative;
+    width: 16px;
+    height: 16px;
+    background-color: var(--danger-color);
+    flex-shrink: 0;
+    display: inline-block;
+    margin: 0;
+    margin-top: -2px;
 }
 
 .warning-icon {
@@ -9052,7 +9073,7 @@ select:disabled:hover {
 .relay-status {
   font-size: 12px;
   font-weight: 600;
-  padding: 4px 12px;
+  padding: 2px 10px;
   border-radius: 20px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -9202,7 +9223,7 @@ select:disabled:hover {
 
 .relay-dialog {
   background: rgba(20, 20, 20, 0.95);
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  border: 1px solid #262626;
   border-radius: 16px;
   width: min(420px, calc(100vw - 40px));
   max-height: calc(100vh - 80px);
@@ -9215,12 +9236,13 @@ select:disabled:hover {
   justify-content: space-between;
   align-items: center;
   padding: 15px 20px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  border-bottom: 1px solid #333333;
+  background: #262626;
 }
 
 .relay-dialog-header h3 {
   margin: 0;
-  font-size: 16px;
+  font-size: 18px;
   color: #fff;
   word-break: break-all;
   padding-right: 10px;
@@ -9250,6 +9272,23 @@ select:disabled:hover {
   transition: transform 0.25s ease;
 }
 
+#relay-info-url {
+    text-align: left;
+    color: var(--primary-color);
+    font-size: 16px;
+    margin: 0 0 16px 0;
+}
+
+.relay-info-header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.relay-info-header-row #relay-info-url {
+    margin: 0;
+}
+
 .relay-dialog-content {
   padding: 20px;
   display: flex;
@@ -9260,22 +9299,31 @@ select:disabled:hover {
 }
 
 .relay-form-group {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.relay-form-group select {
+    width: 160px;
+    margin: 0;
+    margin-left: auto;
 }
 
 .relay-form-label {
   font-size: 13px;
   font-weight: 600;
   color: rgba(255, 255, 255, 0.8);
+  flex-shrink: 0;
 }
 
 .relay-form-input,
 .relay-form-select {
   padding: 10px 12px;
   background: rgba(0, 0, 0, 0.3);
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  border: 1px solid #262626;
   border-radius: 8px;
   color: #fff;
   font-size: 14px;
@@ -9285,6 +9333,7 @@ select:disabled:hover {
 .relay-form-input:focus,
 .relay-form-select:focus {
   outline: none;
+  border-color: var(--primary-color);
 }
 
 .relay-form-select {
@@ -9292,10 +9341,13 @@ select:disabled:hover {
   appearance: none;
   -webkit-appearance: none;
   -moz-appearance: none;
-  padding-right: 36px;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M2.5 4.5L6 8L9.5 4.5' stroke='rgba(255,255,255,0.6)' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
-  background-position: right 12px center;
+  background-position: right 8px center;
+  flex: none;
+  padding: 6px 24px 6px 14px;
+  font-size: 13px;
+  width: 160px;
 }
 
 .relay-form-select:disabled {
@@ -9320,6 +9372,10 @@ select:disabled:hover {
   padding: 10px 15px;
 }
 
+.relay-dialog-buttons .primary-btn:hover {
+  opacity: 0.8;
+}
+
 /* Relay Info Dialog Specific */
 .relay-metrics-section h4,
 .relay-logs-section h4 {
@@ -9334,7 +9390,33 @@ select:disabled:hover {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 10px;
+}
+
+.relay-metrics-inline {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 13px;
+}
+
+.relay-metric-inline-label {
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.relay-metric-inline-value {
+    color: #59fcb3;
+    font-weight: 600;
+}
+
+.relay-metric-inline-divider {
+    color: rgba(255, 255, 255, 0.2);
+}
+
+.relay-metric-inline-right {
+    margin-left: auto;
 }
 
 .relay-status-small {
@@ -9370,23 +9452,14 @@ select:disabled:hover {
   background-color: rgba(255, 255, 255, 0.8);
 }
 
-.relay-metrics-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 10px;
-}
-
-.relay-metric {
-  background: rgba(0, 0, 0, 0.3);
-  border-radius: 8px;
-  padding: 10px;
-  text-align: center;
-}
-
 .relay-metric-value {
   display: block;
-  font-size: 18px;
-  font-weight: 600;
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.relay-metric-inline-right {
+    margin-left: auto;
 }
 
 .relay-metric-label {
@@ -9405,10 +9478,11 @@ select:disabled:hover {
   border-radius: 8px;
   max-height: 150px;
   overflow-y: auto;
+  margin-top: 10px;
 }
 
 .relay-logs-list li {
-  padding: 8px 12px;
+  padding: 6px 12px;
   font-size: 12px;
   color: rgba(255, 255, 255, 0.7);
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
