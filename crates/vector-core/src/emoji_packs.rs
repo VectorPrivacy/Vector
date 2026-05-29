@@ -548,6 +548,54 @@ pub fn load_subscriptions() -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// Load a single cached pack by its raw `kind:pubkey:identifier` addr,
+/// regardless of subscription status. Used by the theme-pack path: a theme
+/// pack is persisted via `save_pack` (so it loads instantly across sessions)
+/// but never gets a subscription row, so `load_all_packs` rightly hides it.
+pub fn load_cached_pack(addr: &str) -> Result<Option<EmojiPack>, String> {
+    let conn = crate::db::get_db_connection_guard_static()?;
+
+    let mut pack = match conn.query_row(
+        "SELECT pubkey, identifier, title, image_url, description, is_own, updated_at
+         FROM emoji_packs WHERE addr = ?1",
+        rusqlite::params![addr],
+        |row| {
+            Ok(EmojiPack {
+                id: naddr_from_addr(addr).unwrap_or_else(|_| addr.to_string()),
+                pubkey: row.get(0)?,
+                identifier: row.get(1)?,
+                title: row.get(2)?,
+                image_url: row.get(3)?,
+                description: row.get(4)?,
+                is_own: row.get::<_, i32>(5)? != 0,
+                updated_at: row.get::<_, i64>(6)? as u64,
+                emojis: Vec::new(),
+            })
+        },
+    ) {
+        Ok(p) => p,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        Err(e) => return Err(format!("query cached pack: {}", e)),
+    };
+
+    let mut stmt = conn.prepare(
+        "SELECT shortcode, url, sha256 FROM emoji_pack_items
+         WHERE pack_addr = ?1 ORDER BY position ASC"
+    ).map_err(|e| format!("prepare items: {}", e))?;
+    let rows = stmt.query_map(rusqlite::params![addr], |row| {
+        Ok(PackEmoji {
+            shortcode: row.get(0)?,
+            url: row.get(1)?,
+            sha256: row.get(2)?,
+        })
+    }).map_err(|e| format!("query items: {}", e))?;
+    for r in rows {
+        pack.emojis.push(r.map_err(|e| format!("row item: {}", e))?);
+    }
+
+    Ok(Some(pack))
+}
+
 /// Load every locally-cached pack the user is currently subscribed to
 /// (plus their own packs, which always count). Hydrated with items.
 /// Cached non-subscribed pack rows stay in the DB so historic reactions
@@ -628,6 +676,151 @@ pub fn load_all_packs() -> Result<Vec<EmojiPack>, String> {
 }
 
 // ============================================================================
+// Author outbox (NIP-65)
+// ============================================================================
+
+/// How long a cached author relay list stays valid before re-fetching.
+/// NIP-65 lists rarely change (relay-set edits are a deliberate user act);
+/// an hour amortises the overhead without serving routing that's egregiously
+/// stale. Mirrors the TTL the NIP-17 inbox cache uses.
+const NIP65_CACHE_TTL_SECS: u64 = 3600;
+/// Shorter TTL after an empty/failed lookup so a transient relay blip doesn't
+/// suppress outbox routing for a whole hour.
+const NIP65_CACHE_TTL_ERROR_SECS: u64 = 60;
+const NIP65_FETCH_TIMEOUT_SECS: u64 = 10;
+
+#[derive(Clone)]
+struct CachedRelayList {
+    relays: Vec<RelayUrl>,
+    fetched_at: std::time::Instant,
+    /// Empty fetches use the shorter TTL so transient outages recover fast.
+    empty: bool,
+}
+
+static NIP65_CACHE: std::sync::OnceLock<std::sync::RwLock<HashMap<PublicKey, CachedRelayList>>> =
+    std::sync::OnceLock::new();
+
+fn nip65_cache() -> &'static std::sync::RwLock<HashMap<PublicKey, CachedRelayList>> {
+    NIP65_CACHE.get_or_init(|| std::sync::RwLock::new(HashMap::new()))
+}
+
+/// Read fresh write relays for `pubkey` from the cache, or `None` if absent /
+/// expired. Honours the dual TTL (short for empty entries).
+fn cached_write_relays(pubkey: &PublicKey) -> Option<Vec<RelayUrl>> {
+    let cache = nip65_cache().read().ok()?;
+    let entry = cache.get(pubkey)?;
+    let ttl = if entry.empty { NIP65_CACHE_TTL_ERROR_SECS } else { NIP65_CACHE_TTL_SECS };
+    if entry.fetched_at.elapsed() < std::time::Duration::from_secs(ttl) {
+        Some(entry.relays.clone())
+    } else {
+        None
+    }
+}
+
+/// Store a freshly-resolved write-relay list for `pubkey` in the cache.
+fn cache_write_relays(pubkey: PublicKey, relays: Vec<RelayUrl>) {
+    if let Ok(mut cache) = nip65_cache().write() {
+        let empty = relays.is_empty();
+        cache.insert(pubkey, CachedRelayList {
+            relays,
+            fetched_at: std::time::Instant::now(),
+            empty,
+        });
+    }
+}
+
+/// Extract the write relays from a kind-10002 event. NIP-65: marker absent =
+/// read+write (both), "write" = author publishes here, "read"-only = consumes
+/// only (useless for finding their packs), so we keep both/write and drop read.
+fn extract_write_relays(ev: &Event) -> Vec<RelayUrl> {
+    let mut relays: Vec<RelayUrl> = Vec::new();
+    for (url, marker) in nostr_sdk::nips::nip65::extract_relay_list(ev) {
+        match marker {
+            None | Some(nostr_sdk::nips::nip65::RelayMetadata::Write) => {
+                if !relays.contains(url) {
+                    relays.push(url.clone());
+                }
+            }
+            Some(nostr_sdk::nips::nip65::RelayMetadata::Read) => {}
+        }
+    }
+    relays
+}
+
+/// Resolve the author's NIP-65 (kind-10002) write relays — where they publish.
+/// Returns an empty Vec on absence or fetch error; callers must treat absence
+/// as "no extra hints," not a failure. Cached per-pubkey. Used by the
+/// single-pack path; the batched list path uses `prefetch_author_write_relays`.
+async fn fetch_author_write_relays(client: &Client, pubkey: PublicKey) -> Vec<RelayUrl> {
+    if let Some(relays) = cached_write_relays(&pubkey) {
+        return relays;
+    }
+
+    let filter = Filter::new()
+        .author(pubkey)
+        .kind(Kind::RelayList)
+        .limit(1);
+    let events = match client
+        .fetch_events(filter, std::time::Duration::from_secs(NIP65_FETCH_TIMEOUT_SECS))
+        .await
+    {
+        Ok(evs) => evs,
+        Err(_) => {
+            cache_write_relays(pubkey, Vec::new());
+            return Vec::new();
+        }
+    };
+
+    let relays = events.into_iter()
+        .max_by_key(|e| e.created_at)
+        .map(|ev| extract_write_relays(&ev))
+        .unwrap_or_default();
+    cache_write_relays(pubkey, relays.clone());
+    relays
+}
+
+/// Warm the NIP-65 cache for many authors in ONE request. Used by the batched
+/// subscribed-list path so a boot with N federated packs pays a single
+/// kind-10002 fetch instead of N. Authors already cached-fresh are skipped;
+/// authors with no kind-10002 are cached empty (short TTL) so we don't refetch
+/// them every pass.
+async fn prefetch_author_write_relays(client: &Client, authors: &[PublicKey]) {
+    let uncached: Vec<PublicKey> = authors.iter()
+        .filter(|pk| cached_write_relays(pk).is_none())
+        .copied()
+        .collect();
+    if uncached.is_empty() {
+        return;
+    }
+
+    let filter = Filter::new()
+        .authors(uncached.iter().copied())
+        .kind(Kind::RelayList);
+    let events = match client
+        .fetch_events(filter, std::time::Duration::from_secs(NIP65_FETCH_TIMEOUT_SECS))
+        .await
+    {
+        Ok(evs) => evs,
+        // On error, leave the cache cold — the next pass retries rather than
+        // poisoning every author with an empty entry off one failed batch.
+        Err(_) => return,
+    };
+
+    // Keep the newest kind-10002 per author, then cache each.
+    let mut newest: HashMap<PublicKey, Event> = HashMap::new();
+    for ev in events {
+        match newest.get(&ev.pubkey) {
+            Some(existing) if existing.created_at >= ev.created_at => {}
+            _ => { newest.insert(ev.pubkey, ev); }
+        }
+    }
+    for pk in uncached {
+        let relays = newest.get(&pk).map(extract_write_relays).unwrap_or_default();
+        cache_write_relays(pk, relays);
+    }
+}
+
+// ============================================================================
 // Relay fetch
 // ============================================================================
 
@@ -641,21 +834,209 @@ async fn fetch_pack_from_relays(client: &Client, addr: &PackAddress) -> Option<E
         .kind(Kind::Custom(KIND_EMOJI_SET))
         .identifier(&addr.identifier)
         .limit(1);
+    let timeout = std::time::Duration::from_secs(FETCH_TIMEOUT_SECS);
+    let me = crate::state::my_public_key().map(|pk| pk.to_hex());
 
-    let events = match client
-        .fetch_events(filter, std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
-        .await
-    {
+    // 1) Home relays first (the shared pool). Covers our own packs and any
+    //    pack that's on Vector's default relays — the common, fast case.
+    match client.fetch_events(filter.clone(), timeout).await {
+        Ok(events) => {
+            if let Some(ev) = events.into_iter().max_by_key(|e| e.created_at) {
+                if let Some(pack) = parse_pack_from_event(&ev, me.as_deref()) {
+                    return Some(pack);
+                }
+            }
+        }
+        Err(e) => crate::log_warn!("[EmojiPacks] home fetch {} failed: {}", &addr.identifier, e),
+    }
+
+    // 2) Outbox fallback (NIP-65): the pack lives wherever the creator
+    //    publishes, which may sit outside our relays. Fetch through an
+    //    ISOLATED throwaway client so these third-party relays never enter
+    //    the shared pool — the DM/MLS sync loops enumerate that pool and
+    //    would otherwise reconcile against every pack author's relays.
+    let outbox = fetch_author_write_relays(client, addr.pubkey).await;
+    if outbox.is_empty() {
+        return None;
+    }
+    fetch_pack_via_isolated_client(&outbox, filter, timeout, me.as_deref()).await
+}
+
+/// Fetch a kind-30030 pack through a dedicated, short-lived client connected
+/// only to the given relays. Built with Tor-aware options; fully torn down
+/// before returning so nothing leaks into the app's relay pool or sync loops.
+async fn fetch_pack_via_isolated_client(
+    relays: &[RelayUrl],
+    filter: Filter,
+    timeout: std::time::Duration,
+    my_pubkey_hex: Option<&str>,
+) -> Option<EmojiPack> {
+    let scratch = ClientBuilder::new()
+        .opts(crate::nostr_client_options())
+        .build();
+    for r in relays {
+        let opts = crate::tor_aware_relay_options(RelayOptions::new().reconnect(false));
+        let _ = scratch.pool().add_relay(r.as_str(), opts).await;
+    }
+    scratch.connect().await;
+
+    let result = scratch.fetch_events(filter, timeout).await;
+    // Tear the scratch client down regardless of outcome.
+    scratch.shutdown().await;
+
+    let events = match result {
         Ok(events) => events,
         Err(e) => {
-            crate::log_warn!("[EmojiPacks] fetch {} failed: {}", &addr.identifier, e);
+            crate::log_warn!("[EmojiPacks] outbox fetch failed: {}", e);
             return None;
         }
     };
-
     let event = events.into_iter().max_by_key(|e| e.created_at)?;
+    parse_pack_from_event(&event, my_pubkey_hex)
+}
+
+// ============================================================================
+// Batched relay fetch (subscribed-list path ONLY)
+// ============================================================================
+//
+// `fetch_pack_from_relays` (above) resolves ONE pack and is used by the
+// per-pack flows: in-chat preview cards and the pinned theme pack, which
+// arrive as independent render events and must stay independent.
+//
+// `fetch_packs_from_relays` (below) resolves MANY packs whose coordinates are
+// all known up front — i.e. the user's own subscribed list. It collapses what
+// used to be N requests into one batched home request plus, for any packs not
+// on our relays, one batched NIP-65 prefetch and one batched outbox request.
+// These two paths intentionally do NOT share fetch logic: the single path is
+// kept byte-stable so the preview/theme behaviour can't regress.
+
+/// Coordinate key for matching a kind-30030 event back to a requested pack:
+/// `pubkey_hex:identifier`. (Not the `30030:`-prefixed addr — just the parts a
+/// fetched event exposes via its author + `d` tag.)
+fn event_coord(ev: &Event) -> Option<String> {
+    let d = first_tag(&ev.tags, &["d"])?;
+    Some(format!("{}:{}", ev.pubkey.to_hex(), d))
+}
+fn addr_coord(addr: &PackAddress) -> String {
+    format!("{}:{}", addr.pubkey.to_hex(), addr.identifier)
+}
+
+/// One batched filter matches the cross-product of authors × identifiers, so it
+/// can return events we didn't ask for (author A's `d` that belongs to author
+/// B's pack). Match strictly by exact coordinate and keep the newest event per
+/// coordinate; strays are dropped.
+fn parse_packs_by_coord(
+    events: impl IntoIterator<Item = Event>,
+    wanted: &std::collections::HashSet<String>,
+    me: Option<&str>,
+) -> HashMap<String, EmojiPack> {
+    let mut newest: HashMap<String, Event> = HashMap::new();
+    for ev in events {
+        if ev.kind.as_u16() != KIND_EMOJI_SET { continue; }
+        let Some(coord) = event_coord(&ev) else { continue; };
+        if !wanted.contains(&coord) { continue; }
+        match newest.get(&coord) {
+            Some(existing) if existing.created_at >= ev.created_at => {}
+            _ => { newest.insert(coord, ev); }
+        }
+    }
+    newest.into_iter()
+        .filter_map(|(coord, ev)| parse_pack_from_event(&ev, me).map(|p| (coord, p)))
+        .collect()
+}
+
+/// Resolve MANY packs in a batch. Home relays in one request; any unresolved
+/// packs then get one batched NIP-65 prefetch + one batched outbox request via
+/// an isolated client. Returns the packs that resolved (in `addrs` order);
+/// callers keep cached copies for the rest.
+async fn fetch_packs_from_relays(client: &Client, addrs: &[PackAddress]) -> Vec<EmojiPack> {
+    if addrs.is_empty() {
+        return Vec::new();
+    }
+    let timeout = std::time::Duration::from_secs(FETCH_TIMEOUT_SECS);
     let me = crate::state::my_public_key().map(|pk| pk.to_hex());
-    parse_pack_from_event(&event, me.as_deref())
+    let wanted: std::collections::HashSet<String> = addrs.iter().map(addr_coord).collect();
+
+    // 1) One batched home request for every subscribed pack.
+    let home_filter = Filter::new()
+        .authors(addrs.iter().map(|a| a.pubkey))
+        .kind(Kind::Custom(KIND_EMOJI_SET))
+        .identifiers(addrs.iter().map(|a| a.identifier.clone()));
+    let mut resolved: HashMap<String, EmojiPack> = match client.fetch_events(home_filter, timeout).await {
+        Ok(events) => parse_packs_by_coord(events, &wanted, me.as_deref()),
+        Err(e) => {
+            crate::log_warn!("[EmojiPacks] batched home fetch failed: {}", e);
+            HashMap::new()
+        }
+    };
+
+    // 2) Outbox fallback for the misses, all in one shot.
+    let misses: Vec<&PackAddress> = addrs.iter()
+        .filter(|a| !resolved.contains_key(&addr_coord(a)))
+        .collect();
+    if !misses.is_empty() {
+        let miss_authors: Vec<PublicKey> = {
+            let mut v: Vec<PublicKey> = misses.iter().map(|a| a.pubkey).collect();
+            v.sort(); v.dedup();
+            v
+        };
+        // Warm NIP-65 for all missed authors in one request, then union their
+        // write relays into a single isolated client + one batched request.
+        prefetch_author_write_relays(client, &miss_authors).await;
+        let mut outbox: Vec<RelayUrl> = Vec::new();
+        for pk in &miss_authors {
+            for r in cached_write_relays(pk).unwrap_or_default() {
+                if !outbox.contains(&r) { outbox.push(r); }
+            }
+        }
+        if !outbox.is_empty() {
+            let miss_filter = Filter::new()
+                .authors(misses.iter().map(|a| a.pubkey))
+                .kind(Kind::Custom(KIND_EMOJI_SET))
+                .identifiers(misses.iter().map(|a| a.identifier.clone()));
+            let wanted_misses: std::collections::HashSet<String> =
+                misses.iter().map(|a| addr_coord(a)).collect();
+            if let Some(packs) = fetch_packs_via_isolated_client(
+                &outbox, miss_filter, timeout, &wanted_misses, me.as_deref(),
+            ).await {
+                resolved.extend(packs);
+            }
+        }
+    }
+
+    // Return in the caller's requested order.
+    addrs.iter()
+        .filter_map(|a| resolved.remove(&addr_coord(a)))
+        .collect()
+}
+
+/// Batched sibling of `fetch_pack_via_isolated_client`: fetch many packs from a
+/// throwaway client connected to the given relays, matched by coordinate.
+async fn fetch_packs_via_isolated_client(
+    relays: &[RelayUrl],
+    filter: Filter,
+    timeout: std::time::Duration,
+    wanted: &std::collections::HashSet<String>,
+    my_pubkey_hex: Option<&str>,
+) -> Option<HashMap<String, EmojiPack>> {
+    let scratch = ClientBuilder::new()
+        .opts(crate::nostr_client_options())
+        .build();
+    for r in relays {
+        let opts = crate::tor_aware_relay_options(RelayOptions::new().reconnect(false));
+        let _ = scratch.pool().add_relay(r.as_str(), opts).await;
+    }
+    scratch.connect().await;
+    let result = scratch.fetch_events(filter, timeout).await;
+    scratch.shutdown().await;
+
+    match result {
+        Ok(events) => Some(parse_packs_by_coord(events, wanted, my_pubkey_hex)),
+        Err(e) => {
+            crate::log_warn!("[EmojiPacks] batched outbox fetch failed: {}", e);
+            None
+        }
+    }
 }
 
 /// Fetch the user's kind 10030 list, resolve every referenced pack, and
@@ -686,43 +1067,57 @@ pub async fn fetch_subscribed_packs(
     }
 
     // Source-of-truth selection. If relays returned a kind 10030, trust
-    // its `a` tags as the canonical subscription set. If they returned
-    // *nothing*, that's almost always a transient sync gap (we just
-    // published, our own publish hasn't propagated, or the relays we
-    // queried don't have the event) — fall back to the local mirror.
+    // its `a` tags as the canonical subscription set — UNLESS it predates
+    // our own last publish, which means our latest republish hasn't
+    // propagated yet and the relay is still serving a stale list. Trusting
+    // a stale list would clobber a just-added pack (last-write-wins by
+    // created_at). If relays returned *nothing*, that's a transient sync
+    // gap — fall back to the local mirror either way.
+    let local_addrs = || -> Vec<PackAddress> {
+        load_subscriptions()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|s| parse_pack_address(&s).ok())
+            .collect()
+    };
+    let our_last_publish: u64 = crate::db::settings::get_sql_setting(EMOJI_LIST_PUBLISHED_AT_KEY.to_string())
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
     let list_event = list_events.into_iter().max_by_key(|e| e.created_at);
     let addrs: Vec<PackAddress> = match list_event {
+        Some(ev) if ev.created_at.as_secs() < our_last_publish => {
+            crate::log_debug!(
+                "[EmojiPacks] fetched kind 10030 (created_at {}) predates our publish ({}) — keeping local subs",
+                ev.created_at.as_secs(), our_last_publish,
+            );
+            local_addrs()
+        }
         Some(ev) => decrypt_subscribed_addresses(client, &my_pubkey, &ev).await,
         None => {
             crate::log_debug!(
                 "[EmojiPacks] kind 10030 not on relays — refreshing local subs only",
             );
-            load_subscriptions()?
-                .into_iter()
-                .filter_map(|s| parse_pack_address(&s).ok())
-                .collect()
+            local_addrs()
         }
     };
 
     let addr_strings: Vec<String> = addrs.iter().map(|a| a.to_addr_string()).collect();
 
-    let mut fresh: Vec<EmojiPack> = Vec::with_capacity(addrs.len());
-    let mut fetch_failures = 0usize;
-
-    for addr in &addrs {
-        if !session.is_valid() {
-            return Ok(fresh);
-        }
-        match fetch_pack_from_relays(client, addr).await {
-            Some(pack) => fresh.push(pack),
-            None => {
-                fetch_failures += 1;
-                crate::log_warn!(
-                    "[EmojiPacks] pack {} not on relays — keeping cached copy",
-                    addr.identifier,
-                );
-            }
-        }
+    // Batched resolve: one home request for every subscribed pack, plus one
+    // batched outbox pass for any not on our relays. Packs that still don't
+    // resolve keep their cached copy (we never shrink the subscription set on
+    // a transient miss). The per-pack `fetch_pack_from_relays` is reserved for
+    // the independent preview/theme flows.
+    let fresh: Vec<EmojiPack> = fetch_packs_from_relays(client, &addrs).await;
+    let fetch_failures = addrs.len().saturating_sub(fresh.len());
+    if fetch_failures > 0 {
+        crate::log_warn!(
+            "[EmojiPacks] {} subscribed pack(s) not on relays — keeping cached copies",
+            fetch_failures,
+        );
     }
 
     if !session.is_valid() {
@@ -778,6 +1173,59 @@ pub async fn fetch_pack_by_naddr(naddr: &str) -> Result<EmojiPack, String> {
         .ok_or_else(|| format!("Pack not found on any relay: {}:{}", addr.pubkey.to_hex(), addr.identifier))
 }
 
+/// Resolve a theme pack cache-first: return the locally-persisted copy
+/// instantly when present (and refresh it in the background), otherwise fetch
+/// live, persist, and return. Theme packs are pinned by the active theme, not
+/// subscribed — `save_pack` persists their data without a subscription row, so
+/// they survive restarts (no per-session relay round-trip) yet never occupy an
+/// equip slot or land in the kind-10030 list. Returns `None` if uncached and
+/// the live fetch finds nothing.
+pub async fn get_or_fetch_theme_pack(naddr: &str) -> Result<Option<EmojiPack>, String> {
+    let addr = parse_naddr(naddr)?;
+    let coord = addr.to_addr_string();
+
+    // Cache hit: return immediately, refresh in the background so a later
+    // creator-side edit still propagates without blocking first paint.
+    if let Some(cached) = load_cached_pack(&coord)? {
+        let naddr_owned = naddr.to_string();
+        let session = crate::state::SessionGuard::capture();
+        tokio::spawn(async move {
+            if !session.is_valid() { return; }
+            let Some(client) = nostr_client() else { return };
+            if let Ok(parsed) = parse_naddr(&naddr_owned) {
+                if let Some(fresh) = fetch_pack_from_relays(&client, &parsed).await {
+                    if session.is_valid() && fresh.updated_at > cached.updated_at {
+                        if let Err(e) = save_pack(&fresh) {
+                            crate::log_warn!("[EmojiPacks] theme pack refresh save failed: {}", e);
+                        } else {
+                            crate::traits::emit_event("emoji_packs_updated", &());
+                        }
+                    }
+                }
+            }
+        });
+        return Ok(Some(cached));
+    }
+
+    // Cache miss: fetch live, persist for next session, return.
+    let session = crate::state::SessionGuard::capture();
+    let client = nostr_client().ok_or_else(|| "Nostr client not initialised".to_string())?;
+    match fetch_pack_from_relays(&client, &addr).await {
+        Some(pack) => {
+            // Still show the pack this session, but only persist if the account
+            // didn't swap during the fetch — otherwise we'd write into the wrong
+            // account's DB.
+            if session.is_valid() {
+                if let Err(e) = save_pack(&pack) {
+                    crate::log_warn!("[EmojiPacks] theme pack cache save failed: {}", e);
+                }
+            }
+            Ok(Some(pack))
+        }
+        None => Ok(None),
+    }
+}
+
 /// Publish a kind 10030 "Emojis" list containing every subscribed pack.
 ///
 /// Encrypted-items mode: the entire subscription set lives inside a
@@ -806,9 +1254,15 @@ pub async fn publish_emoji_list(client: &Client) -> Result<(), String> {
     let builder = EventBuilder::new(Kind::Custom(KIND_EMOJI_LIST), content);
     client.send_event_builder(builder).await
         .map_err(|e| format!("Failed to publish emoji list (kind 10030): {}", e))?;
+
     crate::log_info!("[EmojiPacks] Published encrypted kind 10030 with {} pack subscription(s)", addrs.len());
     Ok(())
 }
+
+/// Settings key holding the UNIX-seconds timestamp of our most recent local
+/// subscription mutation. A refresh ignores any relay kind-10030 older than
+/// this so our just-changed (not-yet-propagated) list can't be clobbered.
+const EMOJI_LIST_PUBLISHED_AT_KEY: &str = "emoji_list_published_at";
 
 static REPUBLISH_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -817,6 +1271,15 @@ static REPUBLISH_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 /// account swap can't sign account A's pack list with account B's key.
 pub fn republish_emoji_list_debounced() {
     use std::sync::atomic::Ordering;
+    // Stamp the mutation time NOW (synchronously, before the debounce sleep)
+    // so a refresh racing the not-yet-fired publish still treats the local
+    // set as newer than any stale relay copy. Every local subscription change
+    // funnels through here; the refresh-persist path does not, so this can't
+    // wrongly suppress a legit cross-device update.
+    let _ = crate::db::settings::set_sql_setting(
+        EMOJI_LIST_PUBLISHED_AT_KEY.to_string(),
+        Timestamp::now().as_secs().to_string(),
+    );
     let gen = REPUBLISH_GEN.fetch_add(1, Ordering::SeqCst) + 1;
     let session = crate::state::SessionGuard::capture();
     tokio::spawn(async move {

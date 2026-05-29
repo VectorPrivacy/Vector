@@ -37,6 +37,14 @@ pub async fn fetch_emoji_pack_by_naddr(naddr: String) -> Result<EmojiPack, Strin
     emoji_packs::fetch_pack_by_naddr(&naddr).await
 }
 
+/// Resolve the active theme's pinned pack cache-first: returns the persisted
+/// copy instantly (refreshing in the background) or fetches + persists on a
+/// cache miss. Returns null if uncached and not found on relays.
+#[tauri::command]
+pub async fn get_theme_emoji_pack(naddr: String) -> Result<Option<EmojiPack>, String> {
+    emoji_packs::get_or_fetch_theme_pack(&naddr).await
+}
+
 
 /// Subscribe to a pack by `naddr`: fetch + persist + add to local
 /// subscription list, then debounce-publish kind 10030.

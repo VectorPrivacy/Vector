@@ -92,6 +92,7 @@
     "allow-list-emoji-packs",
     "allow-refresh-emoji-packs",
     "allow-fetch-emoji-pack-by-naddr",
+    "allow-get-theme-emoji-pack",
     "allow-subscribe-emoji-pack",
     "allow-unsubscribe-emoji-pack",
     "allow-set-theme-emoji-pack",

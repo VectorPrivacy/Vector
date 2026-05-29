@@ -227,7 +227,10 @@ async function _fetchThemePack(naddr, force = false) {
     if (_themePackFetching[naddr]) return _themePackFetching[naddr];
     const p = (async () => {
         try {
-            const pack = await invoke('fetch_emoji_pack_by_naddr', { naddr });
+            // Cache-first: returns the persisted copy instantly across sessions
+            // (and refreshes in the background), so the pinned theme pack paints
+            // without a per-session relay round-trip.
+            const pack = await invoke('get_theme_emoji_pack', { naddr });
             if (pack && Array.isArray(pack.emojis) && pack.emojis.length) {
                 if (pack.emojis.length > MAX_DISPLAY_EMOJIS_PER_PACK) {
                     pack.emojis = pack.emojis.slice(0, MAX_DISPLAY_EMOJIS_PER_PACK);
