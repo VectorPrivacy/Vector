@@ -3420,7 +3420,7 @@ body.chat-bg-disabled .chat-messages::before {
 }
 
 .emoji-sidebar {
-  width: 50px; 
+  width: 50px;
   padding: 8px 0;
   display: flex;
   flex-direction: column;
@@ -3429,9 +3429,16 @@ body.chat-bg-disabled .chat-messages::before {
   left: 0;
   top: 0;
   bottom: 0;
-  background-color: #202020; 
+  background-color: #202020;
   border-top: 4px solid var(--icon-color-primary);
+  /* Scroll the rail when packs overflow rather than squishing the icons.
+     Scrollbar hidden — the rail is only 50px wide. */
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
 }
+
+.emoji-sidebar::-webkit-scrollbar { display: none; }
 
 /* `display: flex` below outranks the UA's `[hidden]` rule on its own,
    so `<button … hidden>` would still render. This explicit reinstates
@@ -3442,6 +3449,7 @@ body.chat-bg-disabled .chat-messages::before {
   position: relative;
   width: 30px;
   height: 30px;
+  flex-shrink: 0;
   margin: 3px 0;
   padding: 0;
   border-radius: 6px;
