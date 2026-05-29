@@ -2190,6 +2190,10 @@ html, body {
   contain-intrinsic-size: 62px;
 }
 
+.chatlist-contact.has-unread {
+    border: none;
+}
+
 /* Fade-in when a row transitions from content-visibility:auto skipped → visible.
    Toggled by the listener in chatlist-reveal.js. Opacity-only so it stays on
    the compositor and doesn't retrigger layout/paint. */
@@ -2255,20 +2259,22 @@ html, body {
  * through the row visually. Every count represents pings: full unread set
  * on unmuted chats, @mentions only on muted groups, nothing on muted DMs. */
 .chatlist-contact-count {
-  margin-top: auto;
-  margin-bottom: auto;
-  margin-left: auto;
-  margin-right: 8px;
-  padding: 2px 9px;
-  border-radius: 999px;
-  background: var(--icon-color-primary, #59fcb3);
-  color: #000;
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1.2;
-  min-width: 18px;
-  text-align: center;
-  flex-shrink: 0;
+    margin-top: auto;
+    margin-bottom: auto;
+    margin-left: auto;
+    margin-right: 12px;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: var(--primary-color);
+    color: #000;
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1.2;
+    min-width: 18px;
+    width: fit-content;
+    text-align: center;
+    flex-shrink: 0;
+    box-sizing: border-box;
 }
 
 .chatlist-contact img {
@@ -2344,6 +2350,15 @@ html, body {
   font-weight: 400;
   flex-shrink: 0;
   white-space: nowrap;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.chatlist-contact.has-unread .chatlist-contact-inline-time {
+    color: var(--primary-color);
+}
+
+.chatlist-contact.has-unread .chatlist-contact-header h4 {
+    color: #fff;
 }
 
 .chatlist-contact-preview h4 {
@@ -2364,6 +2379,29 @@ html, body {
   font-weight: 100;
   color: rgb(161, 161, 161);
   transition: color 0.2s ease;
+}
+
+.chatlist-member-icon-wrap {
+    position: relative;
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    vertical-align: middle;
+    flex-shrink: 0;
+    margin-right: 2px;
+    margin-top: -2px;
+}
+
+.chatlist-member-icon-wrap .icon {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: 100%;
+    height: 100%;
+    margin: auto;
+    background-color: rgba(255, 255, 255, 0.55);
 }
 
 .chatlist-contact:hover {
@@ -10116,6 +10154,22 @@ select:disabled:hover {
   color: rgba(255, 255, 255, 0.85);
 }
 
+.chatlist-invite {
+    border-color: var(--primary-color);
+}
+
+.invite-accept-btn .icon {
+    width: 16px;
+    height: 16px;
+    background-color: #59fcb3;
+}
+
+.invite-decline-btn .icon {
+    width: 16px;
+    height: 16px;
+    background-color: var(--danger-color);
+}
+
 .invite-action-buttons {
   display: flex;
   flex-direction: row;
@@ -10160,7 +10214,7 @@ select:disabled:hover {
 }
 
 .invite-decline-btn:hover {
-  background: rgba(255, 46, 169, 0.2);
+    background: var(--danger-color-hover);
 }
 
 .btn-small {
