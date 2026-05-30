@@ -5920,7 +5920,7 @@ function setWallpaperPreviewBarVisible(visible) {
 
 /** Lock the edit-bar buttons while a publish/removal is in flight. */
 function setWallpaperEditBusy(busy) {
-    for (const id of ['wallpaper-edit-save-btn', 'wallpaper-edit-cancel-btn', 'wallpaper-remove-btn']) {
+    for (const id of ['wallpaper-edit-save-btn', 'wallpaper-edit-cancel-btn']) {
         const el = document.getElementById(id);
         if (!el) continue;
         el.style.pointerEvents = busy ? 'none' : '';
@@ -9519,10 +9519,9 @@ window.addEventListener("DOMContentLoaded", async () => {
         });
     }
 
-    // Wallpaper edit UI — header Cancel/Save overlay, bottom sliders + trash.
+    // Wallpaper edit UI — header Cancel/Save overlay, bottom sliders.
     const wallpaperEditSave = document.getElementById('wallpaper-edit-save-btn');
     const wallpaperEditCancel = document.getElementById('wallpaper-edit-cancel-btn');
-    const wallpaperRemoveBtn = document.getElementById('wallpaper-remove-btn');
     const wallpaperBlurSlider = document.getElementById('wallpaper-blur-slider');
     const wallpaperDimSlider = document.getElementById('wallpaper-dim-slider');
     if (wallpaperEditSave) {
@@ -9530,9 +9529,6 @@ window.addEventListener("DOMContentLoaded", async () => {
     }
     if (wallpaperEditCancel) {
         wallpaperEditCancel.onclick = () => cancelWallpaperChange();
-    }
-    if (wallpaperRemoveBtn) {
-        wallpaperRemoveBtn.onclick = () => cancelWallpaperChange();
     }
     if (wallpaperBlurSlider) {
         wallpaperBlurSlider.addEventListener('input', onWallpaperSliderInput);

@@ -15018,8 +15018,7 @@ hr {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 14px 16px;
+  padding: 14px 8px;
   /* Solid dark surface with a subtle grey border curved over the top,
      lifted by a soft shadow. Flush at the bottom where it meets the
      composer. */
@@ -15038,6 +15037,8 @@ hr {
   flex-direction: column;
   gap: 12px;
   min-width: 0;
+  padding-left: 12px;
+  padding-right: 12px;
 }
 .wallpaper-slider {
   display: flex;
@@ -15077,8 +15078,8 @@ hr {
   border-radius: 5px;
   background: linear-gradient(
     to right,
-    var(--icon-color-primary, #59fcb3) 0%,
-    var(--voice-progress-secondary, rgba(89, 252, 179, 0.4)) var(--slider-pct, 0%),
+    var(--primary-color) 0%,
+    var(--primary-color) var(--slider-pct, 0%),
     rgba(255, 255, 255, 0.08) var(--slider-pct, 0%),
     rgba(255, 255, 255, 0.08) 100%
   );
@@ -15117,33 +15118,6 @@ hr {
   cursor: pointer;
 }
 
-/* Trash — discards the staged edits and exits edit mode (same as Cancel). */
-.wallpaper-remove-btn {
-  flex: 0 0 auto;
-  width: 40px;
-  height: 40px;
-  border: none;
-  background: transparent;
-  border-radius: 50%;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  position: relative;
-}
-.wallpaper-remove-btn .icon {
-  width: 20px;
-  height: 20px;
-  background-color: var(--danger-color);
-  transition: opacity 0.15s ease;
-}
-.wallpaper-remove-btn:hover .icon {
-  opacity: 0.7;
-}
-.wallpaper-remove-btn[disabled] {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
 
 /* Floating hover toolbar (singleton inside .chat-messages, position: absolute
  * so it scrolls naturally with the messages — no per-frame JS reposition). */
