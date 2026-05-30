@@ -2149,6 +2149,10 @@ html, body {
   border-color: #B2B2B2;
 }
 
+.new-chat-btn.btn:hover {
+    opacity: 1;
+}
+
 .new-chat-btn .icon {
   display: inline-block;
   position: relative;
