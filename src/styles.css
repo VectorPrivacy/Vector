@@ -15323,12 +15323,7 @@ hr {
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   background: rgba(255, 255, 255, 0.02);
 }
-.profile-switcher-header .profile-switcher-trash-toggle {
-  position: absolute;
-  right: 14px;
-  top: 50%;
-  transform: translateY(-50%);
-}
+
 .profile-switcher-header-label {
   display: inline-flex;
   align-items: center;
@@ -15337,32 +15332,49 @@ hr {
   color: rgba(255, 255, 255, 0.55);
   letter-spacing: 0.4px;
 }
+
 .profile-switcher-header-icon {
   color: rgba(255, 255, 255, 0.55);
   flex-shrink: 0;
 }
+
 .profile-switcher-trash-toggle {
+  position: absolute;
+  top: 50%;
+  left: 10px;
+  transform: translateY(-50%);
   background: transparent;
   border: none;
   cursor: pointer;
-  padding: 4px;
+  padding: 5px;
   border-radius: 4px;
-  transition: background-color 120ms ease;
-  color: rgba(255, 255, 255, 0.55);
+  transition: color 120ms ease;
+  color: rgba(255, 255, 255, 0.45);
   display: inline-flex;
   align-items: center;
   justify-content: center;
 }
-.profile-switcher-trash-toggle:hover {
-  background-color: rgba(255, 255, 255, 0.06);
+
+#profile-switcher-trash-toggle {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: transparent !important;
+  border: none;
 }
+
+.profile-switcher-trash-toggle:hover {
+  background-color: transparent;
+  color: rgba(255, 255, 255, 0.75);
+}
+
 .profile-switcher-trash-toggle svg {
   transition: color 160ms ease;
   width: 24px;
   height: 24px;
 }
+
 body.profile-switcher-editing .profile-switcher-trash-toggle {
-  color: #e84545;
+  color: var(--danger-color);
 }
 
 /* Each account row */
@@ -15384,9 +15396,10 @@ body.profile-switcher-editing .profile-switcher-trash-toggle {
 }
 .profile-switcher-row.active {
   cursor: default;
+  background-color: transparent !important;
 }
 .profile-switcher-row.active:hover {
-  background-color: transparent;
+  background-color: transparent !important;
 }
 
 /* Active-account dot (left edge) */
@@ -15408,7 +15421,7 @@ body.profile-switcher-editing .profile-switcher-trash-toggle {
   height: 28px;
   border-radius: 50%;
   object-fit: cover;
-  background: rgba(255, 255, 255, 0.06);
+  background: transparent;
   flex-shrink: 0;
 }
 
@@ -15448,19 +15461,20 @@ body.profile-switcher-editing .profile-switcher-trash-toggle {
   padding: 6px;
   border-radius: 4px;
   flex-shrink: 0;
-  color: #e84545;
+  color: var(--danger-color);
   align-items: center;
   justify-content: center;
 }
 .profile-switcher-row-trash:hover {
-  background-color: rgba(232, 69, 69, 0.12);
+  transform: scale(1.25);
+  opacity: 1;
 }
 body.profile-switcher-editing .profile-switcher-row-trash {
   display: inline-flex;
 }
 /* Hide chevron / row interactivity transition while editing the active row */
 body.profile-switcher-editing .profile-switcher-row.active {
-  opacity: 0.55;
+  opacity: 1;
 }
 
 /* Add Profile footer */
@@ -15469,10 +15483,10 @@ body.profile-switcher-editing .profile-switcher-row.active {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 14px 18px;
+  padding: 10px 10px;
   cursor: pointer;
   color: var(--accent-color);
-  font-weight: 600;
+  font-weight: 500;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
   background: rgba(255, 255, 255, 0.02);
   transition: background-color 120ms ease;

@@ -678,3 +678,11 @@ select:disabled {
 .relay-dialog .relay-form-select {
     border: 1px solid #262626;
 }
+
+.profile-switcher-active-dot {
+  background: var(--primary-color);
+}
+
+.profile-switcher-add {
+  color: var(--primary-color);
+}

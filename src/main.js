@@ -187,6 +187,8 @@ const profileSwitcher = {
             document.getElementById('profile-switcher-panel').classList.add('open');
             document.getElementById('my-profile-switcher').classList.add('open');
             this.isOpen = true;
+            const trashToggle = document.getElementById('profile-switcher-trash-toggle');
+            if (trashToggle) trashToggle.style.display = '';
         } catch (e) {
             console.error('[profile-switcher] open failed:', e);
         } finally {
@@ -199,6 +201,8 @@ const profileSwitcher = {
         document.getElementById('profile-switcher-panel').classList.remove('open');
         document.getElementById('my-profile-switcher').classList.remove('open');
         this.isOpen = false;
+        const trashToggle = document.getElementById('profile-switcher-trash-toggle');
+        if (trashToggle) trashToggle.style.display = 'none';
         // Always reset edit mode on close so the next open starts neutral.
         this.exitEditMode();
     },
@@ -264,14 +268,16 @@ const profileSwitcher = {
             isLastAccount = all.length === 1 && all[0].npub === meta.npub;
         } catch (_) { /* err side: don't block the popup */ }
 
-        const baseMsg = `${meta.display_name || 'This account'} will be permanently removed from this device. Make sure you have the seed phrase or nsec backed up if you want to recover it later.`;
+        const baseMsg = `<span style="color: var(--primary-color);">${meta.display_name || 'This account'}</span> will be permanently removed from this device. Make sure you have the seed phrase or nsec backed up if you want to recover it later.`;
         const lastAccountWarning = `\n\n<b>This is your only Vector account on this device.</b> All downloaded attachments will also be removed. Copy any files you want to keep before continuing.`;
         const message = isLastAccount ? baseMsg + lastAccountWarning : baseMsg;
 
         const ok = await popupConfirm(
-            'Delete profile?',
+            'Remove Profile?',
             message,
             false,
+            '',
+            'vector_warning.svg',
         );
         if (!ok) return;
         try {
