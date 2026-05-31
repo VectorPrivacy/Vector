@@ -4736,7 +4736,7 @@ function renderProfileTab(cProfile) {
                 showToast('User Unblocked');
                 renderChatlist();
             } else {
-                const confirmed = await popupConfirm('Block User', 'Are you sure you want to block this user? You will no longer receive DMs from them.');
+                const confirmed = await popupConfirm('Block User', 'Are you sure you want to block this user? You will no longer receive DMs from them.', false, '', 'vector_warning.svg');
                 if (!confirmed) return;
                 await invoke('block_user', { npub: cProfile.id });
                 showToast('User Blocked');
