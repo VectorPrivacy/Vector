@@ -2327,7 +2327,7 @@ function _pcRenderGrid() {
         if (atCap) {
             label.textContent = `Maximum ${PC_MAX_EMOJIS} reached`;
         } else if (_pc.emojis.length === 0) {
-            label.textContent = 'Upload your first Emoji!';
+            label.textContent = 'Upload Emoji';
         } else {
             label.textContent = 'Upload Emoji';
         }
