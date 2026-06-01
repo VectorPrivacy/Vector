@@ -815,17 +815,10 @@ class VoiceSettings {
             await invoke('delete_whisper_model', { modelName });
             await this.loadWhisperModels();
             this.updateModelStatus();
-
-            // Show toast with fallback info
-            const fallback = this.models.find(m => m.model.name === this.selectedModel && m.downloaded);
-            if (fallback && fallback.model.name !== modelName) {
-                showToast(`Deleted — Now using ${fallback.model.display_name}`);
-            } else {
-                showToast(`Deleted ${modelName} model`);
-            }
+            showToast('Model Deleted');
         } catch (error) {
-            console.error('Failed to delete model:', error);
-            await popupConfirm('Deletion Failed', `Could not delete model: ${escapeHtml(String(error.message))}`, true, '', 'vector_warning.svg');
+            console.error('Failed to Delete Model:', error);
+            await popupConfirm('Deletion Failed', `Could not Delete Model: ${escapeHtml(String(error.message))}`, true, '', 'vector_warning.svg');
         }
     }
 
@@ -852,28 +845,17 @@ class VoiceSettings {
             // Update button text to include model size
             const sizeInBytes = model.model.size * 1024 * 1024;
             const formattedSize = formatBytes(sizeInBytes);
-            downloadBtn.textContent = `Download Selected Model (${formattedSize})`;
+            downloadBtn.textContent = `Download Model (${formattedSize})`;
         }
     }
 
-    async downloadModel(modelName) {
-        // Find the model in our cached list and validate it's not already downloaded
+        async downloadModel(modelName) {
         const model = this.models.find(m => m.model.name === modelName);
         if (!model || model.downloaded) return;
 
-        // Get UI elements for progress display
         const modelStatus = document.getElementById('model-status');
-        const progressContainer = document.querySelector('.download-progress-container');
-        const progressFill = progressContainer.querySelector('.progress-bar-fill');
-        const progressText = progressContainer.querySelector('.progress-text');
 
-        // Initialize download UI state
-        modelStatus.textContent = `Downloading AI model...`;
-        progressContainer.style.display = 'block';
-        progressFill.style.width = '0%';
-        progressText.textContent = `0 / ${model.model.size} MB`;
-
-        // Disable UI during download to prevent user interference
+        // Disable UI during download
         document.getElementById('download-model').style.display = 'none';
         document.getElementById('delete-model').style.display = 'none';
         document.getElementById('whisper-model').disabled = true;
@@ -886,76 +868,42 @@ class VoiceSettings {
         }
 
         try {
-            // Mark model as downloading and update status display
             model.downloading = true;
-            this.updateModelStatus();
 
-            // Set up Tauri event listener for download progress updates
+            // Set up the download UI once
+            modelStatus.innerHTML = `<div class="alert alert-info"><span class="spinner"></span><span id="download-progress-text"> Downloading... 0%</span></div>`;
+
+            // Set up progress listener — updates text only, not the spinner
             const unlisten = await window.__TAURI__.event.listen(
                 'whisper_download_progress',
                 (event) => {
-                    const { progress, downloaded_bytes, total_bytes, speed_bps } = event.payload;
-                    progressFill.style.width = `${progress}%`;
-
-                    const dlMB = (downloaded_bytes / (1024 * 1024)).toFixed(1);
-                    const totalMB = (total_bytes / (1024 * 1024)).toFixed(1);
-                    const speedMBs = (speed_bps / (1024 * 1024)).toFixed(1);
-                    progressText.textContent = `${dlMB} / ${totalMB} MB \u2014 ${speedMBs} MB/s`;
-
-                    const progressionSpan = document.getElementById('voice-model-download-progression');
-                    if (progressionSpan) progressionSpan.textContent = `(${Math.round(progress)}%)`;
+                    const { progress } = event.payload;
+                    const textEl = document.getElementById('download-progress-text');
+                    if (textEl) textEl.textContent = ` Downloading... ${Math.round(progress)}%`;
                 }
             );
 
-            // Start the actual download via Tauri backend
             await invoke('download_whisper_model', { modelName });
-
-            // Clean up event listener to prevent memory leaks
             unlisten();
 
-            // Update model state to reflect successful download
             model.downloaded = true;
             model.downloading = false;
 
-            modelStatus.textContent = `Successfully downloaded AI model!`;
-
-            // Show success animation with green gradient
-            progressFill.style.width = `100%`;
-            progressText.textContent = `Complete`;
-            progressFill.style.background = 'linear-gradient(90deg, #59fcb3 0%, #2b976c 100%)';
-            progressContainer.style.animation = 'none';
-            void progressContainer.offsetWidth; // Force reflow to reset animation
-            progressContainer.style.animation = 'fadeIn 0.3s ease-out';
-
-            // Refresh the models dropdown and update UI state
+            modelStatus.innerHTML = `<div class="alert alert-success">Vector AI is ready</div>`;
             await this.loadWhisperModels();
             this.updateModelStatus();
+
         } catch (error) {
-            // Handle download failures
             model.downloading = false;
             const isCancelled = String(error).includes('cancelled');
-            modelStatus.textContent = isCancelled ? 'Download cancelled' : `Error downloading model: ${error}`;
+            modelStatus.innerHTML = isCancelled
+                ? `<div class="alert alert-warning">AI model is not downloaded</div>`
+                : `<div class="alert alert-warning">Download failed: ${escapeHtml(String(error))}</div>`;
             if (!isCancelled) console.error('Download failed:', error);
-
-            // Show error/cancelled state
-            progressFill.style.background = isCancelled
-                ? 'linear-gradient(90deg, #888 0%, #555 100%)'
-                : 'linear-gradient(90deg, #ff5e5e 0%, #d40000 100%)';
-            progressText.textContent = isCancelled ? 'Cancelled' : 'Failed';
+            this.updateModelStatus();
         } finally {
-            // Hide cancel button and re-enable model selector
             if (cancelBtn) cancelBtn.style.display = 'none';
             document.getElementById('whisper-model').disabled = false;
-
-            // Clean up progress bar after a delay, regardless of success/failure
-            setTimeout(() => {
-                progressContainer.style.display = 'none';
-                // Reset progress bar styling for next download
-                progressFill.style.width = '0%';
-                progressFill.style.background = 'linear-gradient(90deg, #59fcb3 0%, #00d4ff 100%)';
-                progressText.textContent = '0%';
-                this.updateModelStatus();
-            }, 3000);
         }
     }
 
@@ -1580,7 +1528,7 @@ domSettingsExport.onclick = async (evt) => {
 
         let exportContent = `
         <div style="text-align: center; padding: 0 8px;">
-            <p style="color: #ff2ea9; font-weight: bold; font-size: 15px; margin: 0 0 10px 0;">Security Warning. Do Not Lose.</p>
+            <p style="color: var(--danger-pink); font-weight: bold; font-size: 15px; margin: 0 0 10px 0;">
             <p style="opacity: 0.75; font-size: 13px; margin: 0 0 16px 0; word-break: break-word;">These keys are your identity on Vector. There are no recovery options! If lost, your account cannot be restored. Never share them.</p>
         `;
 
@@ -2242,9 +2190,7 @@ async function loadBlockedUsersList() {
 
             const unblockBtn = document.createElement('span');
             unblockBtn.textContent = 'Unblock';
-            unblockBtn.style.cssText = 'color: #ff4444; font-size: 13px; cursor: pointer; padding: 4px 10px; border: 1px solid #ff4444; border-radius: 6px;';
-            unblockBtn.onmouseenter = () => { unblockBtn.style.backgroundColor = '#ff444420'; };
-            unblockBtn.onmouseleave = () => { unblockBtn.style.backgroundColor = ''; };
+            unblockBtn.classList.add('unblock-btn');
             unblockBtn.onclick = async () => {
                 const confirmed = await popupConfirm('Unblock User', `Are you sure you want to unblock ${escapeHtml(profile.nickname || profile.name || profile.id.substring(0, 16))}?`);
                 if (!confirmed) return;

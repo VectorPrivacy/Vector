@@ -1499,7 +1499,7 @@ let _emojiTooltipCurrentAnchor = null;
  *  `platformFeatures.is_mobile` is Vector's canonical desktop/mobile split
  *  (set up in main.js at boot) and is used by every other hover-only path. */
 function _supportsHoverTooltip() {
-    return typeof platformFeatures !== 'undefined' && !platformFeatures.is_mobile;
+    return typeof platformFeatures !== 'undefined' && platformFeatures !== null && !platformFeatures.is_mobile;
 }
 
 function _ensureEmojiTooltip() {
@@ -2264,7 +2264,7 @@ function _pcRenderGrid() {
             removeBtn.type = 'button';
             removeBtn.className = 'emoji-creator-cell-remove';
             removeBtn.setAttribute('aria-label', 'Remove emoji');
-            removeBtn.innerHTML = '<span class="icon icon-cancel"></span>';
+            removeBtn.innerHTML = '<span class="icon icon-x"></span>';
             removeBtn.addEventListener('click', (ev) => {
                 ev.stopPropagation();
                 _pcRemoveEmoji(idx);
@@ -2330,7 +2330,7 @@ function _pcRenderGrid() {
         if (atCap) {
             label.textContent = `Maximum ${PC_MAX_EMOJIS} reached`;
         } else if (_pc.emojis.length === 0) {
-            label.textContent = 'Upload your first Emoji!';
+            label.textContent = 'Upload Emoji';
         } else {
             label.textContent = 'Upload Emoji';
         }

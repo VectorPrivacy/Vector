@@ -27,7 +27,7 @@ function renderChat(chat, primaryColor) {
     // border without needing a chatlist re-render (inline color literals
     // would stay stuck on the previous theme until the next paint pass).
     const divContact = document.createElement('div');
-    if (nUnread) divContact.style.borderColor = 'var(--icon-color-primary)';
+    if (nUnread) divContact.classList.add('has-unread');
     divContact.classList.add('chatlist-contact');
     divContact.id = `chatlist-${chat.id}`;
 
@@ -135,12 +135,11 @@ function renderChat(chat, primaryColor) {
     // Inline time-ago (unread-only). Read rows keep the right-aligned variant
     // appended further down.
     const cLastMsgForHeader = chat.messages[chat.messages.length - 1];
-    if (nUnread && cLastMsgForHeader) {
-        const spanInlineTime = document.createElement('span');
-        spanInlineTime.classList.add('chatlist-contact-inline-time');
-        spanInlineTime.textContent = timeAgo(cLastMsgForHeader.at);
-        spanInlineTime.style.color = 'var(--icon-color-primary)';
-        divHeader.appendChild(spanInlineTime);
+    if (cLastMsgForHeader) {
+    const spanInlineTime = document.createElement('span');
+    spanInlineTime.classList.add('chatlist-contact-inline-time');
+    spanInlineTime.textContent = timeAgo(cLastMsgForHeader.at);
+    divHeader.appendChild(spanInlineTime);
     }
 
     divPreviewContainer.appendChild(divHeader);
@@ -174,13 +173,8 @@ function renderChat(chat, primaryColor) {
     if (nUnread) {
         const spanCount = document.createElement('span');
         spanCount.classList.add('chatlist-contact-count');
-        spanCount.textContent = String(nUnread);
+        spanCount.textContent = nUnread > 99 ? '99+' : String(nUnread);
         divContact.appendChild(spanCount);
-    } else {
-        const pTimeAgo = document.createElement('p');
-        pTimeAgo.classList.add('chatlist-contact-timestamp', 'read');
-        if (cLastMsg) pTimeAgo.textContent = timeAgo(cLastMsg.at);
-        divContact.appendChild(pTimeAgo);
     }
 
     return divContact;
@@ -205,7 +199,6 @@ function renderInviteItem(invite, primaryColor) {
     const divInvite = document.createElement('div');
     divInvite.classList.add('chatlist-contact', 'chatlist-invite');
     divInvite.id = `invite-${invite.id || invite.welcome_event_id || groupId}`;
-    divInvite.style.borderColor = 'var(--icon-color-primary)';
 
     // Avatar container — show cached avatar if available, otherwise placeholder
     const divAvatarContainer = document.createElement('div');
@@ -254,12 +247,27 @@ function renderInviteItem(invite, primaryColor) {
     const h4Name = document.createElement('h4');
     h4Name.textContent = groupName;
     h4Name.classList.add('cutoff');
-    divPreviewContainer.appendChild(h4Name);
+
+    const divInviteHeader = document.createElement('div');
+    divInviteHeader.classList.add('chatlist-contact-header');
+    divInviteHeader.appendChild(h4Name);
+    divPreviewContainer.appendChild(divInviteHeader);
 
     // Member count as subtext
     const pMemberCount = document.createElement('p');
     pMemberCount.classList.add('cutoff');
-    pMemberCount.textContent = `${memberCount} ${memberCount === 1 ? 'member' : 'members'}`;
+
+    const groupIconWrap = document.createElement('span');
+    groupIconWrap.className = 'chatlist-member-icon-wrap';
+
+    const groupIcon = document.createElement('span');
+    groupIcon.className = 'icon icon-users-multi';
+    groupIcon.addEventListener('mouseenter', () => showGlobalTooltip('Group Chat', groupIconWrap));
+    groupIcon.addEventListener('mouseleave', hideGlobalTooltip);
+
+    groupIconWrap.appendChild(groupIcon);
+    pMemberCount.appendChild(groupIconWrap);
+    pMemberCount.appendChild(document.createTextNode(` ${memberCount} ${memberCount === 1 ? 'member' : 'members'}`));
     divPreviewContainer.appendChild(pMemberCount);
 
     divInvite.appendChild(divPreviewContainer);
@@ -278,9 +286,6 @@ function renderInviteItem(invite, primaryColor) {
     };
     const acceptIcon = document.createElement('span');
     acceptIcon.classList.add('icon', 'icon-check');
-    acceptIcon.style.width = '16px';
-    acceptIcon.style.height = '16px';
-    acceptIcon.style.backgroundColor = '#59fcb3';
     btnAccept.appendChild(acceptIcon);
 
     // Decline button (danger color X)
@@ -293,9 +298,6 @@ function renderInviteItem(invite, primaryColor) {
     };
     const declineIcon = document.createElement('span');
     declineIcon.classList.add('icon', 'icon-x');
-    declineIcon.style.width = '16px';
-    declineIcon.style.height = '16px';
-    declineIcon.style.backgroundColor = '#ff2ea9';
     btnDecline.appendChild(declineIcon);
 
     divActions.appendChild(btnAccept);

@@ -187,6 +187,8 @@ const profileSwitcher = {
             document.getElementById('profile-switcher-panel').classList.add('open');
             document.getElementById('my-profile-switcher').classList.add('open');
             this.isOpen = true;
+            const trashToggle = document.getElementById('profile-switcher-trash-toggle');
+            if (trashToggle) trashToggle.style.display = '';
         } catch (e) {
             console.error('[profile-switcher] open failed:', e);
         } finally {
@@ -199,6 +201,8 @@ const profileSwitcher = {
         document.getElementById('profile-switcher-panel').classList.remove('open');
         document.getElementById('my-profile-switcher').classList.remove('open');
         this.isOpen = false;
+        const trashToggle = document.getElementById('profile-switcher-trash-toggle');
+        if (trashToggle) trashToggle.style.display = 'none';
         // Always reset edit mode on close so the next open starts neutral.
         this.exitEditMode();
     },
@@ -264,14 +268,16 @@ const profileSwitcher = {
             isLastAccount = all.length === 1 && all[0].npub === meta.npub;
         } catch (_) { /* err side: don't block the popup */ }
 
-        const baseMsg = `${meta.display_name || 'This account'} will be permanently removed from this device. Make sure you have the seed phrase or nsec backed up if you want to recover it later.`;
+        const baseMsg = `<span style="color: var(--primary-color);">${meta.display_name || 'This account'}</span> will be permanently removed from this device. Make sure you have the seed phrase or nsec backed up if you want to recover it later.`;
         const lastAccountWarning = `\n\n<b>This is your only Vector account on this device.</b> All downloaded attachments will also be removed. Copy any files you want to keep before continuing.`;
         const message = isLastAccount ? baseMsg + lastAccountWarning : baseMsg;
 
         const ok = await popupConfirm(
-            'Delete profile?',
+            'Remove Profile?',
             message,
             false,
+            '',
+            'vector_warning.svg',
         );
         if (!ok) return;
         try {
@@ -3707,10 +3713,12 @@ async function refreshRelayInfoDialog() {
             statusEl.className = `relay-status ${freshRelay.status}`;
 
             // Update disable button text
-            const disableBtn = document.getElementById('relay-info-disable');
-            if (freshRelay.is_default) {
-                disableBtn.textContent = freshRelay.enabled ? 'Disable Relay' : 'Enable Relay';
-            }
+        const disableBtn = document.getElementById('relay-info-disable');
+        if (freshRelay.is_default) {
+            disableBtn.innerHTML = freshRelay.enabled 
+                ? '<span class="icon icon-disable"></span> Disable'
+                : '<span class="icon icon-disable"></span> Enable';
+        }
         }
     } catch (err) {
         console.error('Failed to refresh relay data:', err);
@@ -3719,7 +3727,17 @@ async function refreshRelayInfoDialog() {
     // Refresh metrics
     try {
         const metrics = await invoke('get_relay_metrics', { url });
-        document.getElementById('relay-info-ping').textContent = metrics.ping_ms ? `${metrics.ping_ms}ms` : '--';
+        const pingEl = document.getElementById('relay-info-ping');
+        if (metrics.ping_ms) {
+            pingEl.textContent = `${metrics.ping_ms}ms`;
+            pingEl.style.color = metrics.ping_ms < 200 ? 'var(--status-excellent)'
+                : metrics.ping_ms < 500 ? 'var(--status-good)'
+                : metrics.ping_ms < 1000 ? 'var(--status-fair)'
+                : 'var(--status-poor)';
+        } else {
+            pingEl.textContent = '--';
+            pingEl.style.color = '';
+        }
         if (metrics.last_check) {
             const lastCheck = new Date(metrics.last_check * 1000);
             const now = new Date();
@@ -4627,6 +4645,7 @@ function renderProfileTab(cProfile) {
 
     // If this is OUR profile: make the elements clickable, hide the "Contact Options"
     if (cProfile.mine) {
+        document.getElementById('profile').classList.add('is-own-profile');
         // Hide Contact Options
         domProfileOptions.style.display = 'none';
 
@@ -4679,6 +4698,7 @@ function renderProfileTab(cProfile) {
         domProfileDescription.onclick = () => { if (fProfileEditMode) editProfileDescription(); };
         domProfileDescription.classList.add('btn');
     } else {
+        document.getElementById('profile').classList.remove('is-own-profile');
         // Show Contact Options
         domProfileOptions.style.display = '';
         document.getElementById('profile-header-avatar-container').style.display = '';
@@ -4715,9 +4735,8 @@ function renderProfileTab(cProfile) {
         const isBlocked = cProfile.is_blocked || false;
         const blockIcon = domProfileOptionBlock.querySelector('.icon');
         const blockLabel = domProfileOptionBlock.querySelector('span:first-child');
-        blockIcon.style.backgroundColor = '#ff4444';
+        domProfileOptionBlock.classList.add('is-danger');
         if (blockLabel) {
-            blockLabel.style.color = '#ff4444';
             blockLabel.textContent = isBlocked ? 'Unblock' : 'Block';
         }
         domProfileOptionBlock.onclick = async () => {
@@ -4727,7 +4746,7 @@ function renderProfileTab(cProfile) {
                 showToast('User Unblocked');
                 renderChatlist();
             } else {
-                const confirmed = await popupConfirm('Block User', 'Are you sure you want to block this user? You will no longer receive DMs from them.');
+                const confirmed = await popupConfirm('Block User', 'Are you sure you want to block this user? You will no longer receive DMs from them.', false, '', 'vector_warning.svg');
                 if (!confirmed) return;
                 await invoke('block_user', { npub: cProfile.id });
                 showToast('User Blocked');
@@ -5911,7 +5930,7 @@ function setWallpaperPreviewBarVisible(visible) {
 
 /** Lock the edit-bar buttons while a publish/removal is in flight. */
 function setWallpaperEditBusy(busy) {
-    for (const id of ['wallpaper-edit-save-btn', 'wallpaper-edit-cancel-btn', 'wallpaper-remove-btn']) {
+    for (const id of ['wallpaper-edit-save-btn', 'wallpaper-edit-cancel-btn']) {
         const el = document.getElementById(id);
         if (!el) continue;
         el.style.pointerEvents = busy ? 'none' : '';
@@ -7703,24 +7722,7 @@ async function renderGroupOverview(chat) {
             if (iAmGroupAdmin && !isMe) {
                 const kickBtn = document.createElement('button');
                 kickBtn.textContent = 'Kick';
-                kickBtn.style.padding = '4px 12px';
-                kickBtn.style.fontSize = '12px';
-                kickBtn.style.borderRadius = '4px';
-                kickBtn.style.border = 'none';
-                kickBtn.style.background = '#ff4444';
-                kickBtn.style.color = 'white';
-                kickBtn.style.cursor = 'pointer';
-                kickBtn.style.transition = 'background 0.2s ease';
-                kickBtn.style.position = 'relative';
-                kickBtn.style.zIndex = '1';
-                kickBtn.style.marginLeft = '10px';
-                
-                kickBtn.addEventListener('mouseenter', () => {
-                    kickBtn.style.background = '#ff6666';
-                });
-                kickBtn.addEventListener('mouseleave', () => {
-                    kickBtn.style.background = '#ff4444';
-                });
+                kickBtn.classList.add('kick-btn');
                 
                 kickBtn.onclick = async (e) => {
                     e.stopPropagation();
@@ -9527,10 +9529,9 @@ window.addEventListener("DOMContentLoaded", async () => {
         });
     }
 
-    // Wallpaper edit UI — header Cancel/Save overlay, bottom sliders + trash.
+    // Wallpaper edit UI — header Cancel/Save overlay, bottom sliders.
     const wallpaperEditSave = document.getElementById('wallpaper-edit-save-btn');
     const wallpaperEditCancel = document.getElementById('wallpaper-edit-cancel-btn');
-    const wallpaperRemoveBtn = document.getElementById('wallpaper-remove-btn');
     const wallpaperBlurSlider = document.getElementById('wallpaper-blur-slider');
     const wallpaperDimSlider = document.getElementById('wallpaper-dim-slider');
     if (wallpaperEditSave) {
@@ -9538,9 +9539,6 @@ window.addEventListener("DOMContentLoaded", async () => {
     }
     if (wallpaperEditCancel) {
         wallpaperEditCancel.onclick = () => cancelWallpaperChange();
-    }
-    if (wallpaperRemoveBtn) {
-        wallpaperRemoveBtn.onclick = () => cancelWallpaperChange();
     }
     if (wallpaperBlurSlider) {
         wallpaperBlurSlider.addEventListener('input', onWallpaperSliderInput);
