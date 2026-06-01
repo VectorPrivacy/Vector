@@ -586,6 +586,10 @@ select:disabled {
     color: var(--accent-color);
 }
 
+.relay-dialog .relay-form-select {
+    border: 1px solid #262626;
+}
+
 .aggro-glitch-img {
   content: url('../../icons/aggro-glitch.gif');
   width: 64px;

@@ -309,6 +309,10 @@
   --danger-red: #FC595C;
   --danger-color: #FC595C;  /* default: red for all themes */
   --danger-color-hover: color-mix(in srgb, var(--danger-color) 10%, transparent);
+  --status-excellent: #59fcb3;
+  --status-good: #FCE459;
+  --status-fair: #FCA559;
+  --status-poor: var(--danger-color);
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 16px;
   line-height: 24px;
@@ -9316,7 +9320,7 @@ select:disabled:hover {
 
 #relay-info-url {
     text-align: left;
-    color: var(--primary-color);
+    color: #fff;
     font-size: 16px;
     margin: 0 0 16px 0;
 }
@@ -9329,6 +9333,10 @@ select:disabled:hover {
 
 .relay-info-header-row #relay-info-url {
     margin: 0;
+}
+
+#relay-info-done {
+  border: 2px solid #474747;
 }
 
 .relay-dialog-content {

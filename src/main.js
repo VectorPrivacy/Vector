@@ -3727,7 +3727,17 @@ async function refreshRelayInfoDialog() {
     // Refresh metrics
     try {
         const metrics = await invoke('get_relay_metrics', { url });
-        document.getElementById('relay-info-ping').textContent = metrics.ping_ms ? `${metrics.ping_ms}ms` : '--';
+        const pingEl = document.getElementById('relay-info-ping');
+        if (metrics.ping_ms) {
+            pingEl.textContent = `${metrics.ping_ms}ms`;
+            pingEl.style.color = metrics.ping_ms < 200 ? 'var(--status-excellent)'
+                : metrics.ping_ms < 500 ? 'var(--status-good)'
+                : metrics.ping_ms < 1000 ? 'var(--status-fair)'
+                : 'var(--status-poor)';
+        } else {
+            pingEl.textContent = '--';
+            pingEl.style.color = '';
+        }
         if (metrics.last_check) {
             const lastCheck = new Date(metrics.last_check * 1000);
             const now = new Date();
