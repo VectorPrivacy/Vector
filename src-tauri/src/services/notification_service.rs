@@ -22,6 +22,7 @@ use crate::TAURI_APP;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum NotificationType {
     DirectMessage,
+    CommunityMessage,
 }
 
 /// Generic notification data structure
@@ -58,6 +59,27 @@ impl NotificationData {
         }
     }
 
+    /// Create a Community channel notification. Title mirrors the group format ("sender - community");
+    /// `chat_id` is the channel id so tapping navigates to the channel.
+    pub fn community_message(
+        sender_name: String,
+        community_name: String,
+        content: String,
+        avatar_path: Option<String>,
+        community_avatar_path: Option<String>,
+        chat_id: String,
+    ) -> Self {
+        Self {
+            notification_type: NotificationType::CommunityMessage,
+            title: format!("{} - {}", sender_name, community_name),
+            body: content,
+            group_name: Some(community_name),
+            sender_name: Some(sender_name),
+            avatar_path,
+            group_avatar_path: community_avatar_path,
+            chat_id: Some(chat_id),
+        }
+    }
 }
 
 /// Strip HTML tags and markdown formatting from message content for notification previews.

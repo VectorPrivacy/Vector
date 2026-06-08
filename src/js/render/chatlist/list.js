@@ -280,9 +280,11 @@ function countPingMessages(chat) {
         }
         if (!msg.content) continue;
         const mentionedMe = strPubkey && msg.content.includes('@' + strPubkey);
+        // Authorized @everyone = owner or admin (owner isn't in the admins list — it's its own tier).
+        const everyoneAuthor = msg.npub || '';
         const mentionedEveryone = isGroup
             && /@everyone\b/.test(msg.content)
-            && admins?.includes(msg.npub || '');
+            && (admins?.includes(everyoneAuthor) || chat.metadata?.custom_fields?.owner_npub === everyoneAuthor);
         if (mentionedMe || mentionedEveryone) pings++;
     }
     return pings;

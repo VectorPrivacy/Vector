@@ -280,6 +280,11 @@ async fn handle_community_event(
                 "message_new",
                 &serde_json::json!({ "message": &msg, "chat_id": &chat_id }),
             );
+            // OS notification + badge for the realtime arrival (boot/catch-up sweeps don't notify).
+            show_community_notification(&chat_id, &msg).await;
+            if let Some(handle) = crate::TAURI_APP.get() {
+                let _ = crate::commands::messaging::update_unread_counter(handle.clone()).await;
+            }
         }
         Some(vector_core::community::inbound::IncomingEvent::Updated { target_id, message }) => {
             // Reaction or edit applied to an existing message → surgical UI update.
@@ -311,6 +316,114 @@ async fn handle_community_event(
         }
         None => {}
     }
+}
+
+/// OS notification for a realtime Community message, mirroring the DM/group rules: a normal message
+/// notifies only when the channel isn't muted; a direct @mention or an authorized @everyone (owner
+/// or admin) breaks through a muted channel — unless the SENDER's DM is muted, they're blocked, or
+/// @everyone pings are globally disabled. `chat_id` is the channel id.
+async fn show_community_notification(chat_id: &str, msg: &vector_core::Message) {
+    if msg.mine { return; }
+    let sender_npub = msg.npub.as_deref().unwrap_or_default();
+    if sender_npub.is_empty() { return; }
+
+    // Resolve @everyone authority only when the text actually contains it (zero-cost on normal sends).
+    let everyone_ping = if msg.mentions_everyone() {
+        let muted_everyone = vector_core::db::settings::get_sql_setting("notif_mute_everyone".to_string())
+            .ok().flatten().map_or(false, |v| v == "true");
+        !muted_everyone && community_sender_is_admin(chat_id, sender_npub)
+    } else {
+        false
+    };
+
+    let should_notify = {
+        let state = crate::STATE.lock().await;
+        let mentions_me = msg.mentions_me();
+        let sender_blocked = state.get_profile(sender_npub).map_or(false, |p| p.flags.is_blocked());
+        let sender_dm_muted = state.get_chat(sender_npub).map_or(false, |c| c.muted);
+        if sender_blocked {
+            false
+        } else if mentions_me || everyone_ping {
+            // Pings bypass a muted CHANNEL, but never a muted/blocked sender.
+            !sender_dm_muted
+        } else {
+            state.get_chat(chat_id).map_or(false, |c| !c.muted)
+        }
+    };
+    if !should_notify { return; }
+
+    let is_file = !msg.attachments.is_empty();
+    let (sender_name, community_name, avatar, content) = {
+        let state = crate::STATE.lock().await;
+        let (sender, av) = state.get_profile(sender_npub).map(|p| {
+            let name = if !p.nickname.is_empty() { p.nickname.to_string() }
+                else if !p.name.is_empty() { p.name.to_string() }
+                else { "Someone".to_string() };
+            let cached = if !p.avatar_cached.is_empty() { Some(p.avatar_cached.to_string()) } else { None };
+            (name, cached)
+        }).unwrap_or_else(|| ("Someone".to_string(), None));
+        let community_name = state.get_chat(chat_id)
+            .and_then(|c| c.metadata.get_name().map(|n| n.to_string()))
+            .unwrap_or_else(|| "Community".to_string());
+        let content = if is_file {
+            let ext = msg.attachments.first().map(|a| a.extension.clone()).unwrap_or_else(|| "file".into());
+            "Sent a ".to_string() + &crate::util::get_file_type_description(&ext)
+        } else {
+            crate::services::strip_content_for_preview(
+                &crate::services::resolve_mention_display_names(&msg.content, &state)
+            )
+        };
+        (sender, community_name, av, content)
+    };
+
+    // Community icon for the Android embedded design (sender + community + both avatars). Fast
+    // cached-path lookup only (no network) — resolves once the channel's been opened + icon cached.
+    let community_avatar = crate::TAURI_APP.get().and_then(|handle| {
+        vector_core::db::community::community_id_for_channel(chat_id)
+            .ok()
+            .flatten()
+            .and_then(|cid| {
+                let id = vector_core::community::CommunityId(vector_core::simd::hex::hex_to_bytes_32(&cid));
+                vector_core::db::community::load_community(&id).ok().flatten()
+            })
+            .and_then(|c| c.icon)
+            .and_then(|icon| crate::image_cache::get_cached_path(handle, &icon.url, crate::image_cache::ImageType::Avatar))
+    });
+
+    let notification = crate::services::NotificationData::community_message(
+        sender_name, community_name, content, avatar, community_avatar, chat_id.to_string(),
+    );
+    crate::services::show_notification_generic(notification);
+}
+
+/// Whether `sender_npub` (bech32) is the owner or an admin of the community owning `channel_id`.
+/// Used only for @everyone authority; a lookup failure denies the bypass (fail-closed).
+fn community_sender_is_admin(channel_id: &str, sender_npub: &str) -> bool {
+    let Ok(sender_hex) = nostr_sdk::PublicKey::from_bech32(sender_npub).map(|pk| pk.to_hex()) else {
+        return false;
+    };
+    let Ok(Some(community_id)) = vector_core::db::community::community_id_for_channel(channel_id) else {
+        return false;
+    };
+    // Owner (verified attestation) outranks all.
+    let owner_is_sender = vector_core::db::community::load_community(
+        &vector_core::community::CommunityId(vector_core::simd::hex::hex_to_bytes_32(&community_id)),
+    )
+    .ok()
+    .flatten()
+    .and_then(|c| {
+        c.owner_attestation
+            .as_ref()
+            .and_then(|att| vector_core::community::owner::verify_owner_attestation(att, &community_id))
+    })
+    .map_or(false, |pk| pk.to_hex() == sender_hex);
+    if owner_is_sender {
+        return true;
+    }
+    // Otherwise a non-owner admin grant-holder.
+    vector_core::db::community::get_community_roles(&community_id)
+        .map(|roles| roles.is_admin(&sender_hex))
+        .unwrap_or(false)
 }
 
 /// Called once after login to begin receiving real-time events.
