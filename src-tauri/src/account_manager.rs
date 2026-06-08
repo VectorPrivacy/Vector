@@ -637,7 +637,6 @@ pub async fn reset_session() {
         state.is_syncing = false;
     }
     { crate::WRAPPER_ID_CACHE.lock().await.clear(); }
-    { crate::NOTIFIED_WELCOMES.lock().await.clear(); }
     { crate::state::PENDING_EVENTS.lock().await.clear(); }
     // Active-chat marker is an npub; a shared contact across accounts would
     // otherwise let account A's open chat auto-mark account B's messages.
@@ -646,9 +645,23 @@ pub async fn reset_session() {
     // Profile sync queue (long-lived processor loop services this queue
     // forever, so we drain it instead of cancelling the task).
     vector_core::profile::sync::clear_profile_sync_queue();
+    // Theme-pack emoji tags are account-scoped; clear so account A's theme shortcodes don't tag
+    // account B's outbound messages. The frontend re-registers B's theme only if it has one.
+    vector_core::emoji_packs::set_theme_emoji_tags(Vec::new());
 
-    // MLS subscription pointer — the new account will install its own.
-    { *crate::services::subscription_handler::MLS_SUB_ID.lock().await = None; }
+    // Community subscription pointer + routing table — the latter holds channel
+    // SECRET keys, so it MUST be cleared on swap or account A's keys leak into B's
+    // session. The new account rebuilds both via refresh_community_subscription().
+    { *crate::services::subscription_handler::COMMUNITY_SUB_ID.lock().await = None; }
+    { crate::services::subscription_handler::COMMUNITY_ROUTES.lock().await.clear(); }
+    // Control-plane routing table (#z pseudonym -> community id) is keyed off account-specific
+    // pseudonyms; carrying it across swap misroutes account A's control editions into B's session.
+    { crate::services::subscription_handler::CONTROL_ROUTES.lock().await.clear(); }
+    // Community per-channel sync state (account-scoped) — drop so account B doesn't inherit
+    // A's history-start flags, paging cursors, or any stale in-flight claims.
+    { crate::commands::community::COMMUNITY_HISTORY_START.lock().unwrap().clear(); }
+    { crate::commands::community::COMMUNITY_OLDEST_CURSOR.lock().unwrap().clear(); }
+    { crate::commands::community::COMMUNITY_SYNC_INFLIGHT.lock().unwrap().clear(); }
 
     // Pending invite captured during account creation (must NOT auto-execute
     // on the next account).
@@ -685,14 +698,6 @@ pub async fn reset_session() {
         rec.cancel();
     }
 
-    // MLS group failure counters and per-group sync locks — per-account
-    // state that must NOT carry into the next session. Failure counters
-    // (desync-detection threshold) keyed by group id could trigger
-    // spurious desync detection on account B if the same id reappears.
-    // Sync locks are just allocations but pile up across sessions.
-    vector_core::mls::types::clear_group_failure_counts().await;
-    vector_core::mls::service::clear_group_sync_locks();
-
     // Recipient relay-list cache — recipient-keyed, so technically
     // account-agnostic, but holds privacy-adjacent metadata about every
     // contact account A messaged. Drop on swap.
@@ -710,12 +715,6 @@ pub async fn reset_session() {
         let mut state = crate::miniapps::marketplace::MARKETPLACE_STATE.write().await;
         state.clear_for_session_reset();
     }
-
-    // vector-core's MLS subscription pointer (separate from the
-    // subscription_handler one cleared above). Carrying it across a swap
-    // would mean the new account's `listen()` references a sub id that
-    // belonged to account A's relay pool.
-    vector_core::clear_mls_sub_id().await;
 
     if let Ok(mut u) = crate::message::upload_cancel_flags().lock() {
         for flag in u.values() {

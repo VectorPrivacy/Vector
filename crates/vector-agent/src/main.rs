@@ -56,19 +56,6 @@ async fn main() {
     // Wait for relay connections
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-    // Publish keypackage so others can invite us to MLS groups.
-    // `use_cache=true` reuses an existing valid keypackage if present.
-    match core.publish_keypackage(true).await {
-        Ok(kp) => {
-            if kp.cached {
-                eprintln!("[vector-agent] KeyPackage ready (cached): device={}", kp.device_id);
-            } else {
-                eprintln!("[vector-agent] KeyPackage published: device={}", kp.device_id);
-            }
-        }
-        Err(e) => eprintln!("[vector-agent] KeyPackage publish failed (invites won't work): {}", e),
-    }
-
     // Start background listener with event handler
     let (event_handler, message_buffer) = AgentEventHandler::new();
     let listen_core = VectorCore;
@@ -96,22 +83,22 @@ fn dirs_or_default() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
         if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join("Library/Application Support/io.vectorapp/data");
+            return PathBuf::from(home).join("Library/Application Support/io.vectorapp/agent");
         }
     }
     #[cfg(target_os = "linux")]
     {
         if let Ok(data) = std::env::var("XDG_DATA_HOME") {
-            return PathBuf::from(data).join("io.vectorapp/data");
+            return PathBuf::from(data).join("io.vectorapp/agent");
         }
         if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(".local/share/io.vectorapp/data");
+            return PathBuf::from(home).join(".local/share/io.vectorapp/agent");
         }
     }
     #[cfg(target_os = "windows")]
     {
         if let Ok(appdata) = std::env::var("APPDATA") {
-            return PathBuf::from(appdata).join("io.vectorapp/data");
+            return PathBuf::from(appdata).join("io.vectorapp/agent");
         }
     }
     PathBuf::from("/tmp/vector-data")

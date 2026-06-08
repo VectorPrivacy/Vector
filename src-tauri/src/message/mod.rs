@@ -46,7 +46,6 @@ pub use files::*;
 pub use types::{
     AttachmentFile, Reaction,
 };
-pub use vector_core::compact::CompactAttachment;
 
 /// Protocol-agnostic reaction function that works for both DMs and Group Chats.
 /// `emoji_url` carries the NIP-30 image URL when reacting with a custom-pack
@@ -155,55 +154,8 @@ pub async fn react_to_message(
 
             Ok(false)
         }
-        ChatType::MlsGroup => {
-            // For group chats, send reaction through MLS
-            let reference_event = EventId::from_hex(&reference_id).map_err(|e| e.to_string())?;
-
-            // Build reaction rumor manually (simpler than using the builder for group chats)
-            let mut builder = EventBuilder::new(Kind::Reaction, &emoji)
-                .tag(Tag::event(reference_event));
-            if let Some(tag) = custom_emoji_tag {
-                builder = builder.tag(tag);
-            }
-            let rumor = builder.build(my_public_key);
-            let rumor_id = rumor.id.ok_or("Failed to get rumor ID")?.to_hex();
-            
-            // Send through MLS
-            crate::mls::send_mls_message(&chat_id, rumor, None).await?;
-
-            // Add reaction to local state (bech32 npub to match DB format and frontend strPubkey)
-            let reaction = Reaction {
-                id: rumor_id,
-                reference_id: reference_id.clone(),
-                author_id: my_public_key.to_bech32().unwrap_or_else(|_| my_public_key.to_hex()),
-                emoji,
-                emoji_url: emoji_url.clone(),
-            };
-            
-            let msg_for_save = {
-                let mut state = STATE.lock().await;
-                // Use helper that handles interner access via split borrowing
-                if let Some((returned_chat_id, was_added)) = state.add_reaction_to_message(&reference_id, reaction) {
-                    if was_added {
-                        state.find_message(&reference_id)
-                            .map(|(_, msg)| (returned_chat_id, msg))
-                    } else { None }
-                } else { None }
-            };
-
-            if let Some((chat_id_clone, msg)) = msg_for_save {
-                if let Some(handle) = TAURI_APP.get() {
-                    let _ = crate::db::save_message(&chat_id_clone, &msg).await;
-                    let _ = handle.emit("message_update", serde_json::json!({
-                        "old_id": &reference_id,
-                        "message": &msg,
-                        "chat_id": &chat_id_clone
-                    }));
-                    return Ok(true);
-                }
-            }
-
-            Ok(false)
+        ChatType::Community => {
+            return Err("Reactions in Community channels are not yet supported".to_string());
         }
     }
 }
@@ -363,9 +315,8 @@ pub async fn edit_message(
                 let _ = self_wrap_client.gift_wrap(&my_public_key, rumor, []).await;
             });
         }
-        ChatType::MlsGroup => {
-            // For group chats, send edit through MLS
-            crate::mls::send_mls_message(&chat_id, rumor, None).await?;
+        ChatType::Community => {
+            return Err("Editing Community channel messages is not yet supported".to_string());
         }
     }
 

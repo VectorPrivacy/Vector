@@ -22,8 +22,6 @@ use crate::TAURI_APP;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum NotificationType {
     DirectMessage,
-    GroupMessage,
-    GroupInvite,
 }
 
 /// Generic notification data structure
@@ -60,34 +58,6 @@ impl NotificationData {
         }
     }
 
-    /// Create a group message notification (works for both text and file attachments)
-    pub fn group_message(sender_name: String, group_name: String, content: String, avatar_path: Option<String>, group_avatar_path: Option<String>, chat_id: String) -> Self {
-        Self {
-            notification_type: NotificationType::GroupMessage,
-            title: format!("{} - {}", sender_name, group_name),
-            body: content,
-            group_name: Some(group_name),
-            sender_name: Some(sender_name),
-            avatar_path,
-            group_avatar_path,
-            chat_id: Some(chat_id),
-        }
-    }
-
-    /// Create a group invite notification
-    #[allow(dead_code)]
-    pub fn group_invite(group_name: String, inviter_name: String, avatar_path: Option<String>) -> Self {
-        Self {
-            notification_type: NotificationType::GroupInvite,
-            title: group_name.clone(),
-            body: format!("Invited by {}", inviter_name),
-            group_name: Some(group_name),
-            sender_name: Some(inviter_name),
-            avatar_path,
-            group_avatar_path: None,
-            chat_id: None, // No chat to navigate to yet (pending welcome)
-        }
-    }
 }
 
 /// Strip HTML tags and markdown formatting from message content for notification previews.

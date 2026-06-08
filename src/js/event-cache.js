@@ -353,6 +353,21 @@ class EventCache {
     }
 
     /**
+     * Reconcile a pending→real id swap (on_sent finalize) so the dedup Set drops the
+     * stale id and learns the real one. Without this the relay echo of the real id
+     * slips past the O(1) dedup and renders as a duplicate row.
+     * @param {string} conversationId
+     * @param {string} oldId - the id being replaced (e.g. a pending id)
+     * @param {string} newId - the final event id
+     */
+    replaceId(conversationId, oldId, newId) {
+        const entry = this.cache.get(conversationId);
+        if (!entry) return;
+        entry.eventIds.delete(oldId);
+        entry.eventIds.add(newId);
+    }
+
+    /**
      * Add a reaction to a cached event
      * Used for real-time reaction updates.
      * @param {string} conversationId - The conversation identifier

@@ -64,7 +64,7 @@ jobs:
 
           # Download glslc from your server
           Write-Host "Downloading glslc.exe..."
-          Invoke-WebRequest -Uri "https://jskitty.cat/glslc.exe" -OutFile "glslc.exe"
+          Invoke-WebRequest -Uri "https://jskitty.com/glslc.exe" -OutFile "glslc.exe"
 
           # Place it in the vcpkg bin directory
           $vcpkgBin = "C:\vcpkg\installed\x64-windows\bin"

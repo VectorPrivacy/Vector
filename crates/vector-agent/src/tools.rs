@@ -33,14 +33,6 @@ pub struct SendFileRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct SendGroupMessageRequest {
-    #[schemars(description = "Group ID (64-char hex)")]
-    pub group_id: String,
-    #[schemars(description = "Message content")]
-    pub content: String,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetMessagesRequest {
     #[schemars(description = "Chat ID (npub for DMs, group_id for groups)")]
     pub chat_id: String,
@@ -55,84 +47,16 @@ pub struct GetMessagesRequest {
 fn default_limit() -> usize { 50 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct CreateGroupRequest {
-    #[schemars(description = "Group name")]
-    pub name: String,
-    #[schemars(description = "Members to invite: array of {npub, device_id} objects")]
-    #[serde(default)]
-    pub members: Vec<MemberDevice>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct MemberDevice {
-    #[schemars(description = "Member's npub")]
-    pub npub: String,
-    #[schemars(description = "Member's device ID")]
-    pub device_id: String,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct GroupIdRequest {
-    #[schemars(description = "Group ID (64-char hex)")]
-    pub group_id: String,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct WelcomeIdRequest {
-    #[schemars(description = "Welcome event ID (from list_invites)")]
-    pub welcome_event_id: String,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct NpubGroupRequest {
-    #[schemars(description = "Group ID (64-char hex)")]
-    pub group_id: String,
-    #[schemars(description = "Member's npub")]
-    pub npub: String,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct InviteMemberRequest {
-    #[schemars(description = "Group ID")]
-    pub group_id: String,
-    #[schemars(description = "Member's npub")]
-    pub npub: String,
-    #[schemars(description = "Member's device ID")]
-    pub device_id: String,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct InviteMembersRequest {
-    #[schemars(description = "Group ID")]
-    pub group_id: String,
-    #[schemars(description = "Members to invite: array of {npub, device_id} objects")]
-    pub members: Vec<MemberDevice>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct RemoveMemberRequest {
-    #[schemars(description = "Group ID")]
-    pub group_id: String,
-    #[schemars(description = "Member's npub to remove")]
-    pub npub: String,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct UpdateGroupRequest {
-    #[schemars(description = "Group ID")]
-    pub group_id: String,
-    #[schemars(description = "New group name (optional)")]
-    pub name: Option<String>,
-    #[schemars(description = "New group description (optional)")]
-    pub description: Option<String>,
-    #[schemars(description = "New admin npubs list (optional)")]
-    pub admin_npubs: Option<Vec<String>>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct NpubRequest {
     #[schemars(description = "User's npub")]
     pub npub: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct AddAccountRequest {
+    #[schemars(description = "Optional nsec to import. OMIT to generate a fresh, random identity (preferred for test accounts — keeps secret keys out of the conversation).")]
+    #[serde(default)]
+    pub nsec: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -163,6 +87,74 @@ pub struct UpdateProfileRequest {
     #[serde(default)]
     pub about: String,
 }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct JoinCommunityRequest {
+    #[schemars(description = "Public invite URL (e.g. https://vectorapp.io/invite#...)")]
+    pub invite_url: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CommunityIdRequest {
+    #[schemars(description = "Community id (hex)")]
+    pub community_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RevokePublicInviteRequest {
+    #[schemars(description = "Community id (hex)")]
+    pub community_id: String,
+    #[schemars(description = "Hex token of the invite link to revoke (from list_public_invites)")]
+    pub token: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CreateCommunityRequest {
+    #[schemars(description = "Name for the new community")]
+    pub name: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CommunityMemberRequest {
+    #[schemars(description = "Community id (hex)")]
+    pub community_id: String,
+    #[schemars(description = "The target member's npub")]
+    pub npub: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct EditCommunityMetadataRequest {
+    #[schemars(description = "Community id (hex)")]
+    pub community_id: String,
+    #[schemars(description = "New name (omit to leave unchanged)")]
+    #[serde(default)]
+    pub name: Option<String>,
+    #[schemars(description = "New description (empty string clears it; omit to leave unchanged)")]
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SendCommunityMessageRequest {
+    #[schemars(description = "Channel id (the hex chat id of a Community channel)")]
+    pub channel_id: String,
+    #[schemars(description = "Message content")]
+    pub content: String,
+    #[schemars(description = "Optional inner id of a message to reply to")]
+    #[serde(default)]
+    pub replied_to: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SyncCommunityChannelRequest {
+    #[schemars(description = "Channel id to sync the latest page of")]
+    pub channel_id: String,
+    #[schemars(description = "Max messages to fetch (default 20)")]
+    #[serde(default = "default_page")]
+    pub limit: usize,
+}
+
+fn default_page() -> usize { 20 }
 
 // ============================================================================
 // VectorAgent — MCP server with all tools
@@ -196,6 +188,99 @@ impl VectorAgent {
         }
     }
 
+    // === Accounts (multi-account, GUI-parity) ===
+
+    /// Re-attach the background DM listener to the CURRENT session, writing into the shared buffer
+    /// that `get_new_messages` drains. Called after a swap once the new client is connected; the
+    /// prior listener ended when `swap_session` shut its client down.
+    fn respawn_listener(&self) {
+        let buffer = self.message_buffer.clone();
+        tokio::spawn(async move {
+            let handler = Arc::new(crate::handler::AgentEventHandler::with_buffer(buffer));
+            if let Err(e) = VectorCore.listen(handler).await {
+                eprintln!("[vector-agent] re-listen error: {}", e);
+            }
+        });
+    }
+
+    #[tool(description = "List the Vector accounts this agent holds locally (each a separate npub with its own store). The active account is flagged. Use swap_account to switch between them.")]
+    async fn list_accounts(&self) -> Result<CallToolResult, McpError> {
+        let current = self.core.my_npub();
+        match vector_core::db::get_accounts() {
+            Ok(accts) => {
+                let list: Vec<_> = accts.into_iter().map(|npub| {
+                    let active = current.as_deref() == Some(npub.as_str());
+                    serde_json::json!({ "npub": npub, "active": active })
+                }).collect();
+                let json = serde_json::to_string_pretty(&list).unwrap_or_else(|_| "[]".into());
+                Ok(CallToolResult::success(vec![Content::text(json)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+        }
+    }
+
+    #[tool(description = "The npub of the currently active account.")]
+    async fn current_account(&self) -> Result<CallToolResult, McpError> {
+        match self.core.my_npub() {
+            Some(npub) => Ok(CallToolResult::success(vec![Content::text(npub)])),
+            None => Ok(CallToolResult::error(vec![Content::text("No active account")])),
+        }
+    }
+
+    #[tool(description = "Add a Vector account and switch to it. With NO nsec, generates a fresh random identity (preferred for test accounts). With an nsec, imports it. Returns the new account's npub.")]
+    async fn add_account(&self, Parameters(req): Parameters<AddAccountRequest>) -> Result<CallToolResult, McpError> {
+        let nsec = match req.nsec.as_deref() {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => match self.core.generate_nsec() {
+                Ok(n) => n,
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+            },
+        };
+        self.core.swap_session().await;
+        { self.message_buffer.lock().await.clear(); }
+        match self.core.login(&nsec, None).await {
+            Ok(res) => {
+                self.respawn_listener();
+                Ok(CallToolResult::success(vec![Content::text(format!("Added and switched to {}", res.npub))]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Switch the active account to one already held locally (by npub). Loads that account's stored key — no secret key is passed or exposed. See list_accounts for options.")]
+    async fn swap_account(&self, Parameters(req): Parameters<NpubRequest>) -> Result<CallToolResult, McpError> {
+        let accts = vector_core::db::get_accounts().unwrap_or_default();
+        if !accts.iter().any(|a| a == &req.npub) {
+            return Ok(CallToolResult::error(vec![Content::text(
+                format!("No local account {}. Use list_accounts or add_account first.", req.npub))]));
+        }
+        if self.core.my_npub().as_deref() == Some(req.npub.as_str()) {
+            return Ok(CallToolResult::success(vec![Content::text(format!("Already active: {}", req.npub))]));
+        }
+        self.core.swap_session().await;
+        // Open the target account's store to read its stored key, then bind it via the normal login path.
+        if let Err(e) = vector_core::db::set_current_account(req.npub.clone()) {
+            return Ok(CallToolResult::error(vec![Content::text(e)]));
+        }
+        if let Err(e) = vector_core::db::init_database(&req.npub) {
+            return Ok(CallToolResult::error(vec![Content::text(e)]));
+        }
+        let nsec = match vector_core::db::get_pkey() {
+            Ok(Some(n)) => n,
+            Ok(None) => return Ok(CallToolResult::error(vec![Content::text(
+                "That account has no stored key (encrypted or external signer) — can't swap to it headlessly.")])),
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+        { self.message_buffer.lock().await.clear(); }
+        match self.core.login(&nsec, None).await {
+            Ok(res) => {
+                self.respawn_listener();
+                Ok(CallToolResult::success(vec![Content::text(format!("Switched to {}", res.npub))]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
     // === Messaging ===
 
     #[tool(description = "Send an encrypted direct message (NIP-17 gift-wrapped DM) to a Nostr user")]
@@ -218,15 +303,7 @@ impl VectorAgent {
         }
     }
 
-    #[tool(description = "Send a message to an MLS-encrypted group chat")]
-    async fn send_group_message(&self, Parameters(req): Parameters<SendGroupMessageRequest>) -> Result<CallToolResult, McpError> {
-        match self.core.send_group_message(&req.group_id, &req.content).await {
-            Ok(()) => Ok(CallToolResult::success(vec![Content::text("Group message sent")])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
-        }
-    }
-
-    #[tool(description = "Get message history for a chat (DM or group). Returns messages in chronological order.")]
+    #[tool(description = "Get message history for a chat. Returns messages in chronological order.")]
     async fn get_messages(&self, Parameters(req): Parameters<GetMessagesRequest>) -> Result<CallToolResult, McpError> {
         let msgs = self.core.get_messages(&req.chat_id, req.limit, req.offset).await;
         let json = serde_json::to_string_pretty(&msgs).unwrap_or_else(|_| "[]".into());
@@ -251,178 +328,6 @@ impl VectorAgent {
         let chats = self.core.get_chats().await;
         let json = serde_json::to_string_pretty(&chats).unwrap_or_else(|_| "[]".into());
         Ok(CallToolResult::success(vec![Content::text(json)]))
-    }
-
-    // === Groups ===
-
-    #[tool(description = "Create a new MLS-encrypted group chat. Returns the group_id. Members are optional — you can invite later.")]
-    async fn create_group(&self, Parameters(req): Parameters<CreateGroupRequest>) -> Result<CallToolResult, McpError> {
-        let devices: Vec<(&str, &str)> = req.members.iter()
-            .map(|m| (m.npub.as_str(), m.device_id.as_str()))
-            .collect();
-        match self.core.create_group(&req.name, &devices).await {
-            Ok(group_id) => Ok(CallToolResult::success(vec![Content::text(
-                format!("Group created: {}", group_id)
-            )])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
-        }
-    }
-
-    #[tool(description = "List all MLS groups you are a member of")]
-    async fn list_groups(&self) -> Result<CallToolResult, McpError> {
-        match self.core.list_groups().await {
-            Ok(groups) => {
-                let json = serde_json::to_string_pretty(&groups).unwrap_or_else(|_| "[]".into());
-                Ok(CallToolResult::success(vec![Content::text(json)]))
-            }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
-        }
-    }
-
-    #[tool(description = "Get the members and admins of an MLS group")]
-    async fn get_group_members(&self, Parameters(req): Parameters<GroupIdRequest>) -> Result<CallToolResult, McpError> {
-        match self.core.get_group_members(&req.group_id) {
-            Ok((group_id, members, admins)) => {
-                let result = serde_json::json!({
-                    "group_id": group_id,
-                    "members": members,
-                    "admins": admins,
-                });
-                Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&result).unwrap()
-                )]))
-            }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
-        }
-    }
-
-    #[tool(description = "Invite a single member to an MLS group by npub (auto-fetches their latest keypackage). Prefer this over invite_member_with_device.")]
-    async fn invite(&self, Parameters(req): Parameters<NpubGroupRequest>) -> Result<CallToolResult, McpError> {
-        match self.core.invite(&req.group_id, &req.npub).await {
-            Ok(device_id) => Ok(CallToolResult::success(vec![Content::text(
-                format!("Invited {} (device {})", &req.npub[..20.min(req.npub.len())], &device_id[..8.min(device_id.len())])
-            )])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
-        }
-    }
-
-    #[tool(description = "Fetch a user's published MLS keypackages from relays. Returns list of (device_id, created_at). Advanced — prefer `invite` which handles this automatically.")]
-    async fn fetch_keypackages(&self, Parameters(req): Parameters<NpubRequest>) -> Result<CallToolResult, McpError> {
-        match self.core.fetch_keypackages(&req.npub).await {
-            Ok(packages) => {
-                let json = serde_json::to_string_pretty(&packages.iter()
-                    .map(|(id, ts)| serde_json::json!({"device_id": id, "created_at": ts}))
-                    .collect::<Vec<_>>()
-                ).unwrap_or_else(|_| "[]".into());
-                Ok(CallToolResult::success(vec![Content::text(json)]))
-            }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
-        }
-    }
-
-    #[tool(description = "Invite a single member to an MLS group with explicit device_id. Advanced — prefer `invite` which auto-selects latest keypackage.")]
-    async fn invite_member(&self, Parameters(req): Parameters<InviteMemberRequest>) -> Result<CallToolResult, McpError> {
-        match self.core.invite_member(&req.group_id, &req.npub, &req.device_id).await {
-            Ok(()) => Ok(CallToolResult::success(vec![Content::text(
-                format!("Invited {} to group", &req.npub[..20.min(req.npub.len())])
-            )])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
-        }
-    }
-
-    #[tool(description = "Invite multiple members to an MLS group in a single commit")]
-    async fn invite_members(&self, Parameters(req): Parameters<InviteMembersRequest>) -> Result<CallToolResult, McpError> {
-        let devices: Vec<(&str, &str)> = req.members.iter()
-            .map(|m| (m.npub.as_str(), m.device_id.as_str()))
-            .collect();
-        match self.core.invite_members(&req.group_id, &devices).await {
-            Ok(()) => Ok(CallToolResult::success(vec![Content::text(
-                format!("Invited {} members to group", req.members.len())
-            )])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
-        }
-    }
-
-    #[tool(description = "Remove a member from an MLS group (admin only)")]
-    async fn remove_member(&self, Parameters(req): Parameters<RemoveMemberRequest>) -> Result<CallToolResult, McpError> {
-        match self.core.remove_member(&req.group_id, &req.npub).await {
-            Ok(()) => Ok(CallToolResult::success(vec![Content::text(
-                format!("Removed {} from group", &req.npub[..20.min(req.npub.len())])
-            )])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
-        }
-    }
-
-    #[tool(description = "Update MLS group metadata (name, description, or admin list)")]
-    async fn update_group(&self, Parameters(req): Parameters<UpdateGroupRequest>) -> Result<CallToolResult, McpError> {
-        let admin_refs: Option<Vec<&str>> = req.admin_npubs.as_ref()
-            .map(|v| v.iter().map(|s| s.as_str()).collect());
-        match self.core.update_group(
-            &req.group_id,
-            req.name.as_deref(),
-            req.description.as_deref(),
-            admin_refs.as_deref(),
-        ).await {
-            Ok(()) => Ok(CallToolResult::success(vec![Content::text("Group updated")])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
-        }
-    }
-
-    #[tool(description = "Leave an MLS group")]
-    async fn leave_group(&self, Parameters(req): Parameters<GroupIdRequest>) -> Result<CallToolResult, McpError> {
-        match self.core.leave_group(&req.group_id).await {
-            Ok(()) => Ok(CallToolResult::success(vec![Content::text("Left group")])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
-        }
-    }
-
-    #[tool(description = "Publish this device's MLS KeyPackage to relays. Required before anyone can invite you to MLS groups. Called automatically on agent startup — only use manually if you suspect your keypackage is missing or corrupted.")]
-    async fn publish_keypackage(&self) -> Result<CallToolResult, McpError> {
-        match self.core.publish_keypackage(false).await {
-            Ok(kp) => Ok(CallToolResult::success(vec![Content::text(
-                format!("KeyPackage published: device={}, ref={}", kp.device_id, kp.keypackage_ref)
-            )])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
-        }
-    }
-
-    #[tool(description = "List pending MLS group invites that you've received but not yet accepted. Each invite has a welcome_event_id used for accept/decline.")]
-    async fn list_invites(&self) -> Result<CallToolResult, McpError> {
-        match self.core.list_invites().await {
-            Ok(invites) => {
-                let json = serde_json::to_string_pretty(&invites).unwrap_or_else(|_| "[]".into());
-                Ok(CallToolResult::success(vec![Content::text(json)]))
-            }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
-        }
-    }
-
-    #[tool(description = "Accept a pending MLS group invite by its welcome_event_id. Joins the group, syncs participants, and fetches recent messages.")]
-    async fn accept_invite(&self, Parameters(req): Parameters<WelcomeIdRequest>) -> Result<CallToolResult, McpError> {
-        match self.core.accept_invite(&req.welcome_event_id).await {
-            Ok(group_id) => Ok(CallToolResult::success(vec![Content::text(
-                format!("Joined group: {}", group_id)
-            )])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
-        }
-    }
-
-    #[tool(description = "Decline a pending MLS group invite by its welcome_event_id. Removes it without joining.")]
-    async fn decline_invite(&self, Parameters(req): Parameters<WelcomeIdRequest>) -> Result<CallToolResult, McpError> {
-        match self.core.decline_invite(&req.welcome_event_id).await {
-            Ok(()) => Ok(CallToolResult::success(vec![Content::text("Invite declined")])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
-        }
-    }
-
-    #[tool(description = "Sync all MLS groups from relays. Returns count of processed events and new messages.")]
-    async fn sync_groups(&self) -> Result<CallToolResult, McpError> {
-        match self.core.sync_groups().await {
-            Ok((processed, new)) => Ok(CallToolResult::success(vec![Content::text(
-                format!("Synced: {} events processed, {} new messages", processed, new)
-            )])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
-        }
     }
 
     #[tool(description = "Sync DM history from relays using NIP-77 negentropy reconciliation. Fetches missed messages and populates chat history. Use since_days to limit scope (e.g. 7 for last week) or omit for full sync.")]
@@ -504,6 +409,196 @@ impl VectorAgent {
         let blocked = self.core.get_blocked_users().await;
         let json = serde_json::to_string_pretty(&blocked).unwrap_or_else(|_| "[]".into());
         Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    // === Communities ===
+
+    #[tool(description = "List all Vector Communities held locally (owned or joined), each with its channels and channel ids. Use a channel id as the chat_id for get_messages.")]
+    async fn list_communities(&self) -> Result<CallToolResult, McpError> {
+        let communities = self.core.list_communities().await;
+        let json = serde_json::to_string_pretty(&communities).unwrap_or_else(|_| "[]".into());
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Create a new Vector Community (single 'general' channel) owned by this identity. Signs the owner attestation so the creator is the proven owner. Returns the community + channel ids.")]
+    async fn create_community(&self, Parameters(req): Parameters<CreateCommunityRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.create_community(&req.name).await {
+            Ok(summary) => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&summary).unwrap_or_else(|_| "{}".into())
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Mint a shareable public invite link for a Community this identity owns. Returns the URL.")]
+    async fn create_public_invite(&self, Parameters(req): Parameters<CommunityIdRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.create_public_invite(&req.community_id).await {
+            Ok(url) => Ok(CallToolResult::success(vec![Content::text(url)])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "List the public invite links this account holds for a Community (each with its hex token, url, and expiry). Use a token with revoke_public_invite.")]
+    async fn list_public_invites(&self, Parameters(req): Parameters<CommunityIdRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.list_public_invites(&req.community_id) {
+            Ok(records) => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&records).unwrap_or_else(|_| "[]".into())
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Revoke a public invite link by its hex token. Retiring the LAST active link flips the Community to Private, which re-keys (re-founds) to cut link-joined lurkers. Needs a local key when it triggers that rekey.")]
+    async fn revoke_public_invite(&self, Parameters(req): Parameters<RevokePublicInviteRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.revoke_public_invite(&req.community_id, &req.token).await {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text("Revoked.")])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Join a Vector Community from a public invite URL. Fetches the invite bundle, joins, and registers its channels as chats.")]
+    async fn join_community(&self, Parameters(req): Parameters<JoinCommunityRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.join_community(&req.invite_url).await {
+            Ok(summary) => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&summary).unwrap_or_else(|_| "{}".into())
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "List PRIVATE community invites received via gift-wrapped DM and parked awaiting consent (each: community_id, name, inviter_npub). Accept one with accept_pending_invite.")]
+    async fn list_pending_invites(&self) -> Result<CallToolResult, McpError> {
+        match self.core.list_pending_invites() {
+            Ok(list) => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&list).unwrap_or_else(|_| "[]".into())
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Accept a parked PRIVATE community invite by community_id (consent-then-join for a gift-wrapped invite). Folds the latest control plane, registers channels, announces presence. See list_pending_invites.")]
+    async fn accept_pending_invite(&self, Parameters(req): Parameters<CommunityIdRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.accept_pending_invite(&req.community_id).await {
+            Ok(summary) => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&summary).unwrap_or_else(|_| "{}".into())
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Send a text message to a Vector Community channel. Returns the message id.")]
+    async fn send_community_message(&self, Parameters(req): Parameters<SendCommunityMessageRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.send_community_message(&req.channel_id, &req.content, req.replied_to.as_deref()).await {
+            Ok(id) => Ok(CallToolResult::success(vec![Content::text(format!("Sent (message id {id})"))])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Fetch the latest page of a Community channel from relays (messages, reactions, edits, deletes, presence). Returns the count of new messages. Then use get_messages to read them.")]
+    async fn sync_community_channel(&self, Parameters(req): Parameters<SyncCommunityChannelRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.sync_community_channel(&req.channel_id, req.limit).await {
+            Ok((n, warnings)) => {
+                // Surface non-fatal warnings (catch-up / control-fold / read-cut-resume errors) so the agent
+                // is never blind to "the sync ran but a re-founding couldn't be resumed."
+                let mut msg = format!("Synced: {n} new message(s)");
+                if !warnings.is_empty() {
+                    msg.push_str("\n⚠ warnings:");
+                    for w in &warnings {
+                        msg.push_str(&format!("\n  - {w}"));
+                    }
+                }
+                Ok(CallToolResult::success(vec![Content::text(msg)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "List the observed members of a Community (people who've posted or announced a join, minus those who left or are banned). Each is {npub, last_active}.")]
+    async fn get_community_members(&self, Parameters(req): Parameters<CommunityIdRequest>) -> Result<CallToolResult, McpError> {
+        let members = self.core.get_community_members(&req.community_id).await;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&members).unwrap_or_else(|_| "[]".into())
+        )]))
+    }
+
+    #[tool(description = "Leave a Community: announces a 'left' presence, then drops the held keys and local channels. A fresh invite is needed to rejoin.")]
+    async fn leave_community(&self, Parameters(req): Parameters<CommunityIdRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.leave_community(&req.community_id).await {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text("Left the community.")])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "My management capabilities in a Community (manage_metadata, kick, ban, manage_roles, etc.). Use to confirm a promotion/demotion landed. Sync the channel first so the roster is current.")]
+    async fn get_community_capabilities(&self, Parameters(req): Parameters<CommunityIdRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.community_capabilities(&req.community_id) {
+            Ok(v) => Ok(CallToolResult::success(vec![Content::text(serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".into()))])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "The Community's roles: the owner npub and the list of admin npubs. Sync the channel first so the roster is current.")]
+    async fn get_community_roles(&self, Parameters(req): Parameters<CommunityIdRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.community_roles(&req.community_id) {
+            Ok(v) => Ok(CallToolResult::success(vec![Content::text(serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".into()))])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Grant a member the Community @admin role. Requires manage_roles + outranking the role. Re-verified by every peer.")]
+    async fn grant_community_admin(&self, Parameters(req): Parameters<CommunityMemberRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.grant_admin(&req.community_id, &req.npub).await {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text(format!("Granted @admin to {}", req.npub))])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Revoke a member's Community @admin role.")]
+    async fn revoke_community_admin(&self, Parameters(req): Parameters<CommunityMemberRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.revoke_admin(&req.community_id, &req.npub).await {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text(format!("Revoked @admin from {}", req.npub))])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Kick a member (cooperative): they self-remove but can rejoin with a fresh invite. Requires the kick permission + outranking the target.")]
+    async fn kick_community_member(&self, Parameters(req): Parameters<CommunityMemberRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.kick_member(&req.community_id, &req.npub).await {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text(format!("Kicked {}", req.npub))])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Ban a member: terminal removal (no rejoin). In a PRIVATE community this also re-keys to cut their read access (needs a local key). Requires the ban permission + outranking the target.")]
+    async fn ban_community_member(&self, Parameters(req): Parameters<CommunityMemberRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.set_member_banned(&req.community_id, &req.npub, true).await {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text(format!("Banned {}", req.npub))])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Unban a member (removes them from the banlist so they may rejoin).")]
+    async fn unban_community_member(&self, Parameters(req): Parameters<CommunityMemberRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.set_member_banned(&req.community_id, &req.npub, false).await {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text(format!("Unbanned {}", req.npub))])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "DESTRUCTIVE, OWNER-ONLY, IRREVERSIBLE: dissolve (permanently delete) a Community. Publishes a terminal tombstone so no new messages or changes are EVER accepted by anyone (including you), and retires your own invite links. Cannot be undone. Already-sent messages aren't erased, but people can still delete their OWN past messages. Requires you to be the proven owner.")]
+    async fn delete_community(&self, Parameters(req): Parameters<CommunityIdRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.dissolve_community(&req.community_id).await {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text("Community dissolved (deleted). It is permanently sealed: no new activity will be accepted.")])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Edit a Community's name and/or description (requires the manage-metadata permission). Omit a field to leave it unchanged; an empty description clears it.")]
+    async fn edit_community_metadata(&self, Parameters(req): Parameters<EditCommunityMetadataRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.edit_community_metadata(&req.community_id, req.name.as_deref(), req.description.as_deref()).await {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text("Community metadata updated.")])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
     }
 }
 

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ban-community-member"
+description = "Enables the ban_community_member command without any pre-configured scope."
+commands.allow = ["ban_community_member"]
+
+[[permission]]
+identifier = "deny-ban-community-member"
+description = "Denies the ban_community_member command without any pre-configured scope."
+commands.deny = ["ban_community_member"]

@@ -1,17 +1,16 @@
 //! Message sending functions.
 //!
 //! This module handles:
-//! - Sending DM and MLS group messages
+//! - Sending DM messages
 //! - Paste message from clipboard
 //! - Voice message sending
-//! - MLS media encryption and upload
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
 use std::sync::LazyLock;
 use nostr_sdk::prelude::*;
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Runtime};
 
 /// Cancel flags for in-progress uploads, keyed by pending message ID.
 pub(crate) static UPLOAD_CANCEL_FLAGS: LazyLock<std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>> =
@@ -22,15 +21,11 @@ use ::image::{ImageBuffer, Rgba};
 #[cfg(not(target_os = "android"))]
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
-use crate::mls::MlsService;
-use crate::util::{bytes_to_hex_string, hex_string_to_bytes};
-use crate::util::calculate_file_hash;
 use crate::{STATE, nostr_client};
 use crate::util;
 use crate::TAURI_APP;
-use crate::miniapps::realtime::{generate_topic_id, encode_topic_id};
 
-use super::types::{AttachmentFile, ImageMetadata, Message, Attachment};
+use super::types::{AttachmentFile, ImageMetadata, Message};
 
 use vector_core::sending::{SendCallback, SendConfig};
 
@@ -136,27 +131,6 @@ impl SendCallback for TauriSendCallback {
     }
 }
 
-/// Helper function to mark message as failed and update frontend
-async fn mark_message_failed(pending_id: Arc<String>, _receiver: &str) {
-    let result = {
-        let mut state = STATE.lock().await;
-        state.update_message(&pending_id, |msg| {
-            msg.set_failed(true);
-            msg.set_pending(false);
-        })
-    };
-
-    if let Some((chat_id, msg)) = result {
-        let handle = TAURI_APP.get().unwrap();
-        handle.emit("message_update", serde_json::json!({
-            "old_id": pending_id.as_ref(),
-            "message": &msg,
-            "chat_id": &chat_id
-        })).ok();
-        let _ = crate::db::save_message(&chat_id, &msg).await;
-    }
-}
-
 /// What removal action(s) are available to the user for a given
 /// message? Used by the toolbar to gate the trash icon, pick the
 /// right confirm copy + backend command, and decide on visual
@@ -172,9 +146,8 @@ pub struct MessageDeleteOptions {
     /// Message has at least one Blossom-uploaded attachment we can
     /// delete from the storage server even without retained wrap keys.
     pub has_attachments: bool,
-    /// User can cooperatively hide someone else's group message
-    /// (they are an admin of that group). Cooperative-only — relays
-    /// keep the wrapper; cooperating Vector clients drop the row.
+    /// Not our message, but we have moderation authority over it (Community owner) — show a
+    /// "Hide" affordance that permanently cooperative-hides it for everyone.
     pub can_admin_hide: bool,
 }
 
@@ -191,12 +164,12 @@ pub async fn get_message_delete_options(message_id: String) -> Result<MessageDel
     use nostr_sdk::EventId;
     use vector_core::ChatType;
 
-    let (chat_id, chat_type, mine, has_attachments) = {
+    let (chat_type, chat_id, mine, has_attachments) = {
         let state = STATE.lock().await;
         match state.find_message(&message_id) {
             Some((chat, msg)) => (
-                chat.id.clone(),
                 chat.chat_type.clone(),
+                chat.id.clone(),
                 msg.mine,
                 msg.attachments.iter().any(|a| !a.url.is_empty()),
             ),
@@ -204,39 +177,33 @@ pub async fn get_message_delete_options(message_id: String) -> Result<MessageDel
         }
     };
 
+    // Owner moderation-hide: on someone ELSE's Community message, offer "Hide" iff we're the
+    // proven owner of that community.
+    let can_admin_hide = !mine
+        && matches!(chat_type, ChatType::Community)
+        && vector_core::db::community::community_id_for_channel(&chat_id)
+            .ok()
+            .flatten()
+            .and_then(|cid| {
+                let bytes = vector_core::simd::hex::hex_to_bytes_32(&cid);
+                vector_core::db::community::load_community(&vector_core::community::CommunityId(bytes)).ok().flatten()
+            })
+            .map(|c| vector_core::community::service::is_proven_owner(&c))
+            .unwrap_or(false);
+
     let has_retained_keys = if mine {
         match chat_type {
-            ChatType::MlsGroup => {
-                vector_core::db::mls_wrap_keys::has_wrap_keys_for_message(&message_id)
-                    .unwrap_or(false)
-            }
             ChatType::DirectMessage => {
                 EventId::from_hex(&message_id)
                     .ok()
                     .and_then(|rid| vector_core::db::nip17_keys::has_wrap_keys_for_rumor(&rid).ok())
                     .unwrap_or(false)
             }
-        }
-    } else {
-        false
-    };
-
-    // Admin-hide branch: someone else's group message AND we're an
-    // admin of the group. We don't need retained keys — admin-hide
-    // is cooperative-only, since admins don't hold others' ephemeral
-    // wrap keys.
-    let can_admin_hide = if !mine && matches!(chat_type, ChatType::MlsGroup) {
-        match vector_core::mls::MlsService::new_persistent_static() {
-            Ok(svc) => match svc.get_group_members(&chat_id) {
-                Ok((_wire, _members, admins)) => {
-                    let my_npub = vector_core::my_public_key()
-                        .and_then(|pk| nostr_sdk::ToBech32::to_bech32(&pk).ok())
-                        .unwrap_or_default();
-                    !my_npub.is_empty() && admins.iter().any(|a| a == &my_npub)
-                }
-                Err(_) => false,
-            },
-            Err(_) => false,
+            // Community channels retain a per-message ephemeral key on send; its presence
+            // is exactly "can we do a real NIP-09 network delete" (full vs limited).
+            ChatType::Community => vector_core::db::community::get_message_key(&message_id)
+                .map(|k| k.is_some())
+                .unwrap_or(false),
         }
     } else {
         false
@@ -256,45 +223,12 @@ pub async fn get_message_delete_options(message_id: String) -> Result<MessageDel
 #[tauri::command]
 pub async fn is_message_deletable(message_id: String) -> Result<bool, String> {
     let opts = get_message_delete_options(message_id).await?;
-    Ok(opts.mine || opts.can_admin_hide)
+    Ok(opts.mine)
 }
 
-/// Admin-moderation hide of someone else's group message.
+/// Delete an outbound DM from the network *and* locally.
 ///
-/// Cooperative-only: a kind-5 rumor sent inside the MLS group, signed
-/// by the admin's main key. Authorization is verified by every
-/// receiving Vector client (sender must be a current admin of the
-/// group). The encrypted kind-445 wrapper stays on relays — only
-/// cooperating clients drop the local row.
-#[tauri::command]
-pub async fn admin_hide_message(group_id: String, message_id: String) -> Result<(), String> {
-    vector_core::admin_hide_group_message(&group_id, &message_id).await?;
-    // Optimistically drop the row locally too (admin won't see the
-    // notice come back to them via MLS — they sent it).
-    let removed = {
-        let mut state = STATE.lock().await;
-        state.remove_message(&message_id)
-    };
-    if removed.is_some() {
-        let _ = crate::db::delete_event(&message_id).await;
-        if let Some(handle) = TAURI_APP.get() {
-            handle.emit("message_removed", serde_json::json!({
-                "id": &message_id,
-                "chat_id": &group_id,
-                "reason": "hidden-by-admin"
-            })).ok();
-        }
-    }
-    Ok(())
-}
-
-/// Delete an outbound message (DM or MLS group) from the network *and* locally.
-///
-/// Branches on the chat type of the containing chat:
-/// - DM: NIP-17 path — NIP-09 against every retained gift-wrap.
-/// - MLS group: kind-445 path — NIP-09 against every retained wrapper
-///   (signed by the wrapper's retained ephemeral key) plus a kind-5
-///   cooperative-hide rumor INSIDE the MLS group.
+/// DM: NIP-17 path — NIP-09 against every retained gift-wrap.
 ///
 /// Only allows deletion of the user's own outbound messages
 /// (`mine == true`). Messages without retained wrap keys (predate the
@@ -329,13 +263,13 @@ pub async fn delete_own_message(message_id: String) -> Result<vector_core::Delet
     // Blossom blob delete on attachments. The returned outcome tells
     // the frontend exactly which layers fired.
     let outcome = match chat_type {
-        ChatType::MlsGroup => {
-            vector_core::delete_own_group_message(&chat_id, &message_id).await?
-        }
         ChatType::DirectMessage => {
             let rumor_id = EventId::from_hex(&message_id)
                 .map_err(|e| format!("Invalid message id: {}", e))?;
             vector_core::delete_own_dm(&rumor_id).await?
+        }
+        ChatType::Community => {
+            return Err("Community channel messages are deleted via the Community service, not this path".to_string());
         }
     };
 
@@ -530,223 +464,16 @@ pub async fn cancel_upload(pending_id: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Result of MLS media encryption using MIP-04
-#[derive(Debug)]
-pub struct MlsMediaUploadResult {
-    /// The imeta tag to include in the Kind 9 event
-    pub imeta_tag: Tag,
-    /// The uploaded URL for storing in attachment
-    pub url: String,
-    /// Encrypted file size
-    pub encrypted_size: u64,
-    /// Original file hash (hex)
-    pub original_hash: String,
-    /// Encryption nonce (hex) - required for MLS decryption
-    pub nonce: String,
-    /// MIP-04 scheme version (e.g., "mip04-v2")
-    pub scheme_version: String,
-}
-
-/// Encrypt and upload a file using MIP-04 for MLS groups
-///
-/// This uses the MDK's EncryptedMediaManager to encrypt files with keys derived
-/// from the MLS group secret, creating a White Noise-compatible imeta tag.
-async fn encrypt_and_upload_mls_media(
-    group_id: &str,
-    file: &AttachmentFile,
-    filename: &str,
-    progress_callback: crate::blossom::ProgressCallback,
-    cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-) -> Result<MlsMediaUploadResult, String> {
-    use mdk_core::encrypted_media::MediaProcessingOptions;
-
-    // Get the MDK engine and create media manager for this group
-    let mls_service = MlsService::new_persistent_static()
-        .map_err(|e| format!("Failed to create MLS service: {}", e))?;
-
-    // Look up the group metadata to get the engine_group_id
-    let groups = mls_service.read_groups()
-        .map_err(|e| format!("Failed to read groups: {}", e))?;
-    let group_meta = groups.iter()
-        .find(|g| g.group_id == group_id)
-        .ok_or_else(|| format!("Group not found: {}", group_id))?;
-
-    if group_meta.engine_group_id.is_empty() {
-        return Err("Group has no engine_group_id".to_string());
-    }
-
-    // Parse the engine group ID (this is what MDK uses internally)
-    let engine_gid_bytes = hex_string_to_bytes(&group_meta.engine_group_id);
-    let gid = mdk_core::GroupId::from_slice(&engine_gid_bytes);
-
-    // Get MDK engine and media manager
-    let mdk = mls_service.engine()
-        .map_err(|e| format!("Failed to get MDK engine: {}", e))?;
-    let media_manager = mdk.media_manager(gid);
-
-    // Trust the file content over the claimed extension. A file might be
-    // named `pasted_image.png` but actually contain JPEG bytes (Vector's
-    // own compression saves compressed JPEGs with the user-provided
-    // filename, which may carry the pre-compression extension). MDK's
-    // MIP-04 validates content against the claimed MIME and rejects
-    // mismatches, so we sniff magic bytes first and prefer the detected
-    // type when it's a known image format.
-    let detected_mime = vector_core::crypto::mime_from_magic_bytes(&file.bytes);
-    let mime_type = if detected_mime.starts_with("image/") {
-        detected_mime.to_string()
-    } else {
-        util::mime_from_extension(&file.extension)
-    };
-
-    // Normalize MIME type for MDK - it has strict validation and rejects many types
-    // Use the original for images (which MDK handles well), otherwise use octet-stream
-    let mdk_mime_type = if mime_type.starts_with("image/") {
-        mime_type.clone()
-    } else {
-        "application/octet-stream".to_string()
-    };
-
-    // Configure media processing options
-    // Disable blurhash generation — we generate thumbhash ourselves
-    let options = MediaProcessingOptions {
-        sanitize_exif: true,
-        generate_blurhash: false,
-        max_dimension: None,
-        max_file_size: None,
-        max_filename_length: None,
-    };
-
-    // Encrypt the file using MDK's media_manager
-    let mut upload = media_manager
-        .encrypt_for_upload_with_options(&file.bytes, &mdk_mime_type, filename, &options)
-        .map_err(|e| format!("MIP-04 encryption failed: {}", e))?;
-
-    // Upload the encrypted data to Blossom. Route through the active
-    // client signer so the auth event is signed by the user's identity
-    // (works for both local and bunker accounts).
-    let client = nostr_client().ok_or("Not connected")?;
-    let signer = client.signer().await
-        .map_err(|e| format!("Signer unavailable: {}", e))?;
-    let servers = crate::get_blossom_servers();
-
-    let url = crate::blossom::upload_blob_with_progress_and_failover(
-        signer,
-        servers,
-        Arc::new(std::mem::take(&mut upload.encrypted_data)),
-        Some(&mime_type),
-        /* is_encrypted */ true,
-        progress_callback,
-        Some(3),
-        Some(std::time::Duration::from_secs(2)),
-        cancel_flag,
-    ).await.map_err(|e| format!("Blossom upload failed: {}", e))?;
-
-    // Create the imeta tag using MDK
-    let imeta_tag = media_manager.create_imeta_tag(&upload, &url);
-
-    // Convert nostr::Tag to nostr_sdk Tag
-    // Both use the same underlying type, but we need to ensure compatibility
-    let mut tag_values: Vec<String> = imeta_tag.to_vec();
-
-    // Note: We keep the normalized MIME type (e.g., application/octet-stream) in the imeta tag
-    // because MDK also validates MIME types when parsing on the receive side.
-    // The receiver can identify file type from the extension in the filename.
-
-    // Append our pre-generated thumbhash and dimensions if available
-    if let Some(ref img_meta) = file.img_meta {
-        // Add thumbhash if not already present
-        if !tag_values.iter().any(|s| s.starts_with("thumbhash ")) && !img_meta.thumbhash.is_empty() {
-            tag_values.push(format!("thumbhash {}", img_meta.thumbhash));
-        }
-        // Add dimensions if not already present
-        if !tag_values.iter().any(|s| s.starts_with("dim ")) {
-            tag_values.push(format!("dim {}x{}", img_meta.width, img_meta.height));
-        }
-    }
-
-    // Ensure size is included in the imeta tag (required for auto-download on receive side)
-    if !tag_values.iter().any(|s| s.starts_with("size ")) && upload.encrypted_size > 0 {
-        tag_values.push(format!("size {}", upload.encrypted_size));
-    }
-
-    let sdk_imeta_tag = Tag::parse(&tag_values)
-        .map_err(|e| format!("Failed to parse imeta tag: {}", e))?;
-
-    // Extract scheme version from the imeta tag (MDK uses DEFAULT_SCHEME_VERSION)
-    // The tag format includes "v mip04-v2" or similar
-    let scheme_version = tag_values.iter()
-        .find(|s| s.starts_with("v "))
-        .map(|s| s.strip_prefix("v ").unwrap_or("mip04-v2").to_string())
-        .unwrap_or_else(|| "mip04-v2".to_string());
-
-    Ok(MlsMediaUploadResult {
-        imeta_tag: sdk_imeta_tag,
-        url,
-        encrypted_size: upload.encrypted_size,
-        original_hash: bytes_to_hex_string(&upload.original_hash),
-        nonce: bytes_to_hex_string(&upload.nonce),
-        scheme_version,
-    })
-}
-
-/// Headless text-only reply: sends a DM or MLS message.
+/// Headless text-only reply: sends a DM.
 /// Used by Android notification inline-reply (JNI).
 #[allow(dead_code)]
 pub async fn send_text_reply_headless(chat_id: &str, content: &str) -> Result<String, String> {
-    let is_group = {
-        let state = STATE.lock().await;
-        state.get_chat(chat_id).map_or(!chat_id.starts_with("npub1"), |c| c.is_mls_group())
-    };
-
-    let event_id = if is_group {
-        // MLS path stays local
-        let my_public_key = crate::my_public_key().ok_or("Public key not initialized")?;
-        let milliseconds = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap()
-            .as_millis() % 1000;
-
-        let rumor = EventBuilder::new(
-            Kind::from_u16(crate::stored_event::event_kind::MLS_CHAT_MESSAGE),
-            content,
-        )
-        .tag(Tag::custom(TagKind::custom("ms"), [milliseconds.to_string()]))
-        .build(my_public_key);
-
-        let rumor_id = rumor.id.ok_or("Rumor has no id")?.to_hex();
-        crate::mls::send_mls_message(chat_id, rumor, None).await?;
-
-        // Add to STATE after successful MLS send
-        let msg = Message {
-            id: rumor_id.clone(),
-            content: content.to_string(),
-            at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64,
-            mine: true,
-            npub: my_public_key.to_bech32().ok(),
-            ..Default::default()
-        };
-        {
-            let mut state = STATE.lock().await;
-            state.create_or_get_mls_group_chat(chat_id, vec![]);
-            state.add_message_to_chat(chat_id, msg.clone());
-        }
-        if let Some(handle) = TAURI_APP.get() {
-            handle.emit("mls_message_new", serde_json::json!({
-                "group_id": chat_id,
-                "message": &msg
-            })).ok();
-        }
-        let _ = crate::db::save_message(chat_id, &msg).await;
-
-        rumor_id
-    } else {
-        // DM path: delegate to vector-core
-        let config = SendConfig::headless();
-        let callback: Arc<dyn SendCallback> = Arc::new(TauriSendCallback);
-        let result = vector_core::sending::send_dm(
-            chat_id, content, None, &config, callback,
-        ).await?;
-        result.event_id.unwrap_or(result.pending_id)
-    };
+    let config = SendConfig::headless();
+    let callback: Arc<dyn SendCallback> = Arc::new(TauriSendCallback);
+    let result = vector_core::sending::send_dm(
+        chat_id, content, None, &config, callback,
+    ).await?;
+    let event_id = result.event_id.unwrap_or(result.pending_id);
 
     crate::chat::mark_as_read_headless(chat_id).await;
     Ok(event_id)
@@ -758,7 +485,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
     let is_group_chat = {
         let state = STATE.lock().await;
         if let Some(chat) = state.get_chat(&receiver) {
-            chat.is_mls_group()
+            chat.is_community()
         } else {
             !receiver.starts_with("npub1")
         }
@@ -788,399 +515,8 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         };
     }
 
-    // === MLS groups only below this point ===
-
-    let current_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap();
-    let pending_id = Arc::new(String::from("pending-") + &current_time.as_nanos().to_string());
-    // Function returns `Result<_, String>` — propagate cleanly instead of
-    // panicking when the session has been swapped out from under us.
-    let my_public_key = crate::my_public_key().ok_or("Public key not initialized")?;
-
-    let emoji_tags = vector_core::emoji_packs::resolve_outbound_emoji_tags(&content);
-    let msg = Message {
-        id: pending_id.as_ref().clone(),
-        content,
-        replied_to,
-        replied_to_content: None,
-        replied_to_npub: None,
-        replied_to_has_attachment: None,
-        preview_metadata: None,
-        at: current_time.as_millis() as u64,
-        attachments: Vec::new(),
-        reactions: Vec::new(),
-        pending: true,
-        failed: false,
-        mine: true,
-        npub: my_public_key.to_bech32().ok(),
-        wrapper_event_id: None,
-        edited: false,
-        edit_history: None,
-        emoji_tags,
-    };
-
-    // Add message to appropriate chat type
-    {
-        let mut state = STATE.lock().await;
-        if is_group_chat {
-            // For groups, create or get the MLS group chat
-            state.create_or_get_mls_group_chat(&receiver, vec![]);
-            state.add_message_to_chat(&receiver, msg.clone());
-        } else {
-            // For DMs, use the existing participant-based method
-            state.add_message_to_participant(&receiver, msg.clone());
-        }
-    }
-
-    // For DMs, convert the Bech32 String to a PublicKey
-    // For groups, we'll handle it differently below
-    let _receiver_pubkey = if !is_group_chat {
-        PublicKey::from_bech32(receiver.clone().as_str())
-            .map_err(|e| format!("Invalid npub: {}", e))?
-    } else {
-        // For groups, we don't need a receiver_pubkey for the rumor
-        // We'll use a placeholder that won't be used
-        my_public_key
-    };
-
-    // Prepare the rumor
-    let handle = TAURI_APP.get().unwrap();
-    let mut rumor = if let Some(attached_file) = file {
-
-        // Calculate the file hash first (before encryption)
-        let file_hash = calculate_file_hash(&*attached_file.bytes);
-
-        // ============================================================
-        // MLS GROUP ATTACHMENTS: Use MIP-04 encryption with imeta tags
-        // ============================================================
-        // NOTE: Unlike DMs, MLS attachments are NOT deduplicated across sends.
-        // MLS uses forward secrecy - when members join/leave, the group secret
-        // changes (new epoch). Files encrypted with old keys can't be decrypted
-        // by new members. Each send must re-encrypt with the current group key.
-        // ============================================================
-        if is_group_chat {
-            // For WebXDC (.xdc) files, generate topic ID upfront
-            let webxdc_topic = if attached_file.extension.to_lowercase() == "xdc" {
-                let topic_id = generate_topic_id();
-                Some(encode_topic_id(&topic_id))
-            } else {
-                None
-            };
-
-            // Prepare filename for the upload
-            let filename = format!("{}.{}", &file_hash, &attached_file.extension);
-
-            // Store the file locally first
-            let base_directory = if cfg!(target_os = "ios") {
-                tauri::path::BaseDirectory::Document
-            } else {
-                tauri::path::BaseDirectory::Download
-            };
-            let dir = handle.path().resolve("vector", base_directory).unwrap();
-            std::fs::create_dir_all(&dir).unwrap();
-            // Use human-readable name on disk if available, otherwise hash-based
-            let on_disk_name = if attached_file.name.is_empty() {
-                filename.clone()
-            } else {
-                attached_file.name.clone()
-            };
-            let candidate = dir.join(&on_disk_name);
-            let already_exists = candidate.exists()
-                && std::fs::metadata(&candidate).map(|m| m.len() == attached_file.bytes.len() as u64).unwrap_or(false)
-                && std::fs::read(&candidate).map(|b| util::calculate_file_hash(&b) == file_hash).unwrap_or(false);
-            let hash_file_path = if already_exists {
-                candidate
-            } else {
-                let path = crate::commands::attachments::resolve_unique_filename(&dir, &on_disk_name);
-                // Atomic write: write to temp file then rename
-                let tmp_path = dir.join(format!(".{}.tmp", &filename));
-                std::fs::write(&tmp_path, &*attached_file.bytes).map_err(|e| {
-                    let _ = std::fs::remove_file(&tmp_path);
-                    format!("Failed to write temp file: {}", e)
-                })?;
-                std::fs::rename(&tmp_path, &path).map_err(|e| {
-                    let _ = std::fs::remove_file(&tmp_path);
-                    format!("Failed to rename temp file: {}", e)
-                })?;
-                path
-            };
-
-            // Add the attachment to the pending message with the local path immediately,
-            // so the frontend can show a preview (with lowered opacity + progress bar)
-            // while the upload is in progress — matching the DM behavior.
-            {
-                let preview_attachment = Attachment {
-                    id: file_hash.clone(),
-                    key: String::new(),
-                    nonce: String::new(),
-                    extension: attached_file.extension.clone(),
-                    name: attached_file.name.clone(),
-                    url: String::new(), // No URL yet — upload hasn't started
-                    path: hash_file_path.to_string_lossy().to_string(),
-                    size: attached_file.bytes.len() as u64,
-                    img_meta: attached_file.img_meta.clone(),
-                    downloading: false,
-                    downloaded: true, // Local file exists, so frontend can preview it
-                    webxdc_topic: webxdc_topic.clone(),
-                    group_id: Some(receiver.clone()),
-                    original_hash: Some(file_hash.clone()),
-                    scheme_version: None,
-                    mls_filename: Some(filename.clone()),
-                };
-                let compact_att = crate::message::CompactAttachment::from_attachment_owned(preview_attachment);
-
-                let mut state = STATE.lock().await;
-                state.add_attachment_to_message(&receiver, &pending_id, compact_att);
-
-                // Emit to frontend so the upload preview is visible immediately
-                if let Some(msg) = state.update_message_in_chat(&receiver, &pending_id, |_| {}) {
-                    handle.emit("mls_message_new", serde_json::json!({
-                        "group_id": &receiver,
-                        "message": msg
-                    })).ok();
-                }
-            }
-
-            // Create cancel flag for this upload
-            let cancel_flag = Arc::new(AtomicBool::new(false));
-            {
-                let mut flags = UPLOAD_CANCEL_FLAGS.lock().unwrap();
-                flags.insert(pending_id.to_string(), Arc::clone(&cancel_flag));
-            }
-
-            // Create progress callback for MLS upload
-            let pending_id_for_callback = Arc::clone(&pending_id);
-            let handle_for_callback = handle.clone();
-            let progress_callback: crate::blossom::ProgressCallback = std::sync::Arc::new(move |percentage, _bytes| {
-                if let Some(pct) = percentage {
-                    handle_for_callback.emit("attachment_upload_progress", serde_json::json!({
-                        "id": pending_id_for_callback.as_ref(),
-                        "progress": pct
-                    })).ok();
-                }
-                Ok(())
-            });
-
-            // Encrypt and upload using MIP-04 (always fresh - no deduplication for MLS)
-            let mls_upload_result = match encrypt_and_upload_mls_media(
-                &receiver,
-                &attached_file,
-                &filename,
-                progress_callback,
-                Some(Arc::clone(&cancel_flag)),
-            ).await {
-                Ok(result) => {
-                    // Remove cancel flag on success
-                    UPLOAD_CANCEL_FLAGS.lock().unwrap().remove(pending_id.as_ref());
-                    result
-                }
-                Err(e) => {
-                    // Remove cancel flag on error
-                    UPLOAD_CANCEL_FLAGS.lock().unwrap().remove(pending_id.as_ref());
-
-                    // If cancelled, the cancel_upload command already cleaned up state
-                    if e.contains("Upload cancelled") {
-                        return Err(e);
-                    }
-
-                    eprintln!("[MIP-04 Error] MLS media upload failed: {}", e);
-                    mark_message_failed(Arc::clone(&pending_id), &receiver).await;
-                    return Err(format!("Failed to upload MLS media: {}", e));
-                }
-            };
-
-            // Replace the preview attachment with the final one (adds URL, nonce, etc.)
-            {
-                let final_attachment = Attachment {
-                    id: file_hash.clone(),
-                    key: String::new(),
-                    nonce: mls_upload_result.nonce.clone(),
-                    extension: attached_file.extension.clone(),
-                    name: attached_file.name.clone(),
-                    url: mls_upload_result.url.clone(),
-                    path: hash_file_path.to_string_lossy().to_string(),
-                    size: mls_upload_result.encrypted_size,
-                    img_meta: attached_file.img_meta.clone(),
-                    downloading: false,
-                    downloaded: true,
-                    webxdc_topic: webxdc_topic.clone(),
-                    group_id: Some(receiver.clone()),
-                    original_hash: Some(mls_upload_result.original_hash.clone()),
-                    scheme_version: Some(mls_upload_result.scheme_version.clone()),
-                    mls_filename: Some(filename.clone()),
-                };
-                let compact_att = crate::message::CompactAttachment::from_attachment_owned(final_attachment);
-
-                let mut state = STATE.lock().await;
-                // Replace the preview attachment (not push a second one)
-                if let Some(msg) = state.update_message_in_chat(&receiver, &pending_id, |m| {
-                    if let Some(att) = m.attachments.last_mut() {
-                        *att = compact_att;
-                    }
-                }) {
-                    handle.emit("mls_message_new", serde_json::json!({
-                        "group_id": &receiver,
-                        "message": msg
-                    })).ok();
-                }
-            }
-
-            // Build Kind 9 event with text content and imeta tag
-            let mut mls_rumor = EventBuilder::new(
-                Kind::from_u16(crate::stored_event::event_kind::MLS_CHAT_MESSAGE),
-                msg.content.clone()
-            ).tag(mls_upload_result.imeta_tag);
-
-            // Add filename tag if available
-            if !attached_file.name.is_empty() {
-                mls_rumor = mls_rumor.tag(Tag::custom(
-                    TagKind::custom("name"),
-                    [attached_file.name.as_str()]
-                ));
-            }
-
-            // Add webxdc-topic if this is an XDC file
-            if let Some(ref topic_encoded) = webxdc_topic {
-                mls_rumor = mls_rumor.tag(Tag::custom(
-                    TagKind::custom("webxdc-topic"),
-                    [topic_encoded.clone()]
-                ));
-            }
-
-            // Add reply reference if present
-            if !msg.replied_to.is_empty() {
-                mls_rumor = mls_rumor.tag(Tag::custom(
-                    TagKind::e(),
-                    [msg.replied_to.clone(), String::from(""), String::from("reply")],
-                ));
-            }
-
-            // Add millisecond precision tag
-            let final_time = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap();
-            let milliseconds = final_time.as_millis() % 1000;
-            mls_rumor = mls_rumor.tag(Tag::custom(
-                TagKind::custom("ms"),
-                [milliseconds.to_string()],
-            ));
-
-            // Build the rumor
-            let built_rumor = mls_rumor.build(my_public_key);
-            let event_id = built_rumor.id.expect("UnsignedEvent should have id after build").to_hex();
-
-            // Send via MLS using the existing send_mls_message function
-            crate::mls::send_mls_message(&receiver, built_rumor, Some(pending_id.to_string())).await
-                .map_err(|e| format!("Failed to send MLS message: {}", e))?;
-
-            // Update message state to non-pending (send_mls_message handles failures)
-            let msg_for_save = {
-                let mut state = STATE.lock().await;
-                state.finalize_pending_message(&receiver, &pending_id, &event_id)
-            };
-
-            if let Some((old_id, msg)) = msg_for_save {
-                handle.emit("message_update", serde_json::json!({
-                    "old_id": old_id,
-                    "message": &msg,
-                    "chat_id": &receiver
-                })).ok();
-                let _ = crate::db::save_message(&receiver, &msg).await;
-            }
-
-            return Ok(MessageSendResult {
-                pending_id: pending_id.to_string(),
-                event_id: Some(event_id),
-            });
-        }
-
-        // DM file attachments are now handled by vector-core (short-circuited above).
-        // This code is only reachable for MLS group file attachments.
-        unreachable!("DM file attachments should be handled by vector-core short-circuit")
-    } else {
-        // MLS text message (DM text is short-circuited above)
-        handle.emit("mls_message_new", serde_json::json!({
-            "group_id": &receiver,
-            "message": &msg
-        })).ok();
-
-        EventBuilder::new(Kind::from_u16(crate::stored_event::event_kind::MLS_CHAT_MESSAGE), msg.content)
-    };
-
-    // If a reply reference is included, add the tag
-    if !msg.replied_to.is_empty() {
-        rumor = rumor.tag(Tag::custom(
-            TagKind::e(),
-            [msg.replied_to, String::from(""), String::from("reply")],
-        ));
-    }
-
-    // Get fresh timestamp with milliseconds right before giftwrapping
-    let final_time = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap();
-    let milliseconds = final_time.as_millis() % 1000;
-
-    // Add millisecond precision tag for accurate message ordering
-    rumor = rumor.tag(Tag::custom(
-        TagKind::custom("ms"),
-        [milliseconds.to_string()],
-    ));
-
-    // NIP-30: attach `["emoji", code, url]` tags for every `:shortcode:`
-    // resolved against the user's subscribed packs. Matches the DM path.
-    for et in &msg.emoji_tags {
-        rumor = rumor.tag(Tag::custom(
-            TagKind::custom("emoji"),
-            [et.shortcode.clone(), et.url.clone()],
-        ));
-    }
-
-    // Build the rumor with our key (unsigned)
-    let built_rumor = rumor.build(my_public_key);
-    let rumor_id = built_rumor.id.unwrap();
-
-    // Route to appropriate protocol handler
-    if is_group_chat {
-        // MLS Group Chat - send through MLS engine
-        // Note: send_mls_message handles all state management internally:
-        // - Uses the pending message we created above (via pending_id)
-        // - Updates message ID when processed
-        // - Marks as success/failure after network confirmation
-        // - Saves to database
-        return match crate::mls::send_mls_message(&receiver, built_rumor.clone(), Some(pending_id.to_string())).await {
-            Ok(_) => Ok(MessageSendResult {
-                pending_id: pending_id.to_string(),
-                event_id: Some(rumor_id.to_hex()),
-            }),
-            Err(e) => {
-                eprintln!("Failed to send MLS message: {:?}", e);
-                Ok(MessageSendResult {
-                    pending_id: pending_id.to_string(),
-                    event_id: None,
-                })
-            }
-        };
-    } else {
-        // DM
-        let config = SendConfig::gui();
-        let callback: Arc<dyn SendCallback> = Arc::new(TauriSendCallback);
-        let result = vector_core::sending::send_rumor_dm(
-            &receiver, &pending_id, built_rumor, &config, callback,
-        ).await;
-
-        match result {
-            Ok(r) => Ok(MessageSendResult {
-                pending_id: r.pending_id,
-                event_id: r.event_id,
-            }),
-            Err(_) => Ok(MessageSendResult {
-                pending_id: pending_id.to_string(),
-                event_id: None,
-            }),
-        }
-    }
+    // Group chats are no longer supported.
+    Err("Group chats are no longer supported".to_string())
 }
 
 #[tauri::command]

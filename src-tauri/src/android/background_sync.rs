@@ -349,7 +349,7 @@ fn run_standalone_sync_loop(data_dir: &str) {
             }
         }
 
-        // Subscribe to GiftWraps addressed to us (DMs, files, MLS welcomes)
+        // Subscribe to GiftWraps addressed to us (DMs, files)
         // limit(0) = only new events going forward (real-time streaming)
         let giftwrap_filter = Filter::new()
             .pubkey(my_public_key)
@@ -367,44 +367,11 @@ fn run_standalone_sync_loop(data_dir: &str) {
             }
         };
 
-        // Preload profiles and MLS groups — needed for display names and scoped subscriptions.
+        // Preload profiles — needed for display names in notifications.
         // Skip for encrypted accounts (can't read from encrypted DB).
         if can_decrypt {
             preload_profiles_into_state().await;
-            preload_mls_groups_into_state().await;
         }
-
-        // Subscribe to MLS group messages scoped to OUR groups only (via 'h' tag).
-        // Without scoping, the relay sends ALL MLS traffic network-wide — massive battery waste.
-        // Scoped after preload so group IDs are available from the DB.
-        let mls_sub_id = if can_decrypt {
-            let group_ids: Vec<String> = match crate::db::load_mls_groups().await {
-                Ok(groups) => groups.into_iter()
-                    .filter(|g| !g.evicted)
-                    .map(|g| g.group_id.clone())
-                    .collect(),
-                Err(_) => vec![],
-            };
-            if group_ids.is_empty() {
-                logcat("No MLS groups found, skipping MLS subscription");
-                None
-            } else {
-                logcat(&format!("Subscribing to MLS messages for {} groups", group_ids.len()));
-                let mls_filter = Filter::new()
-                    .kind(Kind::MlsGroupMessage)
-                    .custom_tags(SingleLetterTag::lowercase(Alphabet::H), group_ids)
-                    .limit(0);
-                match client.subscribe(mls_filter, None).await {
-                    Ok(output) => Some(output.val),
-                    Err(e) => {
-                        logcat(&format!("Failed to subscribe to MLS messages: {:?}", e));
-                        None
-                    }
-                }
-            }
-        } else {
-            None
-        };
 
         // Spawn a stop-checker task that disconnects the client when stop is signaled.
         // Uses Notify for instant zero-cost wakeup instead of polling.
@@ -421,14 +388,12 @@ fn run_standalone_sync_loop(data_dir: &str) {
         logcat("Waiting for incoming events...");
 
         // Live event handler — runs until stop signal or disconnect.
-        // Routes GiftWrap events through the DM/file handler and MLS group messages
-        // through the shared MLS handler for full state consistency.
+        // Routes GiftWrap events through the DM/file handler for full state consistency.
         let client_for_handler = client.clone();
         let result = client.handle_notifications(move |notification| {
             let client = client_for_handler.clone();
             let seen = seen_events.clone();
             let gift_id = gift_sub_id.clone();
-            let mls_id = mls_sub_id.clone();
 
             async move {
                 if STOP_STANDALONE_SYNC.load(Ordering::SeqCst) {
@@ -438,9 +403,8 @@ fn run_standalone_sync_loop(data_dir: &str) {
                 if let RelayPoolNotification::Event { event, subscription_id, .. } = notification {
                     // Route by subscription
                     let is_gift = subscription_id == gift_id;
-                    let is_mls = mls_id.as_ref().map_or(false, |id| subscription_id == *id);
 
-                    if !is_gift && !is_mls {
+                    if !is_gift {
                         return Ok(false);
                     }
 
@@ -449,21 +413,14 @@ fn run_standalone_sync_loop(data_dir: &str) {
                         return Ok(false);
                     }
 
-                    if is_gift {
-                        if can_decrypt {
-                            // Full pipeline — decrypt, persist to DB, show rich notification
-                            handle_event_with_context(
-                                (*event).clone(), true, &client, my_public_key
-                            ).await;
-                        } else {
-                            // Encrypted account — can't decrypt, but we know something arrived
-                            post_notification_jni("Vector", "You have a new message", None, None, None, None, None);
-                        }
-                    } else if is_mls {
-                        // MLS group message — process through shared handler
-                        crate::services::subscription_handler::handle_mls_group_message(
-                            (*event).clone(), my_public_key
+                    if can_decrypt {
+                        // Full pipeline — decrypt, persist to DB, show rich notification
+                        handle_event_with_context(
+                            (*event).clone(), true, &client, my_public_key
                         ).await;
+                    } else {
+                        // Encrypted account — can't decrypt, but we know something arrived
+                        post_notification_jni("Vector", "You have a new message", None, None, None, None, None);
                     }
 
                     // Cap the seen set to prevent unbounded memory growth
@@ -838,28 +795,6 @@ async fn preload_profiles_into_state() {
     }
 }
 
-/// Load MLS group metadata from the database into STATE so that group message
-/// notifications can show real group names instead of "Group Chat".
-async fn preload_mls_groups_into_state() {
-    match crate::db::load_mls_groups().await {
-        Ok(groups) => {
-            let count = groups.iter().filter(|g| !g.evicted).count();
-            let mut state = crate::STATE.lock().await;
-            for group in groups {
-                if group.evicted { continue; }
-                state.create_or_get_mls_group_chat(&group.group_id, vec![]);
-                if let Some(chat) = state.get_chat_mut(&group.group_id) {
-                    chat.metadata.set_name(group.profile.name.clone());
-                }
-            }
-            logcat(&format!("Preloaded {} MLS groups into STATE", count));
-        }
-        Err(e) => {
-            logcat(&format!("Failed to preload MLS groups: {}", e));
-        }
-    }
-}
-
 /// Post a notification by calling VectorNotificationService.showMessageNotification() in Kotlin.
 /// Uses the stored JavaVM + GlobalRef context (captured during JNI entry) instead of
 /// ndk_context, which is NOT initialized in service-only mode (no Tauri Activity).
@@ -992,7 +927,7 @@ pub extern "C" fn Java_io_vectorapp_NotificationActionReceiver_nativeMarkAsRead(
 }
 
 /// Called from NotificationActionReceiver when the user sends an inline reply.
-/// Sends a text message (DM or MLS) and marks the chat as read.
+/// Sends a DM and marks the chat as read.
 /// On success, re-posts the notification with the reply appended.
 #[no_mangle]
 pub extern "C" fn Java_io_vectorapp_NotificationActionReceiver_nativeSendReply(

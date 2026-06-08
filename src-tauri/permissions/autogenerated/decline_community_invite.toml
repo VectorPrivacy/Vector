@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-decline-community-invite"
+description = "Enables the decline_community_invite command without any pre-configured scope."
+commands.allow = ["decline_community_invite"]
+
+[[permission]]
+identifier = "deny-decline-community-invite"
+description = "Denies the decline_community_invite command without any pre-configured scope."
+commands.deny = ["decline_community_invite"]

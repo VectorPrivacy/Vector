@@ -1708,9 +1708,41 @@ async function sendPreviewedFile() {
     
     // Determine if this is a group or DM
     const isGroup = receiver.startsWith('group:');
-    
+
     // Send file in background
     const chatId = isGroup ? receiver.replace('group:', '') : receiver;
+
+    // Community channels send through their own multi-attachment envelope path. The backend
+    // drives the pending → sent/failed lifecycle, so there's nothing to finalize here. Path
+    // sources go through send_community_files; bytes-only sources (clipboard paste / Android
+    // File object) go through send_community_file_bytes.
+    const communityChat = arrChats.find(c => c.id === chatId && c.chat_type === 'Community');
+    if (communityChat) {
+        // Name drives extension + display name: prefer spoiler/edited name, then source name.
+        const sendName = nameOverride || fileName || (fileObject && fileObject.name) || (ext ? `image.${ext}` : 'image.png');
+        try {
+            if (filePath) {
+                // On-disk source (file picker, drag-drop, voice). nameOverride carries
+                // spoiler/rename (empty = derive from the path) — parity with DM file sends.
+                await invoke('send_community_files', { channelId: chatId, content: '', filePaths: [filePath], nameOverrides: [nameOverride || ''], useCompression: shouldCompress, repliedTo: replyRef });
+            } else if (fileObject) {
+                // Android File object — read the real bytes; sendName already folds in nameOverride.
+                const bytes = Array.from(new Uint8Array(await fileObject.arrayBuffer()));
+                await invoke('send_community_file_bytes', { channelId: chatId, content: '', fileBytes: bytes, fileName: sendName, useCompression: shouldCompress, repliedTo: replyRef });
+            } else if (usingBytes) {
+                // Clipboard paste: the bytes live Rust-side (JS only holds a flag), so send
+                // from the cache. nameOverride applies the spoiler/rename to the cached name.
+                await invoke('send_community_cached_file', { channelId: chatId, content: '', nameOverride: nameOverride || null, useCompression: shouldCompress, repliedTo: replyRef });
+            } else {
+                popupConfirm('Send failed', 'Could not read the attachment to send.', true, '', 'vector_warning.svg');
+            }
+        } catch (e) {
+            const { title, body } = humanizeUploadError(String(e));
+            popupConfirm(title, body, true, '', 'vector_warning.svg');
+        }
+        return;
+    }
+
     let result;
     try {
         if (fileObject) {

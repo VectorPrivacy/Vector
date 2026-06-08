@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-revoke-community-admin"
+description = "Enables the revoke_community_admin command without any pre-configured scope."
+commands.allow = ["revoke_community_admin"]
+
+[[permission]]
+identifier = "deny-revoke-community-admin"
+description = "Denies the revoke_community_admin command without any pre-configured scope."
+commands.deny = ["revoke_community_admin"]

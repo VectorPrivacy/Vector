@@ -149,7 +149,9 @@ pub mod deletion;
 pub mod simd;
 
 // === MLS Group Encryption ===
-pub mod mls;
+
+// === Community protocol (MLS successor — GROUP_PROTOCOL.md) ===
+pub mod community;
 
 // === Event Handler ===
 pub mod event_handler;
@@ -181,7 +183,7 @@ pub use error::{VectorError, Result};
 pub use traits::{EventEmitter, NoOpEmitter, set_event_emitter, emit_event};
 pub use db::{set_app_data_dir, get_app_data_dir};
 pub use sending::{SendCallback, NoOpSendCallback, SendConfig, SendResult};
-pub use deletion::{delete_own_dm, delete_own_group_message, admin_hide_group_message, DeleteOutcome};
+pub use deletion::{delete_own_dm, DeleteOutcome};
 pub use stored_event::{StoredEvent, StoredEventBuilder, SystemEventType};
 pub use rumor::{RumorEvent, RumorContext, ConversationType, RumorProcessingResult, process_rumor};
 pub use profile::{SyncPriority, ProfileSyncHandler, NoOpProfileSyncHandler};
@@ -189,17 +191,6 @@ pub use event_handler::{InboundEventHandler, NoOpEventHandler, PreparedEvent, pr
 
 use std::path::PathBuf;
 use std::sync::Arc;
-
-/// Current MLS group message subscription ID. Updated by `refresh_group_subscription()`.
-static MLS_SUB_ID: std::sync::LazyLock<tokio::sync::Mutex<Option<nostr_sdk::SubscriptionId>>> =
-    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(None));
-
-/// Drop the cached MLS subscription ID — `reset_session()` calls this
-/// so the new session's `listen()` doesn't reference a sub id that
-/// belonged to the previous account's relay pool.
-pub async fn clear_mls_sub_id() {
-    *MLS_SUB_ID.lock().await = None;
-}
 
 // ============================================================================
 // VectorCore — High-level API
@@ -293,8 +284,16 @@ impl VectorCore {
                 .map_err(|e| VectorError::Nostr(format!("Failed to encode nsec: {}", e)))?;
             *state::PENDING_NSEC.lock().unwrap() = Some(nsec.clone());
 
-            // Store pkey in DB
-            db::set_pkey(&nsec)?;
+            // NEVER clobber an existing encrypted key with the plaintext nsec. An account with encryption
+            // enabled keeps its key encrypted-at-rest (PIN-derived); overwriting it with the raw nsec — e.g.
+            // a no-password headless/diagnostic login (the concord CLI) — would leave the GUI deriving the
+            // right key from the correct PIN but trying to decrypt a value that's no longer ciphertext, i.e.
+            // "incorrect pin" with the real key effectively lost. MY_SECRET_KEY is already set in-memory above,
+            // so login works regardless; only persist the raw key when there's no encrypted key to protect.
+            let existing_encrypted = db::get_pkey().ok().flatten().is_some_and(|v| !v.starts_with("nsec1"));
+            if !(state::resolve_encryption_enabled_from_db() && existing_encrypted) {
+                db::set_pkey(&nsec)?;
+            }
         }
 
         // Use the canonical resolver so this high-level API agrees with
@@ -325,6 +324,14 @@ impl VectorCore {
         let _ = { state::set_nostr_client(client); Ok::<(), ()>(()) };
 
         Ok(LoginResult { npub, has_encryption })
+    }
+
+    /// Generate a fresh random account secret key (bech32 nsec). Lets a headless client spin up a
+    /// brand-new identity (`add_account` with no key) without depending on nostr-sdk directly.
+    pub fn generate_nsec(&self) -> Result<String> {
+        use nostr_sdk::prelude::*;
+        Keys::generate().secret_key().to_bech32()
+            .map_err(|e| VectorError::Nostr(format!("Failed to encode nsec: {}", e)))
     }
 
     /// Send a NIP-17 gift-wrapped text DM using the full pipeline.
@@ -433,339 +440,580 @@ impl VectorCore {
             .and_then(|pk| ToBech32::to_bech32(&pk).ok())
     }
 
-    // ========================================================================
-    // MLS Groups
-    // ========================================================================
+    // === Communities (headless) ===
+    // The GUI's Tauri commands carry optimistic-echo + emit machinery a headless client
+    // doesn't need; these are the lean equivalents over the same `community::service` layer,
+    // so a CLI / agent can join, read, post, and sync a Community.
 
-    /// Create a new MLS group and invite members.
-    ///
-    /// Returns the wire group_id (64-hex, used for relay filtering and UI).
-    ///
-    /// ```no_run
-    /// # async fn example() -> vector_core::Result<()> {
-    /// let core = vector_core::VectorCore;
-    /// let group_id = core.create_group(
-    ///     "My Group",
-    ///     &[("npub1alice...", "device1"), ("npub1bob...", "device2")],
-    /// ).await?;
-    /// core.send_group_message(&group_id, "Hello group!").await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn create_group(
-        &self,
-        name: &str,
-        member_devices: &[(&str, &str)], // (npub, device_id) pairs
-    ) -> Result<String> {
-        let devices: Vec<(String, String)> = member_devices.iter()
-            .map(|(npub, did)| (npub.to_string(), did.to_string()))
-            .collect();
-
-        let svc = mls::MlsService::new_persistent_static()
-            .map_err(|e| VectorError::Other(e.to_string()))?;
-
-        let group_id = svc.create_group(name, None, None, &devices, None, None, None, None, &[])
-            .await
-            .map_err(|e| VectorError::Other(e.to_string()))?;
-
-        // Refresh subscription so listen() picks up the new group
-        let _ = self.refresh_group_subscription().await;
-
-        // MLS security: rotate keypackage so the next join uses a fresh
-        // one — reusing a KeyPackage breaks forward secrecy. Fire-and-
-        // forget; SessionGuard prevents a swap from writing the new
-        // keypackage into account A's storage signed by account B's keys.
-        let session = state::SessionGuard::capture();
-        tokio::spawn(async move {
-            if !session.is_valid() { return; }
-            if let Err(e) = mls::publish_keypackage(false).await {
-                log_warn!("[MLS] KeyPackage rotation after create_group failed: {}", e);
+    /// List every Community held locally (owned or joined), each with its channels.
+    pub async fn list_communities(&self) -> Vec<serde_json::Value> {
+        let ids = crate::db::community::list_community_ids().unwrap_or_default();
+        let mut out = Vec::new();
+        for id in ids {
+            if let Ok(Some(c)) = crate::db::community::load_community(&id) {
+                out.push(serde_json::json!({
+                    "community_id": c.id.to_hex(),
+                    "name": c.name,
+                    "description": c.description,
+                    "is_owner": crate::community::service::is_proven_owner(&c),
+                    "channels": c.channels.iter()
+                        .map(|ch| serde_json::json!({ "channel_id": ch.id.to_hex(), "name": ch.name }))
+                        .collect::<Vec<_>>(),
+                }));
             }
-        });
-
-        Ok(group_id)
-    }
-
-    /// Send a text message to an MLS group.
-    pub async fn send_group_message(&self, group_id: &str, content: &str) -> Result<()> {
-        use nostr_sdk::prelude::*;
-
-        let my_pk = state::my_public_key()
-            .ok_or(VectorError::Other("Not logged in".into()))?;
-
-        let milliseconds = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap()
-            .as_millis() % 1000;
-
-        let rumor = EventBuilder::new(
-            Kind::from_u16(crate::stored_event::event_kind::MLS_CHAT_MESSAGE),
-            content,
-        )
-        .tag(Tag::custom(TagKind::custom("ms"), [milliseconds.to_string()]))
-        .build(my_pk);
-
-        let pending_id = format!("pending-{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
-
-        // Add to STATE as pending
-        let msg = Message {
-            id: pending_id.clone(),
-            content: content.to_string(),
-            at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap()
-                .as_millis() as u64,
-            pending: true,
-            mine: true,
-            npub: my_pk.to_bech32().ok(),
-            ..Default::default()
-        };
-        {
-            let mut state_guard = state::STATE.lock().await;
-            state_guard.create_or_get_mls_group_chat(group_id, vec![]);
-            state_guard.add_message_to_chat(group_id, msg);
         }
+        out
+    }
 
-        mls::send_mls_message(group_id, rumor, Some(pending_id))
+    /// Join a Community from a public invite URL (`vectorapp.io/invite#...`). Fetches the
+    /// token-encrypted bundle, persists the member-view Community, and registers its channels
+    /// as chats. Returns a JSON summary.
+    pub async fn join_community(&self, invite_url: &str) -> Result<serde_json::Value> {
+        use crate::community::{public_invite, service, transport::LiveTransport};
+        let (relays, token) = public_invite::parse_invite_url(invite_url)
+            .map_err(|e| VectorError::Other(e.to_string()))?;
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        let bundle = service::fetch_public_invite(&transport, &relays, &token)
             .await
-            .map_err(|e| VectorError::Other(e))
+            .map_err(VectorError::Other)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let community = service::accept_public_invite(&bundle, now).map_err(VectorError::Other)?;
+        self.finalize_member_join(community, &transport).await
     }
 
-    /// List all MLS groups.
-    pub async fn list_groups(&self) -> Result<Vec<mls::MlsGroupFull>> {
-        let svc = mls::MlsService::new_persistent_static()
-            .map_err(|e| VectorError::Other(e.to_string()))?;
-        svc.read_groups()
-            .map_err(|e| VectorError::Other(e.to_string()))
+    /// List the parked private invites (giftwrapped) awaiting acceptance. Each entry is the
+    /// community id, its name (from the stored bundle), and the inviter's npub.
+    pub fn list_pending_invites(&self) -> Result<Vec<serde_json::Value>> {
+        let rows = crate::db::community::list_pending_invites().map_err(VectorError::Other)?;
+        Ok(rows.iter().map(|p| {
+            let name = crate::community::invite::CommunityInvite::from_json(&p.bundle_json)
+                .ok().map(|i| i.name).unwrap_or_default();
+            serde_json::json!({
+                "community_id": p.community_id,
+                "name": name,
+                "inviter_npub": p.inviter_npub,
+            })
+        }).collect())
     }
 
-    /// Get members of an MLS group.
-    ///
-    /// Returns (wire_group_id, member_npubs, admin_npubs).
-    pub fn get_group_members(&self, group_id: &str) -> Result<(String, Vec<String>, Vec<String>)> {
-        let svc = mls::MlsService::new_persistent_static()
-            .map_err(|e| VectorError::Other(e.to_string()))?;
-        svc.get_group_members(group_id)
-            .map_err(|e| VectorError::Other(e.to_string()))
+    /// Accept a PARKED private invite by community id: rebuild the member-view Community from the stored
+    /// bundle, finalize the join exactly like a public link, then drop the pending row. Mirrors the
+    /// desktop's consent-then-join for an invite delivered over a gift wrap.
+    pub async fn accept_pending_invite(&self, community_id: &str) -> Result<serde_json::Value> {
+        use crate::community::{invite::{CommunityInvite, accept_invite}, transport::LiveTransport};
+        let bundle_json = crate::db::community::get_pending_invite(community_id)
+            .map_err(VectorError::Other)?
+            .ok_or_else(|| VectorError::Other(format!("no pending invite for {community_id}")))?;
+        let invite = CommunityInvite::from_json(&bundle_json).map_err(VectorError::Other)?;
+        let community = accept_invite(&invite).map_err(VectorError::Other)?;
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        let summary = self.finalize_member_join(community, &transport).await?;
+        let _ = crate::db::community::delete_pending_invite(community_id);
+        Ok(summary)
     }
 
-    /// Leave an MLS group.
-    pub async fn leave_group(&self, group_id: &str) -> Result<()> {
-        let svc = mls::MlsService::new_persistent_static()
-            .map_err(|e| VectorError::Other(e.to_string()))?;
-        svc.leave_group(group_id).await
-            .map_err(|e| VectorError::Other(e.to_string()))?;
-        let _ = self.refresh_group_subscription().await;
+    /// Shared finalization for joining a Community as a member — public link OR accepted private invite.
+    /// Walks any base rekey, folds the LATEST control plane (so the joiner sees current metadata, not
+    /// the bundle's genesis snapshot), refuses if banned, registers the channels as chats, and announces
+    /// presence. Returns the JSON summary.
+    pub(crate) async fn finalize_member_join<T: crate::community::transport::Transport + ?Sized>(
+        &self,
+        community: crate::community::Community,
+        transport: &T,
+    ) -> Result<serde_json::Value> {
+        use crate::community::service;
+        // Persist the member-view row up front: the catch-up, the control fold, and chat registration all
+        // read it back from the DB. A private bundle (unlike a public one with a preview) arrives with no
+        // display metadata, so nothing else would have saved it. UPSERT — re-saving a public join is a no-op.
+        crate::db::community::save_community(&community).map_err(VectorError::Other)?;
+        // The bundle's root can predate a base rotation, so walk any rekey first (no-op if none) — then
+        // re-load so the control fold + registration happen at the CURRENT epoch.
+        if let Ok(c) = service::catch_up_server_root(transport, &community).await {
+            if c.removed {
+                let _ = crate::db::community::delete_community(&community.id.to_hex());
+                return Err(VectorError::Other("you have been removed from this community".into()));
+            }
+        }
+        let community = crate::db::community::load_community(&community.id)
+            .map_err(VectorError::Other)?
+            .unwrap_or(community);
+        // Fold the LATEST control plane before we register anything — the joiner should see the current
+        // name/description/roster/mode immediately, not a stale snapshot. Banlist first: an honest client
+        // REFUSES to join if this npub is banned (and the just-saved community is torn back down).
+        let _ = service::fetch_and_apply_control(transport, &community).await;
+        if service::am_i_banned(&community) {
+            let _ = crate::db::community::delete_community(&community.id.to_hex());
+            return Err(VectorError::Other("you are banned from this community".into()));
+        }
+        // Re-load so the chat we register + the summary we return carry the freshly-folded latest metadata.
+        let community = crate::db::community::load_community(&community.id)
+            .map_err(VectorError::Other)?
+            .unwrap_or(community);
+        let owner_npub = community
+            .owner_attestation
+            .as_ref()
+            .and_then(|att| crate::community::owner::verify_owner_attestation(att, &community.id.to_hex()))
+            .and_then(|pk| ToBech32::to_bech32(&pk).ok());
+        {
+            let created_at_ms = crate::db::community::community_created_at_ms(&community.id);
+            let mut st = state::STATE.lock().await;
+            for ch in &community.channels {
+                st.upsert_community_chat(
+                    &ch.id.to_hex(),
+                    &community.name,
+                    community.description.as_deref().unwrap_or(""),
+                    &community.id.to_hex(),
+                    crate::community::service::is_proven_owner(&community),
+                    community.icon.is_some(),
+                    owner_npub.as_deref(),
+                    created_at_ms,
+                    community.dissolved,
+                );
+            }
+        }
+        // Best-effort join announcement (kind 3306) into the primary channel so honest peers
+        // see us in their member list even before we post. Failure must not fail the join.
+        if let Some(primary) = community.channels.first() {
+            let _ = service::publish_presence(transport, &community, primary, true, None).await;
+        }
+        Ok(serde_json::json!({
+            "community_id": community.id.to_hex(),
+            "name": community.name,
+            "channels": community.channels.iter()
+                .map(|c| serde_json::json!({ "channel_id": c.id.to_hex(), "name": c.name }))
+                .collect::<Vec<_>>(),
+        }))
+    }
+
+    /// Create a Community (single "general" channel) on the default trusted relays. Signs the
+    /// owner attestation with this identity (so the creator is the proven owner), registers the
+    /// channel as a chat, and returns a JSON summary.
+    pub async fn create_community(&self, name: &str) -> Result<serde_json::Value> {
+        use crate::community::{service, transport::LiveTransport};
+        let relays: Vec<String> = crate::state::active_trusted_relays()
+            .await
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        if relays.is_empty() {
+            return Err(VectorError::Other("no relays available to host the Community".into()));
+        }
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        let community = service::create_community(&transport, name, "general", relays)
+            .await
+            .map_err(VectorError::Other)?;
+        let owner_npub = community
+            .owner_attestation
+            .as_ref()
+            .and_then(|att| crate::community::owner::verify_owner_attestation(att, &community.id.to_hex()))
+            .and_then(|pk| ToBech32::to_bech32(&pk).ok());
+        {
+            let created_at_ms = crate::db::community::community_created_at_ms(&community.id);
+            let mut st = state::STATE.lock().await;
+            for ch in &community.channels {
+                st.upsert_community_chat(
+                    &ch.id.to_hex(),
+                    &community.name,
+                    community.description.as_deref().unwrap_or(""),
+                    &community.id.to_hex(),
+                    crate::community::service::is_proven_owner(&community),
+                    community.icon.is_some(),
+                    owner_npub.as_deref(),
+                    created_at_ms,
+                    community.dissolved,
+                );
+            }
+        }
+        Ok(serde_json::json!({
+            "community_id": community.id.to_hex(),
+            "name": community.name,
+            "channels": community.channels.iter()
+                .map(|c| serde_json::json!({ "channel_id": c.id.to_hex(), "name": c.name }))
+                .collect::<Vec<_>>(),
+        }))
+    }
+
+    /// Mint a public invite link for a Community this identity owns. Returns the shareable URL.
+    pub async fn create_public_invite(&self, community_id: &str) -> Result<String> {
+        use crate::community::{service, transport::LiveTransport, CommunityId};
+        if community_id.len() != 64 {
+            return Err(VectorError::Other("malformed community id".into()));
+        }
+        let community = crate::db::community::load_community(&CommunityId(
+            crate::simd::hex::hex_to_bytes_32(community_id),
+        ))
+        .map_err(VectorError::Other)?
+        .ok_or_else(|| VectorError::Other("community not found".into()))?;
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        let (_token, url) = service::create_public_invite(&transport, &community, None, None)
+            .await
+            .map_err(VectorError::Other)?;
+        Ok(url)
+    }
+
+    /// The public invite links this account holds for a Community (to list + revoke). Each carries the
+    /// hex `token` (the link secret) needed by [`Self::revoke_public_invite`].
+    pub fn list_public_invites(&self, community_id: &str) -> Result<Vec<crate::db::community::PublicInviteRecord>> {
+        crate::db::community::list_public_invites(community_id).map_err(VectorError::Other)
+    }
+
+    /// Revoke a public invite link by its hex token. Retiring the LAST active link flips the Community to
+    /// Private, which re-founds (rotates the base key + every channel key) to cut link-joined lurkers.
+    /// Idempotent: a token this account doesn't hold is a no-op. Needs a local key when the revoke triggers
+    /// the privatize rekey (a bunker account can't rotate).
+    pub async fn revoke_public_invite(&self, community_id: &str, token: &str) -> Result<()> {
+        use crate::community::{service, transport::LiveTransport, CommunityId};
+        if community_id.len() != 64 {
+            return Err(VectorError::Other("malformed community id".into()));
+        }
+        let token_bytes = crate::simd::hex::hex_to_bytes_32(token);
+        let community = crate::db::community::load_community(&CommunityId(
+            crate::simd::hex::hex_to_bytes_32(community_id),
+        ))
+        .map_err(VectorError::Other)?
+        .ok_or_else(|| VectorError::Other("community not found".into()))?;
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(20));
+        service::revoke_public_invite(&transport, &community, &token_bytes)
+            .await
+            .map_err(VectorError::Other)
+    }
+
+    /// Post a text message to a Community channel. Returns the message id (the inner id).
+    pub async fn send_community_message(
+        &self,
+        channel_id: &str,
+        content: &str,
+        replied_to: Option<&str>,
+    ) -> Result<String> {
+        use crate::community::{envelope, inbound, service, transport::LiveTransport};
+        let (community, channel) = self.resolve_channel(channel_id)?;
+        let author_pk = state::my_public_key().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
+        let reply = replied_to.filter(|r| !r.is_empty());
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let unsigned = envelope::build_inner_typed(
+            author_pk,
+            &channel.id,
+            channel.epoch,
+            crate::stored_event::event_kind::COMMUNITY_MESSAGE,
+            content,
+            ms,
+            reply,
+            &[],
+        );
+        let message_id = unsigned.id.ok_or_else(|| VectorError::Other("inner event has no id".into()))?.to_hex();
+        let client = state::nostr_client().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
+        let signer = client.signer().await.map_err(|e| VectorError::Other(format!("Signer unavailable: {e}")))?;
+        let inner = unsigned.sign(&signer).await.map_err(|e| VectorError::Other(format!("sign: {e}")))?;
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        let outer = service::send_signed_message(&transport, &community, &channel, &inner)
+            .await
+            .map_err(VectorError::Other)?;
+        // Local echo so get_messages reflects the send (the relay echo dedups on inner id).
+        let echoed = {
+            let mut st = state::STATE.lock().await;
+            inbound::process_incoming(&mut st, &outer, &channel, &author_pk)
+        };
+        if let Some(inbound::IncomingEvent::NewMessage(msg)) = echoed {
+            let _ = crate::db::events::save_message(channel_id, &msg).await;
+        }
+        Ok(message_id)
+    }
+
+    /// Fetch the latest page of a Community channel from relays, ingesting messages,
+    /// reactions, edits, and deletes. Returns the count of brand-new messages applied.
+    /// Returns `(new_message_count, warnings)`. `warnings` are NON-FATAL errors hit during the sync
+    /// (catch-up, control fold, read-cut resume) — surfaced rather than swallowed so a headless caller is
+    /// never blind to "the sync ran but a re-founding couldn't be resumed."
+    pub async fn sync_community_channel(&self, channel_id: &str, limit: usize) -> Result<(usize, Vec<String>)> {
+        use crate::community::{inbound, send, service, transport::LiveTransport};
+        let my_pk = state::my_public_key().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
+        let (community, _) = self.resolve_channel(channel_id)?;
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        let mut warnings: Vec<String> = Vec::new();
+
+        // FIRST: walk any base (server-root) rotation — a privatize / private-ban rekey advances the
+        // epoch and re-anchors the control plane under the NEW root, so we must follow it BEFORE reading
+        // control/messages or we'd look at stale-epoch pseudonyms and silently fall off. No-op (one cheap
+        // probe) when there's been no rotation. Re-resolve after: the base epoch + root may have advanced.
+        // An AUTHORIZED base rotation that excluded us (private ban / read-cut) is a removal: erase local
+        // community data, exactly like an observed banlist/kick. This is the catch-all for a cut member who
+        // can no longer decrypt the new control plane to read the banlist the normal way (`am_i_banned`).
+        match service::catch_up_server_root(&transport, &community).await {
+            Ok(c) if c.removed => {
+                // ban-rekey exclusion is a self-removal → retain the held epoch keys for later self-scrub.
+                let _ = crate::db::community::delete_community_retain_keys(&community.id.to_hex());
+                return Ok((0, warnings));
+            }
+            Ok(_) => {}
+            Err(e) => warnings.push(format!("base catch-up failed: {e}")),
+        }
+        let (community, _) = self.resolve_channel(channel_id)?;
+
+        // Headless clients have no realtime control-plane subscription, so fold the latest control editions
+        // here (the desktop does the same on its own latest-page sync). Banlist FIRST: a ban that landed on
+        // us self-removes like a kick (drop keys + local data, no rejoin). Then roles, the per-creator invite
+        // links (Public/Private mode), and metadata (name/description/icon/channel-name) — so a rename, role,
+        // ban, or mode change reaches this member on sync, not just in a realtime client.
+        if let Err(e) = service::fetch_and_apply_control(&transport, &community).await {
+            warnings.push(format!("control fold failed: {e}"));
+        }
+        if service::am_i_banned(&community) {
+            // ban self-removal → retain the held epoch keys for later self-scrub.
+            let _ = crate::db::community::delete_community_retain_keys(&community.id.to_hex());
+            return Ok((0, warnings));
+        }
+        // Walk any CHANNEL rekey so we hold the current channel key before paging it, then re-resolve so the
+        // batch below carries the fresh channel epoch/key + the freshly-folded banned set + metadata.
+        let (community, channel) = self.resolve_channel(channel_id)?;
+        if let Err(e) = service::catch_up_channel_rekeys(&transport, &community, &channel.id).await {
+            warnings.push(format!("channel catch-up failed: {e}"));
+        }
+        // Resume any interrupted re-founding (a privatize/ban whose rotation aborted mid-way — e.g. a
+        // transient relay miss on the re-anchor). The GUI's sync did this; the agent's path did NOT, so an
+        // interrupted re-founding stayed `read_cut_pending` forever (channel frozen). Best-effort + surfaced.
+        let (community, _) = self.resolve_channel(channel_id)?;
+        if let Err(e) = service::retry_pending_read_cut(&transport, &community).await {
+            warnings.push(format!("read-cut resume failed: {e}"));
+        }
+        let (community, channel) = self.resolve_channel(channel_id)?;
+
+        let events = send::fetch_channel_page(&transport, &community, &channel, None, limit.max(1))
+            .await
+            .map_err(VectorError::Other)?;
+        let outcomes = {
+            let mut st = state::STATE.lock().await;
+            inbound::process_channel_batch(&mut st, &events, &channel, &my_pk)
+        };
+        let mut new = 0usize;
+        for o in &outcomes {
+            match o {
+                inbound::IncomingEvent::NewMessage(m) => {
+                    let _ = crate::db::events::save_message(channel_id, m).await;
+                    new += 1;
+                }
+                inbound::IncomingEvent::Updated { message, .. } => {
+                    let _ = crate::db::events::save_message(channel_id, message).await;
+                }
+                inbound::IncomingEvent::Removed { target_id } => {
+                    let _ = crate::db::events::delete_event(target_id).await;
+                }
+                inbound::IncomingEvent::Presence { npub, joined, event_id, created_at, invited_by, invited_label } => {
+                    let et = if *joined {
+                        crate::stored_event::SystemEventType::MemberJoined
+                    } else {
+                        crate::stored_event::SystemEventType::MemberLeft
+                    };
+                    // attribution persisted in the note: "invited_by[|label]".
+                    let note = invited_by.as_ref().map(|by| match invited_label {
+                        Some(l) if !l.is_empty() => format!("{by}|{l}"),
+                        _ => by.clone(),
+                    });
+                    let _ = crate::db::events::save_system_event_at(event_id, channel_id, et, npub, note.as_deref(), *created_at).await;
+                }
+                inbound::IncomingEvent::Kicked { community_id }
+                | inbound::IncomingEvent::SelfLeft { community_id } => {
+                    // self-removal (kick of me, or a leave I/another device authored): drop the
+                    // community's local state but RETAIN the held epoch keys (later self-scrub). The core-level
+                    // half of leaving; a client shell layers on subscription-refresh + chat-row teardown + UI.
+                    // Stop the batch — the community is gone, so later same-batch writes would orphan rows.
+                    let _ = crate::db::community::delete_community_retain_keys(community_id);
+                    break;
+                }
+            }
+        }
+        Ok((new, warnings))
+    }
+
+    /// Observed members of a Community (best-effort: those who've posted or announced a join,
+    /// minus anyone who's left or is banned). Each entry is `{npub, last_active}`.
+    pub async fn get_community_members(&self, community_id: &str) -> Vec<serde_json::Value> {
+        crate::db::community::community_member_activity(community_id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(npub, last_active)| serde_json::json!({ "npub": npub, "last_active": last_active }))
+            .collect()
+    }
+
+    // ── Community admin actions ── role-gated; vector-core re-checks authority on every action and peers
+    // re-verify against the owner-rooted roster, so these can't forge standing. A bunker account can't ban
+    // in a private community (the rekey needs a raw local key).
+
+    fn load_community_hex(community_id: &str) -> Result<crate::community::Community> {
+        use crate::community::CommunityId;
+        if community_id.len() != 64 {
+            return Err(VectorError::Other("malformed community id".into()));
+        }
+        crate::db::community::load_community(&CommunityId(crate::simd::hex::hex_to_bytes_32(community_id)))
+            .map_err(VectorError::Other)?
+            .ok_or_else(|| VectorError::Other("community not found".into()))
+    }
+
+    fn admin_role_id_of(community_id: &str) -> Result<String> {
+        let roles = crate::db::community::get_community_roles(community_id).map_err(VectorError::Other)?;
+        roles.roles.iter()
+            .find(|r| matches!(r.scope, crate::community::roles::RoleScope::Server)
+                && r.permissions.contains(crate::community::roles::Permissions::ADMIN_ALL))
+            .map(|r| r.role_id.clone())
+            .ok_or_else(|| VectorError::Other("admin role not found (roster not synced?)".into()))
+    }
+
+    /// My effective management capabilities in a community (role engine — owner is just position 0). Use to
+    /// confirm a promotion/demotion landed.
+    pub fn community_capabilities(&self, community_id: &str) -> Result<serde_json::Value> {
+        use crate::community::service;
+        let community = Self::load_community_hex(community_id)?;
+        let caps = service::caller_capabilities(&community);
+        let manage_admin_role = Self::admin_role_id_of(community_id).ok()
+            .map(|rid| service::caller_can_manage_role_id(&community, &rid))
+            .unwrap_or(false);
+        Ok(serde_json::json!({
+            "manage_metadata": caps.manage_metadata, "manage_channels": caps.manage_channels,
+            "create_invite": caps.create_invite, "kick": caps.kick, "ban": caps.ban,
+            "manage_messages": caps.manage_messages, "manage_roles": caps.manage_roles,
+            "manage_admin_role": manage_admin_role,
+        }))
+    }
+
+    /// The community's owner npub + the admin npubs (role overview).
+    pub fn community_roles(&self, community_id: &str) -> Result<serde_json::Value> {
+        use nostr_sdk::prelude::{PublicKey, ToBech32};
+        let community = Self::load_community_hex(community_id)?;
+        let owner = community.owner_attestation.as_ref()
+            .and_then(|att| crate::community::owner::verify_owner_attestation(att, &community.id.to_hex()))
+            .and_then(|pk| ToBech32::to_bech32(&pk).ok());
+        let roles = crate::db::community::get_community_roles(community_id).map_err(VectorError::Other)?;
+        let admins: Vec<String> = roles.grants.iter().filter(|g| roles.is_admin(&g.member))
+            .filter_map(|g| PublicKey::from_hex(&g.member).ok().and_then(|pk| pk.to_bech32().ok()))
+            .collect();
+        Ok(serde_json::json!({ "owner": owner, "admins": admins }))
+    }
+
+    /// Grant a member the @admin role. Requires MANAGE_ROLES + outranking the role's position.
+    pub async fn grant_admin(&self, community_id: &str, npub: &str) -> Result<()> {
+        use crate::community::{service, transport::LiveTransport};
+        let member = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| VectorError::Other("invalid npub".into()))?;
+        let community = Self::load_community_hex(community_id)?;
+        let role_id = Self::admin_role_id_of(community_id)?;
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        service::grant_role(&transport, &community, member, &role_id).await.map_err(VectorError::Other)
+    }
+
+    /// Revoke a member's @admin role.
+    pub async fn revoke_admin(&self, community_id: &str, npub: &str) -> Result<()> {
+        use crate::community::{service, transport::LiveTransport};
+        let member = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| VectorError::Other("invalid npub".into()))?;
+        let community = Self::load_community_hex(community_id)?;
+        let role_id = Self::admin_role_id_of(community_id)?;
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        service::revoke_role(&transport, &community, member, &role_id).await.map_err(VectorError::Other)
+    }
+
+    /// Cooperatively kick a member (3309) — they self-remove but can rejoin. Requires KICK + outrank.
+    pub async fn kick_member(&self, community_id: &str, npub: &str) -> Result<()> {
+        use crate::community::{service, transport::LiveTransport};
+        let hex = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| VectorError::Other("invalid npub".into()))?.to_hex();
+        let community = Self::load_community_hex(community_id)?;
+        let channel = community.channels.first().ok_or_else(|| VectorError::Other("community has no channel".into()))?;
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        service::publish_kick(&transport, &community, channel, &hex).await.map_err(VectorError::Other)
+    }
+
+    /// Ban (`true`) or unban (`false`) a member. Ban is terminal (no rejoin); in a private community it also
+    /// fires the read-cut rekey (needs a local key). Requires BAN + outrank.
+    pub async fn set_member_banned(&self, community_id: &str, npub: &str, banned: bool) -> Result<()> {
+        use crate::community::{service, transport::LiveTransport};
+        let hex = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| VectorError::Other("invalid npub".into()))?.to_hex();
+        let community = Self::load_community_hex(community_id)?;
+        // Recompute the full list (latest-wins): drop any existing entry, then add if banning.
+        let mut list = crate::db::community::get_community_banlist(community_id).map_err(VectorError::Other)?;
+        list.retain(|h| h != &hex);
+        if banned { list.push(hex); }
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        service::publish_banlist(&transport, &community, &list).await.map_err(VectorError::Other)
+    }
+
+    /// Owner dissolution / "Delete Community": publish the terminal GroupDissolved tombstone (and
+    /// retire the owner's own invite links, no rekey), sealing the community permanently. Owner-only
+    /// (re-verified cryptographically in `service::dissolve_community`); irreversible.
+    pub async fn dissolve_community(&self, community_id: &str) -> Result<()> {
+        use crate::community::{service, transport::LiveTransport};
+        let community = Self::load_community_hex(community_id)?;
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        service::dissolve_community(&transport, &community).await.map_err(VectorError::Other)
+    }
+
+    /// Edit community metadata (name / description) as an authorized member (MANAGE_METADATA). `None` leaves
+    /// a field unchanged; an empty description clears it.
+    pub async fn edit_community_metadata(&self, community_id: &str, name: Option<&str>, description: Option<&str>) -> Result<()> {
+        use crate::community::{service, transport::LiveTransport};
+        let mut community = Self::load_community_hex(community_id)?;
+        if let Some(n) = name { community.name = n.to_string(); }
+        if let Some(d) = description { community.description = if d.is_empty() { None } else { Some(d.to_string()) }; }
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        service::republish_community_metadata(&transport, &community).await.map_err(VectorError::Other)
+    }
+
+    /// Leave a Community: announce a best-effort "left" presence (before dropping keys), then
+    /// drop the held keys + local channel chats. You need a fresh invite to rejoin.
+    pub async fn leave_community(&self, community_id: &str) -> Result<()> {
+        use crate::community::{transport::LiveTransport, CommunityId};
+        if community_id.len() != 64 {
+            return Err(VectorError::Other("malformed community id".into()));
+        }
+        let id = CommunityId(crate::simd::hex::hex_to_bytes_32(community_id));
+        let community = crate::db::community::load_community(&id).map_err(VectorError::Other)?;
+        let channel_ids: Vec<String> = community
+            .as_ref()
+            .map(|c| c.channels.iter().map(|ch| ch.id.to_hex()).collect())
+            .unwrap_or_default();
+        // "Left" announcement BEFORE dropping keys (afterward we can't sign/seal into the channel).
+        if let Some(ref c) = community {
+            if let Some(primary) = c.channels.first() {
+                let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+                let _ = crate::community::service::publish_presence(&transport, c, primary, false, None).await;
+            }
+        }
+        // voluntary leave is a self-removal → retain the held epoch keys for later self-scrub.
+        crate::db::community::delete_community_retain_keys(community_id).map_err(VectorError::Other)?;
+        {
+            let mut st = state::STATE.lock().await;
+            st.chats.retain(|c| !channel_ids.contains(&c.id));
+        }
         Ok(())
     }
 
-    /// Fetch a user's published MLS keypackages from relays.
-    ///
-    /// Returns a list of (device_id, created_at) pairs, newest first.
-    /// Device IDs are the keypackage event IDs (hex). Also persists results
-    /// to the local keypackage index (deduplicated, merged with any local entries).
-    pub async fn fetch_keypackages(&self, npub: &str) -> Result<Vec<(String, u64)>> {
-        use futures_util::StreamExt;
-        use nostr_sdk::prelude::*;
-
-        let client = state::nostr_client()
-            .ok_or(VectorError::Other("Not connected".into()))?;
-        let contact_pubkey = PublicKey::from_bech32(npub)
-            .map_err(|e| VectorError::Nostr(format!("Invalid npub: {}", e)))?;
-
-        let filter = Filter::new()
-            .author(contact_pubkey)
-            .kind(Kind::MlsKeyPackage)
-            .limit(10);
-
-        let mut events = client
-            .stream_events_from(
-                state::active_trusted_relays().await,
-                filter,
-                std::time::Duration::from_secs(10),
-            )
-            .await
-            .map_err(|e| VectorError::Nostr(e.to_string()))?;
-
-        let owner_pubkey_b32 = contact_pubkey.to_bech32()
-            .map_err(|e| VectorError::Nostr(e.to_string()))?;
-        let mut results: Vec<(String, u64)> = Vec::new();
-        let mut new_entries: Vec<serde_json::Value> = Vec::new();
-
-        while let Some(e) = events.next().await {
-            let device_id = e.id.to_hex();
-            let keypackage_ref = e.id.to_hex();
-            let created_at = e.created_at.as_secs();
-            results.push((device_id.clone(), created_at));
-            new_entries.push(serde_json::json!({
-                "owner_pubkey": owner_pubkey_b32,
-                "device_id": device_id,
-                "keypackage_ref": keypackage_ref,
-                "created_at": created_at,
-                "fetched_at": Timestamp::now().as_secs(),
-                "expires_at": 0u64
-            }));
-        }
-
-        // Update local plaintext index (dedup + merge)
-        let mut index = db::mls::load_mls_keypackages().unwrap_or_default();
-
-        // Dedup existing entries by keypackage_ref
-        {
-            let mut seen_refs = std::collections::HashSet::new();
-            index.retain(|entry| {
-                let r = entry.get("keypackage_ref").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                seen_refs.insert(r)
-            });
-        }
-
-        // Merge new entries, preserving local entries with matching keypackage_ref
-        let mut index_changed = false;
-        for new_entry in new_entries {
-            let new_ref = new_entry.get("keypackage_ref").and_then(|v| v.as_str()).unwrap_or_default();
-            let new_owner = new_entry.get("owner_pubkey").and_then(|v| v.as_str()).unwrap_or_default();
-            let new_device = new_entry.get("device_id").and_then(|v| v.as_str()).unwrap_or_default();
-
-            if index.iter().any(|entry| entry.get("keypackage_ref").and_then(|v| v.as_str()) == Some(new_ref)) {
-                continue;
-            }
-
-            index.retain(|entry| {
-                let same_owner = entry.get("owner_pubkey").and_then(|v| v.as_str()) == Some(new_owner);
-                let same_device = entry.get("device_id").and_then(|v| v.as_str()) == Some(new_device);
-                !(same_owner && same_device)
-            });
-            index.push(new_entry);
-            index_changed = true;
-        }
-
-        if index_changed {
-            let _ = db::mls::save_mls_keypackages(&index);
-        }
-
-        // Newest first
-        results.sort_by(|a, b| b.1.cmp(&a.1));
-        Ok(results)
-    }
-
-    /// Invite a member to an existing MLS group.
-    ///
-    /// Fetches the member's keypackage, creates a commit, publishes to relays,
-    /// and sends a welcome message. Runs in a background task.
-    pub async fn invite_member(&self, group_id: &str, member_npub: &str, device_id: &str) -> Result<()> {
-        let svc = mls::MlsService::new_persistent_static()
-            .map_err(|e| VectorError::Other(e.to_string()))?;
-        svc.add_member_device(group_id, member_npub, device_id).await
-            .map_err(|e| VectorError::Other(e.to_string()))
-    }
-
-    /// Invite a member to a group by npub only — fetches their latest keypackage automatically.
-    ///
-    /// Abstracts away keypackage discovery. Returns the device_id that was used.
-    pub async fn invite(&self, group_id: &str, member_npub: &str) -> Result<String> {
-        let keypackages = self.fetch_keypackages(member_npub).await?;
-        let (device_id, _) = keypackages.into_iter().next()
-            .ok_or(VectorError::Other(format!("No keypackages found for {}", member_npub)))?;
-        self.invite_member(group_id, member_npub, &device_id).await?;
-        Ok(device_id)
-    }
-
-    /// Invite multiple members to an existing MLS group in a single commit.
-    pub async fn invite_members(&self, group_id: &str, members: &[(&str, &str)]) -> Result<()> {
-        let devices: Vec<(String, String)> = members.iter()
-            .map(|(npub, did)| (npub.to_string(), did.to_string()))
-            .collect();
-        let svc = mls::MlsService::new_persistent_static()
-            .map_err(|e| VectorError::Other(e.to_string()))?;
-        svc.add_member_devices(group_id, &devices).await
-            .map_err(|e| VectorError::Other(e.to_string()))
-    }
-
-    /// Remove a member from an MLS group (admin only).
-    pub async fn remove_member(&self, group_id: &str, member_npub: &str) -> Result<()> {
-        let svc = mls::MlsService::new_persistent_static()
-            .map_err(|e| VectorError::Other(e.to_string()))?;
-        svc.remove_member_device(group_id, member_npub, "").await
-            .map_err(|e| VectorError::Other(e.to_string()))
-    }
-
-    /// Update MLS group metadata (name, description, admins).
-    pub async fn update_group(
+    /// Resolve a channel id to its owning Community + the Channel (with its secret key).
+    fn resolve_channel(
         &self,
-        group_id: &str,
-        name: Option<&str>,
-        description: Option<&str>,
-        admin_npubs: Option<&[&str]>,
-    ) -> Result<()> {
-        let svc = mls::MlsService::new_persistent_static()
-            .map_err(|e| VectorError::Other(e.to_string()))?;
-        svc.update_group_data(
-            group_id,
-            name.map(|s| s.to_string()),
-            description.map(|s| s.to_string()),
-            admin_npubs.map(|npubs| npubs.iter().map(|s| s.to_string()).collect()),
-            None, None, None,
-        ).await.map_err(|e| VectorError::Other(e.to_string()))
+        channel_id: &str,
+    ) -> Result<(crate::community::Community, crate::community::Channel)> {
+        use crate::community::CommunityId;
+        let community_id = crate::db::community::community_id_for_channel(channel_id)
+            .map_err(VectorError::Other)?
+            .ok_or_else(|| VectorError::Other("Unknown Community channel".into()))?;
+        if community_id.len() != 64 {
+            return Err(VectorError::Other("malformed community id".into()));
+        }
+        let community = crate::db::community::load_community(&CommunityId(
+            crate::simd::hex::hex_to_bytes_32(&community_id),
+        ))
+        .map_err(VectorError::Other)?
+        .ok_or_else(|| VectorError::Other("Community not found".into()))?;
+        let channel = community
+            .channels
+            .iter()
+            .find(|c| c.id.to_hex() == channel_id)
+            .cloned()
+            .ok_or_else(|| VectorError::Other("Channel not found in Community".into()))?;
+        Ok((community, channel))
     }
 
-    /// Publish this device's MLS KeyPackage to relays.
-    ///
-    /// Required before anyone can invite you to MLS groups. If `use_cache` is true,
-    /// reuses an existing valid keypackage if one exists on relay. Otherwise generates
-    /// and publishes a fresh one.
-    pub async fn publish_keypackage(&self, use_cache: bool) -> Result<mls::PublishedKeyPackage> {
-        mls::publish_keypackage(use_cache).await
-            .map_err(|e| VectorError::Other(e.to_string()))
-    }
-
-    /// List all pending MLS group invites (unaccepted welcomes).
-    pub async fn list_invites(&self) -> Result<Vec<mls::PendingInvite>> {
-        mls::list_invites().await
-            .map_err(|e| VectorError::Other(e.to_string()))
-    }
-
-    /// Accept a pending MLS group invite by welcome event ID.
-    ///
-    /// Joins the group, persists metadata, creates chat, syncs participants,
-    /// and does an initial message sync. Returns the wire group_id.
-    pub async fn accept_invite(&self, welcome_event_id: &str) -> Result<String> {
-        let group_id = mls::accept_invite(welcome_event_id).await
-            .map_err(|e| VectorError::Other(e.to_string()))?;
-        // Refresh subscription so listen() picks up the new group
-        let _ = self.refresh_group_subscription().await;
-
-        // MLS security: rotate keypackage so the NEXT invite uses a
-        // fresh one — the one we just consumed is burnt, and reusing
-        // it would break forward secrecy + corrupt MDK state. Fire-
-        // and-forget; SessionGuard prevents cross-account rotation.
-        let session = state::SessionGuard::capture();
-        tokio::spawn(async move {
-            if !session.is_valid() { return; }
-            if let Err(e) = mls::publish_keypackage(false).await {
-                log_warn!("[MLS] KeyPackage rotation after accept_invite failed: {}", e);
-            }
-        });
-
-        Ok(group_id)
-    }
-
-    /// Decline a pending MLS group invite (removes it without joining).
-    pub async fn decline_invite(&self, welcome_event_id: &str) -> Result<()> {
-        mls::decline_invite(welcome_event_id).await
-            .map_err(|e| VectorError::Other(e.to_string()))
-    }
-
-    /// Sync all MLS groups from relays.
-    ///
-    /// Returns total (processed_events, new_messages) across all groups.
-    pub async fn sync_groups(&self) -> Result<(u32, u32)> {
-        let svc = mls::MlsService::new_persistent_static()
-            .map_err(|e| VectorError::Other(e.to_string()))?;
-
-        // Full-set negentropy reconcile across all non-evicted groups.
-        svc.reconcile_and_apply(None, None)
-            .await
-            .map_err(|e| VectorError::Other(e.to_string()))
-    }
 
     /// Sync DM history from relays using NIP-77 negentropy set reconciliation.
     ///
@@ -938,53 +1186,10 @@ impl VectorCore {
         Ok(output.val)
     }
 
-    /// Refresh the MLS group message subscription to match current group membership.
+    /// Start listening for incoming DMs.
     ///
-    /// Unsubscribes the old subscription (if any) and creates a new one scoped to
-    /// all non-evicted groups. Called automatically by `create_group`, `leave_group`,
-    /// `invite_member`, and `remove_member`. Can also be called manually.
-    pub async fn refresh_group_subscription(&self) -> Result<()> {
-        use nostr_sdk::prelude::*;
-        let client = state::nostr_client()
-            .ok_or(VectorError::Other("Not connected".into()))?;
-
-        let mut sub_guard = MLS_SUB_ID.lock().await;
-
-        // Unsubscribe old
-        if let Some(old_id) = sub_guard.take() {
-            client.unsubscribe(&old_id).await;
-        }
-
-        // Subscribe with current group IDs
-        let group_ids: Vec<String> = db::mls::load_mls_groups()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|g| !g.evicted)
-            .map(|g| g.group.group_id)
-            .collect();
-
-        if !group_ids.is_empty() {
-            let filter = Filter::new()
-                .kind(Kind::MlsGroupMessage)
-                .custom_tags(SingleLetterTag::lowercase(Alphabet::H), group_ids)
-                .limit(0);
-            match client.subscribe(filter, None).await {
-                Ok(output) => { *sub_guard = Some(output.val); }
-                Err(e) => eprintln!("[VectorCore] Failed to subscribe to MLS groups: {}", e),
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Start listening for incoming DMs AND MLS group messages.
-    ///
-    /// Blocks until the client disconnects. Processes both event types:
-    /// - GiftWraps (DMs, files, MLS welcomes) → prepare_event → commit_prepared_event
-    /// - MLS group messages (Kind 445) → handle_mls_group_message
-    ///
-    /// MLS group subscriptions are automatically refreshed when groups change
-    /// (via `create_group`, `leave_group`, etc.).
+    /// Blocks until the client disconnects. Processes GiftWraps
+    /// (DMs, files) → prepare_event → commit_prepared_event.
     ///
     /// ```no_run
     /// use vector_core::*;
@@ -1023,9 +1228,6 @@ impl VectorCore {
         // Subscribe to DMs (GiftWraps)
         let dm_sub_id = self.subscribe_dms().await?;
 
-        // Initial MLS group subscription (refreshed automatically on group changes)
-        self.refresh_group_subscription().await?;
-
         let client_for_closure = client.clone();
 
         client.handle_notifications(move |notification| {
@@ -1035,12 +1237,9 @@ impl VectorCore {
             async move {
                 if let RelayPoolNotification::Event { event, subscription_id, .. } = notification {
                     if subscription_id == dm_sid {
-                        // DMs, files, reactions, MLS welcomes
+                        // DMs, files, reactions
                         let prepared = event_handler::prepare_event(*event, &c, my_pk).await;
                         event_handler::commit_prepared_event(prepared, true, &*handler).await;
-                    } else if MLS_SUB_ID.lock().await.as_ref() == Some(&subscription_id) {
-                        // MLS group messages — pass handler for on_group_message callback
-                        mls::handle_mls_group_message_with_handler(*event, my_pk, Some(&*handler)).await;
                     }
                 }
                 Ok(false)
@@ -1056,5 +1255,57 @@ impl VectorCore {
             let _ = client.disconnect().await;
         }
         db::close_database();
+    }
+
+    /// Tear down the current session for an in-process account swap — the account-agnostic core of
+    /// the app's `reset_session()`. Advances the session generation FIRST so any background task
+    /// holding a `SessionGuard` short-circuits before it can touch the next account's storage; shuts
+    /// the client down (which ends any `listen()` notification loop bound to it, so the old account's
+    /// events can't land in the new account's DB); closes the DB pool; and clears the key vaults plus
+    /// all in-memory per-account state. Follow with `login()` to bind the next account, then re-attach
+    /// `listen()`. (The app's `reset_session()` additionally clears Tauri-only caches it owns.)
+    pub async fn swap_session(&self) {
+        // FIRST — invalidate every captured guard before any teardown begins.
+        state::bump_session_generation();
+
+        // Shut the client down before anything else: this detaches relay subscriptions and ends the
+        // prior `listen()` loop, so it stops firing the old account's events into the new session.
+        if let Some(client) = state::take_nostr_client() {
+            let _ = client.shutdown().await;
+        }
+        db::close_database();
+
+        // Key vaults + transient secrets.
+        state::ENCRYPTION_KEY.clear(&[&state::MY_SECRET_KEY]);
+        state::MY_SECRET_KEY.clear(&[&state::ENCRYPTION_KEY]);
+        {
+            use zeroize::Zeroize;
+            if let Ok(mut g) = state::PENDING_NSEC.lock() {
+                if let Some(s) = g.as_mut() { s.zeroize(); }
+                *g = None;
+            }
+        }
+
+        // In-memory per-account state owned by vector-core's globals.
+        {
+            let mut st = state::STATE.lock().await;
+            st.profiles.clear();
+            st.chats.clear();
+            st.db_loaded = false;
+            st.is_syncing = false;
+        }
+        state::WRAPPER_ID_CACHE.lock().await.clear();
+        state::PENDING_EVENTS.lock().await.clear();
+        state::set_active_chat(None);
+        crate::profile::sync::clear_profile_sync_queue();
+        crate::inbox_relays::clear_inbox_relay_cache();
+        // Chat/user row-id caches are PER-ACCOUNT (row ids belong to the prior account's DB). Not clearing
+        // them here let a swapped-in account resolve a channel/npub to the WRONG (prior-account) row id →
+        // saves FK-failed silently + reads hit the wrong row (e.g. a community member vanished post-swap).
+        crate::db::clear_id_caches();
+        // Theme-pack emoji tags are account-scoped; leaving the prior account's set active would tag the
+        // next account's outbound messages with A's theme shortcodes (leaking A's pack Blossom URLs). The
+        // frontend re-registers the new account's theme, but only if it HAS one — clear to be safe.
+        crate::emoji_packs::set_theme_emoji_tags(Vec::new());
     }
 }

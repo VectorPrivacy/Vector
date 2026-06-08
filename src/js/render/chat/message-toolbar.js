@@ -127,10 +127,19 @@ function showMessageToolbar(rowEl) {
         return;
     }
 
+    const mine = rowEl.dataset.mine === 'true';
+
+    // Dissolved community: the backend drops every new event (react/reply/edit). Only
+    // own-message delete still works (data ownership), so suppress the toolbar entirely
+    // for others' messages and offer nothing here for own ones — delete lives in the
+    // right-click / long-press menu, which is gated to the same single action.
+    if (rowIsInDissolvedCommunity() && !mine) {
+        _dmsgToolbarEl.hidden = true;
+        return;
+    }
+
     _dmsgToolbarEl.hidden = false;
     _dmsgToolbarEl.dataset.target = rowEl.id;
-
-    const mine = rowEl.dataset.mine === 'true';
     const reactBtn = _dmsgToolbarEl.querySelector('[data-action="react"]');
     const replyBtn = _dmsgToolbarEl.querySelector('[data-action="reply"]');
     const editBtn = _dmsgToolbarEl.querySelector('[data-action="edit"]');
@@ -160,15 +169,20 @@ function showMessageToolbar(rowEl) {
     const hasContent = !!(msg && msg.content);
     const hasAttachments = !!(msg && msg.attachments && msg.attachments.length);
 
+    // Dissolved community: react/reply/edit all produce events the backend drops, so
+    // offering them would lie. Own-message delete still works and is handled below.
+    const dissolved = rowIsInDissolvedCommunity();
+
     // React: hidden once the message hits the unique-emoji ceiling (matches the
     // inline "+" shortcut gating in _dmsgBuildReactions).
     const uniqueEmojiCount = msg && msg.reactions
         ? new Set(msg.reactions.map(r => r.emoji)).size
         : 0;
-    reactBtn.hidden = uniqueEmojiCount >= 8;
+    reactBtn.hidden = dissolved || uniqueEmojiCount >= 8;
+    replyBtn.hidden = dissolved;
 
     // Edit: own text-only messages (parity with legacy edit gate).
-    editBtn.hidden = !(mine && hasContent && !hasAttachments);
+    editBtn.hidden = dissolved || !(mine && hasContent && !hasAttachments);
 
     // Reveal-file: any message with at least one downloaded attachment.
     // Mirrors legacy behavior — the reveal button isn't restricted to own
@@ -355,6 +369,20 @@ function _dmsgHandleToolbarClick(e) {
  */
 async function _dmsgConfirmAndDelete(targetMsgId, mode, opts) {
     opts = opts || {};
+
+    // Owner moderation-hide (someone ELSE's Community message): a permanent cooperative hide
+    // for everyone. No undo.
+    if (mode === 'hide') {
+        const confirmed = await popupConfirm('Hide this message?', 'Permanently hide this message for everyone in the community. This can\'t be undone.', false, '', 'vector_warning.svg');
+        if (!confirmed) return;
+        try {
+            await invoke('hide_community_message', { channelId: strOpenChat, messageId: targetMsgId });
+        } catch (err) {
+            popupConfirm('Hide Failed', escapeHtml(String(err)), true, '', 'vector_warning.svg');
+        }
+        return;
+    }
+
     // Three flows behind one button:
     //   delete (full)    = own message + retained keys: real
     //                      delete-from-network (NIP-09 against retained
@@ -363,29 +391,6 @@ async function _dmsgConfirmAndDelete(targetMsgId, mode, opts) {
     //                      + Blossom blob delete + local hide. The relay
     //                      copy of the encrypted wrapper persists. Popup
     //                      explains why.
-    //   hide             = admin moderation of someone else's group
-    //                      message. Cooperative-only (kind-5 inside MLS).
-    if (mode === 'hide') {
-        const confirmed = await popupConfirm(
-            'Hide this message?',
-            'Are you sure you want to hide this message?',
-            false,
-            '',
-            'vector_warning.svg'
-        );
-        if (!confirmed) return;
-        const groupId = strOpenChat;
-        if (!groupId) {
-            popupConfirm('Hide Failed', 'Could not determine the group this message belongs to.', true, '', 'vector_warning.svg');
-            return;
-        }
-        try {
-            await invoke('admin_hide_message', { groupId, messageId: targetMsgId });
-        } catch (err) {
-            popupConfirm('Hide Failed', escapeHtml(String(err)), true, '', 'vector_warning.svg');
-        }
-        return;
-    }
 
     // delete branch
     let title, body;
@@ -409,7 +414,14 @@ async function _dmsgConfirmAndDelete(targetMsgId, mode, opts) {
     const confirmed = await popupConfirm(title, body, false, '', 'vector_warning.svg');
     if (!confirmed) return;
     try {
-        await invoke('delete_own_message', { messageId: targetMsgId });
+        // Community channels self-delete via their own retained-key path (§9), keyed by
+        // the inner message id; DMs/MLS use the unified delete_own_message.
+        const openChat = arrChats.find(c => c.id === strOpenChat);
+        if (openChat && openChat.chat_type === 'Community') {
+            await invoke('delete_community_message', { messageId: targetMsgId });
+        } else {
+            await invoke('delete_own_message', { messageId: targetMsgId });
+        }
     } catch (err) {
         popupConfirm('Delete Failed', escapeHtml(String(err)), true, '', 'vector_warning.svg');
     }
@@ -702,12 +714,20 @@ async function _dmsgOpenMessageMenu(rowEl, x, y) {
     const hasAttachments = !!(msg && msg.attachments && msg.attachments.length);
     const uniqueEmojiCount = msg && msg.reactions ? new Set(msg.reactions.map(r => r.emoji)).size : 0;
 
-    if (uniqueEmojiCount < 8) {
-        items.push({ label: 'React', icon: 'smile-face', onClick: () => _dmsgOpenReactionPicker(targetId) });
-    }
-    items.push({ label: 'Reply', icon: 'reply', onClick: () => _dmsgSelectReply(targetId) });
-    if (mine && hasContent && !hasAttachments) {
-        items.push({ label: 'Edit', icon: 'edit', onClick: () => { if (msg) startEditMessage(targetId, msg.content); } });
+    // Dissolved community: react/reply/edit produce events the backend drops, so skip them. But Copy (and
+    // revealing a downloaded file) are benign LOCAL actions and stay available on ANY message, own or not.
+    // Own messages also keep Delete; admin Hide on others is blocked below (the backend rejects moderation
+    // in a dead community anyway).
+    const dissolved = rowIsInDissolvedCommunity();
+
+    if (!dissolved) {
+        if (uniqueEmojiCount < 8) {
+            items.push({ label: 'React', icon: 'smile-face', onClick: () => _dmsgOpenReactionPicker(targetId) });
+        }
+        items.push({ label: 'Reply', icon: 'reply', onClick: () => _dmsgSelectReply(targetId) });
+        if (mine && hasContent && !hasAttachments) {
+            items.push({ label: 'Edit', icon: 'edit', onClick: () => { if (msg) startEditMessage(targetId, msg.content); } });
+        }
     }
     // Reveal/Open a downloaded attachment. Desktop reveals it in the file
     // manager; Android has no "reveal in folder", so open it with the user's
@@ -750,7 +770,8 @@ async function _dmsgOpenMessageMenu(rowEl, x, y) {
                 icon: 'trash', danger: true,
                 onClick: () => _dmsgConfirmAndDelete(targetId, 'delete', { partial, hasAttachments: !!opts.has_attachments }),
             };
-        } else if (opts.can_admin_hide) {
+        } else if (opts.can_admin_hide && !dissolved) {
+            // Moderation-hide is a new authority action the backend drops once dissolved — don't offer it.
             deleteItem = {
                 label: 'Hide', icon: 'trash', danger: true,
                 onClick: () => _dmsgConfirmAndDelete(targetId, 'hide', {}),

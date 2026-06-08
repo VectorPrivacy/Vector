@@ -1028,13 +1028,7 @@ async function checkPivxPaymentClaimedState(bubble, address, hintEl, isMine, ret
  * @returns {string} The display name
  */
 function getChatDisplayName(chatId) {
-    // Check if it's a group chat
-    const chat = arrChats.find(c => c.id === chatId);
-    if (chat && chat.chat_type === 'MlsGroup') {
-        return chat.metadata?.custom_fields?.name || `Group ${chatId.substring(0, 8)}...`;
-    }
-
-    // Otherwise it's a DM - get profile name
+    // DM - get profile name
     const profile = getProfile(chatId);
     if (profile?.nickname) return profile.nickname;
     if (profile?.name) return profile.name;
@@ -1103,7 +1097,7 @@ function handlePivxPaymentReceived(evt) {
 
         // If this chat is currently open, append to DOM and scroll
         if (strOpenChat === conversation_id) {
-            const profile = chat.chat_type === 'MlsGroup' ? null : getProfile(conversation_id);
+            const profile = getProfile(conversation_id);
             const msgEl = renderMessage(pivxMsg, profile);
             domChatMessages.appendChild(msgEl);
             softChatScroll();

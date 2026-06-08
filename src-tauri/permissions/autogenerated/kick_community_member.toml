@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-kick-community-member"
+description = "Enables the kick_community_member command without any pre-configured scope."
+commands.allow = ["kick_community_member"]
+
+[[permission]]
+identifier = "deny-kick-community-member"
+description = "Denies the kick_community_member command without any pre-configured scope."
+commands.deny = ["kick_community_member"]

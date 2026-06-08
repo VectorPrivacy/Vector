@@ -36,7 +36,20 @@ pub struct DeepLinkAction {
 pub fn parse_deep_link(url_str: &str) -> Option<DeepLinkAction> {
     // Normalize the URL for parsing
     let url_str = url_str.trim();
-    
+
+    // Community invites carry their payload in the URL FRAGMENT (#…), which the path parsers
+    // below strip. Catch them first and pass the whole URL through — the join flow re-parses the
+    // fragment. Covers `vector://invite#…` ("//invite" ends with "/invite") and
+    // `https://vectorapp.io/invite#…`.
+    if let Some((before, frag)) = url_str.split_once('#') {
+        if !frag.is_empty() && before.ends_with("/invite") {
+            return Some(DeepLinkAction {
+                action_type: "community_invite".to_string(),
+                target: url_str.to_string(),
+            });
+        }
+    }
+
     // Handle vector:// scheme
     if url_str.starts_with("vector://") {
         return parse_vector_scheme(url_str);

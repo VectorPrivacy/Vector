@@ -464,6 +464,7 @@ fn disable_encryption_transactional<R: Runtime>(
     decrypt_setting_in_tx(&tx, "seed", key, |v| v.contains(' '))?;
     decrypt_setting_in_tx(&tx, "pkey", key, |v| v.starts_with("nsec"))?;
     decrypt_pivx_in_tx(&tx, key)?;
+    decrypt_community_in_tx(&tx, key)?;
 
     // 4. Verify plaintext state within the transaction (before committing)
     verify_plaintext_state_in_tx(&tx)?;
@@ -589,6 +590,7 @@ fn enable_encryption_transactional<R: Runtime>(
     encrypt_setting_in_tx(&tx, "seed", key, |v| v.contains(' '))?;
     encrypt_setting_in_tx(&tx, "pkey", key, |v| v.starts_with("nsec"))?;
     encrypt_pivx_in_tx(&tx, key)?;
+    encrypt_community_in_tx(&tx, key)?;
 
     // 4. Verify encrypted state within the transaction (before committing)
     verify_encrypted_state_in_tx(&tx, key)?;
@@ -733,6 +735,293 @@ fn encrypt_pivx_in_tx(
         }
     }
 
+    Ok(())
+}
+
+// ============================================================================
+// Community (Concord) at-rest migration
+// ============================================================================
+//
+// The community tables hold their own secrets + identifying metadata, wrapped the same way as the
+// pkey/event-content/PIVX fields. These helpers re-wrap them in lockstep with the three lifecycle
+// flows. One direction-agnostic engine: `dec` decrypts with the given key first, then `enc` encrypts
+// with the given key — so enable = enc only, disable = dec only, rekey = dec(old) then enc(new). The
+// discriminators (text `looks_encrypted`; blob 32-byte-raw vs longer) make every step idempotent, so
+// a re-run or the one-time backfill never double-wraps or fails on already-migrated rows.
+
+// Idempotency discriminator for both directions is the AEAD tag itself — "already encrypted under
+// key `k`" iff the value decrypts cleanly under `k` — NOT a hex/length content heuristic. A content
+// heuristic (`looks_encrypted`) silently mis-classifies plaintext that happens to be bare hex (invite
+// tokens, creator pubkeys) as ciphertext and skips wrapping it; the tag check can't be fooled (a
+// 16-byte Poly1305 tag won't validate on non-ciphertext), and it never double-wraps on re-run.
+
+fn xform_text(v: &str, enc: Option<&[u8; 32]>, dec: Option<&[u8; 32]>) -> Result<String, String> {
+    let mut s = v.to_string();
+    if let Some(k) = dec {
+        // Try to decrypt; anything that isn't ciphertext under `k` fails the tag and is kept as-is.
+        if let Ok(p) = decrypt_with_key(&s, k) {
+            s = p;
+        }
+    }
+    if let Some(k) = enc {
+        // Encrypt unless it already decrypts under `k` (already wrapped → leave it).
+        if decrypt_with_key(&s, k).is_err() {
+            s = encrypt_with_key(&s, k);
+        }
+    }
+    Ok(s)
+}
+
+fn xform_text_opt(v: &Option<String>, enc: Option<&[u8; 32]>, dec: Option<&[u8; 32]>) -> Result<Option<String>, String> {
+    v.as_deref().map(|s| xform_text(s, enc, dec)).transpose()
+}
+
+fn xform_blob(v: &[u8], enc: Option<&[u8; 32]>, dec: Option<&[u8; 32]>) -> Result<Vec<u8>, String> {
+    let mut b = v.to_vec();
+    if let Some(k) = dec {
+        // A raw 32-byte key (or anything not ciphertext under `k`) fails the tag and is kept as-is.
+        if let Ok(p) = crate::crypto::decrypt_blob_with_key(&b, k) {
+            b = p;
+        }
+    }
+    if let Some(k) = enc {
+        if crate::crypto::decrypt_blob_with_key(&b, k).is_err() {
+            b = crate::crypto::encrypt_blob_with_key(&b, k)?;
+        }
+    }
+    Ok(b)
+}
+
+#[cfg(test)]
+mod xform_tests {
+    use super::*;
+    const K: [u8; 32] = [7u8; 32];
+    const K2: [u8; 32] = [9u8; 32];
+
+    #[test]
+    fn bare_hex_plaintext_is_encrypted_not_skipped() {
+        // C1 regression: a 64-char-hex plaintext (invite token / creator pubkey) must be wrapped,
+        // never mistaken for ciphertext.
+        let token = "de".repeat(32); // 64 lowercase hex chars
+        let wrapped = xform_text(&token, Some(&K), None).unwrap();
+        assert_ne!(wrapped, token, "bare-hex plaintext must be encrypted");
+        assert_eq!(decrypt_with_key(&wrapped, &K).unwrap(), token);
+    }
+
+    #[test]
+    fn encrypt_is_idempotent() {
+        let token = "de".repeat(32);
+        let once = xform_text(&token, Some(&K), None).unwrap();
+        let twice = xform_text(&once, Some(&K), None).unwrap();
+        assert_eq!(once, twice, "re-running encrypt must not double-wrap");
+        assert_eq!(decrypt_with_key(&twice, &K).unwrap(), token);
+    }
+
+    #[test]
+    fn disable_then_reenable_roundtrips_bare_hex() {
+        let token = "ab".repeat(32);
+        let enc = xform_text(&token, Some(&K), None).unwrap();
+        let dec = xform_text(&enc, None, Some(&K)).unwrap();
+        assert_eq!(dec, token, "disable decrypts back to plaintext");
+        let re = xform_text(&dec, Some(&K), None).unwrap();
+        assert_eq!(decrypt_with_key(&re, &K).unwrap(), token, "re-enable wraps the bare-hex again");
+    }
+
+    #[test]
+    fn rekey_rewraps_bare_hex_under_new_key() {
+        let token = "cd".repeat(32);
+        let old = xform_text(&token, Some(&K), None).unwrap();
+        let new = xform_text(&old, Some(&K2), Some(&K)).unwrap(); // dec old, enc new
+        assert!(decrypt_with_key(&new, &K).is_err(), "no longer under old key");
+        assert_eq!(decrypt_with_key(&new, &K2).unwrap(), token, "now under new key");
+    }
+
+    #[test]
+    fn nonhex_plaintext_roundtrips() {
+        for v in ["general", "{\"roles\":[]}", "wss://relay.example", ""] {
+            let enc = xform_text(v, Some(&K), None).unwrap();
+            assert_eq!(decrypt_with_key(&enc, &K).unwrap(), v);
+            assert_eq!(xform_text(&enc, None, Some(&K)).unwrap(), v);
+        }
+    }
+
+    #[test]
+    fn blob_roundtrip_and_idempotent() {
+        let raw = [0x42u8; 32];
+        let enc = xform_blob(&raw, Some(&K), None).unwrap();
+        assert_eq!(enc.len(), 60);
+        assert_eq!(xform_blob(&enc, Some(&K), None).unwrap(), enc, "blob encrypt idempotent");
+        assert_eq!(xform_blob(&enc, None, Some(&K)).unwrap(), raw.to_vec());
+        // rekey path for blobs
+        let re = xform_blob(&enc, Some(&K2), Some(&K)).unwrap();
+        assert_eq!(crate::crypto::decrypt_blob_with_key(&re, &K2).unwrap(), raw.to_vec());
+    }
+}
+
+fn migrate_community_in_tx(
+    tx: &rusqlite::Transaction,
+    enc: Option<&[u8; 32]>,
+    dec: Option<&[u8; 32]>,
+) -> Result<(), String> {
+    // communities: 1 secret BLOB + identifying text (some nullable).
+    let rows: Vec<(String, Vec<u8>, String, String, Option<String>, Option<String>, Option<String>, String, Option<String>, String, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT community_id, server_root_key, name, relays, description, icon, banner, banlist, owner_attestation, roles, invite_registry FROM communities",
+        ).map_err(|e| format!("prepare communities: {e}"))?;
+        let mapped = stmt.query_map([], |r| Ok((
+            r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?,
+            r.get::<_, Option<String>>(4)?, r.get::<_, Option<String>>(5)?, r.get::<_, Option<String>>(6)?,
+            r.get::<_, String>(7)?, r.get::<_, Option<String>>(8)?, r.get::<_, String>(9)?, r.get::<_, String>(10)?,
+        ))).map_err(|e| format!("query communities: {e}"))?;
+        mapped.filter_map(|r| r.ok()).collect()
+    };
+    for (id, root, name, relays, desc, icon, banner, banlist, owner, roles, registry) in rows {
+        tx.execute(
+            "UPDATE communities SET server_root_key=?1, name=?2, relays=?3, description=?4, icon=?5,
+                banner=?6, banlist=?7, owner_attestation=?8, roles=?9, invite_registry=?10 WHERE community_id=?11",
+            rusqlite::params![
+                xform_blob(&root, enc, dec)?, xform_text(&name, enc, dec)?, xform_text(&relays, enc, dec)?,
+                xform_text_opt(&desc, enc, dec)?, xform_text_opt(&icon, enc, dec)?, xform_text_opt(&banner, enc, dec)?,
+                xform_text(&banlist, enc, dec)?, xform_text_opt(&owner, enc, dec)?, xform_text(&roles, enc, dec)?,
+                xform_text(&registry, enc, dec)?, id,
+            ],
+        ).map_err(|e| format!("update communities: {e}"))?;
+    }
+
+    // community_channels: channel_key BLOB + name.
+    let chans: Vec<(String, Vec<u8>, String)> = {
+        let mut stmt = tx.prepare("SELECT channel_id, channel_key, name FROM community_channels")
+            .map_err(|e| format!("prepare channels: {e}"))?;
+        let mapped = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, String>(2)?)))
+            .map_err(|e| format!("query channels: {e}"))?;
+        mapped.filter_map(|r| r.ok()).collect()
+    };
+    for (cid, key, name) in chans {
+        tx.execute(
+            "UPDATE community_channels SET channel_key=?1, name=?2 WHERE channel_id=?3",
+            rusqlite::params![xform_blob(&key, enc, dec)?, xform_text(&name, enc, dec)?, cid],
+        ).map_err(|e| format!("update channel: {e}"))?;
+    }
+
+    // community_epoch_keys: key BLOB (rowid-keyed — coordinate columns aren't unique enough alone).
+    let eks: Vec<(i64, Vec<u8>)> = {
+        let mut stmt = tx.prepare("SELECT rowid, key FROM community_epoch_keys")
+            .map_err(|e| format!("prepare epoch keys: {e}"))?;
+        let mapped = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))
+            .map_err(|e| format!("query epoch keys: {e}"))?;
+        mapped.filter_map(|r| r.ok()).collect()
+    };
+    for (rowid, key) in eks {
+        tx.execute("UPDATE community_epoch_keys SET key=?1 WHERE rowid=?2",
+            rusqlite::params![xform_blob(&key, enc, dec)?, rowid])
+            .map_err(|e| format!("update epoch key: {e}"))?;
+    }
+
+    // community_message_keys: ephemeral_secret BLOB + relays.
+    let mks: Vec<(String, Vec<u8>, String)> = {
+        let mut stmt = tx.prepare("SELECT outer_event_id, ephemeral_secret, relays FROM community_message_keys")
+            .map_err(|e| format!("prepare msg keys: {e}"))?;
+        let mapped = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, String>(2)?)))
+            .map_err(|e| format!("query msg keys: {e}"))?;
+        mapped.filter_map(|r| r.ok()).collect()
+    };
+    for (oid, secret, relays) in mks {
+        tx.execute("UPDATE community_message_keys SET ephemeral_secret=?1, relays=?2 WHERE outer_event_id=?3",
+            rusqlite::params![xform_blob(&secret, enc, dec)?, xform_text(&relays, enc, dec)?, oid])
+            .map_err(|e| format!("update msg key: {e}"))?;
+    }
+
+    // pending_community_invites: bundle_json + inviter_npub.
+    let pend: Vec<(String, String, String)> = {
+        let mut stmt = tx.prepare("SELECT community_id, bundle_json, inviter_npub FROM pending_community_invites")
+            .map_err(|e| format!("prepare pending: {e}"))?;
+        let mapped = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+            .map_err(|e| format!("query pending: {e}"))?;
+        mapped.filter_map(|r| r.ok()).collect()
+    };
+    for (id, bundle, inviter) in pend {
+        tx.execute("UPDATE pending_community_invites SET bundle_json=?1, inviter_npub=?2 WHERE community_id=?3",
+            rusqlite::params![xform_text(&bundle, enc, dec)?, xform_text(&inviter, enc, dec)?, id])
+            .map_err(|e| format!("update pending: {e}"))?;
+    }
+
+    // community_public_invites: token + url (rowid-keyed — token is itself wrapped).
+    let pubs: Vec<(i64, String, String)> = {
+        let mut stmt = tx.prepare("SELECT rowid, token, url FROM community_public_invites")
+            .map_err(|e| format!("prepare public invites: {e}"))?;
+        let mapped = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+            .map_err(|e| format!("query public invites: {e}"))?;
+        mapped.filter_map(|r| r.ok()).collect()
+    };
+    for (rowid, token, url) in pubs {
+        tx.execute("UPDATE community_public_invites SET token=?1, url=?2 WHERE rowid=?3",
+            rusqlite::params![xform_text(&token, enc, dec)?, xform_text(&url, enc, dec)?, rowid])
+            .map_err(|e| format!("update public invite: {e}"))?;
+    }
+
+    // community_invite_link_sets: creator + locators (rowid-keyed — creator is itself wrapped).
+    let sets: Vec<(i64, String, String)> = {
+        let mut stmt = tx.prepare("SELECT rowid, creator, locators FROM community_invite_link_sets")
+            .map_err(|e| format!("prepare link sets: {e}"))?;
+        let mapped = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+            .map_err(|e| format!("query link sets: {e}"))?;
+        mapped.filter_map(|r| r.ok()).collect()
+    };
+    for (rowid, creator, locators) in sets {
+        tx.execute("UPDATE community_invite_link_sets SET creator=?1, locators=?2 WHERE rowid=?3",
+            rusqlite::params![xform_text(&creator, enc, dec)?, xform_text(&locators, enc, dec)?, rowid])
+            .map_err(|e| format!("update link set: {e}"))?;
+    }
+
+    Ok(())
+}
+
+/// Encrypt all Concord secrets + metadata (enable flow).
+fn encrypt_community_in_tx(tx: &rusqlite::Transaction, key: &[u8; 32]) -> Result<(), String> {
+    migrate_community_in_tx(tx, Some(key), None)
+}
+/// Decrypt all Concord secrets + metadata (disable flow).
+fn decrypt_community_in_tx(tx: &rusqlite::Transaction, key: &[u8; 32]) -> Result<(), String> {
+    migrate_community_in_tx(tx, None, Some(key))
+}
+/// Re-wrap all Concord secrets + metadata old key → new key (PIN-rekey flow).
+fn rekey_community_in_tx(tx: &rusqlite::Transaction, old_key: &[u8; 32], new_key: &[u8; 32]) -> Result<(), String> {
+    migrate_community_in_tx(tx, Some(new_key), Some(old_key))
+}
+
+/// One-time backfill for an account that already had Local Encryption ON *before* Concord at-rest
+/// encryption shipped: its community rows are still plaintext. Wrap them once, gated by a per-account
+/// settings flag. Idempotent (the field discriminators skip already-wrapped rows), so a crash mid-pass
+/// re-runs next login. No-op when encryption is off, the key vault is empty, or the flag is set.
+/// Best-effort at the call site — a failure leaves the flag unset and retries, never blocks login.
+pub fn backfill_community_at_rest() -> Result<(), String> {
+    if !vector_core::state::is_encryption_enabled_fast() {
+        return Ok(());
+    }
+    if vector_core::db::get_sql_setting("community_at_rest_encrypted".to_string())
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("1")
+    {
+        return Ok(());
+    }
+    let mut key = match crate::ENCRYPTION_KEY.get() {
+        Some(k) => k,
+        None => return Ok(()), // locked / not yet derived — retry on a later login
+    };
+    let conn = vector_core::db::get_write_connection_guard_static()?;
+    let tx = conn.unchecked_transaction().map_err(|e| format!("backfill tx: {e}"))?;
+    let res = encrypt_community_in_tx(&tx, &key);
+    key.zeroize();
+    res?;
+    tx.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('community_at_rest_encrypted', '1')",
+        [],
+    )
+    .map_err(|e| format!("backfill flag: {e}"))?;
+    tx.commit().map_err(|e| format!("backfill commit: {e}"))?;
+    println!("[Encryption] Community at-rest backfill complete");
     Ok(())
 }
 
@@ -1080,6 +1369,7 @@ fn rekey_encryption_transactional<R: Runtime>(
     rekey_setting_in_tx(&tx, "pkey", old_key, new_key)?;
     rekey_setting_in_tx(&tx, "seed", old_key, new_key)?;
     rekey_pivx_in_tx(&tx, old_key, new_key)?;
+    rekey_community_in_tx(&tx, old_key, new_key)?;
 
     // 4. Verify re-keyed state within the transaction (before committing)
     verify_encrypted_state_in_tx(&tx, new_key)?;

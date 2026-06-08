@@ -1,6 +1,7 @@
 //! Event storage — save_event for the flat event architecture.
 
 use crate::stored_event::{StoredEvent, event_kind};
+use rusqlite::OptionalExtension;
 use crate::crypto::maybe_encrypt;
 use crate::types::{Message, Attachment, Reaction};
 
@@ -228,11 +229,30 @@ pub async fn save_system_event_by_id(
     member_npub: &str,
     member_name: Option<&str>,
 ) -> Result<bool, String> {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs()).unwrap_or(0);
+    save_system_event_at(event_id, conversation_id, event_type, member_npub, member_name, now_secs).await
+}
+
+/// Like [`save_system_event_by_id`] but stamps `created_at` from the event's own authenticated timestamp
+/// (clamped to not exceed local now, since the inner author sets it) so a HISTORICALLY-synced presence
+/// (join/leave) sorts at the time it happened, not at ingest-time now. `received_at` stays local now.
+pub async fn save_system_event_at(
+    event_id: &str,
+    conversation_id: &str,
+    event_type: crate::stored_event::SystemEventType,
+    member_npub: &str,
+    member_name: Option<&str>,
+    created_at_secs: u64,
+) -> Result<bool, String> {
     let chat_id = super::id_cache::get_or_create_chat_id(conversation_id)?;
 
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs()).unwrap_or(0);
+    // Author-set timestamp: clamp forward so a future-dated event can't jump ahead of real activity.
+    let created_at = created_at_secs.min(now_secs);
 
     let display_name = member_name.unwrap_or(member_npub);
     let content = event_type.display_message(display_name);
@@ -255,7 +275,7 @@ pub async fn save_system_event_by_id(
             event_id,
             event_kind::APPLICATION_SPECIFIC as i32,
             chat_id, None::<i64>, content, tags_json, None::<String>,
-            now_secs as i64, now_secs as i64,
+            created_at as i64, now_secs as i64,
             0, 0, 0, None::<String>, member_npub,
         ],
     ).map_err(|e| format!("Failed to save system event: {}", e))?;
@@ -306,6 +326,23 @@ pub async fn delete_event(event_id: &str) -> Result<(), String> {
         rusqlite::params![event_id],
     ).map_err(|e| format!("Failed to delete event: {}", e))?;
     Ok(())
+}
+
+/// The stored author (npub) of an event, or `None` if the row (or DB) is absent. Lets the
+/// out-of-window moderation-hide path authorize against a paged-out message's real author.
+pub fn event_author(event_id: &str) -> Result<Option<String>, String> {
+    let conn = match super::get_db_connection_guard_static() {
+        Ok(c) => c,
+        Err(_) => return Ok(None),
+    };
+    conn.query_row(
+        "SELECT npub FROM events WHERE id = ?1",
+        rusqlite::params![event_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map(|o| o.flatten())
+    .map_err(|e| format!("Failed to read event author: {}", e))
 }
 
 /// Check if a message/event exists in the database. Returns false if DB unavailable.
@@ -913,7 +950,8 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
              FROM chats c JOIN events e ON e.rowid = ( \
                  SELECT e2.rowid FROM events e2 WHERE e2.chat_id = c.id \
                  AND e2.kind IN (?1, ?2, ?3) \
-                 ORDER BY e2.created_at DESC, e2.received_at DESC LIMIT 1)"
+                 ORDER BY e2.created_at DESC, e2.received_at DESC LIMIT 1) \
+             WHERE c.chat_type != 1"
         ).map_err(|e| format!("Failed to prepare: {}", e))?;
 
         let rows = stmt.query_map(
@@ -1052,4 +1090,65 @@ pub async fn save_chat_messages(chat_id: &str, messages: &[Message]) -> Result<(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stored_event::SystemEventType;
+
+    static TEST_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(71000);
+
+    fn make_test_npub(n: u32) -> String {
+        const BECH32: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+        let mut payload = vec![b'q'; 58];
+        let mut x = n as u64;
+        let mut i = 58;
+        while x > 0 && i > 0 {
+            i -= 1;
+            payload[i] = BECH32[(x as usize) % 32];
+            x /= 32;
+        }
+        format!("npub1{}", std::str::from_utf8(&payload).unwrap())
+    }
+
+    fn init_test_db() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
+        let guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        let tmp = tempfile::tempdir().unwrap();
+        let n = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let account = make_test_npub(n);
+        std::fs::create_dir_all(tmp.path().join(&account)).unwrap();
+        crate::db::set_app_data_dir(tmp.path().to_path_buf());
+        crate::db::set_current_account(account.clone()).unwrap();
+        crate::db::init_database(&account).unwrap();
+        (tmp, guard)
+    }
+
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+    }
+
+    // C-H2: a presence (join/leave) persisted from HISTORY must keep its authenticated timestamp so it
+    // sorts where it happened, not at ingest-time "now"; a future-dated one is clamped so it can't jump
+    // ahead of real activity.
+    #[tokio::test]
+    async fn system_event_stamps_authenticated_time_clamped_to_now() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "channel_ch2_timestamp";
+        let before = now_secs();
+        let past = before - 100_000;
+
+        save_system_event_at("ev_past", chat, SystemEventType::MemberJoined, "npubX", None, past).await.unwrap();
+        save_system_event_at("ev_future", chat, SystemEventType::MemberJoined, "npubX", None, before + 100_000).await.unwrap();
+        let after = now_secs();
+
+        let evs = get_system_events_for_chat(chat).unwrap();
+        let past_ev = evs.iter().find(|e| e.id == "ev_past").expect("past event saved");
+        assert_eq!(past_ev.created_at, past, "historical join keeps its real (authenticated) timestamp");
+
+        let fut_ev = evs.iter().find(|e| e.id == "ev_future").expect("future event saved");
+        assert!(fut_ev.created_at >= before && fut_ev.created_at <= after,
+            "future-dated event clamped to local now ({} not in {}..={})", fut_ev.created_at, before, after);
+    }
 }

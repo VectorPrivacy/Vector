@@ -17,7 +17,7 @@ function generateTypingText(chat) {
     let activeTypers = chat.active_typers || [];
     if (activeTypers.length === 0) return null;
 
-    const isGroup = chat.chat_type === 'MlsGroup';
+    const isGroup = chatIsGroup(chat);
 
     // Filter out blocked users from typing indicators in group chats
     if (isGroup) {
@@ -58,7 +58,7 @@ function generateTypingText(chat) {
  * @returns {{ text: string, isTyping: boolean, needsTwemoji: boolean }}
  */
 function generateChatPreviewText(chat) {
-    const isGroup = chat.chat_type === 'MlsGroup';
+    const isGroup = chatIsGroup(chat);
 
     // Walk back to find the latest actual conversation message. System
     // events (wallpaper changes, member joined/left) and — in group chats —

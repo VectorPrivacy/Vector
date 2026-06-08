@@ -6,13 +6,13 @@
 
 use nostr_sdk::prelude::*;
 
-use crate::{mls, nostr_client, active_trusted_relays};
+use crate::{nostr_client, active_trusted_relays};
 
 // ============================================================================
 // Typing Indicators
 // ============================================================================
 
-/// Send a typing indicator to a DM recipient or MLS group
+/// Send a typing indicator to a DM recipient
 #[tauri::command]
 pub async fn start_typing(receiver: String) -> bool {
     // Return false on no-session — typing fires continuously from
@@ -20,7 +20,6 @@ pub async fn start_typing(receiver: String) -> bool {
     let Some(client) = nostr_client() else { return false; };
     let Some(my_public_key) = crate::my_public_key() else { return false; };
 
-    // Check if this is a group chat (group IDs are hex, not bech32)
     match PublicKey::from_bech32(receiver.as_str()) {
         Ok(pubkey) => {
             // This is a DM - use NIP-17 gift wrapping
@@ -60,28 +59,8 @@ pub async fn start_typing(receiver: String) -> bool {
                 Err(_) => false,
             }
         }
-        Err(_) => {
-            // This is a group chat - use MLS
-            let group_id = receiver.clone();
-
-            // Build the typing indicator rumor
-            let rumor = EventBuilder::new(Kind::ApplicationSpecificData, "typing")
-                .tag(Tag::custom(TagKind::d(), vec!["vector"]))
-                .tag(Tag::expiration(Timestamp::from_secs(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs()
-                        + 30,
-                )))
-                .build(my_public_key);
-
-            // Send via MLS
-            match mls::send_mls_message(&group_id, rumor, None).await {
-                Ok(_) => true,
-                Err(_e) => false,
-            }
-        }
+        // Non-DM (hex) targets have no ephemeral typing transport.
+        Err(_) => false,
     }
 }
 
@@ -103,7 +82,6 @@ pub async fn send_webxdc_peer_advertisement(
     log_info!("Sending WebXDC peer advertisement to {} for topic {}", receiver, topic_id);
     log_debug!("Node address: {}", node_addr);
 
-    // Check if this is a group chat (group IDs are hex, not bech32)
     match PublicKey::from_bech32(receiver.as_str()) {
         Ok(pubkey) => {
             // This is a DM - use NIP-17 gift wrapping
@@ -130,28 +108,13 @@ pub async fn send_webxdc_peer_advertisement(
                 Err(_) => false,
             }
         }
-        Err(_) => {
-            // This is a group chat - use MLS
-            let group_id = receiver.clone();
-
-            // Build the peer advertisement rumor (no expiry — peer-left signal handles cleanup)
-            let rumor = EventBuilder::new(Kind::ApplicationSpecificData, "peer-advertisement")
-                .tag(Tag::custom(TagKind::d(), vec!["vector-webxdc-peer"]))
-                .tag(Tag::custom(TagKind::custom("webxdc-topic"), vec![topic_id]))
-                .tag(Tag::custom(TagKind::custom("webxdc-node-addr"), vec![node_addr]))
-                .build(my_public_key);
-
-            // Send via MLS
-            match mls::send_mls_message(&group_id, rumor, None).await {
-                Ok(_) => true,
-                Err(_e) => false,
-            }
-        }
+        // Non-DM (hex) targets have no WebXDC peer transport.
+        Err(_) => false,
     }
 }
 
 /// Send a "peer-left" signal so other clients know we've stopped playing.
-/// Same transport as peer advertisements (NIP-17 DM or MLS group message).
+/// Same transport as peer advertisements (NIP-17 DM gift wrap).
 pub async fn send_webxdc_peer_left(
     receiver: String,
     topic_id: String,
@@ -182,18 +145,8 @@ pub async fn send_webxdc_peer_left(
                 Err(_) => false,
             }
         }
-        Err(_) => {
-            let group_id = receiver;
-            let rumor = EventBuilder::new(Kind::ApplicationSpecificData, "peer-left")
-                .tag(Tag::custom(TagKind::d(), vec!["vector-webxdc-peer"]))
-                .tag(Tag::custom(TagKind::custom("webxdc-topic"), vec![topic_id]))
-                .build(my_public_key);
-
-            match mls::send_mls_message(&group_id, rumor, None).await {
-                Ok(_) => true,
-                Err(_) => false,
-            }
-        }
+        // Non-DM (hex) targets have no WebXDC peer transport.
+        Err(_) => false,
     }
 }
 
@@ -201,7 +154,7 @@ pub async fn send_webxdc_peer_left(
 // Live Subscriptions
 // ============================================================================
 
-/// Start live subscriptions for real-time events (GiftWraps + MLS messages).
+/// Start live subscriptions for real-time events (GiftWraps + Community messages).
 /// Called once after login to begin receiving notifications.
 #[tauri::command]
 pub async fn notifs() -> Result<bool, String> {

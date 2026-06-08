@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-rename-community-channel"
+description = "Enables the rename_community_channel command without any pre-configured scope."
+commands.allow = ["rename_community_channel"]
+
+[[permission]]
+identifier = "deny-rename-community-channel"
+description = "Denies the rename_community_channel command without any pre-configured scope."
+commands.deny = ["rename_community_channel"]

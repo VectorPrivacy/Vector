@@ -12,6 +12,12 @@ static CHAT_ID_CACHE: LazyLock<Arc<RwLock<HashMap<String, i64>>>> =
 static USER_ID_CACHE: LazyLock<Arc<RwLock<HashMap<String, i64>>>> =
     LazyLock::new(|| Arc::new(RwLock::new(HashMap::new())));
 
+/// Drop a chat's cached identifier→id mapping. Call after deleting a chat row so
+/// a later recreate doesn't reuse the stale (now-deleted) integer id.
+pub fn forget_chat_id(chat_identifier: &str) {
+    CHAT_ID_CACHE.write().unwrap().remove(chat_identifier);
+}
+
 /// Lookup-only: get integer chat ID from identifier. Errors if not found.
 pub fn get_chat_id_by_identifier(chat_identifier: &str) -> Result<i64, String> {
     // Fast path: cache hit
@@ -61,11 +67,14 @@ pub fn get_or_create_chat_id(chat_identifier: &str) -> Result<i64, String> {
     let id = if let Some(id) = existing {
         id
     } else {
-        // Create stub chat entry
+        // Create stub chat entry. Discriminant must match ChatType::to_i32:
+        // 0 = DirectMessage (npub), 2 = Community (non-npub). Value 1 was the
+        // retired MlsGroup variant and is dropped by the get_all_chats load filter,
+        // so a non-npub stub MUST be 2 or the chat vanishes on reload.
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap()
             .as_secs() as i64;
-        let chat_type: i32 = if chat_identifier.starts_with("npub1") { 0 } else { 1 };
+        let chat_type: i32 = if chat_identifier.starts_with("npub1") { 0 } else { 2 };
 
         conn.execute(
             "INSERT INTO chats (chat_identifier, chat_type, participants, created_at) VALUES (?1, ?2, '[]', ?3)",

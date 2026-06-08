@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-update-community-metadata"
+description = "Enables the update_community_metadata command without any pre-configured scope."
+commands.allow = ["update_community_metadata"]
+
+[[permission]]
+identifier = "deny-update-community-metadata"
+description = "Denies the update_community_metadata command without any pre-configured scope."
+commands.deny = ["update_community_metadata"]

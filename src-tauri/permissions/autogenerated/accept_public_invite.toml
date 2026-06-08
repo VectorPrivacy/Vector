@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-accept-public-invite"
+description = "Enables the accept_public_invite command without any pre-configured scope."
+commands.allow = ["accept_public_invite"]
+
+[[permission]]
+identifier = "deny-accept-public-invite"
+description = "Denies the accept_public_invite command without any pre-configured scope."
+commands.deny = ["accept_public_invite"]

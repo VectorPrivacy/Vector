@@ -12,7 +12,7 @@ use std::sync::LazyLock;
 use nostr_sdk::prelude::*;
 use tauri::{AppHandle, Emitter, Runtime};
 
-use crate::{db, nostr_client, TAURI_APP, get_blossom_servers};
+use crate::{nostr_client, TAURI_APP, get_blossom_servers};
 
 // ============================================================================
 // Constants
@@ -20,7 +20,7 @@ use crate::{db, nostr_client, TAURI_APP, get_blossom_servers};
 
 /// Default relays that come pre-configured
 pub const DEFAULT_RELAYS: &[&str] = &[
-    "wss://jskitty.cat/nostr",        // TRUSTED_RELAY
+    "wss://jskitty.com/nostr",        // TRUSTED_RELAY
     "wss://asia.vectorapp.io/nostr",  // TRUSTED_RELAY
     "wss://nostr.computingcache.com", // TRUSTED_RELAY
     "wss://relay.damus.io",
@@ -909,6 +909,9 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                                 tokio::spawn(async move {
                                     crate::commands::sync::fetch_messages(handle_inner, false, Some(url_string)).await;
                                 });
+                                // Communities re-sync on reconnect too (NIP-17 parity). Debounced full
+                                // sweep — coalesces a multi-relay reconnect burst into one sweep.
+                                crate::commands::community::trigger_community_reconnect_resync();
                             }
                         }
                         _ => {}
@@ -1156,40 +1159,6 @@ pub async fn connect<R: Runtime>(handle: AppHandle<R>) -> bool {
         };
         if let Err(e) = crate::inbox_relays::publish_inbox_relays(&client).await {
             eprintln!("[Relay] Failed to publish inbox relays: {}", e);
-        }
-    });
-
-    // Post-connect: force-regenerate device KeyPackage if flagged by migration 13
-    // (v0.3.0 upgrade: old keypackages used incompatible MLS engine format)
-    tokio::spawn(async {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-        if crate::account_manager::get_current_account().is_err() {
-            return;
-        }
-
-        if TAURI_APP.get().is_none() {
-            return;
-        }
-
-        // Check if migration flagged a forced keypackage regeneration
-        let force_regen = db::get_sql_setting("mls_force_keypackage_regen".into())
-            .ok()
-            .flatten()
-            .map(|v| v == "1")
-            .unwrap_or(false);
-
-        if force_regen {
-            println!("[MLS] v0.3.0 upgrade: forcing fresh KeyPackage regeneration...");
-            match crate::commands::mls::regenerate_device_keypackage(false).await {
-                Ok(info) => {
-                    let device_id = info.get("device_id").and_then(|v| v.as_str()).unwrap_or("");
-                    println!("[MLS] Device KeyPackage regenerated (new format): device_id={}", device_id);
-                    // Clear the flag so we don't regenerate again
-                    let _ = db::remove_setting("mls_force_keypackage_regen".into());
-                }
-                Err(e) => println!("[MLS] Device KeyPackage regeneration FAILED: {}", e),
-            }
         }
     });
 

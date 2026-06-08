@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-grant-community-admin"
+description = "Enables the grant_community_admin command without any pre-configured scope."
+commands.allow = ["grant_community_admin"]
+
+[[permission]]
+identifier = "deny-grant-community-admin"
+description = "Denies the grant_community_admin command without any pre-configured scope."
+commands.deny = ["grant_community_admin"]

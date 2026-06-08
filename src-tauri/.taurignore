@@ -10,6 +10,11 @@ patches/**/.git/
 # Build artefacts inside patched crates.
 patches/**/target/
 
+# Cargo `examples/` are standalone diagnostic binaries (e.g. vector-core's concord_control_dump,
+# invite_probe) — they're never linked into the app, so editing one must not trigger an app rebuild.
+**/examples/
+**/examples/**
+
 # IDE / OS / temp files.
 **/.DS_Store
 **/*.swp

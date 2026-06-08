@@ -3640,12 +3640,7 @@ function _sendCustomEmojiReaction(shortcode, url) {
         const divMessage = document.getElementById(cMsg.id);
         _dmsgInjectReaction(divMessage, spanReaction);
 
-        invoke('react_to_message', {
-            referenceId: strCurrentReactionReference,
-            chatId: strReceiverPubkey,
-            emoji: `:${shortcode}:`,
-            emojiUrl: url,
-        });
+        reactToMessageRouted(strCurrentReactionReference, strReceiverPubkey, `:${shortcode}:`, url);
     }
 }
 
@@ -4135,7 +4130,7 @@ picker.addEventListener('click', (e) => {
 
                         const divMessage = document.getElementById(cMsg.id);
                         _dmsgInjectReaction(divMessage, spanReaction);
-                        invoke('react_to_message', { referenceId: strCurrentReactionReference, chatId: strReceiverPubkey, emoji: cEmoji.emoji });
+                        reactToMessageRouted(strCurrentReactionReference, strReceiverPubkey, cEmoji.emoji);
                     }
                 }
             } else {
@@ -4211,7 +4206,7 @@ emojiSearch.onkeydown = async (e) => {
                 _dmsgInjectReaction(divMessage, spanReaction);
 
                 // Send the Reaction to the network (protocol-agnostic)
-                invoke('react_to_message', { referenceId: strCurrentReactionReference, chatId: strReceiverPubkey, emoji: cEmoji.emoji });
+                reactToMessageRouted(strCurrentReactionReference, strReceiverPubkey, cEmoji.emoji);
             }
         } else {
             // Add to message input at cursor position (with auto-spacing)
@@ -4313,7 +4308,7 @@ picker.addEventListener('click', (e) => {
                 _dmsgInjectReaction(divMessage, spanReaction);
 
                 // Send the Reaction to the network (protocol-agnostic)
-                invoke('react_to_message', { referenceId: strCurrentReactionReference, chatId: strReceiverPubkey, emoji: cEmoji.emoji });
+                reactToMessageRouted(strCurrentReactionReference, strReceiverPubkey, cEmoji.emoji);
             }
         }
     }

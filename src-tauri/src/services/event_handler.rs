@@ -3,7 +3,7 @@
 //! Thin Tauri wrapper around vector-core's two-phase event pipeline.
 //! - Processing gate: queues events during encryption migration
 //! - TauriEventHandler: OS notifications, badge updates
-//! - WebXDC/MLS Welcome: intercepted before vector-core (platform-specific)
+//! - WebXDC: intercepted before vector-core (platform-specific)
 
 use nostr_sdk::prelude::*;
 use tauri::{Emitter, Manager};
@@ -13,8 +13,8 @@ use vector_core::{Message, RumorProcessingResult};
 
 use crate::{
     db, miniapps, commands,
-    MlsService, NotificationData, show_notification_generic,
-    STATE, TAURI_APP, nostr_client, WRAPPER_ID_CACHE, NOTIFIED_WELCOMES,
+    NotificationData, show_notification_generic,
+    STATE, TAURI_APP, nostr_client, WRAPPER_ID_CACHE,
     util::get_file_type_description,
     state::{is_processing_allowed, PENDING_EVENTS},
 };
@@ -125,83 +125,15 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
         });
     }
 
-    fn on_mls_welcome(
-        &self,
-        event: &Event,
-        _rumor: &UnsignedEvent,
-        _sender: &PublicKey,
-        contact: &str,
-        is_mine: bool,
-        is_new: bool,
-    ) {
-        let wrapper_id = event.id;
-        let contact = contact.to_string();
-
-        tokio::spawn(async move {
-            // Only emit/notify after initial sync completes
-            let should_emit = {
-                let state = STATE.lock().await;
-                !state.is_syncing
-            };
-            if !should_emit { return; }
-
-            // UI event refreshes the invite list
-            if let Some(app) = TAURI_APP.get() {
-                let _ = app.emit("mls_invite_received", serde_json::json!({
-                    "wrapper_event_id": wrapper_id.to_hex(),
-                }));
-            }
-
-            // OS notification for new inbound invites
-            if !is_mine && is_new {
-                // Read the freshly-processed welcome from MDK to get the group name
-                let group_name = tokio::task::spawn_blocking(move || {
-                    let mls = MlsService::new_persistent_static().ok()?;
-                    let engine = mls.engine().ok()?;
-                    let welcomes = engine.get_pending_welcomes(None).ok()?;
-                    welcomes.iter()
-                        .find(|w| w.wrapper_event_id == wrapper_id)
-                        .map(|w| w.group_name.clone())
-                }).await.ok().flatten().unwrap_or_default();
-
-                let display_info = {
-                    let state = STATE.lock().await;
-                    match state.get_profile(&contact) {
-                        Some(profile) => {
-                            let name = if !profile.nickname.is_empty() {
-                                profile.nickname.to_string()
-                            } else if !profile.name.is_empty() {
-                                profile.name.to_string()
-                            } else {
-                                String::from("Someone")
-                            };
-                            let avatar = if !profile.avatar_cached.is_empty() {
-                                Some(profile.avatar_cached.to_string())
-                            } else {
-                                None
-                            };
-                            (name, avatar)
-                        }
-                        None => (String::from("Someone"), None),
-                    }
-                };
-                let notif_group_name = if group_name.is_empty() {
-                    String::from("Group Chat")
-                } else {
-                    group_name
-                };
-                let notification = NotificationData::group_invite(
-                    notif_group_name,
-                    display_info.0,
-                    display_info.1,
-                );
-                show_notification_generic(notification);
-
-                // Suppress double-notification from list_pending_mls_welcomes
-                let mut notified = NOTIFIED_WELCOMES.lock().await;
-                notified.insert(wrapper_id.to_hex());
-            }
-        });
+    fn on_community_invite(&self, community_id: &str) {
+        // vector-core parked the invite for consent (no join, no relay connect). Just
+        // surface it so the frontend can refresh its pending-invite list; the actual
+        // join + subscription refresh happens on the explicit accept command.
+        if let Some(app) = TAURI_APP.get() {
+            let _ = app.emit("community_invite_received", serde_json::json!({
+                "community_id": community_id,
+            }));
+        }
     }
 }
 
@@ -327,7 +259,7 @@ pub(crate) async fn tauri_commit_prepared_event(
                     let mut cache = WRAPPER_ID_CACHE.lock().await;
                     cache.insert(*wrapper_event_id_bytes);
                 }
-                let _ = db::save_processed_wrapper(wrapper_event_id_bytes, wrapper_created_at);
+                let _ = db::save_processed_wrapper(wrapper_event_id_bytes, wrapper_created_at, vector_core::db::wrappers::TRANSPORT_NIP17);
                 return handle_webxdc_peer_advertisement(event_id, topic_id, node_addr, sender_npub, *created_at, contact).await;
             }
             RumorProcessingResult::WebxdcPeerLeft { event_id, topic_id, sender_npub, created_at } => {
@@ -335,7 +267,7 @@ pub(crate) async fn tauri_commit_prepared_event(
                     let mut cache = WRAPPER_ID_CACHE.lock().await;
                     cache.insert(*wrapper_event_id_bytes);
                 }
-                let _ = db::save_processed_wrapper(wrapper_event_id_bytes, wrapper_created_at);
+                let _ = db::save_processed_wrapper(wrapper_event_id_bytes, wrapper_created_at, vector_core::db::wrappers::TRANSPORT_NIP17);
                 return handle_webxdc_peer_left(event_id, topic_id, sender_npub, *created_at, contact).await;
             }
             _ => {}

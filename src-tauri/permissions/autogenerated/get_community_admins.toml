@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-community-admins"
+description = "Enables the get_community_admins command without any pre-configured scope."
+commands.allow = ["get_community_admins"]
+
+[[permission]]
+identifier = "deny-get-community-admins"
+description = "Denies the get_community_admins command without any pre-configured scope."
+commands.deny = ["get_community_admins"]

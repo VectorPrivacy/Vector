@@ -83,11 +83,12 @@ impl SlimChatDB {
 pub fn get_all_chats() -> Result<Vec<SlimChatDB>, String> {
     let conn = super::get_db_connection_guard_static()?;
 
+    // chat_type 1 was the removed MLS group variant — legacy rows are dropped at load.
     let mut stmt = conn.prepare(
         "SELECT chat_identifier, chat_type, participants, last_read, created_at, metadata, muted, \
                 wallpaper_path, wallpaper_ts, wallpaper_blur, wallpaper_dim, \
                 wallpaper_url, wallpaper_uploader \
-         FROM chats ORDER BY created_at DESC"
+         FROM chats WHERE chat_type != 1 ORDER BY created_at DESC"
     ).map_err(|e| format!("Failed to prepare statement: {}", e))?;
 
     let rows = stmt.query_map([], |row| {
@@ -160,12 +161,65 @@ pub fn save_slim_chat(slim_chat: &SlimChatDB) -> Result<(), String> {
     Ok(())
 }
 
-/// Delete a chat and all its messages from the database.
-pub fn delete_chat(chat_id: &str) -> Result<(), String> {
+/// Delete a chat and all its messages from the database. `chat_identifier` is the
+/// string id (npub for DMs, channel id for Communities) — NOT the integer PK.
+pub fn delete_chat(chat_identifier: &str) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
+    // Drop messages first (explicit, not reliant on the FK cascade pragma being on).
     conn.execute(
-        "DELETE FROM chats WHERE id = ?1",
-        rusqlite::params![chat_id],
+        "DELETE FROM events WHERE chat_id IN (SELECT id FROM chats WHERE chat_identifier = ?1)",
+        rusqlite::params![chat_identifier],
+    ).map_err(|e| format!("Failed to delete chat events: {}", e))?;
+    conn.execute(
+        "DELETE FROM chats WHERE chat_identifier = ?1",
+        rusqlite::params![chat_identifier],
     ).map_err(|e| format!("Failed to delete chat: {}", e))?;
+    super::id_cache::forget_chat_id(chat_identifier);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    static TEST_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(900);
+
+    fn make_test_npub(n: u32) -> String {
+        const BECH32: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+        let mut payload = vec![b'q'; 58];
+        let mut x = n as u64;
+        let mut i = 58;
+        while x > 0 && i > 0 {
+            i -= 1;
+            payload[i] = BECH32[(x as usize) % 32];
+            x /= 32;
+        }
+        format!("npub1{}", std::str::from_utf8(&payload).unwrap())
+    }
+
+    fn init_test_db() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
+        let guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        let tmp = tempfile::tempdir().unwrap();
+        let n = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let account = make_test_npub(n);
+        std::fs::create_dir_all(tmp.path().join(&account)).unwrap();
+        crate::db::set_app_data_dir(tmp.path().to_path_buf());
+        crate::db::set_current_account(account.clone()).unwrap();
+        crate::db::init_database(&account).unwrap();
+        (tmp, guard)
+    }
+
+    // Regression: a non-npub id stub-created via get_or_create_chat_id must use the
+    // Community discriminant (2), not the retired MLS value (1) which get_all_chats
+    // drops — otherwise the chat (and its messages) vanish on the next reload.
+    #[test]
+    fn stub_created_non_npub_chat_survives_reload() {
+        let (_tmp, _guard) = init_test_db();
+        let channel_id = "abc123def456channelid";
+        let _ = crate::db::id_cache::get_or_create_chat_id(channel_id).unwrap();
+
+        let chats = super::get_all_chats().unwrap();
+        let found = chats.iter().find(|c| c.id == channel_id)
+            .expect("stub-created non-npub chat must survive get_all_chats");
+        assert_eq!(found.chat_type, crate::ChatType::Community);
+    }
 }

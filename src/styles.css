@@ -675,6 +675,14 @@ html, body {
   -webkit-backdrop-filter: blur(4px);
 }
 
+/* Community logo in the join-invite popup: avatar-style circular crop. */
+#popupIcon.popup-icon-circular {
+  width: 100px;
+  height: 100px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
 .popup {
   position: fixed;
   z-index: 10001;
@@ -9718,6 +9726,22 @@ select:disabled:hover {
     position: relative;
 }
 
+/* Right-aligned moderation actions (Kick + Ban) on a member row. Always visible by default (so they
+   work on touch, which has no hover). On pointer devices they stay out of the way until the row is
+   hovered, keeping the list scannable while the tools are one hover away. */
+.member-pick-actions {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    transition: opacity 0.15s ease;
+}
+@media (hover: hover) {
+    .member-pick-actions { opacity: 0; }
+    .member-pick-row:hover .member-pick-actions,
+    .member-pick-actions:focus-within { opacity: 1; }
+}
+
 .member-pick-row .member-pick-hover {
     position: absolute;
     top: 0;
@@ -9791,6 +9815,23 @@ select:disabled:hover {
 .member-pick-admin:hover { opacity: 0.7; }
 .member-pick-admin.active { opacity: 1; }
 .member-pick-admin .icon { width: 14px; height: 14px; background-color: #fce459; }
+
+/* Member-list LEFT crown slot: fixed width so every avatar aligns whether or not the row has a
+   crown. Layout per the mockup: [crown-or-spacer] [avatar] [name] ... [ban/kick on the right]. */
+.member-crown-slot {
+    width: 22px;
+    margin-right: 6px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.member-crown-slot .member-pick-admin { margin-right: 0; }
+/* Promotable member (owner hovering a non-admin): the faint crown appears only on row hover, so
+   the rest state matches the mockup (crown shows only on actual owner/admins). */
+.member-pick-admin.promote { opacity: 0; }
+.member-pick-row:hover .member-pick-admin.promote { opacity: 0.35; }
+.member-pick-admin.promote:hover { opacity: 0.75; }
 
 /* Group Overview Edit Controls */
 .group-editable {
@@ -14421,6 +14462,10 @@ hr {
   background: var(--icon-color-primary, #59fcb3);
   color: #000;
 }
+.dmsg-author-badge.owner {
+  background: #fce459;
+  color: #000;
+}
 
 .dmsg-time {
   font-size: 12px;
@@ -15447,3 +15492,226 @@ body.profile-switcher-editing .profile-switcher-add {
   z-index: 970;
 }
 
+
+/* ── Community invite panel (settings → Invite) ───────────────────────────── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  padding: 20px;
+}
+.modal-box {
+  background-color: #0a0a0a;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 22px 24px;
+  max-width: 460px;
+  width: 100%;
+  max-height: 85vh;
+  overflow-y: auto;
+}
+.modal-box h3 { font-size: 18px; }
+.modal-box input {
+  width: 100%;
+  box-sizing: border-box;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: inherit;
+  margin-bottom: 8px;
+}
+.modal-box .btn {
+  background: var(--icon-color-primary);
+  color: #000;
+  border: none;
+  border-radius: 8px;
+  padding: 9px 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.modal-box .btn:disabled { opacity: 0.5; cursor: default; }
+/* ── Community invite modal ─────────────────────────────────────── */
+.cmt-modal { max-width: 480px; }
+
+.cmt-header { display: flex; align-items: center; gap: 13px; margin-bottom: 20px; }
+.cmt-header-icon {
+  width: 46px; height: 46px; border-radius: 13px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--accent-color, #59fcb3) 15%, transparent);
+}
+.cmt-header-icon .icon { background-color: var(--accent-color, #59fcb3); width: 23px; height: 23px; }
+.cmt-title { font-size: 18px; font-weight: 700; margin: 0; line-height: 1.2; }
+.cmt-subtitle { font-size: 13px; opacity: 0.5; margin: 3px 0 0; }
+
+.cmt-section {
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 13px;
+  padding: 15px 16px;
+  margin-bottom: 13px;
+}
+.cmt-section-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 13px; }
+.cmt-section-head > .icon {
+  background-color: var(--accent-color, #59fcb3);
+  width: 17px; height: 17px; margin-top: 2px; flex-shrink: 0;
+}
+.cmt-section-title { font-size: 14px; font-weight: 700; margin: 0; }
+.cmt-section-desc { font-size: 12px; opacity: 0.45; margin: 3px 0 0; line-height: 1.45; }
+/* Live Public/Private mode pill on the Invite Links header. Private = muted (invite-only is the
+   resting state); Public = accent (links are live). */
+.cmt-mode-pill {
+    display: inline-block;
+    vertical-align: middle;
+    margin-left: 6px;
+    padding: 1px 8px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    background: rgba(255, 255, 255, 0.08);
+    color: rgba(255, 255, 255, 0.55);
+}
+.cmt-mode-pill.is-public {
+    background: color-mix(in srgb, var(--accent-color, #59fcb3) 18%, transparent);
+    color: var(--accent-color, #59fcb3);
+}
+
+.cmt-link-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 9px;
+  padding: 7px 7px 7px 12px;
+  margin-bottom: 8px;
+}
+.cmt-link-url {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-family: monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.8;
+}
+.cmt-icon-btn {
+  width: 30px; height: 30px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255, 255, 255, 0.06);
+  border: none; border-radius: 7px; cursor: pointer;
+  transition: background 0.12s;
+}
+.cmt-icon-btn:hover { background: rgba(255, 255, 255, 0.12); }
+.cmt-icon-btn .icon { width: 15px; height: 15px; background-color: #fff; opacity: 0.75; }
+.cmt-icon-btn.cmt-copied .icon { background-color: var(--accent-color, #59fcb3); opacity: 1; }
+.cmt-icon-btn-danger:hover { background: rgba(255, 107, 107, 0.16); }
+.cmt-icon-btn-danger:hover .icon { background-color: #ff6b6b; opacity: 1; }
+.cmt-icon-btn:disabled { opacity: 0.4; cursor: default; }
+
+.cmt-empty { font-size: 12.5px; opacity: 0.4; margin: 0 0 11px; padding: 2px; }
+
+/* Other creators' active-link counts (§10) — context for why the community is Public when you hold no links. */
+.cmt-others { margin: 0 0 10px; padding: 8px 10px; border-radius: 8px; background: rgba(255, 255, 255, 0.04); }
+.cmt-other-line { font-size: 12.5px; opacity: 0.6; margin: 0; padding: 1px 0; }
+
+.cmt-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  border: none; border-radius: 9px; padding: 10px 15px;
+  font-weight: 600; font-size: 14px; cursor: pointer;
+  transition: filter 0.12s, background 0.12s;
+}
+.cmt-btn .icon { width: 15px; height: 15px; }
+.cmt-btn:disabled { opacity: 0.5; cursor: default; }
+.cmt-btn-primary { background: var(--accent-color, #59fcb3); color: #000; flex-shrink: 0; }
+.cmt-btn-primary .icon { background-color: #000; }
+.cmt-btn-primary:hover:not(:disabled) { filter: brightness(1.08); }
+.cmt-btn-secondary {
+  width: 100%;
+  background: color-mix(in srgb, var(--accent-color, #59fcb3) 12%, transparent);
+  color: var(--accent-color, #59fcb3);
+  border: 1px solid color-mix(in srgb, var(--accent-color, #59fcb3) 28%, transparent);
+}
+.cmt-btn-secondary .icon { background-color: var(--accent-color, #59fcb3); }
+.cmt-btn-secondary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent-color, #59fcb3) 20%, transparent); }
+.cmt-btn-ghost { background: rgba(255, 255, 255, 0.06); color: #fff; }
+.cmt-btn-ghost:hover:not(:disabled) { background: rgba(255, 255, 255, 0.11); }
+/* Compact pill for row actions (Ban / Unban). `width:auto` overrides cmt-btn-secondary's
+   full-width (that variant is also used for the full-width "Create invite link" button). */
+.cmt-btn-sm { padding: 5px 11px; font-size: 12px; gap: 5px; flex-shrink: 0; width: auto; }
+.cmt-btn-sm .icon { width: 13px; height: 13px; }
+.cmt-btn-danger { background: color-mix(in srgb, #ff6b6b 14%, transparent); color: #ff6b6b; border: 1px solid color-mix(in srgb, #ff6b6b 30%, transparent); }
+.cmt-btn-danger .icon { background-color: #ff6b6b; }
+.cmt-btn-danger:hover:not(:disabled) { background: color-mix(in srgb, #ff6b6b 22%, transparent); }
+
+.cmt-direct-row { display: flex; gap: 8px; align-items: stretch; }
+.cmt-direct-row input { flex: 1; margin-bottom: 0 !important; }
+
+.cmt-status { font-size: 13px; min-height: 17px; margin: 4px 2px 12px; opacity: 0.85; }
+.cmt-status.cmt-ok { color: var(--accent-color, #59fcb3); opacity: 1; }
+.cmt-status.cmt-err { color: #ff6b6b; opacity: 1; }
+.cmt-close { width: 100%; }
+
+/* Invite panel locked during a critical op (create / revoke+rekey / direct invite) — dim + wait cursor. */
+.cmt-busy { cursor: wait; }
+.cmt-busy button, .cmt-busy input { opacity: 0.55; cursor: wait; }
+
+/* Guided rekey-progress modal (privatize / private-ban) — unclosable, determinate ring + step text. */
+/* Above the invite panel (.modal-overlay = 10000) + popupConfirm (10002) so the ring sits on top. */
+.rekey-progress-overlay { z-index: 10010; }
+.rekey-progress-box { max-width: 320px; text-align: center; padding: 28px 26px 24px; }
+/* Registered so the percentage INTERPOLATES — a plain conic-gradient `background` transition snaps. The
+   ring inherits the animated value and sweeps smoothly between phase jumps. */
+@property --rekey-pct {
+  syntax: '<percentage>';
+  inherits: true;
+  initial-value: 0%;
+}
+.rekey-ring {
+  position: relative;
+  width: 104px; height: 104px;
+  margin: 4px auto 18px;
+  display: grid; place-items: center;
+  --rekey-pct: 0%;
+  transition: --rekey-pct 0.55s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.rekey-ring::before {
+  content: ''; position: absolute; inset: 0; border-radius: 50%;
+  background: conic-gradient(var(--accent-color, #59fcb3) 0% var(--rekey-pct), rgba(255, 255, 255, 0.13) var(--rekey-pct) 100%);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 8px), #fff calc(100% - 7.5px));
+          mask: radial-gradient(farthest-side, transparent calc(100% - 8px), #fff calc(100% - 7.5px));
+}
+.rekey-pct { position: relative; font-size: 21px; font-weight: 700; color: #fff; font-variant-numeric: tabular-nums; }
+.rekey-title { font-size: 16px; font-weight: 700; margin: 0 0 5px; color: #fff; }
+.rekey-step { font-size: 13px; color: rgba(255, 255, 255, 0.62); margin: 0; min-height: 1.2em; }
+
+/* The base .icon is position:absolute (fills a sized parent). In these inline
+   contexts it must flow as a normal sized glyph instead. */
+.cmt-header-icon .icon,
+.cmt-section-head > .icon,
+.cmt-icon-btn .icon,
+.cmt-btn .icon {
+  position: relative;
+  top: auto; left: auto; right: auto; bottom: auto;
+  display: inline-block;
+  margin: 0;
+  flex: none;
+}
+
+/* Direct Invites contact picker */
+.cmt-contacts {
+  max-height: 240px;
+  overflow-y: auto;
+  margin: 6px 0 12px;
+  padding-right: 2px;
+}
+.cmt-invite-btn { width: 100%; }
+.cmt-invite-btn:disabled { opacity: 0.45; }
+.group-placeholder { opacity: 0.5; font-style: italic; }

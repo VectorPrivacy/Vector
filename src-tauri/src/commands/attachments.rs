@@ -3,7 +3,6 @@
 //! This module handles attachment operations:
 //! - ThumbHash preview generation and decoding
 //! - Attachment download, decryption, and saving
-//! - MLS attachment decryption (MIP-04)
 
 use std::collections::HashSet;
 use std::sync::LazyLock;
@@ -11,7 +10,7 @@ use tokio::sync::Mutex;
 use tauri::{AppHandle, Emitter, Runtime};
 
 use crate::{STATE, TAURI_APP, ChatType, Attachment};
-use crate::{util, net, db, mls};
+use crate::{util, net, db};
 use crate::util::hex_string_to_bytes;
 
 /// Global set of attachment IDs currently being downloaded.
@@ -96,15 +95,9 @@ pub(crate) fn sanitize_filename(name: &str) -> String {
     sanitized.to_string()
 }
 
-/// Resolve a unique filename in the directory, appending -1, -2, etc. on collision.
-pub(crate) fn resolve_unique_filename(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-    vector_core::crypto::resolve_unique_filename(dir, name)
-}
-
 /// Decrypt and save an attachment to disk
 ///
-/// For MLS attachments (when group_id is present), uses MDK's MIP-04 decryption.
-/// For DM attachments, uses explicit key/nonce with AES-GCM.
+/// Uses explicit key/nonce with AES-GCM (DM/Community attachments).
 ///
 /// Returns (path, content_hash) if successful, or an error message if unsuccessful
 pub async fn decrypt_and_save_attachment<R: Runtime>(
@@ -112,115 +105,13 @@ pub async fn decrypt_and_save_attachment<R: Runtime>(
     encrypted_data: &[u8],
     attachment: &Attachment
 ) -> Result<(std::path::PathBuf, String), String> {
-    if let Some(ref group_id) = attachment.group_id {
-        // MLS attachment — MDK's MIP-04 decryption (stays in src-tauri)
-        let decrypted_data = decrypt_mls_attachment(encrypted_data, attachment, group_id).await?;
-        let file_hash = util::calculate_file_hash(&decrypted_data);
-
-        let dir = vector_core::db::get_download_dir();
-        std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create directory: {}", e))?;
-
-        let target_name = if attachment.name.is_empty() {
-            format!("{}.{}", file_hash, attachment.extension)
-        } else {
-            attachment.name.clone()
-        };
-
-        let file_path = resolve_unique_filename(&dir, &target_name);
-        let tmp_path = dir.join(format!(".{}.{}.tmp", file_hash, attachment.extension));
-        std::fs::write(&tmp_path, &decrypted_data).map_err(|e| format!("Failed to write file: {}", e))?;
-        std::fs::rename(&tmp_path, &file_path).map_err(|e| format!("Failed to rename file: {}", e))?;
-        Ok((file_path, file_hash))
-    } else {
-        // DM attachment — delegates to vector-core
-        vector_core::crypto::decrypt_and_save_attachment(
-            encrypted_data, &attachment.key, &attachment.nonce,
-            &attachment.name, &attachment.extension,
-        )
+    if attachment.group_id.is_some() {
+        return Err("Group chat attachments are no longer supported".to_string());
     }
-}
-
-/// Decrypt an MLS attachment using MDK's MIP-04 decryption
-///
-/// This derives the encryption key from the MLS group secret using the original file hash
-/// and other metadata stored in the MediaReference. MDK internally handles epoch fallback,
-/// trying historical epoch secrets if the current epoch's key doesn't work.
-async fn decrypt_mls_attachment(
-    encrypted_data: &[u8],
-    attachment: &Attachment,
-    group_id: &str,
-) -> Result<Vec<u8>, String> {
-    use mdk_core::encrypted_media::MediaReference;
-
-    // Create MLS service
-    let mls_service = mls::MlsService::new_persistent_static()
-        .map_err(|e| format!("Failed to create MLS service: {}", e))?;
-
-    // Look up the group metadata to get the engine_group_id
-    let groups = mls_service.read_groups()
-        .map_err(|e| format!("Failed to read groups: {}", e))?;
-    let group_meta = groups.iter()
-        .find(|g| g.group_id == group_id)
-        .ok_or_else(|| format!("Group not found: {}", group_id))?;
-
-    if group_meta.engine_group_id.is_empty() {
-        return Err("Group has no engine_group_id".to_string());
-    }
-
-    // Parse the engine group ID
-    let engine_gid_bytes = hex_string_to_bytes(&group_meta.engine_group_id);
-    let gid = mdk_core::GroupId::from_slice(&engine_gid_bytes);
-
-    // Get MDK engine and media manager
-    let mdk = mls_service.engine()
-        .map_err(|e| format!("Failed to get MDK engine: {}", e))?;
-    let media_manager = mdk.media_manager(gid);
-
-    // Parse the original_hash from the attachment
-    let original_hash_hex = attachment.original_hash.as_ref()
-        .ok_or("MLS attachment missing original_hash")?;
-    let original_hash_bytes = hex_string_to_bytes(original_hash_hex);
-    let original_hash: [u8; 32] = original_hash_bytes.try_into()
-        .map_err(|_| "Invalid original_hash length (expected 32 bytes)")?;
-
-    // Parse the nonce from the attachment
-    let nonce_bytes = hex_string_to_bytes(&attachment.nonce);
-    let nonce: [u8; 12] = nonce_bytes.try_into()
-        .map_err(|_| "Invalid nonce length (expected 12 bytes)")?;
-
-    // Use the stored filename if available (must match what was used during encryption!)
-    // The filename is part of the AAD and must match exactly for decryption to succeed
-    let filename = attachment.mls_filename.clone()
-        .unwrap_or_else(|| format!("{}.{}", original_hash_hex, attachment.extension));
-
-    // Determine MIME type from extension
-    let raw_mime_type = util::mime_from_extension(&attachment.extension);
-
-    // Normalize MIME type the same way as during encryption
-    // MDK only accepts standard MIME types, so non-image files use octet-stream
-    let mime_type = if raw_mime_type.starts_with("image/") {
-        raw_mime_type
-    } else {
-        "application/octet-stream".to_string()
-    };
-
-    // Get scheme version from attachment (default to v2 if not stored)
-    let scheme_version = attachment.scheme_version.clone()
-        .unwrap_or_else(|| "mip04-v2".to_string());
-
-    // Create a MediaReference for decryption
-    let media_ref = MediaReference {
-        url: attachment.url.clone(),
-        original_hash,
-        mime_type,
-        filename,
-        dimensions: attachment.img_meta.as_ref().map(|m| (m.width, m.height)),
-        scheme_version,
-        nonce,
-    };
-
-    media_manager.decrypt_from_download(encrypted_data, &media_ref)
-        .map_err(|e| format!("MIP-04 decryption failed: {}", e))
+    vector_core::crypto::decrypt_and_save_attachment(
+        encrypted_data, &attachment.key, &attachment.nonce,
+        &attachment.name, &attachment.extension,
+    )
 }
 
 // ============================================================================
@@ -240,7 +131,7 @@ pub async fn generate_thumbhash_preview(npub: String, msg_id: String) -> Result<
         for chat in &state.chats {
             // Check if this is the target chat (works for both DMs and group chats)
             let is_target_chat = match &chat.chat_type {
-                ChatType::MlsGroup => chat.id == npub,
+                ChatType::Community => chat.id == npub,
                 ChatType::DirectMessage => chat.has_participant(&npub, &state.interner),
             };
 
@@ -346,7 +237,7 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
         let mut found_attachment = None;
         // Find target chat index first (immutable scan)
         let target_idx = state.chats.iter().position(|chat| match &chat.chat_type {
-            ChatType::MlsGroup => chat.id == npub,
+            ChatType::Community => chat.id == npub,
             ChatType::DirectMessage => chat.has_participant(&npub, &state.interner),
         });
         // Then mutably access only that chat

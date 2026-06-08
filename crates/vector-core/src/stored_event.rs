@@ -63,6 +63,38 @@ pub mod event_kind {
     pub const MLS_GROUP_MESSAGE: u16 = 444;
     /// MLS Key Package
     pub const MLS_KEY_PACKAGE: u16 = 443;
+
+    // Community protocol append-plane kinds (GROUP_PROTOCOL.md). Vector-claimed
+    // block 3300-3399 in the verified-empty 3000-3999 regular range. One kind per
+    // event type so relays can slice by type with a pure `kinds` filter. The inner
+    // signed event mirrors the outer kind (binding triad).
+    pub const COMMUNITY_MESSAGE: u16 = 3300;
+    pub const COMMUNITY_REACTION: u16 = 3301;
+    pub const COMMUNITY_EDIT: u16 = 3302;
+    pub const COMMUNITY_REKEY: u16 = 3303;
+    pub const COMMUNITY_INVITE_BUNDLE: u16 = 3304;
+    /// Cooperative delete: an inner control event referencing a target message's inner
+    /// id, honored only when its signer is the target's author. Lets a member tombstone their
+    /// own message in-app on peers WITHOUT the original per-message ephemeral key (multi-device
+    /// or pre-retention sends), where a relay-side NIP-09 nuke is impossible.
+    pub const COMMUNITY_DELETE: u16 = 3305;
+    /// Presence (join/leave) announcement: an inner event signed by the joining/leaving member's
+    /// identity, content "join" or "leave", posted to the primary channel. A client best-practice
+    /// (not enforced) so honest clients announce arrival/departure; feeds the observed member list
+    /// even before the member posts. A silent join is still possible by simply not sending this.
+    pub const COMMUNITY_PRESENCE: u16 = 3306;
+    // 3307 is RETIRED. Never reuse the number.
+    /// Cooperative kick: an inner directive signed by a `KICK`-permissioned member, naming a
+    /// target member (content = target hex) and carrying the actor's `vac` authority citation. NOT a
+    /// rekey and NOT folded — soft removal. On receipt the TARGET self-removes (drops the community keys
+    /// + wipes local chat data, like a leave); peers drop the target from their observed member list. A
+    /// target that ignores it (malicious) is escalated to a BAN (the cryptographic rekey).
+    pub const COMMUNITY_KICK: u16 = 3309;
+    /// Control-plane authority entity (keyless/real-npub model): a per-entity append
+    /// edition (RoleMetadata / Grant / RoleOrder / Banlist / ChannelMetadata / GroupRoot /
+    /// OwnerAttestation, distinguished by the `vsk` tag), signed INSIDE the encryption by the
+    /// actor's REAL npub and folded by its per-entity version chain.
+    pub const COMMUNITY_CONTROL: u16 = 3308;
 }
 
 /// System event types for group member changes (stored as integers).
@@ -181,8 +213,7 @@ impl StoredEvent {
 
     /// Check if this is a message event (text or file)
     pub fn is_message(&self) -> bool {
-        self.kind == event_kind::MLS_CHAT_MESSAGE
-            || self.kind == event_kind::PRIVATE_DIRECT_MESSAGE
+        self.kind == event_kind::PRIVATE_DIRECT_MESSAGE
             || self.kind == event_kind::FILE_ATTACHMENT
     }
 
@@ -195,8 +226,7 @@ impl StoredEvent {
     pub fn is_known_kind(&self) -> bool {
         matches!(
             self.kind,
-            event_kind::MLS_CHAT_MESSAGE
-                | event_kind::PRIVATE_DIRECT_MESSAGE
+            event_kind::PRIVATE_DIRECT_MESSAGE
                 | event_kind::FILE_ATTACHMENT
                 | event_kind::REACTION
                 | event_kind::APPLICATION_SPECIFIC

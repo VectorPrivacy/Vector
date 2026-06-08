@@ -111,7 +111,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
 
     // ---- Chat / group context -----------------------------------------------
     const currentChat = arrChats.find(c => c.id === strOpenChat);
-    const isGroupChat = currentChat?.chat_type === 'MlsGroup';
+    const isGroupChat = chatIsGroup(currentChat);
 
     // ---- Pinged highlight (mention of self, or @everyone from a group admin).
     // msg.mentions_me() is a Rust method on the backend Message type and does
@@ -391,6 +391,16 @@ function _dmsgBuildHeader(authorFullId, authorProfile, msg, isGroupChat, current
         adminBadge.classList.add('dmsg-author-badge', 'admin');
         adminBadge.textContent = 'admin';
         header.appendChild(adminBadge);
+    }
+
+    // Community owner badge (gold, matches the member-list crown) — gated on the PROVEN owner
+    // npub from the verified attestation, never an unchecked claim.
+    const ownerNpub = currentChat?.metadata?.custom_fields?.owner_npub;
+    if (ownerNpub && authorFullId && ownerNpub === authorFullId) {
+        const ownerBadge = document.createElement('span');
+        ownerBadge.classList.add('dmsg-author-badge', 'owner');
+        ownerBadge.textContent = 'Owner';
+        header.appendChild(ownerBadge);
     }
 
     const time = document.createElement('time');

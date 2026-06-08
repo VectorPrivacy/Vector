@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-delete-community"
+description = "Enables the delete_community command without any pre-configured scope."
+commands.allow = ["delete_community"]
+
+[[permission]]
+identifier = "deny-delete-community"
+description = "Denies the delete_community command without any pre-configured scope."
+commands.deny = ["delete_community"]

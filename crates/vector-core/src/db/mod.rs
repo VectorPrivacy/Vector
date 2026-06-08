@@ -22,9 +22,8 @@ pub mod id_cache;
 pub mod events;
 pub mod chats;
 pub mod wrappers;
-pub mod mls;
 pub mod nip17_keys;
-pub mod mls_wrap_keys;
+pub mod community;
 
 pub use settings::{
     get_sql_setting, set_sql_setting, get_pkey, set_pkey, get_seed, set_seed, remove_setting,
@@ -723,6 +722,14 @@ pub fn get_db_connection_guard_static() -> Result<ConnectionGuard, String> {
     Ok(ConnectionGuard::new(conn, generation))
 }
 
+/// Process-wide serialization lock for tests that install into the global DB pool.
+/// Any test calling `init_database` must hold this for its whole body — otherwise
+/// concurrent inits race on `POOL_GENERATION` and clobber each other's connections.
+/// One shared guard across every module (community, mls, ...) so cross-module test
+/// parallelism can't collide.
+#[cfg(test)]
+pub(crate) static DB_TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Get the WRITE connection (headless-safe — no AppHandle).
 pub fn get_write_connection_guard_static() -> Result<WriteConnectionGuard, String> {
     let generation = current_pool_generation();
@@ -757,6 +764,19 @@ pub fn init_database(npub: &str) -> Result<(), String> {
 
     // Run migrations
     schema::run_migrations(&mut conn)?;
+
+    // MLS is fully removed. Migration 41 drops the relational tables, but the OpenMLS/MDK
+    // crypto store lived in a SEPARATE per-account file (`<account>/mls/`) that no migration
+    // can reach. Purge it here: it's dead weight (can run to hundreds of MB) and, worse,
+    // stale MLS private key material lingering for a feature that no longer exists. Best-effort
+    // and idempotent — a cleanup failure must never block account init.
+    let mls_dir = profile_dir.join("mls");
+    if mls_dir.exists() {
+        match std::fs::remove_dir_all(&mls_dir) {
+            Ok(()) => crate::log_info!("[db] purged orphaned MLS store for account"),
+            Err(e) => crate::log_warn!("[db] could not purge orphaned MLS store: {}", e),
+        }
+    }
 
     // Bump BEFORE installing the new pool so any in-flight guards from
     // the previous account fail their Drop check and don't pollute the
@@ -867,6 +887,11 @@ static USER_ID_CACHE: LazyLock<Arc<RwLock<HashMap<String, i64>>>> =
 pub fn clear_id_caches() {
     CHAT_ID_CACHE.write().unwrap().clear();
     USER_ID_CACHE.write().unwrap().clear();
+    // ALSO clear the parallel caches in `id_cache` — that's the pair `db::events::save_message` and the
+    // community member-activity read actually use. Chat/user row ids are PER-ACCOUNT (each account has its
+    // own DB + id sequence), so a stale entry after an account swap points into the wrong DB → writes
+    // FK-fail (silently) and reads hit the wrong/empty row. One public clear must wipe every id cache.
+    id_cache::clear_id_caches();
 }
 
 /// Get or create a chat_id integer for a chat identifier string.
