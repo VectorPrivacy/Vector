@@ -592,6 +592,23 @@ pub async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, r
 }
 
 pub async fn voice_message(receiver: String, replied_to: String, bytes: Vec<u8>) -> Result<MessageSendResult, String> {
+    // Community channels route through the Concord file-bytes envelope; the DM `message`
+    // command rejects channel ids. Mirrors how text/file sends fan out by chat type.
+    let is_community = {
+        let state = STATE.lock().await;
+        match state.get_chat(&receiver) {
+            Some(chat) => chat.is_community(),
+            None => !receiver.starts_with("npub1"),
+        }
+    };
+    if is_community {
+        let reply = if replied_to.is_empty() { None } else { Some(replied_to) };
+        // Empty-name attachment → renderer shows the voice player + transcription, not a file row.
+        crate::commands::community::send_community_voice_bytes(receiver, bytes, reply).await?;
+        // The Community path drives its own pending→sent lifecycle (no id to finalize).
+        return Ok(MessageSendResult { pending_id: String::new(), event_id: None });
+    }
+
     // Generate an Attachment File
     let attachment_file = AttachmentFile {
         bytes: Arc::new(bytes),

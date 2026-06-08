@@ -9814,7 +9814,9 @@ select:disabled:hover {
 }
 .member-pick-admin:hover { opacity: 0.7; }
 .member-pick-admin.active { opacity: 1; }
-.member-pick-admin .icon { width: 14px; height: 14px; background-color: #fce459; }
+.member-pick-admin .icon { width: 14px; height: 14px; background-color: var(--icon-color-primary, #59fcb3); }
+/* Owner crown stays gold (matches the in-chat Owner tag); admin crowns are green (Admin tag). */
+.member-pick-admin.owner-crown .icon { background-color: #fce459; }
 
 /* Member-list LEFT crown slot: fixed width so every avatar aligns whether or not the row has a
    crown. Layout per the mockup: [crown-or-spacer] [avatar] [name] ... [ban/kick on the right]. */

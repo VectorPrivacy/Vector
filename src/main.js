@@ -1822,6 +1822,17 @@ async function init(skipAccountCheck = false) {
 
     // Display pending Community invites.
     await loadCommunityInvites();
+
+    // Preload each community's admin roster so admin tags + @everyone render from the first paint,
+    // not only after the Group Info panel has been opened (which used to be the sole roster loader).
+    const seenCommunities = new Set();
+    for (const c of arrChats) {
+        const cid = c.chat_type === 'Community' ? c.metadata?.custom_fields?.community_id : null;
+        if (cid && !seenCommunities.has(cid)) {
+            seenCommunities.add(cid);
+            loadCommunityRoles(cid);
+        }
+    }
 }
 
 
@@ -1877,6 +1888,7 @@ async function surfaceCommunitySummary(summary) {
         const p = invoke('sync_community_channel', { channelId: ch.channel_id, beforeMs: null }).catch(() => {});
         if (!firstChannel) { firstChannel = ch.channel_id; firstSync = p; }
     }
+    loadCommunityRoles(summary.community_id);
     resolveCommunityAvatars();
     renderChatlist();
     // Let the primary channel's first page land before we hand control back (so the opener sees
@@ -1884,6 +1896,24 @@ async function surfaceCommunitySummary(summary) {
     if (firstSync) await firstSync;
     renderChatlist();
     return firstChannel;
+}
+
+/**
+ * Preload a community's admin roster into its channel chats' metadata. Message rendering reads
+ * `metadata.admins` to show the admin tag + chip @everyone from admin senders; without this the
+ * roster only loaded when Group Info opened, so admin tags + @everyone were dead until then.
+ * Owner status comes from `owner_npub` (already on the chat); this fills the non-owner admin set.
+ */
+async function loadCommunityRoles(communityId) {
+    if (!communityId) return;
+    let adminNpubs;
+    try { adminNpubs = await invoke('get_community_admins', { communityId }); } catch (_) { return; }
+    for (const c of arrChats) {
+        if (c.chat_type === 'Community' && c.metadata?.custom_fields?.community_id === communityId) {
+            c.metadata = c.metadata || {};
+            c.metadata.admins = adminNpubs.slice();
+        }
+    }
 }
 
 /**
@@ -2379,6 +2409,9 @@ async function setupRustListeners() {
                 if (summary.owner_npub) f.owner_npub = summary.owner_npub;
             }
         } catch (_) {}
+        // A control change may have promoted/demoted admins — refresh the cached roster so in-chat
+        // admin tags + @everyone reflect it (the open overview re-fetches separately below).
+        loadCommunityRoles(communityId);
         renderChatlist();
         // Re-render the open overview (re-fetches caps/members/banlist fresh) if it's this community.
         if (domGroupOverview.style.display !== 'none' && domGroupOverview.getAttribute('data-group-id') === communityId) {
@@ -7499,6 +7532,13 @@ async function renderCommunityOverview(chat) {
         // the UI just exposes the toggle to the owner for now.
         let adminNpubs = [];
         try { adminNpubs = await invoke('get_community_admins', { communityId }); } catch (_) {}
+        // Cache admins onto this community's channel chats so message rendering can chip @everyone
+        // from admin senders (owner is handled separately via owner_npub). Mirrors the group design.
+        for (const c of arrChats) {
+            if (c.chat_type === 'Community' && c.metadata?.custom_fields?.community_id === communityId) {
+                c.metadata.admins = adminNpubs.slice();
+            }
+        }
         const iAmOwner = !!(myNpub && ownerNpub && myNpub === ownerNpub);
         // Per-member outrank for moderation, expressed in role-engine POSITIONS (owner = pos 0 via
         // ownerNpub, admin = pos 1 via adminNpubs, member = none). You may moderate a target you outrank:
@@ -7544,9 +7584,9 @@ async function renderCommunityOverview(chat) {
                     const c = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
                     bg.style.background = `linear-gradient(to right, ${c}40, transparent)`;
                 });
-                // LEFT crown slot (fixed width so avatars always align): gold crown for the owner /
-                // admins; for a promotable member the owner sees a faint crown on row-hover; everyone
-                // else just gets the empty spacer. Clicking toggles the Admin role (owner-only).
+                // LEFT crown slot (fixed width so avatars always align): gold crown for the owner,
+                // green for admins (matches the in-chat tags); a promotable member shows a faint crown
+                // on row-hover; everyone else gets the empty spacer. Clicking toggles the Admin role.
                 const isAdminMember = adminNpubs.includes(m.npub);
                 const crownSlot = document.createElement('div');
                 crownSlot.className = 'member-crown-slot';
@@ -7558,11 +7598,12 @@ async function renderCommunityOverview(chat) {
                 };
                 if (isCommunityOwner) {
                     const crown = buildCrown(true, false);
+                    crown.classList.add('owner-crown'); // gold; admins stay green
                     crown.title = 'Owner';
                     crown.style.cursor = 'default';
                     crownSlot.appendChild(crown);
                 } else if (isAdminMember || caps.manage_admin_role) {
-                    // Admin → gold (someone who can manage the @admin role can click to demote). Plain
+                    // Admin → green (someone who can manage the @admin role can click to demote). Plain
                     // member → faint hover-crown they can click to promote. (manage_admin_role is the
                     // position rule: outrank the @admin role; owner-only in the MVP, but not hardcoded.)
                     const crown = buildCrown(isAdminMember, !isAdminMember && caps.manage_admin_role);
@@ -10019,7 +10060,8 @@ const mentionCtrl = typeof initMentionSelector === 'function' ? initMentionSelec
     domChatMessageInput,
     () => {
         const chat = arrChats.find(c => c.id === strOpenChat);
-        if (!chat || !chat.participants) return [];
+        if (!chat) return [];
+        const isCommunity = chat.chat_type === 'Community';
         // Build a map of each participant's most recent message timestamp
         const lastActive = {};
         if (chat.messages) {
@@ -10029,8 +10071,15 @@ const mentionCtrl = typeof initMentionSelector === 'function' ? initMentionSelec
                 if (!lastActive[sender]) lastActive[sender] = m.at || 0;
             }
         }
-        const candidates = chat.participants
-            .filter(npub => npub !== strPubkey)
+        // Taggable npubs = explicit participants ∪ (for communities) everyone who's posted.
+        // Community rosters aren't mirrored into `participants`, so observed senders are the
+        // reliable taggable set — without this the selector is empty in Community channels.
+        const npubs = new Set(chat.participants || []);
+        if (isCommunity) {
+            for (const np of Object.keys(lastActive)) npubs.add(np);
+        }
+        const candidates = [...npubs]
+            .filter(npub => npub && npub !== strPubkey && npub.startsWith('npub1'))
             .map(npub => {
                 const p = getProfile(npub);
                 return {
@@ -10047,6 +10096,17 @@ const mentionCtrl = typeof initMentionSelector === 'function' ? initMentionSelec
         for (const c of candidates) {
             if (nameCount[c.name] > 1) {
                 c.name = c.name + ' (~' + c.npub.slice(5, 9) + ')';
+            }
+        }
+        // @everyone: lowest-priority option (bottom of the list), placeholder avatar — the original
+        // group design. Offered only to those who can actually use it (owner or admin); a non-admin's
+        // @everyone is ignored, so suggesting it would mislead. Roles preload at boot, so this gate is
+        // reliable now (the earlier always-show was a stopgap for when admins weren't loaded yet).
+        if (isCommunity) {
+            const cf = chat.metadata?.custom_fields || {};
+            const canPingEveryone = cf.is_owner === 'true' || (chat.metadata?.admins || []).includes(strPubkey);
+            if (canPingEveryone) {
+                candidates.push({ npub: 'everyone', name: 'everyone', avatarSrc: null, lastActive: -1 });
             }
         }
         return candidates;

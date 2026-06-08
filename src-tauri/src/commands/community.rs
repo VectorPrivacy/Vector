@@ -896,6 +896,22 @@ pub async fn send_community_file_bytes(
     dispatch_community_attachment_message(channel_id, content, replied_to, session, prepared).await
 }
 
+/// Send a voice note to a Community channel. Same upload path as a file, but the attachment's
+/// `name` is blanked so the renderer treats it as a voice message (waveform + transcription) rather
+/// than a named audio file — mirroring DM voice notes, which also carry an empty name. The WAV
+/// extension survives via the imeta `m audio/wav` field, so the recipient reconstructs name=""/ext=wav.
+pub(crate) async fn send_community_voice_bytes(
+    channel_id: String,
+    bytes: Vec<u8>,
+    replied_to: Option<String>,
+) -> Result<(), String> {
+    let session = vector_core::state::SessionGuard::capture();
+    let (mut attachment, _) = process_outbound_community_attachment_bytes(bytes, "voice-message.wav", false).await?;
+    attachment.name = String::new();
+    let imeta = vector_core::community::attachments::attachment_to_imeta(&attachment);
+    dispatch_community_attachment_message(channel_id, String::new(), replied_to, session, vec![(attachment, imeta)]).await
+}
+
 /// Send the JS-cached paste bytes (populated by `cache_file_bytes` on clipboard paste,
 /// where the actual bytes live Rust-side and JS only holds a flag) as a Community
 /// attachment. Mirrors the DM `send_cached_file` source, routed through the Community path.

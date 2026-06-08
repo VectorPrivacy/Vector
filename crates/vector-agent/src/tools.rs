@@ -438,6 +438,16 @@ impl VectorAgent {
         }
     }
 
+    #[tool(description = "Send a PRIVATE community invite: gift-wrap the invite bundle directly to an npub over a NIP-17 DM (NOT a shareable link). The recipient parks it pending consent (accept_pending_invite). Requires the create-invite permission; a banned npub can't be re-invited.")]
+    async fn send_private_invite(&self, Parameters(req): Parameters<CommunityMemberRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.invite_to_community(&req.community_id, &req.npub).await {
+            Ok(v) => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".into())
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
     #[tool(description = "List the public invite links this account holds for a Community (each with its hex token, url, and expiry). Use a token with revoke_public_invite.")]
     async fn list_public_invites(&self, Parameters(req): Parameters<CommunityIdRequest>) -> Result<CallToolResult, McpError> {
         match self.core.list_public_invites(&req.community_id) {

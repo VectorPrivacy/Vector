@@ -654,6 +654,62 @@ impl VectorCore {
         Ok(url)
     }
 
+    /// Send a PRIVATE invite: gift-wrap this Community's invite bundle directly to an npub over a NIP-17
+    /// DM (the same transport as a regular DM). The invitee parks it pending consent (accept_pending_invite).
+    /// Requires CREATE_INVITE; a banned npub can't be re-invited. Returns the wrap's event id + relays.
+    pub async fn invite_to_community(&self, community_id: &str, invitee_npub: &str) -> Result<serde_json::Value> {
+        use crate::community::{service, CommunityId};
+        use crate::sending::{send_rumor_dm, NoOpSendCallback, SendCallback, SendConfig};
+
+        let session = crate::state::SessionGuard::capture();
+        let my_pk = crate::state::my_public_key()
+            .ok_or_else(|| VectorError::Other("Public key not set".into()))?;
+
+        if community_id.len() != 64 {
+            return Err(VectorError::Other("malformed community id".into()));
+        }
+        let community = crate::db::community::load_community(&CommunityId(
+            crate::simd::hex::hex_to_bytes_32(community_id),
+        ))
+        .map_err(VectorError::Other)?
+        .ok_or_else(|| VectorError::Other("community not found".into()))?;
+
+        if !service::caller_has_permission(&community, crate::community::roles::Permissions::CREATE_INVITE) {
+            return Err(VectorError::Other("You need the create-invite permission to invite someone".into()));
+        }
+        let invitee_hex = nostr_sdk::PublicKey::parse(invitee_npub)
+            .map_err(|_| VectorError::Other("invalid npub".into()))?
+            .to_hex();
+        if crate::db::community::get_community_banlist(community_id)
+            .map_err(VectorError::Other)?
+            .iter()
+            .any(|b| b == &invitee_hex)
+        {
+            return Err(VectorError::Other("That member is banned from this community and can't be invited".into()));
+        }
+
+        // The bundle is built from purely local state; bail if the account swapped before the gift-wrap.
+        if !session.is_valid() {
+            return Err(VectorError::Other("account changed during invite".into()));
+        }
+
+        let rumor = crate::community::invite::build_invite_rumor(&community, my_pk).map_err(VectorError::Other)?;
+        let pending_id = format!("community-invite-{}", community_id);
+        // self_send=false: the owner already holds the Community; the inbound guard would drop the echo.
+        let config = SendConfig { self_send: false, ..SendConfig::gui() };
+        let callback: Arc<dyn SendCallback> = Arc::new(NoOpSendCallback);
+
+        let result = send_rumor_dm(invitee_npub, &pending_id, rumor, &config, callback)
+            .await
+            .map_err(VectorError::Other)?;
+
+        Ok(serde_json::json!({
+            "community_id": community_id,
+            "invitee": invitee_npub,
+            "wrap_event_id": result.event_id,
+        }))
+    }
+
     /// The public invite links this account holds for a Community (to list + revoke). Each carries the
     /// hex `token` (the link secret) needed by [`Self::revoke_public_invite`].
     pub fn list_public_invites(&self, community_id: &str) -> Result<Vec<crate::db::community::PublicInviteRecord>> {

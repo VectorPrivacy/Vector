@@ -7,9 +7,16 @@
 //!
 //! Usage:
 //!   VECTOR_NSEC=nsec1... [VECTOR_DATA_DIR=/path] [VECTOR_PASSWORD=...] concord [community_id_prefix] [--relay]
+//!   VECTOR_PASSWORD=<pin> VECTOR_DATA_DIR=/copy concord --invites [--from <npub>] [--since-hours N]
 //!
-//! Run it against the SAME account whose DB you want to inspect (e.g. the agent: point VECTOR_DATA_DIR at
-//! `…/io.vectorapp/agent` and VECTOR_NSEC at that account). Read-only.
+//! Auth: pass VECTOR_NSEC directly, OR omit it and pass VECTOR_PASSWORD — the key is then read from the
+//! account DB and decrypted with the PIN (the sole `npub1…` subdir, or VECTOR_NPUB to disambiguate).
+//!
+//! `--invites` answers "is a direct invite actually on the network for this account?" — it fetches every
+//! gift wrap addressed to me from my inbox relays (paged past the relay cap), unwraps each, and reports
+//! which are COMMUNITY_INVITE_BUNDLE.
+//!
+//! Run against a COPY of the data dir — login writes a pkey row and purges the per-account mls store.
 
 use std::path::PathBuf;
 use vector_core::community::SERVER_ROOT_SCOPE_HEX;
@@ -26,25 +33,69 @@ fn prefix(b: &[u8]) -> String {
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
     let relay = args.iter().any(|a| a == "--relay");
-    let filter = args.iter().skip(1).find(|a| !a.starts_with("--")).cloned();
+    let invites = args.iter().any(|a| a == "--invites");
+    // `--from <hex|npub>` narrows the invite probe to one sender; `--since-hours N` widens the window
+    // (gift wraps backdate their outer timestamp up to ~2 days, so default generously).
+    let from = arg_value(&args, "--from");
+    let since_arg = arg_value(&args, "--since-hours");
+    let since_hours: u64 = since_arg.as_deref().and_then(|s| s.parse().ok()).unwrap_or(168);
+    // Positional community-id prefix: the first bare token that isn't a flag or a flag's value.
+    let consumed: Vec<&String> = [from.as_ref(), since_arg.as_ref()].into_iter().flatten().collect();
+    let filter = args
+        .iter()
+        .skip(1)
+        .find(|a| !a.starts_with("--") && !consumed.contains(a))
+        .cloned();
 
-    let nsec = std::env::var("VECTOR_NSEC").unwrap_or_default();
-    if nsec.is_empty() {
-        eprintln!("Usage: VECTOR_NSEC=nsec1... [VECTOR_DATA_DIR=...] concord [community_id_prefix] [--relay]");
-        std::process::exit(1);
-    }
+    let mut nsec = std::env::var("VECTOR_NSEC").unwrap_or_default();
+    let password = std::env::var("VECTOR_PASSWORD").ok();
     let data_dir = std::env::var("VECTOR_DATA_DIR").map(PathBuf::from).unwrap_or_else(|_| default_dir());
 
-    let core = VectorCore::init(CoreConfig { data_dir, event_emitter: None }).unwrap_or_else(|e| {
+    let core = VectorCore::init(CoreConfig { data_dir: data_dir.clone(), event_emitter: None }).unwrap_or_else(|e| {
         eprintln!("init failed: {e}");
         std::process::exit(1);
     });
-    let password = std::env::var("VECTOR_PASSWORD").ok();
+
+    // Password-from-DB login: no nsec given → read the encrypted pkey from the account DB and decrypt it
+    // with the PIN. Only the PIN is needed, never the raw nsec. The data dir MUST be a COPY — login writes
+    // a pkey row and purges the per-account mls store, so never point this at a live account dir.
+    if nsec.is_empty() {
+        let npub = resolve_account_npub(&data_dir).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(1);
+        });
+        vector_core::db::set_current_account(npub.clone()).and_then(|_| vector_core::db::init_database(&npub)).unwrap_or_else(|e| {
+            eprintln!("open db for {npub} failed: {e}");
+            std::process::exit(1);
+        });
+        let stored = vector_core::db::get_pkey().ok().flatten().unwrap_or_else(|| {
+            eprintln!("no stored key in {npub}/vector.db");
+            std::process::exit(1);
+        });
+        nsec = if stored.starts_with("nsec1") {
+            stored
+        } else {
+            let pin = password.clone().unwrap_or_else(|| {
+                eprintln!("account is encrypted — set VECTOR_PASSWORD=<pin>");
+                std::process::exit(1);
+            });
+            vector_core::crypto::maybe_decrypt_inner(stored, Some(pin)).await.unwrap_or_else(|_| {
+                eprintln!("incorrect PIN (could not decrypt stored key)");
+                std::process::exit(1);
+            })
+        };
+    }
+
     let acct = core.login(&nsec, password.as_deref()).await.unwrap_or_else(|e| {
         eprintln!("login failed: {e}");
         std::process::exit(1);
     });
     eprintln!("# account {}   source={}", acct.npub, if relay { "local+relay" } else { "local" });
+
+    if invites {
+        probe_invites(since_hours, from.as_deref()).await;
+        std::process::exit(0);
+    }
 
     let ids = cdb::list_community_ids().unwrap_or_default();
     let mut shown = 0usize;
@@ -336,6 +387,180 @@ fn peek_key(sk: &nostr_sdk::SecretKey, p: &vector_core::community::rekey::Parsed
 fn hexpref(b: &[u8]) -> String {
     let h: String = b.iter().take(5).map(|x| format!("{x:02x}")).collect();
     format!("{h}…")
+}
+
+/// Value of a `--flag value` pair on the command line, if present.
+fn arg_value(args: &[String], flag: &str) -> Option<String> {
+    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
+}
+
+/// Resolve which account to open for password-from-DB login: `VECTOR_NPUB` if set, else the sole
+/// `npub1…` subdir under the data dir. Errors (listing options) if it's ambiguous, so we never guess.
+fn resolve_account_npub(data_dir: &std::path::Path) -> Result<String, String> {
+    if let Ok(n) = std::env::var("VECTOR_NPUB") {
+        if !n.is_empty() {
+            return Ok(n);
+        }
+    }
+    let npubs: Vec<String> = std::fs::read_dir(data_dir)
+        .map_err(|e| format!("cannot read {}: {e}", data_dir.display()))?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.starts_with("npub1"))
+        .collect();
+    match npubs.len() {
+        1 => Ok(npubs.into_iter().next().unwrap()),
+        0 => Err(format!("no npub1… account dir under {}", data_dir.display())),
+        _ => Err(format!("multiple accounts under {} — set VECTOR_NPUB to one of:\n  {}", data_dir.display(), npubs.join("\n  "))),
+    }
+}
+
+/// INVITE PROBE: is a direct community invite actually on the network for THIS account?
+///
+/// Fetches every kind-1059 gift wrap addressed to me from my own inbox relays (kind 10050) plus the
+/// trusted relays, per-relay so a "delivered to relay A, missing on relay B" split is visible, unwraps
+/// each with my key, and reports which inner rumors are COMMUNITY_INVITE_BUNDLE (3304) — with sender,
+/// community, channel count and the rumor's own timestamp (the real send time; the wrap backdates).
+async fn probe_invites(since_hours: u64, from: Option<&str>) {
+    use nostr_sdk::{Filter, Kind, RelayUrl, Timestamp, ToBech32};
+    use std::collections::{BTreeMap, HashSet};
+    use std::time::Duration;
+    use vector_core::stored_event::event_kind::COMMUNITY_INVITE_BUNDLE;
+
+    let Some(me) = vector_core::state::my_public_key() else {
+        println!("(no active pubkey)");
+        return;
+    };
+    let Some(keys) = vector_core::state::MY_SECRET_KEY.to_keys() else {
+        println!("(no local key; cannot unwrap)");
+        return;
+    };
+    let Some(client) = vector_core::state::nostr_client() else {
+        println!("(no nostr client)");
+        return;
+    };
+
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let since = Timestamp::from(now.saturating_sub(since_hours.saturating_mul(3600)));
+    let from_pk = from.and_then(|s| {
+        nostr_sdk::PublicKey::parse(s).map_err(|e| eprintln!("bad --from {s}: {e}")).ok()
+    });
+
+    // Relay set: my published inbox relays (where invites are delivered) ∪ trusted relays.
+    let mut relays: Vec<RelayUrl> = vector_core::inbox_relays::trusted_relay_urls();
+    {
+        let f = Filter::new().author(me).kind(Kind::Custom(10050)).limit(1);
+        if let Ok(evs) = client.fetch_events(f, Duration::from_secs(8)).await {
+            if let Some(ev) = evs.into_iter().next() {
+                for t in ev.tags.iter() {
+                    let s = t.as_slice();
+                    if s.len() >= 2 && s[0] == "relay" {
+                        if let Ok(u) = RelayUrl::parse(&s[1]) {
+                            if !relays.contains(&u) {
+                                relays.push(u);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    println!(
+        "\n  ── invite probe ──\n  me {}\n  window last {since_hours}h   relays {}{}",
+        me.to_bech32().unwrap_or_default(),
+        relays.len(),
+        from_pk.map(|p| format!("   from {}", &p.to_hex()[..16])).unwrap_or_default()
+    );
+
+    // Per-relay fetch so a delivery split is visible; union the gift wraps by id for unwrapping.
+    // Relays cap a single response (~500), so page backwards by `until` until the window is exhausted —
+    // otherwise a truncated relay could hide the very invite we're hunting (no silent caps).
+    let mut union: BTreeMap<nostr_sdk::EventId, nostr_sdk::Event> = BTreeMap::new();
+    for r in &relays {
+        let _ = client.add_relay(r.as_str()).await;
+        let mut until: Option<Timestamp> = None;
+        let mut got = 0usize;
+        let mut pages = 0u32;
+        loop {
+            let mut f = Filter::new().kind(Kind::GiftWrap).pubkey(me).since(since).limit(500);
+            if let Some(u) = until {
+                f = f.until(u);
+            }
+            let evs = client.fetch_events_from(vec![r.clone()], f, Duration::from_secs(12)).await.unwrap_or_default();
+            let n = evs.len();
+            // Oldest in this page seeds the next page's `until` (one second before, to avoid re-fetching it).
+            let oldest = evs.iter().map(|e| e.created_at).min();
+            for ev in evs.into_iter() {
+                union.insert(ev.id, ev);
+            }
+            got += n;
+            pages += 1;
+            // Stop when the relay returns a short page (no more), or we'd loop forever, or we've paged deep.
+            match oldest {
+                Some(o) if n >= 500 && o > since && pages < 40 => until = Some(Timestamp::from(o.as_secs().saturating_sub(1))),
+                _ => break,
+            }
+        }
+        println!("    {r}  →  {got} gift wrap(s) ({pages} page(s))");
+    }
+    println!("  unique gift wraps: {}", union.len());
+
+    // Unwrap each, tally inner kinds, detail every invite bundle.
+    let mut by_kind: BTreeMap<u16, usize> = BTreeMap::new();
+    let mut undecryptable = 0usize;
+    let mut invites_found: Vec<(nostr_sdk::PublicKey, u64, vector_core::community::invite::CommunityInvite)> = Vec::new();
+    let mut seen_senders: HashSet<nostr_sdk::PublicKey> = HashSet::new();
+    for ev in union.values() {
+        match nostr_sdk::nips::nip59::UnwrappedGift::from_gift_wrap(&keys, ev).await {
+            Ok(g) => {
+                let k = g.rumor.kind.as_u16();
+                *by_kind.entry(k).or_default() += 1;
+                seen_senders.insert(g.sender);
+                if k == COMMUNITY_INVITE_BUNDLE {
+                    if let Some(inv) = vector_core::community::invite::parse_invite_rumor(g.rumor.kind, &g.rumor.content) {
+                        if from_pk.map(|p| p == g.sender).unwrap_or(true) {
+                            invites_found.push((g.sender, g.rumor.created_at.as_secs(), inv));
+                        }
+                    }
+                }
+            }
+            Err(_) => undecryptable += 1,
+        }
+    }
+
+    println!("\n  inner-kind tally (unwrapped):");
+    for (k, n) in &by_kind {
+        let label = match *k {
+            14 => " (nip17 dm)",
+            15 => " (nip17 file)",
+            COMMUNITY_INVITE_BUNDLE => " (COMMUNITY INVITE)",
+            _ => "",
+        };
+        println!("      kind {k:<5} ×{n}{label}");
+    }
+    if undecryptable > 0 {
+        println!("      ({undecryptable} wrap(s) not addressed to / not decryptable by me)");
+    }
+    println!("  distinct senders seen: {}", seen_senders.len());
+
+    println!("\n  ── community invites on network: {} ──", invites_found.len());
+    if invites_found.is_empty() {
+        println!("    NONE. No COMMUNITY_INVITE_BUNDLE gift wrap for this account on these relays in-window.");
+        println!("    → the invite never reached these relays (sender-side / relay-mismatch), OR it is older than {since_hours}h.");
+    }
+    invites_found.sort_by_key(|(_, ts, _)| *ts);
+    for (sender, ts, inv) in &invites_found {
+        println!(
+            "    • '{}'  ({}…)\n        from {}\n        sent {}  relays {}  channels {}",
+            inv.name,
+            &inv.community_id[..inv.community_id.len().min(16)],
+            sender.to_bech32().unwrap_or_else(|_| sender.to_hex()),
+            ts,
+            inv.relays.len(),
+            inv.channels.len(),
+        );
+    }
 }
 
 fn default_dir() -> PathBuf {

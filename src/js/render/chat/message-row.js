@@ -122,7 +122,8 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
     if (!msg.mine && msg.content) {
         const mentionedMe = strPubkey && msg.content.includes('@' + strPubkey);
         const senderNpub = msg.npub || '';
-        const senderIsAdmin = isGroupChat && currentChat?.metadata?.admins?.includes(senderNpub);
+        const senderIsAdmin = isGroupChat && (currentChat?.metadata?.admins?.includes(senderNpub)
+        || currentChat?.metadata?.custom_fields?.owner_npub === senderNpub);
         const mentionedEveryone = senderIsAdmin && /@everyone\b/.test(msg.content);
         if (mentionedMe || mentionedEveryone) row.dataset.pinged = 'true';
     }
@@ -542,7 +543,8 @@ function _dmsgBuildText(msg, displayContent, fEmojiOnly, isGroupChat, currentCha
     if (!isRevealedBlockedMsg) processInlineImages(span);
 
     const senderNpub = msg.mine ? strPubkey : (msg.npub || '');
-    const senderIsAdmin = isGroupChat && currentChat?.metadata?.admins?.includes(senderNpub);
+    const senderIsAdmin = isGroupChat && (currentChat?.metadata?.admins?.includes(senderNpub)
+        || currentChat?.metadata?.custom_fields?.owner_npub === senderNpub);
     renderMentions(span, senderIsAdmin);
 
     // NIP-30 custom emojis ride along on the rumor; resolve them before
