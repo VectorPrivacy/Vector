@@ -2,7 +2,7 @@
  * Shows a simple toast notification
  * @param {string} message - The message to display
  */
-function showToast(message) {
+function showToast(message, persist = false) {
     // Create toast element if it doesn't exist
     let toast = document.getElementById('pivx-toast');
     if (!toast) {
@@ -53,14 +53,26 @@ function showToast(message) {
     toast.textContent = message;
     toast.style.opacity = '1';
     backdrop.style.opacity = '1';
+    clearTimeout(toast._timeout);
+
+    // Persistent toasts stay until hideToast() — for awaits that can outlast the auto-timeout
+    // (e.g. a multi-second relay fetch), so feedback doesn't vanish mid-operation.
+    if (persist) return;
 
     // Scale duration by message length: 1.5s base + 40ms per char, capped at 6s
     const duration = Math.min(1500 + message.length * 40, 6000);
-    clearTimeout(toast._timeout);
     toast._timeout = setTimeout(() => {
         backdrop.style.opacity = '0';
         toast.style.opacity = '0';
     }, duration);
+}
+
+/** Dismiss the shared toast (pairs with showToast(msg, true)). */
+function hideToast() {
+    const toast = document.getElementById('pivx-toast');
+    const backdrop = document.getElementById('toast-backdrop');
+    if (toast) { clearTimeout(toast._timeout); toast.style.opacity = '0'; }
+    if (backdrop) backdrop.style.opacity = '0';
 }
 
 /**
@@ -248,11 +260,15 @@ function createPlaceholderAvatar(isGroup = false, limitSizeTo = null) {
  * @param {String} strTitleClass - If specified, a CSS class to be added to the title element (e.g., 'typing-indicator-text').
  * @return {Promise<Boolean>} - The Promise will resolve to 'true' if confirm button was clicked, otherwise 'false'.
  */
-async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlaceholder = '', strIcon = '', strTitleClass = '', strConfirmText = null) {
+async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlaceholder = '', strIcon = '', strTitleClass = '', strConfirmText = null, fCircularIcon = false) {
     // Display the popup and render the UI
     domPopup.style.display = '';
-    domPopupIcon.src = './icons/' + strIcon;
+    // A bare filename resolves under ./icons/; a full URL (asset/blob/data/http, e.g. a
+    // decrypted community logo) is used verbatim.
+    domPopupIcon.src = /:\/\/|^data:|^blob:/.test(strIcon) ? strIcon : './icons/' + strIcon;
     domPopupIcon.style.display = strIcon ? '' : 'none';
+    // Avatar-style crop for community logos (matches how Vector renders all avatars).
+    domPopupIcon.classList.toggle('popup-icon-circular', fCircularIcon);
     domPopupTitle.innerText = strTitle;
     // Clear any previous classes and add the new one if specified
     domPopupTitle.className = strTitleClass;
@@ -277,70 +293,44 @@ async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlace
         domPopupInput.style.display = 'none';
     }
 
-    // Event handler for the confirm click
-    const onConfirmClick = (resolve) => {
-        domPopupConfirmBtn.removeEventListener('click', onConfirmClick);
-        domPopupCancelBtn.removeEventListener('click', onCancelClick);
-        domPopup.style.display = 'none';
-        domApp.classList.remove('active');
-        resolve(strInputPlaceholder ? domPopupInput.value : true);
-    };
-
-    // Event handler for the cancel click
-    const onCancelClick = (resolve) => {
-        domPopupConfirmBtn.removeEventListener('click', onConfirmClick);
-        domPopupCancelBtn.removeEventListener('click', onCancelClick);
-        domPopup.style.display = 'none';
-        domApp.classList.remove('active');
-        resolve(false);
-    };
-
-    // Create a promise that resolves when either the confirm or cancel button was clicked
+    // Resolve once, detaching every listener we attached. The handlers are NAMED so
+    // removeEventListener actually unhooks them — registering anonymous wrappers and
+    // trying to remove a different reference leaks one listener per popup onto the
+    // shared confirm/cancel buttons (stale handlers then double-fire on later popups).
     return new Promise((resolve) => {
-        // Keyboard event handler
+        const confirmValue = () => (strInputPlaceholder ? domPopupInput.value : true);
+        const cleanup = () => {
+            domPopupConfirmBtn.removeEventListener('click', onConfirm);
+            domPopupCancelBtn.removeEventListener('click', onCancel);
+            document.removeEventListener('keydown', onKeyDown);
+        };
+        const finish = (value) => {
+            cleanup();
+            domPopup.style.display = 'none';
+            domApp.classList.remove('active');
+            resolve(value);
+        };
+        const onConfirm = () => { popBack('popup-confirm'); finish(confirmValue()); };
+        const onCancel = () => { popBack('popup-confirm'); finish(false); };
         const onKeyDown = (e) => {
             if (e.key === 'Enter') {
                 e.preventDefault();
-                document.removeEventListener('keydown', onKeyDown);
                 popBack('popup-confirm');
-                onConfirmClick(resolve);
+                finish(confirmValue());
             } else if (e.key === 'Escape') {
                 e.preventDefault();
-                document.removeEventListener('keydown', onKeyDown);
                 popBack('popup-confirm');
-                if (fNotice) {
-                    onConfirmClick(resolve);
-                } else {
-                    onCancelClick(resolve);
-                }
+                finish(fNotice ? confirmValue() : false);
             }
         };
 
-        // Apply keyboard event listener
         document.addEventListener('keydown', onKeyDown);
+        domPopupConfirmBtn.addEventListener('click', onConfirm);
+        if (!fNotice) domPopupCancelBtn.addEventListener('click', onCancel);
 
-        // Apply event listener for the confirm button
-        domPopupConfirmBtn.addEventListener('click', () => {
-            document.removeEventListener('keydown', onKeyDown);
-            popBack('popup-confirm');
-            onConfirmClick(resolve);
-        });
-
-        // Apply event listener for the cancel button
-        if (!fNotice) domPopupCancelBtn.addEventListener('click', () => {
-            document.removeEventListener('keydown', onKeyDown);
-            popBack('popup-confirm');
-            onCancelClick(resolve);
-        });
-
-        // Hardware-back wiring: notices accept-on-back (matches Escape's
-        // behaviour above), confirm dialogs cancel-on-back. Either way we
-        // detach the keyboard listener and resolve the promise.
-        pushBack('popup-confirm', () => {
-            document.removeEventListener('keydown', onKeyDown);
-            if (fNotice) onConfirmClick(resolve);
-            else onCancelClick(resolve);
-        });
+        // Hardware-back: notices accept-on-back (matches Escape), confirms cancel-on-back.
+        // This fires as a RESULT of back, so it must not popBack again — just resolve.
+        pushBack('popup-confirm', () => finish(fNotice ? confirmValue() : false));
     });
 }
 

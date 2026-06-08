@@ -7,11 +7,6 @@ pub use vector_core::crypto::{
     mime_from_extension_safe, mime_from_magic_bytes, format_bytes,
 };
 
-/// Convert a file extension to a MIME type. Returns owned String for backward compatibility.
-pub fn mime_from_extension(extension: &str) -> String {
-    vector_core::crypto::mime_from_extension(extension).to_string()
-}
-
 /// Build a `data:{mime};base64,{...}` URI with a single pre-allocated buffer.
 /// Uses SIMD-accelerated base64 encoding (NEON/AVX2).
 #[inline]

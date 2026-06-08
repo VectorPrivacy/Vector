@@ -15,7 +15,7 @@
  */
 function renderChat(chat, primaryColor) {
     // For groups, we don't have a profile, for DMs we do
-    const isGroup = chat.chat_type === 'MlsGroup';
+    const isGroup = chatIsGroup(chat);
     const profile = !isGroup ? getProfile(chat.id) : null;
 
     // Muted DMs stay silent; muted groups still surface pings (mentions of
@@ -186,121 +186,59 @@ function renderChat(chat, primaryColor) {
     return divContact;
 }
 
+
 /**
- * Render an MLS invite as a chat-like item
- * @param {MLSWelcome} invite - The invite we're rendering
+ * Render a pending Community invite row (npub gift-wrap) — same look as an MLS invite
+ * slot, pinned at the top of the chat list, with Accept / Decline actions.
+ * @param {{community_id: string, name: string, inviter_npub: string}} invite
  */
-function renderInviteItem(invite, primaryColor) {
-    const groupId = invite.group_id || invite.id || '';
-    const groupName =
-        invite.group_name ||
-        invite.name ||
-        (groupId ? `Group ${String(groupId).substring(0, 8)}...` : 'Unnamed Group');
-
-    const memberCount =
-        (invite.member_count ??
-            (Array.isArray(invite.members) ? invite.members.length : invite.memberCount)) || 0;
-
-    // Create the invite container styled like a chat item
+function renderCommunityInviteItem(invite) {
     const divInvite = document.createElement('div');
     divInvite.classList.add('chatlist-contact', 'chatlist-invite');
-    divInvite.id = `invite-${invite.id || invite.welcome_event_id || groupId}`;
+    divInvite.id = `community-invite-${invite.community_id}`;
     divInvite.style.borderColor = 'var(--icon-color-primary)';
 
-    // Avatar container — show cached avatar if available, otherwise placeholder
+    // The private bundle carries no icon → group placeholder (real logo appears on join).
     const divAvatarContainer = document.createElement('div');
     divAvatarContainer.style.position = 'relative';
-    if (invite.avatar_cached) {
-        const imgAvatar = document.createElement('img');
-        imgAvatar.src = convertFileSrc(invite.avatar_cached);
-        imgAvatar.style.width = '50px';
-        imgAvatar.style.height = '50px';
-        imgAvatar.style.objectFit = 'cover';
-        imgAvatar.style.borderRadius = '50%';
-        imgAvatar.onerror = () => imgAvatar.replaceWith(createPlaceholderAvatar(true, 50));
-        divAvatarContainer.appendChild(imgAvatar);
-    } else {
-        divAvatarContainer.appendChild(createPlaceholderAvatar(true, 50));
-        // Fire-and-forget: cache the invite avatar if encryption data is available
-        if (invite.image_hash && invite.image_key && invite.image_nonce) {
-            invoke('cache_invite_avatar', {
-                imageHash: invite.image_hash,
-                imageKey: invite.image_key,
-                imageNonce: invite.image_nonce,
-            }).then(cachedPath => {
-                if (cachedPath) {
-                    invite.avatar_cached = cachedPath;
-                    // Direct DOM update + state hash change triggers re-render
-                    const img = document.createElement('img');
-                    img.src = convertFileSrc(cachedPath);
-                    img.style.width = '50px';
-                    img.style.height = '50px';
-                    img.style.objectFit = 'cover';
-                    img.style.borderRadius = '50%';
-                    img.onerror = () => img.replaceWith(createPlaceholderAvatar(true, 50));
-                    divAvatarContainer.innerHTML = '';
-                    divAvatarContainer.appendChild(img);
-                }
-            }).catch(() => {});
-        }
-    }
+    divAvatarContainer.appendChild(createPlaceholderAvatar(true, 50));
     divInvite.appendChild(divAvatarContainer);
 
-    // Preview container with group name and member count
     const divPreviewContainer = document.createElement('div');
     divPreviewContainer.classList.add('chatlist-contact-preview');
-
-    // Group name
     const h4Name = document.createElement('h4');
-    h4Name.textContent = groupName;
+    h4Name.textContent = invite.name || 'Community';
     h4Name.classList.add('cutoff');
     divPreviewContainer.appendChild(h4Name);
-
-    // Member count as subtext
-    const pMemberCount = document.createElement('p');
-    pMemberCount.classList.add('cutoff');
-    pMemberCount.textContent = `${memberCount} ${memberCount === 1 ? 'member' : 'members'}`;
-    divPreviewContainer.appendChild(pMemberCount);
-
+    const pSub = document.createElement('p');
+    pSub.classList.add('cutoff');
+    pSub.textContent = 'Community invite';
+    divPreviewContainer.appendChild(pSub);
     divInvite.appendChild(divPreviewContainer);
 
-    // Action buttons container (replaces timestamp area)
     const divActions = document.createElement('div');
     divActions.classList.add('invite-action-buttons');
 
-    // Accept button (green check)
     const btnAccept = document.createElement('button');
     btnAccept.classList.add('invite-action-btn', 'invite-accept-btn');
     btnAccept.title = 'Accept Invite';
-    btnAccept.onclick = (e) => {
-        e.stopPropagation();
-        acceptMLSInvite(invite.id || invite.welcome_event_id || groupId);
-    };
+    btnAccept.onclick = (e) => { e.stopPropagation(); acceptCommunityInvite(invite.community_id); };
     const acceptIcon = document.createElement('span');
     acceptIcon.classList.add('icon', 'icon-check');
-    acceptIcon.style.width = '16px';
-    acceptIcon.style.height = '16px';
-    acceptIcon.style.backgroundColor = '#59fcb3';
+    acceptIcon.style.cssText = 'width:16px;height:16px;background-color:#59fcb3;';
     btnAccept.appendChild(acceptIcon);
 
-    // Decline button (danger color X)
     const btnDecline = document.createElement('button');
     btnDecline.classList.add('invite-action-btn', 'invite-decline-btn');
     btnDecline.title = 'Decline Invite';
-    btnDecline.onclick = (e) => {
-        e.stopPropagation();
-        declineMLSInvite(invite.id || invite.welcome_event_id || groupId);
-    };
+    btnDecline.onclick = (e) => { e.stopPropagation(); declineCommunityInvite(invite.community_id); };
     const declineIcon = document.createElement('span');
     declineIcon.classList.add('icon', 'icon-x');
-    declineIcon.style.width = '16px';
-    declineIcon.style.height = '16px';
-    declineIcon.style.backgroundColor = '#ff2ea9';
+    declineIcon.style.cssText = 'width:16px;height:16px;background-color:#ff2ea9;';
     btnDecline.appendChild(declineIcon);
 
     divActions.appendChild(btnAccept);
     divActions.appendChild(btnDecline);
     divInvite.appendChild(divActions);
-
     return divInvite;
 }

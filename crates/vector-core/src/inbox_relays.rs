@@ -1152,7 +1152,11 @@ mod tests {
 
     // ---- Debounce ----
 
-    #[tokio::test]
+    // `start_paused`: drive the 800ms debounce window on tokio's VIRTUAL clock, which auto-advances when
+    // all tasks are parked. The spawned timers then resolve deterministically — no dependence on wall-clock
+    // timing, so heavy parallel CPU load (e.g. the serialized vault stress tests) can't make the gate fire
+    // after the test's wait and spuriously fail. (Was a real 1000ms sleep with only a 200ms margin.)
+    #[tokio::test(start_paused = true)]
     async fn debounce_coalesces_rapid_calls_into_one() {
         // Snapshot counters before the burst.
         let gen_before = REPUBLISH_GEN.load(Ordering::SeqCst);
@@ -1166,7 +1170,7 @@ mod tests {
         let gen_after = REPUBLISH_GEN.load(Ordering::SeqCst);
         assert_eq!(gen_after, gen_before + 3);
 
-        // Wait for the 800ms debounce window + margin so all spawned tasks resolve.
+        // Past the 800ms window on the virtual clock (auto-advanced) so all spawned tasks resolve.
         tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
 
         let pass_after = DEBOUNCE_PASS_COUNT.load(Ordering::SeqCst);

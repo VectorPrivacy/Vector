@@ -61,7 +61,7 @@ impl Default for WrapperIdCache {
 // ============================================================================
 
 pub static TRUSTED_RELAYS: &[&str] = &[
-    "wss://jskitty.cat/nostr",
+    "wss://jskitty.com/nostr",
     "wss://asia.vectorapp.io/nostr",
     "wss://nostr.computingcache.com",
 ];
@@ -604,17 +604,60 @@ impl ChatState {
         their_npub.to_string()
     }
 
-    pub fn create_or_get_mls_group_chat(&mut self, group_id: &str, participants: Vec<String>) -> String {
-        if self.get_chat(group_id).is_none() {
-            let chat = Chat::new_mls_group(group_id.to_string(), participants, &mut self.interner);
-            self.chats.push(chat);
-        }
-        group_id.to_string()
-    }
-
     // ========================================================================
     // Message Management
     // ========================================================================
+
+    /// Ensure a Community channel chat exists, created as `ChatType::Community`.
+    pub fn ensure_community_chat(&mut self, channel_id: &str) {
+        if !self.chats.iter().any(|c| c.id == channel_id) {
+            let chat =
+                Chat::new_community_channel(channel_id.to_string(), Vec::new(), &mut self.interner);
+            self.chats.push(chat);
+        }
+    }
+
+    /// Create-or-update a Community channel chat with its display metadata, so the chat
+    /// row carries name/description/owning-community directly (and persists + loads like
+    /// any DM — no separate hydrate). `is_owner`/`has_icon` are stored as "true"/"1"
+    /// strings in `custom_fields`. The caller persists the row (`save_slim_chat`).
+    pub fn upsert_community_chat(
+        &mut self,
+        channel_id: &str,
+        name: &str,
+        description: &str,
+        community_id: &str,
+        is_owner: bool,
+        has_icon: bool,
+        owner_npub: Option<&str>,
+        created_at_ms: Option<u64>,
+        dissolved: bool,
+    ) {
+        self.ensure_community_chat(channel_id);
+        if let Some(chat) = self.chats.iter_mut().find(|c| c.id == channel_id) {
+            let cf = &mut chat.metadata.custom_fields;
+            cf.insert("name".to_string(), name.to_string());
+            cf.insert("description".to_string(), description.to_string());
+            cf.insert("community_id".to_string(), community_id.to_string());
+            cf.insert("is_owner".to_string(), is_owner.to_string());
+            // Owner-dissolution seal — the GUI reads this to lock the composer + show the end divider.
+            cf.insert("dissolved".to_string(), dissolved.to_string());
+            // Join time — sorts a not-yet-active community by when we joined, not to the bottom.
+            if let Some(ms) = created_at_ms {
+                cf.insert("created_at".to_string(), ms.to_string());
+            }
+            // The PROVEN owner npub (verified upstream) — for the crown/hoist + in-chat tag.
+            match owner_npub {
+                Some(n) => { cf.insert("owner_npub".to_string(), n.to_string()); }
+                None => { cf.remove("owner_npub"); }
+            }
+            if has_icon {
+                cf.insert("icon".to_string(), "1".to_string());
+            } else {
+                cf.remove("icon");
+            }
+        }
+    }
 
     pub fn add_message_to_chat(&mut self, chat_id: &str, message: Message) -> bool {
         let compact = CompactMessage::from_message(&message, &mut self.interner);
@@ -626,7 +669,7 @@ impl ChatState {
             let mut chat = if chat_id.starts_with("npub1") {
                 Chat::new_dm(chat_id.to_string(), &mut self.interner)
             } else {
-                Chat::new(chat_id.to_string(), ChatType::MlsGroup, vec![])
+                Chat::new(chat_id.to_string(), ChatType::Community, vec![])
             };
             let was_added = chat.add_compact_message(compact);
             self.chats.push(chat);
@@ -659,7 +702,7 @@ impl ChatState {
             let chat = if chat_id.starts_with("npub1") {
                 Chat::new_dm(chat_id.to_string(), &mut self.interner)
             } else {
-                Chat::new(chat_id.to_string(), ChatType::MlsGroup, vec![])
+                Chat::new(chat_id.to_string(), ChatType::Community, vec![])
             };
             self.chats.push(chat);
             self.chats.len() - 1
@@ -756,7 +799,8 @@ impl ChatState {
     {
         for chat in &mut self.chats {
             let is_target = match &chat.chat_type {
-                ChatType::MlsGroup => chat.id == chat_hint,
+                // Community channels are addressed by their id.
+                ChatType::Community => chat.id == chat_hint,
                 ChatType::DirectMessage => chat.has_participant(chat_hint, &self.interner),
             };
             if is_target {
@@ -816,7 +860,7 @@ impl ChatState {
         let mut total_unread = 0;
         for chat in &self.chats {
             if chat.muted { continue; }
-            let is_group = chat.is_mls_group();
+            let is_group = chat.is_community();
             if !is_group {
                 if let Some(id) = self.interner.lookup(&chat.id) {
                     if self.get_profile_by_id(id).map_or(false, |p| p.flags.is_blocked()) { continue; }
@@ -1139,26 +1183,14 @@ mod tests {
     }
 
     #[test]
-    fn create_or_get_mls_group_chat_works() {
+    fn ensure_community_chat_idempotent() {
         let mut state = ChatState::new();
-        let id = state.create_or_get_mls_group_chat(
-            "group123",
-            vec!["npub1a".to_string(), "npub1b".to_string()],
-        );
-
-        assert_eq!(id, "group123", "returned id should match group_id");
-        let chat = state.get_chat("group123").expect("group chat should exist");
-        assert!(chat.is_mls_group(), "should be an MLS group chat");
-        assert_eq!(chat.participants.len(), 2, "should have two participants");
-    }
-
-    #[test]
-    fn create_or_get_mls_group_chat_idempotent() {
-        let mut state = ChatState::new();
-        state.create_or_get_mls_group_chat("grp1", vec!["npub1a".to_string()]);
-        state.create_or_get_mls_group_chat("grp1", vec!["npub1a".to_string(), "npub1b".to_string()]);
+        state.ensure_community_chat("grp1");
+        state.ensure_community_chat("grp1");
 
         assert_eq!(state.chats.len(), 1, "second call should not create a duplicate");
+        let chat = state.get_chat("grp1").expect("community chat should exist");
+        assert!(chat.is_community(), "should be a Community chat");
     }
 
     #[test]
@@ -1193,7 +1225,7 @@ mod tests {
         let mut state = ChatState::new();
         state.create_dm_chat("npub1alice");
         state.create_dm_chat("npub1bob");
-        state.create_or_get_mls_group_chat("grp1", vec!["npub1alice".to_string()]);
+        state.ensure_community_chat("grp1");
 
         assert_eq!(state.chats.len(), 3, "should have three distinct chats");
     }
@@ -1545,16 +1577,16 @@ mod tests {
     }
 
     #[test]
-    fn add_message_auto_creates_mls_group_chat() {
+    fn add_message_auto_creates_community_chat() {
         let mut state = ChatState::new();
 
-        // Add message to a non-npub ID (should create MLS group)
+        // Add message to a non-npub ID (should create a Community chat)
         let msg = make_message(1, "group msg", 1700000000000, false);
         let added = state.add_message_to_chat("group_abc123", msg);
 
         assert!(added, "message should be added");
-        let chat = state.get_chat("group_abc123").expect("group chat should be auto-created");
-        assert!(chat.is_mls_group(), "auto-created non-npub chat should be MLS group");
+        let chat = state.get_chat("group_abc123").expect("community chat should be auto-created");
+        assert!(chat.is_community(), "auto-created non-npub chat should be a Community chat");
     }
 
     // ========================================================================
@@ -1673,10 +1705,7 @@ mod tests {
         let normal_profile = Profile::new();
         state.insert_or_replace_profile("npub1normal", normal_profile);
 
-        state.create_or_get_mls_group_chat(
-            "grp1",
-            vec!["npub1blockedmember".to_string(), "npub1normal".to_string()],
-        );
+        state.ensure_community_chat("grp1");
 
         // Message from blocked member
         let msg_blocked = make_message_from(1, "blocked says hi", 1700000001000, "npub1blockedmember");

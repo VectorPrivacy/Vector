@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-cache-community-image"
+description = "Enables the cache_community_image command without any pre-configured scope."
+commands.allow = ["cache_community_image"]
+
+[[permission]]
+identifier = "deny-cache-community-image"
+description = "Denies the cache_community_image command without any pre-configured scope."
+commands.deny = ["cache_community_image"]

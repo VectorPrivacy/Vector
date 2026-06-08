@@ -19,6 +19,13 @@ impl AgentEventHandler {
         let buffer = Arc::new(Mutex::new(Vec::new()));
         (Self { buffer: buffer.clone() }, buffer)
     }
+
+    /// Build a handler that writes into an EXISTING buffer — used when re-attaching `listen()`
+    /// after an account swap, so the new session's events flow into the same buffer the MCP
+    /// `get_new_messages` tool already reads from.
+    pub fn with_buffer(buffer: Arc<Mutex<Vec<BufferedMessage>>>) -> Self {
+        Self { buffer }
+    }
 }
 
 impl InboundEventHandler for AgentEventHandler {
@@ -38,18 +45,6 @@ impl InboundEventHandler for AgentEventHandler {
         let entry = BufferedMessage {
             chat_id: chat_id.to_string(),
             is_group: false,
-            message: msg.clone(),
-        };
-        let buf = self.buffer.clone();
-        tokio::spawn(async move {
-            buf.lock().await.push(entry);
-        });
-    }
-
-    fn on_group_message(&self, group_id: &str, msg: &Message) {
-        let entry = BufferedMessage {
-            chat_id: group_id.to_string(),
-            is_group: true,
             message: msg.clone(),
         };
         let buf = self.buffer.clone();

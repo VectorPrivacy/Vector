@@ -10,7 +10,10 @@
 //!    OsRng-initialized, all modified identically during set()/clear()
 //! 3. **No heap allocations**: zero pointers, zero fingerprints, zero mlock
 //! 4. **Scattered positions**: seed, multipliers, and share data each placed at
-//!    (array, slot) positions derived from ASLR instance address
+//!    (array, slot) positions derived from ASLR instance address. The slot
+//!    dimension is partitioned into LANE_COUNT disjoint lanes; each live key
+//!    owns one lane (chosen at set() to differ from other live keys), so two
+//!    keys can never share a slot — cross-key writes are collision-safe.
 //! 5. **Decoy writes**: during set(), ALL 128 arrays receive ~16 random writes,
 //!    making real writes indistinguishable via snapshot diffing
 //! 6. **Zero side-channel**: `AtomicUsize::load` during get() — zero writes
@@ -48,6 +51,15 @@ const NUM_SHARES: usize = 4;
 const USIZES_PER_SHARE: usize = 32 / std::mem::size_of::<usize>();
 /// Total entries used by one key's share data.
 const SHARE_ENTRIES: usize = NUM_SHARES * USIZES_PER_SHARE;
+/// Number of disjoint slot-lanes the slot dimension is partitioned into.
+/// Each live key occupies exactly one lane, so two keys in distinct lanes can
+/// never share an (array, slot) — eliminating cross-key write collisions without
+/// any coordination at read time. Power-of-2: `& (LANE_COUNT-1)` compiles to a
+/// plain AND mask (ubiquitous in any binary). 16 lanes ⇒ up to 16 concurrent keys
+/// (production uses 2). `LANE_WIDTH` = 256 slots ≫ the 19 positions a key needs.
+const LANE_COUNT: usize = 16;
+/// Slots per lane. `ARRAY_SIZE / LANE_COUNT`, power-of-2.
+const LANE_WIDTH: usize = ARRAY_SIZE / LANE_COUNT;
 
 /// 128 vault arrays — all identical, all OsRng-initialized, all modified during set().
 /// Memory: 128 × 4096 × size_of::<usize>() = 4 MB on 64-bit, 2 MB on 32-bit.
@@ -106,12 +118,23 @@ fn addr_mix(mut h: u64, m1: u64, m2: u64, iterations: usize) -> u64 {
     h
 }
 
+/// Map a raw hash to a slot inside `lane`'s disjoint slot-range.
+/// `slot = lane*LANE_WIDTH + (raw % LANE_WIDTH)` — distinct lanes never overlap.
+/// Both ops are AND masks (power-of-2), so this stays a generic AND/OR/SHIFT
+/// sequence with no searchable constants.
+#[inline]
+fn lane_slot(raw: usize, lane: usize) -> usize {
+    (lane << LANE_WIDTH.trailing_zeros()) | (raw & (LANE_WIDTH - 1))
+}
+
 /// Derive the 3 configuration positions (seed, mul1, mul2) from the instance
-/// address alone. No dependency on stored values — breaks the chicken-and-egg.
+/// address. No dependency on stored share values — breaks the chicken-and-egg.
 /// Uses instance address + VAULTS base address (both ASLR'd, both change per launch).
 /// ZERO searchable constants — multipliers derived from the two ASLR addresses.
-/// Guaranteed collision-free: each position is unique (rehash on collision).
-fn config_positions(instance_addr: usize) -> (VaultPos, VaultPos, VaultPos) {
+/// `lane` confines the slot dimension to one of LANE_COUNT disjoint ranges, so two
+/// keys in different lanes can never collide. Guaranteed collision-free within a key
+/// (rehash on collision).
+fn config_positions(instance_addr: usize, lane: usize) -> (VaultPos, VaultPos, VaultPos) {
     let base = VAULTS.as_ptr() as usize;
     // Derive multipliers from ASLR addresses — forced odd for mixing quality.
     // These change every launch. No constants in the binary.
@@ -125,7 +148,7 @@ fn config_positions(instance_addr: usize) -> (VaultPos, VaultPos, VaultPos) {
         loop {
             let candidate = VaultPos {
                 array: ((h >> 32) as usize) & (ARRAY_COUNT - 1),
-                slot: (h as usize) & (ARRAY_SIZE - 1),
+                slot: lane_slot(h as usize, lane),
             };
             if !positions[..i].contains(&candidate) {
                 positions[i] = candidate;
@@ -141,10 +164,11 @@ fn config_positions(instance_addr: usize) -> (VaultPos, VaultPos, VaultPos) {
 
 /// Derive share data positions. Uses the seed + multipliers read from the vault
 /// (which are at config-derived positions) + instance address.
-/// Returns SHARE_ENTRIES (array, slot) pairs — each guaranteed unique and
-/// non-overlapping with config positions (rehash on collision).
-fn share_positions(instance_addr: usize) -> [VaultPos; SHARE_ENTRIES] {
-    let (seed_pos, mul1_pos, mul2_pos) = config_positions(instance_addr);
+/// `lane` confines the slot dimension to the key's disjoint lane (same lane as its
+/// config positions). Returns SHARE_ENTRIES (array, slot) pairs — each guaranteed
+/// unique and non-overlapping with config positions (rehash on collision).
+fn share_positions(instance_addr: usize, lane: usize) -> [VaultPos; SHARE_ENTRIES] {
+    let (seed_pos, mul1_pos, mul2_pos) = config_positions(instance_addr, lane);
     let seed = VAULTS[seed_pos.array][seed_pos.slot].load(Ordering::Relaxed) as u64;
     let mul1 = VAULTS[mul1_pos.array][mul1_pos.slot].load(Ordering::Relaxed) as u64;
     let mul2 = VAULTS[mul2_pos.array][mul2_pos.slot].load(Ordering::Relaxed) as u64;
@@ -162,7 +186,7 @@ fn share_positions(instance_addr: usize) -> [VaultPos; SHARE_ENTRIES] {
             h ^= h >> 16;
             let candidate = VaultPos {
                 array: ((h >> 32) as usize) & (ARRAY_COUNT - 1),
-                slot: (h as usize) & (ARRAY_SIZE - 1),
+                slot: lane_slot(h as usize, lane),
             };
             if !config.contains(&candidate) && !positions[..i].contains(&candidate) {
                 positions[i] = candidate;
@@ -213,23 +237,64 @@ impl GuardedKey {
         &self.active as *const _ as usize
     }
 
+    /// The lane a marker maps to. Lanes partition the slot space; a key lives
+    /// entirely within one lane so it can never share a slot with a key in a
+    /// different lane. `& (LANE_COUNT-1)` is a plain AND mask.
+    #[inline]
+    fn lane_of(marker: usize) -> usize {
+        marker & (LANE_COUNT - 1)
+    }
+
+    /// This instance's current lane, read from its active marker (0 if empty).
+    #[inline]
+    fn lane(&self) -> usize {
+        Self::lane_of(self.active.load(Ordering::Acquire))
+    }
+
+    /// Pick a marker whose lane differs from every currently-live other key's lane,
+    /// so this key's positions stay disjoint from theirs. `rng` supplies the random
+    /// marker; we reroll until its lane is free. With LANE_COUNT lanes and far fewer
+    /// concurrent keys, this terminates in ~1 try. The marker itself remains a
+    /// full-range random non-zero usize — the lane is an emergent low-bit property,
+    /// not separately stored, so it adds no searchable fingerprint.
+    fn pick_marker(&self, others: &[&GuardedKey], rng: &mut rand::rngs::OsRng) -> usize {
+        let mut taken = [false; LANE_COUNT];
+        for &key in others {
+            if std::ptr::eq(key, self) || !key.has_key() { continue; }
+            taken[key.lane()] = true;
+        }
+        loop {
+            let mut marker = rng.next_u64() as usize;
+            if marker == 0 { marker = 1; }
+            if !taken[Self::lane_of(marker)] {
+                return marker;
+            }
+        }
+    }
+
     /// Collect protected vault positions from other active GuardedKey instances.
     /// Prevents write_decoys from corrupting another key's share/config data.
     ///
     /// `others` is a slice of references to other GuardedKey instances that share
     /// the same VAULTS arrays. The caller is responsible for passing all other
     /// active keys to ensure cross-key protection.
-    fn collect_other_protected(&self, others: &[&GuardedKey]) -> ([VaultPos; 3 + SHARE_ENTRIES], usize) {
-        let mut buf = [VaultPos { array: 0, slot: 0 }; 3 + SHARE_ENTRIES];
+    ///
+    /// Sized for up to LANE_COUNT live keys (the max that can coexist in distinct
+    /// lanes). Extra entries are simply not collected — lanes already guarantee
+    /// disjointness, so the decoy exclusion is a redundant safety net.
+    fn collect_other_protected(&self, others: &[&GuardedKey]) -> ([VaultPos; (3 + SHARE_ENTRIES) * LANE_COUNT], usize) {
+        let mut buf = [VaultPos { array: 0, slot: 0 }; (3 + SHARE_ENTRIES) * LANE_COUNT];
         let mut n = 0;
         for &key in others {
             if std::ptr::eq(key, self) || !key.has_key() { continue; }
+            if n + 3 + SHARE_ENTRIES > buf.len() { break; }
             let addr = key.instance_addr();
-            let (s, m1, m2) = config_positions(addr);
+            let lane = key.lane();
+            let (s, m1, m2) = config_positions(addr, lane);
             buf[n] = s; n += 1;
             buf[n] = m1; n += 1;
             buf[n] = m2; n += 1;
-            for &pos in share_positions(addr).iter() {
+            for &pos in share_positions(addr, lane).iter() {
                 buf[n] = pos;
                 n += 1;
             }
@@ -255,10 +320,35 @@ impl GuardedKey {
     ///
     /// `others` is a slice of references to other active GuardedKey instances
     /// for cross-key protection during decoy writes.
+    ///
+    /// INVARIANT: pass EVERY other live key. A key's lane is chosen by excluding only `others`'
+    /// lanes, so an omitted live key can collide and clobber it.
     pub fn set(&self, mut key: [u8; 32], others: &[&GuardedKey]) {
 
         let mut rng = rand::rngs::OsRng;
         ensure_vaults();
+
+        // Choose this key's lane FIRST: a random marker whose lane is free among the
+        // live others. All of this key's positions live in that lane, so they are
+        // physically disjoint from every other-lane key's positions — no real write
+        // can ever land on another key's slot. The marker is committed to `active`
+        // only at the end; until then the old marker still answers get()/lane().
+        let marker = self.pick_marker(others, &mut rng);
+        let lane = Self::lane_of(marker);
+
+        // Overwriting a live key into a different lane? Scrub the old lane's share
+        // slots so the previous key never lingers (matches clear()'s scrub).
+        let old_marker = self.active.load(Ordering::Acquire);
+        if old_marker != 0 {
+            let old_lane = Self::lane_of(old_marker);
+            if old_lane != lane {
+                for pos in share_positions(self.instance_addr(), old_lane).iter() {
+                    let mut val = rng.next_u64() as usize;
+                    if val == 0 { val = 1; }
+                    VAULTS[pos.array][pos.slot].store(val, Ordering::Release);
+                }
+            }
+        }
 
         // Protect other active key's positions from decoy writes
         let (protected, pcount) = self.collect_other_protected(others);
@@ -270,7 +360,7 @@ impl GuardedKey {
 
         // Force multiplier entries odd (mixing quality).
         // ~50% of all entries are already odd, so this isn't a fingerprint.
-        let (_, mul1_pos, mul2_pos) = config_positions(self.instance_addr());
+        let (_, mul1_pos, mul2_pos) = config_positions(self.instance_addr(), lane);
         let v = VAULTS[mul1_pos.array][mul1_pos.slot].load(Ordering::Relaxed);
         VAULTS[mul1_pos.array][mul1_pos.slot].store(v | 1, Ordering::Relaxed);
         let v = VAULTS[mul2_pos.array][mul2_pos.slot].load(Ordering::Relaxed);
@@ -290,7 +380,7 @@ impl GuardedKey {
         key.zeroize();
 
         // Write share data to derived positions (after decoys, so real data survives)
-        let positions = share_positions(self.instance_addr());
+        let positions = share_positions(self.instance_addr(), lane);
         for (share_idx, share) in shares.iter().enumerate() {
             for u_idx in 0..USIZES_PER_SHARE {
                 let byte_off = u_idx * std::mem::size_of::<usize>();
@@ -304,19 +394,20 @@ impl GuardedKey {
         }
         for share in shares.iter_mut() { share.zeroize(); }
 
-        // Mark active with random non-zero value
-        let mut marker = rng.next_u64() as usize;
-        if marker == 0 { marker = 1; }
+        // Commit the lane-bearing marker. share_positions() in get() re-derives the
+        // same lane from this marker, so reads land on exactly these slots.
         self.active.store(marker, Ordering::Release);
     }
 
     /// Recover the key. Zero writes — invisible to snapshot diffing.
     pub fn get(&self) -> Option<[u8; 32]> {
-        if self.active.load(Ordering::Acquire) == 0 {
+        let marker = self.active.load(Ordering::Acquire);
+        if marker == 0 {
             return None;
         }
 
-        let positions = share_positions(self.instance_addr());
+        // Lane comes from the marker, so reads land on exactly the slots set() wrote.
+        let positions = share_positions(self.instance_addr(), Self::lane_of(marker));
         let mut key = [0u8; 32];
 
         for share_idx in 0..NUM_SHARES {
@@ -342,10 +433,12 @@ impl GuardedKey {
     /// for cross-key protection during decoy writes.
     pub fn clear(&self, others: &[&GuardedKey]) {
         // Set inactive FIRST — any concurrent get() will return None
-        if self.active.swap(0, Ordering::SeqCst) != 0 {
+        let old_marker = self.active.swap(0, Ordering::SeqCst);
+        if old_marker != 0 {
 
             let mut rng = rand::rngs::OsRng;
-            let positions = share_positions(self.instance_addr());
+            // Scrub the slots we actually wrote: lane from the now-cleared marker.
+            let positions = share_positions(self.instance_addr(), Self::lane_of(old_marker));
             for pos in &positions {
                 let mut val = rng.next_u64() as usize;
                 if val == 0 { val = 1; }
@@ -375,14 +468,19 @@ impl GuardedKey {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
     // Test-local key statics (replaces crate::MY_SECRET_KEY / crate::ENCRYPTION_KEY)
     static TEST_KEY_A: GuardedKey = GuardedKey::empty();
     static TEST_KEY_B: GuardedKey = GuardedKey::empty();
 
-    /// All tests share VAULTS and the two test keys — serialize them.
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    // SERIALIZE on the crate-wide `DB_TEST_GUARD` — NOT a vault-local lock. The 128 `VAULTS` arrays are
+    // ONE process-global shared by EVERY GuardedKey, including the production `MY_SECRET_KEY` /
+    // `ENCRYPTION_KEY` that other tests write via `init_test_db` (which holds `DB_TEST_GUARD`). Those
+    // writers pass only their partner in `others`, so their decoys/lane don't know about TEST_KEY_A/B and
+    // would clobber them if run concurrently — the cause of the cross-key flake. Sharing the same guard
+    // makes all vault-touching vector-core tests mutually exclusive. (Production is unaffected: its two
+    // keys are always mutually `others`-aware, verified across every login/clear path. Poison-tolerant
+    // via `into_inner` so one test panic doesn't cascade poison across the suite.)
 
     /// Fast reset: mark both test keys inactive without full clear overhead.
     fn reset() {
@@ -416,7 +514,7 @@ mod tests {
 
     #[test]
     fn set_get_roundtrip() {
-        let _l = TEST_LOCK.lock().unwrap();
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         reset();
         let key = test_key(42);
         TEST_KEY_A.set(key, &others_for_a());
@@ -425,7 +523,7 @@ mod tests {
 
     #[test]
     fn set_get_1000_iterations() {
-        let _l = TEST_LOCK.lock().unwrap();
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         for i in 0..1000u16 {
             reset();
             let key = test_key((i ^ (i >> 3)) as u8);
@@ -439,7 +537,7 @@ mod tests {
 
     #[test]
     fn empty_returns_none() {
-        let _l = TEST_LOCK.lock().unwrap();
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         reset();
         assert_eq!(TEST_KEY_A.get(), None);
         assert_eq!(TEST_KEY_B.get(), None);
@@ -447,7 +545,7 @@ mod tests {
 
     #[test]
     fn has_key_lifecycle() {
-        let _l = TEST_LOCK.lock().unwrap();
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         reset();
         assert!(!TEST_KEY_A.has_key());
         TEST_KEY_A.set(test_key(1), &others_for_a());
@@ -458,7 +556,7 @@ mod tests {
 
     #[test]
     fn clear_returns_none() {
-        let _l = TEST_LOCK.lock().unwrap();
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         reset();
         TEST_KEY_A.set(test_key(99), &others_for_a());
         assert!(TEST_KEY_A.get().is_some());
@@ -468,7 +566,7 @@ mod tests {
 
     #[test]
     fn set_overwrites_previous() {
-        let _l = TEST_LOCK.lock().unwrap();
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         reset();
         let a = test_key(10);
         let b = test_key(20);
@@ -480,7 +578,7 @@ mod tests {
 
     #[test]
     fn clear_idempotent() {
-        let _l = TEST_LOCK.lock().unwrap();
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         reset();
         TEST_KEY_A.clear(&others_for_a());
         TEST_KEY_A.clear(&others_for_a());
@@ -493,7 +591,7 @@ mod tests {
 
     #[test]
     fn encryption_key_basic() {
-        let _l = TEST_LOCK.lock().unwrap();
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         reset();
         let key = test_key(0xEE);
         TEST_KEY_B.set(key, &others_for_b());
@@ -504,13 +602,13 @@ mod tests {
 
     // ================================================================
     // Cross-key protection — 500 iterations each.
-    // Before the fix, these had ~7% failure rate per iteration.
-    // With 500 iterations the old bug would fail with P > 99.9999%.
+    // Two keys live in disjoint lanes, so neither key's writes (decoys, shares,
+    // or multiplier-odd-forcing) can ever land on the other's slots.
     // ================================================================
 
     #[test]
     fn cross_key_set_then_set_500() {
-        let _l = TEST_LOCK.lock().unwrap();
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         let key_a = test_key(0xAA);
         let key_b = test_key(0xBB);
         for i in 0..500 {
@@ -530,7 +628,7 @@ mod tests {
 
     #[test]
     fn cross_key_reverse_order_500() {
-        let _l = TEST_LOCK.lock().unwrap();
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         let key_a = test_key(0xCC);
         let key_b = test_key(0xDD);
         for i in 0..500 {
@@ -550,7 +648,7 @@ mod tests {
 
     #[test]
     fn cross_key_clear_preserves_other_500() {
-        let _l = TEST_LOCK.lock().unwrap();
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         let key_a = test_key(0x11);
         let key_b = test_key(0x22);
         for i in 0..500 {
@@ -577,7 +675,7 @@ mod tests {
 
     #[test]
     fn cross_key_alternating_500() {
-        let _l = TEST_LOCK.lock().unwrap();
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         for i in 0..500u16 {
             reset();
             let ka = test_key(i as u8);
@@ -592,9 +690,11 @@ mod tests {
     }
 
     /// Stress: alternating set order, different keys each round, 1000 iterations.
+    /// Two keys occupy disjoint lanes, so a real write from one can never clobber the
+    /// other's share slots regardless of decoy layout.
     #[test]
     fn stress_both_keys_1000() {
-        let _l = TEST_LOCK.lock().unwrap();
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         for i in 0..1000u32 {
             reset();
             let ka = test_key((i & 0xFF) as u8);
@@ -617,28 +717,32 @@ mod tests {
 
     #[test]
     fn config_positions_all_unique() {
-        let _l = TEST_LOCK.lock().unwrap();
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         ensure_vaults();
-        for addr in (0x1000..0x2000usize).step_by(8) {
-            let (a, b, c) = config_positions(addr);
-            assert_ne!(a, b, "config collision a==b at addr {addr:#x}");
-            assert_ne!(a, c, "config collision a==c at addr {addr:#x}");
-            assert_ne!(b, c, "config collision b==c at addr {addr:#x}");
+        for lane in 0..LANE_COUNT {
+            for addr in (0x1000..0x2000usize).step_by(8) {
+                let (a, b, c) = config_positions(addr, lane);
+                assert_ne!(a, b, "config collision a==b at addr {addr:#x} lane {lane}");
+                assert_ne!(a, c, "config collision a==c at addr {addr:#x} lane {lane}");
+                assert_ne!(b, c, "config collision b==c at addr {addr:#x} lane {lane}");
+            }
         }
     }
 
     #[test]
     fn share_positions_all_unique() {
-        let _l = TEST_LOCK.lock().unwrap();
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         ensure_vaults();
-        for addr in (0x2000..0x2100usize).step_by(8) {
-            let positions = share_positions(addr);
-            for i in 0..SHARE_ENTRIES {
-                for j in (i + 1)..SHARE_ENTRIES {
-                    assert_ne!(
-                        positions[i], positions[j],
-                        "share collision [{i}]==[{j}] at addr {addr:#x}"
-                    );
+        for lane in 0..LANE_COUNT {
+            for addr in (0x2000..0x2100usize).step_by(8) {
+                let positions = share_positions(addr, lane);
+                for i in 0..SHARE_ENTRIES {
+                    for j in (i + 1)..SHARE_ENTRIES {
+                        assert_ne!(
+                            positions[i], positions[j],
+                            "share collision [{i}]==[{j}] at addr {addr:#x} lane {lane}"
+                        );
+                    }
                 }
             }
         }
@@ -646,47 +750,83 @@ mod tests {
 
     #[test]
     fn share_positions_no_config_overlap() {
-        let _l = TEST_LOCK.lock().unwrap();
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         ensure_vaults();
-        for addr in (0x3000..0x3100usize).step_by(8) {
-            let (s, m1, m2) = config_positions(addr);
-            let config = [s, m1, m2];
-            let shares = share_positions(addr);
-            for (i, pos) in shares.iter().enumerate() {
-                assert!(
-                    !config.contains(pos),
-                    "share[{i}] collides with config at addr {addr:#x}"
-                );
+        for lane in 0..LANE_COUNT {
+            for addr in (0x3000..0x3100usize).step_by(8) {
+                let (s, m1, m2) = config_positions(addr, lane);
+                let config = [s, m1, m2];
+                let shares = share_positions(addr, lane);
+                for (i, pos) in shares.iter().enumerate() {
+                    assert!(
+                        !config.contains(pos),
+                        "share[{i}] collides with config at addr {addr:#x} lane {lane}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Distinct lanes are physically disjoint: no (array, slot) is shared between
+    /// two different lanes for the same address. This is the property that makes
+    /// cross-key writes collision-safe.
+    #[test]
+    fn distinct_lanes_are_disjoint() {
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        ensure_vaults();
+        for addr in (0x5000..0x5100usize).step_by(8) {
+            for la in 0..LANE_COUNT {
+                for lb in 0..LANE_COUNT {
+                    if la == lb { continue; }
+                    let (sa, m1a, m2a) = config_positions(addr, la);
+                    let a_all: Vec<VaultPos> = [sa, m1a, m2a]
+                        .into_iter()
+                        .chain(share_positions(addr, la))
+                        .collect();
+                    let (sb, m1b, m2b) = config_positions(addr, lb);
+                    let b_all: Vec<VaultPos> = [sb, m1b, m2b]
+                        .into_iter()
+                        .chain(share_positions(addr, lb))
+                        .collect();
+                    for p in &a_all {
+                        assert!(
+                            !b_all.contains(p),
+                            "lane {la} and lane {lb} share {p:?} at addr {addr:#x}"
+                        );
+                    }
+                }
             }
         }
     }
 
     #[test]
     fn positions_deterministic() {
-        let _l = TEST_LOCK.lock().unwrap();
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         ensure_vaults();
         let addr = TEST_KEY_A.instance_addr();
-        let cfg1 = config_positions(addr);
-        let cfg2 = config_positions(addr);
+        let cfg1 = config_positions(addr, 3);
+        let cfg2 = config_positions(addr, 3);
         assert_eq!(cfg1, cfg2);
-        let sp1 = share_positions(addr);
-        let sp2 = share_positions(addr);
+        let sp1 = share_positions(addr, 3);
+        let sp2 = share_positions(addr, 3);
         assert_eq!(sp1, sp2);
     }
 
     #[test]
     fn all_positions_in_bounds() {
-        let _l = TEST_LOCK.lock().unwrap();
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         ensure_vaults();
-        for addr in (0x4000..0x4200usize).step_by(8) {
-            let (a, b, c) = config_positions(addr);
-            for p in [a, b, c] {
-                assert!(p.array < ARRAY_COUNT);
-                assert!(p.slot < ARRAY_SIZE);
-            }
-            for p in share_positions(addr) {
-                assert!(p.array < ARRAY_COUNT);
-                assert!(p.slot < ARRAY_SIZE);
+        for lane in 0..LANE_COUNT {
+            for addr in (0x4000..0x4200usize).step_by(8) {
+                let (a, b, c) = config_positions(addr, lane);
+                for p in [a, b, c] {
+                    assert!(p.array < ARRAY_COUNT);
+                    assert!(p.slot < ARRAY_SIZE);
+                }
+                for p in share_positions(addr, lane) {
+                    assert!(p.array < ARRAY_COUNT);
+                    assert!(p.slot < ARRAY_SIZE);
+                }
             }
         }
     }
@@ -722,7 +862,7 @@ mod tests {
 
     #[test]
     fn ensure_vaults_all_nonzero() {
-        let _l = TEST_LOCK.lock().unwrap();
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         ensure_vaults();
         for (r, row) in VAULTS.iter().enumerate() {
             for (s, slot) in row.iter().enumerate() {
@@ -736,7 +876,7 @@ mod tests {
 
     #[test]
     fn ensure_vaults_idempotent() {
-        let _l = TEST_LOCK.lock().unwrap();
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         ensure_vaults();
         let samples: Vec<_> = (0..20)
             .map(|i| {
@@ -756,10 +896,10 @@ mod tests {
 
     /// Run write_decoys 500 times with protected positions — verify they are NEVER overwritten.
     /// Without exclusion, P(at least one hit) per position ~ 86%. With 6 positions:
-    /// P(all survive unprotected) ~ 0.14^6 ~ 0.00075%. This test catches the bug with certainty.
+    /// P(all survive unprotected) ~ 0.14^6 ~ 0.00075%, so a broken exclusion is caught with near-certainty.
     #[test]
     fn write_decoys_respects_exclusions_500() {
-        let _l = TEST_LOCK.lock().unwrap();
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         ensure_vaults();
         let protected = [
             VaultPos { array: 0, slot: 100 },
@@ -787,7 +927,7 @@ mod tests {
 
     #[test]
     fn write_decoys_empty_exclusion_works() {
-        let _l = TEST_LOCK.lock().unwrap();
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         ensure_vaults();
         write_decoys(&[]);
     }
@@ -798,7 +938,7 @@ mod tests {
 
     #[test]
     fn zero_key_roundtrip() {
-        let _l = TEST_LOCK.lock().unwrap();
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         reset();
         let key = [0u8; 32];
         TEST_KEY_A.set(key, &others_for_a());
@@ -807,7 +947,7 @@ mod tests {
 
     #[test]
     fn max_key_roundtrip() {
-        let _l = TEST_LOCK.lock().unwrap();
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         reset();
         let key = [0xFFu8; 32];
         TEST_KEY_A.set(key, &others_for_a());
@@ -816,7 +956,7 @@ mod tests {
 
     #[test]
     fn to_keys_roundtrip() {
-        let _l = TEST_LOCK.lock().unwrap();
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         reset();
         let mut sk_bytes = [0u8; 32];
         sk_bytes[31] = 1; // scalar = 1, valid secp256k1 key
@@ -828,14 +968,14 @@ mod tests {
 
     #[test]
     fn to_keys_none_when_empty() {
-        let _l = TEST_LOCK.lock().unwrap();
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         reset();
         assert!(TEST_KEY_A.to_keys().is_none());
     }
 
     #[test]
     fn store_from_keys_roundtrip() {
-        let _l = TEST_LOCK.lock().unwrap();
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         reset();
         let keys = nostr_sdk::Keys::generate();
         let expected = keys.secret_key().secret_bytes();

@@ -49,20 +49,6 @@ pub async fn set_pkey<R: tauri::Runtime>(handle: tauri::AppHandle<R>, pkey: Stri
             rusqlite::params!["pkey", pkey],
         ).map_err(|e| format!("Failed to insert pkey: {}", e))?;
 
-        // Bootstrap MLS keypackage for the new account (cache=true: no-op if already published).
-        // PIN/Password flows trigger this via encrypt/decrypt commands, but Skip Encryption
-        // bypasses both, so we ensure it here as the common new-account path.
-        tokio::spawn(async {
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            match crate::commands::mls::regenerate_device_keypackage(true).await {
-                Ok(info) => {
-                    let device_id = info.get("device_id").and_then(|v| v.as_str()).unwrap_or("");
-                    let cached = info.get("cached").and_then(|v| v.as_bool()).unwrap_or(false);
-                    println!("[MLS] Device KeyPackage ready: device_id={}, cached={}", device_id, cached);
-                }
-                Err(e) => println!("[MLS] Device KeyPackage bootstrap FAILED: {}", e),
-            }
-        });
 
         return Ok(());
     }

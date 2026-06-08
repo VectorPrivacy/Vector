@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-cache-invite-logo"
+description = "Enables the cache_invite_logo command without any pre-configured scope."
+commands.allow = ["cache_invite_logo"]
+
+[[permission]]
+identifier = "deny-cache-invite-logo"
+description = "Denies the cache_invite_logo command without any pre-configured scope."
+commands.deny = ["cache_invite_logo"]

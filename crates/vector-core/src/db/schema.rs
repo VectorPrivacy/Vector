@@ -66,34 +66,6 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL
 );
 
--- MLS Groups table
-CREATE TABLE IF NOT EXISTS mls_groups (
-    group_id TEXT PRIMARY KEY,
-    engine_group_id TEXT NOT NULL DEFAULT '',
-    creator_pubkey TEXT NOT NULL,
-    name TEXT NOT NULL DEFAULT '',
-    description TEXT,
-    avatar_ref TEXT,
-    avatar_cached TEXT,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    evicted INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_mls_groups_evicted_updated ON mls_groups(evicted, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_mls_groups_creator ON mls_groups(creator_pubkey);
-
--- MLS Key Packages table
-CREATE TABLE IF NOT EXISTS mls_keypackages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    owner_pubkey TEXT NOT NULL,
-    device_id TEXT NOT NULL,
-    keypackage_ref TEXT NOT NULL,
-    created_at INTEGER,
-    fetched_at INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_keypackages_owner ON mls_keypackages(owner_pubkey);
-
 -- Events table: flat, protocol-aligned storage for all Nostr events
 CREATE TABLE IF NOT EXISTS events (
     id TEXT PRIMARY KEY,
@@ -160,28 +132,18 @@ CREATE TABLE IF NOT EXISTS miniapp_permissions (
 );
 CREATE INDEX IF NOT EXISTS idx_miniapp_permissions_hash ON miniapp_permissions(file_hash);
 
--- MLS processed events table (tracks which MLS wrapper events have been processed)
-CREATE TABLE IF NOT EXISTS mls_processed_events (
-    event_id TEXT PRIMARY KEY,
-    group_id TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    processed_at INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_mls_processed_events_group ON mls_processed_events(group_id);
-CREATE INDEX IF NOT EXISTS idx_mls_processed_events_created ON mls_processed_events(created_at);
-
 -- Processed wrappers table (NIP-59 gift wrap dedup + NIP-77 negentropy)
+-- Universal outer-event ledger across transports. The `transport` discriminator
+-- (0 = nip17 gift-wrap, 1 = concord channel envelope, …) is added by migration 42 so the
+-- dedup is shared but NIP-77 negentropy only fingerprints the nip17 (0) subset.
 CREATE TABLE IF NOT EXISTS processed_wrappers (
     wrapper_id BLOB PRIMARY KEY,
     wrapper_created_at INTEGER NOT NULL DEFAULT 0
 );
 
--- Wrap-key vaults (nip17_wrap_keys, mls_wrap_keys) are introduced by
--- migrations 21 and 22 respectively, and the MLS pending-event queue
--- (mls_pending_events) by migration 23. Migrations are the single
--- source of truth for these tables — running them on a fresh DB
--- creates everything in order, so there's no need to duplicate the
--- CREATE TABLE here.
+-- The nip17_wrap_keys vault is introduced by migration 21. The legacy MLS
+-- tables (mls_wrap_keys / mls_pending_events from migrations 22/23) are dropped
+-- by migration 41, so on a fresh DB they're created in order and then removed.
 
 -- Schema migrations tracking table
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -575,6 +537,140 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     run_atomic_migration(conn, 32, "Drop mls_event_cursors table", |tx| {
         tx.execute_batch("DROP TABLE IF EXISTS mls_event_cursors;")
             .map_err(|e| format!("Failed to drop mls_event_cursors: {}", e))?;
+        Ok(())
+    })?;
+
+    // =========================================================================
+    // GAP: migration ids 33-39 are PERMANENTLY BURNED — do not reuse.
+    // =========================================================================
+    // The distributed v0.4.0 "MLS edition" shipped MLS migrations in the 33-39 range that
+    // never made it into committed history (its release branch was later squashed to max 32).
+    // Migrations are tracked per-id (`schema_migrations`), not by a monotonic counter, so an
+    // MLS-edition DB has 33-39 recorded and would SKIP any new migration reusing those ids,
+    // silently never creating the table. Community state therefore starts at 40. Never fill
+    // the 33-39 gap, even though it looks tidy — those ids are spent forever.
+    //
+    // Migration 40: Community (Concord) protocol local state
+    // =========================================================================
+    // Per-account (the DB itself is account-scoped via account_dir(npub)). Holds the
+    // owner/member's held secrets (server-root key, epoch-tagged channel keys), the folded
+    // control-plane state, and local invite/dedup bookkeeping. Ids are hex. Authority is
+    // keyless: real-npub control editions + the owner attestation, never a shared secret.
+    run_atomic_migration(conn, 40, "Create community tables", |tx| {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS communities (
+                community_id          TEXT PRIMARY KEY,
+                server_root_key       BLOB NOT NULL,
+                name                  TEXT NOT NULL,
+                relays                TEXT NOT NULL,
+                created_at            INTEGER NOT NULL,
+                description           TEXT,
+                icon                  TEXT,
+                banner                TEXT,
+                banlist               TEXT NOT NULL DEFAULT '[]',
+                banlist_at            INTEGER NOT NULL DEFAULT 0,
+                owner_attestation     TEXT,
+                roles                 TEXT NOT NULL DEFAULT '{}',
+                roles_at              INTEGER NOT NULL DEFAULT 0,
+                server_root_epoch     INTEGER NOT NULL DEFAULT 0,
+                invite_registry       TEXT NOT NULL DEFAULT '[]',
+                read_cut_pending      INTEGER NOT NULL DEFAULT 0,
+                read_cut_target_epoch INTEGER NOT NULL DEFAULT 0,
+                dissolved             INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS community_channels (
+                channel_id              TEXT PRIMARY KEY,
+                community_id            TEXT NOT NULL,
+                channel_key             BLOB NOT NULL,
+                epoch                   INTEGER NOT NULL,
+                name                    TEXT NOT NULL,
+                created_at              INTEGER NOT NULL,
+                rekeyed_at_server_epoch INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_community_channels_community
+                ON community_channels(community_id);
+            CREATE TABLE IF NOT EXISTS community_message_keys (
+                outer_event_id   TEXT PRIMARY KEY,
+                ephemeral_secret BLOB NOT NULL,
+                relays           TEXT NOT NULL,
+                created_at       INTEGER NOT NULL,
+                message_id       TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_cmk_message_id
+                ON community_message_keys(message_id);
+            CREATE TABLE IF NOT EXISTS pending_community_invites (
+                community_id TEXT PRIMARY KEY,
+                bundle_json  TEXT NOT NULL,
+                inviter_npub TEXT NOT NULL,
+                received_at  INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS community_public_invites (
+                token        TEXT PRIMARY KEY,
+                community_id TEXT NOT NULL,
+                url          TEXT NOT NULL,
+                expires_at   INTEGER,
+                created_at   INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_public_invites_community
+                ON community_public_invites(community_id);
+            CREATE TABLE IF NOT EXISTS community_edition_heads (
+                community_id TEXT NOT NULL,
+                entity_id    TEXT NOT NULL,
+                version      INTEGER NOT NULL,
+                self_hash    BLOB NOT NULL,
+                inner_id     BLOB,
+                epoch        INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (community_id, entity_id)
+            );
+            CREATE TABLE IF NOT EXISTS community_epoch_keys (
+                community_id TEXT NOT NULL,
+                scope_id     TEXT NOT NULL,
+                epoch        INTEGER NOT NULL,
+                key          BLOB NOT NULL,
+                created_at   INTEGER NOT NULL,
+                PRIMARY KEY (community_id, scope_id, epoch)
+            );
+            CREATE TABLE IF NOT EXISTS community_invite_link_sets (
+                community_id TEXT NOT NULL,
+                creator      TEXT NOT NULL,
+                locators     TEXT NOT NULL DEFAULT '[]',
+                version      INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (community_id, creator)
+            );",
+        )
+        .map_err(|e| format!("Failed to create community tables: {}", e))?;
+        Ok(())
+    })?;
+
+    // =========================================================================
+    // Migration 41: Purge legacy MLS data (MLS is fully removed)
+    // =========================================================================
+    // Drop the retired chat_type=1 (MlsGroup) chats + their events, then the MLS-only
+    // storage tables. chat_type 2 (Community) is untouched. Runs for accounts upgrading
+    // from an MLS build; a no-op on a fresh DB.
+    run_atomic_migration(conn, 41, "Purge legacy MLS data", |tx| {
+        tx.execute_batch(
+            "DELETE FROM events WHERE chat_id IN (SELECT id FROM chats WHERE chat_type = 1);
+             DELETE FROM chats WHERE chat_type = 1;
+             DROP TABLE IF EXISTS mls_groups;
+             DROP TABLE IF EXISTS mls_keypackages;
+             DROP TABLE IF EXISTS mls_processed_events;
+             DROP TABLE IF EXISTS mls_wrap_keys;
+             DROP TABLE IF EXISTS mls_pending_events;",
+        )
+        .map_err(|e| format!("Failed to purge legacy MLS data: {}", e))?;
+        Ok(())
+    })?;
+
+    // =========================================================================
+    // Migration 42: Make processed_wrappers a cross-transport dedup ledger
+    // =========================================================================
+    // A `transport` discriminator so every transport (NIP-17 DMs, Concord) shares ONE
+    // outer-event dedup store, while NIP-77 negentropy keeps fingerprinting only the 'nip17'
+    // subset. Existing rows are gift-wraps, so the default 0 ('nip17') is correct.
+    run_atomic_migration(conn, 42, "Add transport discriminator to processed_wrappers", |tx| {
+        tx.execute_batch("ALTER TABLE processed_wrappers ADD COLUMN transport INTEGER NOT NULL DEFAULT 0;")
+            .map_err(|e| format!("Failed to add transport column: {}", e))?;
         Ok(())
     })?;
 

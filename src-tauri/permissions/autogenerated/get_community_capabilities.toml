@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-community-capabilities"
+description = "Enables the get_community_capabilities command without any pre-configured scope."
+commands.allow = ["get_community_capabilities"]
+
+[[permission]]
+identifier = "deny-get-community-capabilities"
+description = "Denies the get_community_capabilities command without any pre-configured scope."
+commands.deny = ["get_community_capabilities"]

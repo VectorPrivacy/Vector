@@ -1,13 +1,13 @@
 mod globals;
 
 pub use globals::{
-    TAURI_APP, TauriEventEmitter, TauriSubscriptionRefresher,
+    TAURI_APP, TauriEventEmitter,
     NOSTR_CLIENT, MY_SECRET_KEY, STATE,
     nostr_client, my_public_key,
     set_my_public_key,
     active_trusted_relays,
     MNEMONIC_SEED, ENCRYPTION_KEY, PENDING_NSEC,
-    NOTIFIED_WELCOMES, WRAPPER_ID_CACHE,
+    WRAPPER_ID_CACHE,
     get_blossom_servers,
     PendingInviteAcceptance,
     pending_invite, set_pending_invite, clear_pending_invite,

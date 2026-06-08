@@ -13,7 +13,7 @@ use vector_core::PreparedEvent;
 
 use crate::{
     db, profile, profile_sync,
-    ChatType, Profile,
+    Profile,
     nostr_client, STATE, WRAPPER_ID_CACHE,
 };
 
@@ -189,11 +189,6 @@ pub async fn fetch_messages<R: Runtime>(
             }
         }
 
-        // Also sync MLS group messages after single-relay reconnection (negentropy)
-        if let Err(e) = crate::commands::mls::sync_mls_groups_quick().await {
-            eprintln!("[Single-Relay Sync] Failed to sync MLS groups: {}", e);
-        }
-
         return;
     }
 
@@ -225,9 +220,9 @@ pub async fn fetch_messages<R: Runtime>(
 
             // Load our DB (if we haven't already)
             if !state.db_loaded {
-                // Load profiles, chats, MLS groups, and last messages in parallel (all are independent reads)
+                // Load profiles, chats, and last messages in parallel (all are independent reads)
                 let db_start = std::time::Instant::now();
-                let (profiles_result, slim_chats_result, mls_groups_result, last_messages_result) = tokio::join!(
+                let (profiles_result, slim_chats_result, last_messages_result) = tokio::join!(
                     async {
                         let t = std::time::Instant::now();
                         let r = db::get_all_profiles().await;
@@ -238,12 +233,6 @@ pub async fn fetch_messages<R: Runtime>(
                         let t = std::time::Instant::now();
                         let r = db::get_all_chats().await;
                         println!("[Boot]   get_all_chats: {:?}", t.elapsed());
-                        r
-                    },
-                    async {
-                        let t = std::time::Instant::now();
-                        let r = db::load_mls_groups().await;
-                        println!("[Boot]   load_mls_groups: {:?}", t.elapsed());
                         r
                     },
                     async {
@@ -272,15 +261,6 @@ pub async fn fetch_messages<R: Runtime>(
 
                 // Process chats
                 if let Ok(slim_chats) = slim_chats_result {
-                    // Build HashSet of evicted MLS group IDs for O(1) lookup
-                    let evicted_groups: std::collections::HashSet<&str> = mls_groups_result
-                        .as_ref()
-                        .map(|groups| groups.iter()
-                            .filter(|g| g.evicted)
-                            .map(|g| g.group_id.as_str())
-                            .collect())
-                        .unwrap_or_default();
-
                     // Build HashSet of existing profile handles for O(1) lookup
                     let mut known_profiles: std::collections::HashSet<u16> =
                         state.profiles.iter().map(|p| p.id).collect();
@@ -295,11 +275,6 @@ pub async fn fetch_messages<R: Runtime>(
                     let mut total_messages = 0usize;
 
                     for slim_chat in slim_chats {
-                        // Skip evicted MLS groups (O(1) lookup)
-                        if slim_chat.chat_type == ChatType::MlsGroup && evicted_groups.contains(slim_chat.id.as_str()) {
-                            continue;
-                        }
-
                         let mut chat = slim_chat.to_chat(&mut state.interner);
                         let chat_id = chat.id().to_string();
 
@@ -431,16 +406,25 @@ pub async fn fetch_messages<R: Runtime>(
         }
     } // STATE lock released — no lock held during network operations
 
+    // Community boot sweep — initiated HERE in Rust (not from JS) so it runs CONCURRENTLY with the DM
+    // negentropy phase below, which routinely takes 10s+. Communities must not wait on it. Detached:
+    // the sweep windows itself (3 in flight) and emits message_new as pages land. init_finished was
+    // already emitted above, so the frontend holds the Community chat rows before any page arrives.
+    // SessionGuard captured before the spawn boundary (swap-safe); the sweep re-captures internally.
+    let community_session = vector_core::state::SessionGuard::capture();
+    tokio::spawn(async move {
+        if community_session.is_valid() {
+            let _ = crate::commands::community::sync_communities_boot().await;
+        }
+    });
+
     // ========================================================================
-    // Negentropy (NIP-77) + MLS group sync — run concurrently
+    // Negentropy (NIP-77) DM quick phase
     // ========================================================================
 
     let sync_start = std::time::Instant::now();
 
-    // Run DM quick phase and MLS group sync concurrently
-    let (_dm_new_messages, _mls_result) = tokio::join!(
-        // Task A: DM Quick Phase (negentropy reconciliation)
-        async {
+    let _dm_new_messages = async {
     let mut new_messages_count: u32 = 0;
 
     // Load our known wrapper IDs + timestamps for reconciliation fingerprinting
@@ -669,15 +653,13 @@ pub async fn fetch_messages<R: Runtime>(
                         unwrap_ns += u;
                         parse_ns += p;
                     }
-                    PreparedEvent::MlsWelcome { unwrap_ns: u, .. } => {
-                        unwrap_ns += u;
-                    }
                     PreparedEvent::DedupSkip { .. } => {
                         dedup_skips += 1;
                     }
                     PreparedEvent::ErrorSkip { .. } => {
                         error_skips += 1;
                     }
+                    PreparedEvent::CommunityInvite { .. } => {}
                 }
                 let t = std::time::Instant::now();
                 if crate::services::tauri_commit_prepared_event(prepared, false).await {
@@ -710,16 +692,7 @@ pub async fn fetch_messages<R: Runtime>(
     println!("[Sync] Quick phase: {:.2?}, {} new messages", sync_start.elapsed(), new_messages_count);
 
     new_messages_count
-        },
-        // Task B: MLS Quick Sync (batched single-request fetch for recently-active groups)
-        async {
-            let mls_start = std::time::Instant::now();
-            if let Err(e) = crate::commands::mls::sync_mls_groups_quick().await {
-                eprintln!("[Sync] Parallel MLS group sync failed: {}", e);
-            }
-            println!("[Sync] MLS group sync: {:.2?}", mls_start.elapsed());
-        }
-    );
+    }.await;
 
     // Deferred bootstrap: merge own kind 10063, then probe unknown servers.
     // Runs after Quick Sync so it can't contend for boot-window bandwidth.
@@ -902,13 +875,7 @@ pub async fn fetch_messages<R: Runtime>(
                 });
             }
 
-            // Post-sync: MLS archive reconcile (full-set negentropy, the
-            // long-offline catch-up path) + weekly vacuum
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            if !archive_session.is_valid() { return; }
-            if let Err(e) = crate::commands::mls::sync_mls_groups_archive().await {
-                eprintln!("[MLS] Post-sync MLS archive reconcile failed: {}", e);
-            }
+            // Post-sync: weekly vacuum
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             if !archive_session.is_valid() { return; }
             if let Err(e) = db::check_and_vacuum_if_needed().await {

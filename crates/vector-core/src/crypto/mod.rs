@@ -756,6 +756,141 @@ pub async fn maybe_decrypt(input: String) -> Result<String, ()> {
 }
 
 // ============================================================================
+// Synchronous at-rest helpers (Concord tables, sync DB code)
+// ============================================================================
+//
+// `maybe_encrypt`/`maybe_decrypt` are async (they may derive a key from a
+// password). The Concord DB layer is synchronous and only ever uses the live
+// ENCRYPTION_KEY vault, so these sync variants wrap the field-level primitives
+// against the vault + the enabled flag. Discriminators for the half-migrated
+// case: a key BLOB is 32 bytes raw vs 12+len+16 encrypted; a text field uses
+// `looks_encrypted` (>=56 lowercase-hex chars).
+
+/// ChaCha20-Poly1305 encrypt raw bytes with an explicit key → `nonce(12) || ct || tag(16)`.
+pub fn encrypt_blob_with_key(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, String> {
+    use rand::Rng;
+    let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|e| e.to_string())?;
+    let nonce_bytes: [u8; 12] = rand::thread_rng().gen();
+    let nonce = chacha20poly1305::Nonce::from(nonce_bytes);
+    let ct = cipher
+        .encrypt(&nonce, plaintext)
+        .map_err(|e| format!("blob encryption failed: {}", e))?;
+    let mut out = Vec::with_capacity(12 + ct.len());
+    out.extend_from_slice(&nonce_bytes);
+    out.extend_from_slice(&ct);
+    Ok(out)
+}
+
+/// ChaCha20-Poly1305 decrypt `nonce(12) || ct || tag(16)` with an explicit key.
+pub fn decrypt_blob_with_key(stored: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, String> {
+    if stored.len() < 12 + 16 {
+        return Err("blob too short to be ciphertext".to_string());
+    }
+    let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|e| e.to_string())?;
+    let (nonce_bytes, ct) = stored.split_at(12);
+    let nonce_arr: [u8; 12] = nonce_bytes.try_into().map_err(|_| "bad nonce".to_string())?;
+    let nonce = chacha20poly1305::Nonce::from(nonce_arr);
+    cipher
+        .decrypt(&nonce, ct)
+        .map_err(|_| "blob decryption failed (wrong key or corrupted)".to_string())
+}
+
+/// Encrypt a secret key BLOB for at-rest storage. Off → unchanged. Enabled but
+/// the vault is empty → Err (never silently persists a secret in plaintext).
+pub fn maybe_encrypt_blob(plaintext: &[u8]) -> Result<Vec<u8>, String> {
+    if !crate::state::is_encryption_enabled_fast() {
+        return Ok(plaintext.to_vec());
+    }
+    let mut key = crate::state::ENCRYPTION_KEY
+        .get()
+        .ok_or_else(|| "encryption enabled but key vault is empty".to_string())?;
+    let out = encrypt_blob_with_key(plaintext, &key);
+    key.zeroize();
+    out
+}
+
+/// Decrypt a secret key BLOB. Tolerant of the half-migrated DB: a 32-byte value
+/// is a raw (not-yet-wrapped / encryption-off) key, and anything that fails to
+/// authenticate is returned as-is, so a mixed store always reads back correctly.
+pub fn maybe_decrypt_blob(stored: &[u8]) -> Vec<u8> {
+    // 32 bytes = a raw key (encryption off, or a row written before the at-rest pass).
+    if stored.len() == 32 {
+        return stored.to_vec();
+    }
+    match crate::state::ENCRYPTION_KEY.get() {
+        Some(mut key) => {
+            let out = decrypt_blob_with_key(stored, &key).unwrap_or_else(|_| stored.to_vec());
+            key.zeroize();
+            out
+        }
+        None => stored.to_vec(),
+    }
+}
+
+/// Encrypt a text field for at-rest storage. Off → unchanged. Enabled but the
+/// vault is empty → Err.
+pub fn maybe_encrypt_text(plaintext: &str) -> Result<String, String> {
+    if !crate::state::is_encryption_enabled_fast() {
+        return Ok(plaintext.to_string());
+    }
+    let mut key = crate::state::ENCRYPTION_KEY
+        .get()
+        .ok_or_else(|| "encryption enabled but key vault is empty".to_string())?;
+    let out = encrypt_with_key(plaintext, &key);
+    key.zeroize();
+    out
+}
+
+/// Decrypt a text field. A value that doesn't look encrypted (or can't be
+/// decrypted) is returned as-is — pre-migration rows and encryption-off rows.
+pub fn maybe_decrypt_text(stored: &str) -> String {
+    if !looks_encrypted(stored) {
+        return stored.to_string();
+    }
+    match crate::state::ENCRYPTION_KEY.get() {
+        Some(mut key) => {
+            let out = decrypt_with_key(stored, &key).unwrap_or_else(|_| stored.to_string());
+            key.zeroize();
+            out
+        }
+        None => stored.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod at_rest_tests {
+    use super::*;
+
+    #[test]
+    fn blob_roundtrip_with_explicit_key() {
+        let key = [7u8; 32];
+        let secret = [0x42u8; 32];
+        let ct = encrypt_blob_with_key(&secret, &key).unwrap();
+        assert_eq!(ct.len(), 12 + 32 + 16, "nonce + ciphertext + tag");
+        assert_ne!(&ct[12..44], &secret[..], "ciphertext must not equal plaintext");
+        assert_eq!(decrypt_blob_with_key(&ct, &key).unwrap(), secret.to_vec());
+    }
+
+    #[test]
+    fn blob_wrong_key_fails() {
+        let ct = encrypt_blob_with_key(&[1u8; 32], &[7u8; 32]).unwrap();
+        assert!(decrypt_blob_with_key(&ct, &[9u8; 32]).is_err());
+    }
+
+    #[test]
+    fn encrypted_text_is_always_detected_as_encrypted() {
+        // Even the shortest fields ("[]", "{}", "") must exceed the looks_encrypted floor
+        // so they round-trip through maybe_decrypt_text.
+        let key = [3u8; 32];
+        for s in ["", "[]", "{}", "a"] {
+            let ct = encrypt_with_key(s, &key).unwrap();
+            assert!(looks_encrypted(&ct), "ciphertext for {:?} must look encrypted", s);
+            assert_eq!(decrypt_with_key(&ct, &key).unwrap(), s);
+        }
+    }
+}
+
+// ============================================================================
 // Image Metadata — thumbhash + dimensions for file attachments
 // ============================================================================
 

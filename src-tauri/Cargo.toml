@@ -34,9 +34,6 @@ vector-core = { path = "../crates/vector-core", default-features = false }
 
 nostr-sdk = { version = "0.44.1", features = ["nip06", "nip44", "nip59"] }
 nostr-blossom = "0.44.0"
-mdk-core = { git = "https://github.com/marmot-protocol/mdk.git", rev = "136a9ee929580206ea0357d48d9766427918186d", features = ["mip04"] }
-mdk-sqlite-storage = { git = "https://github.com/marmot-protocol/mdk.git", rev = "136a9ee929580206ea0357d48d9766427918186d" }
-mdk-storage-traits = { git = "https://github.com/marmot-protocol/mdk.git", rev = "136a9ee929580206ea0357d48d9766427918186d" }
 bip39 = { version = "2.2.2", features = ["rand"] }
 tokio = { version = "1.49.0", features = ["sync", "time", "net", "io-util"] }
 futures-util = "0.3.31"
@@ -75,9 +72,6 @@ symphonia = { version = "0.5.5", features = ["mp3", "wav", "flac", "pcm", "aac",
 rustfft = "6.2"
 lofty = "0.24"
 rusqlite = { version = "0.32", features = ["bundled"] }
-# Pin OpenMLS crypto deps to versions MDK was tested with (newer versions pull broken sha3/digest pre-release chain)
-openmls_rust_crypto = "=0.5.0"
-hpke-rs-rust-crypto = "=0.4.0"
 rayon = "1.11.0"
 
 # Transitive Dependencies (re-used from frameworks we already utilise, like Tauri)
@@ -151,13 +145,3 @@ pkarr = { path = "patches/pkarr" }
 # Patched to use zeroize (volatile writes) so secret key bytes are guaranteed cleared from the stack.
 # Fork: https://github.com/VectorPrivacy/nostr/tree/zeroize-secretkey
 nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "zeroize-secretkey" }
-
-# MDK fork branched from rev 136a9ee with `build_message_event_retained`
-# added — exposes the kind-445 wrapper's ephemeral signing key so the
-# sender can later publish a NIP-09 deletion against the wrapper.
-# In-repo so collaborators get the patched source without an external
-# checkout. Maintained as a thin diff on top of the pinned upstream rev.
-[patch."https://github.com/marmot-protocol/mdk.git"]
-mdk-core = { path = "../patches/mdk/crates/mdk-core" }
-mdk-sqlite-storage = { path = "../patches/mdk/crates/mdk-sqlite-storage" }
-mdk-storage-traits = { path = "../patches/mdk/crates/mdk-storage-traits" }

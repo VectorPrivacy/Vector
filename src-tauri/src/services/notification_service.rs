@@ -22,8 +22,7 @@ use crate::TAURI_APP;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum NotificationType {
     DirectMessage,
-    GroupMessage,
-    GroupInvite,
+    CommunityMessage,
 }
 
 /// Generic notification data structure
@@ -60,32 +59,25 @@ impl NotificationData {
         }
     }
 
-    /// Create a group message notification (works for both text and file attachments)
-    pub fn group_message(sender_name: String, group_name: String, content: String, avatar_path: Option<String>, group_avatar_path: Option<String>, chat_id: String) -> Self {
+    /// Create a Community channel notification. Title mirrors the group format ("sender - community");
+    /// `chat_id` is the channel id so tapping navigates to the channel.
+    pub fn community_message(
+        sender_name: String,
+        community_name: String,
+        content: String,
+        avatar_path: Option<String>,
+        community_avatar_path: Option<String>,
+        chat_id: String,
+    ) -> Self {
         Self {
-            notification_type: NotificationType::GroupMessage,
-            title: format!("{} - {}", sender_name, group_name),
+            notification_type: NotificationType::CommunityMessage,
+            title: format!("{} - {}", sender_name, community_name),
             body: content,
-            group_name: Some(group_name),
+            group_name: Some(community_name),
             sender_name: Some(sender_name),
             avatar_path,
-            group_avatar_path,
+            group_avatar_path: community_avatar_path,
             chat_id: Some(chat_id),
-        }
-    }
-
-    /// Create a group invite notification
-    #[allow(dead_code)]
-    pub fn group_invite(group_name: String, inviter_name: String, avatar_path: Option<String>) -> Self {
-        Self {
-            notification_type: NotificationType::GroupInvite,
-            title: group_name.clone(),
-            body: format!("Invited by {}", inviter_name),
-            group_name: Some(group_name),
-            sender_name: Some(inviter_name),
-            avatar_path,
-            group_avatar_path: None,
-            chat_id: None, // No chat to navigate to yet (pending welcome)
         }
     }
 }

@@ -23,14 +23,14 @@ function generateChatlistStateHash() {
     // Build a simple array of state values (faster than creating objects)
     const states = [];
 
-    // Add invite IDs and avatar state
-    for (const inv of arrMLSInvites) {
-        states.push(inv.id || inv.welcome_event_id || inv.group_id, inv.avatar_cached);
+    // Add pending Community invite ids
+    for (const inv of arrCommunityInvites) {
+        states.push(inv.community_id, inv.name);
     }
 
     // Add chat states (including chat ID to capture order changes)
     for (const chat of arrChats) {
-        const isGroup = chat.chat_type === 'MlsGroup';
+        const isGroup = chatIsGroup(chat);
         const profile = !isGroup ? getProfile(chat.id) : null;
         const cLastMsg = chat.messages[chat.messages.length - 1];
         const nUnread = computeRowBadgeCount(chat);
@@ -77,22 +77,21 @@ function renderChatlist() {
     const fragment = document.createDocumentFragment();
 
     // Render invites first (at the top of the chat list)
-    for (const invite of arrMLSInvites) {
-        const divInvite = renderInviteItem(invite, primaryColor);
-        fragment.appendChild(divInvite);
+    for (const invite of arrCommunityInvites) {
+        fragment.appendChild(renderCommunityInviteItem(invite));
     }
 
     // Then render regular chats
     for (const chat of arrChats) {
         // For groups, we show them even if they have no messages yet
         // For DMs, we only show them if they have messages
-        if (chat.chat_type !== 'MlsGroup' && chat.messages.length === 0) continue;
+        if (!chatIsGroup(chat) && chat.messages.length === 0) continue;
 
         // Do not render our own profile: it is accessible via the Bookmarks/Notes section
         if (chat.id === strPubkey) continue;
 
         // Hide DM chats with blocked users from the chat list
-        if (chat.chat_type !== 'MlsGroup') {
+        if (!chatIsGroup(chat)) {
             const chatProfile = getProfile(chat.id);
             if (chatProfile?.is_blocked) continue;
         }
@@ -109,7 +108,7 @@ function renderChatlist() {
     // message and groups the user has joined; if the fragment came out
     // empty AND there are no pending invites, surface a friendly nudge
     // so the user understands what to do next.
-    if (!fragment.firstElementChild && arrMLSInvites.length === 0) {
+    if (!fragment.firstElementChild && arrCommunityInvites.length === 0) {
         fragment.appendChild(buildChatlistEmptyState());
     }
 
@@ -233,7 +232,7 @@ function countUnreadMessages(chat) {
         }
 
         // Skip messages from blocked users in group chats
-        if (chat.chat_type === 'MlsGroup' && msg.npub) {
+        if (chatIsGroup(chat) && msg.npub) {
             const authorProfile = getProfile(msg.npub);
             if (authorProfile?.is_blocked) continue;
         }
@@ -260,14 +259,14 @@ function countUnreadMessages(chat) {
  */
 function computeRowBadgeCount(chat) {
     if (chat.muted) {
-        return chat.chat_type === 'MlsGroup' ? countPingMessages(chat) : 0;
+        return chatIsGroup(chat) ? countPingMessages(chat) : 0;
     }
     return countUnreadMessages(chat);
 }
 
 function countPingMessages(chat) {
     if (!chat.messages || !chat.messages.length) return 0;
-    const isGroup = chat.chat_type === 'MlsGroup';
+    const isGroup = chatIsGroup(chat);
     const admins = chat.metadata?.admins;
     let pings = 0;
     for (let i = chat.messages.length - 1; i >= 0; i--) {
@@ -281,9 +280,11 @@ function countPingMessages(chat) {
         }
         if (!msg.content) continue;
         const mentionedMe = strPubkey && msg.content.includes('@' + strPubkey);
+        // Authorized @everyone = owner or admin (owner isn't in the admins list — it's its own tier).
+        const everyoneAuthor = msg.npub || '';
         const mentionedEveryone = isGroup
             && /@everyone\b/.test(msg.content)
-            && admins?.includes(msg.npub || '');
+            && (admins?.includes(everyoneAuthor) || chat.metadata?.custom_fields?.owner_npub === everyoneAuthor);
         if (mentionedMe || mentionedEveryone) pings++;
     }
     return pings;
@@ -322,7 +323,7 @@ function updateChatlistTimestamps() {
 
             // Update status indicator if needed (for DMs only)
             const avatarContainer = item.querySelector('.avatar-status-icon')?.parentElement;
-            if (avatarContainer && chat.chat_type !== 'MlsGroup') {
+            if (avatarContainer && !chatIsGroup(chat)) {
                 // Remove existing status icon if present
                 const existingStatusIcon = avatarContainer.querySelector('.avatar-status-icon');
                 if (existingStatusIcon) {

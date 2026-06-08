@@ -10,7 +10,6 @@
 //! - `system`: Platform features, storage, maintenance (4 commands)
 //! - `messaging`: Message fetching, caching, unread counts (8 commands)
 //! - `realtime`: Typing indicators and WebXDC peer discovery (2 commands)
-//! - [future] `mls`: MLS group messaging commands
 //!
 //! Commands are registered in lib.rs via `generate_handler![]`.
 //! Each module lists its handlers in a comment at the end of the file.
@@ -23,10 +22,10 @@ pub mod system;
 pub mod invites;
 pub mod media;
 pub mod messaging;
-pub mod mls;
 pub mod realtime;
 pub mod encryption;
 pub mod audio;
 pub mod tor;
 pub mod emoji_packs;
 pub mod wallpaper;
+pub mod community;

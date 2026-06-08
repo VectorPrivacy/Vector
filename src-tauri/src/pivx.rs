@@ -1268,18 +1268,7 @@ pub async fn pivx_send_payment<R: Runtime>(
 
         event_id
     } else {
-        let rumor = EventBuilder::new(Kind::ApplicationSpecificData, &content)
-            .tag(Tag::custom(TagKind::d(), vec!["pivx-payment"]))
-            .tag(Tag::custom(TagKind::Custom(Cow::Borrowed("gift-code")), vec![&send_promo.0]))
-            .tag(Tag::custom(TagKind::Custom(Cow::Borrowed("amount")), vec![&amount_sats.to_string()]))
-            .tag(Tag::custom(TagKind::Custom(Cow::Borrowed("address")), vec![&send_promo.1]))
-            .build(my_public_key);
-
-        let event_id = rumor.id.ok_or("Failed to get event ID")?.to_hex();
-
-        crate::mls::send_mls_message(&receiver, rumor, None).await?;
-
-        event_id
+        return Err("Group payments are no longer supported".to_string());
     };
 
     // Delete sent promo from our DB (funds are transferred to recipient)
@@ -1396,20 +1385,7 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
 
         event_id
     } else {
-        // MLS group - build rumor without p tag but include address for balance checks
-        let rumor = EventBuilder::new(Kind::ApplicationSpecificData, &content)
-            .tag(Tag::custom(TagKind::d(), vec!["pivx-payment"]))
-            .tag(Tag::custom(TagKind::Custom(Cow::Borrowed("gift-code")), vec![&gift_code]))
-            .tag(Tag::custom(TagKind::Custom(Cow::Borrowed("amount")), vec![&amount_sats.to_string()]))
-            .tag(Tag::custom(TagKind::Custom(Cow::Borrowed("address")), vec![&address]))
-            .build(my_public_key);
-
-        let event_id = rumor.id.ok_or("Failed to get event ID")?.to_hex();
-
-        // Send via MLS
-        crate::mls::send_mls_message(&receiver, rumor, None).await?;
-
-        event_id
+        return Err("Group payments are no longer supported".to_string());
     };
 
     // Delete sent promo from DB (funds are gone, no need to track it)

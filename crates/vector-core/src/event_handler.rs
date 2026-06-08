@@ -26,21 +26,32 @@ pub trait InboundEventHandler: Send + Sync {
     /// A reaction was received and applied to a message.
     fn on_reaction_received(&self, _chat_id: &str, _msg: &Message) {}
 
-    /// An MLS Welcome event — platform handles group join flow.
-    fn on_mls_welcome(&self, _event: &Event, _rumor: &UnsignedEvent, _sender: &PublicKey, _contact: &str, _is_mine: bool, _is_new: bool) {}
-
-    /// An MLS group message was received and committed to STATE + DB.
-    /// Called after MDK decryption + rumor processing. The message is ready for display.
-    fn on_group_message(&self, _group_id: &str, _msg: &Message) {}
-
     /// A previously-stored message was deleted by its sender (Layer 2
     /// cooperative hide via NIP-09 over NIP-17). Frontend drops the row.
     fn on_message_deleted(&self, _chat_id: &str, _message_id: &str) {}
+
+    /// A Community invite was received over a gift wrap and the local user was
+    /// joined (member-view Community persisted). Platform refreshes the Community
+    /// subscription so messages start flowing, and surfaces the new Community in the UI.
+    fn on_community_invite(&self, _community_id: &str) {}
 }
 
 /// No-op handler for CLI/tests.
 pub struct NoOpEventHandler;
 impl InboundEventHandler for NoOpEventHandler {}
+
+/// Decode a 64-char hex id to 32 bytes; `None` on any malformed input (never
+/// zero-fills). Used to validate an inbound invite's `community_id` before DB lookups.
+fn hex_to_id32(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
 
 /// Result of Phase 1 (prepare_event) — everything needed for sequential commit.
 pub enum PreparedEvent {
@@ -58,17 +69,14 @@ pub enum PreparedEvent {
         /// Time spent on rumor parsing (nanoseconds)
         parse_ns: u64,
     },
-    /// MLS Welcome — platform handles group join.
-    MlsWelcome {
-        event: Event,
-        rumor: UnsignedEvent,
-        contact: String,
-        sender: PublicKey,
+    /// Community invite bundle (kind 3304) — parked for explicit user consent.
+    CommunityInvite {
+        invite: crate::community::invite::CommunityInvite,
+        /// Inviter's npub (bech32) — shown in the pending-invite UI.
+        inviter: String,
         is_mine: bool,
-        wrapper_event_id: String,
         wrapper_event_id_bytes: [u8; 32],
         wrapper_created_at: u64,
-        unwrap_ns: u64,
     },
     /// Duplicate event — just persist wrapper for negentropy.
     DedupSkip {
@@ -127,18 +135,21 @@ pub async fn prepare_event(
         sender.to_bech32().unwrap_or_default()
     };
 
-    // Skip NIP-17 group messages (multiple p-tags) — Vector uses MLS
+    // Skip NIP-17 group messages (multiple p-tags) — Vector DMs are 1:1
     if rumor.tags.public_keys().count() > 1 {
         return PreparedEvent::ErrorSkip {
             wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at,
         };
     }
 
-    // MLS Welcome — defer to platform
-    if rumor.kind == Kind::MlsWelcome {
-        return PreparedEvent::MlsWelcome {
-            event, rumor, contact, sender, is_mine,
-            wrapper_event_id, wrapper_event_id_bytes, wrapper_created_at, unwrap_ns,
+    // Community invite (carrier) — a join, not a chat message. Recognized before
+    // process_rumor so it never lands as an UnknownEvent in the DM thread.
+    if rumor.kind == Kind::Custom(crate::stored_event::event_kind::COMMUNITY_INVITE_BUNDLE) {
+        return match crate::community::invite::parse_invite_rumor(rumor.kind, &rumor.content) {
+            Some(invite) => PreparedEvent::CommunityInvite {
+                invite, inviter: contact.clone(), is_mine, wrapper_event_id_bytes, wrapper_created_at,
+            },
+            None => PreparedEvent::ErrorSkip { wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at },
         };
     }
 
@@ -214,7 +225,7 @@ pub async fn commit_prepared_event(
                 cache.insert(wrapper_event_id_bytes);
             }
             // Persist for cross-session dedup + negentropy
-            let _ = crate::db::wrappers::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at);
+            let _ = crate::db::wrappers::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at, crate::db::wrappers::TRANSPORT_NIP17);
 
             // Blocked check — drop content from blocked contacts (wrapper still persisted for negentropy)
             if !is_mine {
@@ -330,60 +341,55 @@ pub async fn commit_prepared_event(
                 RumorProcessingResult::Ignored => false,
             }
         }
-        PreparedEvent::MlsWelcome { event, rumor, contact, sender, is_mine, wrapper_event_id_bytes, wrapper_created_at, .. } => {
-            // Dedup: same welcome can arrive from multiple relays simultaneously.
-            // Check-and-insert atomically (single lock scope) to close the race window.
+        PreparedEvent::CommunityInvite { invite, inviter, is_mine, wrapper_event_id_bytes, wrapper_created_at } => {
+            // Negentropy bookkeeping regardless of outcome (the outer wrapper id is
+            // attacker-controlled, so it can't be the join-idempotency key — see below).
             {
                 let mut cache = WRAPPER_ID_CACHE.lock().await;
-                if cache.contains(&wrapper_event_id_bytes) {
-                    return false;
-                }
                 cache.insert(wrapper_event_id_bytes);
             }
+            let _ = crate::db::wrappers::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at, crate::db::wrappers::TRANSPORT_NIP17);
 
-            // Process welcome through MDK so it lands in the pending_welcomes list.
-            // Without this step, `list_invites()` would return empty even after the
-            // GiftWrap arrives. Runs on a blocking thread (MDK engine is non-Send).
-            //
-            // IMPORTANT: Only persist the wrapper to negentropy if MDK accepted the
-            // welcome (successful process_welcome OR MDK self-recorded Failed via its
-            // own return path). If the MLS service/engine failed to initialize, the
-            // welcome wasn't seen by MDK at all — leaving the wrapper unpersisted
-            // allows negentropy to re-fetch and re-process it next sync.
-            let wrapper_id = event.id;
-            let rumor_for_mdk = rumor.clone();
-            let mdk_saw_welcome = tokio::task::spawn_blocking(move || {
-                let mls = match crate::mls::MlsService::new_persistent_static() {
-                    Ok(m) => m,
-                    Err(e) => {
-                        log_warn!("[MLS] Welcome deferred: MlsService init failed: {}", e);
-                        return false;
-                    }
-                };
-                let engine = match mls.engine() {
-                    Ok(e) => e,
-                    Err(e) => {
-                        log_warn!("[MLS] Welcome deferred: engine() failed: {}", e);
-                        return false;
-                    }
-                };
-                // process_welcome handles its own dedup; errors are recorded as
-                // Failed state in MDK so retries are no-ops (safe to persist wrapper).
-                if let Err(e) = engine.process_welcome(&wrapper_id, &rumor_for_mdk) {
-                    log_warn!("[MLS] process_welcome error (recorded in MDK): {}", e);
-                }
-                true
-            })
-            .await
-            .unwrap_or(false);
+            // Never park our own echoed invite.
+            if is_mine {
+                return false;
+            }
 
-            // Platform-specific hook (notifications, badge updates, etc.)
-            handler.on_mls_welcome(&event, &rumor, &sender, &contact, is_mine, is_new);
+            // Cap-check before touching the DB (a hostile bundle can declare an
+            // unbounded channel/relay list).
+            if let Err(e) = invite.validate() {
+                log_warn!("[community] invite rejected: {}", e);
+                return false;
+            }
 
-            // Only persist wrapper if MDK has a record of this welcome (success or
-            // recorded-as-failed). Otherwise leave it for retry via next sync.
-            if mdk_saw_welcome {
-                let _ = crate::db::wrappers::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at);
+            // Idempotency on the INNER identity (community_id), NOT the wrapper id: a
+            // replayed bundle re-wrapped under fresh ephemeral keys must not re-notify
+            // or churn. If we already hold this Community, or already have it parked,
+            // drop silently.
+            let community_id = invite.community_id.clone();
+            let already_held = crate::community::CommunityId(
+                match hex_to_id32(&community_id) {
+                    Some(b) => b,
+                    None => { log_warn!("[community] invite has malformed id"); return false; }
+                },
+            );
+            if crate::db::community::community_exists(&already_held).unwrap_or(false) {
+                return false;
+            }
+            if crate::db::community::pending_invite_exists(&community_id).unwrap_or(false) {
+                return false;
+            }
+
+            // Park for explicit consent — do NOT join, subscribe, or dial the bundle's
+            // relays here. The user accepts via the command layer (mirrors MLS welcomes).
+            let bundle_json = match invite.to_json() {
+                Ok(j) => j,
+                Err(e) => { log_warn!("[community] invite re-serialize failed: {}", e); return false; }
+            };
+            match crate::db::community::save_pending_invite(&community_id, &bundle_json, &inviter) {
+                Ok(true) => handler.on_community_invite(&community_id),
+                Ok(false) => {} // raced — already parked
+                Err(e) => log_warn!("[community] invite park failed: {}", e),
             }
             false
         }
@@ -395,7 +401,7 @@ pub async fn commit_prepared_event(
             false
         }
         PreparedEvent::ErrorSkip { wrapper_id_bytes, wrapper_created_at } => {
-            let _ = crate::db::wrappers::save_processed_wrapper(&wrapper_id_bytes, wrapper_created_at);
+            let _ = crate::db::wrappers::save_processed_wrapper(&wrapper_id_bytes, wrapper_created_at, crate::db::wrappers::TRANSPORT_NIP17);
             false
         }
     }

@@ -14,6 +14,26 @@ const SystemEventType = {
     WallpaperRemoved: 4,
 };
 
+/** Resolve a system-event actor's display name from cached profiles; npub-prefix fallback. */
+function systemEventName(npub) {
+    const p = arrProfiles.find(x => x.id === npub);
+    return p?.nickname || p?.name || (npub ? npub.substring(0, 12) + '…' : 'Someone');
+}
+
+/** Build a system-event line, resolving the actor's CURRENT cached name (the stored content
+ * was baked with the raw npub at receive time, before the profile was known). */
+function systemEventContent(eventType, npub) {
+    const name = systemEventName(npub);
+    switch (eventType) {
+        case SystemEventType.MemberLeft: return `${name} has left`;
+        case SystemEventType.MemberJoined: return `${name} has joined`;
+        case SystemEventType.MemberRemoved: return `${name} was removed`;
+        case SystemEventType.WallpaperChanged: return `${name} changed the wallpaper`;
+        case SystemEventType.WallpaperRemoved: return `${name} removed the wallpaper`;
+        default: return name;
+    }
+}
+
 /**
  * Multi-account API surface. Wraps the Tauri commands that the in-app My
  * Profile dropdown and the pre-login picker both consume. Keeping it in one
@@ -1414,11 +1434,13 @@ let arrProfiles = [];
  */
 let arrChats = [];
 
+
 /**
- * A cache of MLS group invites
- * @type {MLSWelcome[]}
+ * Pending Community invites (npub gift-wraps the user hasn't accepted yet). Rendered as
+ * pinned slots at the top of the chat list, like MLS welcomes.
+ * @type {Array<{community_id: string, name: string, inviter_npub: string}>}
  */
-let arrMLSInvites = [];
+let arrCommunityInvites = [];
 
 /**
  * The current open chat (by npub)
@@ -1447,17 +1469,8 @@ function getDMChat(npub) {
 }
 
 /**
- * Get a group chat by ID
- * @param {string} groupId - The group's ID
- * @returns {Chat|undefined} - The chat if it exists
- */
-function getGroupChat(groupId) {
-    return arrChats.find(c => c.chat_type === 'MlsGroup' && c.id === groupId);
-}
-
-/**
- * Get a chat by ID (works for both DMs and Group Chats)
- * @param {string} id - The chat ID (npub for DM, group_id for MlsGroup)
+ * Get a chat by ID (works for DMs and Community channels)
+ * @param {string} id - The chat ID (npub for DM, channel id for Community)
  * @returns {Chat|undefined} - The chat if it exists
  */
 function getChat(id) {
@@ -1465,27 +1478,100 @@ function getChat(id) {
 }
 
 /**
- * Get or create a chat (DM or MLS Group)
- * @param {string} id - The chat ID (npub for DM, group_id for MlsGroup)
- * @param {string} chatType - 'DirectMessage' or 'MlsGroup'
+ * Get or create a chat (DM or Community channel)
+ * @param {string} id - The chat ID (npub for DM, channel id for Community)
+ * @param {string} chatType - 'DirectMessage' or 'Community'
  * @returns {Chat} - The chat (existing or newly created)
  */
 function getOrCreateChat(id, chatType = 'DirectMessage') {
-    let chat = chatType === 'MlsGroup' ? getGroupChat(id) : getDMChat(id);
+    const isGroupType = chatType === 'Community';
+    let chat = isGroupType
+        ? arrChats.find(c => c.chat_type === 'Community' && c.id === id)
+        : getDMChat(id);
     if (!chat) {
         chat = {
             id: id,
             chat_type: chatType,
-            participants: chatType === 'MlsGroup' ? [] : [id],
+            participants: isGroupType ? [] : [id],
             messages: [],
             last_read: '',
             created_at: Math.floor(Date.now() / 1000),
-            metadata: chatType === 'MlsGroup' ? { group_id: id } : {},
+            metadata: {},
             muted: false
         };
         arrChats.push(chat);
     }
     return chat;
+}
+
+/**
+ * Whether a chat is "group-like": a many-person room rendered with avatar + per-message
+ * author headers (an MLS group OR a Community channel), as opposed to a 1:1 DM. Single
+ * source of truth for the render-layer group/DM fork. (MLS is being retired in favor of
+ * Communities; this keeps both rendering during the transition.)
+ */
+function chatIsGroup(chat) {
+    // MLS is being torn out; a "group-like" chat is now exclusively a Community channel.
+    return !!chat && chat.chat_type === 'Community';
+}
+
+/**
+ * Whether a chat is a dissolved Community channel (owner tombstone, §6.1). The backend seals
+ * a dissolved community: new sends/reactions/edits silently go nowhere. The UI mirrors that
+ * by disabling the composer and stripping all message actions except own-message delete.
+ */
+function chatIsDissolved(chat) {
+    return !!chat && chat.chat_type === 'Community' && chat.metadata?.custom_fields?.dissolved === 'true';
+}
+
+/** Lookup a message row's chat (by the open chat) and report if it's dissolved. */
+function rowIsInDissolvedCommunity() {
+    return chatIsDissolved(arrChats.find(c => c.id === strOpenChat));
+}
+
+/**
+ * Apply the dissolved-community composer lockdown + end-of-community divider to the currently open chat.
+ * Shared by `openChat` (on open) and the `community_refreshed` listener (when a community seals while it's
+ * the open view) so a realtime dissolution updates the live UI, not just the cached flag.
+ */
+function applyDissolvedChatUI(chat) {
+    domChatMessageInput.disabled = true;
+    domChatMessageInput.placeholder = 'This community has been dissolved.';
+    domChatMessageInput.style.paddingLeft = '15px';
+    domChatMessageInputFile.style.display = 'none';
+    domChatMessageInputVoice.style.display = 'none';
+    domChatMessageInputEmoji.style.display = 'none';
+    if (!document.getElementById('dissolved-notice')) {
+        const communityName = chat?.metadata?.custom_fields?.name || 'This community';
+        const dissolvedNotice = insertSystemEvent(`${communityName} was dissolved by the owner.`);
+        dissolvedNotice.id = 'dissolved-notice';
+        dissolvedNotice.style.marginBottom = '20px';
+        domChatMessages.appendChild(dissolvedNotice);
+    }
+}
+
+/**
+ * Resolve Community channel logos to local cached paths. Unlike MLS, a Community chat's
+ * name/description/identity already arrive IN the chat payload (`custom_fields`, persisted
+ * in the chats table) and load uniformly with DMs — no metadata hydrate needed. Only the
+ * encrypted logo needs an async cache step, exactly like DM profile avatars: read the
+ * `icon` flag + `community_id` from the chat's own metadata and cache lazily.
+ */
+function resolveCommunityAvatars() {
+    for (const chat of arrChats) {
+        if (chat.chat_type !== 'Community') continue;
+        const cf = chat.metadata?.custom_fields || {};
+        if (cf.icon === '1' && cf.community_id && !chat.metadata.avatar_cached) {
+            invoke('cache_community_image', { communityId: cf.community_id, isBanner: false })
+                .then(path => {
+                    if (path) {
+                        chat.metadata.avatar_cached = path;
+                        if (!fInit) renderChatlist();
+                    }
+                })
+                .catch(() => {});
+        }
+    }
 }
 
 /**
@@ -1558,89 +1644,20 @@ function getChatSortTimestamp(chat) {
     }
     let lastActivity = lastMessage?.at || 0;
 
-    if (chat.chat_type === 'MlsGroup') {
-        const updatedAt = chat.metadata?.updated_at || chat.metadata?.custom_fields?.updated_at || 0;
-        if (updatedAt > lastActivity) {
-            lastActivity = updatedAt;
-        }
-    }
-
     if (!lastActivity) {
-        lastActivity =
+        // No real messages yet — fall back to join/creation time so a fresh community
+        // sorts by when we joined, not to the bottom. custom_fields values are strings.
+        lastActivity = Number(
             chat.metadata?.created_at ||
             chat.metadata?.custom_fields?.created_at ||
             chat.created_at ||
-            0;
+            0
+        );
     }
 
     return lastActivity || 0;
 }
 
-/**
- * Apply backend-provided metadata to an MLS group chat object.
- * @param {Object} metadata - The metadata from Rust.
- * @returns {{chat: Chat|null, changed: boolean}}
- */
-function applyMlsGroupMetadata(metadata) {
-    if (!metadata || !metadata.group_id) {
-        return { chat: null, changed: false };
-    }
-
-    const chat = getOrCreateChat(metadata.group_id, 'MlsGroup');
-    chat.metadata = chat.metadata || {};
-    chat.metadata.custom_fields = chat.metadata.custom_fields || {};
-
-    let changed = false;
-    const assignIfChanged = (target, key, value) => {
-        if (value === undefined) return;
-        if (target[key] !== value) {
-            target[key] = value;
-            changed = true;
-        }
-    };
-
-    assignIfChanged(chat.metadata, 'group_id', metadata.group_id);
-    assignIfChanged(chat.metadata, 'engine_group_id', metadata.engine_group_id);
-    assignIfChanged(chat.metadata, 'creator_pubkey', metadata.creator_pubkey);
-    assignIfChanged(chat.metadata, 'avatar_ref', metadata.avatar_ref ?? null);
-    assignIfChanged(chat.metadata, 'avatar_cached', metadata.avatar_cached ?? null);
-    assignIfChanged(chat.metadata, 'created_at', metadata.created_at);
-    assignIfChanged(chat.metadata, 'updated_at', metadata.updated_at);
-    assignIfChanged(chat.metadata, 'evicted', metadata.evicted);
-
-    // Auto-trigger avatar caching if we have a ref but no cache
-    if (chat.metadata.avatar_ref && !chat.metadata.avatar_cached) {
-        invoke('cache_group_avatar', { groupId: metadata.group_id }).catch(() => {});
-    }
-    assignIfChanged(chat.metadata.custom_fields, 'name', metadata.name);
-    assignIfChanged(chat.metadata.custom_fields, 'description', metadata.description);
-    if (metadata.member_count !== undefined) {
-        assignIfChanged(chat.metadata.custom_fields, 'member_count', metadata.member_count);
-    }
-
-    return { chat, changed };
-}
-
-/**
- * Hydrate all MLS group metadata from the backend store.
- */
-async function hydrateMLSGroupMetadata() {
-    try {
-        const metadataList = await invoke('get_mls_group_metadata');
-        let changed = false;
-        for (const metadata of metadataList || []) {
-            const result = applyMlsGroupMetadata(metadata);
-            if (result.changed) {
-                changed = true;
-            }
-        }
-        if (changed && !fInit) {
-            renderChatlist();
-        }
-    } catch (e) {
-        console.error('Failed to hydrate MLS group metadata:', e);
-    }
-}
 
 /** Extract a valid npub from a bare npub string or a vectorapp.io profile URL */
 function extractNpub(input) {
@@ -1803,137 +1820,211 @@ async function init(skipAccountCheck = false) {
         setAsyncInterval(fetchProfiles, 45000);
     });
 
-    // Display Invites (MLS Welcomes)
-    await loadMLSInvites();
-}
+    // Display pending Community invites.
+    await loadCommunityInvites();
 
-/**
- * Refresh and cache the member count for a given MLS group.
- * Also updates open chat header and re-renders chat list.
- */
-async function refreshGroupMemberCount(groupId) {
-    try {
-        const result = await invoke('get_mls_group_members', { groupId });
-        const chat = getOrCreateChat(groupId, 'MlsGroup');
-        
-        // get_mls_group_members returns { group_id, members, admins }
-        if (result && result.members) {
-            chat.metadata = chat.metadata || {};
-            chat.metadata.custom_fields = chat.metadata.custom_fields || {};
-            chat.metadata.custom_fields.member_count = result.members.length;
-            chat.participants = result.members.slice();
-            // Cache admin list for @everyone and admin checks
-            if (result.admins) {
-                chat.metadata.admins = result.admins.slice();
-            }
-
-            console.log(`[MLS] Updated member count for ${groupId.substring(0, 8)}: ${result.members.length} members`);
+    // Preload each community's admin roster so admin tags + @everyone render from the first paint,
+    // not only after the Group Info panel has been opened (which used to be the sole roster loader).
+    const seenCommunities = new Set();
+    for (const c of arrChats) {
+        const cid = c.chat_type === 'Community' ? c.metadata?.custom_fields?.community_id : null;
+        if (cid && !seenCommunities.has(cid)) {
+            seenCommunities.add(cid);
+            loadCommunityRoles(cid);
         }
-        if (strOpenChat === groupId) {
-            // Update the chat header subtext (respects typing indicators)
-            updateChatHeaderSubtext(chat);
-
-            // Admin list arrives async — re-render rows from now-known
-            // admins so admin badges + @everyone treatment apply.
-            const admins = chat.metadata?.admins;
-            if (Array.isArray(admins) && admins.length > 0 && domChatMessages) {
-                const adminSet = new Set(admins);
-                const rows = domChatMessages.querySelectorAll('.dmsg');
-                rows.forEach(row => {
-                    const m = row._dmsgMsg;
-                    if (!m || m.mine) return;
-                    const senderNpub = m.npub || '';
-                    if (!adminSet.has(senderNpub)) return;
-                    const profile = getProfile(senderNpub);
-                    row.replaceWith(renderMessage(m, profile, m.id));
-                });
-            }
-        }
-    } catch (e) {
-        console.warn('Failed to refresh group member count for', groupId, e);
     }
 }
 
-/**
- * Load pending MLS invites and render them
- */
-async function loadMLSInvites() {
-    try {
-        const raw = await invoke('list_pending_mls_welcomes');
-        // Normalize shape: backend should return an array; support {welcomes} or {items} fallback
-        const welcomes = Array.isArray(raw) ? raw : (raw?.welcomes || raw?.items || []);
-        arrMLSInvites = (welcomes || []).filter(Boolean);
 
-        // Make sure to notify if there's pending invites
+// ── Community invites (pending npub gift-wraps) ──────────────────────────────
+
+/**
+ * Load pending Community invites from the backend. The private bundle carries the name
+ * (no icon/description), so we parse it out for display.
+ */
+async function loadCommunityInvites() {
+    try {
+        const invites = await invoke('list_community_invites');
+        arrCommunityInvites = (invites || []).map(inv => {
+            let name = 'Community';
+            try { name = JSON.parse(inv.bundle_json).name || name; } catch (_) {}
+            return { community_id: inv.community_id, name, inviter_npub: inv.inviter_npub };
+        });
         updateChatBackNotification();
     } catch (e) {
-        console.error('Failed to load MLS invites:', e);
+        console.error('Failed to load community invites:', e);
     }
 }
 
 /**
- * Accept an MLS group invite
- * @param {string} welcomeEventId - The welcome event ID
+ * Add/refresh a Community's channel chats in the running session from a backend
+ * CommunitySummary (so a freshly-joined/created Community appears without a reload).
+ * Returns the first channel id (to navigate to), or null.
  */
-async function acceptMLSInvite(welcomeEventId) {
-    // Optimistic UI update: drop the invite from the list immediately so the
-    // user sees their action take effect without waiting for the 2-4s backend
-    // round-trip (welcome processing + group join + list refresh). If the
-    // backend rejects, we restore via loadMLSInvites in the catch path.
-    const snapshot = arrMLSInvites;
-    arrMLSInvites = arrMLSInvites.filter(i => i.id !== welcomeEventId);
+async function surfaceCommunitySummary(summary) {
+    if (!summary) return null;
+    let firstChannel = null;
+    let firstSync = null;
+    for (const ch of summary.channels || []) {
+        const chat = getOrCreateChat(ch.channel_id, 'Community');
+        chat.metadata = chat.metadata || {};
+        chat.metadata.custom_fields = chat.metadata.custom_fields || {};
+        chat.metadata.custom_fields.name = summary.name;
+        chat.metadata.custom_fields.description = summary.description || '';
+        chat.metadata.custom_fields.community_id = summary.community_id;
+        chat.metadata.custom_fields.is_owner = summary.is_owner ? 'true' : 'false';
+        chat.metadata.custom_fields.dissolved = summary.dissolved ? 'true' : 'false';
+        // Stamp the join moment so an empty community sorts to the top right away. Reloads
+        // re-source this from the persisted DB created_at via upsert_community_chat.
+        if (!chat.metadata.custom_fields.created_at) {
+            chat.metadata.custom_fields.created_at = String(Date.now());
+        }
+        // Proven owner (verified attestation) → drives the crown + hoist + in-chat Owner tag.
+        if (summary.owner_npub) chat.metadata.custom_fields.owner_npub = summary.owner_npub;
+        else delete chat.metadata.custom_fields.owner_npub;
+        if (summary.has_icon) chat.metadata.custom_fields.icon = '1';
+        // The page-1 sync pulls existing history (e.g. the owner's welcome message) so the
+        // channel isn't empty on open. Backend anti-stampede dedups a later open.
+        const p = invoke('sync_community_channel', { channelId: ch.channel_id, beforeMs: null }).catch(() => {});
+        if (!firstChannel) { firstChannel = ch.channel_id; firstSync = p; }
+    }
+    loadCommunityRoles(summary.community_id);
+    resolveCommunityAvatars();
+    renderChatlist();
+    // Let the primary channel's first page land before we hand control back (so the opener sees
+    // messages + the chat sorts by real activity, not bottom-of-list).
+    if (firstSync) await firstSync;
+    renderChatlist();
+    return firstChannel;
+}
+
+/**
+ * Preload a community's admin roster into its channel chats' metadata. Message rendering reads
+ * `metadata.admins` to show the admin tag + chip @everyone from admin senders; without this the
+ * roster only loaded when Group Info opened, so admin tags + @everyone were dead until then.
+ * Owner status comes from `owner_npub` (already on the chat); this fills the non-owner admin set.
+ */
+async function loadCommunityRoles(communityId) {
+    if (!communityId) return;
+    let adminNpubs;
+    try { adminNpubs = await invoke('get_community_admins', { communityId }); } catch (_) { return; }
+    for (const c of arrChats) {
+        if (c.chat_type === 'Community' && c.metadata?.custom_fields?.community_id === communityId) {
+            c.metadata = c.metadata || {};
+            c.metadata.admins = adminNpubs.slice();
+        }
+    }
+}
+
+/**
+ * Accept a pending Community invite → join + open it. Optimistic removal from the list.
+ */
+async function acceptCommunityInvite(communityId) {
+    const snapshot = arrCommunityInvites;
+    arrCommunityInvites = arrCommunityInvites.filter(i => i.community_id !== communityId);
     updateChatBackNotification();
     renderChatlist();
     adjustSize();
-
     try {
-        console.log('Accepting MLS invite:', welcomeEventId);
-        const success = await invoke('accept_mls_welcome', {
-            welcomeEventIdHex: welcomeEventId
-        });
-
-        if (success) {
-            // Reload invites from backend (canonical source) and re-render
-            // so the chatlist reflects any other invites that may have
-            // arrived in the meantime.
-            await loadMLSInvites();
-            renderChatlist();
-            adjustSize();
-        } else {
-            // Backend returned not-success without throwing — restore the
-            // invite so the user can retry.
-            arrMLSInvites = snapshot;
-            updateChatBackNotification();
-            renderChatlist();
-            adjustSize();
-        }
+        const summary = await invoke('accept_community_invite', { communityId });
+        await loadCommunityInvites();
+        const channelId = await surfaceCommunitySummary(summary);
+        adjustSize();
+        if (channelId) openChat(channelId);
     } catch (e) {
-        console.error('Failed to accept invite:', e);
-        // Restore the invite on failure so the user can retry.
-        arrMLSInvites = snapshot;
+        console.error('Failed to accept community invite:', e);
+        arrCommunityInvites = snapshot;
         updateChatBackNotification();
         renderChatlist();
         adjustSize();
-        popupConfirm('Error', 'Failed to join group: ' + escapeHtml(String(e)), true, '', 'vector_warning.svg');
+        popupConfirm('Error', 'Failed to join Community: ' + escapeHtml(String(e)), true, '', 'vector_warning.svg');
     }
 }
 
 /**
- * Decline an MLS invite (UI-only hide; backend filtering handles persistence)
- * @param {string} welcomeEventId - The welcome event ID
+ * Decline a pending Community invite (drops the parked bundle locally).
  */
-function declineMLSInvite(welcomeEventId) {
-    // Remove from UI; next backend fetch will exclude if server persisted dismissal
-    arrMLSInvites = arrMLSInvites.filter(i => i.id !== welcomeEventId);
-
-    // Make sure to notify if there's still pending invites, or remove the notification
+async function declineCommunityInvite(communityId) {
+    const snapshot = arrCommunityInvites;
+    arrCommunityInvites = arrCommunityInvites.filter(i => i.community_id !== communityId);
     updateChatBackNotification();
-
-    // Re-render the chatlist so the invite row leaves the DOM immediately.
     renderChatlist();
-
-    // After rendering UI changes, ensure layout recalculates to prevent oversized chat list
     adjustSize();
+    try {
+        await invoke('decline_community_invite', { communityId });
+    } catch (e) {
+        // Roll back the optimistic removal — otherwise the invite is gone from the UI but still
+        // parked in the backend, and silently reappears on the next invite refresh.
+        console.error('Failed to decline community invite:', e);
+        arrCommunityInvites = snapshot;
+        updateChatBackNotification();
+        renderChatlist();
+        adjustSize();
+        popupConfirm('Error', 'Failed to decline invite: ' + escapeHtml(String(e)), true, '', 'vector_warning.svg');
+    }
+}
+
+/**
+ * Preview a public invite URL (or fragment) and offer to join. Shows the community name +
+ * description with Join / Ignore. On Join, accepts and navigates into the new channel.
+ */
+let _communityJoinInFlight = false;
+async function previewAndJoinCommunityLink(url) {
+    // Re-entrancy guard: a double-paste, deep-link-while-pasting, or double-tap must not fire
+    // two concurrent joins (which race surfaceCommunitySummary and hijack the shared popup).
+    if (_communityJoinInFlight) return;
+    _communityJoinInFlight = true;
+    try {
+        let preview;
+        // Fetching the encrypted bundle off the relays can take several seconds — a PERSISTENT
+        // toast (not the auto-timeout one) keeps feedback up for the whole await.
+        showToast('Loading community invite…', true);
+        try {
+            preview = await invoke('preview_public_invite', { url });
+        } catch (e) {
+            hideToast();
+            popupConfirm('Invalid Invite', 'This invite link could not be loaded.<br><br>' + escapeHtml(String(e)), true, '', 'vector_warning.svg');
+            return;
+        }
+        const descHtml = preview.description ? `<br><br><span style="opacity:0.8;">${escapeHtml(preview.description)}</span>` : '';
+        // Show the community's own logo when it has one, else the same placeholder the chat list
+        // uses for logo-less communities (group-placeholder.svg).
+        let iconSrc = 'group-placeholder.svg';
+        if (preview.icon) {
+            try {
+                const path = await invoke('cache_invite_logo', { image: preview.icon });
+                if (path) iconSrc = convertFileSrc(path);
+            } catch (e) { console.debug('invite logo decrypt failed, using placeholder', e); }
+        }
+        hideToast();
+        const confirmed = await popupConfirm(
+            `Join ${escapeHtml(preview.name)}?`,
+            `You've been invited to join <b>${escapeHtml(preview.name)}</b>.${descHtml}`,
+            false, '', iconSrc, '', null, true
+        );
+        if (!confirmed) return;
+        showToast(`Joining ${preview.name}…`, true);
+        try {
+            const summary = await invoke('accept_public_invite', { url });
+            // Await the first-page sync so the channel opens with its history (not empty) and lands
+            // in the right chat-list slot instead of at the bottom.
+            const channelId = await surfaceCommunitySummary(summary);
+            hideToast();
+            // Only auto-open if the user is still parked on the chat list (no chat open) — don't
+            // yank them out of a DM they opened while the multi-second join was in flight.
+            if (channelId && !strOpenChat) openChat(channelId);
+        } catch (e) {
+            hideToast();
+            popupConfirm('Failed to Join', escapeHtml(String(e)), true, '', 'vector_warning.svg');
+        }
+    } finally {
+        _communityJoinInFlight = false;
+    }
+}
+
+/** Detect a Vector community invite URL (or bare fragment) in pasted/typed text. */
+function isCommunityInviteUrl(text) {
+    return typeof text === 'string' && /vectorapp\.io\/invite\/?#|^#?[A-Za-z0-9_-]{40,}$/.test(text.trim()) && text.includes('#');
 }
 
 /**
@@ -1955,6 +2046,47 @@ let statusHideTimeout = null;
  * Update the chat header subtext (status/typing indicator) for the currently open chat
  * @param {Object} chat - The chat object
  */
+// Cached member count per community id, for the chat-header subtext + overview status. Membership is
+// derived from observed activity (best-effort), so this is refreshed live as people join/speak.
+const communityMemberCounts = new Map();
+const _communityCountLastFetch = new Map();
+const _communityCountInFlight = new Set();
+
+/** Render text for a community's member count, or '' if not yet known. */
+function communityMemberSubtext(communityId) {
+    const n = communityMemberCounts.get(communityId);
+    return (n == null) ? '' : `${n} member${n === 1 ? '' : 's'}`;
+}
+
+/**
+ * Refresh a community's cached member count and live-update the header/overview if open. Throttled to
+ * one fetch per 2s per community (pass force=true to bypass, e.g. on a join/leave/control change).
+ */
+async function refreshCommunityMemberCount(communityId, force = false) {
+    if (!communityId || _communityCountInFlight.has(communityId)) return;
+    if (!force && Date.now() - (_communityCountLastFetch.get(communityId) || 0) < 2000) return;
+    _communityCountInFlight.add(communityId);
+    let members;
+    try {
+        members = await invoke('get_community_members', { communityId });
+    } catch (_) {
+        _communityCountInFlight.delete(communityId);
+        return;
+    }
+    _communityCountInFlight.delete(communityId);
+    _communityCountLastFetch.set(communityId, Date.now());
+    if (communityMemberCounts.get(communityId) === members.length) return; // unchanged, no re-render
+    communityMemberCounts.set(communityId, members.length);
+    // Live-update the open channel's header (its chat carries this community_id) + the overview status.
+    const openChat = strOpenChat ? arrChats.find(c => c.id === strOpenChat) : null;
+    if (openChat && openChat.metadata?.custom_fields?.community_id === communityId) {
+        updateChatHeaderSubtext(openChat);
+    }
+    if (domGroupOverview.getAttribute('data-group-id') === communityId) {
+        domGroupOverviewStatus.textContent = communityMemberSubtext(communityId);
+    }
+}
+
 function updateChatHeaderSubtext(chat) {
     if (!chat) return;
 
@@ -1967,7 +2099,7 @@ function updateChatHeaderSubtext(chat) {
     let newStatusText = '';
     let shouldAddGradient = false;
 
-    const isGroup = chat.chat_type === 'MlsGroup';
+    const isCommunity = chat.chat_type === 'Community';
     const fNotes = chat.id === strPubkey;
 
     // Check for typing indicators first (shared logic)
@@ -1980,16 +2112,14 @@ function updateChatHeaderSubtext(chat) {
         // Someone is typing - use shared helper
         newStatusText = typingText;
         shouldAddGradient = true;
-    } else if (isGroup) {
-        // Not typing - show member count
-        const memberCount = chat.metadata?.custom_fields?.member_count ? parseInt(chat.metadata.custom_fields.member_count) : null;
-        if (typeof memberCount === 'number') {
-            const label = memberCount === 1 ? 'member' : 'members';
-            newStatusText = `${memberCount} ${label}`;
-        } else {
-            newStatusText = 'Members syncing...';
-        }
+    } else if (isCommunity) {
+        // Show the member count as the subtext (typing, handled above, takes priority). The count is
+        // per-community (a channel chat carries its community_id in custom_fields). Throttled refresh
+        // keeps it live and re-renders this line when the count changes.
+        const communityId = chat.metadata?.custom_fields?.community_id;
+        newStatusText = communityMemberSubtext(communityId);
         shouldAddGradient = false;
+        refreshCommunityMemberCount(communityId);
     } else {
         // DM - not typing, show profile status
         const profile = getProfile(chat.id);
@@ -2053,7 +2183,7 @@ function updateChatBackNotification() {
     }
     
     // Check if there are any unanswered MLS invites
-    const hasUnansweredInvites = arrMLSInvites.length > 0;
+    const hasUnansweredInvites = arrCommunityInvites.length > 0;
     
     // Check if any OTHER chat has unread messages
     const hasOtherUnreads = arrChats.some(chat => {
@@ -2067,7 +2197,7 @@ function updateChatBackNotification() {
         if (chat.id === strPubkey) return false;
         
         // Get profile for DM chats
-        const isGroup = chat.chat_type === 'MlsGroup';
+        const isGroup = chatIsGroup(chat);
         const profile = !isGroup && chat.participants.length === 1 ? getProfile(chat.id) : null;
         
         // Skip muted chats
@@ -2091,11 +2221,15 @@ function updateChatBackNotification() {
  *  not conversation, so they must not be picked as the markAsRead anchor —
  *  otherwise `last_read` lands on the system event itself and prior contact
  *  messages re-surface as unread on the next walk. */
-function findLatestContactMessage(messages) {
+function findLatestContactMessage(messages, maxAt = Infinity) {
     if (!messages?.length) return null;
     for (let i = messages.length - 1; i >= 0; i--) {
         const m = messages[i];
         if (m.system_event) continue;
+        // An own message proves we read up to ITS time, not past it: a boot/catch-up
+        // sweep replays our OLD sends, and marking newer contact messages read off a
+        // stale own-send would silently swallow genuinely-unread arrivals.
+        if (m.at > maxAt) continue;
         if (!m.mine) return m;
     }
     return null;
@@ -2118,10 +2252,33 @@ function markAsRead(chat, message) {
  * @param {string?} replied_to - The reference of the message, if any
  */
 async function message(pubkey, content, replied_to) {
+    // Community channels send through their own envelope path (the DM/MLS `message`
+    // command can't address a channel id). The backend drives the pending→sent/failed
+    // lifecycle (optimistic bubble + finalize), so there's no pending id to finalize here.
+    const chat = arrChats.find(c => c.id === pubkey);
+    if (chat && chat.chat_type === 'Community') {
+        await invoke('send_community_message', { channelId: pubkey, content, repliedTo: replied_to || '' });
+        return;
+    }
     const result = await invoke("message", { receiver: pubkey, content: content, repliedTo: replied_to });
     if (result && result.event_id) {
         finalizePendingMessage(pubkey, result.pending_id, result.event_id);
     }
+}
+
+/**
+ * Send an emoji reaction, routing Community channels to their own command (the DM/MLS
+ * `react_to_message` can't address a channel id). Custom-emoji images aren't carried in
+ * the Community envelope yet, so a community reaction sends the emoji/shortcode content.
+ */
+function reactToMessageRouted(referenceId, chatId, emoji, emojiUrl) {
+    const chat = arrChats.find(c => c.id === chatId);
+    if (chat && chat.chat_type === 'Community') {
+        return invoke('react_to_community_message', { channelId: chatId, messageId: referenceId, emoji, emojiUrl: emojiUrl || null });
+    }
+    const args = { referenceId, chatId, emoji };
+    if (emojiUrl) args.emojiUrl = emojiUrl;
+    return invoke('react_to_message', args);
 }
 
 /**
@@ -2132,10 +2289,18 @@ async function message(pubkey, content, replied_to) {
  */
 async function sendFile(pubkey, replied_to, filepath) {
     try {
-        // Use the protocol-agnostic file_message command for both DMs and MLS groups
-        const result = await invoke("file_message", { receiver: pubkey, repliedTo: replied_to, filePath: filepath, nameOverride: '' });
-        if (result && result.event_id) {
-            finalizePendingMessage(pubkey, result.pending_id, result.event_id);
+        // Community channels send through their own envelope path (multi-attachment
+        // capable). The backend drives the pending → sent/failed lifecycle, so there's
+        // no pending id to finalize here (mirrors send_community_message).
+        const chat = arrChats.find(c => c.id === pubkey);
+        if (chat && chat.chat_type === 'Community') {
+            await invoke('send_community_files', { channelId: pubkey, content: '', filePaths: [filepath], nameOverrides: [''], useCompression: false, repliedTo: replied_to || '' });
+        } else {
+            // DMs use the protocol-agnostic file_message command.
+            const result = await invoke("file_message", { receiver: pubkey, repliedTo: replied_to, filePath: filepath, nameOverride: '' });
+            if (result && result.event_id) {
+                finalizePendingMessage(pubkey, result.pending_id, result.event_id);
+            }
         }
     } catch (e) {
         const { title, body } = humanizeUploadError(String(e));
@@ -2207,254 +2372,73 @@ async function setupRustListeners() {
     const _p = [];
     const _on = (event, handler) => _p.push(listen(event, handler));
 
-    // Listen for MLS message events
-    _on('mls_message_new', async (evt) => {
-        const { group_id, message } = evt.payload;
-        console.log('MLS message received for group:', group_id, 'pending:', message?.pending, 'attachments:', message?.attachments?.length);
-        
-        // Validate message has required fields
-        if (!message || !message.id || !message.at) {
-            console.warn('Invalid message received (missing id or timestamp):', message);
-            return;
-        }
-        
-        // Find or create the group chat
-        const chat = getOrCreateChat(group_id, 'MlsGroup');
-        
-        // Check for duplicates in chat.messages
-        const existingMsg = chat.messages?.find(m => m.id === message.id);
-        if (existingMsg) {
-            return;
-        }
-        
-        // Add to event cache
-        // During sync, only add if this chat is currently open (to avoid cache flooding)
-        // After sync complete, always add to cache
-        const shouldAddToCache = fSyncComplete || group_id === strOpenChat;
-        let cacheInsertedIntoChatMessages = false;
-        if (shouldAddToCache) {
-            const added = eventCache.addEvent(group_id, message);
-            if (!added) return;
-            // openChat aliases chat.messages = entry.events, so addEvent has
-            // already inserted into chat.messages. Skip the manual insertion
-            // below to avoid duplicates.
-            cacheInsertedIntoChatMessages = chat.messages === eventCache.getEventsRef(group_id);
-        }
-
-        // Clear typing indicator for the sender when they send a message
-        if (!message.mine && chat.active_typers) {
-            // For group chats, use npub if available; for DMs, use sender identifier
-            chat.active_typers = chat.active_typers.filter(npub => npub !== message.npub);
-        }
-
-        if (!cacheInsertedIntoChatMessages) {
-            // Find the correct position to insert the message based on timestamp (efficient binary search)
-            const messages = chat.messages;
-
-            // Check if the array is empty or the new message is newer than the newest message
-            if (messages.length === 0 || message.at > messages[messages.length - 1].at) {
-                // Insert at the end (newest)
-                messages.push(message);
-            }
-            // Check if the new message is older than the oldest message
-            else if (message.at < messages[0].at) {
-                // Insert at the beginning (oldest)
-                messages.unshift(message);
-            }
-            // Otherwise, find the correct position in the middle using binary search
-            else {
-                // Binary search for better performance with large message arrays
-                let low = 0;
-                let high = messages.length - 1;
-
-                while (low <= high) {
-                    const mid = Math.floor((low + high) / 2);
-
-                    if (messages[mid].at < message.at) {
-                        low = mid + 1;
-                    } else {
-                        high = mid - 1;
-                    }
-                }
-
-                // Insert the message at the correct position (low is now the index where it should go)
-                messages.splice(low, 0, message);
-            }
-        }
-        
-        // If this group has the open chat, update it
-        if (strOpenChat === group_id) {
-            updateChat(chat, [message]);
-            // Increment rendered count since we're adding a new message
-            proceduralScrollState.renderedMessageCount++;
-            proceduralScrollState.totalMessageCount++;
-            // Open chat + pinned + visible = user saw it land. If the
-            // window is tabbed out / app backgrounded, leave the message
-            // unread until activity resumes.
-            if (!message.mine && chatPinnedToBottom && isWindowActive()) {
-                markAsRead(chat, message);
-                clearUnreadDivider();
-            }
-            // Own-send catches up to the latest non-mine message.
-            if (message.mine) {
-                const lastContactMsg = findLatestContactMessage(chat.messages);
-                if (lastContactMsg) markAsRead(chat, lastContactMsg);
-            }
-        } else {
-            console.log('Group chat not open, message added to background chat');
-            // Own message synced from another device — mark chat as read
-            // since we clearly saw the conversation before replying
-            if (message.mine) {
-                const lastContactMsg = findLatestContactMessage(chat.messages);
-                if (lastContactMsg) markAsRead(chat, lastContactMsg);
-            }
-        }
-        
-        // Resort chat list order so recent groups bubble up (fallback to metadata)
-        arrChats.sort((a, b) => getChatSortTimestamp(b) - getChatSortTimestamp(a));
-
-        // Re-render chat list
+    // A Community invite (npub gift-wrap) was parked → surface it as a pending slot.
+    _on('community_invite_received', async (evt) => {
+        await loadCommunityInvites();
         renderChatlist();
-
-        // Update the back button notification dot (for unread messages in other chats)
-        updateChatBackNotification();
+        adjustSize();
     });
 
-    // Listen for MLS invite received events (real-time)
-    _on('mls_invite_received', async (evt) => {
-        console.log('MLS invite received in real-time, refreshing invites list');
-        // Reload invites list to show the new invite
-        await loadMLSInvites();
-        // Re-render chatlist to display the new invite
+    // §6.2 self-removal: a cooperative kick of us, a ban-rekey exclusion, OR a leave another device
+    // authored. The backend already wiped this community's local data (retaining the epoch keys for a
+    // later self-scrub). Silently mirror it in the UI — close the view + drop it from the list — with no
+    // popup (the removal speaks for itself).
+    _on('community_kicked', async (evt) => {
+        const communityId = evt.payload?.community_id || evt.payload;
+        if (!communityId) return;
+        await removeCommunityFromUI(communityId);
+    });
+
+    // A control change (banlist / roles / metadata / invite-mode) landed in REALTIME (via the 3308
+    // control-plane subscription). Re-read this community's summary into the chat list + re-render the
+    // overview if it's open, so online members see name/role/mode changes live, not just on next open.
+    _on('community_refreshed', async (evt) => {
+        const communityId = evt.payload?.community_id || evt.payload;
+        if (!communityId) return;
+        // A control change (ban/role/mode/metadata) can move the roster — refresh the count immediately.
+        refreshCommunityMemberCount(communityId, true);
+        try {
+            const summary = await invoke('get_community', { communityId });
+            for (const c of arrChats) {
+                if (c.metadata?.custom_fields?.community_id !== communityId) continue;
+                const f = c.metadata.custom_fields;
+                f.name = summary.name;
+                f.description = summary.description || '';
+                f.is_owner = summary.is_owner ? 'true' : 'false';
+                f.dissolved = summary.dissolved ? 'true' : 'false';
+                if (summary.owner_npub) f.owner_npub = summary.owner_npub;
+            }
+        } catch (_) {}
+        // A control change may have promoted/demoted admins — refresh the cached roster so in-chat
+        // admin tags + @everyone reflect it (the open overview re-fetches separately below).
+        loadCommunityRoles(communityId);
         renderChatlist();
-    });
-
-    // Listen for MLS group metadata updates
-    _on('mls_group_metadata', async (evt) => {
-        try {
-            const metadata = evt.payload?.metadata;
-            const { chat, changed } = applyMlsGroupMetadata(metadata);
-            if (!chat || !changed) return;
-
-            if (strOpenChat === chat.id) {
-                const groupName = chat.metadata?.custom_fields?.name || `Group ${strOpenChat.substring(0, 10)}...`;
-                domChatContact.textContent = groupName;
-                updateChatHeaderSubtext(chat);
-                // Update header avatar if cached avatar changed
-                if (chat.metadata?.avatar_cached) {
-                    domChatHeaderAvatarContainer.innerHTML = '';
-                    const avatarImg = createAvatarImg(convertFileSrc(chat.metadata.avatar_cached), 22, true);
-                    avatarImg.classList.add('btn');
-                    avatarImg.onclick = () => { closeChat(); openGroupOverview(chat); };
-                    domChatHeaderAvatarContainer.appendChild(avatarImg);
-                }
+        // Re-render the open overview (re-fetches caps/members/banlist fresh) if it's this community.
+        if (domGroupOverview.style.display !== 'none' && domGroupOverview.getAttribute('data-group-id') === communityId) {
+            const chat = arrChats.find(c => c.metadata?.custom_fields?.community_id === communityId);
+            if (chat) renderCommunityOverview(chat);
+        }
+        // Re-render the OPEN channel's header so a live metadata edit (name/description/icon) shows
+        // immediately, not only after navigating away and back. The chatlist + overview refresh above.
+        if (strOpenChat) {
+            const open = arrChats.find(c => c.id === strOpenChat);
+            if (open && open.metadata?.custom_fields?.community_id === communityId) {
+                const isGroup = chatIsGroup(open);
+                setChatHeader(open, isGroup ? null : getProfile(open.id), isGroup, open.id === strPubkey);
+                // A community that seals WHILE it's the open view: openChat won't re-run, so lock the
+                // composer + drop the end divider live here (the flag was refreshed above).
+                if (chatIsDissolved(open)) applyDissolvedChatUI(open);
             }
-
-            const overviewGroupId = domGroupOverview.getAttribute('data-group-id');
-            if (overviewGroupId && overviewGroupId === chat.id) {
-                await renderGroupOverview(chat);
-            }
-
-            renderChatlist();
-        } catch (e) {
-            console.error('Error handling mls_group_metadata event:', e);
         }
     });
 
-    // Listen for MLS welcome accepted events
-    _on('mls_welcome_accepted', async (evt) => {
-        console.log('MLS welcome accepted, refreshing groups and invites');
-        // Reload invites
-        await loadMLSInvites();
-    });
-
-    // Listen for MLS group updates (member additions, removals, etc.)
-    _on('mls_group_updated', async (evt) => {
-        try {
-            const { group_id } = evt.payload || {};
-            console.log('MLS group updated:', group_id);
-            
-            // Refresh member count
-            await refreshGroupMemberCount(group_id);
-            
-            // If the group overview is currently open for THIS SPECIFIC group, refresh it
-            if (domGroupOverview.style.display !== 'none') {
-                // Check if the overview is for the same group that was updated
-                const overviewGroupId = domGroupOverview.getAttribute('data-group-id');
-                if (overviewGroupId === group_id) {
-                    const currentChat = arrChats.find(c => c.id === group_id);
-                    if (currentChat) {
-                        await renderGroupOverview(currentChat);
-                    }
-                }
-            }
-            
-            // Refresh chat list to update any UI elements
-            renderChatlist();
-        } catch (e) {
-            console.error('Error handling mls_group_updated event:', e);
-        }
-    });
-    
-    // Listen for MLS group left events
-    _on('mls_group_left', async (evt) => {
-        try {
-            const { group_id } = evt.payload || {};
-            console.log('[MLS][Frontend] Received mls_group_left event for group:', group_id?.substring(0, 16));
-            
-            // Remove the group from the chat list
-            const chatIndex = arrChats.findIndex(c => c.id === group_id);
-            if (chatIndex !== -1) {
-                console.log('[MLS][Frontend] Removing group from arrChats at index:', chatIndex);
-                arrChats.splice(chatIndex, 1);
-            } else {
-                console.log('[MLS][Frontend] Group not found in arrChats');
-            }
-            
-            // Close the group overview if it's open for this group
-            const overviewGroupId = domGroupOverview.getAttribute('data-group-id');
-            if (overviewGroupId === group_id) {
-                domGroupOverview.style.display = 'none';
-                domGroupOverview.removeAttribute('data-group-id');
-            }
-            
-            // If this was the active chat, close it and return to chat list
-            if (strOpenChat === group_id) {
-                await closeChat();
-            }
-            
-            // Refresh chat list
-            renderChatlist();
-        } catch (e) {
-            console.error('Error handling mls_group_left event:', e);
-        }
-    });
-
-    // Listen for async MLS operation failures (background publish/merge errors)
-    _on('mls_error', (evt) => {
-        const { group_id, error } = evt.payload || {};
-        console.error('[MLS] Background operation failed:', group_id, error);
-        showToast(error || 'Group Operation Failed');
-    });
-
-    // Listen for MLS initial sync completion after joining a group
-    _on('mls_group_initial_sync', async (evt) => {
-        try {
-            const { group_id, processed, new: newCount } = evt.payload || {};
-            console.log('MLS initial group sync complete:', group_id, 'processed:', processed, 'new:', newCount);
-
-            // Ensure the group chat exists even if there are no messages yet
-            getOrCreateChat(group_id, 'MlsGroup');
-            await refreshGroupMemberCount(group_id);
-
-            // Resort chat list order by last activity (message or metadata)
-            arrChats.sort((a, b) => getChatSortTimestamp(b) - getChatSortTimestamp(a));
-
-            // Re-render the chat list so empty groups show with "No messages yet" preview
-            renderChatlist();
-        } catch (e) {
-            console.error('Error handling mls_group_initial_sync:', e);
-        }
+    // A community synced in from another device (cross-device Community List, §6.3) appeared seamlessly —
+    // render its metadata via the same path as a manual join so name/crown/members show without a restart.
+    _on('community_surfaced', async (evt) => {
+        const summary = evt.payload;
+        if (!summary || !summary.community_id) return;
+        await surfaceCommunitySummary(summary);
+        refreshCommunityMemberCount(summary.community_id, true);
     });
 
     // Listen for system events (member joined/left, etc.)
@@ -2470,33 +2454,23 @@ async function setupRustListeners() {
                 return;
             }
 
-            // Build display content
-            const displayName = member_name || member_pubkey?.substring(0, 12) + '...';
-            let content;
-            switch (event_type) {
-                case SystemEventType.MemberLeft:
-                    content = `${displayName} has left`;
-                    break;
-                case SystemEventType.MemberJoined:
-                    content = `${displayName} has joined`;
-                    break;
-                case SystemEventType.MemberRemoved:
-                    content = `${displayName} was removed`;
-                    break;
-                case SystemEventType.WallpaperChanged:
-                    content = `${displayName} changed the wallpaper`;
-                    break;
-                case SystemEventType.WallpaperRemoved:
-                    content = `${displayName} removed the wallpaper`;
-                    break;
-                default:
-                    content = `System event ${event_type}: ${displayName}`;
+            // Resolve the actor's CURRENT cached name (member_name from the backend is null for
+            // community presence; the name lives in our profile cache). Fetch it if unknown so a
+            // later repaint/reload shows the real name instead of the npub.
+            if (member_pubkey && !arrProfiles.some(p => p.id === member_pubkey) && !strangerProfileRequested.has(member_pubkey)) {
+                strangerProfileRequested.add(member_pubkey);
+                invoke('load_profile', { npub: member_pubkey }).catch(() => {});
             }
+            const content = systemEventContent(event_type, member_pubkey);
+
+            // Use the event's REAL time so it sorts chronologically. A join replayed during history paging /
+            // rehydration would otherwise be stamped `now` and sink to the bottom of the chat.
+            const atMs = Number(evt.payload?.created_at_ms) || Date.now();
 
             // Create system event message using the event_id
             const systemMsg = {
                 id: event_id,
-                at: Date.now(),
+                at: atMs,
                 content: content,
                 mine: false,
                 attachments: [],
@@ -2510,15 +2484,24 @@ async function setupRustListeners() {
             // Note: chat.messages and cache share the same array reference, so only use cache
             eventCache.addEvent(conversation_id, systemMsg);
 
-            // If this chat is currently open, render the system event
+            // Paint into the OPEN view only if this is genuinely the newest event. A historical replay (paging
+            // / rehydration) is already in the cache at its real time and renders in order on the next chat
+            // open/render — appending it to the bottom here would misplace it.
             if (strOpenChat === conversation_id && domChatMessages) {
-                const systemElement = insertSystemEvent(content);
-                domChatMessages.appendChild(systemElement);
-                softChatScroll();
+                const newestAt = (chat?.messages || []).reduce((mx, m) => (m.id !== event_id && m.at > mx ? m.at : mx), 0);
+                if (atMs >= newestAt) {
+                    const systemElement = insertSystemEvent(content);
+                    domChatMessages.appendChild(systemElement);
+                    softChatScroll();
+                }
             }
 
             // Re-render chatlist
             renderChatlist();
+
+            // A member join/leave moved the roster — refresh this community's cached member count.
+            const evCommunityId = chat?.metadata?.custom_fields?.community_id;
+            if (evCommunityId) refreshCommunityMemberCount(evCommunityId, true);
         } catch (e) {
             console.error('Error handling system_event:', e);
         }
@@ -2925,8 +2908,15 @@ async function setupRustListeners() {
 
     // Listen for incoming DM messages
     _on('message_new', (evt) => {
-        // Get the chat for this message (chat_id is the npub for DMs)
-        let chat = getOrCreateDMChat(evt.payload.chat_id);
+        // chat_id is the npub for DMs, the group id for MLS, the channel id for
+        // Communities. Resolve the existing chat by id first; only create when truly new,
+        // picking the type by id shape (npub → DM, otherwise a Community channel).
+        let chat = arrChats.find(c => c.id === evt.payload.chat_id);
+        if (!chat) {
+            chat = evt.payload.chat_id.startsWith('npub1')
+                ? getOrCreateDMChat(evt.payload.chat_id)
+                : getOrCreateChat(evt.payload.chat_id, 'Community');
+        }
         
         // Get the new message
         const newMessage = evt.payload.message;
@@ -3005,15 +2995,17 @@ async function setupRustListeners() {
                 markAsRead(chat, newMessage);
                 clearUnreadDivider();
             }
-            // Own-send catches up to the latest non-mine message.
+            // Own-send catches up to the latest non-mine message AT OR BEFORE this send
+            // (never past it — see findLatestContactMessage).
             if (newMessage.mine) {
-                const lastContactMsg = findLatestContactMessage(chat.messages);
+                const lastContactMsg = findLatestContactMessage(chat.messages, newMessage.at);
                 if (lastContactMsg) markAsRead(chat, lastContactMsg);
             }
         } else if (newMessage.mine) {
-            // Own message synced from another device — mark chat as read
-            // since we clearly saw the conversation before replying
-            const lastContactMsg = findLatestContactMessage(chat.messages);
+            // Own message synced from another device — mark read up to the latest contact
+            // message no newer than this send. Bounding by `newMessage.at` is what keeps a
+            // boot sweep's replay of our OLD sends from marking genuinely-new arrivals read.
+            const lastContactMsg = findLatestContactMessage(chat.messages, newMessage.at);
             if (lastContactMsg) markAsRead(chat, lastContactMsg);
         }
 
@@ -3047,6 +3039,11 @@ async function setupRustListeners() {
                 const cacheIdx = cachedEvents.findIndex(m => m.id === evt.payload.old_id);
                 if (cacheIdx !== -1) {
                     cachedEvents[cacheIdx] = evt.payload.message;
+                }
+                // Keep the dedup Set in sync with the id swap, else the relay echo of
+                // the finalized id renders as a duplicate (esp. for Community sends).
+                if (evt.payload.old_id !== evt.payload.message.id) {
+                    eventCache.replaceId(evt.payload.chat_id, evt.payload.old_id, evt.payload.message.id);
                 }
             }
         }
@@ -3395,6 +3392,10 @@ async function executeDeepLinkAction(payload) {
         if (typeof openPackDetailsModal === 'function') {
             await openPackDetailsModal(target);
         }
+    } else if (action_type === 'community_invite') {
+        // Invite link (vector://invite#… or vectorapp.io/invite#…) — `target` is the full URL;
+        // the join flow re-parses its fragment, previews, and accepts on confirm.
+        await previewAndJoinCommunityLink(target);
     }
 }
 
@@ -4214,10 +4215,9 @@ async function login(skipAnimations = false) {
             arrProfiles = evt.payload.profiles || [];
             arrChats = evt.payload.chats || [];
 
-            // Fire metadata hydration in background — completes after first render,
-            // then re-renders chatlist if any group metadata changed
-            console.time('[Boot] hydrateMLSGroupMetadata (bg)');
-            hydrateMLSGroupMetadata().then(() => console.timeEnd('[Boot] hydrateMLSGroupMetadata (bg)'));
+            // Resolve Community logos in the background (Community metadata rides the
+            // chat payload; only the encrypted logo needs a lazy cache step).
+            resolveCommunityAvatars();
 
             // Warm the active theme's emoji pack in the background so it's pinned
             // instantly on the first picker open (it's runtime-injected, not in
@@ -5430,7 +5430,7 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
     }
     
     // Check if this is a group chat
-    const isGroup = chat?.chat_type === 'MlsGroup';
+    const isGroup = chatIsGroup(chat);
 
     // If no profile is provided and it's not a group, try to get it from the chat ID
     if (!profile && chat && !isGroup) {
@@ -6493,21 +6493,35 @@ async function retryFailedMessage(msg) {
     }
     // Re-send: use file_message if attachment exists, otherwise text message
     try {
+        const chat = arrChats.find(c => c.id === chatId);
+        const isCommunity = chat && chat.chat_type === 'Community';
         if (msg.attachments && msg.attachments.length > 0) {
-            const att = msg.attachments[0];
-            await invoke('file_message', {
-                receiver: chatId,
-                repliedTo: msg.replied_to || '',
-                filePath: att.path,
-                nameOverride: att.name || ''
-            });
+            if (isCommunity) {
+                // Community resends all attachments + caption in one event (multi-attachment).
+                // Bail if any local file is gone — silently resending fewer files would
+                // publish a different message than the one that failed.
+                const paths = msg.attachments.map(a => a.path);
+                if (paths.some(p => !p)) {
+                    popupConfirm('Cannot retry', 'One or more attachments are no longer available locally. Re-attach the files to send again.', true, '', 'vector_warning.svg');
+                    return;
+                }
+                // Preserve each attachment's name (incl. SPOILER_ prefix) on resend. The local
+                // files were already compressed on first send, so don't re-compress.
+                const names = msg.attachments.map(a => a.name || '');
+                await invoke('send_community_files', { channelId: chatId, content: msg.content || '', filePaths: paths, nameOverrides: names, useCompression: false, repliedTo: msg.replied_to || '' });
+            } else {
+                const att = msg.attachments[0];
+                await invoke('file_message', {
+                    receiver: chatId,
+                    repliedTo: msg.replied_to || '',
+                    filePath: att.path,
+                    nameOverride: att.name || ''
+                });
+            }
         } else {
-            await invoke('message', {
-                receiver: chatId,
-                content: msg.content,
-                repliedTo: msg.replied_to || '',
-                file: null
-            });
+            // Route through message() so Community retries hit send_community_message
+            // (not the DM `message` command, which can't address a channel id).
+            await message(chatId, msg.content, msg.replied_to || '');
         }
     } catch (e) {
         console.error('Retry send failed:', e);
@@ -6847,7 +6861,7 @@ async function openChat(contact) {
 
     // Get the chat (could be DM or Group)
     const chat = arrChats.find(c => c.id === contact);
-    const isGroup = chat?.chat_type === 'MlsGroup';
+    const isGroup = chatIsGroup(chat);
     const profile = !isGroup ? getProfile(contact) : null;
     strOpenChat = contact;
     // Snapshot last_read BEFORE the open-time markAsRead — the divider needs
@@ -6887,8 +6901,6 @@ async function openChat(contact) {
             forceRefresh: false
         }).catch(err => console.error('Failed to queue DM profile sync:', err));
     }
-    
-    if (isGroup) { refreshGroupMemberCount(contact); }
 
     // Clear any existing auto-scroll timer
     if (chatOpenAutoScrollTimer) {
@@ -6925,6 +6937,10 @@ async function openChat(contact) {
     // Merge any historical PIVX payments — helper in pivx.js
     await mergePivxPaymentsIntoChat(contact, initialMessages);
 
+    // No on-open Community sync: NIP-17-parity means catch-up happens at boot (sync_communities_boot)
+    // and on relay reconnect, with realtime delivering everything in between. Opening a channel reads
+    // DB history; older pages load on scroll-up.
+
     // Load system events (wallpaper/membership changes). They're fetched in
     // full but buffered — only the ones inside the initially-loaded message
     // window are revealed now; the rest surface as the user scrolls older
@@ -6936,7 +6952,16 @@ async function openChat(contact) {
             .map(event => ({
                 id: event.id,
                 at: event.at,
-                content: event.content,
+                // Rebuild from the actor's CURRENT cached name rather than the npub-baked
+                // stored content. Fetch unknown profiles so the next open resolves them.
+                content: (() => {
+                    const np = event.member_npub;
+                    if (np && !arrProfiles.some(p => p.id === np) && !strangerProfileRequested.has(np)) {
+                        strangerProfileRequested.add(np);
+                        invoke('load_profile', { npub: np }).catch(() => {});
+                    }
+                    return systemEventContent(event.event_type, np);
+                })(),
                 mine: false,
                 attachments: [],
                 system_event: {
@@ -6993,8 +7018,12 @@ async function openChat(contact) {
 
     // If the user is blocked (DM only), disable the chat input and show a system message
     const isBlockedChat = !isGroup && profile?.is_blocked;
-    // Remove any previous blocked notice before (re-)evaluating
+    // Dissolved community: the backend seals it (no new events accepted), so disable the
+    // composer the same way a blocked DM does and mark the timeline's end.
+    const isDissolvedChat = chatIsDissolved(chat);
+    // Remove any previous blocked / dissolved notice before (re-)evaluating
     document.getElementById('blocked-notice')?.remove();
+    document.getElementById('dissolved-notice')?.remove();
     if (isBlockedChat) {
         domChatMessageInput.disabled = true;
         domChatMessageInput.placeholder = 'Unblock to send messages';
@@ -7007,6 +7036,8 @@ async function openChat(contact) {
         blockedNotice.id = 'blocked-notice';
         blockedNotice.style.marginBottom = '20px';
         domChatMessages.appendChild(blockedNotice);
+    } else if (isDissolvedChat) {
+        applyDissolvedChatUI(chat);
     } else {
         domChatMessageInput.disabled = false;
         domChatMessageInput.placeholder = 'Enter message...';
@@ -7024,7 +7055,7 @@ async function openChat(contact) {
     updateChatBackNotification();
 
     // Focus chat input on desktop (mobile keyboards are intrusive)
-    if (!platformFeatures.is_mobile && !isBlockedChat) {
+    if (!platformFeatures.is_mobile && !isBlockedChat && !isDissolvedChat) {
         domChatMessageInput.focus();
     }
 
@@ -7268,7 +7299,7 @@ async function openProfile(cProfile) {
  * @param {Chat} chat - The group chat object
  */
 async function openGroupOverview(chat) {
-    if (!chat || chat.chat_type !== 'MlsGroup') return;
+    if (!chat || !chatIsGroup(chat)) return;
 
     pushBack('group-overview', () => {
         domGroupOverview.style.display = 'none';
@@ -7288,8 +7319,9 @@ async function openGroupOverview(chat) {
     // Store which group is being viewed
     domGroupOverview.setAttribute('data-group-id', chat.id);
 
-    // Render the group overview
-    await renderGroupOverview(chat);
+    // Only Communities are group-like now (chatIsGroup gate above), so render the
+    // Community overview (no member roster; invite by link/npub).
+    await renderCommunityOverview(chat);
 
     if (domGroupOverview.style.display !== '') {
         // Run a subtle fade-in animation
@@ -7301,126 +7333,105 @@ async function openGroupOverview(chat) {
     }
 }
 
-/**
- * Render the Group Overview tab based on a given group chat
- * @param {Chat} chat - The group chat object
- */
-async function renderGroupOverview(chat) {
-    const groupName = chat.metadata?.custom_fields?.name || `Group ${chat.id.substring(0, 10)}...`;
-    
-    // Fetch fresh member list and admins from the engine
-    let members = [];
-    let admins = [];
-    
-    try {
-        const result = await invoke('get_mls_group_members', { groupId: chat.id });
-        // The result is an object with 'members' and 'admins' array properties
-        members = result?.members || [];
-        admins = result?.admins || [];
-    } catch (e) {
-        console.error('Failed to fetch group members:');
-        console.error(e);
-    }
-    
-    // Use actual member count from engine, not cached metadata
-    const memberCount = members.length;
-    
-    // Display Name (top header)
-    domGroupOverviewName.textContent = groupName;
-    domGroupOverviewStatus.textContent = `${memberCount} ${memberCount === 1 ? 'member' : 'members'}`;
 
-    // Header avatar (small, next to name)
+/**
+ * Render the overview panel for a Community channel. Reuses the group-overview DOM, but:
+ * editable name/avatar/description (owner only) via the Community commands, NO member
+ * roster (membership is hidden), and an invite panel offering a shareable link + by-npub.
+ * @param {Chat} chat - The Community channel chat
+ */
+/**
+ * Silently tear the local UI down for a community that's gone (the involuntary KICK path; the backend has
+ * already dropped its keys + DB rows). Closes the open channel if it belongs to the community, removes its
+ * channels from the chat list + overview, and re-renders. Voluntary leave keeps its own inline teardown.
+ */
+async function removeCommunityFromUI(communityId) {
+    const ids = new Set(
+        arrChats.filter(c => c.metadata?.custom_fields?.community_id === communityId).map(c => c.id)
+    );
+    const wasViewing = ids.has(strOpenChat);
+    if (wasViewing) {
+        await closeChat();
+        domGroupOverview.style.display = 'none';
+        domGroupOverview.removeAttribute('data-group-id');
+    }
+    arrChats = arrChats.filter(c => c.metadata?.custom_fields?.community_id !== communityId);
+    renderChatlist();
+    if (wasViewing) openChatlist();
+}
+
+async function renderCommunityOverview(chat) {
+    const cf = chat.metadata?.custom_fields || {};
+    const communityId = cf.community_id;
+    const isOwner = cf.is_owner === 'true';
+    // Role-engine capabilities (NOT an owner check — the owner is just the top role). Each management
+    // affordance gates on the matching bit, so an admin whose role carries a permission sees the same
+    // button as the owner. Falls back to no-caps on error (hide everything management).
+    let caps = {};
+    try { caps = await invoke('get_community_capabilities', { communityId }); } catch (_) {}
+    // Tag the overview with its community so the realtime `community_refreshed` listener knows to re-render
+    // it when a control change (ban/role/metadata/mode) lands live.
+    domGroupOverview.setAttribute('data-group-id', communityId);
+    const name = cf.name || `Community ${chat.id.substring(0, 10)}...`;
+    const description = cf.description || '';
+
+    // Header: name + member count as subtext (the description has its own block below). Shows the
+    // cached count instantly; the member fetch further down refreshes it.
+    domGroupOverviewName.textContent = name;
+    domGroupOverviewStatus.textContent = communityMemberSubtext(communityId);
+
     const headerAvatarContainer = document.getElementById('group-overview-header-avatar-container');
     if (headerAvatarContainer) {
         headerAvatarContainer.innerHTML = '';
-        const groupAvatarSrc = chat.metadata?.avatar_cached ? convertFileSrc(chat.metadata.avatar_cached) : null;
-        headerAvatarContainer.appendChild(createAvatarImg(groupAvatarSrc, 22, true));
+        const src = chat.metadata?.avatar_cached ? convertFileSrc(chat.metadata.avatar_cached) : null;
+        headerAvatarContainer.appendChild(createAvatarImg(src, 22, true));
     }
 
-    // Check admin status (used for edit controls throughout)
-    const iAmGroupAdmin = admins.includes(strPubkey);
-
-    // Large center avatar
+    // Large center avatar (+ owner edit overlay).
     const avatarParent = domGroupOverviewAvatar.parentElement;
-    const groupAvatarSrc = chat.metadata?.avatar_cached ? convertFileSrc(chat.metadata.avatar_cached) : null;
-    if (groupAvatarSrc) {
+    const avatarSrc = chat.metadata?.avatar_cached ? convertFileSrc(chat.metadata.avatar_cached) : null;
+    const prevImg = avatarParent.querySelector('img');
+    if (prevImg) prevImg.remove();
+    if (avatarSrc) {
         const img = document.createElement('img');
-        img.src = groupAvatarSrc;
-        img.style.width = '100px';
-        img.style.height = '100px';
-        img.style.objectFit = 'cover';
-        img.style.borderRadius = '50%';
-        img.onerror = () => {
-            img.replaceWith(domGroupOverviewAvatar);
-            domGroupOverviewAvatar.style.display = 'inline-block';
-        };
+        img.src = avatarSrc;
+        img.style.cssText = 'width:100px;height:100px;object-fit:cover;border-radius:50%;';
+        img.onerror = () => { img.replaceWith(domGroupOverviewAvatar); domGroupOverviewAvatar.style.display = 'inline-block'; };
         domGroupOverviewAvatar.style.display = 'none';
-        // Remove any previous cached avatar img from parent
-        const prevImg = avatarParent.querySelector('img');
-        if (prevImg) prevImg.remove();
         avatarParent.appendChild(img);
     } else {
-        // Remove any stale cached img
-        const prevImg = avatarParent.querySelector('img');
-        if (prevImg) prevImg.remove();
         domGroupOverviewAvatar.style.display = 'inline-block';
     }
-    // Admin avatar edit overlay
     const prevOverlay = avatarParent.querySelector('.group-avatar-edit-overlay');
     if (prevOverlay) prevOverlay.remove();
-    if (iAmGroupAdmin) {
+    if (caps.manage_metadata) {
         const overlay = document.createElement('div');
         overlay.className = 'group-avatar-edit-overlay';
-        overlay.innerHTML = '<span class="icon icon-edit" style="width: 16px; height: 16px; background-color: #fff;"></span>';
+        overlay.innerHTML = '<span class="icon icon-edit" style="width:16px;height:16px;background-color:#fff;"></span>';
         overlay.onclick = async (e) => {
             e.stopPropagation();
             try {
                 const { open } = window.__TAURI__.dialog;
-                const selected = await open({
-                    multiple: false,
-                    filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }]
-                });
-                if (!selected) return;
-                const filePath = typeof selected === 'string' ? selected : selected.path;
+                const selected = await open({ multiple: false, filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }] });
+                const filePath = typeof selected === 'string' ? selected : selected?.path;
                 if (!filePath) return;
                 overlay.style.opacity = '0.5';
-                const result = await invoke('upload_group_avatar', { filepath: filePath });
-                if (result?.image_hash && result?.image_key && result?.image_nonce) {
-                    await invoke('update_group_metadata', {
-                        groupId: chat.id,
-                        imageHash: result.image_hash,
-                        imageKey: result.image_key,
-                        imageNonce: result.image_nonce,
-                    });
-                    // Cache the new avatar for instant display
-                    if (result.blob_url) {
-                        try {
-                            const cachedPath = await invoke('cache_group_avatar', {
-                                groupId: chat.id,
-                                blobUrl: result.blob_url,
-                                imageHash: result.image_hash,
-                                imageKey: result.image_key,
-                                imageNonce: result.image_nonce,
-                            });
-                            if (cachedPath) {
-                                chat.metadata.avatar_cached = cachedPath;
-                            }
-                        } catch (cacheErr) {
-                            console.error('[MLS] Failed to cache group avatar:', cacheErr);
-                        }
-                    }
-                    // Re-render to show new avatar
-                    await renderGroupOverview(chat);
-                }
+                await invoke('set_community_image', { communityId, filepath: filePath, isBanner: false });
+                cf.icon = '1';
+                const cachedPath = await invoke('cache_community_image', { communityId, isBanner: false });
+                if (cachedPath) chat.metadata.avatar_cached = cachedPath;
+                await renderCommunityOverview(chat);
+                renderChatlist();
             } catch (err) {
-                console.error('[MLS] Failed to update group avatar:', err);
+                console.error('Failed to set community image:', err);
                 overlay.style.opacity = '';
+                showToast('Failed to update the image');
             }
         };
         avatarParent.appendChild(overlay);
     }
 
-    // Mute button
+    // Mute button (same as groups).
     const domGroupMuteBtn = document.getElementById('group-mute-btn');
     if (domGroupMuteBtn) {
         const updateMuteBtn = (muted) => {
@@ -7428,40 +7439,35 @@ async function renderGroupOverview(chat) {
             domGroupMuteBtn.querySelector('p').innerText = muted ? 'Unmute' : 'Mute';
         };
         updateMuteBtn(chat.muted);
-        domGroupMuteBtn.onclick = async () => {
-            const newMuted = await invoke('toggle_chat_mute', { chatId: chat.id });
-            updateMuteBtn(newMuted);
-        };
+        domGroupMuteBtn.onclick = async () => { updateMuteBtn(await invoke('toggle_chat_mute', { chatId: chat.id })); };
     }
 
-    // Secondary name (editable for admins)
-    domGroupOverviewNameSecondary.textContent = groupName;
-    if (iAmGroupAdmin) {
+    // Editable name (owner only).
+    domGroupOverviewNameSecondary.textContent = name;
+    if (caps.manage_metadata) {
         domGroupOverviewNameSecondary.classList.add('group-editable');
         domGroupOverviewNameSecondary.onclick = () => {
             const input = document.createElement('input');
-            input.type = 'text';
-            input.className = 'group-name-input';
-            input.value = groupName;
-            input.maxLength = 100;
+            input.type = 'text'; input.className = 'group-name-input'; input.value = name; input.maxLength = 100;
             domGroupOverviewNameSecondary.replaceWith(input);
-            input.focus();
-            input.select();
+            input.focus(); input.select();
             let saved = false;
             const save = async () => {
-                if (saved) return;
-                saved = true;
+                if (saved) return; saved = true;
                 const newName = input.value.trim();
                 input.replaceWith(domGroupOverviewNameSecondary);
-                if (newName && newName !== groupName) {
+                if (newName && newName !== name) {
                     domGroupOverviewNameSecondary.textContent = newName;
                     domGroupOverviewName.textContent = newName;
-                    try {
-                        await invoke('update_group_metadata', { groupId: chat.id, name: newName });
-                    } catch (e) {
-                        console.error('[MLS] Failed to update group name:', e);
-                        domGroupOverviewNameSecondary.textContent = groupName;
-                        domGroupOverviewName.textContent = groupName;
+                    cf.name = newName;
+                    try { await invoke('update_community_metadata', { communityId, name: newName, description: null }); renderChatlist(); }
+                    catch (e) {
+                        console.error('Failed to rename community:', e);
+                        // Revert the optimistic header text.
+                        cf.name = name;
+                        domGroupOverviewNameSecondary.textContent = name;
+                        domGroupOverviewName.textContent = name;
+                        showToast('Failed to update the name');
                     }
                 }
             };
@@ -7473,380 +7479,393 @@ async function renderGroupOverview(chat) {
         domGroupOverviewNameSecondary.onclick = null;
     }
 
-    // Group description (editable for admins)
-    const description = chat.metadata?.custom_fields?.description;
-    if (iAmGroupAdmin) {
-        domGroupOverviewDescription.style.display = '';
-        domGroupOverviewDescription.textContent = description || '';
+    // Editable description (anyone with manage-metadata); shown to everyone if set.
+    domGroupOverviewDescription.style.display = (description || caps.manage_metadata) ? '' : 'none';
+    domGroupOverviewDescription.textContent = description || (caps.manage_metadata ? 'Add a description...' : '');
+    domGroupOverviewDescription.classList.toggle('group-placeholder', !description && caps.manage_metadata);
+    if (caps.manage_metadata) {
         domGroupOverviewDescription.classList.add('group-editable');
-        if (!description) {
-            domGroupOverviewDescription.setAttribute('data-placeholder', 'Add description...');
-            domGroupOverviewDescription.classList.add('group-desc-empty');
-        } else {
-            domGroupOverviewDescription.classList.remove('group-desc-empty');
-        }
         domGroupOverviewDescription.onclick = () => {
-            const textarea = document.createElement('textarea');
-            textarea.className = 'group-desc-textarea';
-            textarea.value = description || '';
-            textarea.placeholder = 'Enter group description...';
-            textarea.maxLength = 500;
-            domGroupOverviewDescription.replaceWith(textarea);
-            textarea.focus();
-            // Auto-size
-            textarea.style.height = Math.max(60, textarea.scrollHeight) + 'px';
-            textarea.oninput = () => { textarea.style.height = 'auto'; textarea.style.height = Math.max(60, textarea.scrollHeight) + 'px'; };
+            const input = document.createElement('textarea');
+            input.className = 'group-name-input'; input.value = description; input.maxLength = 500; input.rows = 2;
+            domGroupOverviewDescription.replaceWith(input);
+            input.focus();
             let saved = false;
             const save = async () => {
-                if (saved) return;
-                saved = true;
-                const newDesc = textarea.value.trim();
-                textarea.replaceWith(domGroupOverviewDescription);
-                if (newDesc !== (description || '')) {
-                    domGroupOverviewDescription.textContent = newDesc;
-                    if (!newDesc) {
-                        domGroupOverviewDescription.classList.add('group-desc-empty');
-                    } else {
-                        domGroupOverviewDescription.classList.remove('group-desc-empty');
-                    }
-                    try {
-                        await invoke('update_group_metadata', { groupId: chat.id, description: newDesc });
-                    } catch (e) {
-                        console.error('[MLS] Failed to update group description:', e);
-                        domGroupOverviewDescription.textContent = description || '';
-                        // Restore empty/non-empty class state
-                        if (description) { domGroupOverviewDescription.classList.remove('group-desc-empty'); }
-                        else { domGroupOverviewDescription.classList.add('group-desc-empty'); }
-                    }
+                if (saved) return; saved = true;
+                const newDesc = input.value.trim();
+                input.replaceWith(domGroupOverviewDescription);
+                if (newDesc !== description) {
+                    cf.description = newDesc;
+                    domGroupOverviewDescription.textContent = newDesc || (caps.manage_metadata ? 'Add a description...' : '');
+                    domGroupOverviewDescription.classList.toggle('group-placeholder', !newDesc);
+                    domGroupOverviewStatus.textContent = newDesc;
+                    try { await invoke('update_community_metadata', { communityId, name: null, description: newDesc }); }
+                    catch (e) { console.error('Failed to update community description:', e); showToast('Failed to update the description'); }
                 }
             };
-            textarea.onblur = save;
-            textarea.onkeydown = (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); textarea.blur(); } if (e.key === 'Escape') { saved = true; textarea.replaceWith(domGroupOverviewDescription); } };
+            input.onblur = save;
+            input.onkeydown = (e) => { if (e.key === 'Escape') { saved = true; input.replaceWith(domGroupOverviewDescription); } };
         };
     } else {
-        domGroupOverviewDescription.classList.remove('group-editable', 'group-desc-empty');
+        domGroupOverviewDescription.classList.remove('group-editable');
         domGroupOverviewDescription.onclick = null;
-        if (description) {
-            domGroupOverviewDescription.textContent = description;
-            domGroupOverviewDescription.style.display = '';
-        } else {
-            domGroupOverviewDescription.style.display = 'none';
+    }
+
+    // Member list = observed participants (best-effort): everyone who has posted across the
+    // Community's channels. Lurkers and link-joiners who haven't spoken don't appear (membership
+    // isn't authoritative). Join announcements (presence) surface here too once that ships.
+    if (domGroupOverviewMembers) {
+        const membersEl = domGroupOverviewMembers;
+        const searchEl = domGroupMemberSearchInput;
+        const myNpub = arrProfiles.find(p => p.mine)?.id;
+        const ownerNpub = cf.owner_npub || null; // PROVEN owner (verified attestation), or null
+        let memberList = [];
+        try { memberList = await invoke('get_community_members', { communityId }); } catch (_) {}
+        // Cache the count for the header/overview subtext (the overview's own authoritative fetch).
+        communityMemberCounts.set(communityId, memberList.length);
+        _communityCountLastFetch.set(communityId, Date.now());
+        domGroupOverviewStatus.textContent = communityMemberSubtext(communityId);
+        // Admins (members holding a management role) drive the gold crown. MVP: the OWNER elects /
+        // removes admins (no role hierarchy yet, so that's the only real promotion path). The
+        // backend authorizes on the MANAGE_ROLES permission (futureproof — `can_manage_community_roles`);
+        // the UI just exposes the toggle to the owner for now.
+        let adminNpubs = [];
+        try { adminNpubs = await invoke('get_community_admins', { communityId }); } catch (_) {}
+        // Cache admins onto this community's channel chats so message rendering can chip @everyone
+        // from admin senders (owner is handled separately via owner_npub). Mirrors the group design.
+        for (const c of arrChats) {
+            if (c.chat_type === 'Community' && c.metadata?.custom_fields?.community_id === communityId) {
+                c.metadata.admins = adminNpubs.slice();
+            }
+        }
+        const iAmOwner = !!(myNpub && ownerNpub && myNpub === ownerNpub);
+        // Per-member outrank for moderation, expressed in role-engine POSITIONS (owner = pos 0 via
+        // ownerNpub, admin = pos 1 via adminNpubs, member = none). You may moderate a target you outrank:
+        // the owner outranks everyone; an admin outranks only non-admins. The backend re-verifies the real
+        // can_act_on_member, so this is just which buttons to show (best-effort, never authoritative).
+        const iOutrank = (npub) => {
+            if (npub === ownerNpub || npub === myNpub) return false;     // never the owner, never yourself
+            if (iAmOwner) return true;                                   // pos 0 outranks all
+            return !adminNpubs.includes(npub);                           // an admin outranks only non-admins
+        };
+        // The banlist (for the unban list + to hide banned members), shown to anyone who can BAN.
+        let bannedList = [];
+        if (caps.ban) { try { bannedList = await invoke('get_community_banlist', { communityId }); } catch (_) {} }
+
+        const renderMembers = (filterText = '') => {
+            const f = (filterText || '').trim().toLowerCase();
+            const frag = document.createDocumentFragment();
+            let shown = 0;
+            // Hoist tiers: owner → admins → members. Within a tier, sort alphabetically by display
+            // (nickname → name → npub), so rows read A→Z inside each tier.
+            const tierOf = (npub) => npub === ownerNpub ? 0 : (adminNpubs.includes(npub) ? 1 : 2);
+            const displayOf = (m) => {
+                const profile = arrProfiles.find(p => p.id === m.npub) || null;
+                const name = profile ? (profile.nickname || profile.name || '') : '';
+                return name || (m.npub.substring(0, 10) + '...' + m.npub.substring(m.npub.length - 6));
+            };
+            const ordered = [...memberList].sort((a, b) =>
+                (tierOf(a.npub) - tierOf(b.npub)) ||
+                displayOf(a).toLowerCase().localeCompare(displayOf(b).toLowerCase()));
+            for (const m of ordered) {
+                const isCommunityOwner = m.npub === ownerNpub;
+                const profile = arrProfiles.find(p => p.id === m.npub) || null;
+                const name = profile ? (profile.nickname || profile.name || '') : '';
+                const display = name || (m.npub.substring(0, 10) + '...' + m.npub.substring(m.npub.length - 6));
+                if (f && !(display + ' ' + m.npub).toLowerCase().includes(f)) continue;
+                // Reuse the existing member-row design (display-only: no selection indicator).
+                const row = document.createElement('div');
+                row.className = 'member-pick-row';
+                const bg = document.createElement('div');
+                bg.className = 'member-pick-hover';
+                row.appendChild(bg);
+                row.addEventListener('mouseenter', () => {
+                    const c = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
+                    bg.style.background = `linear-gradient(to right, ${c}40, transparent)`;
+                });
+                // LEFT crown slot (fixed width so avatars always align): gold crown for the owner,
+                // green for admins (matches the in-chat tags); a promotable member shows a faint crown
+                // on row-hover; everyone else gets the empty spacer. Clicking toggles the Admin role.
+                const isAdminMember = adminNpubs.includes(m.npub);
+                const crownSlot = document.createElement('div');
+                crownSlot.className = 'member-crown-slot';
+                const buildCrown = (active, promote) => {
+                    const c = document.createElement('div');
+                    c.className = 'member-pick-admin' + (active ? ' active' : '') + (promote ? ' promote' : '');
+                    c.innerHTML = '<span class="icon icon-crown"></span>';
+                    return c;
+                };
+                if (isCommunityOwner) {
+                    const crown = buildCrown(true, false);
+                    crown.classList.add('owner-crown'); // gold; admins stay green
+                    crown.title = 'Owner';
+                    crown.style.cursor = 'default';
+                    crownSlot.appendChild(crown);
+                } else if (isAdminMember || caps.manage_admin_role) {
+                    // Admin → green (someone who can manage the @admin role can click to demote). Plain
+                    // member → faint hover-crown they can click to promote. (manage_admin_role is the
+                    // position rule: outrank the @admin role; owner-only in the MVP, but not hardcoded.)
+                    const crown = buildCrown(isAdminMember, !isAdminMember && caps.manage_admin_role);
+                    if (caps.manage_admin_role) {
+                        crown.title = isAdminMember ? 'Remove admin' : 'Make admin';
+                        crown.style.cursor = 'pointer';
+                        crown.onclick = async (e) => {
+                            e.stopPropagation();
+                            const makeAdmin = !isAdminMember;
+                            const confirmed = await popupConfirm(
+                                makeAdmin ? 'Make Admin' : 'Remove Admin',
+                                makeAdmin
+                                    ? `Make <b>${escapeHtml(display)}</b> an admin? They'll be able to moderate this community (ban, hide messages, manage settings).`
+                                    : `Remove <b>${escapeHtml(display)}</b> as an admin? They'll lose all moderation powers.`,
+                                false, '', 'vector_warning.svg');
+                            if (!confirmed) return;
+                            // Spinner on the crown through the publish + broadcast wait.
+                            crown.classList.add('active');
+                            crown.style.pointerEvents = 'none';
+                            crown.innerHTML = '<span class="icon icon-loading spin"></span>';
+                            try {
+                                await invoke(makeAdmin ? 'grant_community_admin' : 'revoke_community_admin', { communityId, npub: m.npub });
+                                if (makeAdmin) { if (!adminNpubs.includes(m.npub)) adminNpubs.push(m.npub); }
+                                else { adminNpubs = adminNpubs.filter(n => n !== m.npub); }
+                                renderMembers(searchEl?.value || '');
+                            } catch (err) {
+                                crown.style.pointerEvents = '';
+                                crown.innerHTML = '<span class="icon icon-crown"></span>';
+                                crown.classList.toggle('active', isAdminMember);
+                                showToast(String(err));
+                            }
+                        };
+                    } else {
+                        crown.title = 'Admin';
+                        crown.style.cursor = 'default';
+                    }
+                    crownSlot.appendChild(crown);
+                }
+                row.appendChild(crownSlot);
+                const avatar = createAvatarImg(profile ? getProfileAvatarSrc(profile) : null, 25, false);
+                avatar.className = 'member-pick-avatar';
+                row.appendChild(avatar);
+                const nameSpan = document.createElement('div');
+                nameSpan.className = 'compact-member-name';
+                nameSpan.textContent = display;
+                if (name) twemojify(nameSpan);
+                row.appendChild(nameSpan);
+                // Role-engine moderation: shown to anyone who holds KICK/BAN AND outranks this member
+                // (the owner outranks all; an admin outranks non-admins — never the owner, never self).
+                // Two tiers (§7 escalation ladder): KICK is cooperative + soft (they self-remove, can
+                // rejoin with a new invite); BAN is forceful (suppressed + read-cut in a private community).
+                if (iOutrank(m.npub) && (caps.kick || caps.ban)) {
+                    const actions = document.createElement('div');
+                    actions.className = 'member-pick-actions';
+
+                    if (caps.kick) {
+                    const kickBtn = document.createElement('button');
+                    kickBtn.className = 'cmt-btn cmt-btn-sm cmt-btn-secondary';
+                    kickBtn.title = 'Kick (they can rejoin with a new invite)';
+                    kickBtn.innerHTML = '<span class="icon icon-x"></span>Kick';
+                    kickBtn.onclick = async (e) => {
+                        e.stopPropagation();
+                        const confirmed = await popupConfirm('Kick member', `Kick <b>${escapeHtml(display)}</b>? They'll be removed from the community but can rejoin with a new invite.`, false, '', 'vector_warning.svg');
+                        if (!confirmed) return;
+                        kickBtn.disabled = true;
+                        kickBtn.innerHTML = '<span class="icon icon-loading spin"></span>Kicking';
+                        try {
+                            await invoke('kick_community_member', { communityId, npub: m.npub });
+                            memberList = memberList.filter(x => x.npub !== m.npub);
+                            renderMembers(searchEl?.value || '');
+                        } catch (err) {
+                            kickBtn.disabled = false;
+                            kickBtn.innerHTML = '<span class="icon icon-x"></span>Kick';
+                            showToast(String(err));
+                        }
+                    };
+                    actions.appendChild(kickBtn);
+                    }
+
+                    if (caps.ban) {
+                    const banBtn = document.createElement('button');
+                    banBtn.className = 'cmt-btn cmt-btn-sm cmt-btn-danger';
+                    banBtn.title = 'Ban from community';
+                    banBtn.innerHTML = '<span class="icon icon-x-user"></span>Ban';
+                    banBtn.onclick = async (e) => {
+                        e.stopPropagation();
+                        const confirmed = await popupConfirm('Ban member', `Ban <b>${escapeHtml(display)}</b>? They'll be removed from the community and can't rejoin unless you unban them.`, false, '', 'vector_warning.svg');
+                        if (!confirmed) return;
+                        // Banning publishes to relays + rebuilds the subscription (a few seconds);
+                        // show a spinner so the button isn't dead during the wait.
+                        banBtn.disabled = true;
+                        banBtn.innerHTML = '<span class="icon icon-loading spin"></span>Banning';
+                        try {
+                            await invoke('ban_community_member', { communityId, npub: m.npub });
+                            memberList = memberList.filter(x => x.npub !== m.npub);
+                            renderMembers(searchEl?.value || '');
+                        } catch (err) {
+                            banBtn.disabled = false;
+                            banBtn.innerHTML = '<span class="icon icon-x-user"></span>Ban';
+                            // A private-community ban can fail with the (long, important) bunker read-cut
+                            // explanation — show it as a persistent notice, not a fleeting toast.
+                            await popupConfirm("Couldn't ban", escapeHtml(String(err)), true, '', 'vector_warning.svg');
+                        }
+                    };
+                    actions.appendChild(banBtn);
+                    }
+                    row.appendChild(actions);
+                }
+                frag.appendChild(row);
+                shown++;
+            }
+            membersEl.innerHTML = '';
+            if (!shown) {
+                const empty = document.createElement('p');
+                empty.className = 'group-placeholder';
+                empty.style.cssText = 'text-align:center;padding:14px;';
+                empty.textContent = f ? 'No matches.' : 'No one has spoken yet. Members appear here once they post.';
+                membersEl.appendChild(empty);
+            } else {
+                membersEl.appendChild(frag);
+            }
+
+            // Owner-only "Banned" section: the banlist isn't otherwise visible (banned members
+            // are excluded from the list above), so surface it here with an unban affordance.
+            if (caps.ban && bannedList.length && !f) {
+                const hdr = document.createElement('div');
+                hdr.textContent = `Banned (${bannedList.length})`;
+                hdr.style.cssText = 'font-size:12px;text-transform:uppercase;letter-spacing:0.06em;opacity:0.5;margin:16px 0 6px;padding-left:2px;';
+                membersEl.appendChild(hdr);
+                for (const bnpub of bannedList) {
+                    const p = arrProfiles.find(x => x.id === bnpub) || null;
+                    const nm = p ? (p.nickname || p.name || '') : '';
+                    const disp = nm || (bnpub.substring(0, 10) + '...' + bnpub.substring(bnpub.length - 6));
+                    const row = document.createElement('div');
+                    row.className = 'member-pick-row';
+                    const av = createAvatarImg(p ? getProfileAvatarSrc(p) : null, 25, false);
+                    av.className = 'member-pick-avatar';
+                    av.style.opacity = '0.5';
+                    row.appendChild(av);
+                    const ns = document.createElement('div');
+                    ns.className = 'compact-member-name';
+                    ns.textContent = disp;
+                    ns.style.opacity = '0.6';
+                    if (nm) twemojify(ns);
+                    row.appendChild(ns);
+                    const unbanBtn = document.createElement('button');
+                    unbanBtn.className = 'cmt-btn cmt-btn-sm cmt-btn-secondary';
+                    unbanBtn.title = 'Unban';
+                    unbanBtn.style.marginLeft = 'auto';
+                    unbanBtn.innerHTML = '<span class="icon icon-add-user"></span>Unban';
+                    unbanBtn.onclick = async (e) => {
+                        e.stopPropagation();
+                        unbanBtn.disabled = true;
+                        unbanBtn.innerHTML = '<span class="icon icon-loading spin"></span>Unbanning';
+                        try {
+                            await invoke('unban_community_member', { communityId, npub: bnpub });
+                            bannedList = bannedList.filter(x => x !== bnpub);
+                            renderMembers(searchEl?.value || '');
+                        } catch (err) {
+                            unbanBtn.disabled = false;
+                            unbanBtn.innerHTML = '<span class="icon icon-add-user"></span>Unban';
+                            showToast(String(err));
+                        }
+                    };
+                    row.appendChild(unbanBtn);
+                    membersEl.appendChild(row);
+                }
+            }
+        };
+        renderMembers();
+
+        // Resolve unknown member + banned-member profiles (name/avatar), then re-render once.
+        const unknowns = [...memberList.map(m => m.npub), ...bannedList].filter(np => !arrProfiles.some(p => p.id === np) && !strangerProfileRequested.has(np));
+        unknowns.forEach(np => strangerProfileRequested.add(np));
+        if (unknowns.length) {
+            Promise.allSettled(unknowns.map(np => invoke('load_profile', { npub: np }))).then(() => {
+                if (domGroupOverview.getAttribute('data-group-id') === chat.id) renderMembers(searchEl?.value || '');
+            });
+        }
+
+        if (searchEl) {
+            // Hide the whole search row (icon + input), not just the input — else the magnifying glass
+            // hovers orphaned above an empty member list.
+            const searchContainer = searchEl.parentElement;
+            if (searchContainer) searchContainer.style.display = memberList.length ? '' : 'none';
+            searchEl.value = '';
+            searchEl.oninput = () => renderMembers(searchEl.value || '');
         }
     }
-    
-    // Function to render the member list (can be called for search filtering)
-    const renderMemberList = (searchQuery = '') => {
-        domGroupOverviewMembers.innerHTML = '';
-        
-        if (!members || members.length === 0) {
-            const noMembers = document.createElement('p');
-            noMembers.textContent = 'No members found';
-            noMembers.style.textAlign = 'center';
-            noMembers.style.color = '#999';
-            noMembers.style.padding = '20px';
-            domGroupOverviewMembers.appendChild(noMembers);
-            return;
-        }
-        
-        // Sort members: admins first, then regular members
-        const sortedMembers = [...members].sort((a, b) => {
-            const aIsAdmin = admins.includes(a);
-            const bIsAdmin = admins.includes(b);
-            if (aIsAdmin && !bIsAdmin) return -1;
-            if (!aIsAdmin && bIsAdmin) return 1;
-            return 0;
-        });
-        
-        // Filter members based on search query
-        const filteredMembers = sortedMembers.filter(member => {
-            if (!searchQuery) return true;
-            
-            const memberProfile = getProfile(member);
-            const query = searchQuery.toLowerCase();
-            
-            // Search in nickname, name, and npub
-            const nickname = (memberProfile?.nickname || '').toLowerCase();
-            const name = (memberProfile?.name || '').toLowerCase();
-            const npub = member.toLowerCase();
-            
-            return nickname.includes(query) || name.includes(query) || npub.includes(query);
-        });
-        
-        if (filteredMembers.length === 0) {
-            const noResults = document.createElement('p');
-            noResults.textContent = 'No members match your search';
-            noResults.style.textAlign = 'center';
-            noResults.style.color = '#999';
-            noResults.style.padding = '20px';
-            domGroupOverviewMembers.appendChild(noResults);
-            return;
-        }
-        
-        for (const member of filteredMembers) {
-            const isAdmin = admins.includes(member);
-            const memberDiv = document.createElement('div');
-            memberDiv.style.display = 'flex';
-            memberDiv.style.alignItems = 'center';
-            memberDiv.style.padding = '5px 10px';
-            memberDiv.style.borderRadius = '6px';
-            memberDiv.style.transition = 'background 0.2s ease';
-            memberDiv.style.isolation = 'isolate';
-            memberDiv.style.cursor = 'pointer';
-            
-            // Add hover effect with theme-based gradient using ::before pseudo-element approach
-            const bgDiv = document.createElement('div');
-            bgDiv.style.position = 'absolute';
-            bgDiv.style.top = '0';
-            bgDiv.style.left = '0';
-            bgDiv.style.right = '0';
-            bgDiv.style.bottom = '0';
-            bgDiv.style.borderRadius = '6px';
-            bgDiv.style.opacity = '0';
-            bgDiv.style.transition = 'opacity 0.2s ease';
-            bgDiv.style.pointerEvents = 'none';
-            bgDiv.style.zIndex = '0';
-            
-            memberDiv.style.position = 'relative';
-            memberDiv.appendChild(bgDiv);
-            
-            memberDiv.addEventListener('mouseenter', () => {
-                const primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
-                bgDiv.style.background = `linear-gradient(to right, ${primaryColor}40, transparent)`;
-                bgDiv.style.opacity = '1';
-            });
-            memberDiv.addEventListener('mouseleave', () => {
-                bgDiv.style.opacity = '0';
-            });
-            
-            // Get member profile
-            const memberProfile = getProfile(member);
-            if (!memberProfile && member) {
-                invoke("queue_profile_sync", {
-                    npub: member,
-                    priority: "normal",
-                    forceRefresh: false
-                }).catch(console.error);
-            }
-            const openMemberProfile = () => {
-                const profile = getProfile(member) || memberProfile || { id: member, mine: false };
-                const originChatId = domGroupOverview.getAttribute('data-group-id') || strOpenChat || chat.id;
-                previousChatBeforeProfile = originChatId;
-                openProfile(profile);
-            };
-            memberDiv.onclick = openMemberProfile;
-            
-            // Crown icon for admins (clickable toggle for admins, decorative otherwise)
-            const crownContainer = document.createElement('span');
-            crownContainer.className = 'group-admin-toggle' + (isAdmin ? ' active' : '');
-            crownContainer.innerHTML = '<span class="icon icon-crown"></span>';
-            const isMe = member === strPubkey;
-            if (iAmGroupAdmin && !isMe) {
-                crownContainer.classList.add('toggleable');
-                crownContainer.addEventListener('click', async (e) => {
-                    e.stopPropagation();
-                    e.preventDefault();
-                    const newIsAdmin = !admins.includes(member);
-                    // Demoting: confirm first
-                    if (!newIsAdmin) {
-                        const memberName = memberProfile?.nickname || memberProfile?.name || member.substring(0, 10) + '...';
-                        const confirmed = await popupConfirm(
-                            'Remove Admin',
-                            `Remove admin privileges from <b>${escapeHtml(memberName)}</b>?`
-                        );
-                        if (!confirmed) return;
-                    }
-                    // Build new admin list
-                    let newAdmins;
-                    if (newIsAdmin) {
-                        newAdmins = [...admins, member];
-                    } else {
-                        newAdmins = admins.filter(a => a !== member);
-                    }
-                    // Always include self
-                    if (!newAdmins.includes(strPubkey)) newAdmins.push(strPubkey);
-                    try {
-                        await invoke('update_group_metadata', { groupId: chat.id, adminIds: newAdmins });
-                        // Update local admins list for immediate UI feedback
-                        if (newIsAdmin && !admins.includes(member)) admins.push(member);
-                        else if (!newIsAdmin) { const idx = admins.indexOf(member); if (idx >= 0) admins.splice(idx, 1); }
-                        renderMemberList(domGroupMemberSearchInput.value);
-                    } catch (err) {
-                        console.error('[MLS] Failed to update admin status:', err);
-                    }
-                });
-            }
-            memberDiv.appendChild(crownContainer);
-            
-            // Member avatar
-            let avatar;
-            const memberAvatarSrc = getProfileAvatarSrc(memberProfile);
-            avatar = createAvatarImg(memberAvatarSrc, 25, false);
-            avatar.style.marginRight = '10px';
-            avatar.style.position = 'relative';
-            avatar.style.zIndex = '1';
-            memberDiv.appendChild(avatar);
-            
-            // Member name
-            const nameSpan = document.createElement('div');
-            nameSpan.className = 'compact-member-name';
-            nameSpan.textContent = memberProfile?.nickname || memberProfile?.name || member.substring(0, 10) + '...';
-            nameSpan.style.color = '#f7f4f4';
-            nameSpan.style.fontSize = '14px';
-            nameSpan.style.flex = '1';
-            nameSpan.style.textAlign = 'left';
-            nameSpan.style.position = 'relative';
-            nameSpan.style.zIndex = '1';
-            if (memberProfile?.nickname || memberProfile?.name) twemojify(nameSpan);
-            memberDiv.appendChild(nameSpan);
-            
-            // Kick button (only visible to admins, and not for themselves)
-            if (iAmGroupAdmin && !isMe) {
-                const kickBtn = document.createElement('button');
-                kickBtn.textContent = 'Kick';
-                kickBtn.style.padding = '4px 12px';
-                kickBtn.style.fontSize = '12px';
-                kickBtn.style.borderRadius = '4px';
-                kickBtn.style.border = 'none';
-                kickBtn.style.background = '#ff4444';
-                kickBtn.style.color = 'white';
-                kickBtn.style.cursor = 'pointer';
-                kickBtn.style.transition = 'background 0.2s ease';
-                kickBtn.style.position = 'relative';
-                kickBtn.style.zIndex = '1';
-                kickBtn.style.marginLeft = '10px';
-                
-                kickBtn.addEventListener('mouseenter', () => {
-                    kickBtn.style.background = '#ff6666';
-                });
-                kickBtn.addEventListener('mouseleave', () => {
-                    kickBtn.style.background = '#ff4444';
-                });
-                
-                kickBtn.onclick = async (e) => {
-                    e.stopPropagation();
-                    
-                    // Prevent double-clicks
-                    if (kickBtn.disabled) return;
-                    
-                    const memberName = memberProfile?.nickname || memberProfile?.name || member.substring(0, 10) + '...';
-                    const confirmed = await popupConfirm(
-                        `Remove ${escapeHtml(memberName)} from the group?`,
-                        'This will remove them from the group immediately.'
-                    );
-                    
-                    if (!confirmed) return;
-                    
-                    // Disable button and show loading state
-                    kickBtn.disabled = true;
-                    kickBtn.style.opacity = '0.5';
-                    kickBtn.style.cursor = 'not-allowed';
-                    const originalText = kickBtn.textContent;
-                    kickBtn.textContent = 'Removing...';
-                    
-                    try {
-                        // Call the remove_mls_member_device command
-                        // We don't have device_id, so we pass an empty string (backend will handle it)
-                        await window.__TAURI__.core.invoke('remove_mls_member_device', {
-                            groupId: chat.id,
-                            memberNpub: member,
-                            deviceId: ''
-                        });
-                        
-                        console.log(`[MLS] Successfully kicked member: ${member}`);
-                        
-                        // The mls_group_updated event will trigger a refresh
-                        // But we can also manually refresh the overview
-                        setTimeout(async () => {
-                            await renderGroupOverview(chat);
-                        }, 500);
-                    } catch (error) {
-                        console.error('[MLS] Failed to kick member:', error);
-                        alert(`Failed to remove member: ${error}`);
-                        
-                        // Re-enable button on error
-                        kickBtn.disabled = false;
-                        kickBtn.style.opacity = '1';
-                        kickBtn.style.cursor = 'pointer';
-                        kickBtn.textContent = originalText;
-                    }
-                };
-                
-                memberDiv.appendChild(kickBtn);
-            }
-            
-            domGroupOverviewMembers.appendChild(memberDiv);
-        }
-    };
-    
-    // Initial render of member list
-    renderMemberList();
-    
-    // Add search functionality
-    domGroupMemberSearchInput.value = '';
-    domGroupMemberSearchInput.oninput = (e) => {
-        renderMemberList(e.target.value);
-    };
-    
-    // Show/hide invite button based on admin status
-    if (iAmGroupAdmin) {
+
+    // Invite (owner only — link + by-npub).
+    if (caps.create_invite) {
         domGroupInviteMemberBtn.style.display = 'flex';
-        // Invite Member button - open member selection UI
-        domGroupInviteMemberBtn.onclick = async () => {
-            await openInviteMemberToGroup(chat);
-        };
+        domGroupInviteMemberBtn.onclick = () => openCommunityInvitePanel(chat);
     } else {
         domGroupInviteMemberBtn.style.display = 'none';
     }
-    
-    // Leave Group button
+
+    // Leave / Delete Community. A member leaves (local drop). The OWNER can't meaningfully leave their own
+    // root (§6.1): their button DELETES (dissolves) the community for everyone via an owner tombstone, then
+    // tears down locally. The button label is set in BOTH branches (shared DOM, else a stale label leaks).
+    const isCommunityOwner = chat.metadata?.custom_fields?.is_owner === 'true';
+    const leaveLabel = domGroupLeaveBtn.querySelectorAll('span')[1];
     domGroupLeaveBtn.style.display = 'flex';
-    domGroupLeaveBtn.onclick = async () => {
-        const groupName = chat.metadata?.custom_fields?.name || `Group ${chat.id.substring(0, 10)}...`;
-
-        // Check if user is the group creator
-        const isCreator = strPubkey === chat.metadata?.creator_pubkey;
-
-        // Creators cannot leave unless they are the only member
-        if (isCreator && memberCount > 1) {
-            await popupConfirm(
-                'Cannot Leave Group',
-                'You are the creator of this group. You must remove all other members before you can leave.<br><br>Please kick all members first, then you can leave the group.',
-                true, // Notice only, no cancel button
-                '', // No input
-                'vector_warning.svg'
-            );
-            return;
-        }
-
-        // Confirm before leaving using popupConfirm
-        const confirmed = await popupConfirm(
-            'Leave Group',
-            `Are you sure you want to leave "<b>${groupName}</b>"?<br><br>You will need to be re-invited to rejoin.`,
-            false, // Not a notice, show cancel button
-            '', // No input
-            'vector_warning.svg'
+    domGroupLeaveBtn.style.opacity = '';
+    domGroupLeaveBtn.style.pointerEvents = '';
+    // Shared local teardown after a leave OR a delete: the backend dropped keys/rows; mirror it in the
+    // local chat list (its own copy), resetting the open chat first so late events can't paint an orphan.
+    const tearDownCommunityLocally = async () => {
+        const goneChannelIds = new Set(
+            arrChats.filter(c => c.metadata?.custom_fields?.community_id === communityId).map(c => c.id)
         );
-
-        if (!confirmed) return;
-
-        try {
-            await invoke('leave_mls_group', { groupId: chat.id });
-
-            // Close the group overview
-            domGroupOverview.style.display = 'none';
-            domGroupOverview.removeAttribute('data-group-id');
-
-            // Open the chat list
-            openChatlist();
-
-            // The group will be removed from the chat list via the mls_group_left event
-        } catch (error) {
-            console.error('Failed to leave group:', error);
-            await popupConfirm('Failed to Leave Group', error.toString(), true, '', 'vector_warning.svg');
-        }
+        if (goneChannelIds.has(strOpenChat)) await closeChat();
+        arrChats = arrChats.filter(c => c.metadata?.custom_fields?.community_id !== communityId);
+        domGroupOverview.style.display = 'none';
+        domGroupOverview.removeAttribute('data-group-id');
+        renderChatlist();
+        openChatlist();
     };
-    
-    // Back button - return to the group chat
+    if (isCommunityOwner) {
+        if (leaveLabel) leaveLabel.innerText = 'Delete Community';
+        domGroupLeaveBtn.onclick = async () => {
+            // Type-to-confirm: the destructive action requires typing the community name exactly, so it
+            // can't be fat-fingered (it ends the community for everyone, irreversibly).
+            const typed = await popupConfirm(
+                'Delete this community?',
+                `This permanently ends "<b>${escapeHtml(name)}</b>" for everyone, including you. No new messages can be sent and no one can rejoin. People can still delete their own past messages. This cannot be undone.<br><br>Type the community name to confirm:`,
+                false, name, 'vector_warning.svg');
+            if (typed === false) return;
+            if (String(typed).trim() !== name) {
+                await popupConfirm('Not Deleted', 'The name did not match, so nothing was changed.', true, '', 'vector_warning.svg');
+                return;
+            }
+            domGroupLeaveBtn.style.opacity = '0.5';
+            domGroupLeaveBtn.style.pointerEvents = 'none';
+            try {
+                await invoke('delete_community', { communityId });
+                await tearDownCommunityLocally();
+            } catch (e) {
+                domGroupLeaveBtn.style.opacity = '';
+                domGroupLeaveBtn.style.pointerEvents = '';
+                await popupConfirm('Failed to Delete', escapeHtml(String(e)), true, '', 'vector_warning.svg');
+            }
+        };
+    } else {
+        if (leaveLabel) leaveLabel.innerText = 'Leave';
+        domGroupLeaveBtn.onclick = async () => {
+            const confirmed = await popupConfirm('Leave Community', `Leave "<b>${escapeHtml(name)}</b>"? You'll need a new invite to rejoin.`, false, '', 'vector_warning.svg');
+            if (!confirmed) return;
+            domGroupLeaveBtn.style.opacity = '0.5';
+            domGroupLeaveBtn.style.pointerEvents = 'none';
+            try {
+                await invoke('leave_community', { communityId });
+                await tearDownCommunityLocally();
+            } catch (e) {
+                domGroupLeaveBtn.style.opacity = '';
+                domGroupLeaveBtn.style.pointerEvents = '';
+                await popupConfirm('Failed to Leave', escapeHtml(String(e)), true, '', 'vector_warning.svg');
+            }
+        };
+    }
+
     domGroupOverviewBackBtn.onclick = () => {
         popBack('group-overview');
         domGroupOverview.style.display = 'none';
@@ -7856,323 +7875,382 @@ async function renderGroupOverview(chat) {
 }
 
 /**
- * Open the invite members UI for a specific group (multi-select)
- * @param {Chat} chat - The group chat object
+ * The Community invite panel: generate/copy/revoke shareable links, and invite by npub.
+ * @param {Chat} chat - The Community channel chat
  */
-async function openInviteMemberToGroup(chat) {
-    // Get current group members to exclude them from selection
-    let currentMembers = [];
-    try {
-        const result = await invoke('get_mls_group_members', { groupId: chat.id });
-        currentMembers = result?.members || [];
-    } catch (e) {
-        console.error('Failed to fetch group members:', e);
-    }
-    
-    // Create a modal/popup for member selection
-    const modal = document.createElement('div');
-    modal.style.position = 'fixed';
-    modal.style.top = '0';
-    modal.style.left = '0';
-    modal.style.right = '0';
-    modal.style.bottom = '0';
-    modal.style.backgroundColor = 'rgba(0, 0, 0, 0.8)';
-    modal.style.display = 'flex';
-    modal.style.alignItems = 'center';
-    modal.style.justifyContent = 'center';
-    modal.style.zIndex = '10000';
-    modal.style.padding = '20px';
-
-    // Single dismissal entry point so close button, backdrop click, success
-    // path, and Android back all stay in sync with the back stack.
-    const dismissModal = () => {
-        activeInviteModalRerender = null;
-        modal.remove();
-        popBack('invite-member');
+/**
+ * A non-interactable, unclosable progress modal that guides the user through a multi-second rekey
+ * (privatize / private-ban). Listens to `community_rekey_progress` (emitted per phase by the backend:
+ * reroll → per-member key prep → send → per-edition repost → finalize) and fills a determinate ring.
+ * Awaits the listener registration before returning so early phases aren't missed. Returns { finish, close }.
+ */
+async function showRekeyProgressModal(title) {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay rekey-progress-overlay';
+    overlay.onclick = (e) => e.stopPropagation(); // swallow — no backdrop dismiss
+    const box = document.createElement('div');
+    box.className = 'modal-box rekey-progress-box';
+    box.innerHTML = `
+        <div class="rekey-ring"><span class="rekey-pct">0%</span></div>
+        <p class="rekey-title">${escapeHtml(title || 'Updating community keys')}</p>
+        <p class="rekey-step">Starting...</p>
+    `;
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    const ring = box.querySelector('.rekey-ring');
+    const pctEl = box.querySelector('.rekey-pct');
+    const stepEl = box.querySelector('.rekey-step');
+    const setProgress = (pct, label) => {
+        const p = Math.max(0, Math.min(100, pct | 0));
+        ring.style.setProperty('--rekey-pct', `${p}%`); // the @property transition sweeps the ring to it
+        if (label) stepEl.textContent = label;
     };
-    
-    const container = document.createElement('div');
-    container.style.backgroundColor = '#0a0a0a';
-    container.style.borderRadius = '12px';
-    container.style.padding = '24px';
-    container.style.maxWidth = '500px';
-    container.style.width = '100%';
-    container.style.maxHeight = '80vh';
-    container.style.display = 'flex';
-    container.style.flexDirection = 'column';
-    container.style.borderStyle = 'solid';
-    container.style.borderColor = '#1c1c1c';
-    container.style.borderWidth = '1px';
-    
-    // Header
-    const header = document.createElement('div');
-    header.style.display = 'flex';
-    header.style.justifyContent = 'space-between';
-    header.style.alignItems = 'center';
-    header.style.marginBottom = '20px';
-    
-    const title = document.createElement('h3');
-    title.textContent = 'Invite Members';
-    title.style.margin = '0';
-    title.style.color = '#f7f4f4';
-    header.appendChild(title);
-    
-    const closeBtn = document.createElement('button');
-    closeBtn.textContent = '✕';
-    closeBtn.className = 'btn';
-    closeBtn.style.padding = '8px 12px';
-    closeBtn.style.fontSize = '18px';
-    closeBtn.onclick = dismissModal;
-    header.appendChild(closeBtn);
-    
-    container.appendChild(header);
-    
-    // Search input
-    const searchContainer = document.createElement('div');
-    searchContainer.className = 'emoji-search-container';
-    searchContainer.style.padding = '10px 0px';
-    searchContainer.style.marginBottom = '16px';
-    searchContainer.style.background = 'transparent';
-    
-    const searchIcon = document.createElement('span');
-    searchIcon.className = 'emoji-search-icon icon icon-search';
-    searchIcon.style.setProperty('width', '25px', 'important');
-    searchIcon.style.setProperty('height', '25px', 'important');
-    searchContainer.appendChild(searchIcon);
-    
-    const searchInput = document.createElement('input');
-    searchInput.placeholder = 'Search or paste npub...';
-    searchInput.autocomplete = 'off';
-    searchInput.setAttribute('autocorrect', 'off');
-    searchInput.setAttribute('autocapitalize', 'off');
-    searchInput.spellcheck = false;
-    searchInput.style.padding = '10px 40px';
-    searchInput.style.backgroundColor = 'transparent';
-    searchInput.style.border = '1px solid rgba(57, 57, 57, 0.5)';
-    searchInput.style.width = '100%';
-    searchContainer.appendChild(searchInput);
-    
-    container.appendChild(searchContainer);
-    
-    // Member list (matching the group overview member list style)
-    const memberList = document.createElement('div');
-    memberList.style.flex = '1';
-    memberList.style.overflowY = 'auto';
-    memberList.style.marginBottom = '16px';
-    memberList.style.border = '1px solid rgba(57, 57, 57, 0.5)';
-    memberList.style.borderRadius = '8px';
-    memberList.style.padding = '6px';
-    
-    // Status message
-    const statusMsg = document.createElement('p');
-    statusMsg.style.textAlign = 'center';
-    statusMsg.style.color = '#999';
-    statusMsg.style.margin = '10px 0';
-    statusMsg.style.display = 'none';
-    container.appendChild(statusMsg);
-    
-    // Invite button
-    const inviteBtn = document.createElement('button');
-    inviteBtn.textContent = 'Invite';
-    inviteBtn.className = 'btn';
-    inviteBtn.style.padding = '12px 24px';
-    inviteBtn.style.background = 'linear-gradient(135deg, var(--icon-color-primary), var(--icon-color-secondary))';
-    inviteBtn.style.borderRadius = '6px';
-    inviteBtn.style.fontWeight = '500';
-    inviteBtn.style.width = '100%';
-    inviteBtn.disabled = true;
-    inviteBtn.style.opacity = '0.5';
-    
-    const selectedMembers = new Set();
-
-    const updateInviteButton = () => {
-        const count = selectedMembers.size;
-        inviteBtn.disabled = count === 0;
-        inviteBtn.style.opacity = count === 0 ? '0.5' : '1';
-        inviteBtn.textContent = count > 1 ? `Invite (${count})` : 'Invite';
-    };
-
-    const renderMemberList = (filterText = '') => {
-        memberList.innerHTML = '';
-        const filter = (filterText || '').trim().toLowerCase();
-
-        // Get mine profile to exclude self
-        const mine = arrProfiles.find(p => p.mine)?.id;
-
-        // Collect stranger npubs: selected npubs not in arrProfiles and not current members
-        const knownIds = new Set(arrProfiles.map(p => p.id));
-        const strangerNpubs = [...selectedMembers].filter(id => !knownIds.has(id) && !currentMembers.includes(id));
-
-        // Check if filter text is a valid stranger npub
-        const filterNpub = extractNpub(filterText);
-        if (filterNpub && filterNpub !== mine && !knownIds.has(filterNpub) && !currentMembers.includes(filterNpub) && !strangerNpubs.includes(filterNpub)) {
-            strangerNpubs.push(filterNpub);
-        }
-
-        // Helper to build a row
-        const buildInviteRow = (npub, profile) => {
-            const name = profile ? (profile.nickname || profile.name || '') : '';
-            const isSelected = selectedMembers.has(npub);
-
-            const row = document.createElement('div');
-            row.className = 'member-pick-row';
-
-            const bgDiv = document.createElement('div');
-            bgDiv.className = 'member-pick-hover';
-            row.appendChild(bgDiv);
-
-            row.addEventListener('mouseenter', () => {
-                const primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
-                bgDiv.style.background = `linear-gradient(to right, ${primaryColor}40, transparent)`;
-            });
-
-            const avatarSrc = profile ? getProfileAvatarSrc(profile) : null;
-            const avatar = createAvatarImg(avatarSrc, 25, false);
-            avatar.className = 'member-pick-avatar';
-            row.appendChild(avatar);
-
-            const nameSpan = document.createElement('div');
-            nameSpan.className = 'compact-member-name';
-            nameSpan.textContent = name || (npub.substring(0, 10) + '...' + npub.substring(npub.length - 6));
-            if (name) twemojify(nameSpan);
-            row.appendChild(nameSpan);
-
-            const indicator = document.createElement('div');
-            indicator.className = 'member-pick-indicator' + (isSelected ? ' selected' : '');
-            row.appendChild(indicator);
-
-            row.onclick = () => {
-                if (selectedMembers.has(npub)) {
-                    selectedMembers.delete(npub);
-                } else {
-                    selectedMembers.add(npub);
-                }
-                renderMemberList(searchInput.value || '');
-                updateInviteButton();
-            };
-
-            return row;
-        };
-
-        let hasRows = false;
-
-        // Render stranger npubs (selected first, then filter-matched)
-        for (const npub of strangerNpubs) {
-            const isSelected = selectedMembers.has(npub);
-            if (!isSelected && filterNpub !== npub) continue;
-            memberList.appendChild(buildInviteRow(npub, null));
-            hasRows = true;
-            // Fire-and-forget relay lookup
-            if (!strangerProfileRequested.has(npub)) {
-                strangerProfileRequested.add(npub);
-                invoke('load_profile', { npub }).catch(() => {});
-            }
-        }
-
-        // Filter available contacts (exclude self and current members)
-        const availableContacts = arrProfiles.filter(p => {
-            if (!p || !p.id || p.id === mine) return false;
-            if (currentMembers.includes(p.id)) return false;
-            if (p.is_blocked) return false;
-
-            if (filter) {
-                const name = (p.nickname || p.name || '').toLowerCase();
-                const npub = p.id.toLowerCase();
-                const match = filterNpub || filter;
-                return name.includes(match) || npub.includes(match);
-            }
-            return true;
-        });
-
-        // Hoist selected members to top
-        availableContacts.sort((a, b) => {
-            const aSelected = selectedMembers.has(a.id) ? 0 : 1;
-            const bSelected = selectedMembers.has(b.id) ? 0 : 1;
-            return aSelected - bSelected;
-        });
-
-        for (const contact of availableContacts) {
-            memberList.appendChild(buildInviteRow(contact.id, getProfile(contact.id)));
-            hasRows = true;
-        }
-
-        if (!hasRows) {
-            const empty = document.createElement('p');
-            empty.textContent = filter ? 'No matches' : 'No contacts available to invite';
-            empty.style.textAlign = 'center';
-            empty.style.color = '#999';
-            empty.style.padding = '20px';
-            memberList.appendChild(empty);
-        }
-    };
-    
-    renderMemberList();
-    searchInput.oninput = (e) => renderMemberList(e.target.value);
-    activeInviteModalRerender = () => renderMemberList(searchInput.value || '');
-
-    inviteBtn.onclick = async () => {
-        if (selectedMembers.size === 0) return;
-
-        inviteBtn.disabled = true;
-        inviteBtn.textContent = 'Inviting...';
-        statusMsg.style.display = '';
-        statusMsg.style.color = '#999';
-        statusMsg.textContent = 'Preparing invitation...';
-
-        try {
-            await invoke('invite_member_to_group', {
-                groupId: chat.id,
-                memberNpubs: Array.from(selectedMembers)
-            });
-
-            const count = selectedMembers.size;
-            statusMsg.style.color = '#4caf50';
-            statusMsg.textContent = count > 1
-                ? `${count} members invited successfully!`
-                : 'Member invited successfully!';
-
-            // Refresh the group overview
-            setTimeout(async () => {
-                dismissModal();
-                await renderGroupOverview(chat);
-            }, 1000);
-        } catch (e) {
-            const errorMsg = typeof e === 'string' ? e : (e?.message || e || '').toString();
-            let friendlyMsg = errorMsg;
-
-            // Map backend errors to friendly messages
-            const keyPkgMatch = errorMsg.match(/(?:no device keypackag(?:e|es) found|failed to refresh device keypackage) for (\S+)/i);
-            if (keyPkgMatch && keyPkgMatch[1]) {
-                const npub = keyPkgMatch[1].replace(/:$/, '');
-                const prof = getProfile(npub);
-                const display = prof?.nickname || prof?.name || (npub.substring(0, 10) + '...' + npub.substring(npub.length - 6));
-                friendlyMsg = `${display} can't join group chats yet. They may need to update Vector or set up their device.`;
-            }
-
-            statusMsg.style.color = '#f44336';
-            statusMsg.textContent = friendlyMsg;
-            inviteBtn.disabled = false;
-            updateInviteButton();
-
-            // Error is already displayed in the modal, no need for popup
-        }
-    };
-    
-    container.appendChild(memberList);
-    container.appendChild(inviteBtn);
-    
-    modal.appendChild(container);
-    document.body.appendChild(modal);
-    pushBack('invite-member', dismissModal);
-
-    // Autofocus search on desktop (avoid triggering virtual keyboard on mobile)
-    if (!platformFeatures.is_mobile) searchInput.focus();
-
-    // Close on background click
-    modal.onclick = (e) => {
-        if (e.target === modal) dismissModal();
+    // Drive the % readout from the LIVE animated ring value so the number counts up in lockstep with the
+    // sweep, instead of snapping to the target ahead of it.
+    let rafId = requestAnimationFrame(function tick() {
+        const cur = parseFloat(getComputedStyle(ring).getPropertyValue('--rekey-pct')) || 0;
+        pctEl.textContent = `${Math.round(cur)}%`;
+        rafId = requestAnimationFrame(tick);
+    });
+    // Register BEFORE the caller invokes the op, so we don't miss the opening phases.
+    const unlisten = await listen('community_rekey_progress', (evt) => {
+        const { pct, label } = evt.payload || {};
+        setProgress(typeof pct === 'number' ? pct : 0, label);
+    });
+    return {
+        // Fill to 100% with a closing label and hold so the sweep + count-up finish before we close.
+        finish: async (label) => { setProgress(100, label || 'Done!'); await new Promise(r => setTimeout(r, 700)); },
+        close: () => { cancelAnimationFrame(rafId); unlisten(); overlay.remove(); },
     };
 }
+
+async function openCommunityInvitePanel(chat) {
+    const communityId = chat.metadata?.custom_fields?.community_id;
+    if (!communityId) return;
+
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    let busy = false; // a critical op (link create / revoke+rekey / direct invite) is in flight — lock the panel
+    let unlistenRefresh = null; // community_refreshed subscription, torn down on dismiss
+    const dismiss = () => { if (unlistenRefresh) { unlistenRefresh(); unlistenRefresh = null; } overlay.remove(); };
+    overlay.onclick = (e) => { if (e.target === overlay && !busy) dismiss(); };
+
+    const box = document.createElement('div');
+    box.className = 'modal-box cmt-modal';
+    box.innerHTML = `
+        <div class="cmt-header">
+            <div class="cmt-header-icon"><span class="icon icon-users-multi"></span></div>
+            <div class="cmt-header-text">
+                <h3 class="cmt-title">Invite to ${escapeHtml(chat.metadata.custom_fields.name || 'Community')}</h3>
+                <p class="cmt-subtitle">Bring people into your community.</p>
+            </div>
+        </div>
+
+        <section class="cmt-section">
+            <div class="cmt-section-head">
+                <span class="icon icon-share"></span>
+                <div>
+                    <p class="cmt-section-title">Invite Links <span id="cmt-mode" class="cmt-mode-pill"></span></p>
+                    <p class="cmt-section-desc">Anyone with a link can join. Revoke every link to go private again.</p>
+                </div>
+            </div>
+            <div id="cmt-links"></div>
+            <button id="cmt-new-link" class="cmt-btn cmt-btn-secondary"><span class="icon icon-plus"></span>Create invite link</button>
+        </section>
+
+        <section class="cmt-section">
+            <div class="cmt-section-head">
+                <span class="icon icon-add-user"></span>
+                <div>
+                    <p class="cmt-section-title">Direct Invites</p>
+                    <p class="cmt-section-desc">Pick contacts to invite, or paste an npub to add someone new.</p>
+                </div>
+            </div>
+            <input id="cmt-npub" type="text" placeholder="Search contacts or paste an npub..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+            <div id="cmt-contacts" class="cmt-contacts"></div>
+            <button id="cmt-send-npub" class="cmt-btn cmt-btn-primary cmt-invite-btn" disabled><span class="icon icon-send"></span><span id="cmt-invite-label">Invite</span></button>
+        </section>
+
+        <div id="cmt-status" class="cmt-status"></div>
+        <button id="cmt-close" class="cmt-btn cmt-btn-ghost cmt-close">Done</button>
+    `;
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    pushBack('community-invite', dismiss);
+
+    const status = box.querySelector('#cmt-status');
+    const linksDiv = box.querySelector('#cmt-links');
+    const setStatus = (msg, isError) => {
+        status.textContent = msg || '';
+        status.classList.toggle('cmt-err', !!isError);
+        status.classList.toggle('cmt-ok', !!msg && !isError);
+    };
+    box.querySelector('#cmt-close').onclick = () => { if (busy) return; popBack('community-invite'); dismiss(); };
+    // Lock the ENTIRE panel during a critical op: disable every control + block close/backdrop-dismiss, so a
+    // link create / revoke (which re-keys) / direct invite can't be raced or interrupted half-applied. Restores
+    // each control's prior disabled state on release (e.g. the Invite button stays disabled if nothing's picked).
+    const setBusy = (on) => {
+        busy = on;
+        box.classList.toggle('cmt-busy', on);
+        box.querySelectorAll('button, input').forEach(el => {
+            if (on) { el.dataset.cmtPrev = el.disabled ? '1' : '0'; el.disabled = true; }
+            else if (el.dataset.cmtPrev !== undefined) { el.disabled = el.dataset.cmtPrev === '1'; delete el.dataset.cmtPrev; }
+        });
+    };
+
+    // Track the GLOBAL link state (across every creator, §10) so the create/revoke handlers know when a
+    // click crosses the Public⇄Private boundary. The mode is the folded registry, NOT just my own links —
+    // another admin's live link keeps the community Public even when I hold none.
+    let currentLinkCount = 0;   // MY own links (drives the per-row revoke confirm)
+    let globalLinkCount = 0;    // every creator's links combined (drives the mode boundary)
+    const renderLinks = async () => {
+        linksDiv.innerHTML = '';
+        let links = [];
+        try { links = await invoke('list_public_invites', { communityId }); } catch (_) {}
+        currentLinkCount = links.length;
+        // §10 computed mode + per-creator breakdown from the folded registry (the authoritative source).
+        let summary = { is_public: links.length > 0, creators: [] };
+        try { summary = await invoke('get_community_invite_summary', { communityId }); } catch (_) {}
+        globalLinkCount = (summary.creators || []).reduce((n, c) => n + (c.count || 0), 0);
+        const modeEl = box.querySelector('#cmt-mode');
+        if (modeEl) {
+            const pub = !!summary.is_public;
+            modeEl.textContent = pub ? 'Public' : 'Private';
+            modeEl.classList.toggle('is-public', pub);
+            modeEl.title = pub ? 'Anyone with a link can join' : 'Invite-only — no public links';
+        }
+        // Other creators' active links (mine are listed individually below). Surfaces the multi-creator
+        // reality: "Alice has 2 active invite links" — so the mode isn't a mystery when I hold no links.
+        const others = (summary.creators || []).filter(c => c.npub !== strPubkey && (c.count || 0) > 0);
+        if (others.length) {
+            const note = document.createElement('div');
+            note.className = 'cmt-others';
+            for (const c of others) {
+                const line = document.createElement('p');
+                line.className = 'cmt-other-line';
+                line.textContent = `${systemEventName(c.npub)} has ${c.count} active invite link${c.count === 1 ? '' : 's'}`;
+                note.appendChild(line);
+            }
+            linksDiv.appendChild(note);
+        }
+        if (!links.length) {
+            if (!others.length) linksDiv.innerHTML = '<p class="cmt-empty">No active links yet. Create one to start inviting.</p>';
+            else linksDiv.insertAdjacentHTML('beforeend', '<p class="cmt-empty">You have no links of your own yet. Create one to start inviting.</p>');
+            return;
+        }
+        for (const link of links) {
+            const row = document.createElement('div');
+            row.className = 'cmt-link-row';
+            const url = document.createElement('span');
+            url.className = 'cmt-link-url';
+            url.textContent = link.url;
+            const copyBtn = document.createElement('button');
+            copyBtn.className = 'cmt-icon-btn'; copyBtn.title = 'Copy link';
+            copyBtn.innerHTML = '<span class="icon icon-copy"></span>';
+            copyBtn.onclick = () => {
+                navigator.clipboard.writeText(link.url);
+                copyBtn.classList.add('cmt-copied');
+                copyBtn.innerHTML = '<span class="icon icon-check"></span>';
+                setTimeout(() => { copyBtn.classList.remove('cmt-copied'); copyBtn.innerHTML = '<span class="icon icon-copy"></span>'; }, 1200);
+            };
+            const revokeBtn = document.createElement('button');
+            revokeBtn.className = 'cmt-icon-btn cmt-icon-btn-danger'; revokeBtn.title = 'Revoke link';
+            revokeBtn.innerHTML = '<span class="icon icon-trash"></span>';
+            revokeBtn.onclick = async () => {
+                // Revoking the last GLOBAL link (across every creator) flips the community back to Private —
+                // a re-founding rekey that cuts off link-joined lurkers. Confirm + warn (it's slow). If
+                // another creator still has a link, this revoke is a quiet, instant edit (mode stays Public).
+                const wouldPrivatize = globalLinkCount === 1;
+                if (wouldPrivatize) {
+                    const ok = await popupConfirm('Make community private?',
+                        'Revoking the last invite link makes this community <b>private</b> again. This can take a few seconds.',
+                        false, '', 'vector_warning.svg', '', 'Make private');
+                    if (!ok) return;
+                }
+                setBusy(true); // lock the whole panel — revoking the last link re-keys, a critical op
+                revokeBtn.innerHTML = '<span class="icon icon-loading spin"></span>';
+                // Privatizing re-keys (multi-second): show the guided progress ring. A plain revoke is quick.
+                const prog = wouldPrivatize ? await showRekeyProgressModal('Making community private') : null;
+                if (!wouldPrivatize) setStatus('Revoking…');
+                try {
+                    await invoke('revoke_public_invite', { communityId, token: link.token });
+                    if (prog) await prog.finish('Community is now private');
+                    setStatus('');
+                    setBusy(false);
+                    if (prog) prog.close();
+                    await renderLinks();
+                } catch (e) {
+                    setBusy(false);
+                    if (prog) prog.close();
+                    revokeBtn.innerHTML = '<span class="icon icon-trash"></span>';
+                    setStatus('');
+                    if (isLast) {
+                        // Privatizing re-keys; on a bunker account that fails with a long explanation —
+                        // show it as a persistent notice rather than a one-line status that scrolls away.
+                        await popupConfirm("Couldn't make private", escapeHtml(String(e)), true, '', 'vector_warning.svg');
+                    } else {
+                        setStatus(String(e), true);
+                    }
+                }
+            };
+            row.append(url, copyBtn, revokeBtn);
+            linksDiv.appendChild(row);
+        }
+    };
+    await renderLinks();
+    // Live-refresh when a control change folds in (a remote create/revoke by another admin, or our own
+    // privatize re-founding), so the mode pill + per-creator counts update without a manual close/reopen.
+    // Skipped while a local critical op is in flight (its own handler re-renders on completion).
+    unlistenRefresh = await listen('community_refreshed', (evt) => {
+        const cid = evt.payload?.community_id || evt.payload;
+        if (cid === communityId && !busy) renderLinks();
+    });
+
+    box.querySelector('#cmt-new-link').onclick = async (e) => {
+        const btn = e.currentTarget; // capture before await — currentTarget is null after it
+        // The FIRST link ANYWHERE (across all creators) flips a private community to Public (anyone with the
+        // link can join). Confirm that boundary crossing; if it's already Public (someone holds a link), a
+        // new link doesn't change the mode, so skip the warning.
+        if (globalLinkCount === 0) {
+            const ok = await popupConfirm('Make community public?',
+                'Creating an invite link makes this community <b>public</b>: anyone with the link can join. You can make it private again later by revoking every link.',
+                false, '', 'vector_warning.svg', '', 'Make public');
+            if (!ok) return;
+        }
+        // Optional label — the attribution bucket ("Reddit", "Conf"). Shows up as "joined via <label>".
+        const labelInput = await popupConfirm('Label this link', 'Optional. A label lets you see which link people join through (e.g. "Reddit", "Twitter"). Leave blank to skip.', false, 'Label (optional)', '', '', 'Create link');
+        if (labelInput === false) return; // cancelled
+        const label = (typeof labelInput === 'string' && labelInput.trim()) ? labelInput.trim() : null;
+        setBusy(true); // lock the panel — the FIRST link flips public + the publish is a critical op
+        btn.innerHTML = '<span class="icon icon-loading spin"></span>Creating…'; setStatus('Creating link...');
+        try { await invoke('create_public_invite', { communityId, expiresInSecs: null, label }); setStatus(''); }
+        catch (err) { setStatus(String(err), true); }
+        finally { setBusy(false); btn.innerHTML = '<span class="icon icon-plus"></span>Create invite link'; await renderLinks(); }
+    };
+
+    // ── Direct Invites: a multi-select contact list (DM contacts) with paste-to-add ──
+    const npubInput = box.querySelector('#cmt-npub');
+    const contactsDiv = box.querySelector('#cmt-contacts');
+    const inviteBtn = box.querySelector('#cmt-send-npub');
+    const inviteLabel = box.querySelector('#cmt-invite-label');
+    const myNpub = arrProfiles.find(p => p.mine)?.id;
+    const selectedInvitees = new Set();   // npubs chosen to invite
+    const strangerInvitees = new Set();   // pasted npubs not in our contacts
+    // Banned npubs can't be invited (§7) — hide them from the picker (the backend also refuses). Empty if
+    // we lack the ban permission to read the list (then the backend refusal is the only guard).
+    let bannedSet = new Set();
+    try { bannedSet = new Set(await invoke('get_community_banlist', { communityId })); } catch (_) {}
+
+    const buildContactRow = (npub, profile) => {
+        const isSel = selectedInvitees.has(npub);
+        const row = document.createElement('div');
+        row.className = 'member-pick-row';
+        const bg = document.createElement('div');
+        bg.className = 'member-pick-hover';
+        row.appendChild(bg);
+        row.addEventListener('mouseenter', () => {
+            const c = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
+            bg.style.background = `linear-gradient(to right, ${c}40, transparent)`;
+        });
+        const avatar = createAvatarImg(profile ? getProfileAvatarSrc(profile) : null, 25, false);
+        avatar.className = 'member-pick-avatar';
+        row.appendChild(avatar);
+        const nameSpan = document.createElement('div');
+        nameSpan.className = 'compact-member-name';
+        const nm = profile ? (profile.nickname || profile.name || '') : '';
+        nameSpan.textContent = nm || (npub.substring(0, 10) + '...' + npub.substring(npub.length - 6));
+        if (nm) twemojify(nameSpan);
+        row.appendChild(nameSpan);
+        const indicator = document.createElement('div');
+        indicator.className = 'member-pick-indicator' + (isSel ? ' selected' : '');
+        row.appendChild(indicator);
+        row.addEventListener('click', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            if (selectedInvitees.has(npub)) selectedInvitees.delete(npub);
+            else selectedInvitees.add(npub);
+            renderContacts(npubInput.value || '');
+        });
+        return row;
+    };
+
+    const renderContacts = (filterText = '') => {
+        contactsDiv.innerHTML = '';
+        const f = (filterText || '').trim().toLowerCase();
+        const filterNpub = extractNpub(filterText);
+        const dmIds = new Set(arrChats.filter(c => c.chat_type === 'DirectMessage').map(c => c.id));
+        const frag = document.createDocumentFragment();
+
+        // Pasted strangers (show if selected, or matching the current filter npub) — never a banned npub.
+        for (const npub of strangerInvitees) {
+            if (bannedSet.has(npub)) continue;
+            if (!selectedInvitees.has(npub) && filterNpub !== npub) continue;
+            frag.appendChild(buildContactRow(npub, arrProfiles.find(p => p.id === npub) || null));
+        }
+
+        // DM contacts: selected first, then most-recent conversation. Banned npubs are excluded.
+        const contacts = arrProfiles
+            .filter(p => p && p.id && p.id !== myNpub && !p.is_blocked && !bannedSet.has(p.id) && dmIds.has(p.id))
+            .sort((a, b) => {
+                const aSel = selectedInvitees.has(a.id), bSel = selectedInvitees.has(b.id);
+                if (aSel !== bSel) return aSel ? -1 : 1;
+                const at = getChatSortTimestamp(arrChats.find(c => c.id === a.id) || {});
+                const bt = getChatSortTimestamp(arrChats.find(c => c.id === b.id) || {});
+                return (bt || 0) - (at || 0);
+            });
+        for (const p of contacts) {
+            const name = p.nickname || p.name || '';
+            if (f && !(name + ' ' + p.id).toLowerCase().includes(filterNpub || f)) continue;
+            frag.appendChild(buildContactRow(p.id, p));
+        }
+
+        if (!frag.childElementCount) {
+            contactsDiv.innerHTML = `<p class="cmt-empty" style="text-align:center;">${f ? 'No matches.' : 'No contacts yet. Paste an npub to invite someone.'}</p>`;
+        } else {
+            contactsDiv.appendChild(frag);
+        }
+
+        const n = selectedInvitees.size;
+        inviteBtn.disabled = n === 0;
+        inviteLabel.textContent = n === 0 ? 'Invite' : `Invite ${n}`;
+    };
+    renderContacts();
+
+    // Typing filters; a pasted/typed valid npub gets added to the list and auto-selected.
+    npubInput.oninput = () => {
+        const np = extractNpub(npubInput.value || '');
+        if (np && np !== myNpub) {
+            if (!arrProfiles.some(p => p.id === np)) {
+                strangerInvitees.add(np);
+                if (!strangerProfileRequested.has(np)) {
+                    strangerProfileRequested.add(np);
+                    invoke('load_profile', { npub: np }).then(() => renderContacts(npubInput.value || '')).catch(() => {});
+                }
+            }
+            selectedInvitees.add(np);
+        }
+        renderContacts(npubInput.value || '');
+    };
+
+    inviteBtn.onclick = async (e) => {
+        const targets = [...selectedInvitees];
+        if (!targets.length) return;
+        e.currentTarget.disabled = true;
+        setStatus(`Inviting ${targets.length}...`);
+        let ok = 0, fail = 0;
+        for (const np of targets) {
+            try { await invoke('invite_to_community', { communityId, inviteeNpub: np }); ok++; }
+            catch (_) { fail++; }
+        }
+        if (fail === 0) {
+            setStatus(`Invited ${ok} ${ok === 1 ? 'person' : 'people'}!`);
+            selectedInvitees.clear(); strangerInvitees.clear(); npubInput.value = '';
+        } else {
+            setStatus(`Invited ${ok}, ${fail} failed.`, ok === 0);
+        }
+        renderContacts('');
+    };
+}
+
 
 async function openChatlist() {
     // Chatlist is the root — clearing the back stack means the next back
@@ -8196,9 +8274,9 @@ async function openChatlist() {
         domChats.style.display = '';
     }
     
-    // Load and display MLS invites in the Chat tab (and adjust layout before/after for consistency)
+    // Load and display pending Community invites (adjust layout before/after for consistency)
     adjustSize();
-    await loadMLSInvites();
+    await loadCommunityInvites();
     adjustSize();
 
     // Refresh timestamps immediately so they're not stale after viewing a chat
@@ -8269,9 +8347,6 @@ function openSettings() {
     loadBlockedUsersList();
     invoke('get_logs').then((log) => { window._cachedLogs = log || ''; });
     refreshRemoteSignerCard();
-
-    // Check primary device status when settings are opened
-    checkPrimaryDeviceStatus();
 
     // If an update is available, scroll to the updates section
     const updateDot = document.getElementById('settings-update-dot');
@@ -9078,10 +9153,10 @@ window.addEventListener("DOMContentLoaded", async () => {
                 
                 // Setup Rust listeners
                 await setupRustListeners();
-                
-                // Hydrate MLS group metadata
-                await hydrateMLSGroupMetadata();
-                
+
+                // Resolve Community logos (metadata already rides the chat payload).
+                resolveCommunityAvatars();
+
                 // Hide login UI and show main UI
                 domLogin.style.display = 'none';
                 domLoginEncrypt.style.display = 'none';
@@ -9606,6 +9681,12 @@ window.addEventListener("DOMContentLoaded", async () => {
     }
     domChatNewStartBtn.onclick = () => {
         let inputValue = domChatNewInput.value.trim();
+        // A pasted Community invite link → preview + join flow (not a DM).
+        if (isCommunityInviteUrl(inputValue)) {
+            domChatNewInput.value = ``;
+            previewAndJoinCommunityLink(inputValue);
+            return;
+        }
         // Parse npub from vectorapp.io profile URL if pasted
         const profileUrlMatch = inputValue.match(/https?:\/\/vectorapp\.io\/profile\/(npub1[a-z0-9]{58})/i);
         if (profileUrlMatch) {
@@ -9875,9 +9956,7 @@ async function sendMessage(messageText) {
                     spanMessage.innerHTML = parseMarkdown(cleanedText.trim());
                     linkifyUrls(spanMessage);
                     processInlineImages(spanMessage);
-                    const editChat = arrChats.find(c => c.id === strOpenChat);
-                    const editIsAdmin = editChat?.chat_type === 'MlsGroup' && editChat?.metadata?.admins?.includes(strPubkey);
-                    renderMentions(spanMessage, editIsAdmin);
+                    renderMentions(spanMessage, false);
                     twemojify(spanMessage);
                 }
                 // Add edited indicator if not already present
@@ -9916,12 +9995,13 @@ async function sendMessage(messageText) {
                 }
             }
 
-            // Send edit to backend (fire and forget for responsiveness)
-            invoke('edit_message', {
-                messageId: editMsgId,
-                chatId: strOpenChat,
-                newContent: cleanedText
-            }).catch(e => {
+            // Send edit to backend (fire and forget for responsiveness). Community
+            // channels use their own envelope path (the edit rides a kind-3302 event).
+            const editChatForRoute = arrChats.find(c => c.id === strOpenChat);
+            const editPromise = editChatForRoute?.chat_type === 'Community'
+                ? invoke('edit_community_message', { channelId: strOpenChat, messageId: editMsgId, newContent: cleanedText })
+                : invoke('edit_message', { messageId: editMsgId, chatId: strOpenChat, newContent: cleanedText });
+            editPromise.catch(e => {
                 console.error('Failed to edit message:', e);
                 // Optionally: revert the UI change on failure
             });
@@ -9980,7 +10060,8 @@ const mentionCtrl = typeof initMentionSelector === 'function' ? initMentionSelec
     domChatMessageInput,
     () => {
         const chat = arrChats.find(c => c.id === strOpenChat);
-        if (!chat || !chat.participants) return [];
+        if (!chat) return [];
+        const isCommunity = chat.chat_type === 'Community';
         // Build a map of each participant's most recent message timestamp
         const lastActive = {};
         if (chat.messages) {
@@ -9990,8 +10071,15 @@ const mentionCtrl = typeof initMentionSelector === 'function' ? initMentionSelec
                 if (!lastActive[sender]) lastActive[sender] = m.at || 0;
             }
         }
-        const candidates = chat.participants
-            .filter(npub => npub !== strPubkey)
+        // Taggable npubs = explicit participants ∪ (for communities) everyone who's posted.
+        // Community rosters aren't mirrored into `participants`, so observed senders are the
+        // reliable taggable set — without this the selector is empty in Community channels.
+        const npubs = new Set(chat.participants || []);
+        if (isCommunity) {
+            for (const np of Object.keys(lastActive)) npubs.add(np);
+        }
+        const candidates = [...npubs]
+            .filter(npub => npub && npub !== strPubkey && npub.startsWith('npub1'))
             .map(npub => {
                 const p = getProfile(npub);
                 return {
@@ -10002,21 +10090,23 @@ const mentionCtrl = typeof initMentionSelector === 'function' ? initMentionSelec
                 };
             })
             .sort((a, b) => b.lastActive - a.lastActive);
-        // Add @everyone option for group admins (lowest priority)
-        if (chat.chat_type === 'MlsGroup' && chat.metadata?.admins?.includes(strPubkey)) {
-            candidates.push({
-                npub: 'everyone',
-                name: 'everyone',
-                avatarSrc: null,
-                lastActive: -1
-            });
-        }
         // Disambiguate duplicate display names with a short npub suffix
         const nameCount = {};
         for (const c of candidates) nameCount[c.name] = (nameCount[c.name] || 0) + 1;
         for (const c of candidates) {
             if (nameCount[c.name] > 1) {
                 c.name = c.name + ' (~' + c.npub.slice(5, 9) + ')';
+            }
+        }
+        // @everyone: lowest-priority option (bottom of the list), placeholder avatar — the original
+        // group design. Offered only to those who can actually use it (owner or admin); a non-admin's
+        // @everyone is ignored, so suggesting it would mislead. Roles preload at boot, so this gate is
+        // reliable now (the earlier always-show was a stopgap for when admins weren't loaded yet).
+        if (isCommunity) {
+            const cf = chat.metadata?.custom_fields || {};
+            const canPingEveryone = cf.is_owner === 'true' || (chat.metadata?.admins || []).includes(strPubkey);
+            if (canPingEveryone) {
+                candidates.push({ npub: 'everyone', name: 'everyone', avatarSrc: null, lastActive: -1 });
             }
         }
         return candidates;
@@ -10338,20 +10428,6 @@ domChatMessageInput.oninput = async () => {
         };
     }
 
-    // Info button for Refresh KeyPackages
-    const domRefreshKeypkgInfo = document.getElementById('refresh-keypkg-info');
-    if (domRefreshKeypkgInfo) {
-        domRefreshKeypkgInfo.onclick = (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            popupConfirm(
-                'Refresh KeyPackages',
-                'Regenerates a fresh device KeyPackage for MLS. This can help you receive Group Invites on this device.',
-                true
-            );
-        };
-    }
-
     // Info button for Copy Logs
     const domCrashLogInfo = document.getElementById('crash-log-info');
     if (domCrashLogInfo) {
@@ -10562,7 +10638,7 @@ document.addEventListener('click', (e) => {
                     const count = parseInt(countNode.textContent.trim()) || 1;
                     countNode.textContent = ` ${count + 1}`;
                 }
-                invoke('react_to_message', { referenceId: msgId, chatId: cChat.id, emoji });
+                reactToMessageRouted(msgId, cChat.id, emoji);
                 break;
             }
         }
@@ -10932,14 +11008,12 @@ function renderCreateGroupList(filterText = '') {
  */
 function updateCreateGroupValidation(showInline = false) {
     if (!domCreateGroupCreateBtn) return;
+    // A Community needs only a name — members aren't added at creation (you invite via
+    // link/npub afterward), so there's no member-selection requirement.
     const nameOk = !!domCreateGroupName?.value.trim();
-    const membersOk = arrSelectedGroupMembers.length > 0;
 
-    const enabled = nameOk && membersOk;
-
-    // Toggle both property and attribute to avoid any CSS/UA inconsistencies
-    domCreateGroupCreateBtn.disabled = !enabled;
-    if (enabled) {
+    domCreateGroupCreateBtn.disabled = !nameOk;
+    if (nameOk) {
         domCreateGroupCreateBtn.removeAttribute('disabled');
     } else {
         domCreateGroupCreateBtn.setAttribute('disabled', '');
@@ -10949,11 +11023,9 @@ function updateCreateGroupValidation(showInline = false) {
     const shouldShow = showInline || fCreateGroupAttempt;
 
     if (domCreateGroupStatus) {
-        if (shouldShow && (!nameOk || !membersOk)) {
+        if (shouldShow && !nameOk) {
             domCreateGroupStatus.style.display = '';
-            domCreateGroupStatus.textContent = !nameOk
-                ? 'Group name is required'
-                : 'Select at least one contact';
+            domCreateGroupStatus.textContent = 'A name is required';
         } else {
             domCreateGroupStatus.style.display = 'none';
             domCreateGroupStatus.textContent = '';
@@ -10993,8 +11065,10 @@ function openCreateGroup() {
     if (domCreateGroupAvatarPlaceholder) domCreateGroupAvatarPlaceholder.style.display = '';
     if (domCreateGroupAvatarPicker) domCreateGroupAvatarPicker.classList.remove('has-image');
 
-    // Render list
-    renderCreateGroupList('');
+    // Communities don't pick members at creation (invite via link/npub afterward) — hide
+    // the member filter + list so the create panel is just name + description + avatar.
+    if (domCreateGroupFilter) domCreateGroupFilter.style.display = 'none';
+    if (domCreateGroupList) domCreateGroupList.style.display = 'none';
     updateCreateGroupValidation(false);
 
     // Focus name
@@ -11020,27 +11094,11 @@ async function closeCreateGroup() {
 }
 
 /**
- * Wire up Create Group UI events
+ * Wire up the Create Community UI (the panel is still id'd "CreateGroup" for now).
+ * Creates a single-channel Community via `create_community`, then applies optional
+ * description (`update_community_metadata`) and icon (`set_community_image`), and
+ * navigates to the new channel. Any failure surfaces via popupConfirm + the inline status.
  */
-/*
-Create Group UI wiring
-- Validation: Create button disabled until non-empty group name and at least one member selected. See updateCreateGroupValidation() for state sync.
-- Loading states:
-  • Button text toggles to 'Creating...' and disabled during IPC.
-  • Inline status text shows 'Preparing devices...' then 'Finalizing...' on success.
-- IPC flow:
-  • invoke('create_group_chat', { groupName, memberIds })
-    - Backend validates inputs and refreshes each member's device KeyPackage.
-    - If any member fails refresh/fetch, backend returns Err with a user-facing string. We surface that string directly via popupConfirm and status label.
-  • On success:
-    - openChat(newGroupId) navigates to the newly created group.
-- Error handling:
-  • popupConfirm('Group creation failed', errorString, ...) shows a clear toast/modal.
-  • domCreateGroupStatus also mirrors the exact error string for inline context.
-  • We do not partially create groups: any device refresh failure aborts.
-- Notes:
-  • Backend emits 'mls_group_initial_sync' on success.
-*/
 (function wireCreateGroupUI() {
     if (!domCreateGroup) return;
 
@@ -11076,13 +11134,12 @@ Create Group UI wiring
     }
 
     domCreateGroupCreateBtn.onclick = async () => {
-        const groupName = (domCreateGroupName?.value || '').trim();
-        const memberIds = [...arrSelectedGroupMembers];
+        const name = (domCreateGroupName?.value || '').trim();
 
-        // Mark that the user attempted to create a group
+        // Mark that the user attempted to create
         fCreateGroupAttempt = true;
 
-        if (!groupName || memberIds.length === 0) {
+        if (!name) {
             updateCreateGroupValidation(true);
             return;
         }
@@ -11098,83 +11155,54 @@ Create Group UI wiring
         }
 
         try {
-            // Upload group avatar if one was selected
-            let avatarResult = null;
+            const description = (domCreateGroupDescription?.value || '').trim() || null;
+
+            if (domCreateGroupStatus) domCreateGroupStatus.textContent = 'Creating...';
+            // Single-channel Community: defaults the channel to "general" + trusted relays.
+            const created = await invoke('create_community', { name, channelName: null, relays: null });
+            const communityId = created.community_id;
+            const channelId = created.channel_id;
+
+            // Description + avatar are set after creation (the Community must exist first).
+            if (description) {
+                try { await invoke('update_community_metadata', { communityId, name: null, description }); }
+                catch (err) { console.error('Set community description failed:', err); showToast('Community created, but the description failed to save'); }
+            }
             if (strCreateGroupAvatarPath) {
-                if (domCreateGroupStatus) {
-                    domCreateGroupStatus.style.display = '';
-                    domCreateGroupStatus.textContent = 'Uploading avatar...';
-                }
-                // Show progress spinner on edit badge (matches profile avatar pattern)
-                let unlisten = null;
-                if (domCreateGroupAvatarEditIcon) {
-                    domCreateGroupAvatarEditIcon.className = 'profile-upload-spinner';
-                    domCreateGroupAvatarEditIcon.style.setProperty('--progress', '5%');
-                    unlisten = await window.__TAURI__.event.listen('profile_upload_progress', (event) => {
-                        if (event.payload.type === 'group_avatar') {
-                            const progress = Math.max(5, event.payload.progress);
-                            domCreateGroupAvatarEditIcon.style.setProperty('--progress', `${progress}%`);
-                        }
-                    });
-                }
-                try {
-                    avatarResult = await invoke('upload_group_avatar', { filepath: strCreateGroupAvatarPath });
-                } finally {
-                    if (unlisten) unlisten();
-                    if (domCreateGroupAvatarEditIcon) domCreateGroupAvatarEditIcon.className = 'icon icon-plus-circle';
-                }
+                if (domCreateGroupStatus) domCreateGroupStatus.textContent = 'Uploading avatar...';
+                try { await invoke('set_community_image', { communityId, filepath: strCreateGroupAvatarPath, isBanner: false }); }
+                catch (err) { console.error('Set community avatar failed:', err); showToast('Community created, but the avatar upload failed'); }
             }
 
-            const groupDescription = (domCreateGroupDescription?.value || '').trim() || null;
-
-            if (domCreateGroupStatus) {
-                domCreateGroupStatus.textContent = 'Preparing devices...';
+            // Surface the new channel chat in the running session (mirrors what the
+            // unified load would produce at next startup).
+            const chat = getOrCreateChat(channelId, 'Community');
+            chat.metadata = chat.metadata || {};
+            chat.metadata.custom_fields = chat.metadata.custom_fields || {};
+            chat.metadata.custom_fields.name = name;
+            chat.metadata.custom_fields.description = description || '';
+            chat.metadata.custom_fields.community_id = communityId;
+            chat.metadata.custom_fields.is_owner = 'true';
+            // Stamp creation time so the empty community sorts to the TOP right away (mirrors the join
+            // path); reloads re-source this from the persisted DB created_at.
+            chat.metadata.custom_fields.created_at = String(Date.now());
+            if (strCreateGroupAvatarPath) {
+                chat.metadata.custom_fields.icon = '1';
+                invoke('cache_community_image', { communityId, isBanner: false })
+                    .then(path => { if (path) { chat.metadata.avatar_cached = path; renderChatlist(); } })
+                    .catch(() => {});
             }
+            renderChatlist();
 
-            // Backend orchestration: refresh keypackages per member, create group, persist
-            // Note: Tauri expects camelCase arg keys for Rust snake_case params.
-            const newGroupId = await invoke('create_group_chat', {
-                groupName: groupName,
-                memberIds: memberIds,
-                adminIds: [...arrSelectedGroupAdmins],
-                groupDescription: groupDescription,
-                imageHash: avatarResult?.image_hash || null,
-                imageKey: avatarResult?.image_key || null,
-                imageNonce: avatarResult?.image_nonce || null,
-                avatarBlobUrl: avatarResult?.blob_url || null,
-                avatarCached: avatarResult?.cached_path || null,
-            });
-
-            // On success: refresh groups, open the new group chat, and close panel
-            if (domCreateGroupStatus) {
-                domCreateGroupStatus.textContent = 'Finalizing...';
-            }
-
-            // Navigate to the new group
-            openChat(newGroupId);
-
-            // Hide panel
+            // Navigate to the new channel + hide the panel.
+            openChat(channelId);
             domCreateGroup.style.display = 'none';
         } catch (e) {
-            const raw = typeof e === 'string' ? e : (e?.message || e || '').toString();
-            // Map backend "no device keypackages" errors to a friendlier UX message
-            let friendly = raw;
-            let isHtml = false;
-            try {
-                const m = raw.match(/(?:no device keypackag(?:e|es) found|failed to refresh device keypackage) for (\S+)/i);
-                if (m && m[1]) {
-                    const npub = m[1].replace(/:$/, '');
-                    const prof = getProfile(npub);
-                    const display = prof?.nickname || prof?.name || (npub.substring(0, 10) + '...' + npub.substring(npub.length - 6));
-                    friendly = `<b>${display}</b> can't join group chats yet.<br>They may need to update Vector or set up their device.`;
-                    isHtml = true;
-                }
-            } catch (_) {}
-            popupConfirm('Group creation failed', friendly, true, '', 'vector_warning.svg');
+            const friendly = typeof e === 'string' ? e : (e?.message || e || '').toString();
+            popupConfirm('Community creation failed', friendly, true, '', 'vector_warning.svg');
             if (domCreateGroupStatus) {
                 domCreateGroupStatus.style.display = '';
-                if (isHtml) domCreateGroupStatus.innerHTML = friendly;
-                else domCreateGroupStatus.textContent = friendly;
+                domCreateGroupStatus.textContent = friendly;
             }
         } finally {
             domCreateGroupCreateBtn.textContent = prevTxt || 'Create';

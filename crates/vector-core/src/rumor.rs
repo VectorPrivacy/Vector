@@ -1,8 +1,7 @@
-//! Protocol-Agnostic Rumor Processing Module
+//! Rumor Processing Module
 //!
-//! This module provides unified event processing for all messaging protocols (NIP-17 DMs, MLS Groups, etc.).
-//! The core insight is that "rumors" (the inner decrypted events) are protocol-agnostic - only the
-//! wrapping/unwrapping differs between protocols.
+//! Unified processing for the inner decrypted events of NIP-17 DMs. "Rumors" are
+//! the inner events; only the gift-wrap unwrapping happens before this.
 //!
 //! ## Architecture
 //!
@@ -32,10 +31,7 @@ use crate::types::{Message, Attachment, ImageMetadata, Reaction};
 use crate::stored_event::{StoredEvent, StoredEventBuilder, event_kind};
 use crate::crypto::{extension_from_mime, sanitize_filename};
 
-/// Protocol-agnostic rumor event representation
-///
-/// This is the unified format for all decrypted events, regardless of whether
-/// they came from NIP-17 giftwraps or MLS encryption.
+/// Decrypted NIP-17 rumor event representation.
 #[derive(Debug, Clone)]
 pub struct RumorEvent {
     pub id: EventId,
@@ -56,19 +52,31 @@ pub struct RumorContext {
     pub sender: PublicKey,
     /// Whether this rumor is from ourselves
     pub is_mine: bool,
-    /// The conversation ID (npub for DMs, group_id for MLS)
+    /// The conversation ID (npub for DMs)
     pub conversation_id: String,
     /// The type of conversation
     pub conversation_type: ConversationType,
 }
 
-/// Type of conversation
+/// Type of conversation — the transport-specific dimension the shared parser keys off (e.g. who the
+/// author is). `conversation_id` carries the address: an npub for a DM, a channel id for a Community.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConversationType {
-    /// Direct message (NIP-17)
+    /// Direct message (NIP-17) — 1:1, so the author is implied by the chat.
     DirectMessage,
-    /// MLS group chat
-    MlsGroup,
+    /// Concord community channel — a group, so each message records its real author.
+    Community,
+}
+
+impl RumorContext {
+    /// The author npub to stamp on a parsed message. A DM is 1:1 so the author is implied by the
+    /// chat (`None`); a Community message records its real author so the group can attribute it.
+    pub fn author_npub(&self, author: &PublicKey) -> Option<String> {
+        match self.conversation_type {
+            ConversationType::Community => author.to_bech32().ok(),
+            ConversationType::DirectMessage => None,
+        }
+    }
 }
 
 /// Result of processing a rumor
@@ -198,11 +206,8 @@ pub fn process_rumor(
     download_dir: &Path,
 ) -> Result<RumorProcessingResult, String> {
     match rumor.kind {
-        // Text messages - Kind 9 (MLS/White Noise) or Kind 14 (DMs/legacy)
+        // Text messages — Kind 14 (NIP-17 DM chat message).
         Kind::PrivateDirectMessage => {
-            process_text_message(rumor, context)
-        }
-        k if k.as_u16() == event_kind::MLS_CHAT_MESSAGE => {
             process_text_message(rumor, context)
         }
         // File attachments
@@ -290,6 +295,8 @@ fn process_text_message(
     let ms_timestamp = extract_millisecond_timestamp(&rumor);
 
     let emoji_tags = crate::types::EmojiTag::extract_from_tags(rumor.tags.iter());
+    // DM → None (1:1, implied by chat); Community → the real author.
+    let npub = context.author_npub(&rumor.pubkey);
 
     // Create the message
     let msg = Message {
@@ -306,11 +313,7 @@ fn process_text_message(
         mine: context.is_mine,
         pending: false,
         failed: false,
-        npub: if context.conversation_type == ConversationType::MlsGroup {
-            rumor.pubkey.to_bech32().ok()
-        } else {
-            None
-        },
+        npub,
         wrapper_event_id: None, // Set by caller after processing
         edited: false,
         edit_history: None,
@@ -491,6 +494,8 @@ fn process_file_attachment(
     };
 
     let emoji_tags = crate::types::EmojiTag::extract_from_tags(rumor.tags.iter());
+    // DM → None (1:1, implied by chat); Community → the real author.
+    let npub = context.author_npub(&rumor.pubkey);
 
     // Create the message with attachment
     let msg = Message {
@@ -507,11 +512,7 @@ fn process_file_attachment(
         mine: context.is_mine,
         pending: false,
         failed: false,
-        npub: if context.conversation_type == ConversationType::MlsGroup {
-            rumor.pubkey.to_bech32().ok()
-        } else {
-            None
-        },
+        npub,
         wrapper_event_id: None, // Set by caller after processing
         edited: false,
         edit_history: None,
@@ -526,16 +527,25 @@ fn process_file_attachment(
 /// Extracts the target event id from the `["e", ...]` tag. Authorization
 /// (sender pubkey == original message author) is verified at commit
 /// time so callers can short-circuit without an extra DB hit at parse.
+/// The single `e`-tag target id, or `None` if absent OR ambiguous (multiple `e` tags). A reaction,
+/// edit, and deletion each act on ONE specific message, so a first-of-many match could route to the
+/// wrong target — reject ambiguity for every transport (shared hardening; honest senders emit exactly
+/// one `e` tag). This mirrors Concord's `unique_tag` discipline and extends it to DMs.
+fn unique_event_ref(rumor: &RumorEvent) -> Option<String> {
+    let mut matches = rumor.tags.iter().filter(|t| t.kind() == TagKind::e());
+    let first = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    first.content().map(|s| s.to_string())
+}
+
 fn process_deletion(
     rumor: RumorEvent,
     _context: RumorContext,
 ) -> Result<RumorProcessingResult, String> {
-    let target_tag = rumor.tags
-        .find(TagKind::e())
-        .ok_or("Deletion rumor missing target event tag")?;
-    let target_event_id = target_tag.content()
-        .ok_or("Deletion target tag has no content")?
-        .to_string();
+    let target_event_id = unique_event_ref(&rumor)
+        .ok_or("Deletion target tag missing or ambiguous")?;
     Ok(RumorProcessingResult::DeletionRequest { target_event_id })
 }
 
@@ -546,13 +556,8 @@ fn process_reaction(
     rumor: RumorEvent,
     _context: RumorContext,
 ) -> Result<RumorProcessingResult, String> {
-    let reference_tag = rumor.tags
-        .find(TagKind::e())
-        .ok_or("Reaction missing reference event tag")?;
-
-    let reference_id = reference_tag.content()
-        .ok_or("Reaction reference tag has no content")?
-        .to_string();
+    let reference_id = unique_event_ref(&rumor)
+        .ok_or("Reaction reference tag missing or ambiguous")?;
 
     // NIP-30: pull the first `["emoji", shortcode, url]` tag whose
     // shortcode matches the reaction content (`:shortcode:` form).
@@ -590,13 +595,8 @@ fn process_edit_event(
     rumor: RumorEvent,
     context: RumorContext,
 ) -> Result<RumorProcessingResult, String> {
-    let reference_tag = rumor.tags
-        .find(TagKind::e())
-        .ok_or("Edit event missing reference event tag")?;
-
-    let message_id = reference_tag.content()
-        .ok_or("Edit reference tag has no content")?
-        .to_string();
+    let message_id = unique_event_ref(&rumor)
+        .ok_or("Edit reference tag missing or ambiguous")?;
 
     let edited_at = extract_millisecond_timestamp(&rumor);
 
@@ -865,19 +865,34 @@ fn is_pivx_payment(rumor: &RumorEvent) -> bool {
 /// Combines the rumor's created_at (seconds) with a custom "ms" tag
 /// to provide millisecond precision for accurate message ordering.
 fn extract_millisecond_timestamp(rumor: &RumorEvent) -> u64 {
-    match rumor.tags.find(TagKind::Custom(Cow::Borrowed("ms"))) {
-        Some(ms_tag) => {
-            if let Some(ms_str) = ms_tag.content() {
-                if let Ok(ms_value) = ms_str.parse::<u64>() {
-                    if ms_value <= 999 {
-                        return rumor.created_at.as_secs() * 1000 + ms_value;
-                    }
-                }
-            }
-            rumor.created_at.as_secs() * 1000
-        }
-        None => rumor.created_at.as_secs() * 1000
-    }
+    let ms_tag = rumor.tags
+        .find(TagKind::Custom(Cow::Borrowed("ms")))
+        .and_then(|t| t.content());
+    resolve_message_timestamp(rumor.created_at.as_secs(), ms_tag)
+}
+
+/// Resolve a message's ordering timestamp (epoch ms) from its second-resolution `created_at` and an
+/// optional `ms` sub-second offset tag. ONE implementation for every transport — DMs and Concord share
+/// the exact ms convention AND the anti-abuse clamp.
+///
+/// - The `ms` tag is a 0..=999 sub-second offset (senders decompose `created_at = ms/1000`,
+///   `tag = ms%1000`); an out-of-range or unparseable tag is ignored, falling back to whole seconds.
+/// - The inner event escapes relay far-future clamping (DM rumors and Concord inners are both
+///   encrypted and never published bare), so a hostile sender could stamp `created_at` year-9999 to
+///   pin a message to the top forever. Clamp an implausible-future result back to receipt time; a few
+///   minutes' grace absorbs clock skew.
+pub fn resolve_message_timestamp(created_at_secs: u64, ms_tag: Option<&str>) -> u64 {
+    const FUTURE_GRACE_MS: u64 = 5 * 60 * 1000;
+    let base = created_at_secs.saturating_mul(1000);
+    let at = match ms_tag.and_then(|s| s.parse::<u64>().ok()) {
+        Some(offset) if offset <= 999 => base.saturating_add(offset),
+        _ => base,
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(u64::MAX);
+    if at > now_ms.saturating_add(FUTURE_GRACE_MS) { now_ms } else { at }
 }
 
 /// Extract reply reference from rumor tags
@@ -942,7 +957,42 @@ fn is_leave_request(rumor: &RumorEvent) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr_sdk::prelude::*;
+
+    /// One ms resolver for every transport: sub-second offset convention + future-clamp.
+    /// Without the clamp a year-9999 `created_at` would pin a message to the top forever — the shared
+    /// resolver enforces it for DMs too.
+    #[test]
+    fn ms_resolver_applies_offset_enforces_sub_second_and_clamps_future() {
+        // created_at seconds + a valid 0..=999 offset.
+        assert_eq!(resolve_message_timestamp(1500, Some("242")), 1_500_242);
+        // No tag → whole-second resolution.
+        assert_eq!(resolve_message_timestamp(1500, None), 1_500_000);
+        // Out-of-range offset (>999) or junk is ignored, never added.
+        assert_eq!(resolve_message_timestamp(1500, Some("4242")), 1_500_000);
+        assert_eq!(resolve_message_timestamp(1500, Some("nope")), 1_500_000);
+        // Far-future created_at (year ~9999) is clamped back to ~now — can't dominate ordering.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let clamped = resolve_message_timestamp(253_402_300_800, Some("5"));
+        assert!(clamped <= (now + 3600) * 1000, "implausible-future ms must clamp to ~now");
+    }
+
+    /// The dup-`e` target reject moved from Concord's `open_message` into the SHARED parser, so it now
+    /// guards BOTH transports: a reaction/edit/delete naming TWO targets is ambiguous and rejected
+    /// (a single, unambiguous target parses fine).
+    #[test]
+    fn ambiguous_target_is_rejected_for_reaction_edit_delete() {
+        let keys = test_keypair();
+        let two_e = || tags(vec![
+            Tag::custom(TagKind::e(), ["aa".repeat(32)]),
+            Tag::custom(TagKind::e(), ["bb".repeat(32)]),
+        ]);
+        assert!(process_rumor(make_rumor(&keys, Kind::Reaction, "🔥", two_e()), dm_context(&keys), &temp_dir()).is_err());
+        assert!(process_rumor(make_rumor(&keys, Kind::EventDeletion, "", two_e()), dm_context(&keys), &temp_dir()).is_err());
+        assert!(process_rumor(make_rumor(&keys, Kind::from(event_kind::MESSAGE_EDIT), "edited", two_e()), dm_context(&keys), &temp_dir()).is_err());
+        let one_e = tags(vec![Tag::custom(TagKind::e(), ["aa".repeat(32)])]);
+        assert!(process_rumor(make_rumor(&keys, Kind::Reaction, "🔥", one_e), dm_context(&keys), &temp_dir()).is_ok());
+    }
 
     fn test_keypair() -> Keys {
         Keys::generate()
@@ -983,15 +1033,6 @@ mod tests {
         }
     }
 
-    fn mls_context(keys: &Keys) -> RumorContext {
-        RumorContext {
-            sender: keys.public_key(),
-            is_mine: false,
-            conversation_id: "group123".to_string(),
-            conversation_type: ConversationType::MlsGroup,
-        }
-    }
-
     fn temp_dir() -> std::path::PathBuf {
         std::env::temp_dir().join("vector-rumor-test")
     }
@@ -1013,22 +1054,6 @@ mod tests {
                 assert!(!msg.mine);
                 assert!(msg.npub.is_none());
                 assert!(msg.attachments.is_empty());
-            }
-            _ => panic!("Expected TextMessage"),
-        }
-    }
-
-    #[test]
-    fn test_text_message_mls() {
-        let keys = test_keypair();
-        let rumor = make_rumor(&keys, Kind::from_u16(9), "Group hello!", Tags::new());
-        let ctx = mls_context(&keys);
-        let result = process_rumor(rumor, ctx, &temp_dir()).unwrap();
-
-        match result {
-            RumorProcessingResult::TextMessage(msg) => {
-                assert_eq!(msg.content, "Group hello!");
-                assert!(msg.npub.is_some());
             }
             _ => panic!("Expected TextMessage"),
         }
@@ -1189,7 +1214,7 @@ mod tests {
         let keys = test_keypair();
         let t = tags(vec![Tag::identifier("vector")]);
         let rumor = make_rumor(&keys, Kind::ApplicationSpecificData, "leave", t);
-        let ctx = mls_context(&keys);
+        let ctx = dm_context(&keys);
         let result = process_rumor(rumor, ctx, &temp_dir()).unwrap();
 
         match result {

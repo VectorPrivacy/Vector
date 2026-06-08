@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-sync-communities-boot"
+description = "Enables the sync_communities_boot command without any pre-configured scope."
+commands.allow = ["sync_communities_boot"]
+
+[[permission]]
+identifier = "deny-sync-communities-boot"
+description = "Denies the sync_communities_boot command without any pre-configured scope."
+commands.deny = ["sync_communities_boot"]

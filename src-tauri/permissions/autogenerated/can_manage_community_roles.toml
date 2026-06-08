@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-can-manage-community-roles"
+description = "Enables the can_manage_community_roles command without any pre-configured scope."
+commands.allow = ["can_manage_community_roles"]
+
+[[permission]]
+identifier = "deny-can-manage-community-roles"
+description = "Denies the can_manage_community_roles command without any pre-configured scope."
+commands.deny = ["can_manage_community_roles"]

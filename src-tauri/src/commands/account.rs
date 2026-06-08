@@ -13,7 +13,7 @@ use zeroize::Zeroize;
 
 use std::sync::atomic::AtomicBool;
 use crate::{STATE, TAURI_APP, NOSTR_CLIENT, nostr_client, set_my_public_key, MY_SECRET_KEY, MNEMONIC_SEED, PENDING_NSEC, active_trusted_relays};
-use crate::{Profile, account_manager, db, crypto, commands};
+use crate::{Profile, account_manager, db, crypto};
 
 /// Set to true after a full foreground login+sync flow completes.
 /// Prevents debug_hot_reload_sync from using partial state preloaded by standalone background sync.
@@ -1174,93 +1174,19 @@ pub async fn encrypt(input: String, password: Option<String>) -> String {
         }
     }
 
-    // Bootstrap MLS device keypackage for newly created accounts (non-blocking)
-    // This ensures keypackages are published immediately after PIN setup, not just on restart.
-    // SessionGuard mirrors the pattern used by setup_encryption / skip_encryption
-    // bootstraps — keeps every keypackage spawn consistent.
-    let bootstrap_session = vector_core::state::SessionGuard::capture();
-    tokio::spawn(async move {
-        // Brief delay to allow encryption key to be set
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-
-        if !bootstrap_session.is_valid() { return; }
-
-        // Skip if no account selected (migration pending)
-        if crate::account_manager::get_current_account().is_err() {
-            println!("[MLS] Skipping KeyPackage bootstrap - no account selected (migration may be pending)");
-            return;
-        }
-
-        // Skip if a forced regen is pending (connect() post-connect handler owns this)
-        let force_pending = db::get_sql_setting("mls_force_keypackage_regen".into())
-            .ok().flatten().map(|v| v == "1").unwrap_or(false);
-        if force_pending {
-            println!("[MLS] Skipping cached KeyPackage bootstrap — forced regen pending (connect handler)");
-            return;
-        }
-
-        println!("[MLS] Ensuring persistent device KeyPackage after PIN setup...");
-        match commands::mls::regenerate_device_keypackage(true).await {
-            Ok(info) => {
-                let device_id = info.get("device_id").and_then(|v| v.as_str()).unwrap_or("");
-                let cached = info.get("cached").and_then(|v| v.as_bool()).unwrap_or(false);
-                println!("[MLS] Device KeyPackage ready: device_id={}, cached={}", device_id, cached);
-            }
-            Err(e) => println!("[MLS] Device KeyPackage bootstrap FAILED: {}", e),
-        }
-    });
-
     res
 }
 
 /// Decrypt data with PIN (used during login)
-/// Also handles post-decryption tasks like MLS keypackage bootstrap
 #[tauri::command]
 pub async fn decrypt(ciphertext: String, password: Option<String>) -> Result<String, ()> {
     let res = crypto::internal_decrypt(ciphertext, password).await;
-
-    // On success, ensure persistent device KeyPackage and run non-blocking smoke test
-    if res.is_ok() {
-        // Best-effort persistent device KeyPackage bootstrap (non-blocking).
-        // SessionGuard for consistency with the other keypackage bootstraps.
-        let bootstrap_session = vector_core::state::SessionGuard::capture();
-        tokio::spawn(async move {
-            // brief delay to allow any post-login setup to settle
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-
-            if !bootstrap_session.is_valid() { return; }
-
-            // Skip if no account selected (migration pending)
-            if crate::account_manager::get_current_account().is_err() {
-                println!("[MLS] Skipping KeyPackage bootstrap - no account selected (migration may be pending)");
-                return;
-            }
-
-            // Skip if a forced regen is pending (connect() post-connect handler owns this)
-            let force_pending = db::get_sql_setting("mls_force_keypackage_regen".into())
-                .ok().flatten().map(|v| v == "1").unwrap_or(false);
-            if force_pending {
-                println!("[MLS] Skipping cached KeyPackage bootstrap — forced regen pending (connect handler)");
-                return;
-            }
-
-            println!("[MLS] Ensuring persistent device KeyPackage...");
-            match commands::mls::regenerate_device_keypackage(true).await {
-                Ok(info) => {
-                    let device_id = info.get("device_id").and_then(|v| v.as_str()).unwrap_or("");
-                    let cached = info.get("cached").and_then(|v| v.as_bool()).unwrap_or(false);
-                    println!("[MLS] Device KeyPackage ready: device_id={}, cached={}", device_id, cached);
-                }
-                Err(e) => println!("[MLS] Device KeyPackage bootstrap FAILED: {}", e),
-            }
-        });
-    }
 
     res
 }
 
 // ============================================================================
-// Backend-Only Key Management (C7 fix: keys never cross IPC)
+// Backend-Only Key Management (keys never cross IPC)
 // ============================================================================
 
 /// Login using the stored private key (boot flow).
@@ -1343,6 +1269,10 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
                 crate::ENCRYPTION_KEY.set(key, &[&crate::MY_SECRET_KEY]);
             }
         }
+        // One-time wrap of pre-existing plaintext community rows on an already-encrypted account.
+        if let Err(e) = crate::commands::encryption::backfill_community_at_rest() {
+            eprintln!("[Login] community at-rest backfill deferred: {e}");
+        }
 
         let npub = crate::my_public_key().ok_or("Public key not initialized")?
             .to_bech32()
@@ -1375,6 +1305,11 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
 
     let client_public_key = keys.public_key;
     MY_SECRET_KEY.store_from_keys(&keys, &[&crate::ENCRYPTION_KEY]);
+
+    // One-time wrap of pre-existing plaintext community rows on an already-encrypted account.
+    if let Err(e) = crate::commands::encryption::backfill_community_at_rest() {
+        eprintln!("[Login] community at-rest backfill deferred: {e}");
+    }
 
     // Branch: bunker-signer accounts re-bootstrap the NIP-46 connection
     // BEFORE building the Nostr Client, so the Client gets installed with
@@ -1517,9 +1452,6 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
         vector_core::blossom_servers::refresh_cache();
     }
 
-    // MLS keypackage bootstrap (non-blocking, same as decrypt command)
-    spawn_mls_bootstrap();
-
     FULL_SESSION_INITIALIZED.store(true, std::sync::atomic::Ordering::Release);
     Ok(npub)
 }
@@ -1660,21 +1592,6 @@ pub async fn setup_encryption<R: Runtime>(
     crate::state::set_encryption_enabled(true);
     vector_core::blossom_servers::refresh_cache();
 
-    // MLS keypackage bootstrap.
-    let bootstrap_session = vector_core::state::SessionGuard::capture();
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        if !bootstrap_session.is_valid() { return; }
-        match crate::commands::mls::regenerate_device_keypackage(true).await {
-            Ok(info) => {
-                let device_id = info.get("device_id").and_then(|v| v.as_str()).unwrap_or("");
-                let cached = info.get("cached").and_then(|v| v.as_bool()).unwrap_or(false);
-                println!("[MLS] Device KeyPackage ready: device_id={}, cached={}", device_id, cached);
-            }
-            Err(e) => println!("[MLS] Device KeyPackage bootstrap FAILED: {}", e),
-        }
-    });
-
     // Broadcast pending invite acceptance — consume up-front so a re-entry
     // can't re-broadcast the same invite.
     broadcast_pending_invite_if_any();
@@ -1770,21 +1687,6 @@ pub async fn skip_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), Str
     crate::state::set_encryption_enabled(false);
     vector_core::blossom_servers::refresh_cache();
 
-    // MLS keypackage bootstrap.
-    let bootstrap_session = vector_core::state::SessionGuard::capture();
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        if !bootstrap_session.is_valid() { return; }
-        match crate::commands::mls::regenerate_device_keypackage(true).await {
-            Ok(info) => {
-                let device_id = info.get("device_id").and_then(|v| v.as_str()).unwrap_or("");
-                let cached = info.get("cached").and_then(|v| v.as_bool()).unwrap_or(false);
-                println!("[MLS] Device KeyPackage ready: device_id={}, cached={}", device_id, cached);
-            }
-            Err(e) => println!("[MLS] Device KeyPackage bootstrap FAILED: {}", e),
-        }
-    });
-
     // Broadcast pending invite acceptance.
     broadcast_pending_invite_if_any();
 
@@ -1824,42 +1726,6 @@ fn broadcast_pending_invite_if_any() {
                 }
             }
             Err(e) => eprintln!("Failed to sign invite acceptance event: {}", e),
-        }
-    });
-}
-
-/// Shared MLS keypackage bootstrap (non-blocking, used by login_from_stored_key and setup_encryption)
-fn spawn_mls_bootstrap() {
-    // Capture the current session before spawn — a swap before the 250ms
-    // sleep elapses should abandon the bootstrap rather than write a new
-    // keypackage into the WRONG account's MDK storage. Consistent with
-    // the inline keypackage spawns in encrypt() / decrypt() / setup_encryption.
-    let session = vector_core::state::SessionGuard::capture();
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-
-        if !session.is_valid() { return; }
-
-        if crate::account_manager::get_current_account().is_err() {
-            println!("[MLS] Skipping KeyPackage bootstrap - no account selected");
-            return;
-        }
-
-        let force_pending = db::get_sql_setting("mls_force_keypackage_regen".into())
-            .ok().flatten().map(|v| v == "1").unwrap_or(false);
-        if force_pending {
-            println!("[MLS] Skipping cached KeyPackage bootstrap — forced regen pending");
-            return;
-        }
-
-        println!("[MLS] Ensuring persistent device KeyPackage...");
-        match commands::mls::regenerate_device_keypackage(true).await {
-            Ok(info) => {
-                let device_id = info.get("device_id").and_then(|v| v.as_str()).unwrap_or("");
-                let cached = info.get("cached").and_then(|v| v.as_bool()).unwrap_or(false);
-                println!("[MLS] Device KeyPackage ready: device_id={}, cached={}", device_id, cached);
-            }
-            Err(e) => println!("[MLS] Device KeyPackage bootstrap FAILED: {}", e),
         }
     });
 }

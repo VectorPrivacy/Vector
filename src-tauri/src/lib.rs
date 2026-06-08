@@ -13,9 +13,6 @@ mod db;
 
 mod account_manager;
 
-mod mls;
-pub use mls::MlsService;
-
 mod voice;
 
 mod net;
@@ -102,7 +99,7 @@ pub(crate) use state::{
     NOSTR_CLIENT, MY_SECRET_KEY, STATE,
     nostr_client, my_public_key,
     set_my_public_key,
-    active_trusted_relays, NOTIFIED_WELCOMES, WRAPPER_ID_CACHE,
+    active_trusted_relays, WRAPPER_ID_CACHE,
     MNEMONIC_SEED, ENCRYPTION_KEY, PENDING_NSEC,
     get_blossom_servers, PendingInviteAcceptance,
 };
@@ -403,29 +400,12 @@ pub fn run() {
                 let _ = account_manager::boot_select_account(&handle_clone);
             }
 
-            // Startup log: persistent MLS device_id if present
-            {
-                tauri::async_runtime::spawn(async move {
-                    if let Ok(Some(id)) = db::load_mls_device_id().await {
-                        println!("[MLS] Found persistent mls_device_id at startup: {}", id);
-                    }
-                });
-            }
 
             // Set as our accessible static app handle
             TAURI_APP.set(handle.clone()).unwrap();
 
             // Bridge vector-core's EventEmitter to Tauri's emit system
             vector_core::set_event_emitter(Box::new(TauriEventEmitter));
-
-            // Bridge vector-core's SubscriptionRefresher so eviction/leave
-            // immediately drops the kicked group from our live subscription.
-            // Without this, post-eviction kind=445 events keep arriving and
-            // get cached in MDK's processed_messages as Failed — blocking
-            // recovery even after rejoin.
-            vector_core::traits::set_subscription_refresher(
-                Box::new(state::TauriSubscriptionRefresher),
-            );
 
             // Initialize the unified audio engine (persistent cpal output stream)
             audio_engine::AudioEngine::init();
@@ -505,7 +485,6 @@ pub fn run() {
             message::delete_own_message,
             message::is_message_deletable,
             message::get_message_delete_options,
-            message::admin_hide_message,
             message::cancel_upload,
             message::paste_message,
             message::file_message,
@@ -576,28 +555,6 @@ pub fn run() {
             commands::system::set_background_service_enabled,
             commands::system::get_background_service_prompted,
             commands::system::set_background_service_prompted,
-            // MLS commands (commands/mls.rs)
-            commands::mls::load_mls_device_id,
-            commands::mls::load_mls_keypackages,
-            commands::mls::list_mls_groups,
-            commands::mls::get_mls_group_metadata,
-            commands::mls::create_mls_group,
-            commands::mls::create_group_chat,
-            commands::mls::upload_group_avatar,
-            commands::mls::cache_group_avatar,
-            commands::mls::cache_invite_avatar,
-            commands::mls::invite_member_to_group,
-            commands::mls::remove_mls_member_device,
-            commands::mls::sync_mls_groups_now,
-            commands::mls::add_mls_member_device,
-            commands::mls::get_mls_group_members,
-            commands::mls::leave_mls_group,
-            commands::mls::update_group_metadata,
-            commands::mls::refresh_keypackages_for_contact,
-            commands::mls::regenerate_device_keypackage,
-            // MLS welcome/invite commands
-            commands::mls::list_pending_mls_welcomes,
-            commands::mls::accept_mls_welcome,
             // Deep link commands
             deep_link::get_pending_deep_link,
             share::get_pending_share,
@@ -771,6 +728,47 @@ pub fn run() {
             commands::attachments::download_attachment,
             commands::attachments::open_attachment,
             commands::attachments::share_attachment,
+            // Community commands (commands/community.rs)
+            commands::community::list_communities,
+            commands::community::get_community,
+            commands::community::get_community_members,
+            commands::community::ban_community_member,
+            commands::community::unban_community_member,
+            commands::community::delete_community,
+            commands::community::kick_community_member,
+            commands::community::get_community_banlist,
+            commands::community::hide_community_message,
+            commands::community::leave_community,
+            commands::community::create_community,
+            commands::community::send_community_message,
+            commands::community::send_community_files,
+            commands::community::send_community_file_bytes,
+            commands::community::send_community_cached_file,
+            commands::community::sync_community_channel,
+            commands::community::sync_communities_boot,
+            commands::community::delete_community_message,
+            commands::community::react_to_community_message,
+            commands::community::edit_community_message,
+            commands::community::invite_to_community,
+            commands::community::list_community_invites,
+            commands::community::accept_community_invite,
+            commands::community::decline_community_invite,
+            commands::community::create_public_invite,
+            commands::community::preview_public_invite,
+            commands::community::accept_public_invite,
+            commands::community::list_public_invites,
+            commands::community::revoke_public_invite,
+            commands::community::update_community_metadata,
+            commands::community::rename_community_channel,
+            commands::community::set_community_image,
+            commands::community::cache_community_image,
+            commands::community::cache_invite_logo,
+            commands::community::grant_community_admin,
+            commands::community::revoke_community_admin,
+            commands::community::get_community_admins,
+            commands::community::can_manage_community_roles,
+            commands::community::get_community_capabilities,
+            commands::community::get_community_invite_summary,
             // Sync commands (commands/sync.rs)
             commands::sync::queue_profile_sync,
             commands::sync::queue_chat_profiles_sync,

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-invite-to-community"
+description = "Enables the invite_to_community command without any pre-configured scope."
+commands.allow = ["invite_to_community"]
+
+[[permission]]
+identifier = "deny-invite-to-community"
+description = "Denies the invite_to_community command without any pre-configured scope."
+commands.deny = ["invite_to_community"]

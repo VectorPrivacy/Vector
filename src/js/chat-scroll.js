@@ -16,6 +16,50 @@ const proceduralScrollState = {
     useCache: false // Whether to use the message cache
 };
 
+// Community network-pagination guards (keyed by channel id): one in-flight older-page fetch
+// at a time, and a set of channels whose network history-start has been reached (stop trying).
+const _communityOlderInFlight = new Set();
+const _communityOlderExhausted = new Set();
+
+/**
+ * When a Community channel's LOCAL (DB) history is exhausted on scroll-up, fetch an older
+ * page from the network, and — if the DB grew — load it (prepend). This is what blends DB
+ * pagination (offline / already-fetched) with network pagination (no known prior history).
+ * Anti-stampede here + in the backend; once the network has nothing older, we stop asking.
+ */
+async function maybeLoadCommunityOlderFromNetwork(chatId) {
+    if (!chatId || _communityOlderInFlight.has(chatId) || _communityOlderExhausted.has(chatId)) return;
+    const chat = arrChats.find(c => c.id === chatId);
+    if (!chat || chat.chat_type !== 'Community') return;
+
+    // Cursor = the TRUE oldest message we hold. The cache array is NOT reliably sorted after
+    // back-paging (loadMoreEvents prepends descending batches), so reduce to the minimum `at`
+    // rather than trusting index 0. getEventsRef is read-only (no LRU side effect).
+    const events = eventCache.getEventsRef(chatId) || chat.messages || [];
+    if (!events.length) return;
+    const oldestMs = events.reduce((min, e) => (e.at < min ? e.at : min), events[0].at);
+
+    _communityOlderInFlight.add(chatId);
+    try {
+        const prevTotal = (eventCache.getStats(chatId) || {}).totalInDb || 0;
+        const res = await invoke('sync_community_channel', { channelId: chatId, beforeMs: oldestMs });
+        // Refresh the cache count so hasMoreEvents reflects any newly-ingested older rows,
+        // then load (prepend) them.
+        const newTotal = await invoke('get_chat_message_count', { chatId });
+        if (newTotal > prevTotal) {
+            eventCache.updateTotalCount(chatId, newTotal);
+            if (strOpenChat === chatId) loadMoreMessages();
+        }
+        // Terminate ONLY on the backend's authoritative "no more older" signal — a page that
+        // returned just already-known events (no count growth) does NOT mean history's start.
+        if (res && res.reached_start) _communityOlderExhausted.add(chatId);
+    } catch (e) {
+        console.warn('Community older-page fetch failed:', e);
+    } finally {
+        _communityOlderInFlight.delete(chatId);
+    }
+}
+
 /**
  * Correct scroll position when media loads during procedural scroll
  * This prevents "snap-back" when images/videos load after messages are rendered
@@ -50,7 +94,10 @@ function handleProceduralScroll() {
         // Use cache stats to determine if there are more events
         const cacheStats = eventCache.getStats(strOpenChat);
         if (!cacheStats?.hasMoreEvents) {
-            return; // No more events to load
+            // Local DB exhausted. Community channels then try the network for older history
+            // (DB ⊕ network pagination); DMs have no further source, so they stop.
+            maybeLoadCommunityOlderFromNetwork(strOpenChat);
+            return;
         }
         // Load more events
         loadMoreMessages();
@@ -116,7 +163,7 @@ async function loadMoreMessages() {
         chat.messages = eventCache.getEvents(strOpenChat) || [];
 
         // Get profile for rendering
-        const isGroup = chat?.chat_type === 'MlsGroup';
+        const isGroup = chatIsGroup(chat);
         const profile = !isGroup ? getProfile(chat.id) : null;
 
         // Render the older events + newly-revealed system events (prepend)
@@ -183,7 +230,7 @@ async function loadMoreMessages() {
     const scrollTopBefore = domChatMessages.scrollTop;
 
     // Get profile for rendering
-    const isGroup = chat?.chat_type === 'MlsGroup';
+    const isGroup = chatIsGroup(chat);
     const profile = !isGroup ? getProfile(chat.id) : null;
 
     // Render the older messages
@@ -397,7 +444,7 @@ async function loadAndScrollToMessage(targetMsgId) {
     proceduralScrollState.totalMessageCount = chat.messages.length;
 
     // Get profile for rendering
-    const isGroup = chat?.chat_type === 'MlsGroup';
+    const isGroup = chatIsGroup(chat);
     const profile = !isGroup ? getProfile(chat.id) : null;
 
     // Clear existing messages and render the new range

@@ -111,7 +111,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
 
     // ---- Chat / group context -----------------------------------------------
     const currentChat = arrChats.find(c => c.id === strOpenChat);
-    const isGroupChat = currentChat?.chat_type === 'MlsGroup';
+    const isGroupChat = chatIsGroup(currentChat);
 
     // ---- Pinged highlight (mention of self, or @everyone from a group admin).
     // msg.mentions_me() is a Rust method on the backend Message type and does
@@ -122,7 +122,8 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
     if (!msg.mine && msg.content) {
         const mentionedMe = strPubkey && msg.content.includes('@' + strPubkey);
         const senderNpub = msg.npub || '';
-        const senderIsAdmin = isGroupChat && currentChat?.metadata?.admins?.includes(senderNpub);
+        const senderIsAdmin = isGroupChat && (currentChat?.metadata?.admins?.includes(senderNpub)
+        || currentChat?.metadata?.custom_fields?.owner_npub === senderNpub);
         const mentionedEveryone = senderIsAdmin && /@everyone\b/.test(msg.content);
         if (mentionedMe || mentionedEveryone) row.dataset.pinged = 'true';
     }
@@ -393,6 +394,16 @@ function _dmsgBuildHeader(authorFullId, authorProfile, msg, isGroupChat, current
         header.appendChild(adminBadge);
     }
 
+    // Community owner badge (gold, matches the member-list crown) — gated on the PROVEN owner
+    // npub from the verified attestation, never an unchecked claim.
+    const ownerNpub = currentChat?.metadata?.custom_fields?.owner_npub;
+    if (ownerNpub && authorFullId && ownerNpub === authorFullId) {
+        const ownerBadge = document.createElement('span');
+        ownerBadge.classList.add('dmsg-author-badge', 'owner');
+        ownerBadge.textContent = 'Owner';
+        header.appendChild(ownerBadge);
+    }
+
     const time = document.createElement('time');
     time.classList.add('dmsg-time');
     time.textContent = _dmsgFormatHourMinute(msg.at);
@@ -532,7 +543,8 @@ function _dmsgBuildText(msg, displayContent, fEmojiOnly, isGroupChat, currentCha
     if (!isRevealedBlockedMsg) processInlineImages(span);
 
     const senderNpub = msg.mine ? strPubkey : (msg.npub || '');
-    const senderIsAdmin = isGroupChat && currentChat?.metadata?.admins?.includes(senderNpub);
+    const senderIsAdmin = isGroupChat && (currentChat?.metadata?.admins?.includes(senderNpub)
+        || currentChat?.metadata?.custom_fields?.owner_npub === senderNpub);
     renderMentions(span, senderIsAdmin);
 
     // NIP-30 custom emojis ride along on the rumor; resolve them before

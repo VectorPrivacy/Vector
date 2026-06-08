@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-sync-community-channel"
+description = "Enables the sync_community_channel command without any pre-configured scope."
+commands.allow = ["sync_community_channel"]
+
+[[permission]]
+identifier = "deny-sync-community-channel"
+description = "Denies the sync_community_channel command without any pre-configured scope."
+commands.deny = ["sync_community_channel"]

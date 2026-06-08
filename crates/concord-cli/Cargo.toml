@@ -1,0 +1,14 @@
+[package]
+name = "concord-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Diagnostic CLI to inspect Concord protocol state (epoch chains, rekeys, forks, keys) from a Vector account — local DB now, relay source next."
+
+[[bin]]
+name = "concord"
+path = "src/main.rs"
+
+[dependencies]
+vector-core = { path = "../vector-core" }
+tokio = { version = "1.49.0", features = ["full"] }
+nostr-sdk = { version = "0.44.1", features = ["nip44", "nip59"] }

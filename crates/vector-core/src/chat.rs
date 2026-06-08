@@ -78,9 +78,12 @@ impl Chat {
         Self::new(their_npub, ChatType::DirectMessage, vec![handle])
     }
 
-    pub fn new_mls_group(group_id: String, participants: Vec<String>, interner: &mut NpubInterner) -> Self {
+
+    /// A Community channel chat (GROUP_PROTOCOL.md). `channel_id` is the channel's
+    /// stable random id (hex); `participants` are the members known so far.
+    pub fn new_community_channel(channel_id: String, participants: Vec<String>, interner: &mut NpubInterner) -> Self {
         let handles: Vec<u16> = participants.iter().map(|p| interner.intern(p)).collect();
-        Self::new(group_id, ChatType::MlsGroup, handles)
+        Self::new(channel_id, ChatType::Community, handles)
     }
 
     // ========================================================================
@@ -221,7 +224,8 @@ impl Chat {
                     .find(|&&h| Some(h) != my_handle)
                     .and_then(|&h| interner.resolve(h).map(|s| s.to_string()))
             }
-            ChatType::MlsGroup => None,
+            // Community channels have no single "other" participant.
+            ChatType::Community => None,
         }
     }
 
@@ -230,7 +234,7 @@ impl Chat {
             && interner.lookup(npub).map_or(false, |h| self.participants.contains(&h))
     }
 
-    pub fn is_mls_group(&self) -> bool { matches!(self.chat_type, ChatType::MlsGroup) }
+    pub fn is_community(&self) -> bool { matches!(self.chat_type, ChatType::Community) }
 
     pub fn has_participant(&self, npub: &str, interner: &NpubInterner) -> bool {
         interner.lookup(npub).map_or(false, |h| self.participants.contains(&h))
@@ -323,15 +327,25 @@ impl SerializableChat {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum ChatType {
     DirectMessage,
-    MlsGroup,
+    /// A Community channel (GROUP_PROTOCOL.md — the MLS successor). The chat `id`
+    /// is the channel's stable random id.
+    Community,
 }
 
 impl ChatType {
+    // Discriminant 1 was the removed MlsGroup variant; Community keeps 2 for
+    // on-disk compatibility. Legacy chat_type=1 rows are dropped at the DB load layer.
     pub fn to_i32(&self) -> i32 {
-        match self { ChatType::DirectMessage => 0, ChatType::MlsGroup => 1 }
+        match self {
+            ChatType::DirectMessage => 0,
+            ChatType::Community => 2,
+        }
     }
     pub fn from_i32(value: i32) -> Self {
-        match value { 1 => ChatType::MlsGroup, _ => ChatType::DirectMessage }
+        match value {
+            2 => ChatType::Community,
+            _ => ChatType::DirectMessage,
+        }
     }
 }
 
@@ -398,19 +412,19 @@ mod tests {
     }
 
     #[test]
-    fn new_mls_group_with_participants() {
+    fn new_community_channel_with_participants() {
         let mut interner = NpubInterner::new();
         let participants = vec![
             "npub1alice".to_string(),
             "npub1bob".to_string(),
             "npub1charlie".to_string(),
         ];
-        let chat = Chat::new_mls_group("grp_abc".to_string(), participants, &mut interner);
+        let chat = Chat::new_community_channel("grp_abc".to_string(), participants, &mut interner);
 
         assert_eq!(chat.id, "grp_abc", "group chat id should match");
-        assert_eq!(chat.chat_type, ChatType::MlsGroup, "should be MlsGroup type");
+        assert_eq!(chat.chat_type, ChatType::Community, "should be Community type");
         assert_eq!(chat.participants.len(), 3, "should have 3 participants");
-        assert!(chat.is_mls_group(), "is_mls_group() should return true");
+        assert!(chat.is_community(), "is_community() should return true");
     }
 
     #[test]
@@ -590,7 +604,7 @@ mod tests {
     fn to_serializable_and_back_via_to_chat() {
         let mut interner = NpubInterner::new();
         let participants = vec!["npub1alice".to_string(), "npub1bob".to_string()];
-        let mut chat = Chat::new_mls_group("grp_test".to_string(), participants.clone(), &mut interner);
+        let mut chat = Chat::new_community_channel("grp_test".to_string(), participants.clone(), &mut interner);
 
         chat.metadata.set_name("Test Group".to_string());
         chat.muted = true;
@@ -605,7 +619,7 @@ mod tests {
         // Serialize to SerializableChat
         let serializable = chat.to_serializable(&interner);
         assert_eq!(serializable.id, "grp_test", "serialized id should match");
-        assert_eq!(serializable.chat_type, ChatType::MlsGroup, "serialized type should match");
+        assert_eq!(serializable.chat_type, ChatType::Community, "serialized type should match");
         assert_eq!(serializable.participants.len(), 2, "should have 2 participants");
         assert_eq!(serializable.messages.len(), 2, "should have 2 messages");
         assert!(serializable.muted, "muted should be preserved");
@@ -620,7 +634,7 @@ mod tests {
         let restored = serializable.to_chat(&mut interner2);
 
         assert_eq!(restored.id, "grp_test", "restored id should match");
-        assert_eq!(restored.chat_type, ChatType::MlsGroup, "restored type should match");
+        assert_eq!(restored.chat_type, ChatType::Community, "restored type should match");
         assert_eq!(restored.participants.len(), 2, "restored participants count should match");
         assert_eq!(restored.message_count(), 2, "restored message count should match");
         assert!(restored.muted, "restored muted should be true");
@@ -650,7 +664,7 @@ mod tests {
     #[test]
     fn has_participant_check() {
         let mut interner = NpubInterner::new();
-        let chat = Chat::new_mls_group(
+        let chat = Chat::new_community_channel(
             "grp1".to_string(),
             vec!["npub1alice".to_string(), "npub1bob".to_string()],
             &mut interner,
@@ -688,7 +702,7 @@ mod tests {
     #[test]
     fn is_dm_with_returns_false_for_group() {
         let mut interner = NpubInterner::new();
-        let chat = Chat::new_mls_group(
+        let chat = Chat::new_community_channel(
             "grp1".to_string(),
             vec!["npub1alice".to_string()],
             &mut interner,
@@ -716,7 +730,7 @@ mod tests {
     #[test]
     fn get_other_participant_returns_none_for_group() {
         let mut interner = NpubInterner::new();
-        let chat = Chat::new_mls_group(
+        let chat = Chat::new_community_channel(
             "grp1".to_string(),
             vec!["npub1alice".to_string(), "npub1bob".to_string()],
             &mut interner,
@@ -785,7 +799,7 @@ mod tests {
     #[test]
     fn chat_type_i32_roundtrip() {
         assert_eq!(ChatType::from_i32(ChatType::DirectMessage.to_i32()), ChatType::DirectMessage);
-        assert_eq!(ChatType::from_i32(ChatType::MlsGroup.to_i32()), ChatType::MlsGroup);
+        assert_eq!(ChatType::from_i32(ChatType::Community.to_i32()), ChatType::Community);
         assert_eq!(
             ChatType::from_i32(999), ChatType::DirectMessage,
             "unknown i32 should default to DirectMessage"

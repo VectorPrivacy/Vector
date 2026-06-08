@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-send-community-file-bytes"
+description = "Enables the send_community_file_bytes command without any pre-configured scope."
+commands.allow = ["send_community_file_bytes"]
+
+[[permission]]
+identifier = "deny-send-community-file-bytes"
+description = "Denies the send_community_file_bytes command without any pre-configured scope."
+commands.deny = ["send_community_file_bytes"]

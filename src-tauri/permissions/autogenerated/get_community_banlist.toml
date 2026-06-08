@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-community-banlist"
+description = "Enables the get_community_banlist command without any pre-configured scope."
+commands.allow = ["get_community_banlist"]
+
+[[permission]]
+identifier = "deny-get-community-banlist"
+description = "Denies the get_community_banlist command without any pre-configured scope."
+commands.deny = ["get_community_banlist"]

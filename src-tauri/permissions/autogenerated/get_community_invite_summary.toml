@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-community-invite-summary"
+description = "Enables the get_community_invite_summary command without any pre-configured scope."
+commands.allow = ["get_community_invite_summary"]
+
+[[permission]]
+identifier = "deny-get-community-invite-summary"
+description = "Denies the get_community_invite_summary command without any pre-configured scope."
+commands.deny = ["get_community_invite_summary"]

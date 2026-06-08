@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-leave-community"
+description = "Enables the leave_community command without any pre-configured scope."
+commands.allow = ["leave_community"]
+
+[[permission]]
+identifier = "deny-leave-community"
+description = "Denies the leave_community command without any pre-configured scope."
+commands.deny = ["leave_community"]
