@@ -11,6 +11,7 @@
   --primary-color: #59FCF4;
   --secondary-color: #FC59AD;
   --accent-color: #59FCF4;
+  --danger-color: #FC59AD;
 }
 
 .sync-line {
@@ -225,14 +226,6 @@ select {
   box-shadow: 0 0 15px #59FCF430;
 }
 
-.voice-progress-fill {
-  background: linear-gradient(90deg, var(--primary-color), var(--secondary-color));
-}
-
-.voice-preview-progress {
-  background: linear-gradient(90deg, var(--primary-color), var(--secondary-color));
-}
-
 .voice-progress-text {
   color: #59FCF4;
 }
@@ -262,10 +255,6 @@ input[type="checkbox"]:checked + .neon-toggle:hover {
   background-color: #59FCF4;
 }
 
-select:disabled {
-  border-color: #59FCF460;
-}
-
 .nav-icon {
   background-color: #59FCF4;
 }
@@ -274,7 +263,6 @@ select:disabled {
 /* Default style */
 .custom-audio-player {
   background: #59FCF420;
-  backdrop-filter: blur(6px);
   box-shadow: 0 0 12px #00000050, 0 0 24px #00000025;
   border-color: #59FCF440;
 }
@@ -285,11 +273,11 @@ select:disabled {
 }
 
 .audio-play-btn {
-  background: linear-gradient(135deg, #59FCF4 0%, #59FCF4 100%);
+  background: var(--primary-color);
 }
 
 .audio-progress-fill {
-  background: linear-gradient(90deg, #59FCF4 0%, #59FCF4 80%);
+  background: var(--primary-color);
 }
 
 .audio-progress-handle {
@@ -317,7 +305,7 @@ select:disabled {
 }
 
 .transcribe-progress-text {
-  color: #59FCF4;
+  color: #fff;
 }
 
 .transcription-section.current {
@@ -601,14 +589,14 @@ select:disabled {
 
 /* App Details Uninstall Button */
 .app-details-uninstall-btn {
-  background-color: #FC59AD20;
-  color: #FC59AD;
-  border: 1px solid #FC59AD40;
+  background-color: var(--danger-color-hover);
+  color: var(--danger-color);
+  border: 1px solid color-mix(in srgb, var(--danger-color) 40%, transparent);
 }
 
 .app-details-uninstall-btn:hover {
-  background-color: rgba(255, 100, 100, 0.3);
-  box-shadow: 0 4px 16px rgba(255, 100, 100, 0.2);
+  background-color: color-mix(in srgb, var(--danger-color) 40%, transparent);
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--danger-color) 20%, transparent);
 }
 
 /* App Details Update Button */
@@ -669,17 +657,6 @@ select:disabled {
 }
 
 /* Relay Dialog */
-.relay-dialog {
-  border-color: #171717;
-}
-
-.relay-dialog-header {
-  background: linear-gradient(90deg, var(--primary-color), var(--secondary-color));
-}
-
-.relay-dialog-header h3 {
-  color: #000;
-}
 
 .relay-form-input:focus,
 .relay-form-select:focus {
@@ -687,14 +664,22 @@ select:disabled {
 }
 
 .relay-dialog-buttons .primary-btn {
-  background-color: #59FCF4;
-  color: #000;
-}
-
-.relay-dialog-buttons .primary-btn:hover {
+  background-color: var(--primary-color);
   color: #000;
 }
 
 .relay-metric-value {
   color: #59FCF4;
+}
+
+.aggro-glitch-img {
+  content: url('../../icons/aggro-glitch.gif');
+  width: 64px;
+  height: 64px;
+}
+
+.warning-icon {
+  content: url('../../icons/warning_pink.png');
+  width: 16px;
+  height: 16px;
 }

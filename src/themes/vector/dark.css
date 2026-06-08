@@ -8,6 +8,7 @@
   --toast-border-color: #33DB98;
   --primary-color: #33DB98;
   --accent-color: #59fcb3;
+  --danger-color: #FF2EA9;
 }
 
 .sync-line {
@@ -35,7 +36,7 @@
 }
 
 .chat {
-  background-color: #161616;
+  background-color: #171717;
 }
 
 .chat-messages {
@@ -108,7 +109,7 @@
 input,
 textarea,
 button {
-  background-color: #161616;
+  background-color: #171717;
 }
 
 .corner-float {
@@ -140,9 +141,7 @@ select {
 }
 
 #download-model:hover {
-  box-shadow: 0 0 5px rgba(0, 255, 157, 0.5),
-              0 0 10px rgba(0, 212, 255, 0.3),
-              inset 0 1px 3px rgba(0, 0, 0, 0.3);
+  opacity: 0.8;
 }
 
 .model-status {
@@ -282,10 +281,6 @@ select:disabled {
   box-shadow: none;
 }
 
-.audio-time-display .current-time {
-  color: #59fcb3;
-}
-
 /* File Preview Overlay Theme */
 .file-preview-container {
   border-color: var(--primary-color);
@@ -341,7 +336,7 @@ select:disabled {
 }
 
 .marketplace-app-card {
-  background-color: #161616;
+  background-color: #171717;
   border-color: rgba(90, 252, 180, 0.15);
 }
 
@@ -577,28 +572,32 @@ select:disabled {
 }
 
 /* Relay Dialog */
-.relay-dialog {
-  border-color: #171717;
-}
-
-.relay-dialog-header {
-  background: linear-gradient(90deg, #2b976c00 0%, #2b976c20 40%, #33DB9880 100%);
-}
-
-.relay-form-input:focus,
-.relay-form-select:focus {
-  border-color: #59fcb3;
-}
 
 .relay-dialog-buttons .primary-btn {
   background-color: #59fcb3;
   color: #000;
 }
 
-.relay-dialog-buttons .primary-btn:hover {
-  box-shadow: 0 0 0px #2b976c00;
-}
-
 .relay-metric-value {
   color: #59fcb3;
+}
+
+.relay-metric-inline-value {
+    color: var(--accent-color);
+}
+
+.relay-dialog .relay-form-select {
+    border: 1px solid #262626;
+}
+
+.aggro-glitch-img {
+  content: url('../../icons/aggro-glitch.gif');
+  width: 64px;
+  height: 64px;
+}
+
+.warning-icon {
+  content: url('../../icons/warning_pink.png');
+  width: 16px;
+  height: 16px;
 }

@@ -225,13 +225,13 @@ select:disabled {
 /* Custom Audio Player Theme Overrides */
 /* Default style */
 .custom-audio-player {
-  background: #F7FFAE40;
-  border-color: #F7FFAE;
+  background: #F7FFAE30;
+  border-color: #F7FFAE50;
 }
 
 .custom-audio-player:hover {
-  background: #F7FFAE60;
-  border-color: #F7FFAE50;
+  background: #F7FFAE40;
+  border-color: #F7FFAE70;
 }
 
 .audio-play-btn {
@@ -267,7 +267,7 @@ select:disabled {
 }
 
 .transcribe-progress-text {
-  color: #FFAECE;
+  color: #fff;
 }
 
 .transcription-section.current {
@@ -616,13 +616,6 @@ select:disabled {
 }
 
 /* Relay Dialog */
-.relay-dialog {
-  border-color: #171717;
-}
-
-.relay-dialog-header {
-  background: linear-gradient(90deg, #F7FFAE 40%, #AEFFDF 60%, #B6AEFF 80%, #FFAECE 100%);
-}
 
 .relay-form-input:focus,
 .relay-form-select:focus {
@@ -634,17 +627,6 @@ select:disabled {
   color: #000000;
 }
 
-.relay-dialog-buttons .primary-btn:hover {
-  color: #000;
-  box-shadow: 0 0 4px #F7FFAE00;
-}
-
 .relay-metric-value {
   color: #F7FFAE;
-}
-
-.relay-dialog-header h3 {
-  color: #000;
-  margin: 0;
-  line-height: 1;
 }

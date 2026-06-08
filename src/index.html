@@ -483,7 +483,7 @@
     <div class="file-preview-buttons">
       <button class="file-preview-btn file-preview-btn-cancel" id="miniapp-launch-cancel">Cancel</button>
       <button class="file-preview-btn file-preview-btn-cancel" id="miniapp-launch-solo">Play</button>
-      <button class="file-preview-btn file-preview-btn-send" id="miniapp-launch-invite">Play & Invite</button>
+      <button class="file-preview-btn file-preview-btn-send" id="miniapp-launch-invite">Invite</button>
     </div>
   </div>
 </div>
@@ -684,34 +684,28 @@
 <div class="relay-dialog-overlay" id="relay-info-overlay">
   <div class="relay-dialog relay-info-dialog">
     <div class="relay-dialog-header">
-      <h3 id="relay-info-url">Relay URL</h3>
-      <button class="relay-dialog-close" id="relay-info-close">&times;</button>
+        <h3>Relay Settings</h3>
+        <button class="relay-dialog-close" id="relay-info-close">&times;</button>
     </div>
     <div class="relay-dialog-content">
-      <div class="relay-form-group">
-        <label class="relay-form-label">Mode</label>
-        <select id="relay-info-mode" class="relay-form-select">
-          <option value="both">Read & Write</option>
-          <option value="read">Read Only</option>
-          <option value="write">Write Only</option>
-        </select>
-      </div>
-      <div class="relay-metrics-section">
-        <div class="relay-metrics-header">
-          <h4>Connection Info</h4>
-          <span class="relay-status relay-status-small" id="relay-info-status">connected</span>
+        <div class="relay-info-header-row">
+            <p id="relay-info-url"></p>
+            <span class="relay-status relay-status-small" id="relay-info-status">connected</span>
         </div>
-        <div class="relay-metrics-grid">
-          <div class="relay-metric">
-            <span class="relay-metric-value" id="relay-info-ping">--</span>
-            <span class="relay-metric-label">Ping</span>
-          </div>
-          <div class="relay-metric">
-            <span class="relay-metric-value" id="relay-info-last-check">--</span>
-            <span class="relay-metric-label">Last Check</span>
-          </div>
+        <div class="relay-metrics-inline">
+            <span class="relay-metric-inline-label">Ping</span>
+            <span class="relay-metric-inline-value" id="relay-info-ping">--</span>
+            <span class="relay-metric-inline-label relay-metric-inline-right">Last Check</span>
+            <span class="relay-metric-inline-value" id="relay-info-last-check">--</span>
         </div>
-      </div>
+        <div class="relay-form-group">
+            <label class="relay-form-label">Mode</label>
+            <select id="relay-info-mode" class="relay-form-select">
+                <option value="both">Read & Write</option>
+                <option value="read">Read Only</option>
+                <option value="write">Write Only</option>
+            </select>
+        </div>
       <div class="relay-logs-section">
         <div class="relay-logs-header">
           <h4>Recent Activity</h4>
@@ -724,8 +718,11 @@
         </ul>
       </div>
       <div class="relay-dialog-buttons">
-        <button class="btn danger-btn" id="relay-info-disable">Disable Relay</button>
-        <button class="btn primary-btn" id="relay-info-done">Done</button>
+          <button class="btn danger-btn" id="relay-info-disable">
+              <span class="icon icon-disable"></span>
+              Disable
+          </button>
+          <button class="btn cancel-btn" id="relay-info-done">Close</button>
       </div>
     </div>
   </div>
@@ -733,6 +730,11 @@
 
 <div id="profile" class="chats" style="display: none;">
   <div class="profile-header">
+    <button id="profile-switcher-trash-toggle" class="profile-switcher-trash-toggle btn" aria-label="Toggle delete mode" style="display: none;">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14ZM10 11v6M14 11v6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </button>
     <div id="profile-back-btn" class="btn nav-back-btn">
       <span class="icon icon-chevron-double-left nav-icon"></span>
     </div>
@@ -816,8 +818,8 @@
           <span class="icon icon-edit" style="width: 18px; height: 18px; background-color: white;"></span>
         </div>
         <div id="profile-option-block" class="profile-more-item">
-          <span style="color: #ff4444;">Block</span>
-          <span class="icon icon-x-user" style="width: 18px; height: 18px; background-color: #ff4444;"></span>
+          <span class="is-danger-text">Block</span>
+          <span class="icon icon-x-user is-danger-icon" style="width: 18px; height: 18px;"></span>
         </div>
       </div>
     </div>
@@ -871,7 +873,7 @@
             <span style="color: white;">Invite</span>
           </button>
           <button id="group-leave-btn" class="btn cancel-btn btn-bounce" style="display: none; align-items: center; gap: 6px;">
-            <span class="icon icon-x-user" style="width: 16px; height: 16px; flex-shrink: 0; position: relative; background-color: #ff2ea9;"></span>
+            <span class="icon icon-x-user" style="width: 16px; height: 16px; flex-shrink: 0; position: relative; background-color: var(--danger-color);"></span>
             <span style="color: white;">Leave</span>
           </button>
         </div>
@@ -973,9 +975,6 @@
               <input type="range" id="wallpaper-dim-slider" min="10" max="100" step="1" value="50">
             </label>
           </div>
-          <button id="wallpaper-remove-btn" class="wallpaper-remove-btn" title="Discard edits">
-            <span class="icon icon-trash"></span>
-          </button>
         </div>
 
         <div class="row input-box" id="chat-box">
@@ -1492,7 +1491,7 @@
 
         <div class="settings-section">
           <hr class="divider settings-divider">
-          <img src="./icons/aggro-glitch.gif">
+          <img class="aggro-glitch-img">
           <h2 class="danger-title" style="margin-bottom: 0; margin-top: 0;">Dangerzone</h2>
           <p class="danger-subtitle">Irreversible Actions</p>
           <div class="danger-buttons">
@@ -1513,7 +1512,7 @@
                 <span>Logout</span>
               </div>
               <button id="logout-btn" class="danger-btn">
-                <img src="./icons/warning_pink.png" class="danger-btn-icon" alt="">
+                <img class="warning-icon" alt="">
                 Logout
               </button>
             </div>
@@ -1740,19 +1739,6 @@
   <!-- Multi-account: My Profile dropdown (in-app) -->
   <div id="profile-switcher-backdrop" class="profile-switcher-backdrop"></div>
   <div id="profile-switcher-panel" class="profile-switcher-panel" role="dialog" aria-label="My Profile">
-    <div class="profile-switcher-header">
-      <span class="profile-switcher-header-label">
-        <svg class="profile-switcher-header-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <path d="M18 15.8369C19.4559 16.5683 20.7041 17.742 21.6152 19.2096C21.7956 19.5003 21.8858 19.6456 21.917 19.8468C21.9804 20.2558 21.7008 20.7585 21.3199 20.9204C21.1325 21 20.9216 21 20.5 21M16 11.5322C17.4817 10.7959 18.5 9.26686 18.5 7.5C18.5 5.73314 17.4817 4.20411 16 3.46776M14 7.5C14 9.98528 11.9852 12 9.49996 12C7.01468 12 4.99996 9.98528 4.99996 7.5C4.99996 5.01472 7.01468 3 9.49996 3C11.9852 3 14 5.01472 14 7.5ZM2.55919 18.9383C4.1535 16.5446 6.66933 15 9.49996 15C12.3306 15 14.8464 16.5446 16.4407 18.9383C16.79 19.4628 16.9646 19.725 16.9445 20.0599C16.9289 20.3207 16.7579 20.64 16.5495 20.7976C16.2819 21 15.9138 21 15.1776 21H3.82232C3.08613 21 2.71804 21 2.4504 20.7976C2.24201 20.64 2.07105 20.3207 2.05539 20.0599C2.03529 19.725 2.20992 19.4628 2.55919 18.9383Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-        Profiles
-      </span>
-      <button id="profile-switcher-trash-toggle" class="profile-switcher-trash-toggle btn" aria-label="Toggle delete mode">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14ZM10 11v6M14 11v6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-      </button>
-    </div>
     <div id="profile-switcher-list" class="profile-switcher-list"></div>
     <div id="profile-switcher-add" class="profile-switcher-add btn">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">

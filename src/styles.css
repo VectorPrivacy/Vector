@@ -192,7 +192,7 @@
 }
 
 #chat-input-cancel .icon-cancel {
-  background-color: #FC595C;
+  background-color: var(--danger-color);
 }
 
 .icon-x {
@@ -204,7 +204,7 @@
   mask: url('./icons/edit-x.svg') no-repeat center;
   -webkit-mask-size: contain;
   mask-size: contain;
-  background-color: #FC595C;
+  background-color: var(--danger-color);
   width: 16px;
   height: 16px;
   display: inline-block;
@@ -305,6 +305,14 @@
 }
 
 :root {
+  --danger-pink: #FF2EA9;
+  --danger-red: #FC595C;
+  --danger-color: #FC595C;  /* default: red for all themes */
+  --danger-color-hover: color-mix(in srgb, var(--danger-color) 10%, transparent);
+  --status-excellent: #59fcb3;
+  --status-good: #FCE459;
+  --status-fair: #FCA559;
+  --status-poor: var(--danger-color);
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 16px;
   line-height: 24px;
@@ -619,9 +627,9 @@ html, body {
   transition: filter 0.15s ease, transform 0.1s ease;
 }
 .pack-details-action.is-subscribed {
-  background-color: rgba(255, 74, 138, 0.18);
-  color: #ff4a8a;
-  border: 1px solid rgba(255, 74, 138, 0.4);
+  background-color: var(--danger-color-hover);
+  color: var(--danger-color);
+  border: 1px solid color-mix(in srgb, var(--danger-color) 40%, transparent);
 }
 .pack-details-action:hover { filter: brightness(1.08); }
 .pack-details-action:active { transform: translateY(1px); }
@@ -639,7 +647,7 @@ html, body {
 .pack-details-error-title {
   font-size: 16px;
   font-weight: 700;
-  color: #ff4a8a;
+  color: var(--danger-color);
   margin: 0 0 8px;
 }
 .pack-details-error-detail {
@@ -1051,15 +1059,21 @@ html, body {
 
 /* Profile Content - Scrollable */
 .profile-content {
-  padding-top: 60px;
-  padding-bottom: 60px;
+  position: fixed;
+  top: 60px;
+  bottom: 65px;
+  left: 0;
+  right: 0px;
   overflow-x: hidden;
   overflow-y: auto;
-  height: 100%;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: none;
   touch-action: pan-y;
   box-sizing: border-box;
+}
+
+#profile:not(.is-own-profile) .profile-content {
+  bottom: 6px;
 }
 
 /* Profile Banner */
@@ -1269,6 +1283,12 @@ html, body {
   cursor: pointer;
 }
 
+.aggro-glitch-img {
+  content: url('./icons/aggro-glitch-red.gif');
+  width: 64px;
+  height: 64px;
+}
+
 /* Dangerzone button group styling */
 .danger-buttons {
   display: block;
@@ -1469,7 +1489,7 @@ html, body {
 
 #profile-edit-cancel-btn .icon-edit-x,
 #wallpaper-edit-cancel-btn .icon-edit-x {
-  background-color: #FC595C !important;
+  background-color: var(--danger-color) !important;
   width: 14px !important;
   height: 14px !important;
 }
@@ -1626,7 +1646,7 @@ html, body {
 }
 
 .device-status-dot.not-primary {
-  background-color: #ff5252; /* Red for not primary device */
+  background-color: var(--danger-color); /* Red or Pink for not primary device */
 }
 
 .profile-options {
@@ -1659,6 +1679,25 @@ html, body {
   border-color: #959899;
   color: white;
   opacity: 1;
+}
+
+.profile-option.is-danger span { color: var(--danger-color); }
+.profile-option.is-danger .icon { background-color: var(--danger-color); }
+.is-danger-text { color: var(--danger-color); }
+.is-danger-icon { background-color: var(--danger-color); }
+.profile-more-item.is-danger:hover { background: var(--danger-color-hover); }
+
+.unblock-btn {
+  color: var(--danger-color);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 4px 10px;
+  border: 1px solid var(--danger-color);
+  border-radius: 6px;
+}
+
+.unblock-btn:hover {
+  background-color: var(--danger-color-hover);
 }
 
 /* Profile "More" dropdown menu */
@@ -1702,13 +1741,13 @@ html, body {
   background: #2a2a2a;
   color: #fff;
 }
-.context-menu-item.is-danger        { color: #ff4a8a; }
-.context-menu-item.is-danger:hover  { background: rgba(255, 74, 138, 0.12); color: #ff4a8a; }
+.context-menu-item.is-danger        { color: var(--danger-color); }
+.context-menu-item.is-danger:hover  { background: var(--danger-color-hover); color: var(--danger-color); }
 .context-menu-item .icon {
   position: relative;
   flex-shrink: 0;
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   margin: 0;
   padding: 0;
   border-radius: 0;
@@ -1727,7 +1766,7 @@ html, body {
   font-size: 15px;
 }
 .context-menu-item:active { background: #2a2a2a; color: #fff; }
-.context-menu-item.is-danger:active { background: rgba(255, 74, 138, 0.12); color: #ff4a8a; }
+.context-menu-item.is-danger:active { background: var(--danger-color-hover); color: var(--danger-color); }
 
 /* Dimmed qualifier after an item label, e.g. Copy (plain). */
 .context-menu-item-hint {
@@ -1888,7 +1927,7 @@ html, body {
   align-items: center;
   width: 85%;
   gap: 4px;
-  margin: 8px auto 20px auto;
+  margin: 8px auto 40px auto;
   padding: 4px 4px 4px 8px;
 }
 
@@ -2122,6 +2161,10 @@ html, body {
   border-color: #B2B2B2;
 }
 
+.new-chat-btn.btn:hover {
+    opacity: 1;
+}
+
 .new-chat-btn .icon {
   display: inline-block;
   position: relative;
@@ -2136,7 +2179,12 @@ html, body {
 }
 
 #chat-list {
-  overflow-y: scroll;
+  position: fixed;
+  top: 120px;
+  bottom: 70px;
+  left: 0;
+  right: 2px;
+  overflow-y: auto;
   padding-left: 15px;
   padding-right: 15px;
 }
@@ -2156,6 +2204,10 @@ html, body {
      margin-bottom) = 62px stride. */
   content-visibility: auto;
   contain-intrinsic-size: 62px;
+}
+
+.chatlist-contact.has-unread {
+    border: none;
 }
 
 /* Fade-in when a row transitions from content-visibility:auto skipped → visible.
@@ -2219,24 +2271,43 @@ html, body {
   font-size: 0.8em;
 }
 
+/* Community invite row: accent border + action-icon sizing/colors via design tokens
+ * (was inline-styled). Accept = accent; decline = the theme danger token (pink on
+ * Vector/Neon, red elsewhere) — matching YuurinBee's danger-color system. */
+.chatlist-invite {
+  border-color: var(--icon-color-primary);
+}
+.invite-action-btn .icon {
+  width: 16px;
+  height: 16px;
+}
+.invite-accept-btn .icon {
+  background-color: var(--accent-color);
+}
+.invite-decline-btn .icon {
+  background-color: var(--danger-color);
+}
+
 /* Ping pill — negative space (solid accent fill, dark numeral) so it cuts
  * through the row visually. Every count represents pings: full unread set
  * on unmuted chats, @mentions only on muted groups, nothing on muted DMs. */
 .chatlist-contact-count {
-  margin-top: auto;
-  margin-bottom: auto;
-  margin-left: auto;
-  margin-right: 8px;
-  padding: 2px 9px;
-  border-radius: 999px;
-  background: var(--icon-color-primary, #59fcb3);
-  color: #000;
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1.2;
-  min-width: 18px;
-  text-align: center;
-  flex-shrink: 0;
+    margin-top: auto;
+    margin-bottom: auto;
+    margin-left: auto;
+    margin-right: 12px;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: var(--primary-color);
+    color: #000;
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1.2;
+    min-width: 18px;
+    width: fit-content;
+    text-align: center;
+    flex-shrink: 0;
+    box-sizing: border-box;
 }
 
 .chatlist-contact img {
@@ -2312,6 +2383,15 @@ html, body {
   font-weight: 400;
   flex-shrink: 0;
   white-space: nowrap;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.chatlist-contact.has-unread .chatlist-contact-inline-time {
+    color: var(--primary-color);
+}
+
+.chatlist-contact.has-unread .chatlist-contact-header h4 {
+    color: #fff;
 }
 
 .chatlist-contact-preview h4 {
@@ -2332,6 +2412,29 @@ html, body {
   font-weight: 100;
   color: rgb(161, 161, 161);
   transition: color 0.2s ease;
+}
+
+.chatlist-member-icon-wrap {
+    position: relative;
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    vertical-align: middle;
+    flex-shrink: 0;
+    margin-right: 2px;
+    margin-top: -2px;
+}
+
+.chatlist-member-icon-wrap .icon {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: 100%;
+    height: 100%;
+    margin: auto;
+    background-color: rgba(255, 255, 255, 0.55);
 }
 
 .chatlist-contact:hover {
@@ -4123,8 +4226,8 @@ img.emoji-img-loading {
 }
 .emoji-creator-cell-busy.is-deleting .emoji-creator-cell-busy-ring {
   background: conic-gradient(
-    #ff4a8a 0% 30%,
-    rgba(255, 74, 138, 0.25) 30% 100%
+    var(--danger-color) 0% 30%,
+    color-mix(in srgb, var(--danger-color) 25%, transparent) 30% 100%
   );
 }
 @keyframes emoji-creator-busy-spin { to { transform: rotate(360deg); } }
@@ -4163,12 +4266,12 @@ img.emoji-img-loading {
 .emoji-creator-cell-remove {
   position: absolute;
   top: -4px;
-  right: -4px;
-  width: 16px;
-  height: 16px;
+  right: -6px;
+  width: 20px;
+  height: 20px;
   border-radius: 50%;
-  background-color: #ff4a8a;
-  border: 2px solid #0a0a0a;
+  background-color: transparent;
+  background: #0a0a0a;
   padding: 0;
   cursor: pointer;
   display: none;
@@ -4181,9 +4284,9 @@ img.emoji-img-loading {
    a drag can never get stuck in an apparent hover state after drop. */
 .emoji-creator-cell.is-hovered .emoji-creator-cell-remove { display: flex; }
 .emoji-creator-cell-remove .icon {
-  width: 7px;
-  height: 7px;
-  background-color: #fff;
+  width: 10px;
+  height: 10px;
+  background-color: var(--danger-color);
 }
 
 /* Bottom dropzone — second affordance for uploading (mirrors mockup). */
@@ -4257,11 +4360,11 @@ img.emoji-img-loading {
 .emoji-creator-delete .icon {
   width: 16px;
   height: 16px;
-  background-color: #FF2EA9;
+  background-color: var(--danger-color);
 }
 
 .emoji-creator-delete:hover .icon {
-  background-color: #FF2EA9;
+  background-color: var(--danger-color);
 }
 
 /* Confirm overlay — generalised question modal. Same in-panel chrome
@@ -4285,9 +4388,9 @@ img.emoji-img-loading {
 }
 .emoji-pack-creator-confirm[data-tone="danger"] {
   background:
-    linear-gradient(to top, rgba(255, 74, 138, 0.22) 0%, rgba(255, 74, 138, 0) 38%),
+    linear-gradient(to top, color-mix(in srgb, var(--danger-color) 22%, transparent) 0%, color-mix(in srgb, var(--danger-color) 0%, transparent) 38%),
     rgba(8, 8, 8, 0.82);
-  border-color: #ff4a8a;
+  border-color: var(--danger-color);
 }
 .emoji-pack-creator-confirm[hidden] { display: none; }
 .emoji-pack-creator-confirm-body {
@@ -4313,7 +4416,7 @@ img.emoji-img-loading {
   color: #fff;
 }
 .emoji-pack-creator-confirm[data-tone="danger"] .emoji-pack-creator-confirm-title {
-  color: #ff4a8a;
+  color: var(--danger-color);
 }
 .emoji-pack-creator-confirm-detail {
   color: #fff;
@@ -4348,13 +4451,13 @@ img.emoji-img-loading {
 }
 
 .emoji-pack-creator-confirm[data-tone="danger"] .emoji-pack-creator-confirm-ok {
-  background-color: #ff2ea9;
-  border-color: #ff2ea9;
+  background-color: var(--danger-color);
+  border-color: var(--danger-color);
   color: #000;
 }
 
 .emoji-pack-creator-confirm-cancel {
-  border-color: #ff2ea9;
+  border-color: var(--danger-color);
   background-color: #03030390;
 }
 /* Pack creator cropper overlay — square-crop UX for non-square static
@@ -4651,11 +4754,11 @@ img.emoji-img-loading {
   background-color: #030303;
 }
 .emoji-pack-creator-naming-input.is-invalid {
-  border-color: #ff4a8a;
-  background-color: rgba(255, 74, 138, 0.06);
+  border-color: var(--danger-color);
+  background-color: var(--danger-color-hover);
 }
 .emoji-pack-creator-naming-error {
-  color: #ff4a8a;
+  color: var(--danger-color);
   font-size: 11px;
   font-weight: 500;
   margin: 4px 0 12px;
@@ -4703,12 +4806,12 @@ img.emoji-img-loading {
   inset: 0;
   border-radius: inherit;
   background:
-    linear-gradient(to top, rgba(255, 74, 138, 0.32) 0%, rgba(255, 74, 138, 0) 38%),
+    linear-gradient(to top, color-mix(in srgb, var(--danger-color) 32%, transparent) 0%, color-mix(in srgb, var(--danger-color) 0%, transparent) 38%),
     rgba(8, 8, 8, 0.85);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
-  border: 2px solid #ff4a8a;
-  box-shadow: 0 0 24px rgba(255, 74, 138, 0.25) inset;
+  border: 2px solid var(--danger-color);
+  box-shadow: 0 0 24px color-mix(in srgb, var(--danger-color) 25%, transparent) inset;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -4737,7 +4840,7 @@ img.emoji-img-loading {
   image-rendering: -webkit-optimize-contrast;
 }
 .emoji-pack-creator-error-pretitle {
-  color: #ff4a8a;
+  color: var(--danger-color);
   font-weight: 700;
   font-size: 13px;
   margin: 4px 0 2px;
@@ -4756,7 +4859,7 @@ img.emoji-img-loading {
   margin: 0 0 16px;
 }
 .emoji-pack-creator-error-retry {
-  background-color: #ff2ea9;
+  background-color: var(--danger-color);
   color: #000;
   border: none;
   padding: 12px 28px;
@@ -5006,8 +5109,8 @@ img.emoji-img-loading {
 }
 
 .emoji-pack-preview.is-error {
-  border-color: rgba(255, 100, 100, 0.25);
-  background-color: rgba(255, 60, 60, 0.05);
+  border-color: color-mix(in srgb, var(--danger-color) 25%, transparent);
+  background-color: color-mix(in srgb, var(--danger-color) 5%, transparent);
 }
 
 @media (max-width: 480px) {
@@ -5899,9 +6002,12 @@ audio {
 }
 
 #settings {
+  position: fixed;
+  top: 10px;
+  bottom: 70px;
+  left: 0;
+  right: 2px;
   overflow-y: auto;
-  height: 100%;
-  padding-bottom: 80px;
   overscroll-behavior: none;
   -webkit-overflow-scrolling: touch;
   touch-action: pan-y;
@@ -5945,7 +6051,7 @@ select {
 #download-model {
   color: #000;
   border: none;
-  padding: 12px 20px;
+  padding: 12px;
   border-radius: 8px;
   font-weight: bold;
   cursor: pointer;
@@ -5954,7 +6060,9 @@ select {
   align-items: center;
   justify-content: center;
   margin-top: 10px;
-  width: 100%;
+  width: 80%;
+  margin-left: auto;
+  margin-right: auto;
 }
 
 #download-model:active {
@@ -5963,9 +6071,26 @@ select {
 
 /* Model Status Styles */
 .model-status {
-  margin-top: 15px;
+  margin-top: 0px;
   font-size: 14px;
   min-height: 20px;
+}
+
+#cancel-download {
+  margin-top: 16px;
+}
+
+/* Inline spinner for model download status */
+.spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(255, 255, 255, 0.1);
+  border-top-color: var(--icon-color-primary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  vertical-align: middle;
+  margin-right: 6px;
 }
 
 /* Progress Bar Container */
@@ -6430,7 +6555,7 @@ select {
 }
 
 .voice-preview-delete .icon {
-  background-color: #ff4444;
+  background-color: var(--danger-color);
   transition: opacity 0.15s ease;
 }
 
@@ -6490,7 +6615,7 @@ select {
   top: 0;
   bottom: 0;
   width: 0%;
-  background: linear-gradient(90deg, var(--icon-color-primary), var(--voice-progress-secondary, rgba(89, 252, 179, 0.4)));
+  background: var(--primary-color);
   border-radius: 5px 0 0 5px;
   pointer-events: none;
 }
@@ -7502,6 +7627,10 @@ select:focus::-ms-value {
   display: none; /* Hidden by default */
 }
 
+.btn-delete-model .icon-trash {
+  background-color: var(--danger-color);
+}
+
 .btn-delete-model:hover {
   opacity: 1;
 }
@@ -7513,6 +7642,11 @@ select:focus::-ms-value {
   background-color: transparent;
   mask: url('./icons/trash.svg') no-repeat center;
   mask-size: contain;
+}
+
+.icon-disable {
+    mask-image: url("./icons/disable.svg");
+    -webkit-mask-image: url("./icons/disable.svg");
 }
 
 .icon-x-user {
@@ -7551,6 +7685,10 @@ select:focus::-ms-value {
   box-shadow: none !important;
 }
 
+#whisper-model.form-control {
+    text-align: center !important;
+}
+
 /* Disabled select styles for visual feedback */
 select:disabled {
   opacity: 0.5;
@@ -7573,7 +7711,7 @@ select:disabled:hover {
   background-color: #00000000;
   margin-left: 10px;
   backdrop-filter: none;
-  border-color: #ff2ea9;
+  border-color: var(--danger-color);
   background-color: #171717;
 }
 
@@ -7838,7 +7976,7 @@ select:disabled:hover {
 }
 
 .danger-subtitle {
-  color: #ff2ea9;
+  color: var(--danger-color);
   font-size: 12px;
   text-align: center;
   margin-top: 5px;
@@ -7854,8 +7992,30 @@ select:disabled:hover {
 
 .danger-btn {
   backdrop-filter: none;
-  border-color: #ff2ea9;
+  border-color: var(--danger-color);
   background-color: #00000000;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding-top: 2px;
+}
+
+.danger-btn .icon-disable {
+    position: relative;
+    width: 16px;
+    height: 16px;
+    background-color: var(--danger-color);
+    flex-shrink: 0;
+    display: inline-block;
+    margin: 0;
+    margin-top: -2px;
+}
+
+.warning-icon {
+  content: url('./icons/warning_red.png');
+  width: 16px;
+  height: 16px;
 }
 
 .navbar {
@@ -8685,7 +8845,7 @@ select:disabled:hover {
 .transcribe-progress-fill {
     height: 100%;
     width: 0%;
-    background: linear-gradient(90deg, #59fcb3, #00d4ff);
+    background: var(--primary-color);
     border-radius: 2px;
     transition: width 0.3s ease;
 }
@@ -8699,11 +8859,29 @@ select:disabled:hover {
     text-overflow: ellipsis;
 }
 
+.cancel-download-inline {
+  display: block;
+  margin: 6px auto 0;
+  padding: 3px 12px;
+  font-size: 11px;
+  font-weight: 500;
+  border-radius: 4px;
+  border: 1px solid var(--danger-color);
+  background: none;
+  color: var(--danger-color);
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.cancel-download-inline:hover {
+  background: var(--danger-color-hover);
+}
+
 /* Custom Audio Player Styles */
 .custom-audio-player {
     gap: 12px;
     padding: 12px;
-    background: rgba(22, 22, 22, 0.6);
+    background: #17171750;
     border: 1px solid rgba(89, 252, 179, 0.2);
     border-radius: 12px;
     position: relative;
@@ -8711,6 +8889,7 @@ select:disabled:hover {
     width: min(500px, calc(100vw - 100px));
     box-sizing: border-box;
     transition: all 0.3s ease;
+    margin-bottom: 6px;
 }
 
 .custom-audio-player-inner {
@@ -8905,7 +9084,7 @@ select:disabled:hover {
 }
 
 .audio-time-display .current-time {
-    color: #59fcb3;
+    color: #ffffff66;
     font-weight: bold;
 }
 
@@ -8973,7 +9152,7 @@ select:disabled:hover {
 .relay-status {
   font-size: 12px;
   font-weight: 600;
-  padding: 4px 12px;
+  padding: 2px 10px;
   border-radius: 20px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -9123,7 +9302,7 @@ select:disabled:hover {
 
 .relay-dialog {
   background: rgba(20, 20, 20, 0.95);
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  border: 1px solid #262626;
   border-radius: 16px;
   width: min(420px, calc(100vw - 40px));
   max-height: calc(100vh - 80px);
@@ -9136,12 +9315,13 @@ select:disabled:hover {
   justify-content: space-between;
   align-items: center;
   padding: 15px 20px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  border-bottom: 1px solid #333333;
+  background: #262626;
 }
 
 .relay-dialog-header h3 {
   margin: 0;
-  font-size: 16px;
+  font-size: 18px;
   color: #fff;
   word-break: break-all;
   padding-right: 10px;
@@ -9171,6 +9351,27 @@ select:disabled:hover {
   transition: transform 0.25s ease;
 }
 
+#relay-info-url {
+    text-align: left;
+    color: #fff;
+    font-size: 16px;
+    margin: 0 0 16px 0;
+}
+
+.relay-info-header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.relay-info-header-row #relay-info-url {
+    margin: 0;
+}
+
+#relay-info-done {
+  border: 2px solid #474747;
+}
+
 .relay-dialog-content {
   padding: 20px;
   display: flex;
@@ -9181,22 +9382,31 @@ select:disabled:hover {
 }
 
 .relay-form-group {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.relay-form-group select {
+    width: 160px;
+    margin: 0;
+    margin-left: auto;
 }
 
 .relay-form-label {
   font-size: 13px;
   font-weight: 600;
   color: rgba(255, 255, 255, 0.8);
+  flex-shrink: 0;
 }
 
 .relay-form-input,
 .relay-form-select {
   padding: 10px 12px;
   background: rgba(0, 0, 0, 0.3);
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  border: 1px solid #262626;
   border-radius: 8px;
   color: #fff;
   font-size: 14px;
@@ -9206,6 +9416,7 @@ select:disabled:hover {
 .relay-form-input:focus,
 .relay-form-select:focus {
   outline: none;
+  border-color: var(--primary-color);
 }
 
 .relay-form-select {
@@ -9213,10 +9424,13 @@ select:disabled:hover {
   appearance: none;
   -webkit-appearance: none;
   -moz-appearance: none;
-  padding-right: 36px;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M2.5 4.5L6 8L9.5 4.5' stroke='rgba(255,255,255,0.6)' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
-  background-position: right 12px center;
+  background-position: right 8px center;
+  flex: none;
+  padding: 6px 24px 6px 14px;
+  font-size: 13px;
+  width: 160px;
 }
 
 .relay-form-select:disabled {
@@ -9241,6 +9455,10 @@ select:disabled:hover {
   padding: 10px 15px;
 }
 
+.relay-dialog-buttons .primary-btn:hover {
+  opacity: 0.8;
+}
+
 /* Relay Info Dialog Specific */
 .relay-metrics-section h4,
 .relay-logs-section h4 {
@@ -9255,7 +9473,33 @@ select:disabled:hover {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 10px;
+}
+
+.relay-metrics-inline {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 13px;
+}
+
+.relay-metric-inline-label {
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.relay-metric-inline-value {
+    color: #59fcb3;
+    font-weight: 600;
+}
+
+.relay-metric-inline-divider {
+    color: rgba(255, 255, 255, 0.2);
+}
+
+.relay-metric-inline-right {
+    margin-left: auto;
 }
 
 .relay-status-small {
@@ -9291,23 +9535,14 @@ select:disabled:hover {
   background-color: rgba(255, 255, 255, 0.8);
 }
 
-.relay-metrics-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 10px;
-}
-
-.relay-metric {
-  background: rgba(0, 0, 0, 0.3);
-  border-radius: 8px;
-  padding: 10px;
-  text-align: center;
-}
-
 .relay-metric-value {
   display: block;
-  font-size: 18px;
-  font-weight: 600;
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.relay-metric-inline-right {
+    margin-left: auto;
 }
 
 .relay-metric-label {
@@ -9326,10 +9561,11 @@ select:disabled:hover {
   border-radius: 8px;
   max-height: 150px;
   overflow-y: auto;
+  margin-top: 10px;
 }
 
 .relay-logs-list li {
-  padding: 8px 12px;
+  padding: 6px 12px;
   font-size: 12px;
   color: rgba(255, 255, 255, 0.7);
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
@@ -9385,7 +9621,7 @@ select:disabled:hover {
 }
 .blossom-cap-accepted { color: #59fcb3; }
 .blossom-cap-limited { color: #ffc107; }
-.blossom-cap-rejected { color: #ff6464; }
+.blossom-cap-rejected { color: var(--danger-color); }
 .blossom-cap-list {
   list-style: none;
   padding: 0;
@@ -9409,7 +9645,7 @@ select:disabled:hover {
   flex-shrink: 0;
 }
 .blossom-cap-marker.blossom-cap-accepted { color: #59fcb3; }
-.blossom-cap-marker.blossom-cap-rejected { color: #ff6464; }
+.blossom-cap-marker.blossom-cap-rejected { color: var(--danger-color); }
 .blossom-cap-mime {
   flex: 1;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -9965,6 +10201,25 @@ select:disabled:hover {
   opacity: 0.7;
 }
 
+.kick-btn {
+  padding: 4px 12px;
+  font-size: 12px;
+  border-radius: 4px;
+  border: 1px solid var(--danger-color);
+  background: none;
+  color: var(--danger-color);
+  cursor: pointer;
+  transition: background 0.2s ease;
+  position: relative;
+  z-index: 1;
+  margin-left: 10px;
+}
+
+.kick-btn:hover {
+  background: var(--danger-color);
+  color: #000;
+}
+
 /* MLS Group Invite Styles */
 .chatlist-invite {
   cursor: default !important;
@@ -9977,6 +10232,22 @@ select:disabled:hover {
 
 .chatlist-invite .chatlist-contact-preview p {
   color: rgba(255, 255, 255, 0.85);
+}
+
+.chatlist-invite {
+    border-color: var(--primary-color);
+}
+
+.invite-accept-btn .icon {
+    width: 16px;
+    height: 16px;
+    background-color: #59fcb3;
+}
+
+.invite-decline-btn .icon {
+    width: 16px;
+    height: 16px;
+    background-color: var(--danger-color);
 }
 
 .invite-action-buttons {
@@ -10007,7 +10278,7 @@ select:disabled:hover {
 }
 
 .invite-decline-btn {
-  border: 2px solid #ff2ea9;
+  border: 2px solid var(--danger-color);
 }
 
 .invite-action-btn:hover {
@@ -10023,7 +10294,7 @@ select:disabled:hover {
 }
 
 .invite-decline-btn:hover {
-  background: rgba(255, 46, 169, 0.2);
+    background: var(--danger-color-hover);
 }
 
 .btn-small {
@@ -12800,7 +13071,7 @@ hr {
 }
 
 .marketplace-install-btn.failed {
-  background-color: rgba(255, 100, 100, 0.3);
+  background-color: var(--danger-color-hover);
 }
 
 /* Loading spinner in install/update buttons */
@@ -13585,14 +13856,14 @@ hr {
 /* App Details Uninstall Button */
 .app-details-uninstall-btn {
   flex: 1;
-  background-color: rgba(255, 100, 100, 0.3);
-  color: #ff6464;
-  border: 1px solid rgba(255, 100, 100, 0.5);
+  background-color: var(--danger-color-hover);
+  color: var(--danger-color);
+  border: 1px solid color-mix(in srgb, var(--danger-color) 50%, transparent);
 }
 
 .app-details-uninstall-btn:hover {
-  background-color: rgba(255, 100, 100, 0.4);
-  box-shadow: 0 4px 16px rgba(255, 100, 100, 0.3);
+  background-color: color-mix(in srgb, var(--danger-color) 40%, transparent);
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--danger-color) 30%, transparent);
 }
 
 /* App Details Update Button */
@@ -13875,10 +14146,10 @@ hr {
 .app-details-reset-permissions-btn {
   margin-top: 12px;
   padding: 8px 16px;
-  background: rgba(255, 100, 100, 0.15);
-  border: 1px solid rgba(255, 100, 100, 0.3);
+  background: color-mix(in srgb, var(--danger-color) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger-color) 30%, transparent);
   border-radius: 8px;
-  color: rgba(255, 150, 150, 0.9);
+  color: var(--danger-color);
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
@@ -13887,9 +14158,9 @@ hr {
 }
 
 .app-details-reset-permissions-btn:hover {
-  background: rgba(255, 100, 100, 0.25);
-  border-color: rgba(255, 100, 100, 0.5);
-  color: rgba(255, 180, 180, 1);
+  background: color-mix(in srgb, var(--danger-color) 25%, transparent);
+  border-color: color-mix(in srgb, var(--danger-color) 50%, transparent);
+  color: var(--danger-color);
 }
 
 /* Permission Prompt Overlay */
@@ -14071,8 +14342,8 @@ hr {
 }
 
 .notif-sound-chip-clear:hover {
-  background: rgba(255, 100, 100, 0.3);
-  color: #ff6b6b;
+  background: var(--danger-color-hover);
+  color: var(--danger-color);
 }
 
 /* --- Mention Selector --- */
@@ -14295,8 +14566,8 @@ hr {
   --dmsg-pinged-border: var(--icon-color-primary, #59fcb3);
   --dmsg-replying-bg: rgba(255, 255, 255, 0.05);
   --dmsg-replying-border: rgba(255, 255, 255, 0.5);
-  --dmsg-failed-bg: rgba(255, 100, 100, 0.10);
-  --dmsg-failed-border: #ff6464;
+  --dmsg-failed-bg: color-mix(in srgb, var(--danger-color) 10%, transparent);
+  --dmsg-failed-border: var(--danger-color);
 }
 
 .dmsg {
@@ -14676,8 +14947,8 @@ hr {
   vertical-align: middle;
   position: static;
 }
-.dmsg-status-failed { color: #ff6464; }
-.dmsg-status-failed .icon { background-color: #ff6464; }
+.dmsg-status-failed { color: var(--danger-color); }
+.dmsg-status-failed .icon { background-color: var(--danger-color); }
 .dmsg-status-hidden { display: none !important; }  /* beat the block-right sibling rules above */
 .dmsg-failed-action {
   cursor: pointer;
@@ -14827,8 +15098,7 @@ hr {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 14px 16px;
+  padding: 14px 8px;
   /* Solid dark surface with a subtle grey border curved over the top,
      lifted by a soft shadow. Flush at the bottom where it meets the
      composer. */
@@ -14847,6 +15117,8 @@ hr {
   flex-direction: column;
   gap: 12px;
   min-width: 0;
+  padding-left: 12px;
+  padding-right: 12px;
 }
 .wallpaper-slider {
   display: flex;
@@ -14886,8 +15158,8 @@ hr {
   border-radius: 5px;
   background: linear-gradient(
     to right,
-    var(--icon-color-primary, #59fcb3) 0%,
-    var(--voice-progress-secondary, rgba(89, 252, 179, 0.4)) var(--slider-pct, 0%),
+    var(--primary-color) 0%,
+    var(--primary-color) var(--slider-pct, 0%),
     rgba(255, 255, 255, 0.08) var(--slider-pct, 0%),
     rgba(255, 255, 255, 0.08) 100%
   );
@@ -14926,33 +15198,6 @@ hr {
   cursor: pointer;
 }
 
-/* Trash — discards the staged edits and exits edit mode (same as Cancel). */
-.wallpaper-remove-btn {
-  flex: 0 0 auto;
-  width: 40px;
-  height: 40px;
-  border: none;
-  background: transparent;
-  border-radius: 50%;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  position: relative;
-}
-.wallpaper-remove-btn .icon {
-  width: 20px;
-  height: 20px;
-  background-color: #ff4444;
-  transition: opacity 0.15s ease;
-}
-.wallpaper-remove-btn:hover .icon {
-  opacity: 0.7;
-}
-.wallpaper-remove-btn[disabled] {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
 
 /* Floating hover toolbar (singleton inside .chat-messages, position: absolute
  * so it scrolls naturally with the messages — no per-frame JS reposition). */
@@ -15000,10 +15245,10 @@ hr {
    distinctly from the additive ones (react/reply/edit) without
    tinting the whole button. */
 .dmsg-toolbar-btn-danger .icon {
-  background-color: #FC595C;
+  background-color: var(--danger-color);
 }
 .dmsg-toolbar-btn-danger:hover .icon {
-  background-color: #FC595C;
+  background-color: var(--danger-color);
   filter: brightness(1.15);
 }
 
@@ -15132,12 +15377,7 @@ hr {
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   background: rgba(255, 255, 255, 0.02);
 }
-.profile-switcher-header .profile-switcher-trash-toggle {
-  position: absolute;
-  right: 14px;
-  top: 50%;
-  transform: translateY(-50%);
-}
+
 .profile-switcher-header-label {
   display: inline-flex;
   align-items: center;
@@ -15146,32 +15386,49 @@ hr {
   color: rgba(255, 255, 255, 0.55);
   letter-spacing: 0.4px;
 }
+
 .profile-switcher-header-icon {
   color: rgba(255, 255, 255, 0.55);
   flex-shrink: 0;
 }
+
 .profile-switcher-trash-toggle {
+  position: absolute;
+  top: 50%;
+  left: 10px;
+  transform: translateY(-50%);
   background: transparent;
   border: none;
   cursor: pointer;
-  padding: 4px;
+  padding: 5px;
   border-radius: 4px;
-  transition: background-color 120ms ease;
-  color: rgba(255, 255, 255, 0.55);
+  transition: color 120ms ease;
+  color: rgba(255, 255, 255, 0.45);
   display: inline-flex;
   align-items: center;
   justify-content: center;
 }
-.profile-switcher-trash-toggle:hover {
-  background-color: rgba(255, 255, 255, 0.06);
+
+#profile-switcher-trash-toggle {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: transparent !important;
+  border: none;
 }
+
+.profile-switcher-trash-toggle:hover {
+  background-color: transparent;
+  color: rgba(255, 255, 255, 0.75);
+}
+
 .profile-switcher-trash-toggle svg {
   transition: color 160ms ease;
   width: 24px;
   height: 24px;
 }
+
 body.profile-switcher-editing .profile-switcher-trash-toggle {
-  color: #e84545;
+  color: var(--danger-color);
 }
 
 /* Each account row */
@@ -15193,9 +15450,10 @@ body.profile-switcher-editing .profile-switcher-trash-toggle {
 }
 .profile-switcher-row.active {
   cursor: default;
+  background-color: transparent !important;
 }
 .profile-switcher-row.active:hover {
-  background-color: transparent;
+  background-color: transparent !important;
 }
 
 /* Active-account dot (left edge) */
@@ -15217,7 +15475,7 @@ body.profile-switcher-editing .profile-switcher-trash-toggle {
   height: 28px;
   border-radius: 50%;
   object-fit: cover;
-  background: rgba(255, 255, 255, 0.06);
+  background: transparent;
   flex-shrink: 0;
 }
 
@@ -15257,19 +15515,20 @@ body.profile-switcher-editing .profile-switcher-trash-toggle {
   padding: 6px;
   border-radius: 4px;
   flex-shrink: 0;
-  color: #e84545;
+  color: var(--danger-color);
   align-items: center;
   justify-content: center;
 }
 .profile-switcher-row-trash:hover {
-  background-color: rgba(232, 69, 69, 0.12);
+  transform: scale(1.25);
+  opacity: 1;
 }
 body.profile-switcher-editing .profile-switcher-row-trash {
   display: inline-flex;
 }
 /* Hide chevron / row interactivity transition while editing the active row */
 body.profile-switcher-editing .profile-switcher-row.active {
-  opacity: 0.55;
+  opacity: 1;
 }
 
 /* Add Profile footer */
@@ -15278,10 +15537,10 @@ body.profile-switcher-editing .profile-switcher-row.active {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 14px 18px;
+  padding: 10px 10px;
   cursor: pointer;
   color: var(--accent-color);
-  font-weight: 600;
+  font-weight: 500;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
   background: rgba(255, 255, 255, 0.02);
   transition: background-color 120ms ease;
@@ -15614,8 +15873,8 @@ body.profile-switcher-editing .profile-switcher-add {
 .cmt-icon-btn:hover { background: rgba(255, 255, 255, 0.12); }
 .cmt-icon-btn .icon { width: 15px; height: 15px; background-color: #fff; opacity: 0.75; }
 .cmt-icon-btn.cmt-copied .icon { background-color: var(--accent-color, #59fcb3); opacity: 1; }
-.cmt-icon-btn-danger:hover { background: rgba(255, 107, 107, 0.16); }
-.cmt-icon-btn-danger:hover .icon { background-color: #ff6b6b; opacity: 1; }
+.cmt-icon-btn-danger:hover { background: color-mix(in srgb, var(--danger-color) 16%, transparent); }
+.cmt-icon-btn-danger:hover .icon { background-color: var(--danger-color); opacity: 1; }
 .cmt-icon-btn:disabled { opacity: 0.4; cursor: default; }
 
 .cmt-empty { font-size: 12.5px; opacity: 0.4; margin: 0 0 11px; padding: 2px; }
@@ -15649,16 +15908,16 @@ body.profile-switcher-editing .profile-switcher-add {
    full-width (that variant is also used for the full-width "Create invite link" button). */
 .cmt-btn-sm { padding: 5px 11px; font-size: 12px; gap: 5px; flex-shrink: 0; width: auto; }
 .cmt-btn-sm .icon { width: 13px; height: 13px; }
-.cmt-btn-danger { background: color-mix(in srgb, #ff6b6b 14%, transparent); color: #ff6b6b; border: 1px solid color-mix(in srgb, #ff6b6b 30%, transparent); }
-.cmt-btn-danger .icon { background-color: #ff6b6b; }
-.cmt-btn-danger:hover:not(:disabled) { background: color-mix(in srgb, #ff6b6b 22%, transparent); }
+.cmt-btn-danger { background: color-mix(in srgb, var(--danger-color) 14%, transparent); color: var(--danger-color); border: 1px solid color-mix(in srgb, var(--danger-color) 30%, transparent); }
+.cmt-btn-danger .icon { background-color: var(--danger-color); }
+.cmt-btn-danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger-color) 22%, transparent); }
 
 .cmt-direct-row { display: flex; gap: 8px; align-items: stretch; }
 .cmt-direct-row input { flex: 1; margin-bottom: 0 !important; }
 
 .cmt-status { font-size: 13px; min-height: 17px; margin: 4px 2px 12px; opacity: 0.85; }
 .cmt-status.cmt-ok { color: var(--accent-color, #59fcb3); opacity: 1; }
-.cmt-status.cmt-err { color: #ff6b6b; opacity: 1; }
+.cmt-status.cmt-err { color: var(--danger-color); opacity: 1; }
 .cmt-close { width: 100%; }
 
 /* Invite panel locked during a critical op (create / revoke+rekey / direct invite) — dim + wait cursor. */

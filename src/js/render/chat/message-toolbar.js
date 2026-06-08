@@ -754,7 +754,7 @@ async function _dmsgOpenMessageMenu(rowEl, x, y) {
         if (plain === raw.trim()) {
             items.push({ label: 'Copy', icon: 'copy', onClick: () => _dmsgCopyText(raw) });
         } else {
-            items.push({ label: 'Copy', hint: '(plain)', icon: 'copy', onClick: () => _dmsgCopyText(plain) });
+            items.push({ label: 'Copy', icon: 'copy', onClick: () => _dmsgCopyText(plain) });
             items.push({ label: 'Copy', hint: '(markdown)', icon: 'file-code', onClick: () => _dmsgCopyText(raw) });
         }
     }

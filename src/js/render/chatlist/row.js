@@ -27,7 +27,7 @@ function renderChat(chat, primaryColor) {
     // border without needing a chatlist re-render (inline color literals
     // would stay stuck on the previous theme until the next paint pass).
     const divContact = document.createElement('div');
-    if (nUnread) divContact.style.borderColor = 'var(--icon-color-primary)';
+    if (nUnread) divContact.classList.add('has-unread');
     divContact.classList.add('chatlist-contact');
     divContact.id = `chatlist-${chat.id}`;
 
@@ -135,12 +135,11 @@ function renderChat(chat, primaryColor) {
     // Inline time-ago (unread-only). Read rows keep the right-aligned variant
     // appended further down.
     const cLastMsgForHeader = chat.messages[chat.messages.length - 1];
-    if (nUnread && cLastMsgForHeader) {
-        const spanInlineTime = document.createElement('span');
-        spanInlineTime.classList.add('chatlist-contact-inline-time');
-        spanInlineTime.textContent = timeAgo(cLastMsgForHeader.at);
-        spanInlineTime.style.color = 'var(--icon-color-primary)';
-        divHeader.appendChild(spanInlineTime);
+    if (cLastMsgForHeader) {
+    const spanInlineTime = document.createElement('span');
+    spanInlineTime.classList.add('chatlist-contact-inline-time');
+    spanInlineTime.textContent = timeAgo(cLastMsgForHeader.at);
+    divHeader.appendChild(spanInlineTime);
     }
 
     divPreviewContainer.appendChild(divHeader);
@@ -174,13 +173,8 @@ function renderChat(chat, primaryColor) {
     if (nUnread) {
         const spanCount = document.createElement('span');
         spanCount.classList.add('chatlist-contact-count');
-        spanCount.textContent = String(nUnread);
+        spanCount.textContent = nUnread > 99 ? '99+' : String(nUnread);
         divContact.appendChild(spanCount);
-    } else {
-        const pTimeAgo = document.createElement('p');
-        pTimeAgo.classList.add('chatlist-contact-timestamp', 'read');
-        if (cLastMsg) pTimeAgo.textContent = timeAgo(cLastMsg.at);
-        divContact.appendChild(pTimeAgo);
     }
 
     return divContact;
@@ -196,7 +190,6 @@ function renderCommunityInviteItem(invite) {
     const divInvite = document.createElement('div');
     divInvite.classList.add('chatlist-contact', 'chatlist-invite');
     divInvite.id = `community-invite-${invite.community_id}`;
-    divInvite.style.borderColor = 'var(--icon-color-primary)';
 
     // The private bundle carries no icon → group placeholder (real logo appears on join).
     const divAvatarContainer = document.createElement('div');
@@ -225,7 +218,6 @@ function renderCommunityInviteItem(invite) {
     btnAccept.onclick = (e) => { e.stopPropagation(); acceptCommunityInvite(invite.community_id); };
     const acceptIcon = document.createElement('span');
     acceptIcon.classList.add('icon', 'icon-check');
-    acceptIcon.style.cssText = 'width:16px;height:16px;background-color:#59fcb3;';
     btnAccept.appendChild(acceptIcon);
 
     const btnDecline = document.createElement('button');
@@ -234,7 +226,6 @@ function renderCommunityInviteItem(invite) {
     btnDecline.onclick = (e) => { e.stopPropagation(); declineCommunityInvite(invite.community_id); };
     const declineIcon = document.createElement('span');
     declineIcon.classList.add('icon', 'icon-x');
-    declineIcon.style.cssText = 'width:16px;height:16px;background-color:#ff2ea9;';
     btnDecline.appendChild(declineIcon);
 
     divActions.appendChild(btnAccept);
