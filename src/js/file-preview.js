@@ -1737,6 +1737,9 @@ async function sendPreviewedFile() {
                 popupConfirm('Send failed', 'Could not read the attachment to send.', true, '', 'vector_warning.svg');
             }
         } catch (e) {
+            // Silently ignore cancelled uploads — the user intentionally aborted (the
+            // pending bubble is already removed by cancel_upload).
+            if (e && e.toString().includes('Upload cancelled')) return;
             const { title, body } = humanizeUploadError(String(e));
             popupConfirm(title, body, true, '', 'vector_warning.svg');
         }

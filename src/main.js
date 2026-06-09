@@ -2358,6 +2358,8 @@ async function sendFile(pubkey, replied_to, filepath) {
             }
         }
     } catch (e) {
+        // User-initiated cancel — the pending bubble is already gone; no error toast.
+        if (e && e.toString().includes('Upload cancelled')) { nLastTypingIndicator = 0; return; }
         const { title, body } = humanizeUploadError(String(e));
         popupConfirm(title, body, true, '', 'vector_warning.svg');
     }

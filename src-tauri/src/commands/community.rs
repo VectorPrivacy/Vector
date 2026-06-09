@@ -720,7 +720,22 @@ pub async fn send_community_message(
     }
 }
 
-/// Encrypt + upload a single outbound file (read from disk) for a Community message.
+/// A Community attachment that's been encrypted and previewed locally but NOT yet uploaded.
+/// The upload is deferred into [`dispatch_community_attachment_message`] so the optimistic
+/// bubble (with the progress ring + cancel button) shows BEFORE the bytes hit the network —
+/// parity with DM file sends.
+struct PreparedCommunityAttachment {
+    /// Optimistic attachment — `url` is empty until the upload completes; the plaintext is
+    /// already on disk so the sender previews it instantly.
+    attachment: vector_core::types::Attachment,
+    /// Ciphertext to upload to Blossom.
+    encrypted: Vec<u8>,
+    /// Original MIME (servers reject `application/octet-stream` but accept the same bytes
+    /// under their real type) — used for capability-aware server routing.
+    mime: String,
+}
+
+/// Encrypt a single outbound file (read from disk) for a Community message.
 /// Thin wrapper over [`process_outbound_community_attachment_bytes`]. `name_override` (a
 /// full filename, e.g. `SPOILER_photo.png` or an edited name) wins when non-empty — this is
 /// how spoiler + rename reach the attachment's `name` (parity with DM `file_message`);
@@ -729,7 +744,7 @@ async fn process_outbound_community_attachment(
     file_path: &str,
     name_override: &str,
     use_compression: bool,
-) -> Result<(vector_core::types::Attachment, nostr_sdk::Tag), String> {
+) -> Result<PreparedCommunityAttachment, String> {
     let bytes = std::fs::read(file_path).map_err(|e| format!("read attachment: {e}"))?;
     let name = if !name_override.is_empty() {
         name_override.to_string()
@@ -743,17 +758,17 @@ async fn process_outbound_community_attachment(
     process_outbound_community_attachment_bytes(bytes, &name, use_compression).await
 }
 
-/// Encrypt + upload a single outbound file (raw bytes + filename) for a Community message.
+/// Encrypt a single outbound file (raw bytes + filename) for a Community message.
 /// Returns the optimistic [`Attachment`] (with the plaintext saved locally so the sender
-/// previews it instantly) and its NIP-92 `imeta` tag. Uses the NIP-17 attachment technique:
-/// a fresh per-file AES-GCM key+nonce, so the Blossom ciphertext is only decryptable by
-/// members who open the event. Drives the bytes path (clipboard paste / Android File object)
-/// — no on-disk source required.
+/// previews it instantly, `url` empty until upload) plus the ciphertext to upload. Uses the
+/// NIP-17 attachment technique: a fresh per-file AES-GCM key+nonce, so the Blossom ciphertext
+/// is only decryptable by members who open the event. Drives the bytes path (clipboard paste
+/// / Android File object) — no on-disk source required.
 async fn process_outbound_community_attachment_bytes(
     bytes: Vec<u8>,
     file_name: &str,
     use_compression: bool,
-) -> Result<(vector_core::types::Attachment, nostr_sdk::Tag), String> {
+) -> Result<PreparedCommunityAttachment, String> {
     use vector_core::types::{Attachment, ImageMetadata};
 
     if bytes.is_empty() {
@@ -811,24 +826,12 @@ async fn process_outbound_community_attachment_bytes(
         let _ = std::fs::write(&local_path, &bytes);
     }
 
-    // Encrypt with a fresh key+nonce, then upload the ciphertext.
+    // Encrypt with a fresh key+nonce; the ciphertext is uploaded later (after the optimistic
+    // bubble is shown) so progress + cancel drive the sender's UI.
     let params = vector_core::crypto::generate_encryption_params();
     let encrypted = vector_core::crypto::encrypt_data(&bytes, &params)?;
     let encrypted_size = encrypted.len() as u64;
-
-    let client = vector_core::state::nostr_client().ok_or("Nostr client not initialised")?;
-    let signer = client.signer().await.map_err(|e| format!("signer: {e}"))?;
-    let servers = vector_core::blossom_servers::compute_enabled_servers();
-    if servers.is_empty() {
-        return Err("No Blossom servers configured.".to_string());
-    }
-    let url = vector_core::blossom::upload_blob_with_failover(
-        signer,
-        servers,
-        std::sync::Arc::new(encrypted),
-        Some("application/octet-stream"),
-    )
-    .await?;
+    let mime = vector_core::crypto::mime_from_extension(&extension).to_string();
 
     let attachment = Attachment {
         id: plaintext_hash.clone(),
@@ -836,7 +839,7 @@ async fn process_outbound_community_attachment_bytes(
         nonce: params.nonce,
         extension,
         name,
-        url,
+        url: String::new(), // filled in once the upload completes
         path: local_path.to_string_lossy().to_string(),
         size: encrypted_size,
         img_meta,
@@ -848,8 +851,7 @@ async fn process_outbound_community_attachment_bytes(
         scheme_version: None,
         mls_filename: None,
     };
-    let imeta = vector_core::community::attachments::attachment_to_imeta(&attachment);
-    Ok((attachment, imeta))
+    Ok(PreparedCommunityAttachment { attachment, encrypted, mime })
 }
 
 /// Post a Community message carrying a caption (`content`, may be empty) plus one or more
@@ -906,10 +908,9 @@ pub(crate) async fn send_community_voice_bytes(
     replied_to: Option<String>,
 ) -> Result<(), String> {
     let session = vector_core::state::SessionGuard::capture();
-    let (mut attachment, _) = process_outbound_community_attachment_bytes(bytes, "voice-message.wav", false).await?;
-    attachment.name = String::new();
-    let imeta = vector_core::community::attachments::attachment_to_imeta(&attachment);
-    dispatch_community_attachment_message(channel_id, String::new(), replied_to, session, vec![(attachment, imeta)]).await
+    let mut prepared = process_outbound_community_attachment_bytes(bytes, "voice-message.wav", false).await?;
+    prepared.attachment.name = String::new();
+    dispatch_community_attachment_message(channel_id, String::new(), replied_to, session, vec![prepared]).await
 }
 
 /// Send the JS-cached paste bytes (populated by `cache_file_bytes` on clipboard paste,
@@ -938,21 +939,22 @@ pub async fn send_community_cached_file(
     dispatch_community_attachment_message(channel_id, content, replied_to, session, prepared).await
 }
 
-/// Shared tail for the Community file-send commands: resolve the channel, build ONE inner
-/// event carrying the caption + every attachment's `imeta`, drive the optimistic
-/// pending → sent/failed lifecycle (mirrors `send_community_message`), and finalize.
-/// `prepared` is the already-encrypted-and-uploaded (Attachment, imeta-Tag) set.
+/// Shared tail for the Community file-send commands: resolve the channel, show an optimistic
+/// bubble FIRST (temp id), upload each attachment with progress + cancel, then build ONE inner
+/// event carrying the caption + every attachment's `imeta`, sign, publish, and finalize the
+/// temp id → real id. Mirrors the DM `send_file_dm` lifecycle so Communities get the same
+/// progress ring / cancel button / instant preview. `prepared` is the encrypted-but-not-yet-
+/// uploaded attachment set.
 async fn dispatch_community_attachment_message(
     channel_id: String,
     content: String,
     replied_to: Option<String>,
     session: vector_core::state::SessionGuard,
-    prepared: Vec<(vector_core::types::Attachment, nostr_sdk::Tag)>,
+    prepared: Vec<PreparedCommunityAttachment>,
 ) -> Result<(), String> {
     use vector_core::sending::SendCallback;
     use vector_core::Message;
 
-    // The uploads already ran; bail if the account swapped under them.
     if !session.is_valid() {
         return Err("account changed during upload".to_string());
     }
@@ -973,15 +975,102 @@ async fn dispatch_community_attachment_message(
         .ok_or("Channel not found in Community")?
         .clone();
 
-    let (attachments, imeta_tags): (Vec<_>, Vec<_>) = prepared.into_iter().unzip();
-
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     let ms = now.as_millis() as u64;
+    // Temp id keyed during upload — the real inner id depends on the imeta (uploaded URLs),
+    // so it isn't known until every attachment lands. Finalized → real id on publish ack.
+    let pending_id = format!("pending-{}", now.as_nanos());
     let callback = crate::message::sending::TauriSendCallback;
-
     let emoji_tags = vector_core::emoji_packs::resolve_outbound_emoji_tags(&content);
+
+    // Optimistic bubble — attachments carry empty URLs (plaintext is already on disk for the
+    // sender's preview); the upload fills them in.
+    let optimistic_attachments: Vec<_> = prepared.iter().map(|p| p.attachment.clone()).collect();
+    let pending_msg = Message {
+        id: pending_id.clone(),
+        content: content.clone(),
+        at: ms,
+        pending: true,
+        mine: true,
+        npub: my_npub.clone(),
+        replied_to: reply.clone().unwrap_or_default(),
+        emoji_tags: emoji_tags.clone(),
+        attachments: optimistic_attachments,
+        ..Default::default()
+    };
+    {
+        let mut state = vector_core::state::STATE.lock().await;
+        state.add_message_to_chat(&channel_id, pending_msg.clone());
+    }
+    // Registers the cancel flag (keyed by pending_id) + emits the pending bubble.
+    callback.on_pending(&channel_id, &pending_msg);
+
+    // Cancel flag the cancel_upload command flips — bridge it into Blossom so a cancel
+    // between progress ticks still aborts the transfer.
+    let cancel_flag = crate::message::upload_cancel_flags().lock().unwrap().get(&pending_id).cloned();
+
+    let client = vector_core::state::nostr_client().ok_or("Not logged in")?;
+    let signer = client.signer().await.map_err(|e| format!("Signer unavailable: {e}"))?;
+    let servers = vector_core::blossom_servers::compute_enabled_servers();
+    if servers.is_empty() {
+        let _ = mark_attachment_send_failed(&callback, &channel_id, &pending_id).await;
+        return Err("No Blossom servers configured.".to_string());
+    }
+
+    // Upload each attachment, driving the progress ring (keyed by pending_id) + filling URLs.
+    let mut uploaded: Vec<vector_core::types::Attachment> = Vec::with_capacity(prepared.len());
+    for prep in prepared {
+        let PreparedCommunityAttachment { mut attachment, encrypted, mime } = prep;
+        let cb_for_progress = callback.clone();
+        let pid_for_progress = pending_id.clone();
+        let progress_cb: vector_core::blossom::ProgressCallback =
+            std::sync::Arc::new(move |percentage, bytes| {
+                cb_for_progress.on_upload_progress(
+                    &pid_for_progress,
+                    percentage.unwrap_or(0),
+                    bytes.unwrap_or(0),
+                )
+            });
+
+        let upload_url = match vector_core::blossom::upload_blob_with_progress_and_failover(
+            signer.clone(),
+            servers.clone(),
+            std::sync::Arc::new(encrypted),
+            Some(mime.as_str()),
+            /* is_encrypted */ true,
+            progress_cb,
+            Some(3),
+            Some(Duration::from_secs(2)),
+            cancel_flag.clone(),
+        )
+        .await
+        {
+            Ok(url) => url,
+            Err(e) => {
+                let _ = mark_attachment_send_failed(&callback, &channel_id, &pending_id).await;
+                return Err(format!("Upload failed: {e}"));
+            }
+        };
+
+        attachment.url = upload_url.clone();
+        // Reflect the uploaded URL on the optimistic bubble's attachment.
+        {
+            let mut state = vector_core::state::STATE.lock().await;
+            state.update_attachment(&channel_id, &pending_id, &attachment.id, |a| {
+                a.url = upload_url.clone().into_boxed_str();
+            });
+        }
+        callback.on_upload_complete(&channel_id, &pending_id, &attachment.id, &upload_url);
+        uploaded.push(attachment);
+    }
+
+    // Build the real inner now that every imeta carries its uploaded URL.
+    let imeta_tags: Vec<_> = uploaded
+        .iter()
+        .map(vector_core::community::attachments::attachment_to_imeta)
+        .collect();
     let unsigned = vector_core::community::envelope::build_inner_full(
         author_pk,
         &channel.id,
@@ -993,33 +1082,18 @@ async fn dispatch_community_attachment_message(
         &emoji_tags,
         &imeta_tags,
     );
-    let message_id = unsigned.id.ok_or("inner event has no id")?.to_hex();
-
-    // Optimistic message — caption + all attachments, keyed by its real id.
-    let pending_msg = Message {
-        id: message_id.clone(),
-        content: content.clone(),
-        at: ms,
-        pending: true,
-        mine: true,
-        npub: my_npub.clone(),
-        replied_to: reply.clone().unwrap_or_default(),
-        emoji_tags: emoji_tags.clone(),
-        attachments,
-        ..Default::default()
+    let real_id = match unsigned.id {
+        Some(id) => id.to_hex(),
+        None => {
+            let _ = mark_attachment_send_failed(&callback, &channel_id, &pending_id).await;
+            return Err("inner event has no id".to_string());
+        }
     };
-    {
-        let mut state = vector_core::state::STATE.lock().await;
-        state.add_message_to_chat(&channel_id, pending_msg.clone());
-    }
-    callback.on_pending(&channel_id, &pending_msg);
 
-    let signed = async {
-        let client = vector_core::state::nostr_client().ok_or("Not logged in")?;
-        let signer = client.signer().await.map_err(|e| format!("Signer unavailable: {e}"))?;
-        unsigned.sign(&signer).await.map_err(|e| format!("Failed to sign message: {e}"))
-    }
-    .await;
+    let signed = unsigned
+        .sign(&signer)
+        .await
+        .map_err(|e| format!("Failed to sign message: {e}"));
 
     let publish_result = match signed {
         Ok(inner) if session.is_valid() => {
@@ -1032,30 +1106,42 @@ async fn dispatch_community_attachment_message(
 
     match publish_result {
         Ok(_outer) => {
-            let sent = {
+            // Swap temp id → real id and clear pending.
+            let finalized = {
                 let mut state = vector_core::state::STATE.lock().await;
-                state.update_message(&message_id, |m| m.set_pending(false))
+                state.finalize_pending_message(&channel_id, &pending_id, &real_id)
             };
-            if let Some((_cid, ref msg)) = sent {
-                callback.on_sent(&channel_id, &message_id, msg);
+            if let Some((_old, ref msg)) = finalized {
+                callback.on_sent(&channel_id, &pending_id, msg);
                 callback.on_persist(&channel_id, msg);
             }
             Ok(())
         }
         Err(e) => {
-            let failed = {
-                let mut state = vector_core::state::STATE.lock().await;
-                state.update_message(&message_id, |m| {
-                    m.set_failed(true);
-                    m.set_pending(false);
-                })
-            };
-            if let Some((_cid, ref msg)) = failed {
-                callback.on_failed(&channel_id, &message_id, msg);
-            }
+            let _ = mark_attachment_send_failed(&callback, &channel_id, &pending_id).await;
             Err(e)
         }
     }
+}
+
+/// Mark an optimistic Community attachment message failed (keeps the temp id; offers retry).
+async fn mark_attachment_send_failed(
+    callback: &crate::message::sending::TauriSendCallback,
+    channel_id: &str,
+    pending_id: &str,
+) -> Option<()> {
+    use vector_core::sending::SendCallback;
+    let failed = {
+        let mut state = vector_core::state::STATE.lock().await;
+        state.update_message(pending_id, |m| {
+            m.set_failed(true);
+            m.set_pending(false);
+        })
+    };
+    if let Some((_cid, ref msg)) = failed {
+        callback.on_failed(channel_id, pending_id, msg);
+    }
+    Some(())
 }
 
 /// How many append-plane events a single network page fetches (newest-first). Larger than

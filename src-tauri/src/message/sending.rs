@@ -42,6 +42,7 @@ pub struct MessageSendResult {
 // TauriSendCallback — Bridges vector-core send events to Tauri frontend
 // ============================================================================
 
+#[derive(Clone, Copy)]
 pub struct TauriSendCallback;
 
 impl SendCallback for TauriSendCallback {
