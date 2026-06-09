@@ -78,6 +78,12 @@ pub struct CommunitySummary {
     /// True once a valid owner GroupDissolved tombstone has sealed the community. The frontend
     /// renders the end-of-community marker, disables the composer, and offers a local Remove.
     pub dissolved: bool,
+    /// True when a warmed invite preload was promoted on this accept — the chat is already populated
+    /// (and its messages emitted), so the frontend can open it IMMEDIATELY instead of awaiting the
+    /// first sync (which would otherwise gate the open on the control fold). Always false outside
+    /// the accept path.
+    #[serde(default)]
+    pub preloaded: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -109,6 +115,7 @@ fn summarize(community: &vector_core::community::Community) -> CommunitySummary 
             .collect(),
         owner_npub,
         dissolved: community.dissolved,
+        preloaded: false,
     }
 }
 
@@ -1416,12 +1423,26 @@ async fn sync_community_channel_inner(
         vector_core::community::cache::newest_cursor(channel_id).map(|s| s.saturating_sub(SINCE_LOOKBACK_SECS))
     };
 
+    // Adopt an in-flight invite preload for the PRIMARY channel's latest page: rather than fire a
+    // second fetch, wait on the warm-up fetch already running (it IS the page) — so the join speedup
+    // holds even if the user tapped Join before the warm-up landed. Falls through to a normal fetch
+    // on miss / timeout / non-primary channel / older page (only the primary channel was warmed, and
+    // only the latest page is preload-shaped: newest, no `until`).
+    let is_primary = community.channels.first().map(|c| c.id) == Some(channel.id);
+    let adopted = if !is_older && is_primary {
+        vector_core::community::cache::take_or_await_preload(&community_id).await
+    } else {
+        None
+    };
     // Fetch one page over the network — NO STATE lock held across the await.
     let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-    let events = vector_core::community::send::fetch_channel_page(
-        &transport, &community, &channel, until_secs, since_secs, COMMUNITY_PAGE_FETCH_LIMIT,
-    )
-    .await?;
+    let events = match adopted {
+        Some(page) => page,
+        None => vector_core::community::send::fetch_channel_page(
+            &transport, &community, &channel, until_secs, since_secs, COMMUNITY_PAGE_FETCH_LIMIT,
+        )
+        .await?,
+    };
     if !session.is_valid() {
         return Err("account changed during sync".to_string());
     }
@@ -2122,6 +2143,63 @@ pub async fn list_community_invites() -> Result<Vec<vector_core::db::community::
     vector_core::db::community::list_pending_invites()
 }
 
+/// Ingest a warmed preload page into STATE + DB so a just-accepted community opens populated.
+/// Mirrors the sync's persistence (`process_channel_batch` → save outcomes) MINUS the UI emits —
+/// the chat isn't open yet, so the frontend reads this from STATE on open; the background sync
+/// trues it up (presence/system events included). Seeds the newest cursor so that sync only pulls
+/// genuinely-new events.
+/// Returns `true` if it painted ≥1 message (so the caller can flag the summary `preloaded` and the
+/// frontend opens immediately instead of awaiting the first sync).
+async fn promote_preloaded_page(community: &vector_core::community::Community, page: Vec<nostr_sdk::Event>) -> bool {
+    use vector_core::community::inbound::IncomingEvent;
+    let Some(channel) = community.channels.first().cloned() else { return false };
+    let channel_id = channel.id.to_hex();
+    let Some(my_pk) = vector_core::my_public_key() else { return false };
+    let session = vector_core::state::SessionGuard::capture();
+    if !session.is_valid() {
+        return false;
+    }
+    let outcomes = {
+        let mut state = vector_core::state::STATE.lock().await;
+        vector_core::community::inbound::process_channel_batch(&mut state, &page, &channel, &my_pk)
+    };
+    let mut painted = 0u32;
+    for outcome in &outcomes {
+        if !session.is_valid() {
+            break;
+        }
+        match outcome {
+            IncomingEvent::NewMessage(msg) => {
+                let _ = crate::db::save_message(&channel_id, msg).await;
+                // Emit so the (optimistic, locked) chat row populates + unlocks NOW — the frontend
+                // learns messages via message_new, so without this the promote is invisible to the UI.
+                vector_core::emit_event(
+                    "message_new",
+                    &serde_json::json!({ "message": msg, "chat_id": &channel_id }),
+                );
+                painted += 1;
+            }
+            IncomingEvent::Updated { target_id, message } => {
+                let _ = crate::db::save_message(&channel_id, message).await;
+                vector_core::emit_event(
+                    "message_update",
+                    &serde_json::json!({ "old_id": target_id, "message": message, "chat_id": &channel_id }),
+                );
+            }
+            IncomingEvent::Removed { target_id } => {
+                let _ = crate::db::delete_event(target_id).await;
+            }
+            // Presence / membership outcomes are left to the background true-up sync (it re-fetches
+            // the same page and applies them, deduped) — promotion only paints the message content.
+            _ => {}
+        }
+    }
+    if let Some(newest) = page.iter().map(|e| e.created_at.as_secs()).max() {
+        vector_core::community::cache::advance_newest_cursor(&channel_id, newest);
+    }
+    painted > 0
+}
+
 /// Accept a parked invite: join as a member, persist, and start receiving. Guards
 /// against id-collision overwrites (vector-core `service::accept_invite`), then dials
 /// the Community relays + subscribes.
@@ -2153,6 +2231,14 @@ pub async fn accept_community_invite(community_id: String) -> Result<CommunitySu
     // Return the summary the instant local state is ready; fan the rest out in the background.
     vector_core::db::community::delete_pending_invite(&community_id)?;
     sync_community_chats(&community).await;
+
+    // Promote a warmed preload: if we fetched this community's first page ahead of Join (invite
+    // receive / public preview), ingest it NOW so the chat opens populated instead of waiting on the
+    // first sync. The background sync still runs and trues it up; dedup makes the re-fetch harmless.
+    let preloaded = match vector_core::community::cache::take_ready_preload(&community_id) {
+        Some(page) => promote_preloaded_page(&community, page).await,
+        None => false,
+    };
 
     // Local-first self-join: build our join presence, record the "X joined" system event immediately
     // (memory→DB + UI), then publish it in the background. The relay echo dedups by this inner's id, so
@@ -2187,7 +2273,7 @@ pub async fn accept_community_invite(community_id: String) -> Result<CommunitySu
         crate::services::subscription_handler::refresh_community_subscription().await;
     });
 
-    Ok(summarize(&community))
+    Ok(CommunitySummary { preloaded, ..summarize(&community) })
 }
 
 /// Decline a parked invite (drop it without joining).
@@ -2434,6 +2520,16 @@ pub async fn preview_public_invite(url: String) -> Result<PublicInvitePreview, S
     let (relays, token) = parse_invite_url(&url).map_err(|e| e.to_string())?;
     let transport = LiveTransport::with_timeout(Duration::from_secs(12));
     let bundle = service::fetch_public_invite(&transport, &relays, &token).await?;
+    // Warm the community's first page in the background while the user reads the preview, so an
+    // Accept opens populated. RAM-only + best-effort; promotion on Join re-validates freshness.
+    let invite_warm = bundle.join.clone();
+    let bg = vector_core::state::SessionGuard::capture();
+    tokio::spawn(async move {
+        if !bg.is_valid() {
+            return;
+        }
+        vector_core::community::service::preload_community(&invite_warm).await;
+    });
     Ok(bundle.preview)
 }
 
@@ -2449,40 +2545,68 @@ pub async fn accept_public_invite(url: String) -> Result<CommunitySummary, Strin
         return Err("account changed during invite accept".to_string());
     }
     let community = service::accept_public_invite(&bundle, now_secs())?;
-    // The bundle's root can predate a base rotation, so walk any rekey first (no-op if none), then re-load
-    // so the control fold + registration happen at the CURRENT epoch. An authorized rotation that excluded us
-    // (the link predates our ban) is a removal — refuse the join + tear back down.
-    if let Ok(c) = service::catch_up_server_root(&transport, &community).await {
-        if c.removed {
-            let _ = vector_core::db::community::delete_community(&community.id.to_hex());
-            return Err("you have been removed from this community".to_string());
-        }
-    }
-    let community = vector_core::db::community::load_community(&community.id)?.unwrap_or(community);
-    // Fold the LATEST control plane before registering — show the current name/description/roster/mode, not
-    // the bundle's genesis snapshot. Banlist first: refuse (and tear back down) if this npub is banned, so an
-    // honest client won't let a banned member rejoin through an old link.
-    let _ = service::fetch_and_apply_control(&transport, &community).await;
-    if service::am_i_banned(&community) {
-        let _ = vector_core::db::community::delete_community(&community.id.to_hex());
-        return Err("you are banned from this community".to_string());
-    }
-    let community = vector_core::db::community::load_community(&community.id)?.unwrap_or(community);
     if !session.is_valid() {
         return Err("account changed during invite accept".to_string());
     }
+    // Open NOW, gate in the BACKGROUND (mirrors the private accept). Register the chat + promote the
+    // warmed page so the chat opens populated instantly; the control gate (rotation follow + banlist /
+    // read-cut) runs in the background first-sync (fired by the frontend) AND in the membership task
+    // below, tearing the chat down if this link's holder turns out to be banned/removed. The page
+    // shown is content the link's own keys already decrypt, so the brief pre-teardown window discloses
+    // nothing new — the rekey + teardown cut all future access.
     sync_community_chats(&community).await;
-    // record the join in the cross-device list so our other devices auto-join silently. Captured
-    // AFTER the catch-up so the seed bundle holds the current root + channel keys (a link can predate a rotation).
-    vector_core::community::list::add_membership(&community);
-    crate::services::subscription_handler::refresh_community_subscription().await;
-    // Best-effort join announcement (kind 3306) so honest peers see us in their member list — carrying
-    // attribution (who/which-link invited us) from the bundle, so the community gets the metric.
+    let preloaded = match vector_core::community::cache::take_ready_preload(&community.id.to_hex()) {
+        Some(page) => promote_preloaded_page(&community, page).await,
+        None => false,
+    };
+
+    // Local-first join presence (carry the link's attribution), published in the background — so the
+    // "X joined" line shows instantly without waiting on the 12s presence publish.
+    let attribution = bundle.creator_npub.clone().map(|by| (by, bundle.label.clone()));
     if let Some(primary) = community.channels.first() {
-        let attribution = bundle.creator_npub.clone().map(|by| (by, bundle.label.clone()));
-        let _ = service::publish_presence(&transport, &community, primary, true, attribution).await;
+        if let Ok(inner) = service::build_presence(primary, true, attribution.clone()).await {
+            if let Some(my_npub) = vector_core::my_public_key().and_then(|pk| pk.to_bech32().ok()) {
+                let (by, label) = match &attribution {
+                    Some((b, l)) => (Some(b.as_str()), l.as_deref()),
+                    None => (None, None),
+                };
+                apply_community_presence(
+                    &primary.id.to_hex(), &my_npub, true,
+                    &inner.id.to_hex(), inner.created_at.as_secs(), by, label,
+                ).await;
+            }
+            let bg_pub = vector_core::state::SessionGuard::capture();
+            let community_pub = community.clone();
+            let primary_pub = primary.clone();
+            tokio::spawn(async move {
+                if !bg_pub.is_valid() { return; }
+                let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+                let _ = service::publish_presence_event(&transport, &community_pub, &primary_pub, &inner).await;
+            });
+        }
     }
-    Ok(summarize(&community))
+
+    // Background: follow any rotation the link predates (so membership records CURRENT keys; an
+    // excluding rotation = removal → teardown), then record cross-device membership + (re)subscribe.
+    let bg = vector_core::state::SessionGuard::capture();
+    let community_bg = community.clone();
+    tokio::spawn(async move {
+        if !bg.is_valid() { return; }
+        let bt = LiveTransport::with_timeout(Duration::from_secs(20));
+        if let Ok(c) = service::catch_up_server_root(&bt, &community_bg).await {
+            if c.removed {
+                self_remove_from_community(&community_bg.id.to_hex(), false).await;
+                return;
+            }
+        }
+        let community_bg = vector_core::db::community::load_community(&community_bg.id)
+            .ok()
+            .flatten()
+            .unwrap_or(community_bg);
+        vector_core::community::list::add_membership(&community_bg);
+        crate::services::subscription_handler::refresh_community_subscription().await;
+    });
+    Ok(CommunitySummary { preloaded, ..summarize(&community) })
 }
 
 /// List the active public-invite links the user has minted for a Community.

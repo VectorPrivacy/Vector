@@ -1904,9 +1904,10 @@ async function surfaceCommunitySummary(summary) {
     loadCommunityRoles(summary.community_id);
     resolveCommunityAvatars();
     renderChatlist();
-    // Let the primary channel's first page land before we hand control back (so the opener sees
-    // messages + the chat sorts by real activity, not bottom-of-list).
-    if (firstSync) await firstSync;
+    // If a warmed preload was promoted on Accept, the chat is ALREADY populated (its messages were
+    // emitted by the backend), so open immediately — the first sync trues it up in the background.
+    // Only await the sync when NOT preloaded (a cold join would otherwise open to an empty chat).
+    if (firstSync && !summary.preloaded) await firstSync;
     renderChatlist();
     return firstChannel;
 }

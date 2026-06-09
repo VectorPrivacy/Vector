@@ -1129,6 +1129,27 @@ pub fn accept_invite(invite: &CommunityInvite) -> Result<Community, String> {
     Ok(community)
 }
 
+/// Warm a community's primary-channel first page into the RAM preload cache BEFORE the user joins,
+/// so accepting opens a populated chat instead of paying the join sync. RAM-only and side-effect-
+/// free: builds the member view from the bundle WITHOUT persisting (nothing is stored for a
+/// community the user may decline), fetches one page, and stashes it keyed by community id (the
+/// fetch also warms the relay connection). Best-effort — any failure just leaves Join to sync
+/// normally. Spawn this behind a `SessionGuard`; promotion on Join re-validates freshness.
+pub async fn preload_community(invite: &super::invite::CommunityInvite) {
+    let Ok(community) = super::invite::accept_invite(invite) else { return };
+    let Some(channel) = community.channels.first() else { return };
+    let cid = community.id.to_hex();
+    // Mark in-flight FIRST so a Join that races the fetch adopts it instead of double-fetching.
+    crate::community::cache::begin_preload(&cid);
+    let transport = super::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+    // Newest page, no `since` (first warm). 50 mirrors the GUI page limit.
+    match super::send::fetch_channel_page(&transport, &community, channel, None, None, 50).await {
+        Ok(page) if !page.is_empty() => crate::community::cache::finish_preload(&cid, page),
+        // Empty page or fetch error → drop the in-flight marker so an adopter falls back at once.
+        _ => crate::community::cache::abort_preload(&cid),
+    }
+}
+
 /// Persist edited Community display metadata and republish the GroupRoot as a real-npub 3308 edition
 /// (vsk=0) so other members + re-anchoring pick it up. Keyless authority: the actor must hold
 /// `MANAGE_METADATA` (the owner holds every permission). The caller mutates `community` (name /

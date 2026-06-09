@@ -387,7 +387,20 @@ pub async fn commit_prepared_event(
                 Err(e) => { log_warn!("[community] invite re-serialize failed: {}", e); return false; }
             };
             match crate::db::community::save_pending_invite(&community_id, &bundle_json, &inviter) {
-                Ok(true) => handler.on_community_invite(&community_id),
+                Ok(true) => {
+                    handler.on_community_invite(&community_id);
+                    // Warm the community's first page in the background so a subsequent Accept opens
+                    // populated instead of paying the join sync. RAM-only + best-effort; promotion on
+                    // Join re-validates freshness. SessionGuard'd so a mid-flight swap is a no-op.
+                    let invite_warm = invite.clone();
+                    let bg = crate::state::SessionGuard::capture();
+                    tokio::spawn(async move {
+                        if !bg.is_valid() {
+                            return;
+                        }
+                        crate::community::service::preload_community(&invite_warm).await;
+                    });
+                }
                 Ok(false) => {} // raced — already parked
                 Err(e) => log_warn!("[community] invite park failed: {}", e),
             }
