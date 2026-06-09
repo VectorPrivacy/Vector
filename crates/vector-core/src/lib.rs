@@ -855,7 +855,7 @@ impl VectorCore {
         }
         let (community, channel) = self.resolve_channel(channel_id)?;
 
-        let events = send::fetch_channel_page(&transport, &community, &channel, None, limit.max(1))
+        let events = send::fetch_channel_page(&transport, &community, &channel, None, None, limit.max(1))
             .await
             .map_err(VectorError::Other)?;
         let outcomes = {

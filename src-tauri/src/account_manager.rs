@@ -658,10 +658,9 @@ pub async fn reset_session() {
     // pseudonyms; carrying it across swap misroutes account A's control editions into B's session.
     { crate::services::subscription_handler::CONTROL_ROUTES.lock().await.clear(); }
     // Community per-channel sync state (account-scoped) — drop so account B doesn't inherit
-    // A's history-start flags, paging cursors, or any stale in-flight claims.
-    { crate::commands::community::COMMUNITY_HISTORY_START.lock().unwrap().clear(); }
-    { crate::commands::community::COMMUNITY_OLDEST_CURSOR.lock().unwrap().clear(); }
-    { crate::commands::community::COMMUNITY_SYNC_INFLIGHT.lock().unwrap().clear(); }
+    // A's history-start flags, paging cursors, or any stale in-flight claims. (Access-time
+    // generation checks self-reset too; this is the explicit teardown.)
+    vector_core::community::cache::clear();
 
     // Pending invite captured during account creation (must NOT auto-execute
     // on the next account).

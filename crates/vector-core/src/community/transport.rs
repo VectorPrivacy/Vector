@@ -211,6 +211,14 @@ fn submit_stragglers(events: Vec<Event>) {
 static WARMED_RELAYS: std::sync::LazyLock<std::sync::Mutex<(u64, std::collections::HashSet<String>)>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new((0, std::collections::HashSet::new())));
 
+/// Forget a relay from the warm set — call when a relay is REMOVED from the pool (e.g. pruned after
+/// leaving a community), so a later `warm_client` for another community that shares it doesn't
+/// fast-path-skip the re-add and target a relay the pool no longer holds. Poison-tolerant: the set
+/// is pure optimization state, so a poisoned lock is recovered rather than propagated.
+pub fn forget_warmed_relay(url: &str) {
+    WARMED_RELAYS.lock().unwrap_or_else(|e| e.into_inner()).1.remove(url);
+}
+
 /// Production [`Transport`] over the live Nostr network.
 ///
 /// Reuses the app's persistent client (`state::nostr_client`) — already connected to the user's relays,
@@ -252,7 +260,7 @@ impl LiveTransport {
         // EVERY fetch/publish. Account swaps bump the generation, dropping the cache.
         let generation = crate::state::current_session_generation();
         {
-            let warmed = WARMED_RELAYS.lock().unwrap();
+            let warmed = WARMED_RELAYS.lock().unwrap_or_else(|e| e.into_inner());
             if warmed.0 == generation && relays.iter().all(|r| warmed.1.contains(r)) {
                 return Ok(client);
             }
@@ -289,7 +297,7 @@ impl LiveTransport {
         // Record the now-connected relays as warmed for this generation so subsequent calls fast-path
         // (reset the set if the generation advanced under us — a swap mid-warm).
         {
-            let mut warmed = WARMED_RELAYS.lock().unwrap();
+            let mut warmed = WARMED_RELAYS.lock().unwrap_or_else(|e| e.into_inner());
             if warmed.0 != generation {
                 warmed.0 = generation;
                 warmed.1.clear();
@@ -392,7 +400,10 @@ impl Transport for LiveTransport {
         // If the fastest relay came back EMPTY, briefly wait for a relay that actually HOLDS events
         // before returning — a fast-but-empty relay must not win over one with the data (and control
         // folds fail-closed on an empty plane). Bounded so an unreachable straggler can't stall us.
-        if result.is_empty() && !fetches.is_empty() {
+        // SKIPPED for `since`-bounded queries (the steady-state message page): a `since`-floored empty
+        // is almost always a true "nothing new", so paying 800ms on the most common sync isn't worth
+        // it — and the background-merge below still folds in anything a slower relay alone holds.
+        if result.is_empty() && !fetches.is_empty() && query.since.is_none() {
             let grace = tokio::time::sleep(std::time::Duration::from_millis(800));
             tokio::pin!(grace);
             loop {

@@ -184,6 +184,7 @@ pub async fn fetch_channel_page<T: Transport + ?Sized>(
     community: &Community,
     channel: &Channel,
     until: Option<u64>,
+    since: Option<u64>,
     limit: usize,
 ) -> Result<Vec<Event>, String> {
     let query = Query {
@@ -200,6 +201,11 @@ pub async fn fetch_channel_page<T: Transport + ?Sized>(
         // first, older epochs backfill the deficit) and scroll-back keeps walking older epochs.
         z_tags: channel_read_pseudonyms(channel),
         until,
+        // `since` (latest-page only) skips re-pulling events already held — set to the newest wire
+        // time seen. Inclusive on the relay, so the boundary second is re-admitted (dedup drops it),
+        // catching any sibling event sharing that second. Epoch spanning is unaffected (it's in
+        // z_tags, above), and back-pagination passes `None` here.
+        since,
         limit: Some(limit),
         ..Default::default()
     };
@@ -324,7 +330,7 @@ mod tests {
             epoch_keys: vec![(Epoch(0), k0), (Epoch(1), k1)],
             dissolved: false,
         };
-        let page = fetch_channel_page(&relay, &reader, &reader.channels[0], None, 20).await.unwrap();
+        let page = fetch_channel_page(&relay, &reader, &reader.channels[0], None, None, 20).await.unwrap();
         let opened: Vec<String> = page.iter()
             .filter_map(|e| open_message_multi(e, &reader.channels[0].id, &reader.channels[0].read_epoch_keys()).ok())
             .map(|m| m.content)

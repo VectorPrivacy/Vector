@@ -467,8 +467,11 @@ async fn prune_orphaned_community_relays(left_relays: &[String]) {
                 }
             }
             // Pure GOSSIP-only community relay nobody else needs → force-remove (plain remove_relay
-            // refuses GOSSIP relays) + disconnect.
+            // refuses GOSSIP relays) + disconnect. Also forget it from the warm-set, else a later
+            // warm_client for a community that shares this relay would fast-path-skip the re-add and
+            // target a relay the pool no longer holds.
             let _ = pool.force_remove_relay(parsed).await;
+            vector_core::community::transport::forget_warmed_relay(url);
         }
     }
 }
@@ -518,7 +521,32 @@ const CHANNEL_FOLLOW_BACKOFF_MS: u64 = 700;
 /// only on the next sync; a `community_refreshed` event tells the UI to re-render. Best-effort, SessionGuard
 /// across the fetches. Runs SPAWNED off the notification loop, so it may rebuild the subscription when the
 /// follow advances an epoch (resubscribe at the new pseudonyms) without re-entering that loop.
+/// Per-community in-flight guard for `refresh_community_control` — one 3308 can be delivered by the
+/// realtime route, the straggler sink, AND a reconnect resync at once; without this they'd run
+/// duplicate concurrent full control catch-ups racing on the same community row.
+static REFRESH_CONTROL_INFLIGHT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
 pub(crate) async fn refresh_community_control(community_id: &str) {
+    // Claim the in-flight slot or bail (a concurrent refresh is already folding this community).
+    {
+        let mut inflight = REFRESH_CONTROL_INFLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+        if !inflight.insert(community_id.to_string()) {
+            return;
+        }
+    }
+    // RAII release — panic-safe, so a fold panic can't permanently wedge this community's refreshes.
+    struct RefreshClaim(String);
+    impl Drop for RefreshClaim {
+        fn drop(&mut self) {
+            REFRESH_CONTROL_INFLIGHT
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&self.0);
+        }
+    }
+    let _claim = RefreshClaim(community_id.to_string());
+
     let session = vector_core::state::SessionGuard::capture();
     let Ok(id_bytes) = hex_to_id32(community_id) else { return; };
     let Some(community) = vector_core::db::community::load_community(&CommunityId(id_bytes)).ok().flatten() else { return; };
@@ -1211,25 +1239,8 @@ async fn mark_attachment_send_failed(
 /// before another network page is needed.
 const COMMUNITY_PAGE_FETCH_LIMIT: usize = 50;
 
-/// In-flight network page fetches, keyed `"{channel_id}:{cursor|latest}"`. Anti-stampede:
-/// an eager user clicking/scrolling can't fire the same page twice — the duplicate no-ops.
-/// Cleared on account swap (reset_session) for symmetry with the others.
-pub(crate) static COMMUNITY_SYNC_INFLIGHT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
-
-/// Channels whose network history-start has been reached (an older-page fetch found nothing
-/// strictly older than the cursor). Older-page requests for these go DB-only — no wasted
-/// network round-trips paging into the void. Cleared on account swap (reset_session).
-pub(crate) static COMMUNITY_HISTORY_START: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
-
-/// Oldest OUTER (wire send-time) created_at, in seconds, fetched per channel. The relay
-/// filters its `until` against the outer event's created_at, so the older-page cursor MUST be
-/// on that same clock — NOT the inner authored `at` (which a hostile member can backdate or
-/// post-date, and which `open_message` clamps for far-future values). Tracking the real wire
-/// time here immunizes scroll-back against inner-timestamp manipulation. Cleared on reset_session.
-pub(crate) static COMMUNITY_OLDEST_CURSOR: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+// Community sync RAM state (page cursors, history-start floors, in-flight de-dup) lives in
+// `vector_core::community::cache`, consolidated under one session-generation invalidation key.
 
 /// Result of a Community page sync. `reached_start` is the AUTHORITATIVE "no more older
 /// history" signal (the relay returned nothing strictly older than the cursor) — the frontend
@@ -1257,7 +1268,7 @@ pub async fn sync_community_channel(channel_id: String, before_ms: Option<u64>) 
     let is_older = before_ms.is_some();
 
     // History-start: stop paging into the void once we've found a channel's beginning.
-    if is_older && COMMUNITY_HISTORY_START.lock().unwrap().contains(&channel_id) {
+    if is_older && vector_core::community::cache::is_at_history_start(&channel_id) {
         return Ok(CommunitySyncResult { new_messages: 0, reached_start: true });
     }
 
@@ -1265,13 +1276,19 @@ pub async fn sync_community_channel(channel_id: String, before_ms: Option<u64>) 
     // backend-tracked (not the varying `before_ms`), so all concurrent older requests target
     // the same page → one key dedups them; latest is its own key.
     let key = format!("{channel_id}:{}", if is_older { "older" } else { "latest" });
-    if !COMMUNITY_SYNC_INFLIGHT.lock().unwrap().insert(key.clone()) {
+    if !vector_core::community::cache::try_begin_page_fetch(&key) {
         return Ok(CommunitySyncResult::default());
     }
-    // Run the fetch; ALWAYS release the in-flight claim (success or error).
-    let result = sync_community_channel_inner(&channel_id, before_ms, is_older).await;
-    COMMUNITY_SYNC_INFLIGHT.lock().unwrap().remove(&key);
-    result
+    // RAII release: the claim is dropped on return OR panic, so a panic deep in the fetch can never
+    // leave a permanent in-flight claim that wedges all future syncs of this channel.
+    struct PageClaim(String);
+    impl Drop for PageClaim {
+        fn drop(&mut self) {
+            vector_core::community::cache::end_page_fetch(&self.0);
+        }
+    }
+    let _claim = PageClaim(key);
+    sync_community_channel_inner(&channel_id, before_ms, is_older).await
 }
 
 async fn sync_community_channel_inner(
@@ -1294,20 +1311,22 @@ async fn sync_community_channel_inner(
     // the OLD epoch's pseudonyms until the next sync (the rekey realtime gap).
     let pre_server_epoch = community.server_root_epoch.0;
     let pre_channel_epoch = community.channels.iter().find(|c| c.id.to_hex() == channel_id).map(|c| c.epoch.0);
-    // On the latest-page sync, refresh the banlist FIRST (best-effort), then re-load so the
-    // channel we process carries the fresh `banned` set — banned authors in this very batch get
-    // dropped. Skipped on older-page scroll-back (the list is already current).
+    // On the latest-page sync, run the control catch-up UNCONDITIONALLY — no liveness/freshness gate
+    // ever decides whether to detect authority changes. `catch_up_server_root` /
+    // `catch_up_channel_rekeys` are themselves cheap probes (one racing-fast fetch that breaks when
+    // nothing rotated), and the channel walk MUST run every sync to converge: a re-founding's channel
+    // rekey can lag the base rekey's propagation and is addressed under the PRIOR root, so a one-shot
+    // "did it rotate?" probe would false-negative and strand the new channel key. Skipped only on
+    // older-page scroll-back (the plane is already current).
     let community = if !is_older {
         // Longer than the 12s op-norm: catch-up + the whole-control-plane fold ride this one transport, and
         // boot is REQ-heavy (relays contended + ratelimited), so a short cap returns the plane partial →
-        // convergence/authority silently fail closed. (See refresh_community_control for the same rationale.)
+        // convergence/authority silently fail closed. (See refresh_community_control for the rationale.)
         let bt = LiveTransport::with_timeout(Duration::from_secs(20));
-        // FIRST: walk any base (server-root) rotation — a privatize / private-ban rekey re-anchors the
-        // control plane under the NEW epoch, so we follow it BEFORE reading control/messages (else we read
-        // stale-epoch pseudonyms and fall off). No-op (one cheap probe) when nothing rotated. Re-load after.
-        // An AUTHORIZED base rotation that excluded us (private ban / read-cut) is a removal — tear down
-        // locally, exactly like an observed ban/kick. The catch-all for a cut member who can no longer
-        // decrypt the new control plane to read the banlist (`check_self_banned`) the normal way.
+        // Follow a base (server-root) re-founding BEFORE reading control/messages (else we'd read
+        // stale-epoch pseudonyms and fall off). An AUTHORIZED base rotation that excluded us (private
+        // ban / read-cut) is a removal — tear down locally, the catch-all for a cut member who can no
+        // longer decrypt the new control plane to read the banlist the normal way.
         if let Ok(c) = vector_core::community::service::catch_up_server_root(&bt, &community).await {
             if c.removed {
                 self_remove_from_community(&community_id, false).await;
@@ -1323,7 +1342,9 @@ async fn sync_community_channel_inner(
         if check_self_banned(&community_id).await {
             return Ok(CommunitySyncResult { new_messages: 0, reached_start: true });
         }
-        // Walk THIS channel's rekey chain so we hold the current channel key before paging it.
+        // Walk THIS channel's rekey chain (all held roots + gap-fill) so we hold the current channel
+        // key before paging — unconditional, the self-healing convergence for a lagging/prior-root
+        // channel rekey (mirrors the realtime path).
         if let Some(ch) = community.channels.iter().find(|c| c.id.to_hex() == channel_id) {
             let _ = vector_core::community::service::catch_up_channel_rekeys(&bt, &community, &ch.id).await;
         }
@@ -1373,16 +1394,32 @@ async fn sync_community_channel_inner(
     // page this session. `until` is inclusive (re-admits the boundary; dedup drops it). Latest
     // page (None) fetches the newest events.
     let until_secs = if is_older {
-        let tracked = COMMUNITY_OLDEST_CURSOR.lock().unwrap().get(channel_id).copied();
+        let tracked = vector_core::community::cache::oldest_cursor(channel_id);
         tracked.or_else(|| before_ms.map(|m| m / 1000))
     } else {
         None
     };
 
+    // Latest-page `since`: skip re-pulling events we already hold by floor-ing the fetch at the
+    // newest wire time seen this session. ONLY the latest page (an older page must page strictly
+    // back with no lower bound). `None` before the first latest fetch this session → full newest
+    // page. Epoch spanning is untouched (it's in the pseudonym OR-set, not the cursor).
+    //
+    // The floor is pulled back by SINCE_LOOKBACK_SECS so an event whose OUTER time lands slightly
+    // BELOW the cursor — author clock-skew or late relay propagation — is still swept in (dedup
+    // drops the overlap). Reconnect-gap events aren't at risk: they're NEWER than the cursor, so
+    // they're above the floor regardless.
+    const SINCE_LOOKBACK_SECS: u64 = 120;
+    let since_secs = if is_older {
+        None
+    } else {
+        vector_core::community::cache::newest_cursor(channel_id).map(|s| s.saturating_sub(SINCE_LOOKBACK_SECS))
+    };
+
     // Fetch one page over the network — NO STATE lock held across the await.
     let transport = LiveTransport::with_timeout(Duration::from_secs(12));
     let events = vector_core::community::send::fetch_channel_page(
-        &transport, &community, &channel, until_secs, COMMUNITY_PAGE_FETCH_LIMIT,
+        &transport, &community, &channel, until_secs, since_secs, COMMUNITY_PAGE_FETCH_LIMIT,
     )
     .await?;
     if !session.is_valid() {
@@ -1392,9 +1429,15 @@ async fn sync_community_channel_inner(
     // Advance the outer-time cursor to the oldest wire created_at this page returned (so the
     // NEXT older page steps strictly further back, on the relay's own clock).
     if let Some(oldest) = events.iter().map(|e| e.created_at.as_secs()).min() {
-        let mut cursor = COMMUNITY_OLDEST_CURSOR.lock().unwrap();
-        let slot = cursor.entry(channel_id.to_string()).or_insert(oldest);
-        *slot = (*slot).min(oldest);
+        vector_core::community::cache::advance_oldest_cursor(channel_id, oldest);
+    }
+    // Advance the latest-page `since` floor to the newest wire time this page returned, so the next
+    // latest sync only pulls what's genuinely new. Latest page only — an older page must not raise
+    // the floor (it returns OLD events, which would wrongly cap future top-fetches).
+    if !is_older {
+        if let Some(newest) = events.iter().map(|e| e.created_at.as_secs()).max() {
+            vector_core::community::cache::advance_newest_cursor(channel_id, newest);
+        }
     }
 
     // History-start (older pages): the page came back NON-EMPTY but with nothing strictly
@@ -1407,7 +1450,7 @@ async fn sync_community_channel_inner(
             events.iter().filter(|e| e.created_at.as_secs() < u).count()
         });
         if older_than_cursor == 0 {
-            COMMUNITY_HISTORY_START.lock().unwrap().insert(channel_id.to_string());
+            vector_core::community::cache::mark_history_start(channel_id);
             true
         } else {
             false
@@ -1643,13 +1686,8 @@ async fn rehydrate_listed_communities(
                             // re-page each channel's latest with the now-complete keyset: the multi-epoch fetch
                             // spans all epochs, so a small community shows its whole history immediately and a
                             // busy one still loads older on scroll. Nudge the UI last.
-                            {
-                                let mut hs = COMMUNITY_HISTORY_START.lock().unwrap();
-                                let mut cur = COMMUNITY_OLDEST_CURSOR.lock().unwrap();
-                                for cid in &backfill_channels {
-                                    hs.remove(cid);
-                                    cur.remove(cid);
-                                }
+                            for cid in &backfill_channels {
+                                vector_core::community::cache::clear_channel_floors(cid);
                             }
                             for cid in &backfill_channels {
                                 if !session_for_backfill.is_valid() {

@@ -7,6 +7,7 @@
 //! isolated for exhaustive unit testing before anything depends on them.
 
 pub mod attachments;
+pub mod cache;
 pub mod cipher;
 pub mod derive;
 pub mod envelope;
