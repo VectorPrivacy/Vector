@@ -89,8 +89,10 @@ impl EmojiTag {
                 continue;
             }
             let shortcode = parts[1];
+            // `~` is the reserved separator for duplicate-shortcode disambiguation
+            // (`love~2`); pack-defined codes never contain it, but message tags do.
             if shortcode.is_empty()
-                || !shortcode.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                || !shortcode.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '~')
             {
                 continue;
             }
@@ -114,8 +116,9 @@ impl EmojiTag {
         for tag in tags {
             if tag.len() < 3 || tag[0] != "emoji" { continue; }
             let shortcode = &tag[1];
+            // `~` is the reserved disambiguation separator (see `extract_from_tags`).
             if shortcode.is_empty()
-                || !shortcode.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                || !shortcode.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '~')
             {
                 continue;
             }

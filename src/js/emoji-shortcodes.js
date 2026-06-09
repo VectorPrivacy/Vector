@@ -92,12 +92,15 @@ function initEmojiShortcodeSelector(textarea, anchorEl) {
             row.style.animationDelay = (i * 30) + 'ms';
 
             if (item.isCustom) {
-                // Pack-image icon — straight `<img src=...>` since we
-                // already have a URL. No twemoji indirection.
+                // Route through the cached-image pipeline (downloads via the backend, serves the
+                // bytes from a local `asset://` path the CSP allows). A raw remote `https://` src
+                // is blocked / fails to load in the WebView — which is why custom emojis rendered
+                // blank here while the picker + panel search (both cached) showed them fine.
                 const img = document.createElement('img');
                 img.className = 'emoji-shortcode-item-custom';
-                img.src = item.url;
                 img.alt = `:${item.shortcode}:`;
+                // Cached pipeline only — never a raw remote src (that would fetch outside Tor).
+                bindCachedEmojiImg(img, item.url, 'emoji');
                 row.appendChild(img);
             } else {
                 const twemojiSrc = emojiToTwemojiUrl(item.emoji);
@@ -135,7 +138,12 @@ function initEmojiShortcodeSelector(textarea, anchorEl) {
     function getFiltered() {
         // Don't cache empty-query results — used counts can change between views
         if (!query.length) {
-            return (typeof getMostUsedEmojis === 'function' ? getMostUsedEmojis() : []).slice(0, 5);
+            // Merge stock + custom recents (the picker's Recently Used does the
+            // same) — a user whose recents are mostly custom emojis would
+            // otherwise see an empty/stock-only list on a bare `:`.
+            return getMostUsedEmojis().concat(getMostUsedCustomEmojis(5))
+                .sort((a, b) => (b.used || 0) - (a.used || 0))
+                .slice(0, 5);
         }
         if (cachedResults[query]) return cachedResults[query];
         // Unified merge by score. Both stock and custom bake personal

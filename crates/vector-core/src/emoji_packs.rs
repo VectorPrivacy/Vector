@@ -174,36 +174,67 @@ pub fn set_theme_emoji_tags(tags: Vec<(String, String)>) {
     }
 }
 
-/// Scan `content` for `:shortcode:` patterns and resolve them against
-/// the user's currently-subscribed packs (plus the active theme pack).
-/// Returns deduped emoji tags in first-match order. Used by the send pipeline
-/// to attach NIP-30 emoji tags so recipients without the pack subscribed still
-/// render.
+/// Per-pack emoji cap mirrored from the frontend's `MAX_DISPLAY_EMOJIS_PER_PACK`
+/// (`applyBadgeLimits`). The send resolver caps each subscribed pack to this
+/// many items so its `~N` disambiguation of duplicate shortcodes matches exactly
+/// what the picker displayed — otherwise a large pack's hidden tail (the picker
+/// only shows the first N) would enter the candidate set and shift the indices.
+pub fn effective_display_cap() -> usize {
+    if crate::badges::has_vector_badge() { 100 } else { 30 }
+}
+
+/// Resolve a (possibly `~N`-suffixed) shortcode token against the candidate map.
+/// Plain `base` → the first candidate; `base~N` → the N-th (1-based) candidate
+/// in the same URL-sorted order the picker assigns. A `~N` whose base is unknown
+/// or whose index is out of range yields nothing (renders as literal text).
+fn resolve_emoji_token(by_code: &HashMap<String, Vec<String>>, token: &str) -> Option<String> {
+    if let Some((base, suffix)) = token.rsplit_once('~') {
+        let n: usize = suffix.parse().ok()?;
+        if n == 0 { return None; }
+        return by_code.get(base).and_then(|urls| urls.get(n - 1).cloned());
+    }
+    by_code.get(token).and_then(|urls| urls.first().cloned())
+}
+
+/// Scan `content` for `:shortcode:` patterns and resolve them against the user's
+/// currently-subscribed packs (plus the active theme pack). Returns deduped emoji
+/// tags in first-match order. Used by the send pipeline to attach NIP-30 emoji
+/// tags so recipients without the pack subscribed still render.
+///
+/// Duplicate shortcodes across packs are disambiguated `base~N` (1-based) by a
+/// lexicographic URL sort — the SAME ordering the frontend's `_assignEmojiDisambig`
+/// uses — so a `:love~2:` the picker inserted resolves here to the same image.
 pub fn resolve_outbound_emoji_tags(content: &str) -> Vec<crate::types::EmojiTag> {
     if content.is_empty() || !content.contains(':') {
         return Vec::new();
     }
 
-    // Own pack wins shortcode collisions, then subscribed pack order
-    // (mirrors the picker resolution rule documented in the plan).
-    let mut by_code: HashMap<String, String> = HashMap::new();
+    // base shortcode -> ordered candidate URLs (one per distinct image).
+    let cap = effective_display_cap();
+    let mut by_code: HashMap<String, Vec<String>> = HashMap::new();
 
-    // Subscribed packs (highest priority). INNER JOIN matches `load_all_packs`
-    // — soft-removed own packs shouldn't leak their Blossom URLs through
-    // outbound tags when the user types a shortcode they thought was hidden.
+    // Subscribed packs. INNER JOIN matches `load_all_packs` — soft-removed own
+    // packs shouldn't leak their Blossom URLs through outbound tags when the
+    // user types a shortcode they thought was hidden.
     if let Ok(conn) = crate::db::get_db_connection_guard_static() {
         if let Ok(mut stmt) = conn.prepare(
-            "SELECT i.shortcode, i.url
+            "SELECT p.addr, i.shortcode, i.url
              FROM emoji_pack_items i
              INNER JOIN emoji_packs p ON p.addr = i.pack_addr
              INNER JOIN emoji_pack_subscriptions s ON s.addr = p.addr
              ORDER BY p.is_own DESC, p.updated_at DESC, i.position ASC"
         ) {
             if let Ok(rows) = stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
             }) {
-                for row in rows.flatten() {
-                    by_code.entry(row.0).or_insert(row.1);
+                // Mirror the picker's per-pack display cap so hidden tail emojis
+                // don't enter (and skew) disambiguation.
+                let mut per_pack: HashMap<String, usize> = HashMap::new();
+                for (addr, code, url) in rows.flatten() {
+                    let n = per_pack.entry(addr).or_insert(0);
+                    if *n >= cap { continue; }
+                    *n += 1;
+                    by_code.entry(code).or_default().push(url);
                 }
             }
         }
@@ -211,15 +242,22 @@ pub fn resolve_outbound_emoji_tags(content: &str) -> Vec<crate::types::EmojiTag>
 
     // Active theme pack fills any gaps. It's shown in the picker without being
     // a real subscription, so its shortcodes aren't in the DB — registered
-    // from the frontend via `set_theme_emoji_tags`. Subscribed packs win.
+    // from the frontend via `set_theme_emoji_tags` (already capped there).
     if let Ok(theme) = theme_emoji_tags().lock() {
         for (code, url) in theme.iter() {
-            by_code.entry(code.clone()).or_insert_with(|| url.clone());
+            by_code.entry(code.clone()).or_default().push(url.clone());
         }
     }
 
     if by_code.is_empty() {
         return Vec::new();
+    }
+
+    // De-dup identical images + lexicographic sort so `~N` is stable and matches
+    // the frontend (two packs carrying the same URL collapse to one candidate).
+    for urls in by_code.values_mut() {
+        urls.sort();
+        urls.dedup();
     }
 
     let mut out: Vec<crate::types::EmojiTag> = Vec::new();
@@ -232,19 +270,20 @@ pub fn resolve_outbound_emoji_tags(content: &str) -> Vec<crate::types::EmojiTag>
             let mut j = start;
             while j < bytes.len() {
                 let c = bytes[j];
-                let ok = c.is_ascii_alphanumeric() || c == b'_' || c == b'-';
+                // `~` is the reserved disambiguation separator (`:love~2:`).
+                let ok = c.is_ascii_alphanumeric() || c == b'_' || c == b'-' || c == b'~';
                 if !ok { break; }
                 j += 1;
             }
             if j > start && j < bytes.len() && bytes[j] == b':' {
-                if let Ok(code) = std::str::from_utf8(&bytes[start..j]) {
-                    if !seen.contains(code) {
-                        if let Some(url) = by_code.get(code) {
+                if let Ok(token) = std::str::from_utf8(&bytes[start..j]) {
+                    if !seen.contains(token) {
+                        if let Some(url) = resolve_emoji_token(&by_code, token) {
                             out.push(crate::types::EmojiTag {
-                                shortcode: code.to_string(),
-                                url: url.clone(),
+                                shortcode: token.to_string(),
+                                url,
                             });
-                            seen.insert(code.to_string());
+                            seen.insert(token.to_string());
                         }
                     }
                 }
@@ -303,10 +342,15 @@ pub fn parse_pack_from_event(event: &Event, my_pubkey_hex: Option<&str>) -> Opti
         if parts.len() >= 3 && parts[0] == "emoji" {
             let shortcode = parts[1];
             if !is_valid_shortcode(shortcode) { continue; }
+            // Trim URL whitespace: some packs in the wild carry a stray leading/trailing space
+            // (e.g. "…/x.gif "), which the WebView strips for a raw <img> but the cache fetch does
+            // NOT — leaving the emoji blank everywhere it's served from cache. Skip if empty after.
+            let url = parts[2].trim();
+            if url.is_empty() { continue; }
             if !seen.insert(shortcode.to_string()) { continue; }
             emojis.push(PackEmoji {
                 shortcode: shortcode.to_string(),
-                url: parts[2].to_string(),
+                url: url.to_string(),
                 sha256: None,
             });
         }
@@ -1825,5 +1869,44 @@ mod tests {
         assert!(!is_valid_shortcode("smile face"));
         assert!(!is_valid_shortcode("smile:face"));
         assert!(!is_valid_shortcode("😀"));
+        // `~` is reserved for message-tag disambiguation, NOT valid in
+        // pack-authored shortcodes.
+        assert!(!is_valid_shortcode("love~2"));
+    }
+
+    #[test]
+    fn resolve_token_disambiguates_duplicate_shortcodes() {
+        // Two distinct images share `:love:`, sorted lexicographically by URL.
+        let mut by_code: HashMap<String, Vec<String>> = HashMap::new();
+        by_code.insert(
+            "love".to_string(),
+            vec!["https://a.example/love.png".to_string(), "https://b.example/love.gif".to_string()],
+        );
+        by_code.insert("cat".to_string(), vec!["https://a.example/cat.png".to_string()]);
+
+        // Plain code → first candidate (matches a bare `:love:`).
+        assert_eq!(resolve_emoji_token(&by_code, "love").as_deref(), Some("https://a.example/love.png"));
+        // `~1` / `~2` select by 1-based index.
+        assert_eq!(resolve_emoji_token(&by_code, "love~1").as_deref(), Some("https://a.example/love.png"));
+        assert_eq!(resolve_emoji_token(&by_code, "love~2").as_deref(), Some("https://b.example/love.gif"));
+        // Out-of-range / zero / unknown base → nothing (renders literal).
+        assert_eq!(resolve_emoji_token(&by_code, "love~3"), None);
+        assert_eq!(resolve_emoji_token(&by_code, "love~0"), None);
+        assert_eq!(resolve_emoji_token(&by_code, "nope~1"), None);
+        // Non-colliding code resolves bare; a stray `~N` on it is out of range.
+        assert_eq!(resolve_emoji_token(&by_code, "cat").as_deref(), Some("https://a.example/cat.png"));
+        assert_eq!(resolve_emoji_token(&by_code, "cat~2"), None);
+    }
+
+    #[test]
+    fn message_emoji_tags_accept_disambiguation_separator() {
+        // Inbound `love~2` tags must survive parsing so the recipient renders.
+        let tags = vec![
+            vec!["emoji".to_string(), "love~2".to_string(), "https://b.example/love.gif".to_string()],
+            vec!["emoji".to_string(), "bad name".to_string(), "https://x".to_string()],
+        ];
+        let out = crate::types::EmojiTag::extract_from_stored(&tags);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].shortcode, "love~2");
     }
 }

@@ -189,7 +189,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
     let customEmojiCount = 0;
     let strippedContent = safeContent;
     if (emojiTagSet) {
-        strippedContent = safeContent.replace(/:([a-zA-Z0-9_-]+):/g, (m, code) => {
+        strippedContent = safeContent.replace(/:([a-zA-Z0-9_~-]+):/g, (m, code) => {
             if (emojiTagSet.has(code)) {
                 customEmojiCount++;
                 return '';
@@ -1183,12 +1183,13 @@ function _dmsgBuildReactions(msg) {
         // `:shortcode:` text if neither knows the emoji.
         let customUrl = url || null;
         if (!customUrl) {
-            const m = /^:([a-zA-Z0-9_-]+):$/.exec(emoji);
+            const m = /^:([a-zA-Z0-9_~-]+):$/.exec(emoji);
             if (m && typeof arrEmojiPacks !== 'undefined' && Array.isArray(arrEmojiPacks)) {
                 const sc = m[1];
                 for (const pack of arrEmojiPacks) {
                     if (!pack.emojis) continue;
-                    const found = pack.emojis.find(e => e.shortcode === sc);
+                    // Match the disambiguated code first (`love~2`), then the bare one.
+                    const found = pack.emojis.find(e => (e.dispCode || e.shortcode) === sc);
                     if (found) { customUrl = found.url; break; }
                 }
             }

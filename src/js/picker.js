@@ -253,6 +253,44 @@ async function _fetchThemePack(naddr, force = false) {
     return p;
 }
 
+/**
+ * Discord-style duplicate-shortcode disambiguation. When the same `:code:`
+ * appears in more than one (displayed) pack with DIFFERENT images, stamp each
+ * emoji with a `dispCode` of `code~N` (1-based). The index follows a
+ * lexicographic URL sort — the SAME ordering vector-core's
+ * `resolve_outbound_emoji_tags` uses — so a `:love~2:` inserted here resolves
+ * to the same image on send + on the recipient. Single-image codes keep their
+ * bare `code`. Runs over the already-display-capped `packs`, matching the
+ * backend's per-pack cap, so the indices agree exactly.
+ */
+function _assignEmojiDisambig(packs) {
+    const urlsByCode = new Map(); // base code -> Set of distinct URLs
+    for (const pack of packs) {
+        if (!Array.isArray(pack.emojis)) continue;
+        for (const e of pack.emojis) {
+            if (!e || !e.shortcode || !e.url) continue;
+            let set = urlsByCode.get(e.shortcode);
+            if (!set) { set = new Set(); urlsByCode.set(e.shortcode, set); }
+            set.add(e.url);
+        }
+    }
+    // Pre-sort the colliding codes once.
+    const orderByCode = new Map();
+    for (const [code, set] of urlsByCode) {
+        if (set.size > 1) orderByCode.set(code, Array.from(set).sort());
+    }
+    for (const pack of packs) {
+        if (!Array.isArray(pack.emojis)) continue;
+        for (const e of pack.emojis) {
+            if (!e || !e.shortcode) continue;
+            const sorted = orderByCode.get(e.shortcode);
+            if (!sorted) { e.dispCode = e.shortcode; continue; }
+            const idx = sorted.indexOf(e.url);
+            e.dispCode = idx >= 0 ? `${e.shortcode}~${idx + 1}` : e.shortcode;
+        }
+    }
+}
+
 // Merge the active theme's pinned pack (pinned first, de-duped against the
 // user's list) and repaint. Idempotent via the packs signature.
 function _composeAndRenderPacks() {
@@ -286,6 +324,7 @@ function _composeAndRenderPacks() {
     if (sig === _lastPacksSignature && emojiPacksLoaded) return;
     _lastPacksSignature = sig;
     arrEmojiPacks = combined;
+    _assignEmojiDisambig(arrEmojiPacks);
     emojiPacksLoaded = true;
     const activeAddr = document.querySelector('.emoji-pack-tab.active')?.dataset.packId;
     renderEmojiPackSidebar();
@@ -496,7 +535,14 @@ async function loadEmojiPacks({ refresh = false } = {}) {
         // packs may exceed the limit (creator's choice), but we surface
         // the first N uniformly across picker, search, and recents.
         for (const p of arr) {
-            if (Array.isArray(p.emojis) && p.emojis.length > MAX_DISPLAY_EMOJIS_PER_PACK) {
+            if (!Array.isArray(p.emojis)) continue;
+            // Defensive URL trim (mirrors the backend) — a stray leading/trailing space breaks the
+            // cache fetch, blanking the emoji wherever it's served from cache; clean already-loaded
+            // data so it renders without waiting for a re-fetch.
+            for (const e of p.emojis) {
+                if (typeof e.url === 'string') e.url = e.url.trim();
+            }
+            if (p.emojis.length > MAX_DISPLAY_EMOJIS_PER_PACK) {
                 p.emojis = p.emojis.slice(0, MAX_DISPLAY_EMOJIS_PER_PACK);
             }
         }
@@ -572,9 +618,11 @@ function getMostUsedCustomEmojis(limit) {
         const used = map[shortcode];
         if (!used || used <= 0) continue;
         if (seen.has(shortcode)) continue;
+        // Usage is keyed by the disambiguated code, so match on `dispCode`
+        // (falling back to the bare shortcode for non-colliding emojis).
         for (const pack of arrEmojiPacks) {
             if (!pack.emojis) continue;
-            const match = pack.emojis.find(e => e.shortcode === shortcode);
+            const match = pack.emojis.find(e => (e.dispCode || e.shortcode) === shortcode);
             if (match) {
                 seen.add(shortcode);
                 out.push({ isCustom: true, shortcode, url: match.url, used });
@@ -607,6 +655,9 @@ function searchCustomEmojis(query) {
     //    0.3 substring        (between stock word-starts-with 0.1 and fuzzy 0.5)
     // Personal usage subtracts via the same USAGE_SCORE_WEIGHT.
     const out = [];
+    // De-dup by the disambiguated code (`love~1` / `love~2`) so same-name
+    // emojis from different packs each surface as their own result instead of
+    // one clobbering the other. Matching is still against the bare shortcode.
     const seen = new Set();
     for (const pack of arrEmojiPacks) {
         if (!pack.emojis) continue;
@@ -617,15 +668,16 @@ function searchCustomEmojis(query) {
             else if (sc.startsWith(q)) baseScore = -1.5;
             else if (sc.includes(q)) baseScore = 0.3;
             else continue;
-            if (seen.has(sc)) continue;
-            seen.add(sc);
-            const used = _customEmojiUsage(e.shortcode);
+            const code = e.dispCode || e.shortcode;
+            if (seen.has(code)) continue;
+            seen.add(code);
+            const used = _customEmojiUsage(code);
             const weight = (typeof USAGE_SCORE_WEIGHT === 'number') ? USAGE_SCORE_WEIGHT : 0.2;
             out.push({
                 isCustom: true,
-                shortcode: e.shortcode,
+                shortcode: code,
                 url: e.url,
-                name: e.shortcode,
+                name: code,
                 packTitle: pack.title || pack.identifier,
                 used,
                 score: baseScore - used * weight,
@@ -761,7 +813,8 @@ function renderCustomEmojiShortcodes(rootEl, emojiTags) {
     }
     if (!map.size) return;
 
-    const pattern = /:([a-zA-Z0-9_-]+):/g;
+    // `~` matches the disambiguation separator (`:love~2:`).
+    const pattern = /:([a-zA-Z0-9_~-]+):/g;
     const walker = document.createTreeWalker(rootEl, NodeFilter.SHOW_TEXT, {
         acceptNode(node) {
             // Skip text inside pack-emoji spans and code blocks — those
@@ -1423,7 +1476,7 @@ function _hydrateEmojiCellsStaggered(cells) {
             const { span, emoji } = cells[i];
             if (!span.isConnected) continue;
             const img = document.createElement('img');
-            img.alt = `:${emoji.shortcode}:`;
+            img.alt = `:${emoji.dispCode || emoji.shortcode}:`;
             bindCachedEmojiImg(img, emoji.url, 'emoji');
             span.appendChild(img);
         }
@@ -1862,7 +1915,7 @@ class PackCanvasGrid {
         const row = (idx / this.cols) | 0;
         const cx = rect.left + col * (this.cellW + PACK_CANVAS_GAP_PX) + this.cellW / 2;
         const cy = rect.top + row * this.cellH;
-        scheduleEmojiTooltipAt(`:${emoji.shortcode}:`, cx, cy);
+        scheduleEmojiTooltipAt(`:${emoji.dispCode || emoji.shortcode}:`, cx, cy);
     }
 
     _cellAtEvent(e) {
@@ -3541,6 +3594,15 @@ async function _pcDelete() {
             namingInput.classList.add('is-invalid');
             namingErr.textContent = `:${sc}: is already used in this pack.`;
             namingErr.hidden = false;
+            // Also surface the prominent panel overlay — the inline hint is
+            // easy to miss, and a duplicate name silently drops one emoji at
+            // publish. Duplicate names across DIFFERENT packs are fine (they
+            // disambiguate as `~1`/`~2`); only same-pack collisions are blocked.
+            _pcShowError(
+                'Oops! Name Already Taken!',
+                `:${sc}: is already used by another emoji in this pack. Pick a different name.`,
+                { title: 'Duplicate Shortcode.', buttonText: 'GOT IT' },
+            );
             return;
         }
         _pcNamingFinish(sc);
@@ -3572,16 +3634,19 @@ async function _pcDelete() {
 
 function _handlePackEmojiSelect(pack, emoji) {
     if (!emoji) return;
-    bumpCustomEmojiUsage(emoji.shortcode);
+    // Insert the disambiguated code (`love~2`) so duplicate-name emojis resolve
+    // to the exact image the user clicked.
+    const code = emoji.dispCode || emoji.shortcode;
+    bumpCustomEmojiUsage(code);
     if (strCurrentReactionReference) {
-        const literal = `:${emoji.shortcode}:`;
+        const literal = `:${code}:`;
         if (!_userAlreadyReacted(literal)) {
-            _sendCustomEmojiReaction(emoji.shortcode, emoji.url);
+            _sendCustomEmojiReaction(code, emoji.url);
         }
         picker.classList.remove('visible');
         return;
     }
-    insertAtCursor(`:${emoji.shortcode}:`, true);
+    insertAtCursor(`:${code}:`, true);
     picker.classList.remove('visible');
     if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
         domChatMessageInput.focus();
@@ -3710,10 +3775,10 @@ function renderEmojiPackSections() {
             for (const emoji of pack.emojis) {
                 const span = document.createElement('span');
                 span.className = 'emoji-pack-emoji';
-                span.dataset.packShortcode = emoji.shortcode;
+                span.dataset.packShortcode = emoji.dispCode || emoji.shortcode;
                 span.dataset.packUrl = emoji.url;
                 span.dataset.packId = pack.id;
-                span.title = `:${emoji.shortcode}:`;
+                span.title = `:${emoji.dispCode || emoji.shortcode}:`;
                 grid.appendChild(span);
                 pendingCells.push({ span, emoji });
             }
