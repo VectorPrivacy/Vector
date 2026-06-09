@@ -141,7 +141,20 @@ where
     F: FnMut() -> nostr_sdk::RelayOptions,
 {
     let was_deferring = defer_connect_for_bootstrap();
-    client.pool().add_relay(url, make_opts()).await?;
+    let newly_added = client.pool().add_relay(url, make_opts()).await?;
+
+    // Promotion: the relay was already pooled — possibly a PING-only Community relay
+    // (`community_relay_options`). The user is now adding it as their OWN relay, so grant READ+WRITE
+    // on the existing handle. Additive + in-place: keeps the single live connection and any Community
+    // subscription intact (no disconnect), and lets pool-wide DM/profile ops use it.
+    if !newly_added {
+        // all_relays(): a pre-existing GOSSIP-only community relay isn't in `relays()` (READ/WRITE only).
+        if let Ok(parsed) = nostr_sdk::RelayUrl::parse(url) {
+            if let Some(relay) = client.pool().all_relays().await.get(&parsed) {
+                relay.flags().add(nostr_sdk::RelayServiceFlags::READ | nostr_sdk::RelayServiceFlags::WRITE);
+            }
+        }
+    }
 
     if defer_connect_for_bootstrap() {
         // Still bootstrapping; switch_relay_transport will cycle this relay

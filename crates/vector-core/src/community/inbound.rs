@@ -1124,8 +1124,13 @@ mod tests {
         let admin = Keys::generate();
         let (_tmp, _g, channel, _cite) = db_roster_channel(&owner, &admin.public_key());
         let mut state = ChatState::new();
+        // A FRESH self-leave (newer than the join) is the teardown case — build it after the
+        // community's recorded join time so the staleness gate treats it as a real SelfLeft.
+        let cid = crate::db::community::community_id_for_channel(&channel.id.to_hex()).unwrap().unwrap();
+        let cid_bytes = crate::community::CommunityId(crate::simd::hex::hex_to_bytes_32(&cid));
+        let leave_ms = crate::db::community::community_created_at_ms(&cid_bytes).unwrap_or(0) + 10_000;
         let leave = {
-            let inner = build_inner_typed(owner.public_key(), &channel.id, channel.epoch, event_kind::COMMUNITY_PRESENCE, "leave", 2, None, &[])
+            let inner = build_inner_typed(owner.public_key(), &channel.id, channel.epoch, event_kind::COMMUNITY_PRESENCE, "leave", leave_ms, None, &[])
                 .sign_with_keys(&owner).unwrap();
             seal_with_signed_inner(&Keys::generate(), &inner, &channel.key, &channel.id, channel.epoch).unwrap()
         };

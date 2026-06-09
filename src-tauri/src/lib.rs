@@ -407,6 +407,12 @@ pub fn run() {
             // Bridge vector-core's EventEmitter to Tauri's emit system
             vector_core::set_event_emitter(Box::new(TauriEventEmitter));
 
+            // Route racing-fetch stragglers (events a slow relay returns after a fast one already
+            // answered) back through the realtime Community ingest path.
+            vector_core::community::transport::set_community_ingest_sink(Box::new(
+                crate::services::subscription_handler::CommunityStragglerSink,
+            ));
+
             // Initialize the unified audio engine (persistent cpal output stream)
             audio_engine::AudioEngine::init();
 

@@ -130,6 +130,22 @@ pub fn tor_aware_relay_options(opts: nostr_sdk::RelayOptions) -> nostr_sdk::Rela
     opts
 }
 
+/// Relay options for a Community / "external" relay: the GOSSIP flag (+ PING for a 24/7 keepalive
+/// connection). GOSSIP is read/write-capable when TARGETED — `can_read()` is `READ|GOSSIP|DISCOVERY`
+/// and `can_write()` is `WRITE|GOSSIP`, so per-relay checks pass for `fetch_events_from` /
+/// `send_event_to` / `subscribe_to`. But pool-wide ops select READ-only / WRITE-only relays, so the
+/// DM/giftwrap subscription (`subscribe(None)`) and the user's outbox (`send_event`) skip GOSSIP
+/// relays — the user's own traffic never touches relays they don't own. (A bare PING-only relay can
+/// NOT be used: `can_write()`/`can_read()` are false → the relay layer returns WriteDisabled /
+/// ReadDisabled.) An overlap relay that's ALSO a user relay keeps its existing READ+WRITE flags —
+/// `add_relay` is a no-op (`Ok(false)`) for a url already pooled, reusing the one existing connection.
+pub fn community_relay_options() -> nostr_sdk::RelayOptions {
+    use nostr_sdk::RelayServiceFlags;
+    tor_aware_relay_options(
+        nostr_sdk::RelayOptions::new().flags(RelayServiceFlags::GOSSIP | RelayServiceFlags::PING),
+    )
+}
+
 // === Event Storage ===
 pub mod stored_event;
 

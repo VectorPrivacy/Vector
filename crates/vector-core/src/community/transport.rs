@@ -175,6 +175,42 @@ where
     }
 }
 
+/// Sink for "straggler" events — ones a SLOWER relay returns after a racing [`LiveTransport::fetch`]
+/// has already handed the caller the first relay's batch. The integrator (src-tauri) registers a
+/// handler that feeds them back through the normal Concord ingest path (`process_incoming` for
+/// content, control/rekey re-fold for authority). The transport stays DUMB: it dedups only by event
+/// id (identical bytes) and forwards everything else. Two relays disagreeing on the latest control
+/// commit are two editions with DIFFERENT ids, so BOTH reach the ingester, where the deterministic
+/// convergence engine (version floors + same-version tiebreakers) decides the winner. The transport
+/// never resolves conflicts itself.
+pub trait CommunityIngestSink: Send + Sync + 'static {
+    fn ingest_stragglers(&self, events: Vec<Event>);
+}
+
+static INGEST_SINK: std::sync::OnceLock<Box<dyn CommunityIngestSink>> = std::sync::OnceLock::new();
+
+/// Register the straggler ingest sink. Call once during app startup (mirrors `set_event_emitter`).
+pub fn set_community_ingest_sink(sink: Box<dyn CommunityIngestSink>) {
+    let _ = INGEST_SINK.set(sink);
+}
+
+fn submit_stragglers(events: Vec<Event>) {
+    if events.is_empty() {
+        return;
+    }
+    if let Some(sink) = INGEST_SINK.get() {
+        sink.ingest_stragglers(events);
+    }
+}
+
+/// Relay urls already added + connected into the shared pool this session, so `warm_client` can
+/// skip the per-call `add_relay` bookkeeping + whole-pool `connect()` sweep once a community's
+/// relays are established (relays auto-reconnect on drop, so the re-kick is redundant once warm).
+/// Keyed by session generation: an account swap bumps the generation, invalidating every entry
+/// (the pool is rebuilt for the new account).
+static WARMED_RELAYS: std::sync::LazyLock<std::sync::Mutex<(u64, std::collections::HashSet<String>)>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new((0, std::collections::HashSet::new())));
+
 /// Production [`Transport`] over the live Nostr network.
 ///
 /// Reuses the app's persistent client (`state::nostr_client`) — already connected to the user's relays,
@@ -210,18 +246,33 @@ impl LiveTransport {
             return Err("community has no relays configured".to_string());
         }
         let client = crate::state::nostr_client().ok_or_else(|| "nostr client not initialized".to_string())?;
+
+        // Fast path: every one of these relays was already warmed this session → the pool holds and
+        // (auto-)maintains them, so skip the redundant add_relay + connect churn that otherwise runs on
+        // EVERY fetch/publish. Account swaps bump the generation, dropping the cache.
+        let generation = crate::state::current_session_generation();
+        {
+            let warmed = WARMED_RELAYS.lock().unwrap();
+            if warmed.0 == generation && relays.iter().all(|r| warmed.1.contains(r)) {
+                return Ok(client);
+            }
+        }
+
         // `add_relay` returns Ok(true) if NEWLY added, Ok(false) if the pool already held it.
-        let mut valid = 0usize;
+        // Community relays join PING-only (see `community_relay_options`) so they stay 24/7 warm
+        // without pulling the user's DM/profile traffic onto relays they don't own. An overlap
+        // relay already in the pool as a user relay keeps its READ+WRITE flags (add_relay no-ops).
         let mut added_new = false;
+        let mut succeeded: Vec<&String> = Vec::new();
         for url in relays {
-            let opts = crate::tor_aware_relay_options(RelayOptions::new());
+            let opts = crate::community_relay_options();
             match client.pool().add_relay(url.as_str(), opts).await {
-                Ok(true) => { valid += 1; added_new = true; }
-                Ok(false) => { valid += 1; }
+                Ok(true) => { added_new = true; succeeded.push(url); }
+                Ok(false) => { succeeded.push(url); }
                 Err(_) => {}
             }
         }
-        if valid == 0 {
+        if succeeded.is_empty() {
             return Err("no valid community relays could be added".to_string());
         }
         if added_new {
@@ -233,6 +284,19 @@ impl LiveTransport {
         } else {
             // Every relay already warm in the pool — cheap re-kick of any dropped connection, no wait.
             client.connect().await;
+        }
+
+        // Record the now-connected relays as warmed for this generation so subsequent calls fast-path
+        // (reset the set if the generation advanced under us — a swap mid-warm).
+        {
+            let mut warmed = WARMED_RELAYS.lock().unwrap();
+            if warmed.0 != generation {
+                warmed.0 = generation;
+                warmed.1.clear();
+            }
+            for url in succeeded {
+                warmed.1.insert(url.clone());
+            }
         }
         Ok(client)
     }
@@ -274,11 +338,97 @@ impl Transport for LiveTransport {
 
     async fn fetch(&self, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
         let client = Self::warm_client(relays, self.timeout).await?;
-        client
-            .fetch_events_from(relays.to_vec(), query.to_filter(), self.timeout)
-            .await
-            .map(|evs| evs.into_iter().collect())
-            .map_err(|e| e.to_string())
+        let timeout = self.timeout;
+        let filter = query.to_filter();
+
+        let mut targets: Vec<String> = Vec::new();
+        for r in relays {
+            if !targets.contains(r) {
+                targets.push(r.clone());
+            }
+        }
+
+        // One relay → nothing to race.
+        if targets.len() <= 1 {
+            return client
+                .fetch_events_from(targets, filter, timeout)
+                .await
+                .map(|evs| evs.into_iter().collect())
+                .map_err(|e| e.to_string());
+        }
+
+        // RACE per-relay (mirrors the publish first-ACK race): hand the caller the FIRST relay's
+        // batch the instant it completes, then keep the slower relays running in the BACKGROUND and
+        // feed any events they alone hold back through the ingester. Never wait for the slowest relay.
+        use futures_util::stream::{FuturesUnordered, StreamExt};
+        let mut fetches: FuturesUnordered<_> = targets
+            .into_iter()
+            .map(|r| {
+                let client = client.clone();
+                let filter = filter.clone();
+                tokio::spawn(async move {
+                    client
+                        .fetch_events_from(vec![r], filter, timeout)
+                        .await
+                        .map(|evs| evs.into_iter().collect::<Vec<Event>>())
+                        .unwrap_or_default()
+                })
+            })
+            .collect();
+
+        // Block for the first relay to finish — a baseline, even if it's empty.
+        let mut result: Vec<Event> = Vec::new();
+        loop {
+            match fetches.next().await {
+                Some(Ok(evs)) => {
+                    result = evs;
+                    break;
+                }
+                Some(Err(_)) => continue, // task join error — try the next relay
+                None => break,            // every relay failed
+            }
+        }
+
+        // If the fastest relay came back EMPTY, briefly wait for a relay that actually HOLDS events
+        // before returning — a fast-but-empty relay must not win over one with the data (and control
+        // folds fail-closed on an empty plane). Bounded so an unreachable straggler can't stall us.
+        if result.is_empty() && !fetches.is_empty() {
+            let grace = tokio::time::sleep(std::time::Duration::from_millis(800));
+            tokio::pin!(grace);
+            loop {
+                tokio::select! {
+                    _ = &mut grace => break,
+                    next = fetches.next() => match next {
+                        Some(Ok(evs)) if !evs.is_empty() => { result = evs; break; }
+                        Some(_) => continue,
+                        None => break,
+                    }
+                }
+            }
+        }
+
+        // Background-merge the relays that haven't finished: dedup by event id ONLY (identical bytes)
+        // against what we returned, then hand the rest to the ingester. Conflicting editions carry
+        // distinct ids, so the protocol's convergence engine resolves them — not the transport.
+        if !fetches.is_empty() {
+            let seen: std::collections::HashSet<EventId> = result.iter().map(|e| e.id).collect();
+            tokio::spawn(async move {
+                let mut extra: Vec<Event> = Vec::new();
+                let mut extra_ids: std::collections::HashSet<EventId> = std::collections::HashSet::new();
+                while let Some(joined) = fetches.next().await {
+                    if let Ok(evs) = joined {
+                        for e in evs {
+                            if !seen.contains(&e.id) && extra_ids.insert(e.id) {
+                                extra.push(e);
+                            }
+                        }
+                    }
+                }
+                submit_stragglers(extra);
+            });
+        }
+
+        Ok(result)
     }
 
     async fn publish_durable(&self, event: &Event, relays: &[String]) -> Result<(), String> {

@@ -121,14 +121,13 @@ pub(crate) async fn refresh_community_subscription() {
     }
 
     if !pseudonyms.is_empty() {
-        // Community events live on the Community's relays, which may differ from the
-        // user's DM relays — ensure the client is connected to them before subscribing.
-        // Tradeoff: this adds Community relays to the MAIN pool (a persistent
-        // subscription needs a persistent connection, unlike LiveTransport's
-        // throwaway isolated client). Acceptable for the prototype; a dedicated
-        // per-Community relay pool is a later optimization.
+        // Community events live on the Community's relays, which may differ from the user's own DM
+        // relays. Add them PING-only (24/7 warm, but excluded from pool-wide DM/profile ops — the
+        // user's traffic never touches relays they don't own) and subscribe to them by TARGET, since
+        // a non-READ relay is skipped by the pool-wide `subscribe(None)`. An overlap relay that's
+        // also a user relay keeps its READ+WRITE flags and its single existing connection.
         for r in &relays {
-            let _ = client.add_relay(r.as_str()).await;
+            let _ = client.pool().add_relay(r.as_str(), vector_core::community_relay_options()).await;
         }
         client.connect().await;
 
@@ -148,7 +147,9 @@ pub(crate) async fn refresh_community_subscription() {
             ])
             .custom_tags(SingleLetterTag::lowercase(Alphabet::Z), pseudonyms)
             .limit(0);
-        match client.subscribe(filter, None).await {
+        // Targeted at the Community relays (flag-independent) — NOT pool-wide, which would skip the
+        // PING-only Community relays and uselessly REQ the user's own relays that lack these events.
+        match client.subscribe_to(relays.iter().cloned(), filter, None).await {
             Ok(output) => { *sub_guard = Some(output.val); }
             Err(e) => eprintln!("[community] Failed to subscribe: {:?}", e),
         }
@@ -315,6 +316,30 @@ async fn handle_community_event(
             crate::commands::community::self_remove_from_community(&community_id, false).await;
         }
         None => {}
+    }
+}
+
+/// Routes "straggler" community events — ones a slower relay returned after a racing
+/// `LiveTransport::fetch` already handed the caller the fast relay's batch — back through the SAME
+/// realtime ingest path. So a historical message, control edition, or rekey that only a slow relay
+/// held is never lost; it's folded a beat late by the deterministic convergence engine (`process_incoming`
+/// for content, `refresh_community_control` for authority — both via `handle_community_event`).
+pub struct CommunityStragglerSink;
+
+impl vector_core::community::transport::CommunityIngestSink for CommunityStragglerSink {
+    fn ingest_stragglers(&self, events: Vec<Event>) {
+        // Called from inside the transport's background drain task (always within the tokio runtime).
+        // SessionGuard so a mid-flight account swap doesn't fold the previous account's stragglers
+        // into the new account's state.
+        tokio::spawn(async move {
+            let session = vector_core::state::SessionGuard::capture();
+            for event in events {
+                if !session.is_valid() {
+                    return;
+                }
+                handle_community_event(&session, event).await;
+            }
+        });
     }
 }
 

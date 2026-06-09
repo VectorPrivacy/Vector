@@ -392,6 +392,14 @@ pub async fn leave_community(community_id: String) -> Result<(), String> {
 /// chat-row teardown, else an in-flight inbound message could route in and recreate a ghost chat after
 /// we'd deleted it. Shared by every self-removal trigger (voluntary leave, kick of us, ban-rekey exclusion).
 pub(crate) async fn teardown_community_local(community_id: &str, channel_ids: &[String], republish_list: bool) {
+    // Capture this community's relays BEFORE deletion so we can drop any that no remaining community
+    // needs — and that aren't the user's own relays — from the pool after the routes refresh.
+    let left_relays: Vec<String> = hex_to_id32(community_id)
+        .ok()
+        .and_then(|b| vector_core::db::community::load_community(&CommunityId(b)).ok().flatten())
+        .map(|c| c.relays.clone())
+        .unwrap_or_default();
+
     let _ = vector_core::db::community::delete_community_retain_keys(community_id);
     // tombstone it out of the cross-device list. A LOCAL trigger (leave / observed-ban / kick)
     // republishes so our other devices tear it down too; the RECEIVE path (a sibling already published the
@@ -408,6 +416,60 @@ pub(crate) async fn teardown_community_local(community_id: &str, channel_ids: &[
     }
     for cid in channel_ids {
         let _ = vector_core::db::chats::delete_chat(cid);
+    }
+
+    // Drop the left community's now-orphaned relays from the pool (bounds growth).
+    prune_orphaned_community_relays(&left_relays).await;
+}
+
+/// Disconnect + remove relays that belonged to a just-left community, but ONLY the ones nothing
+/// else needs. Three protections, any of which keeps a relay:
+///   1. another community still lists it (`still_needed`);
+///   2. the user reads/writes it — their own primary/imported relay, or a relay that's BOTH theirs
+///      and a community's (READ/WRITE flag set; community relays are PING-only — see
+///      `community_relay_options`). DM recipient inbox relays are added READ+WRITE too, so this
+///      also shields any transient chat relay;
+///   3. it's a NIP-65 GOSSIP relay (the pool itself refuses to remove those).
+/// So leaving a community can never sever the user's own connectivity or another chat's relays.
+async fn prune_orphaned_community_relays(left_relays: &[String]) {
+    if left_relays.is_empty() {
+        return;
+    }
+    let Some(client) = vector_core::state::nostr_client() else { return; };
+
+    // Relays still claimed by a REMAINING community.
+    let mut still_needed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Ok(ids) = vector_core::db::community::list_community_ids() {
+        for id in ids {
+            if let Ok(Some(c)) = vector_core::db::community::load_community(&id) {
+                for r in &c.relays {
+                    still_needed.insert(r.clone());
+                }
+            }
+        }
+    }
+
+    let pool = client.pool();
+    // all_relays(): community relays carry the GOSSIP flag, so they're absent from `relays()`
+    // (which returns READ/WRITE only).
+    let pooled = pool.all_relays().await;
+    for url in left_relays {
+        if still_needed.contains(url) {
+            continue; // another community needs it
+        }
+        if let Ok(parsed) = nostr_sdk::RelayUrl::parse(url) {
+            if let Some(relay) = pooled.get(&parsed) {
+                // The user's own relay (or an overlap relay that's both theirs and a community's),
+                // or any READ/WRITE chat relay — never sever it. (Community relays are GOSSIP-only,
+                // so has_read()/has_write() are false for them — they remain eligible.)
+                if relay.flags().has_read() || relay.flags().has_write() {
+                    continue;
+                }
+            }
+            // Pure GOSSIP-only community relay nobody else needs → force-remove (plain remove_relay
+            // refuses GOSSIP relays) + disconnect.
+            let _ = pool.force_remove_relay(parsed).await;
+        }
     }
 }
 
