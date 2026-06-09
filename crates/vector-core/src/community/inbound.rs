@@ -210,7 +210,19 @@ fn apply_presence(opened: &OpenedMessage, channel: &Channel, my_pubkey: &PublicK
     // every device that syncs it. Safe because the inner is real-npub-signed (only my devices author it).
     if !joined && opened.author == *my_pubkey {
         if let Ok(Some(cid)) = crate::db::community::community_id_for_channel(&channel.id.to_hex()) {
-            return Some(IncomingEvent::SelfLeft { community_id: cid });
+            // Only a leave NEWER than the current join is a real teardown. A leave OLDER than the join is
+            // a historical leave from a PRIOR membership cycle (re-accepting an invite writes a fresh,
+            // later join time) — it must NOT tear down the re-join (mirrors apply_kick's staleness gate),
+            // but it SHOULD still surface as a "left" system event so my own join/leave history matches
+            // what other members see. So: fresh leave → SelfLeft (teardown); stale leave → fall through to
+            // the normal Presence emission below (a MemberLeft history line). saturating_mul: the inner
+            // created_at isn't relay-clamped.
+            let cid_bytes = crate::community::CommunityId(crate::simd::hex::hex_to_bytes_32(&cid));
+            let join_ms = crate::db::community::community_created_at_ms(&cid_bytes).unwrap_or(0);
+            if opened.created_at.as_secs().saturating_mul(1000) > join_ms {
+                return Some(IncomingEvent::SelfLeft { community_id: cid });
+            }
+            crate::log_debug!("[community] self-leave predates this join — rendering as history, not teardown");
         }
     }
     let (invited_by, invited_label) = if joined {

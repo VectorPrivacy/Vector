@@ -2189,6 +2189,58 @@ html, body {
   padding-right: 15px;
 }
 
+/* Optimistic community join in flight: visible at the top of the list but non-interactive
+ * + dimmed until the control-fold/sync makes it read/writeable. */
+.chatlist-joining {
+  pointer-events: none;
+  opacity: 0.85;
+}
+
+/* "Start of the channel" placeholder for an empty Community (Discord-style) so a fresh/quiet
+ * community never opens to a blank void. Removed the instant any message/system event lands. */
+.chat-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  margin: auto;
+  padding: 40px 24px;
+  gap: 6px;
+  color: rgba(255, 255, 255, 0.6);
+}
+.chat-empty-state-icon {
+  position: relative; /* positioning context for the absolute .icon */
+  width: 44px;
+  height: 44px;
+  margin-bottom: 6px;
+  opacity: 0.5;
+}
+.chat-empty-state-icon .icon {
+  background-color: var(--accent-color, #59fcb3);
+}
+.chat-empty-state h3 {
+  margin: 0;
+  font-size: 16px;
+  color: rgba(255, 255, 255, 0.9);
+}
+.chat-empty-state p {
+  margin: 0;
+  font-size: 13px;
+  max-width: 280px;
+}
+.chatlist-joining-spinner {
+  position: relative; /* positioning context for the absolute .icon inside */
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+.chatlist-joining-spinner .icon {
+  background-color: var(--accent-color, #59fcb3);
+}
+
 .chatlist-contact {
   display: flex;
   border-style: solid;

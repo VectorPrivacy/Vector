@@ -190,13 +190,14 @@ pub async fn send_signed_message<T: Transport + ?Sized>(
 /// link/source brought this member; members-only). Client best-practice (not enforced); no deletion key
 /// retained. Callers treat failure as non-fatal. `attribution` = `Some((inviter_npub, label))` on an
 /// invite-join, else `None`.
-pub async fn publish_presence<T: Transport + ?Sized>(
-    transport: &T,
-    community: &Community,
+/// Build + sign a presence (3306) inner event WITHOUT publishing. Lets the caller record the local
+/// system event first (memory→DB, like an outgoing message) and publish in the background — the relay
+/// echo then dedups by this inner's id. `inner.id` is the system-event dedup key.
+pub async fn build_presence(
     channel: &Channel,
     joined: bool,
     attribution: Option<(String, Option<String>)>,
-) -> Result<(), String> {
+) -> Result<nostr_sdk::Event, String> {
     let author_pk = crate::state::my_public_key().ok_or("not logged in")?;
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -211,9 +212,29 @@ pub async fn publish_presence<T: Transport + ?Sized>(
         author_pk, &channel.id, channel.epoch, event_kind::COMMUNITY_PRESENCE, &content, ms, None, &[],
     );
     let signer = active_signer().await?;
-    let inner = unsigned.sign(&signer).await.map_err(|e| format!("Failed to sign presence: {e}"))?;
-    let _ = publish_signed_message(transport, community, channel, &inner, true).await?;
+    unsigned.sign(&signer).await.map_err(|e| format!("Failed to sign presence: {e}"))
+}
+
+/// Publish a pre-built presence inner (from [`build_presence`]) to the channel's recipient set.
+pub async fn publish_presence_event<T: Transport + ?Sized>(
+    transport: &T,
+    community: &Community,
+    channel: &Channel,
+    inner: &nostr_sdk::Event,
+) -> Result<(), String> {
+    let _ = publish_signed_message(transport, community, channel, inner, true).await?;
     Ok(())
+}
+
+pub async fn publish_presence<T: Transport + ?Sized>(
+    transport: &T,
+    community: &Community,
+    channel: &Channel,
+    joined: bool,
+    attribution: Option<(String, Option<String>)>,
+) -> Result<(), String> {
+    let inner = build_presence(channel, joined, attribution).await?;
+    publish_presence_event(transport, community, channel, &inner).await
 }
 
 /// Publish a cooperative kick (3309) of `target_hex` into `channel`: a real-npub-signed inner directive

@@ -50,7 +50,8 @@ function generateChatlistStateHash() {
             chat.muted,
             profile?.is_blocked,
             isGroup ? chat.metadata?.avatar_cached : undefined,
-            isGroup ? chat.metadata?.custom_fields?.name : undefined
+            isGroup ? chat.metadata?.custom_fields?.name : undefined,
+            chat._joining // so the "Joining…" lock clearing re-renders the row
         );
     }
 

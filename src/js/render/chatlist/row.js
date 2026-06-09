@@ -29,6 +29,8 @@ function renderChat(chat, primaryColor) {
     const divContact = document.createElement('div');
     if (nUnread) divContact.classList.add('has-unread');
     divContact.classList.add('chatlist-contact');
+    // Optimistic join in flight: non-interactive + "Joining…" preview until the control-fold/sync lands.
+    if (chat._joining) divContact.classList.add('chatlist-joining');
     divContact.id = `chatlist-${chat.id}`;
 
     // The Username + Message Preview container
@@ -149,16 +151,23 @@ function renderChat(chat, primaryColor) {
     const pChatPreview = document.createElement('p');
     pChatPreview.classList.add('cutoff');
 
-    const preview = generateChatPreviewText(chat);
-    pChatPreview.classList.toggle('typing-indicator-text', preview.isTyping);
-    if (preview.isHtml) {
-        pChatPreview.innerHTML = preview.text;
+    if (chat._joining) {
+        // Optimistic join: spinner + "Joining…" while the community syncs (row is locked via
+        // .chatlist-joining). Replaces the otherwise-empty preview during the wait.
+        // .icon is position:absolute, so it needs a relative+sized wrapper to sit inline-left of the text.
+        pChatPreview.innerHTML = '<span class="chatlist-joining-spinner"><span class="icon icon-loading spin"></span></span>Joining…';
     } else {
-        pChatPreview.textContent = preview.text;
-    }
-    if (preview.needsTwemoji) twemojify(pChatPreview);
-    if (preview.emojiTags && typeof renderCustomEmojiShortcodes === 'function') {
-        renderCustomEmojiShortcodes(pChatPreview, preview.emojiTags);
+        const preview = generateChatPreviewText(chat);
+        pChatPreview.classList.toggle('typing-indicator-text', preview.isTyping);
+        if (preview.isHtml) {
+            pChatPreview.innerHTML = preview.text;
+        } else {
+            pChatPreview.textContent = preview.text;
+        }
+        if (preview.needsTwemoji) twemojify(pChatPreview);
+        if (preview.emojiTags && typeof renderCustomEmojiShortcodes === 'function') {
+            renderCustomEmojiShortcodes(pChatPreview, preview.emojiTags);
+        }
     }
 
     divPreviewContainer.appendChild(pChatPreview);
@@ -199,10 +208,20 @@ function renderCommunityInviteItem(invite) {
 
     const divPreviewContainer = document.createElement('div');
     divPreviewContainer.classList.add('chatlist-contact-preview');
+    // Name + Group Chat icon in a header, matching the real community row (renderChat) so the invite
+    // row and the joined row look consistent.
+    const divHeader = document.createElement('div');
+    divHeader.classList.add('chatlist-contact-header');
     const h4Name = document.createElement('h4');
     h4Name.textContent = invite.name || 'Community';
     h4Name.classList.add('cutoff');
-    divPreviewContainer.appendChild(h4Name);
+    divHeader.appendChild(h4Name);
+    const groupIcon = document.createElement('span');
+    groupIcon.className = 'icon icon-users-multi chatlist-type-icon';
+    groupIcon.addEventListener('mouseenter', () => showGlobalTooltip('Group Chat', groupIcon));
+    groupIcon.addEventListener('mouseleave', hideGlobalTooltip);
+    divHeader.appendChild(groupIcon);
+    divPreviewContainer.appendChild(divHeader);
     const pSub = document.createElement('p');
     pSub.classList.add('cutoff');
     pSub.textContent = 'Community invite';

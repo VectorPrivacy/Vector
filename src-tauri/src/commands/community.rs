@@ -1961,17 +1961,46 @@ pub async fn accept_community_invite(community_id: String) -> Result<CommunitySu
     if !session.is_valid() {
         return Err("account changed during invite accept".to_string());
     }
-    // Joined — clear the parked row, surface the channel chat(s), then subscribe.
+    // Joined — clear the parked row + register the channel chat(s) locally. accept_invite already
+    // installed the bundle's keys, so the community is read/writeable now; everything below is relay-bound
+    // PROPAGATION the user shouldn't wait on (where the join latency lived — esp. the 12s presence timeout).
+    // Return the summary the instant local state is ready; fan the rest out in the background.
     vector_core::db::community::delete_pending_invite(&community_id)?;
     sync_community_chats(&community).await;
-    // record the join in the cross-device list so our other devices auto-join silently.
-    vector_core::community::list::add_membership(&community);
-    crate::services::subscription_handler::refresh_community_subscription().await;
-    // Best-effort join announcement (kind 3306) so honest peers see us in their member list.
+
+    // Local-first self-join: build our join presence, record the "X joined" system event immediately
+    // (memory→DB + UI), then publish it in the background. The relay echo dedups by this inner's id, so
+    // our own join shows instantly without waiting on (or depending on) the echo — same as an outgoing
+    // message. Without this a fresh join opens to an empty timeline until the relay round-trips the echo.
     if let Some(primary) = community.channels.first() {
-        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-        let _ = vector_core::community::service::publish_presence(&transport, &community, primary, true, None).await;
+        if let Ok(inner) = vector_core::community::service::build_presence(primary, true, None).await {
+            if let Some(my_npub) = vector_core::my_public_key().and_then(|pk| pk.to_bech32().ok()) {
+                apply_community_presence(
+                    &primary.id.to_hex(), &my_npub, true,
+                    &inner.id.to_hex(), inner.created_at.as_secs(), None, None,
+                ).await;
+            }
+            let bg_pub = vector_core::state::SessionGuard::capture();
+            let community_pub = community.clone();
+            let primary_pub = primary.clone();
+            tokio::spawn(async move {
+                if !bg_pub.is_valid() { return; }
+                let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+                let _ = vector_core::community::service::publish_presence_event(&transport, &community_pub, &primary_pub, &inner).await;
+            });
+        }
     }
+
+    // Background: record the cross-device membership (so our other devices auto-join) + (re)subscribe for
+    // realtime. SessionGuard re-checked so a mid-flight account swap can't write account A's join into B.
+    let bg = vector_core::state::SessionGuard::capture();
+    let community_bg = community.clone();
+    tokio::spawn(async move {
+        if !bg.is_valid() { return; }
+        vector_core::community::list::add_membership(&community_bg);
+        crate::services::subscription_handler::refresh_community_subscription().await;
+    });
+
     Ok(summarize(&community))
 }
 

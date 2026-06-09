@@ -1853,8 +1853,15 @@ async function loadCommunityInvites() {
         const invites = await invoke('list_community_invites');
         arrCommunityInvites = (invites || []).map(inv => {
             let name = 'Community';
-            try { name = JSON.parse(inv.bundle_json).name || name; } catch (_) {}
-            return { community_id: inv.community_id, name, inviter_npub: inv.inviter_npub };
+            let channels = [];
+            // The bundle carries name + the channel id(s) + keys; we pull the ids so Accept can
+            // render the real community row optimistically (same channel id → no swap on reconcile).
+            try {
+                const b = JSON.parse(inv.bundle_json);
+                name = b.name || name;
+                channels = (b.channels || []).map(c => ({ id: c.id, name: c.name }));
+            } catch (_) {}
+            return { community_id: inv.community_id, name, inviter_npub: inv.inviter_npub, channels };
         });
         updateChatBackNotification();
     } catch (e) {
@@ -1927,24 +1934,66 @@ async function loadCommunityRoles(communityId) {
  */
 async function acceptCommunityInvite(communityId) {
     const snapshot = arrCommunityInvites;
+    const invite = arrCommunityInvites.find(i => i.community_id === communityId);
     arrCommunityInvites = arrCommunityInvites.filter(i => i.community_id !== communityId);
+
+    // Optimistic row: the bundle carries the channel id, so we render the real community row INSTANTLY
+    // (locked, "Joining…") instead of leaving a dead zone. Same channel id means surfaceCommunitySummary
+    // reconciles this exact chat later — no swap/flicker. It unlocks once read/writeable (control-fold/sync
+    // resolves, or a message streams in — see the message_new handler).
+    const optimisticChannelId = invite?.channels?.[0]?.id || null;
+    if (optimisticChannelId) {
+        const chat = getOrCreateChat(optimisticChannelId, 'Community');
+        chat.metadata = chat.metadata || {};
+        chat.metadata.custom_fields = chat.metadata.custom_fields || {};
+        chat.metadata.custom_fields.name = invite.name || 'Community';
+        chat.metadata.custom_fields.community_id = communityId;
+        if (!chat.metadata.custom_fields.created_at) chat.metadata.custom_fields.created_at = String(Date.now());
+        chat._joining = true; // renders locked
+        // Re-sort so the fresh created_at floats the joining row to the TOP (renderChatlist itself
+        // renders arrChats in order; the new chat was pushed to the end).
+        arrChats.sort((a, b) => getChatSortTimestamp(b) - getChatSortTimestamp(a));
+    }
     updateChatBackNotification();
     renderChatlist();
     adjustSize();
+
     try {
         const summary = await invoke('accept_community_invite', { communityId });
         await loadCommunityInvites();
+        // surfaceCommunitySummary awaits the page-1 sync = control-folded + read/writeable.
         const channelId = await surfaceCommunitySummary(summary);
+        clearCommunityJoining(communityId);
         adjustSize();
         if (channelId) openChat(channelId);
     } catch (e) {
         console.error('Failed to accept community invite:', e);
+        // Roll back the optimistic row + restore the invite.
+        if (optimisticChannelId) {
+            const idx = arrChats.findIndex(c => c.id === optimisticChannelId);
+            if (idx !== -1) arrChats.splice(idx, 1);
+        }
         arrCommunityInvites = snapshot;
         updateChatBackNotification();
         renderChatlist();
         adjustSize();
         popupConfirm('Error', 'Failed to join Community: ' + escapeHtml(String(e)), true, '', 'vector_warning.svg');
     }
+}
+
+/**
+ * Release the "Joining…" lock on a community's channel rows (read/writeable now). Idempotent;
+ * re-renders only if a locked row actually flipped, so the message_new early-unlock is cheap.
+ */
+function clearCommunityJoining(communityId) {
+    let changed = false;
+    for (const c of arrChats) {
+        if (c._joining && c.chat_type === 'Community' && c.metadata?.custom_fields?.community_id === communityId) {
+            c._joining = false;
+            changed = true;
+        }
+    }
+    if (changed) renderChatlist();
 }
 
 /**
@@ -2500,6 +2549,7 @@ async function setupRustListeners() {
                     domChatMessages.appendChild(systemElement);
                     softChatScroll();
                 }
+                refreshChatEmptyState(); // a "X joined" landed in the open chat → drop the start marker
             }
 
             // Re-render chatlist
@@ -2924,9 +2974,13 @@ async function setupRustListeners() {
                 : getOrCreateChat(evt.payload.chat_id, 'Community');
         }
         
+        // Early-unlock an optimistic "Joining…" row the moment a message streams in (proves
+        // read access) — the other release path is the control-fold/sync resolving in acceptCommunityInvite.
+        if (chat._joining) clearCommunityJoining(chat.metadata?.custom_fields?.community_id);
+
         // Get the new message
         const newMessage = evt.payload.message;
-        
+
         // Add to event cache
         // During sync, only add if this chat is currently open (to avoid cache flooding)
         // After sync complete, always add to cache
@@ -2991,6 +3045,7 @@ async function setupRustListeners() {
         // If this user has the open chat, then update the chat too
         if (strOpenChat === chat.id) {
             updateChat(chat, [newMessage]);
+            refreshChatEmptyState(); // first message in a fresh community → drop the start marker
             // Increment rendered count since we're adding a new message
             proceduralScrollState.renderedMessageCount++;
             proceduralScrollState.totalMessageCount++;
@@ -6844,6 +6899,33 @@ function revealSystemEventsInWindow(chatId) {
     return revealed;
 }
 
+/**
+ * Show/hide the "start of the channel" marker for an empty Community (no messages or system events
+ * yet). Discord-style placeholder so a fresh/quiet community never opens to a blank void; removed
+ * the moment any content (a message or a "X joined" event) lands. Idempotent — safe to call on every
+ * render/content change for the open chat.
+ */
+function refreshChatEmptyState() {
+    const existing = document.getElementById('chat-empty-state');
+    const chat = strOpenChat ? arrChats.find(c => c.id === strOpenChat) : null;
+    const isEmptyCommunity = !!chat && chat.chat_type === 'Community' && (!chat.messages || chat.messages.length === 0);
+    if (isEmptyCommunity) {
+        if (!existing && domChatMessages) {
+            const name = chat.metadata?.custom_fields?.name || 'this community';
+            const el = document.createElement('div');
+            el.id = 'chat-empty-state';
+            el.className = 'chat-empty-state';
+            // .icon is position:absolute → wrap it in a relative, sized span (same pattern as elsewhere).
+            el.innerHTML = `<div class="chat-empty-state-icon"><span class="icon icon-users-multi"></span></div>`
+                + `<h3>Welcome to ${escapeHtml(name)}</h3>`
+                + `<p>This is the very beginning of the channel — say hello! 👋</p>`;
+            domChatMessages.appendChild(el);
+        }
+    } else if (existing) {
+        existing.remove();
+    }
+}
+
 async function openChat(contact) {
     pushBack('chat', closeChat);
     // Abandon a wallpaper preview staged in a different chat so its edit
@@ -6880,6 +6962,13 @@ async function openChat(contact) {
 
     // Get the chat (could be DM or Group)
     const chat = arrChats.find(c => c.id === contact);
+    // A community channel id with no chat = a community we no longer hold (e.g. torn down mid-open by a
+    // removal). Bail to the chatlist rather than render a phantom — updateChat(undefined) would throw and
+    // jam the render loop. (DMs legitimately open with no prior chat, so this only guards channel ids.)
+    if (!chat && !contact.startsWith('npub1')) {
+        console.warn('openChat: no chat for community channel, returning to list:', contact);
+        return openChatlist();
+    }
     const isGroup = chatIsGroup(chat);
     const profile = !isGroup ? getProfile(contact) : null;
     strOpenChat = contact;
@@ -7014,6 +7103,7 @@ async function openChat(contact) {
     initProceduralScrollWithCache(contact, initialMessages.length, totalMessages);
     
     await updateChat(chat, initialMessages, profile, true);
+    refreshChatEmptyState(); // empty community → show the "start of channel" marker
 
     // Drop a "New" divider above the first non-mine message after
     // `last_read`. Only fires when last_read matches a loaded message —
@@ -10604,8 +10694,9 @@ document.addEventListener('click', (e) => {
     const inCreateGroup = cg && cg.style.display !== 'none' && cg.contains(e.target);
     const chatlistItem = e.target.closest('.chatlist-contact');
     if (!inCreateGroup && chatlistItem) {
-        // Don't open chat if clicking on an invite item
-        if (chatlistItem.classList.contains("chatlist-invite")) {
+        // Don't open chat if clicking on an invite item, or a community still joining (locked
+        // until the control-fold/sync makes it read/writeable).
+        if (chatlistItem.classList.contains("chatlist-invite") || chatlistItem.classList.contains("chatlist-joining")) {
             return;
         }
         const chatId = chatlistItem.id.replace('chatlist-', '');
