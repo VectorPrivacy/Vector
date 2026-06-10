@@ -28,6 +28,10 @@ pub struct TorState {
     /// stream while bootstrap is running. 100 once running. The frontend
     /// drives the comet-trail radial progress bar from this.
     pub bootstrap_progress: u8,
+    /// `socks5h://127.0.0.1:<port>` while the service is up, else None.
+    /// Lets JS-initiated plugin requests (updater) ride the same proxy —
+    /// they use their own reqwest client, invisible to the backend failsafe.
+    pub socks_proxy: Option<String>,
 }
 
 const SETTING_KEY: &str = "tor_enabled";
@@ -137,9 +141,26 @@ pub async fn sync_to_active_account() -> Result<(), String> {
                 | vector_core::tor::TorTransportState::RequiredButInactive
         );
         if want_on {
+            // Fail closed before the bootstrap await: the previous account's
+            // service is already stopped, so a rebuild here lands the shared
+            // client on the blackhole instead of leaving the old (possibly
+            // direct) client serving requests during bootstrap.
+            vector_core::net::rebuild_shared_http_client()?;
             let (state_dir, cache_dir) = tor_data_dirs()?;
             let bridges = read_saved_bridges();
-            vector_core::tor::TorService::start(state_dir, cache_dir, &bridges).await?;
+            // Bounded like the toggle path — account switching must not hang
+            // forever on a censored network. Timeout/error leaves the pref ON
+            // with no service: blackholed, and the caller logs + continues.
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(120),
+                vector_core::tor::TorService::start(state_dir, cache_dir, &bridges),
+            )
+            .await
+            {
+                Ok(Ok(_svc)) => {}
+                Ok(Err(e)) => return Err(e),
+                Err(_) => return Err("Tor bootstrap timed out (120s) during account switch".to_string()),
+            }
         }
         vector_core::net::rebuild_shared_http_client()?;
     }
@@ -360,12 +381,19 @@ pub fn tor_get_state() -> TorState {
         #[cfg(not(feature = "tor"))]
         { 0u8 }
     };
+    let socks_proxy = {
+        #[cfg(feature = "tor")]
+        { vector_core::tor::proxy_url() }
+        #[cfg(not(feature = "tor"))]
+        { None }
+    };
     TorState {
         enabled,
         running,
         supported,
         status: current_status_string(),
         bootstrap_progress,
+        socks_proxy,
     }
 }
 
@@ -391,10 +419,41 @@ pub async fn tor_set_enabled(enabled: bool) -> Result<TorState, String> {
             // returns RequiredButInactive while we boot Tor → blackhole), then
             // start the service. Once it's up, transport_state returns Active.
             write_setting_enabled(true)?;
+            // Fail closed for the whole bootstrap window: rebuild the shared
+            // HTTP client (lands on the blackhole) and cycle existing direct
+            // relay sockets onto the blackhole proxy BEFORE the multi-second
+            // bootstrap await. Otherwise pre-toggle clients/sockets keep
+            // talking clearnet while the user believes Tor is on. The rebuild
+            // result is deferred so a (near-impossible) builder failure can't
+            // early-return with relays still flowing direct.
+            let rebuild = vector_core::net::rebuild_shared_http_client();
+            switch_relay_transport(true).await?;
+            rebuild?;
+            // Iroh (mini-app realtime) is deliberately left running: it's
+            // QUIC/UDP (can't ride Tor) but relay-only, and the user consents
+            // per session before launching a realtime app under Tor — killing
+            // an active lobby on toggle would punish that informed choice.
             if !vector_core::tor::is_active() {
                 let (state_dir, cache_dir) = tor_data_dirs()?;
                 let bridges = read_saved_bridges();
-                vector_core::tor::TorService::start(state_dir, cache_dir, &bridges).await?;
+                // Bounded: a censored/blackholed network can stall Arti's
+                // consensus fetch indefinitely, and login awaits this command.
+                // On timeout/error everything is already blackholed (pref ON,
+                // no service) — never half-switched.
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(120),
+                    vector_core::tor::TorService::start(state_dir, cache_dir, &bridges),
+                )
+                .await
+                {
+                    Ok(Ok(_svc)) => {}
+                    Ok(Err(e)) => return Err(e),
+                    Err(_) => {
+                        return Err(
+                            "Tor bootstrap timed out (120s) — connections stay blocked until Tor connects or is disabled".to_string(),
+                        )
+                    }
+                }
             }
         } else {
             // OFF: stop the service first so transport_state stays in

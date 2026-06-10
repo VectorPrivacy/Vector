@@ -1067,13 +1067,15 @@ function _dmsgBuildLinkPreview(msg) {
 
     const imgFavicon = document.createElement('img');
     imgFavicon.classList.add('favicon');
-    imgFavicon.src = msg.preview_metadata.favicon;
     imgFavicon.addEventListener('load', () => {
         if (!imgFavicon.isConnected) return;
         if (proceduralScrollState.isLoadingOlderMessages) correctScrollForMediaLoad();
         else softChatScroll();
     }, { once: true });
     imgFavicon.addEventListener('error', () => imgFavicon.style.display = 'none', { once: true });
+    // Backend-cached: the favicon URL points at the linked (attacker-chosen)
+    // host — a raw img.src would be a clearnet fetch that bypasses Tor.
+    bindBackendCachedImg(imgFavicon, msg.preview_metadata.favicon);
 
     const spanPreviewTitle = document.createElement('span');
     spanPreviewTitle.appendChild(imgFavicon);
@@ -1101,13 +1103,15 @@ function _dmsgBuildLinkPreview(msg) {
     if (hasImage) {
         const imgPreview = document.createElement('img');
         imgPreview.classList.add('dmsg-preview-img');
-        imgPreview.src = msg.preview_metadata.og_image;
         imgPreview.onerror = () => imgPreview.remove();
         imgPreview.addEventListener('load', () => {
             if (!imgPreview.isConnected) return;
             if (proceduralScrollState.isLoadingOlderMessages) correctScrollForMediaLoad();
             else softChatScroll();
         }, { once: true });
+        // Backend-cached: og:image is served by the attacker-controlled
+        // linked page — never fetch it from the WebView (Tor bypass).
+        bindBackendCachedImg(imgPreview, msg.preview_metadata.og_image);
         divPrev.appendChild(imgPreview);
     }
 

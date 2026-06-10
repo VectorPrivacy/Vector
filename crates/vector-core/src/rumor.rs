@@ -448,7 +448,16 @@ fn process_file_attachment(
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(0);
 
-    // Determine file path and download status
+    // Determine file path and download status. The basis (ox hash or nonce)
+    // is author-controlled and becomes an on-disk filename — require bounded
+    // plain hex before joining it into a path, mirroring the Community
+    // parser, so a crafted tag can't smuggle `../` traversal into `path`.
+    let valid_path_basis =
+        |s: &str| !s.is_empty() && s.len() <= 128 && s.bytes().all(|b| b.is_ascii_hexdigit());
+    let original_file_hash = original_file_hash.filter(|h| valid_path_basis(h));
+    if !valid_path_basis(&decryption_nonce) {
+        return Err("Invalid decryption-nonce tag".to_string());
+    }
     let (file_hash, file_path, downloaded) = if let Some(ox_hash) = original_file_hash {
         let hash_file_path = download_dir.join(format!("{}.{}", ox_hash, extension));
         if hash_file_path.exists() {
@@ -467,10 +476,13 @@ fn process_file_attachment(
     // Extract millisecond-precision timestamp
     let ms_timestamp = extract_millisecond_timestamp(&rumor);
 
-    // Extract webxdc-topic for Mini Apps (realtime channel isolation)
+    // Extract webxdc-topic for Mini Apps (realtime channel isolation).
+    // Bounded sanity (mirrors the Community parser): base32 alphabet only,
+    // 32-byte payload (52 chars); anything else is dropped, not propagated.
     let webxdc_topic = rumor.tags
         .find(TagKind::Custom(Cow::Borrowed("webxdc-topic")))
         .and_then(|tag| tag.content())
+        .filter(|t| t.len() == 52 && t.bytes().all(|b| b.is_ascii_uppercase() || (b'2'..=b'7').contains(&b)))
         .map(|s| s.to_string());
 
     // Create the attachment
@@ -1365,6 +1377,41 @@ mod tests {
             }
             _ => panic!("Expected FileAttachment"),
         }
+    }
+
+    #[test]
+    fn test_file_attachment_hostile_path_basis_rejected() {
+        let keys = test_keypair();
+        let dir = temp_dir();
+        let ctx = || dm_context(&keys);
+
+        // Traversal via ox: non-hex basis is ignored → path falls back to the
+        // (hex) nonce and never leaves the download dir.
+        let t = tags(vec![
+            custom_tag("decryption-key", &["aabbccdd"]),
+            custom_tag("decryption-nonce", &["11223344"]),
+            custom_tag("ox", &["../../../etc/passwd"]),
+            custom_tag("file-type", &["image/jpeg"]),
+            custom_tag("name", &["x.jpg"]),
+        ]);
+        let rumor = make_rumor(&keys, Kind::from_u16(15), "https://blossom.example/x.jpg", t);
+        match process_rumor(rumor, ctx(), &dir).unwrap() {
+            RumorProcessingResult::FileAttachment(msg) => {
+                let att = &msg.attachments[0];
+                assert!(!att.path.contains(".."), "traversal basis must not reach the path: {}", att.path);
+                assert_eq!(att.id, "11223344", "id falls back to the hex nonce");
+            }
+            _ => panic!("Expected FileAttachment"),
+        }
+
+        // Traversal via the nonce (no ox): hard reject, nothing to fall back to.
+        let t = tags(vec![
+            custom_tag("decryption-key", &["aabbccdd"]),
+            custom_tag("decryption-nonce", &["../../../etc/cron.d/evil"]),
+            custom_tag("file-type", &["image/jpeg"]),
+        ]);
+        let rumor = make_rumor(&keys, Kind::from_u16(15), "https://blossom.example/y.jpg", t);
+        assert!(process_rumor(rumor, ctx(), &dir).is_err());
     }
 
     #[test]

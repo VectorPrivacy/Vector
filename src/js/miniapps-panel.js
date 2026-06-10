@@ -213,11 +213,16 @@ async function loadMiniAppsHistory() {
                     if (app && placeholder) {
                         appsToInstall.push(app);
 
-                        // Update with actual icon and name
-                        const iconSrc = app.icon_cached ? convertFileSrc(app.icon_cached) : app.icon_url;
-                        const iconHtml = iconSrc
-                            ? `<img src="${escapeHtml(iconSrc)}" style="width: 100%; height: 100%; object-fit: cover; border-radius: inherit;" onerror="this.outerHTML='<span class=\\'icon icon-play\\'></span>'">`
-                            : '<span class="icon icon-play"></span>';
+                        // Update with actual icon and name. Cached local icon
+                        // directly; remote icon_url via the backend cache
+                        // (the WebView never fetches remote — Tor).
+                        const imgStyle = 'width: 100%; height: 100%; object-fit: cover; border-radius: inherit;';
+                        let iconHtml = '<span class="icon icon-play"></span>';
+                        if (app.icon_cached) {
+                            iconHtml = `<img src="${escapeHtml(convertFileSrc(app.icon_cached))}" style="${imgStyle}" onerror="this.outerHTML='<span class=\\'icon icon-play\\'></span>'">`;
+                        } else if (app.icon_url) {
+                            iconHtml = `<img data-cache-icon-url="${escapeHtml(app.icon_url)}" style="${imgStyle}" onerror="this.outerHTML='<span class=\\'icon icon-play\\'></span>'">`;
+                        }
 
                         placeholder.innerHTML = `
                             <div class="attachment-panel-btn attachment-panel-miniapp-btn">
@@ -228,6 +233,11 @@ async function loadMiniAppsHistory() {
                             </div>
                             <span class="attachment-panel-label cutoff">${escapeHtml(app.name)}</span>
                         `;
+                        for (const img of placeholder.querySelectorAll('img[data-cache-icon-url]')) {
+                            const url = img.dataset.cacheIconUrl;
+                            delete img.dataset.cacheIconUrl;
+                            bindBackendCachedImg(img, url);
+                        }
                         placeholder.dataset.appName = app.name.toLowerCase();
                     } else if (!app && placeholder) {
                         console.warn(`[Mini Apps] Default app "${appId}" not found in marketplace`);
@@ -775,7 +785,11 @@ async function showMiniAppLaunchDialog(app) {
     try {
         const info = await invoke('miniapp_load_info', { filePath: app.src_url });
         if (info && info.icon_data) {
-            domMiniAppLaunchIconContainer.innerHTML = `<img src="${info.icon_data}" alt="${escapeHtml(app.name)}">`;
+            // DOM construction: app.name comes from the .xdc manifest
+            const img = document.createElement('img');
+            img.src = info.icon_data;
+            img.alt = app.name;
+            domMiniAppLaunchIconContainer.replaceChildren(img);
         } else {
             domMiniAppLaunchIconContainer.innerHTML = '<span class="icon icon-play"></span>';
         }
@@ -815,15 +829,10 @@ async function playMiniAppSolo() {
     }
 
     try {
-        // Open the Mini App directly using the cached file path
+        // Open the Mini App directly using the cached file path (openMiniApp
+        // runs the Tor IP-exposure consent gate).
         // Use a placeholder chat_id and message_id for solo play
-        await invoke('miniapp_open', {
-            filePath: app.src_url,
-            chatId: 'solo',
-            messageId: `solo_${Date.now()}`,
-            href: null,
-            topicId: null,
-        });
+        await openMiniApp(app.src_url, 'solo', `solo_${Date.now()}`, null, null);
     } catch (e) {
         console.error('Failed to open Mini App:', e);
     }
@@ -861,6 +870,13 @@ async function playMiniAppAndInvite() {
     if (!shouldContinue) {
         closeMiniAppLaunchDialog();
         return; // User cancelled
+    }
+
+    // Tor IP-exposure consent BEFORE the file is sent to the chat — declining
+    // after the invite already landed would strand a dead lobby message.
+    if (!(await confirmMiniAppTorExposure(app.src_url))) {
+        closeMiniAppLaunchDialog();
+        return; // User declined launching multiplayer over clearnet
     }
 
     // Show upload progress spinner on the invite button and disable all buttons
@@ -953,14 +969,9 @@ async function playMiniAppAndInvite() {
             }
         }
 
-        // Open the Mini App
-        await invoke('miniapp_open', {
-            filePath,
-            chatId: targetChatId,
-            messageId,
-            href: null,
-            topicId,
-        });
+        // Open the Mini App (consent already given above; the session flag
+        // makes openMiniApp's gate a no-op here)
+        await openMiniApp(filePath, targetChatId, messageId, null, topicId);
 
         finishAndClose();
     } catch (e) {
@@ -1098,14 +1109,9 @@ async function playMiniAppSoloInternal(app) {
             return; // User cancelled
         }
 
-        // Open the Mini App directly using the cached file path
-        await invoke('miniapp_open', {
-            filePath: app.src_url,
-            chatId: 'solo',
-            messageId: `solo_${Date.now()}`,
-            href: null,
-            topicId: null,
-        });
+        // Open the Mini App directly using the cached file path (openMiniApp
+        // runs the Tor IP-exposure consent gate).
+        await openMiniApp(app.src_url, 'solo', `solo_${Date.now()}`, null, null);
     } catch (e) {
         console.error('Failed to open Mini App:', e);
     }

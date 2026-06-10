@@ -888,7 +888,7 @@ async fn process_outbound_community_attachment_bytes(
     // any decode/encode failure. Done BEFORE hashing/preview so they describe what's uploaded.
     let mut bytes = bytes;
     if use_compression && is_image && extension != "gif" {
-        if let Ok(img) = ::image::load_from_memory(&bytes) {
+        if let Ok(img) = vector_core::crypto::decode_image_bounded(&bytes) {
             let rgba = img.to_rgba8();
             if let Ok(enc) = crate::shared::image::encode_rgba_auto(
                 rgba.as_raw(), img.width(), img.height(), crate::shared::image::JPEG_QUALITY_STANDARD,
@@ -903,7 +903,7 @@ async fn process_outbound_community_attachment_bytes(
 
     // Image metadata (thumbhash + dimensions) for inline rendering, when decodable.
     let img_meta = if is_image {
-        ::image::load_from_memory(&bytes).ok().and_then(|img| {
+        vector_core::crypto::decode_image_bounded(&bytes).ok().and_then(|img| {
             crate::util::generate_thumbhash_from_image(&img).map(|thumbhash| ImageMetadata {
                 thumbhash,
                 width: img.width(),
@@ -1355,9 +1355,17 @@ async fn sync_community_channel_inner(
         // longer decrypt the new control plane to read the banlist the normal way.
         if let Ok(c) = vector_core::community::service::catch_up_server_root(&bt, &community).await {
             if c.removed {
+                // Destructive teardown after a multi-second fetch: re-validate the
+                // session or a mid-sync account swap tears down account B's membership.
+                if !session.is_valid() {
+                    return Err("account changed during sync".to_string());
+                }
                 self_remove_from_community(&community_id, false).await;
                 return Ok(CommunitySyncResult { new_messages: 0, reached_start: true });
             }
+        }
+        if !session.is_valid() {
+            return Err("account changed during sync".to_string());
         }
         let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?.unwrap_or(community);
         // ONE REQ for the entire control plane, applied banlist-first: roles (authority graph), invite links
@@ -1365,6 +1373,10 @@ async fn sync_community_channel_inner(
         let _ = vector_core::community::service::fetch_and_apply_control(&bt, &community).await;
         // Did a ban land on us? A banned member self-removes (drop keys + wipe data, like a kick but no
         // rejoin) — caught here on sync/boot, and in realtime via the control-plane subscription.
+        // Guarded: check_self_banned tears down on a hit, and the control fold above awaited.
+        if !session.is_valid() {
+            return Err("account changed during sync".to_string());
+        }
         if check_self_banned(&community_id).await {
             return Ok(CommunitySyncResult { new_messages: 0, reached_start: true });
         }
@@ -1466,39 +1478,6 @@ async fn sync_community_channel_inner(
         return Err("account changed during sync".to_string());
     }
 
-    // Advance the outer-time cursor to the oldest wire created_at this page returned (so the
-    // NEXT older page steps strictly further back, on the relay's own clock).
-    if let Some(oldest) = events.iter().map(|e| e.created_at.as_secs()).min() {
-        vector_core::community::cache::advance_oldest_cursor(channel_id, oldest);
-    }
-    // Advance the latest-page `since` floor to the newest wire time this page returned, so the next
-    // latest sync only pulls what's genuinely new. Latest page only — an older page must not raise
-    // the floor (it returns OLD events, which would wrongly cap future top-fetches).
-    if !is_older {
-        if let Some(newest) = events.iter().map(|e| e.created_at.as_secs()).max() {
-            vector_core::community::cache::advance_newest_cursor(channel_id, newest);
-        }
-    }
-
-    // History-start (older pages): the page came back NON-EMPTY but with nothing strictly
-    // older than the cursor → we've hit the channel's beginning; mark it so future older pages
-    // stay DB-only, and report it (the frontend trusts THIS, not a row-count delta). An EMPTY
-    // page is treated as a transient relay miss (rate-limit / unreachable), NOT history-start —
-    // so a flaky relay can't permanently wedge scroll-back.
-    let reached_start = if is_older && !events.is_empty() {
-        let older_than_cursor = until_secs.map_or(0, |u| {
-            events.iter().filter(|e| e.created_at.as_secs() < u).count()
-        });
-        if older_than_cursor == 0 {
-            vector_core::community::cache::mark_history_start(channel_id);
-            true
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-
     // Process the batch into STATE (sync), collecting outcomes to persist (+ emit).
     let outcomes = {
         let mut state = vector_core::state::STATE.lock().await;
@@ -1568,10 +1547,60 @@ async fn sync_community_channel_inner(
                 // batch — the community is being torn down, so later same-batch writes (message saves,
                 // presence) would orphan rows under a now-deleted chat. Teardown retains the held epoch keys.
                 self_remove_from_community(community_id, false).await;
-                break;
+                return Ok(CommunitySyncResult { new_messages, reached_start: false });
             }
         }
     }
+
+    // Cursors and the history-start verdict consider ONLY events that authenticate against the
+    // channel's keys: the outer created_at is unauthenticated, and the cleartext pseudonym is in
+    // our own REQ — a relay (or any member) could otherwise stamp one junk event far-future/past
+    // and silently wedge this channel's fetch floor/ceiling for the whole session. Computed AFTER
+    // ingest so just-processed events are dedup-ledger hits (no second decryption).
+    if !session.is_valid() {
+        return Err("account changed during sync".to_string());
+    }
+    let verified_times: Vec<u64> = events
+        .iter()
+        .filter(|e| vector_core::community::inbound::event_authenticates(e, &channel))
+        .map(|e| e.created_at.as_secs())
+        .collect();
+
+    // Advance the outer-time cursor to the oldest wire created_at this page returned (so the
+    // NEXT older page steps strictly further back, on the relay's own clock).
+    if let Some(oldest) = verified_times.iter().copied().min() {
+        vector_core::community::cache::advance_oldest_cursor(channel_id, oldest);
+    }
+    // Advance the latest-page `since` floor to the newest wire time this page returned, so the next
+    // latest sync only pulls what's genuinely new. Latest page only — an older page must not raise
+    // the floor (it returns OLD events, which would wrongly cap future top-fetches).
+    if !is_older {
+        if let Some(newest) = verified_times.iter().copied().max() {
+            vector_core::community::cache::advance_newest_cursor(channel_id, newest);
+        }
+    }
+
+    // History-start (older pages): the page came back NON-EMPTY but with nothing strictly
+    // older than the cursor → we've hit the channel's beginning; mark it so future older pages
+    // stay DB-only, and report it (the frontend trusts THIS, not a row-count delta). An EMPTY
+    // page is treated as a transient relay miss (rate-limit / unreachable), NOT history-start —
+    // so a flaky relay can't permanently wedge scroll-back. A FULL page is never history-start
+    // either: ≥limit events sharing the boundary second (a burst "wall") just means the next
+    // page must step past them, not that history ended.
+    let reached_start = if is_older && !verified_times.is_empty() && events.len() < COMMUNITY_PAGE_FETCH_LIMIT {
+        let older_than_cursor = until_secs.map_or(0, |u| {
+            verified_times.iter().filter(|t| **t < u).count()
+        });
+        if older_than_cursor == 0 {
+            vector_core::community::cache::mark_history_start(channel_id);
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
     Ok(CommunitySyncResult { new_messages, reached_start })
 }
 
@@ -1768,6 +1797,10 @@ async fn rehydrate_listed_communities(
             Ok(vector_core::community::list::RehydrateOutcome::Removed) => {
                 // Banned since the entry was written. Full teardown (DB + STATE chats + routes) + tombstone
                 // local-only — boot's explicit publish propagates it; republishing here would re-echo.
+                // Destructive after a long rehydrate await: re-validate the session first.
+                if !session.is_valid() {
+                    break;
+                }
                 let channel_ids: Vec<String> = hex_to_id32(&entry.community_id)
                     .ok()
                     .and_then(|b| vector_core::db::community::load_community(&CommunityId(b)).ok().flatten())
@@ -2229,7 +2262,14 @@ async fn promote_preloaded_page(community: &vector_core::community::Community, p
             _ => {}
         }
     }
-    if let Some(newest) = page.iter().map(|e| e.created_at.as_secs()).max() {
+    // Authenticated wire times only (see sync_community_channel): a junk event with a
+    // forged far-future created_at must not seed the since-floor.
+    if let Some(newest) = page
+        .iter()
+        .filter(|e| vector_core::community::inbound::event_authenticates(e, &channel))
+        .map(|e| e.created_at.as_secs())
+        .max()
+    {
         vector_core::community::cache::advance_newest_cursor(&channel_id, newest);
     }
     painted > 0

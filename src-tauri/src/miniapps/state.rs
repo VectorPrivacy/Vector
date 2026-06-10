@@ -76,8 +76,9 @@ impl MiniAppPackage {
         // Try to read manifest.toml
         let manifest = match archive.by_name("manifest.toml") {
             Ok(mut file) => {
-                let mut contents = String::new();
-                file.read_to_string(&mut contents)?;
+                let bytes = Self::read_entry_capped(&mut file, 1024 * 1024)?;
+                let contents = String::from_utf8(bytes)
+                    .map_err(|e| Error::ManifestParseError(e.to_string()))?;
                 toml::from_str(&contents)
                     .map_err(|e| Error::ManifestParseError(e.to_string()))?
             }
@@ -100,6 +101,20 @@ impl MiniAppPackage {
         Ok(Self { id, path, manifest, file_hash })
     }
     
+    /// Read a zip entry with a hard decompressed-size cap. The archive itself
+    /// is size-capped, but deflate expands ~1000:1 — entry headers can't be
+    /// trusted, so bound the actual bytes read.
+    fn read_entry_capped<R: std::io::Read>(entry: &mut R, cap: u64) -> Result<Vec<u8>, Error> {
+        let mut buf = Vec::new();
+        entry.take(cap + 1).read_to_end(&mut buf)?;
+        if buf.len() as u64 > cap {
+            return Err(Error::InvalidPackage(
+                "Zip entry exceeds decompressed size limit".to_string(),
+            ));
+        }
+        Ok(buf)
+    }
+
     /// Load Mini App info from bytes (in-memory, no file needed)
     /// Returns (manifest, icon_bytes)
     pub fn load_info_from_bytes(bytes: &[u8], fallback_name: &str) -> Result<(MiniAppManifest, Option<Vec<u8>>), Error> {
@@ -111,8 +126,9 @@ impl MiniAppPackage {
         // Try to read manifest.toml
         let manifest = match archive.by_name("manifest.toml") {
             Ok(mut file) => {
-                let mut contents = String::new();
-                file.read_to_string(&mut contents)?;
+                let bytes = Self::read_entry_capped(&mut file, 1024 * 1024)?;
+                let contents = String::from_utf8(bytes)
+                    .map_err(|e| Error::ManifestParseError(e.to_string()))?;
                 toml::from_str(&contents)
                     .map_err(|e| Error::ManifestParseError(e.to_string()))?
             }
@@ -124,16 +140,13 @@ impl MiniAppPackage {
                 }
             }
         };
-        
+
+        const ICON_CAP: u64 = 8 * 1024 * 1024;
         // Try to get icon
         let icon = if !manifest.icon.is_empty() {
             // Use icon from manifest
             match archive.by_name(&manifest.icon) {
-                Ok(mut file) => {
-                    let mut data = Vec::new();
-                    file.read_to_end(&mut data).ok();
-                    Some(data)
-                }
+                Ok(mut file) => Self::read_entry_capped(&mut file, ICON_CAP).ok(),
                 Err(_) => None,
             }
         } else {
@@ -141,8 +154,7 @@ impl MiniAppPackage {
             let mut icon_data = None;
             for icon_name in &["icon.png", "icon.jpg", "icon.svg"] {
                 if let Ok(mut file) = archive.by_name(icon_name) {
-                    let mut data = Vec::new();
-                    if file.read_to_end(&mut data).is_ok() {
+                    if let Ok(data) = Self::read_entry_capped(&mut file, ICON_CAP) {
                         icon_data = Some(data);
                         break;
                     }
@@ -169,10 +181,12 @@ impl MiniAppPackage {
         
         let mut zip_file = archive.by_name(normalized_path)
             .map_err(|_| Error::FileNotFound(path.to_string()))?;
-        
-        let mut contents = Vec::new();
-        zip_file.read_to_end(&mut contents)?;
-        Ok(contents)
+
+        // Generous: real .xdc games ship single packed assets (e.g. a Godot
+        // .pck / wasm bundle) well past 100 MB. The cap only exists to stop
+        // a small archive deflating to multi-GB, not to police app size —
+        // the 500 MB whole-archive cap handles that.
+        Self::read_entry_capped(&mut zip_file, 512 * 1024 * 1024)
     }
     
     /// Get the icon as bytes, if available
@@ -210,8 +224,9 @@ impl MiniAppPackage {
             {
                 continue;
             }
-            let mut buf = Vec::new();
-            if entry.read_to_end(&mut buf).is_err() { continue; }
+            // Generous: a skipped oversize bundle.js would silently break
+            // realtime detection (preconnect never fires) for that game.
+            let Ok(buf) = Self::read_entry_capped(&mut entry, 128 * 1024 * 1024) else { continue };
             if buf.windows(NEEDLE.len()).any(|w| w == NEEDLE) {
                 return true;
             }

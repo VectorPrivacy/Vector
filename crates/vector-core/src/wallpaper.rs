@@ -130,9 +130,10 @@ fn estimate_brightness_for_white_text(bytes: &[u8]) -> Option<u8> {
     use ::image::{GenericImageView, ImageReader};
     use std::io::Cursor;
 
-    let reader = ImageReader::new(Cursor::new(bytes))
+    let mut reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .ok()?;
+    reader.limits(crate::crypto::bounded_image_limits());
     let img = reader.decode().ok()?;
     let thumb = img.thumbnail(64, 64);
     let rgb = thumb.to_rgb8();
@@ -191,10 +192,11 @@ fn extract_first_frame_if_animated(
     }
 
     // `image::ImageReader::decode()` yields frame 0 for animated GIF / WebP.
-    let reader = ImageReader::with_format(
+    let mut reader = ImageReader::with_format(
         Cursor::new(src),
         if is_gif { ImageFormat::Gif } else { ImageFormat::WebP },
     );
+    reader.limits(crate::crypto::bounded_image_limits());
     let img = reader
         .decode()
         .map_err(|e| format!("Failed to decode image: {}", e))?;

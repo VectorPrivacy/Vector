@@ -520,6 +520,20 @@ function truncateAllCategoryTags() {
     });
 }
 
+/**
+ * Resolve every `img[data-cache-icon-url]` under rootEl through the backend
+ * cache pipeline (Tor-aware, SSRF-guarded). Templates emit the attribute
+ * instead of a remote src; failures fire the img's onerror placeholder swap.
+ * @param {HTMLElement} rootEl
+ */
+function hydrateRemoteIcons(rootEl) {
+    for (const img of rootEl.querySelectorAll('img[data-cache-icon-url]')) {
+        const url = img.dataset.cacheIconUrl;
+        delete img.dataset.cacheIconUrl;
+        bindBackendCachedImg(img, url);
+    }
+}
+
 function createMarketplaceAppCard(app) {
     const card = document.createElement('div');
     card.className = 'marketplace-app-card';
@@ -539,11 +553,13 @@ function createMarketplaceAppCard(app) {
         installBtnText = getAppActionText(app);
     }
 
-    // Create icon element - prefer cached local path for offline support
+    // Create icon element - cached local path, or deferred backend-cache
+    // hydration for remote icon_url (the WebView never fetches remote: Tor)
     let iconHtml = '<span class="icon icon-play marketplace-app-icon-placeholder"></span>';
-    const iconSrc = app.icon_cached ? convertFileSrc(app.icon_cached) : app.icon_url;
-    if (iconSrc) {
-        iconHtml = `<img src="${escapeHtml(iconSrc)}" alt="${escapeHtml(app.name)}" class="marketplace-app-icon" onerror="this.outerHTML='<span class=\\'icon icon-play marketplace-app-icon-placeholder\\'></span>'">`;
+    if (app.icon_cached) {
+        iconHtml = `<img src="${escapeHtml(convertFileSrc(app.icon_cached))}" alt="${escapeHtml(app.name)}" class="marketplace-app-icon" onerror="this.outerHTML='<span class=\\'icon icon-play marketplace-app-icon-placeholder\\'></span>'">`;
+    } else if (app.icon_url) {
+        iconHtml = `<img data-cache-icon-url="${escapeHtml(app.icon_url)}" alt="${escapeHtml(app.name)}" class="marketplace-app-icon" onerror="this.outerHTML='<span class=\\'icon icon-play marketplace-app-icon-placeholder\\'></span>'">`;
     }
 
     // Categories/tags - render all, will be dynamically truncated after mount
@@ -577,6 +593,8 @@ function createMarketplaceAppCard(app) {
             ${installBtnText}
         </button>
     `;
+
+    hydrateRemoteIcons(card);
 
     // Add click handler for install/play button
     const installBtn = card.querySelector('.marketplace-install-btn');
@@ -770,11 +788,12 @@ async function showAppDetails(app) {
     // Store current app ID on panel for refresh detection
     panel.dataset.appId = app.id;
 
-    // Create icon HTML - prefer cached local path for offline support
+    // Create icon HTML - cached local path, or deferred backend-cache hydration
     let iconHtml = '<span class="icon icon-play app-details-icon-placeholder"></span>';
-    const detailsIconSrc = app.icon_cached ? convertFileSrc(app.icon_cached) : app.icon_url;
-    if (detailsIconSrc) {
-        iconHtml = `<img src="${escapeHtml(detailsIconSrc)}" alt="${escapeHtml(app.name)}" class="app-details-icon" onerror="this.outerHTML='<span class=\\'icon icon-play app-details-icon-placeholder\\'></span>'">`;
+    if (app.icon_cached) {
+        iconHtml = `<img src="${escapeHtml(convertFileSrc(app.icon_cached))}" alt="${escapeHtml(app.name)}" class="app-details-icon" onerror="this.outerHTML='<span class=\\'icon icon-play app-details-icon-placeholder\\'></span>'">`;
+    } else if (app.icon_url) {
+        iconHtml = `<img data-cache-icon-url="${escapeHtml(app.icon_url)}" alt="${escapeHtml(app.name)}" class="app-details-icon" onerror="this.outerHTML='<span class=\\'icon icon-play app-details-icon-placeholder\\'></span>'">`;
     }
 
     // Create categories HTML - make them clickable for filtering
@@ -928,6 +947,7 @@ async function showAppDetails(app) {
             </div>
         </div>
     `;
+    hydrateRemoteIcons(content);
 
     // Show the panel
     panel.style.display = 'flex';
@@ -1489,9 +1509,10 @@ function createFeaturedCategoryCard(categoryName, description, apps, totalCount,
     // Create card spread preview - prefer cached icons for offline support
     let cardSpreadHtml = '<div class="marketplace-card-spread">';
     for (const app of apps) {
-        const spreadIconSrc = app.icon_cached ? convertFileSrc(app.icon_cached) : app.icon_url;
-        if (spreadIconSrc) {
-            cardSpreadHtml += `<div class="marketplace-card-spread-item"><img src="${escapeHtml(spreadIconSrc)}" alt="${escapeHtml(app.name)}" onerror="this.outerHTML='<span class=\\'icon icon-play\\'></span>'"></div>`;
+        if (app.icon_cached) {
+            cardSpreadHtml += `<div class="marketplace-card-spread-item"><img src="${escapeHtml(convertFileSrc(app.icon_cached))}" alt="${escapeHtml(app.name)}" onerror="this.outerHTML='<span class=\\'icon icon-play\\'></span>'"></div>`;
+        } else if (app.icon_url) {
+            cardSpreadHtml += `<div class="marketplace-card-spread-item"><img data-cache-icon-url="${escapeHtml(app.icon_url)}" alt="${escapeHtml(app.name)}" onerror="this.outerHTML='<span class=\\'icon icon-play\\'></span>'"></div>`;
         } else {
             cardSpreadHtml += `<div class="marketplace-card-spread-item"><span class="icon icon-play"></span></div>`;
         }
@@ -1508,7 +1529,8 @@ function createFeaturedCategoryCard(categoryName, description, apps, totalCount,
         <p class="marketplace-featured-description">${escapeHtml(description)}</p>
         ${cardSpreadHtml}
     `;
-    
+    hydrateRemoteIcons(card);
+
     card.onclick = () => addMarketplaceFilter(categoryName);
     
     return card;
@@ -1901,7 +1923,7 @@ async function showPublishAppDialog(filePath, miniAppInfo) {
             <div class="publish-app-content">
                 <div class="publish-app-icon-container">
                     ${miniAppInfo?.icon_data
-                        ? `<img src="${miniAppInfo.icon_data}" alt="App Icon" class="publish-app-icon">`
+                        ? `<img src="${escapeHtml(miniAppInfo.icon_data)}" alt="App Icon" class="publish-app-icon">`
                         : '<span class="icon icon-play publish-app-icon-placeholder"></span>'
                     }
                 </div>

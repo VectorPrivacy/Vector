@@ -90,8 +90,7 @@ pub fn get_cached_image_preview(quality: u32) -> Result<String, String> {
     let bytes = bytes.clone();
     drop(cache);
 
-    let img = ::image::load_from_memory(&bytes)
-        .map_err(|e| format!("Failed to decode image: {}", e))?;
+    let img = vector_core::crypto::decode_image_bounded(&bytes)?;
 
     let (width, height) = (img.width(), img.height());
     let (new_width, new_height) = calculate_preview_dimensions(width, height, quality);
@@ -112,7 +111,7 @@ pub fn generate_thumbhash_for_preview(file_path: String) -> Result<String, Strin
     let img = {
         let cache = JS_FILE_CACHE.lock().unwrap();
         if let Some((bytes, _, _)) = cache.as_ref() {
-            ::image::load_from_memory(bytes).ok()
+            vector_core::crypto::decode_image_bounded(bytes).ok()
         } else {
             None
         }
@@ -240,7 +239,7 @@ pub async fn send_cached_file(receiver: String, replied_to: String, use_compress
 
     // Process images: generate metadata and optionally compress
     let (bytes, extension, img_meta) = if is_image {
-        if let Ok(img) = ::image::load_from_memory(&original_bytes) {
+        if let Ok(img) = vector_core::crypto::decode_image_bounded(&original_bytes) {
             let thumbhash_meta = crate::util::generate_thumbhash_from_image(&img)
                 .map(|thumbhash| ImageMetadata {
                     thumbhash,
@@ -439,7 +438,7 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
 
     // Generate image metadata if the file is an image
     if matches!(attachment_file.extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico") {
-        if let Ok(img) = ::image::load_from_memory(&attachment_file.bytes) {
+        if let Ok(img) = vector_core::crypto::decode_image_bounded(&attachment_file.bytes) {
             attachment_file.img_meta = util::generate_thumbhash_from_image(&img)
                 .map(|thumbhash| ImageMetadata {
                     thumbhash,
@@ -560,8 +559,7 @@ fn generate_image_preview_from_bytes(bytes: &[u8]) -> Result<String, String> {
         return Ok(crate::util::data_uri(mime_type, bytes));
     }
 
-    let img = ::image::load_from_memory(bytes)
-        .map_err(|e| format!("Failed to decode image: {}", e))?;
+    let img = vector_core::crypto::decode_image_bounded(bytes)?;
 
     let (width, height) = (img.width(), img.height());
     let (new_width, new_height) = calculate_capped_preview_dimensions(width, height);
@@ -628,8 +626,7 @@ pub fn get_image_preview_base64(file_path: String, quality: u32) -> Result<Strin
         let file_data = std::fs::read(&file_path)
             .map_err(|e| format!("Failed to read file: {}", e))?;
 
-        let img = ::image::load_from_memory(&file_data)
-            .map_err(|e| format!("Failed to decode image: {}", e))?;
+        let img = vector_core::crypto::decode_image_bounded(&file_data)?;
 
         let (width, height) = (img.width(), img.height());
         let (new_width, new_height) = calculate_preview_dimensions(width, height, quality);
@@ -655,8 +652,7 @@ pub fn get_image_preview_base64(file_path: String, quality: u32) -> Result<Strin
             }
         };
 
-        let img = ::image::load_from_memory(&bytes)
-            .map_err(|e| format!("Failed to decode image: {}", e))?;
+        let img = vector_core::crypto::decode_image_bounded(&bytes)?;
 
         let (width, height) = (img.width(), img.height());
         let (new_width, new_height) = calculate_preview_dimensions(width, height, quality);

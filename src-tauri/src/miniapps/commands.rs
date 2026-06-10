@@ -34,6 +34,10 @@ pub struct MiniAppInfo {
     pub source_code_url: Option<String>,
     /// SHA-256 hash of the .xdc file (used for permission identification)
     pub file_hash: Option<String>,
+    /// Whether the app calls the realtime (Iroh) API — drives the frontend's
+    /// Tor IP-exposure consent prompt. `default` so older persisted JSON parses.
+    #[serde(default)]
+    pub uses_realtime: bool,
 }
 
 impl MiniAppInfo {
@@ -42,7 +46,7 @@ impl MiniAppInfo {
             let mime = crate::util::mime_from_magic_bytes(&bytes);
             crate::util::data_uri(mime, &bytes)
         });
-        
+
         Self {
             id: pkg.id.clone(),
             name: pkg.manifest.name.clone(),
@@ -52,6 +56,7 @@ impl MiniAppInfo {
             icon_data,
             source_code_url: pkg.manifest.source_code_url.clone(),
             file_hash: Some(pkg.file_hash.clone()),
+            uses_realtime: super::state::MiniAppPackage::scan_for_realtime_api(&pkg.path),
         }
     }
 }
@@ -679,6 +684,9 @@ pub async fn miniapp_load_info_from_bytes(
         icon_data,
         source_code_url: manifest.source_code_url,
         file_hash: Some(file_hash),
+        // Bytes-only preview (publish dialog) — never a launch path, so the
+        // realtime flag isn't consulted; skip the scan.
+        uses_realtime: false,
     })
 }
 

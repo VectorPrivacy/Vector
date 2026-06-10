@@ -261,10 +261,21 @@ fn apply_presence(opened: &OpenedMessage, channel: &Channel, my_pubkey: &PublicK
         npub: opened.author.to_bech32().ok()?,
         joined,
         event_id: opened.message_id.to_hex(),
-        created_at: opened.created_at.as_secs(),
+        created_at: clamp_inner_secs(opened.created_at.as_secs()),
         invited_by,
         invited_label,
     })
+}
+
+/// Clamp an author-controlled inner timestamp before it becomes a persisted
+/// sort key — a forged far-future stamp would otherwise pin the event at the
+/// timeline edge forever (mirrors the webxdc handlers' clamp).
+fn clamp_inner_secs(secs: u64) -> u64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    secs.min(now + 300)
 }
 
 /// Interpret a WebXDC peer signal (3310). JSON content: `{"op":"ad","topic":...,"addr":...}` for an
@@ -340,10 +351,31 @@ fn apply_kick(opened: &OpenedMessage, channel: &Channel, my_pubkey: &PublicKey) 
         npub: target.to_bech32().ok()?,
         joined: false,
         event_id: opened.message_id.to_hex(),
-        created_at: opened.created_at.as_secs(),
+        created_at: clamp_inner_secs(opened.created_at.as_secs()),
         invited_by: None,
         invited_label: None,
     })
+}
+
+/// Does this wire event authenticate against the channel's keys — now (open +
+/// MAC) or on a prior sight (dedup ledgers)? The outer `created_at` is
+/// otherwise unauthenticated relay input: sync cursors must only ever advance
+/// over events that pass this, or one junk event stamped far-future/past at
+/// the channel's cleartext pseudonym wedges the session's fetch floor/ceiling.
+/// Ledger hits skip decryption, so steady-state re-syncs stay cheap.
+///
+/// CAVEAT: the ledger half is keyed by event id, NOT channel-scoped — a relay
+/// replaying channel A's real events into channel B's page authenticates here.
+/// Cursor skew from that is bounded by genuinely-authored (signature-pinned)
+/// times, roughly equivalent to the relay's existing withholding power; do not
+/// repurpose this as a channel-membership check.
+pub fn event_authenticates(event: &Event, channel: &Channel) -> bool {
+    if crate::db::events::wrapper_event_exists(&event.id.to_hex()).unwrap_or(false)
+        || crate::db::wrappers::processed_wrapper_exists(&event.id.to_bytes())
+    {
+        return true;
+    }
+    open_message_multi(event, &channel.id, &channel.read_epoch_keys()).is_ok()
 }
 
 /// Process a fetched batch of raw channel events (backfill / cold-start) in a SAFE order:
@@ -521,8 +553,13 @@ fn apply_delete(state: &mut ChatState, opened: &OpenedMessage, channel: &Channel
     // target, so an admin can't tombstone the owner's (or a peer's) paged-out message.
     if let Ok(Some(author_npub)) = crate::db::events::event_author(&target_id) {
         if let Ok(author) = PublicKey::parse(&author_npub) {
+            // Dissolved gate mirrors the resident path: the seal blocks
+            // moderation-hides over paged-out targets too — only self-deletes
+            // survive in a dead community.
             let ok = author == deleter
-                || (pinned && channel.roster.can_act_on_member(&deleter_hex, owner_hex.as_deref(), &author.to_hex(), Permissions::MANAGE_MESSAGES));
+                || (pinned
+                    && !channel.dissolved
+                    && channel.roster.can_act_on_member(&deleter_hex, owner_hex.as_deref(), &author.to_hex(), Permissions::MANAGE_MESSAGES));
             if ok {
                 return Some(IncomingEvent::Removed { target_id });
             }
@@ -997,6 +1034,24 @@ mod tests {
         match process_incoming(&mut state, &hide_member, &c, &owner.public_key()) {
             Some(IncomingEvent::Removed { target_id }) => assert_eq!(target_id, member_msg),
             _ => panic!("admin should hide a member's paged-out message"),
+        }
+
+        // Dissolved seal covers paged-out targets too: an admin moderation-hide of a
+        // member's DB-only message is dropped in a dead community, while the author's
+        // own self-delete of their paged-out message still passes (data ownership).
+        let member_msg2 = "c".repeat(64);
+        crate::db::events::save_message("chatoow", &mk(&member_msg2, &member, 5)).await.unwrap();
+        let mut sealed = c.clone();
+        sealed.dissolved = true;
+        let hide_sealed = seal_hide(&sealed, &admin, &member_msg2, 6, Some(&cite));
+        assert!(
+            process_incoming(&mut state, &hide_sealed, &sealed, &owner.public_key()).is_none(),
+            "a dissolved community accepts no moderation-hide, resident or paged-out"
+        );
+        let self_del = seal_hide(&sealed, &member, &member_msg2, 7, None);
+        match process_incoming(&mut state, &self_del, &sealed, &owner.public_key()) {
+            Some(IncomingEvent::Removed { target_id }) => assert_eq!(target_id, member_msg2),
+            _ => panic!("a self-delete of a paged-out message must survive the dissolved seal"),
         }
         crate::db::close_database();
     }

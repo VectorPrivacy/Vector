@@ -1307,6 +1307,45 @@ function setupInlineImageListeners() {
                 indicator.remove();
             }
         }
+
+        // Also resolve any <img> waiting on this URL via bindBackendCachedImg
+        // (link-preview og:image / favicon ride the same cache pipeline)
+        const pendingImgs = document.querySelectorAll(`img[data-pending-cache-url="${CSS.escape(url)}"]`);
+        for (const img of pendingImgs) {
+            delete img.dataset.pendingCacheUrl;
+            if (path) img.src = convertFileSrc(path);
+            else img.dispatchEvent(new Event('error'));
+        }
+    });
+}
+
+/**
+ * Bind a REMOTE image URL to an <img> through the backend cache pipeline.
+ *
+ * The WebView has no Tor awareness — a raw remote `img.src` is a clearnet
+ * fetch from the user's real IP. `cache_url_image` downloads via the
+ * Tor-aware backend client (HTTPS-only, SSRF-guarded) and we render the
+ * cached file. On failure the img's `error` event fires so existing
+ * fallbacks (hide favicon, remove preview) behave as before.
+ * @param {HTMLImageElement} img
+ * @param {string} url - remote https URL (attacker-controlled is fine)
+ */
+function bindBackendCachedImg(img, url) {
+    if (!url || typeof url !== 'string') {
+        queueMicrotask(() => img.dispatchEvent(new Event('error')));
+        return;
+    }
+    img.dataset.pendingCacheUrl = url;
+    invoke('cache_url_image', { url }).then(path => {
+        if (path) {
+            delete img.dataset.pendingCacheUrl;
+            img.src = convertFileSrc(path);
+        }
+        // null = download already in flight; the inline_image_cached event
+        // listener above fills us in when it lands.
+    }).catch(() => {
+        delete img.dataset.pendingCacheUrl;
+        img.dispatchEvent(new Event('error'));
     });
 }
 

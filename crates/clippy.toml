@@ -6,4 +6,10 @@ disallowed-methods = [
     { path = "reqwest::Client::new", reason = "Use vector_core::net::build_http_client so the Tor failsafe applies (or annotate this call site with #[allow(clippy::disallowed_methods)] if you genuinely need a raw client and have audited why it's safe)." },
     { path = "reqwest::Client::builder", reason = "Use vector_core::net::build_http_client so the Tor failsafe applies." },
     { path = "reqwest::ClientBuilder::new", reason = "Use vector_core::net::build_http_client so the Tor failsafe applies." },
+    { path = "reqwest::get", reason = "Use vector_core::net::build_http_client so the Tor failsafe applies." },
+    { path = "reqwest::Client::default", reason = "Use vector_core::net::build_http_client so the Tor failsafe applies." },
+    { path = "reqwest::blocking::Client::new", reason = "Use vector_core::net::build_http_client so the Tor failsafe applies." },
+    { path = "reqwest::blocking::Client::builder", reason = "Use vector_core::net::build_http_client so the Tor failsafe applies." },
+    { path = "reqwest::blocking::ClientBuilder::new", reason = "Use vector_core::net::build_http_client so the Tor failsafe applies." },
+    { path = "reqwest::blocking::get", reason = "Use vector_core::net::build_http_client so the Tor failsafe applies." },
 ]

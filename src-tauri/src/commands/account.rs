@@ -1379,8 +1379,9 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
     // If the user previously enabled Tor, bootstrap it BEFORE building the
     // Nostr client so the client picks up the SOCKS proxy from the start.
     // First boot takes 5–15s for the consensus fetch; subsequent ~2s from
-    // the cached directory under <account>/tor/. Failures fall through to
-    // a direct connection so the app still boots.
+    // the cached directory under <account>/tor/. On failure the app still
+    // boots, but fail-closed: pref stays ON with no service, so all
+    // connections blackhole until Tor connects or the user disables it.
     #[cfg(feature = "tor")]
     {
         let tor_enabled = matches!(

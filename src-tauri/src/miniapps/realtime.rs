@@ -888,6 +888,12 @@ impl RealtimeManager {
             }
         }
 
+        // Tor note: iroh is QUIC/UDP and cannot ride the SOCKS proxy, so this
+        // endpoint talks clearnet even with Tor on. Deliberate (relay-only
+        // mode means peers only ever see the relay, never each other's IPs);
+        // the frontend obtains once-per-session user consent before launching
+        // a realtime-capable Mini App while Tor is enabled.
+
         // Slow path: write lock, double-check, initialize
         let mut guard = self.iroh.write().await;
         if let Some(ref iroh) = *guard {

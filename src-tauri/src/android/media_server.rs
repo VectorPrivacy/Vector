@@ -209,8 +209,16 @@ async fn handle_connection(
     let req_token = &path[..slash_pos];
     let encoded_path = &path[slash_pos + 1..];
 
-    // Validate token (byte-level comparison, no String needed)
-    if req_token != state.token.as_bytes() {
+    // Validate token — constant-time so another on-device app can't
+    // byte-at-a-time the secret out of response timing.
+    let expected = state.token.as_bytes();
+    let token_ok = req_token.len() == expected.len()
+        && req_token
+            .iter()
+            .zip(expected)
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            == 0;
+    if !token_ok {
         send_response(&mut stream, 403, "Forbidden", &[], &[]).await?;
         return Ok(());
     }

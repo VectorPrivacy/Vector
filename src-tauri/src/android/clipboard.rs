@@ -140,7 +140,7 @@ fn read_image_from_uri(env: &mut JNIEnv, context: &JObject, uri: &JObject) -> Re
         .map_err(|e| format!("Failed to convert byte array: {:?}", e))?;
     
     // Decode image
-    let img = image::load_from_memory(&bytes)
+    let img = vector_core::crypto::decode_image_bounded(&bytes)
         .map_err(|e| format!("Failed to decode image: {:?}", e))?;
     
     Ok(img.to_rgba8())

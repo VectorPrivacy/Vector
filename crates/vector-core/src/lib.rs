@@ -327,12 +327,17 @@ impl VectorCore {
         // must agree with the DB regardless of branch.
         state::init_encryption_enabled();
 
-        // Build Nostr client
-        let client = ClientBuilder::new().signer(keys).build();
+        // Build Nostr client — tor-aware options so a headless consumer with
+        // the Tor pref ON proxies (or blackholes) instead of dialing direct.
+        let client = ClientBuilder::new()
+            .signer(keys)
+            .opts(nostr_client_options())
+            .build();
 
         // Add trusted relays
         for relay in state::TRUSTED_RELAYS {
-            client.add_relay(*relay).await.ok();
+            let opts = tor_aware_relay_options(nostr_sdk::RelayOptions::default());
+            client.pool().add_relay(*relay, opts).await.ok();
         }
 
         // Connect

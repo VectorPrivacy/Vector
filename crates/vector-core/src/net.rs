@@ -75,6 +75,19 @@ pub fn build_http_client_with_options(
     let mut builder = reqwest::Client::builder().timeout(timeout);
     if !follow_redirects {
         builder = builder.redirect(reqwest::redirect::Policy::none());
+    } else {
+        // Validate EVERY redirect hop, not just the initial URL: a public
+        // host answering `302 Location: http://169.254.169.254/…` would
+        // otherwise walk the request straight past the SSRF check.
+        builder = builder.redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.error("too many redirects");
+            }
+            match validate_url_not_private(attempt.url().as_str()) {
+                Ok(()) => attempt.follow(),
+                Err(e) => attempt.error(e),
+            }
+        }));
     }
 
     #[cfg(feature = "tor")]

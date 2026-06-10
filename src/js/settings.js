@@ -1120,10 +1120,12 @@ async function askForAvatar() {
     cProfile.avatar_cached = '';
 
     if (inEditMode) {
-        // Surgical swap — see askForBanner for rationale.
+        // Surgical swap — see askForBanner for rationale. Preview via the
+        // backend cache (the WebView must never fetch remote, even our own
+        // fresh Blossom upload — Tor bypass).
         const imgEl = document.getElementById('profile-avatar');
         if (imgEl && imgEl.tagName === 'IMG') {
-            imgEl.src = strUploadURL;
+            bindBackendCachedImg(imgEl, strUploadURL);
         }
     } else {
         renderCurrentProfile(cProfile);
@@ -1226,13 +1228,13 @@ async function askForBanner() {
         // Surgical img.src swap. renderProfileTab would tear down the
         // edit-bar overlay; Save's exit handler paints the final state.
         if (domProfileBanner.tagName === 'IMG') {
-            domProfileBanner.src = strUploadURL;
+            bindBackendCachedImg(domProfileBanner, strUploadURL);
         } else {
             // Currently a placeholder <div>; swap to a real <img>.
             const img = document.createElement('img');
             img.id = 'profile-banner';
             img.className = domProfileBanner.className;
-            img.src = strUploadURL;
+            bindBackendCachedImg(img, strUploadURL);
             domProfileBanner.replaceWith(img);
             domProfileBanner = img;
         }

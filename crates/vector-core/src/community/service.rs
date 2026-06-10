@@ -590,8 +590,11 @@ async fn fetch_control_folded<T: Transport + ?Sized>(
     let z_tags = vec![super::roster::control_pseudonym(&community.server_root_key, &community.id, community.server_root_epoch)];
     let query = Query { kinds: vec![event_kind::COMMUNITY_CONTROL], z_tags, ..Default::default() };
     let raw = transport.fetch(&query, &community.relays).await?;
+    // Bound the AEAD work too (fold_roster re-caps the verify/fold): a relay
+    // flooding the coordinate must not buy unbounded decrypt attempts.
     let inner_editions: Vec<Event> = raw
         .iter()
+        .take(super::roster::MAX_CONTROL_EDITIONS)
         .filter_map(|ev| super::roster::open_control_edition(ev, &community.server_root_key).ok())
         .collect();
     // VALID (opened) editions, NOT raw.len() — the admin-write isolation signal must mean "a relay served
@@ -965,6 +968,31 @@ fn proven_owner_hex(community: &Community) -> Option<String> {
         .as_ref()
         .and_then(|a| super::owner::verify_owner_attestation(a, &cid))
         .map(|pk| pk.to_hex())
+}
+
+/// Rekey-plane authority with §6 banlist precedence: a positive authority
+/// lookup can never honor a banned identity. The banlist and the grant-revoke
+/// are SEPARATE editions a withholding relay can split — without this, a
+/// since-banned admin whose revoke is withheld still ranks for rotations,
+/// letting them race their own removal with a re-founding. Read failure
+/// degrades to "not banned" (the roster gate still fails closed on its own
+/// read failure); the owner is exempt (supreme, never a valid ban target).
+fn rotator_is_authorized(
+    cid: &str,
+    roster: &super::roles::CommunityRoles,
+    owner_hex: Option<&str>,
+    rotator_hex: &str,
+    permission: u64,
+) -> bool {
+    if owner_hex != Some(rotator_hex)
+        && crate::db::community::get_community_banlist(cid)
+            .unwrap_or_default()
+            .iter()
+            .any(|b| b == rotator_hex)
+    {
+        return false;
+    }
+    roster.is_authorized(rotator_hex, owner_hex, permission)
 }
 
 /// escalation defense for an authoring action — may the local caller grant/revoke `role_id` on
@@ -2604,12 +2632,14 @@ pub fn apply_server_root_rekey(
     // the chain root — a community whose deed is missing/stripped yields `owner = None`, so NO rotator
     // authorizes (a deedless re-founding is followed by no one). A roster-read failure degrades to
     // owner-only (fail-closed): a stale/unreadable roster only UNDER-authorizes a non-owner, never over-.
+    // Version-pinned rotator authority (spec §6 rule 1) is deferred, as on the channel path; the
+    // banlist-precedence gate + the heal's deauthorized-root abandonment are the implemented mitigations.
     let owner = proven_owner_hex(community);
     let roster = crate::db::community::get_community_roles(&cid).unwrap_or_else(|e| {
         crate::log_warn!("base rekey apply: roster read failed ({e}); authorizing owner only");
         Default::default()
     });
-    if !roster.is_authorized(&parsed.rotator.to_hex(), owner.as_deref(), super::roles::Permissions::BAN) {
+    if !rotator_is_authorized(&cid, &roster, owner.as_deref(), &parsed.rotator.to_hex(), super::roles::Permissions::BAN) {
         return Err("base rekey rotator lacks server-wide rotation authority (BAN)".to_string());
     }
 
@@ -2696,7 +2726,7 @@ async fn heal_channel_fork_epochs<T: Transport + ?Sized>(
             if !matches!(p.scope, super::derive::RekeyScope::Channel(c) if &c == channel_id) || !epochs.contains(&p.new_epoch.0) {
                 continue;
             }
-            if !roster.is_authorized(&p.rotator.to_hex(), owner_hex.as_deref(), super::roles::Permissions::MANAGE_CHANNELS) {
+            if !rotator_is_authorized(cid, &roster, owner_hex.as_deref(), &p.rotator.to_hex(), super::roles::Permissions::MANAGE_CHANNELS) {
                 continue;
             }
             let Some(key) = peek_my_channel_key(&p) else { continue }; // not a recipient of this candidate
@@ -3020,7 +3050,7 @@ pub async fn catch_up_server_root<T: Transport + ?Sized>(
         let roster = crate::db::community::get_community_roles(&cid).unwrap_or_default();
         let mut candidates: Vec<(&super::rekey::ParsedRekey, [u8; 32])> = Vec::new();
         for parsed in &chunks {
-            if !roster.is_authorized(&parsed.rotator.to_hex(), owner_hex.as_deref(), super::roles::Permissions::BAN) {
+            if !rotator_is_authorized(&cid, &roster, owner_hex.as_deref(), &parsed.rotator.to_hex(), super::roles::Permissions::BAN) {
                 continue;
             }
             match peek_my_server_root(parsed) {
@@ -3042,7 +3072,7 @@ pub async fn catch_up_server_root<T: Transport + ?Sized>(
                 // the prior root can't forge an eviction event that tricks me into self-deleting.
                 let owner = proven_owner_hex(community);
                 let roster = crate::db::community::get_community_roles(&cid).unwrap_or_default();
-                if chunks.iter().any(|p| roster.is_authorized(&p.rotator.to_hex(), owner.as_deref(), super::roles::Permissions::BAN)) {
+                if chunks.iter().any(|p| rotator_is_authorized(&cid, &roster, owner.as_deref(), &p.rotator.to_hex(), super::roles::Permissions::BAN)) {
                     removed = true;
                 }
                 false // removed from the base (terminal) → stop the walk
@@ -3086,9 +3116,10 @@ pub async fn catch_up_server_root<T: Transport + ?Sized>(
             let roster = crate::db::community::get_community_roles(&cid).unwrap_or_default();
             let mut best: Option<(&super::rekey::ParsedRekey, [u8; 32])> = None;
             for p in &chunks {
-                // Only an AUTHORIZED re-founding (rotator held BAN) is a convergence candidate — a non-BAN
-                // member who merely holds the prior root can't forge a lower root to hijack the chain.
-                if !roster.is_authorized(&p.rotator.to_hex(), owner_hex.as_deref(), super::roles::Permissions::BAN) {
+                // Only an AUTHORIZED re-founding (rotator held BAN, not banned) is a convergence
+                // candidate — a non-BAN member who merely holds the prior root can't forge a lower
+                // root to hijack the chain.
+                if !rotator_is_authorized(&cid, &roster, owner_hex.as_deref(), &p.rotator.to_hex(), super::roles::Permissions::BAN) {
                     continue;
                 }
                 if let Ok(Some(root)) = peek_my_server_root(p) {
@@ -3097,8 +3128,26 @@ pub async fn catch_up_server_root<T: Transport + ?Sized>(
                     }
                 }
             }
+            // Authority dominates the down-only rule: if the root I currently hold is POSITIVELY
+            // identified as a since-deauthorized rotation (its chunk is on the wire, delivers my
+            // current root, and its rotator now fails the authority/banlist gate), abandon it for
+            // the lowest AUTHORIZED sibling even when that sibling is byte-higher. Without this, a
+            // banned admin who raced their own removal with a ground-low re-founding root keeps
+            // every member who adopted it partitioned forever — the heal would refuse to climb back
+            // to the owner's legitimate (higher) root. Positive identification only: when the
+            // current root's chunk is absent (withheld), keep the strict down-only rule so a flaky
+            // round can't re-fork a converged epoch.
+            let current_deauthorized = chunks.iter().any(|p| {
+                matches!(peek_my_server_root(p), Ok(Some(r)) if r == current_root)
+                    && !rotator_is_authorized(&cid, &roster, owner_hex.as_deref(), &p.rotator.to_hex(), super::roles::Permissions::BAN)
+            });
             if let Some((winner, win_root)) = best {
-                if win_root < current_root {
+                let adopt = if current_deauthorized {
+                    win_root != current_root
+                } else {
+                    win_root < current_root
+                };
+                if adopt {
                     if !session.is_valid() {
                         return Err("session changed during base convergence".to_string());
                     }
@@ -3904,6 +3953,102 @@ mod tests {
         // Idempotent: a second pass holding the winner stays put (no flip back to the higher root).
         let _ = catch_up_server_root(&relay, &after).await.unwrap();
         assert_eq!(crate::db::community::load_community(&community.id).unwrap().unwrap().server_root_key.as_bytes(), &root_lo, "no flip-flop");
+    }
+
+    #[tokio::test]
+    async fn banned_rotators_rekey_is_not_a_convergence_candidate() {
+        // §6 banlist precedence on the rekey plane: an admin who holds a (withheld-revoke) BAN grant
+        // but sits on the SYNCED banlist must not be honored as a rotator — not by apply, not by the
+        // forward walk, not by the heal. Here the banned admin's re-founding delivers a byte-LOWER
+        // root than the one I hold; without the banlist gate the heal would adopt it.
+        let (_tmp, _guard) = init_test_db();
+        let owner = Keys::generate();
+        let me = Keys::generate();
+        let banned_admin = Keys::generate();
+        become_local(&me);
+        let community = saved_community_owned_by(&owner);
+        let cid = community.id.to_hex();
+        let genesis_root = *community.server_root_key.as_bytes();
+        let scope = super::super::derive::RekeyScope::ServerRoot;
+
+        // The attacker still ranks in the roster (their grant-revoke is "withheld")...
+        let role_id = "e".repeat(64);
+        let roster = crate::community::roles::CommunityRoles {
+            roles: vec![crate::community::roles::Role::admin(role_id.clone())],
+            grants: vec![crate::community::roles::MemberGrant { member: banned_admin.public_key().to_hex(), role_ids: vec![role_id] }],
+        };
+        crate::db::community::set_community_roles(&cid, &roster, 1).unwrap();
+        // ...but the banlist naming them DID sync. Banlist must dominate.
+        crate::db::community::set_community_banlist(&cid, &[banned_admin.public_key().to_hex()], 2).unwrap();
+
+        // Banned admin's epoch-1 re-founding with a ground-low root, blob addressed to me.
+        let root_evil = [0x01u8; 32];
+        let commit0 = super::super::rekey::epoch_key_commitment(crate::community::Epoch(0), &genesis_root);
+        let blob = super::super::rekey::build_rekey_blob(banned_admin.secret_key(), &me.public_key(), scope, crate::community::Epoch(1), &root_evil).unwrap();
+        let ev = super::super::rekey::build_server_root_rekey_event(
+            &Keys::generate(), &banned_admin, &genesis_root, &community.id, crate::community::Epoch(1), crate::community::Epoch(0), &commit0, &[blob]).unwrap();
+        let relay = MemoryRelay::new();
+        relay.inject(&ev, &community.relays);
+
+        // Forward walk: the banned rotation is the ONLY epoch-1 candidate → not adopted, not a
+        // removal signal (a banned admin can't trick members into self-erasing either).
+        let out = catch_up_server_root(&relay, &community).await.unwrap();
+        assert_eq!(out.epoch, 0, "banned rotator's re-founding must not advance the base");
+        assert!(!out.removed, "banned rotator's exclusion must not read as an authorized removal");
+        let after = crate::db::community::load_community(&community.id).unwrap().unwrap();
+        assert_eq!(after.server_root_key.as_bytes(), &genesis_root, "root unchanged");
+
+        // Direct apply refuses too.
+        let parsed = super::super::rekey::open_rekey_event(&ev, &genesis_root).unwrap();
+        assert!(apply_server_root_rekey(&community, &parsed).is_err(), "apply must refuse a banned rotator");
+    }
+
+    #[tokio::test]
+    async fn heal_abandons_a_deauthorized_root_for_the_authorized_higher_sibling() {
+        // B1 (rekey-race fork): I adopted a since-BANNED admin's ground-low epoch-1 root before the
+        // banlist reached me. Once the banlist syncs, the heal must abandon their root and climb UP
+        // to the owner's legitimate (byte-higher) sibling — authority dominates the down-only rule.
+        let (_tmp, _guard) = init_test_db();
+        let owner = Keys::generate();
+        let me = Keys::generate();
+        let banned_admin = Keys::generate();
+        become_local(&me);
+        let community = saved_community_owned_by(&owner);
+        let cid = community.id.to_hex();
+        let genesis_root = *community.server_root_key.as_bytes();
+        let scope = super::super::derive::RekeyScope::ServerRoot;
+        let commit0 = super::super::rekey::epoch_key_commitment(crate::community::Epoch(0), &genesis_root);
+
+        // Both epoch-1 siblings on the wire, addressed under the shared genesis root:
+        // the attacker's (ground-low) and the owner's (higher).
+        let root_evil = [0x01u8; 32];
+        let root_owner = [0x77u8; 32];
+        let blob_evil = super::super::rekey::build_rekey_blob(banned_admin.secret_key(), &me.public_key(), scope, crate::community::Epoch(1), &root_evil).unwrap();
+        let ev_evil = super::super::rekey::build_server_root_rekey_event(
+            &Keys::generate(), &banned_admin, &genesis_root, &community.id, crate::community::Epoch(1), crate::community::Epoch(0), &commit0, &[blob_evil]).unwrap();
+        let blob_owner = super::super::rekey::build_rekey_blob(owner.secret_key(), &me.public_key(), scope, crate::community::Epoch(1), &root_owner).unwrap();
+        let ev_owner = super::super::rekey::build_server_root_rekey_event(
+            &Keys::generate(), &owner, &genesis_root, &community.id, crate::community::Epoch(1), crate::community::Epoch(0), &commit0, &[blob_owner]).unwrap();
+        let relay = MemoryRelay::new();
+        relay.inject(&ev_evil, &community.relays);
+        relay.inject(&ev_owner, &community.relays);
+
+        // I already adopted the attacker's root at epoch 1 (the race), and the ban has now synced.
+        crate::db::community::advance_server_root_epoch(&cid, 1, &root_evil).unwrap();
+        crate::db::community::set_community_banlist(&cid, &[banned_admin.public_key().to_hex()], 2).unwrap();
+        let community = crate::db::community::load_community(&community.id).unwrap().unwrap();
+        assert_eq!(community.server_root_key.as_bytes(), &root_evil, "start partitioned on the attacker's root");
+
+        let out = catch_up_server_root(&relay, &community).await.unwrap();
+        assert_eq!(out.epoch, 1);
+        assert!(!out.removed);
+        let after = crate::db::community::load_community(&community.id).unwrap().unwrap();
+        assert_eq!(after.server_root_key.as_bytes(), &root_owner,
+            "heal must abandon the deauthorized root and adopt the owner's higher sibling");
+
+        // Stable: re-running keeps the owner's root (the attacker's lower root never wins again).
+        let _ = catch_up_server_root(&relay, &after).await.unwrap();
+        assert_eq!(crate::db::community::load_community(&community.id).unwrap().unwrap().server_root_key.as_bytes(), &root_owner, "no flap back to the banned root");
     }
 
     #[tokio::test]

@@ -204,16 +204,41 @@ function updateUI(state, message = '', progress = 0) {
     }
 }
 
+// Resolve the proxy the updater's own HTTP client must use. The updater
+// plugin bypasses the backend's Tor-aware client entirely, so with Tor on
+// we either hand it the SOCKS proxy or refuse to touch the network at all.
+// Returns: { allowed: boolean, proxy?: string }
+async function resolveUpdateTransport() {
+    try {
+        const tor = await window.__TAURI__.core.invoke('tor_get_state');
+        if (!tor?.enabled) return { allowed: true };
+        if (tor.running && tor.socks_proxy) return { allowed: true, proxy: tor.socks_proxy };
+        // Tor wanted but not up (bootstrapping/failed): fail closed.
+        return { allowed: false };
+    } catch (e) {
+        console.warn('Updater: could not read Tor state, skipping update check:', e);
+        return { allowed: false };
+    }
+}
+
 // Check for updates
 async function checkForUpdates(silent = false) {
     if (updateState === 'checking' || updateState === 'downloading') return;
-    
+
     if (!silent) {
         updateUI('checking');
     }
-    
+
     try {
-        const update = await check();
+        const transport = await resolveUpdateTransport();
+        if (!transport.allowed) {
+            console.log('Updater: skipping update check (Tor enabled but not connected)');
+            if (!silent) {
+                updateUI('error', 'Update check paused until Tor connects');
+            }
+            return false;
+        }
+        const update = await check(transport.proxy ? { proxy: transport.proxy } : undefined);
         
         if (!update) {
             if (!silent) {

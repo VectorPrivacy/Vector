@@ -38,7 +38,8 @@ const VSK_DISSOLVED: &str = "10";
 
 /// Hard cap on editions processed per fold — bounds the Schnorr-verify + fold work a hostile relay
 /// can force by piling junk at the control coordinate. Legit control history is far smaller.
-const MAX_CONTROL_EDITIONS: usize = 50_000;
+/// pub(crate): the fetch layer also bounds its AEAD open loop with this.
+pub(crate) const MAX_CONTROL_EDITIONS: usize = 50_000;
 
 /// Validate a 64-char lowercase/uppercase hex string and decode it, returning `None` on bad
 /// length/charset (so [`crate::simd::hex::hex_to_bytes_32`]'s silent zero-on-invalid never bites).

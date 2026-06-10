@@ -4456,6 +4456,10 @@ function showGifSkeletons(count) {
 /**
  * Establish early connection to GIF API server
  * Called when opening a chat to warm up connection before user needs GIFs
+ *
+ * GIFs are the ONE granted exception to "the frontend never fetches remote",
+ * Tor included: gifverse.net is Vector's own service, so the WebView talks
+ * to it directly even while Tor is on (user-accepted tradeoff).
  */
 function preconnectGifServer() {
     if (gifPreconnectLink) return; // Already connected

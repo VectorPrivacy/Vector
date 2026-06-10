@@ -1210,12 +1210,18 @@ document.addEventListener('touchstart', hideGlobalTooltip);
 window.addEventListener('blur', hideGlobalTooltip);
 
 /**
- * Helper function to escape HTML
+ * Helper function to escape HTML.
+ * Escapes quotes too: callers interpolate into quoted attributes
+ * (alt="...", data-*="..."), where an unescaped quote is an attribute
+ * breakout → injected event handler. Safe for text contexts as well.
  */
 function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    return String(text ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }
 
 /**
@@ -1690,35 +1696,35 @@ function getProfile(npub) {
 }
 
 /**
- * Get the best avatar URL for a profile
- * Prefers cached local file (for offline support), falls back to remote URL
+ * Get the avatar src for a profile: the backend-cached local file, or null
+ * (placeholder) while the cache is empty.
+ *
+ * NEVER fall back to the remote `profile.avatar` URL: it's attacker-chosen
+ * kind-0 data and a WebView fetch of it bypasses Tor — worst exactly when
+ * the backend cache download is still pending/blackholed during bootstrap.
  * @param {Profile} profile - The profile object
- * @returns {string|null} - The avatar URL to use, or null if none available
+ * @returns {string|null} - The avatar src to use, or null if none available
  */
 function getProfileAvatarSrc(profile) {
     if (!profile) return null;
-    // Prefer cached local path for offline support
     if (profile.avatar_cached) {
         return convertFileSrc(profile.avatar_cached);
     }
-    // Fall back to remote URL
-    return profile.avatar || null;
+    return null;
 }
 
 /**
- * Get the best banner URL for a profile
- * Prefers cached local file (for offline support), falls back to remote URL
+ * Get the banner src for a profile: backend-cached local file or null.
+ * Same rule as getProfileAvatarSrc — never emit the remote URL.
  * @param {Profile} profile - The profile object
- * @returns {string|null} - The banner URL to use, or null if none available
+ * @returns {string|null} - The banner src to use, or null if none available
  */
 function getProfileBannerSrc(profile) {
     if (!profile) return null;
-    // Prefer cached local path for offline support
     if (profile.banner_cached) {
         return convertFileSrc(profile.banner_cached);
     }
-    // Fall back to remote URL
-    return profile.banner || null;
+    return null;
 }
 
 /**
@@ -4563,13 +4569,15 @@ function renderProfileTab(cProfile) {
     } else {
         if (domSwitcher) domSwitcher.style.display = 'none';
         domProfileName.style.display = '';
-        domProfileName.innerHTML = cProfile?.nickname || cProfile?.name || (cProfile?.id ? cProfile.id.substring(0, 10) + '…' : 'Unknown');
+        // textContent: name is attacker-controlled kind-0 data, never HTML.
+        domProfileName.textContent = cProfile?.nickname || cProfile?.name || (cProfile?.id ? cProfile.id.substring(0, 10) + '…' : 'Unknown');
         if (cProfile?.nickname || cProfile?.name) twemojify(domProfileName);
     }
 
     // Status
     const strStatusPlaceholder = cProfile.mine ? 'Set a Status' : '';
-    domProfileStatus.innerHTML = cProfile?.status?.title || strStatusPlaceholder;
+    // textContent: status is attacker-controlled NIP-38 data, never HTML.
+    domProfileStatus.textContent = cProfile?.status?.title || strStatusPlaceholder;
     if (cProfile?.status?.title) twemojify(domProfileStatus);
 
     // Adjust our Profile Name class to manage space according to Status visibility
@@ -4634,10 +4642,11 @@ function renderProfileTab(cProfile) {
 
     // Secondary Display Name - use profile's npub as fallback
     const strNamePlaceholder = cProfile.mine ? 'Set a Display Name' : (cProfile?.id ? cProfile.id.substring(0, 10) + '…' : '');
-    domProfileNameSecondary.innerHTML = cProfile?.nickname || cProfile?.name || strNamePlaceholder;
+    domProfileNameSecondary.textContent = cProfile?.nickname || cProfile?.name || strNamePlaceholder;
     if (cProfile?.nickname || cProfile?.name) twemojify(domProfileNameSecondary);
 
-    // Secondary Status
+    // Secondary Status (innerHTML copy is safe: source was built from a text
+    // node, so serialization is escaped; only twemoji markup carries over)
     domProfileStatusSecondary.innerHTML = domProfileStatus.innerHTML;
 
     // Badges
@@ -6514,9 +6523,13 @@ function createFileBox(cAttachment, state = 'downloaded') {
                 .then(app => {
                     if (!app) return;
                     if (app.name) descriptionSpan.innerText = app.name;
-                    const iconSrc = app.icon_cached ? convertFileSrc(app.icon_cached) : app.icon_url;
-                    if (iconSrc && iconRef.tagName === 'IMG') {
-                        iconRef.src = iconSrc;
+                    if (iconRef.tagName === 'IMG') {
+                        if (app.icon_cached) {
+                            iconRef.src = convertFileSrc(app.icon_cached);
+                        } else if (app.icon_url) {
+                            // Remote icon → backend cache (never a WebView fetch)
+                            bindBackendCachedImg(iconRef, app.icon_url);
+                        }
                     }
                 })
                 .catch(() => { /* Marketplace lookup is best-effort */ });
@@ -8562,7 +8575,7 @@ function enterProfileEditMode() {
         status: cProfile.status || '',
         about: cProfile.about || '',
         avatar: getProfileAvatarSrc(cProfile) || null,
-        banner: cProfile.banner || null
+        banner: getProfileBannerSrc(cProfile) || null
     };
     strPendingProfileAvatarPath = null;
     strPendingProfileBannerPath = null;
@@ -8605,10 +8618,15 @@ function enterProfileEditMode() {
     const editBio = document.getElementById('profile-edit-bio');
 
     editName.closest('.profile-edit-field-wrapper').style.position = 'relative';
-    editName.innerHTML = `<input type="text" value="${cProfile.name || ''}" maxlength="50" style="background: none; border: none; outline: none; color: inherit; font-size: 16px; width: 100%;">`;
-    editStatus.innerHTML = `<input type="text" value="${cProfile.status?.title || ''}" style="background: none; border: none; outline: none; color: inherit; font-size: 16px; width: 100%;">`;
-    editBio.innerHTML = `<textarea style="background: none; border: none; outline: none; color: inherit; font-size: 16px; width: 100%; resize: none; min-height: 60px;">${typeof cProfile.about === 'string' ? cProfile.about : ''}</textarea>`;
+    // Static shells via innerHTML; profile values via DOM properties so they
+    // are never parsed as HTML.
+    editName.innerHTML = `<input type="text" maxlength="50" style="background: none; border: none; outline: none; color: inherit; font-size: 16px; width: 100%;">`;
+    editName.querySelector('input').value = cProfile.name || '';
+    editStatus.innerHTML = `<input type="text" style="background: none; border: none; outline: none; color: inherit; font-size: 16px; width: 100%;">`;
+    editStatus.querySelector('input').value = cProfile.status?.title || '';
+    editBio.innerHTML = `<textarea style="background: none; border: none; outline: none; color: inherit; font-size: 16px; width: 100%; resize: none; min-height: 60px;"></textarea>`;
     const bioTextarea = editBio.querySelector('textarea');
+    bioTextarea.value = typeof cProfile.about === 'string' ? cProfile.about : '';
     setTimeout(() => {
         bioTextarea.style.height = 'auto';
         bioTextarea.style.height = bioTextarea.scrollHeight + 'px';

@@ -136,11 +136,16 @@ pub fn attachment_from_imeta(tag: &Tag, download_dir: &Path) -> Option<Attachmen
 }
 
 /// Parse every `imeta` tag on an event into attachments, order preserved.
+/// Capped: a max-size event can carry ~1700 imeta tags, each becoming a
+/// persisted + in-STATE Attachment — bound the per-message amplification.
 pub fn attachments_from_tags<'a>(
     tags: impl Iterator<Item = &'a Tag>,
     download_dir: &Path,
 ) -> Vec<Attachment> {
-    tags.filter_map(|t| attachment_from_imeta(t, download_dir)).collect()
+    const MAX_ATTACHMENTS_PER_MESSAGE: usize = 32;
+    tags.filter_map(|t| attachment_from_imeta(t, download_dir))
+        .take(MAX_ATTACHMENTS_PER_MESSAGE)
+        .collect()
 }
 
 #[cfg(test)]

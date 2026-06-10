@@ -148,6 +148,17 @@ pub async fn get_remote_file_size(url: &str) -> Option<u64> {
     None
 }
 
+/// Hard ceiling for any single download on this pipeline (attachments,
+/// inline images, mini-apps). The advertised size is attacker/server
+/// controlled — without a cap, a lying Content-Length means a giant
+/// `Vec::with_capacity` (alloc abort = process kill) and an endless body
+/// streams until OOM.
+pub const MAX_DOWNLOAD_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
+
+/// Cap for pre-allocation hints: never trust the advertised size for more
+/// than this up front; the Vec grows naturally past it for honest servers.
+const MAX_PREALLOC_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
+
 /// Generic download function that works with any progress reporter
 pub async fn download_with_reporter(
     content_url: &str,
@@ -166,6 +177,9 @@ pub async fn download_with_reporter(
 
     // Determine file size using reusable probe
     let total_size = get_remote_file_size(content_url).await;
+    if matches!(total_size, Some(size) if size > MAX_DOWNLOAD_BYTES) {
+        return Err("File exceeds the maximum download size");
+    }
 
     // Based on findings, choose the appropriate download method
     match total_size {
@@ -209,7 +223,10 @@ async fn download_with_ranges(
     total_size: u64,
     reporter: &impl ProgressReporter,
 ) -> Result<Vec<u8>, &'static str> {
-    let mut result = Vec::with_capacity(total_size as usize);
+    if total_size > MAX_DOWNLOAD_BYTES {
+        return Err("File exceeds the maximum download size");
+    }
+    let mut result = Vec::with_capacity(total_size.min(MAX_PREALLOC_BYTES) as usize);
     let mut downloaded: u64 = 0;
     let mut last_emitted_percentage: u8 = 0;
 
@@ -246,11 +263,23 @@ async fn download_with_ranges(
                 vector_core::log_warn!("[AttachmentDownload] unexpected HTTP 200 mid-range for {}", url);
                 return Err("Server did not honor range request");
             }
-            let full = chunk_res.bytes().await.map_err(|e| {
-                vector_core::log_warn!("[AttachmentDownload] full-body read failed for {}: {}", url, e);
-                "Failed to read chunk bytes"
-            })?;
-            result.extend_from_slice(&full);
+            if matches!(chunk_res.content_length(), Some(len) if len > MAX_DOWNLOAD_BYTES) {
+                return Err("File exceeds the maximum download size");
+            }
+            // Stream-capped, NOT .bytes(): a chunked 200 carries no
+            // Content-Length, so .bytes() would buffer an endless body —
+            // the exact unbounded read the byte cap exists to stop.
+            let mut stream = chunk_res.bytes_stream();
+            while let Some(item) = stream.next().await {
+                let chunk = item.map_err(|e| {
+                    vector_core::log_warn!("[AttachmentDownload] full-body read failed for {}: {}", url, e);
+                    "Failed to read chunk bytes"
+                })?;
+                result.extend_from_slice(&chunk);
+                if result.len() as u64 > MAX_DOWNLOAD_BYTES {
+                    return Err("File exceeds the maximum download size");
+                }
+            }
             let _ = reporter.report_complete();
             return Ok(result);
         }
@@ -270,6 +299,9 @@ async fn download_with_ranges(
         let elapsed = chunk_start.elapsed().as_secs_f64();
         result.extend_from_slice(&chunk);
         downloaded += chunk.len() as u64;
+        if downloaded > MAX_DOWNLOAD_BYTES {
+            return Err("File exceeds the maximum download size");
+        }
 
         // Track speed and adapt chunk size
         if elapsed > 0.0 {
@@ -327,7 +359,7 @@ async fn download_with_streaming(
     }
 
     // Create a buffer to store all data
-    let capacity = total_size.unwrap_or(1024 * 1024) as usize; // 1MB default or known size
+    let capacity = total_size.unwrap_or(1024 * 1024).min(MAX_PREALLOC_BYTES) as usize;
     let mut result = Vec::with_capacity(capacity);
     let mut downloaded: u64 = 0;
     let mut last_emitted_percentage: u8 = 0;
@@ -344,6 +376,9 @@ async fn download_with_streaming(
 
         result.extend_from_slice(&chunk);
         downloaded += chunk.len() as u64;
+        if downloaded > MAX_DOWNLOAD_BYTES {
+            return Err("File exceeds the maximum download size");
+        }
 
         // Report progress
         if let Some(size) = total_size {

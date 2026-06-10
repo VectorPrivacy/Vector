@@ -924,12 +924,33 @@ pub fn generate_thumbhash_from_rgba(pixels: &[u8], width: u32, height: u32) -> O
     Some(base91_encode(&hash))
 }
 
+/// Decode an image with allocation limits. A tiny file declaring 60000×60000
+/// would otherwise allocate ~14 GB before a single pixel decodes — every
+/// decode of bytes we didn't author must go through this.
+pub fn decode_image_bounded(bytes: &[u8]) -> Result<image::DynamicImage, String> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("image format: {e}"))?;
+    reader.limits(bounded_image_limits());
+    reader.decode().map_err(|e| format!("image decode: {e}"))
+}
+
+/// Shared decode limits for [`decode_image_bounded`] and call sites that need
+/// their own `ImageReader` (fixed-format decodes).
+pub fn bounded_image_limits() -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(256 * 1024 * 1024);
+    limits
+}
+
 /// Generate image metadata (thumbhash + dimensions) from raw file bytes.
 ///
 /// Returns None if the bytes can't be decoded as an image.
 /// Used by `send_file_dm` to automatically include preview metadata for images.
 pub fn generate_image_metadata(file_bytes: &[u8]) -> Option<crate::types::ImageMetadata> {
-    let img = image::load_from_memory(file_bytes).ok()?;
+    let img = decode_image_bounded(file_bytes).ok()?;
     let width = img.width();
     let height = img.height();
 

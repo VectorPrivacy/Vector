@@ -32,6 +32,49 @@ async function loadMiniAppInfoFromBytes(bytes, fileName) {
     return await invoke('miniapp_load_info_from_bytes', { bytes: byteArray, fileName });
 }
 
+// Once-per-session consent for launching realtime (Iroh) Mini Apps with Tor on
+let _miniAppTorConsentGiven = false;
+
+/**
+ * Informed consent before launching a realtime-capable Mini App while Tor is
+ * enabled. Iroh multiplayer is QUIC/UDP and can't route through Tor — but it
+ * runs relay-only, so the exposure is the user's IP to the iroh relay
+ * infrastructure, never to other players. Asked once per session; non-realtime
+ * apps never prompt (they open no network channel at all).
+ * @param {string} filePath - Path to the .xdc about to launch
+ * @returns {Promise<boolean>} true to proceed with the launch
+ */
+async function confirmMiniAppTorExposure(filePath) {
+    const { invoke } = window.__TAURI__.core;
+    let torEnabled;
+    try {
+        torEnabled = !!(await invoke('tor_get_state'))?.enabled;
+    } catch (e) {
+        torEnabled = true; // unknown state → ask rather than silently expose
+    }
+    if (!torEnabled || _miniAppTorConsentGiven) return true;
+
+    let usesRealtime;
+    try {
+        usesRealtime = !!(await loadMiniAppInfo(filePath))?.uses_realtime;
+    } catch (e) {
+        usesRealtime = true; // can't tell → ask rather than silently expose
+    }
+    if (!usesRealtime) return true;
+
+    const ok = await popupConfirm(
+        'Multiplayer & Tor',
+        'Tor is enabled, but Mini App multiplayer can\'t route through Tor yet.' +
+        '<br><br>Launching this app connects directly to the <b>iroh.computer</b> relay network, ' +
+        'which exposes your IP address to those relays only — <b>other players can never see your IP</b>; ' +
+        'they only ever see the relay.' +
+        '<br><br>This choice is remembered until you close Vector.',
+        false, '', '', '', 'Continue'
+    );
+    if (ok) _miniAppTorConsentGiven = true;
+    return !!ok;
+}
+
 /**
  * Open a Mini App in a new window
  * @param {string} filePath - Path to the .xdc file
@@ -43,6 +86,9 @@ async function loadMiniAppInfoFromBytes(bytes, fileName) {
  */
 async function openMiniApp(filePath, chatId = '', messageId = '', href = null, topicId = null) {
     const { invoke } = window.__TAURI__.core;
+    if (!(await confirmMiniAppTorExposure(filePath))) {
+        return; // user declined the Tor IP-exposure prompt
+    }
     return await invoke('miniapp_open', { filePath, chatId, messageId, href, topicId });
 }
 

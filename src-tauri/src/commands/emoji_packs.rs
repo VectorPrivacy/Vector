@@ -668,7 +668,9 @@ fn decode_webp_frames(bytes: &[u8]) -> Result<Vec<(image::RgbaImage, u32)>, Stri
     }
 
     // Still WebP — image-webp handles single-frame decoding correctly.
-    let img = image::ImageReader::with_format(Cursor::new(bytes), image::ImageFormat::WebP)
+    let mut reader = image::ImageReader::with_format(Cursor::new(bytes), image::ImageFormat::WebP);
+    reader.limits(vector_core::crypto::bounded_image_limits());
+    let img = reader
         .decode()
         .map_err(|e| format!("webp still: {}", e))?
         .into_rgba8();
@@ -694,9 +696,11 @@ fn decode_apng_frames(bytes: &[u8]) -> Result<Vec<(image::RgbaImage, u32)>, Stri
 }
 
 fn decode_static_fallback(bytes: &[u8]) -> Result<Vec<(image::RgbaImage, u32)>, String> {
-    let img = image::ImageReader::new(Cursor::new(bytes))
+    let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
-        .map_err(|e| format!("sniff: {}", e))?
+        .map_err(|e| format!("sniff: {}", e))?;
+    reader.limits(vector_core::crypto::bounded_image_limits());
+    let img = reader
         .decode()
         .map_err(|e| format!("decode: {}", e))?
         .into_rgba8();
@@ -778,9 +782,11 @@ fn crop_and_reencode_blocking(input: EmojiCropInput) -> Result<Vec<u8>, String> 
         return crop_gif(&bytes, x, y, w, h);
     }
 
-    let dynimg = image::ImageReader::new(Cursor::new(&bytes))
+    let mut reader = image::ImageReader::new(Cursor::new(&bytes))
         .with_guessed_format()
-        .map_err(|e| format!("sniff: {}", e))?
+        .map_err(|e| format!("sniff: {}", e))?;
+    reader.limits(vector_core::crypto::bounded_image_limits());
+    let dynimg = reader
         .decode()
         .map_err(|e| format!("decode: {}", e))?;
     let (sw, sh) = (dynimg.width(), dynimg.height());
