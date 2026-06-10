@@ -241,31 +241,107 @@ struct UrlFragment {
     t: String,
 }
 
-/// Build the shareable invite URL. The fragment = base64url(JSON{v, relays, token}); the
-/// relays are needed because a fresh joiner has nowhere else to look for the bundle.
+/// v2 fragment version byte. A v1 fragment is base64url(JSON) whose first decoded byte is
+/// `{` (0x7B), so the first payload byte discriminates the two formats for free.
+const URL_V2: u8 = 2;
+/// v2 flags bit: the community runs on the stock [`crate::state::TRUSTED_RELAYS`] set,
+/// encoded as ZERO bytes — the parser (and the website's copy) reconstitutes it.
+const V2_FLAG_DEFAULT_RELAYS: u8 = 0b0000_0001;
+/// Mint-side cap on explicit v2 bootstrap relays: the URL only has to FIND the bundle (the
+/// bundle carries the authoritative relay set), and 3 rides out one sick relay.
+const MAX_V2_BOOTSTRAP_RELAYS: usize = 3;
+
+/// Append-only dictionary of well-known relays for v2 links — a listed relay costs ONE byte
+/// instead of a literal string. Ids live in 1..=254 (0 = wss-implied literal, 255 = verbatim
+/// literal). NEVER renumber or remove entries (ids are baked into minted links forever);
+/// append only, in lockstep with the website's /invite parser copy.
+const RELAY_DICTIONARY: &[&str] = &[
+    "wss://jskitty.com/nostr",        // id 1
+    "wss://asia.vectorapp.io/nostr",  // id 2
+    "wss://nostr.computingcache.com", // id 3
+    "wss://relay.damus.io",           // id 4
+];
+
+/// Order/case/trailing-slash-insensitive relay comparison key.
+fn norm_relay(r: &str) -> String {
+    r.trim().trim_end_matches('/').to_ascii_lowercase()
+}
+
+fn is_default_relay_set(relays: &[String]) -> bool {
+    let defaults: std::collections::HashSet<String> =
+        crate::state::TRUSTED_RELAYS.iter().map(|r| norm_relay(r)).collect();
+    let theirs: std::collections::HashSet<String> = relays.iter().map(|r| norm_relay(r)).collect();
+    theirs == defaults
+}
+
+fn dictionary_id(relay: &str) -> Option<u8> {
+    let n = norm_relay(relay);
+    RELAY_DICTIONARY.iter().position(|d| norm_relay(d) == n).map(|i| (i + 1) as u8)
+}
+
+/// Build the shareable invite URL (v2 binary fragment): `[ver][flags][relays?][token:32]`,
+/// base64url. The stock relay set costs zero bytes (flag bit); known relays cost one byte
+/// each (dictionary); customs are length-prefixed literals with `wss://` implied. ~74 chars
+/// total in the common case, vs ~269 for the v1 JSON fragment it replaces.
 pub fn encode_invite_url(relays: &[String], token: &[u8; 32]) -> String {
-    let frag = UrlFragment {
-        v: 1,
-        relays: relays.to_vec(),
-        t: crate::simd::hex::bytes_to_hex_32(token),
-    };
-    let json = serde_json::to_string(&frag).expect("UrlFragment serializes");
-    let b64 = base64_simd::URL_SAFE_NO_PAD.encode_to_string(json.as_bytes());
+    let mut payload: Vec<u8> = Vec::with_capacity(34);
+    payload.push(URL_V2);
+    if is_default_relay_set(relays) {
+        payload.push(V2_FLAG_DEFAULT_RELAYS);
+    } else {
+        payload.push(0);
+        // Bootstrap only — the bundle carries the authoritative set. Relays over 255 bytes
+        // can't length-prefix; skip them (absurd in practice).
+        let boot: Vec<&String> = relays
+            .iter()
+            .filter(|r| r.strip_prefix("wss://").unwrap_or(r).len() <= 255)
+            .take(MAX_V2_BOOTSTRAP_RELAYS)
+            .collect();
+        payload.push(boot.len() as u8);
+        for r in boot {
+            match dictionary_id(r) {
+                Some(id) => payload.push(id),
+                None => {
+                    // Literal: wss:// (the overwhelmingly common scheme) rides implied as
+                    // entry 0; anything else is stored VERBATIM as entry 255 so the string
+                    // round-trips exactly (ws://, exotic schemes, test relays).
+                    let (kind, s) = match r.strip_prefix("wss://") {
+                        Some(host) => (0u8, host),
+                        None => (255u8, r.as_str()),
+                    };
+                    payload.push(kind);
+                    payload.push(s.len() as u8);
+                    payload.extend_from_slice(s.as_bytes());
+                }
+            }
+        }
+    }
+    payload.extend_from_slice(token);
+    let b64 = base64_simd::URL_SAFE_NO_PAD.encode_to_string(&payload);
     format!("{INVITE_URL_BASE}#{b64}")
 }
 
 /// Parse a shareable invite URL (or a bare fragment) back to `(relays, token)`. Accepts
-/// the full URL or just the fragment after `#`.
+/// the full URL or just the fragment after `#`, in either the v2 binary format or the
+/// legacy v1 JSON format (v1 links in the wild stay valid forever).
 pub fn parse_invite_url(url: &str) -> Result<(Vec<String>, [u8; 32]), PublicInviteError> {
     let fragment = url.rsplit_once('#').map(|(_, f)| f).unwrap_or(url);
     if fragment.is_empty() {
         return Err(PublicInviteError::BadUrl("no fragment".into()));
     }
-    let json = base64_simd::URL_SAFE_NO_PAD
+    let raw = base64_simd::URL_SAFE_NO_PAD
         .decode_to_vec(fragment.as_bytes())
         .map_err(|e| PublicInviteError::BadUrl(format!("base64: {e}")))?;
+    match raw.first() {
+        Some(&URL_V2) => parse_v2_fragment(&raw),
+        Some(&b'{') => parse_v1_fragment(&raw),
+        _ => Err(PublicInviteError::BadUrl("unrecognized fragment format".into())),
+    }
+}
+
+fn parse_v1_fragment(json: &[u8]) -> Result<(Vec<String>, [u8; 32]), PublicInviteError> {
     let frag: UrlFragment =
-        serde_json::from_slice(&json).map_err(|e| PublicInviteError::BadUrl(format!("json: {e}")))?;
+        serde_json::from_slice(json).map_err(|e| PublicInviteError::BadUrl(format!("json: {e}")))?;
     if frag.v != 1 {
         return Err(PublicInviteError::BadUrl(format!("unsupported url version {}", frag.v)));
     }
@@ -286,9 +362,124 @@ pub fn parse_invite_url(url: &str) -> Result<(Vec<String>, [u8; 32]), PublicInvi
     Ok((frag.relays, token))
 }
 
+fn parse_v2_fragment(raw: &[u8]) -> Result<(Vec<String>, [u8; 32]), PublicInviteError> {
+    let bad = |m: &str| PublicInviteError::BadUrl(m.into());
+    let flags = *raw.get(1).ok_or_else(|| bad("truncated v2 fragment"))?;
+    let mut pos = 2usize;
+    let relays: Vec<String> = if flags & V2_FLAG_DEFAULT_RELAYS != 0 {
+        crate::state::TRUSTED_RELAYS.iter().map(|s| s.to_string()).collect()
+    } else {
+        // Parse cap is the lax v1 cap (not the mint cap) so a future build minting more
+        // bootstrap relays stays readable here.
+        let count = *raw.get(pos).ok_or_else(|| bad("truncated v2 relay count"))? as usize;
+        pos += 1;
+        if count == 0 || count > MAX_URL_RELAYS {
+            return Err(bad("bad v2 relay count"));
+        }
+        let mut out = Vec::with_capacity(count.min(MAX_V2_BOOTSTRAP_RELAYS));
+        for _ in 0..count {
+            let id = *raw.get(pos).ok_or_else(|| bad("truncated v2 relay entry"))?;
+            pos += 1;
+            if id == 0 || id == 255 {
+                let len = *raw.get(pos).ok_or_else(|| bad("truncated v2 relay literal"))? as usize;
+                pos += 1;
+                let end = pos.checked_add(len).ok_or_else(|| bad("bad v2 relay length"))?;
+                let host = raw.get(pos..end).ok_or_else(|| bad("truncated v2 relay literal"))?;
+                let host =
+                    std::str::from_utf8(host).map_err(|_| bad("v2 relay literal not utf-8"))?;
+                out.push(if id == 0 { format!("wss://{host}") } else { host.to_string() });
+                pos = end;
+            } else if let Some(relay) = RELAY_DICTIONARY.get(id as usize - 1) {
+                out.push(relay.to_string());
+            }
+            // Unknown dictionary id = an entry appended by a NEWER build — skip it
+            // (forward-compat); the remaining entries still bootstrap.
+        }
+        if out.is_empty() {
+            return Err(bad("no resolvable bootstrap relays"));
+        }
+        out
+    };
+    let token_bytes = raw.get(pos..).ok_or_else(|| bad("truncated v2 token"))?;
+    if token_bytes.len() != 32 {
+        return Err(bad("v2 token must be exactly 32 bytes"));
+    }
+    let mut token = [0u8; 32];
+    token.copy_from_slice(token_bytes);
+    Ok((relays, token))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v2_url_default_relay_set_roundtrips_and_is_tiny() {
+        let relays: Vec<String> =
+            crate::state::TRUSTED_RELAYS.iter().map(|s| s.to_string()).collect();
+        let token = new_token();
+        let url = encode_invite_url(&relays, &token);
+        assert!(url.len() <= 80, "default-set v2 url should be ~74 chars, got {}", url.len());
+        let (parsed_relays, parsed_token) = parse_invite_url(&url).unwrap();
+        assert_eq!(parsed_token, token);
+        assert_eq!(parsed_relays, relays);
+    }
+
+    #[test]
+    fn v2_url_dictionary_and_literal_relays_roundtrip() {
+        // One of each entry kind: dictionary, wss-implied literal, verbatim (schemeless) literal.
+        let relays = vec![
+            "wss://relay.damus.io".to_string(),
+            "wss://my.custom.relay/nostr".to_string(),
+            "r1".to_string(),
+        ];
+        let token = new_token();
+        let url = encode_invite_url(&relays, &token);
+        let (parsed_relays, parsed_token) = parse_invite_url(&url).unwrap();
+        assert_eq!(parsed_token, token);
+        assert_eq!(parsed_relays, relays);
+    }
+
+    #[test]
+    fn v1_json_fragment_still_parses() {
+        // Links minted before v2 live in chats forever — the old JSON format must keep parsing.
+        let token = new_token();
+        let json = format!(
+            "{{\"v\":1,\"relays\":[\"wss://r1\",\"wss://r2\"],\"t\":\"{}\"}}",
+            crate::simd::hex::bytes_to_hex_32(&token)
+        );
+        let frag = base64_simd::URL_SAFE_NO_PAD.encode_to_string(json.as_bytes());
+        let (relays, parsed) = parse_invite_url(&format!("{INVITE_URL_BASE}#{frag}")).unwrap();
+        assert_eq!(parsed, token);
+        assert_eq!(relays, vec!["wss://r1".to_string(), "wss://r2".to_string()]);
+    }
+
+    #[test]
+    fn v2_unknown_dictionary_id_is_skipped_not_fatal() {
+        // Forward-compat: an id appended by a NEWER build must not brick the link on an old
+        // client — the remaining entries still bootstrap.
+        let token = new_token();
+        let mut payload = vec![2u8, 0, 2, 250, 1]; // count=2: unknown id 250, then id 1
+        payload.extend_from_slice(&token);
+        let frag = base64_simd::URL_SAFE_NO_PAD.encode_to_string(&payload);
+        let (relays, parsed) = parse_invite_url(&frag).unwrap();
+        assert_eq!(parsed, token);
+        assert_eq!(relays, vec!["wss://jskitty.com/nostr".to_string()]);
+    }
+
+    #[test]
+    fn v2_garbage_and_truncations_error_without_panic() {
+        for frag_bytes in [
+            vec![2u8],               // just the version byte
+            vec![2u8, 1],            // default flag, no token
+            vec![2u8, 0, 1, 0, 200], // literal claims 200 bytes, has none
+            vec![2u8, 1, 0xAA],      // token wrong length
+            vec![9u8, 1, 2, 3],      // unknown version byte
+        ] {
+            let frag = base64_simd::URL_SAFE_NO_PAD.encode_to_string(&frag_bytes);
+            assert!(parse_invite_url(&frag).is_err());
+        }
+    }
 
     #[test]
     fn bundle_round_trips_with_token() {
@@ -401,11 +592,22 @@ mod tests {
     fn url_with_too_many_relays_is_rejected() {
         // A hostile link can't fan out unbounded relay connections on preview/accept.
         let token = new_token();
+        // v2 minting CAPS the bootstrap set (the bundle carries the authoritative relays)…
         let many: Vec<String> = (0..MAX_URL_RELAYS + 1).map(|i| format!("wss://r{i}")).collect();
-        let url = encode_invite_url(&many, &token);
-        assert!(parse_invite_url(&url).is_err());
-        // Exactly at the cap still parses.
-        let ok: Vec<String> = (0..MAX_URL_RELAYS).map(|i| format!("wss://r{i}")).collect();
-        assert!(parse_invite_url(&encode_invite_url(&ok, &token)).is_ok());
+        let (relays, _) = parse_invite_url(&encode_invite_url(&many, &token)).unwrap();
+        assert!(relays.len() <= MAX_V2_BOOTSTRAP_RELAYS);
+        // …a hand-crafted v2 fragment claiming an absurd count is refused outright…
+        let mut payload = vec![URL_V2, 0, (MAX_URL_RELAYS + 1) as u8];
+        payload.extend_from_slice(&token);
+        let frag = base64_simd::URL_SAFE_NO_PAD.encode_to_string(&payload);
+        assert!(parse_invite_url(&frag).is_err());
+        // …and v1 JSON fragments keep their original cap.
+        let json = format!(
+            "{{\"v\":1,\"relays\":[{}],\"t\":\"{}\"}}",
+            (0..MAX_URL_RELAYS + 1).map(|i| format!("\"wss://r{i}\"")).collect::<Vec<_>>().join(","),
+            crate::simd::hex::bytes_to_hex_32(&token)
+        );
+        let frag = base64_simd::URL_SAFE_NO_PAD.encode_to_string(json.as_bytes());
+        assert!(parse_invite_url(&frag).is_err());
     }
 }
