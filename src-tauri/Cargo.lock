@@ -12801,7 +12801,3 @@ dependencies = [
  "syn 2.0.100",
  "winnow 0.7.13",
 ]
-
-[[patch.unused]]
-name = "pkarr"
-version = "5.0.3"

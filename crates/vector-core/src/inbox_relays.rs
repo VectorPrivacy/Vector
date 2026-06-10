@@ -144,6 +144,11 @@ pub fn spawn_tracked_publish(
     event: Event,
 ) -> Vec<tokio::task::JoinHandle<(RelayUrl, Result<EventId, String>)>> {
     let event_id = event.id;
+    // Zero relays → zero tasks → nobody ever calls note_settled; a registered tracker
+    // would leak forever.
+    if resolved.is_empty() {
+        return Vec::new();
+    }
     let tracker = EventPublishTracker::new(event_id, resolved.len());
     PUBLISH_TRACKERS.lock().unwrap().insert(event_id, tracker.clone());
 

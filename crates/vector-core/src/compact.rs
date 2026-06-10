@@ -864,6 +864,11 @@ impl NpubInterner {
         match result {
             Ok(pos) => self.sorted[pos], // Found existing
             Err(insert_pos) => {
+                // u16::MAX is the NO_NPUB sentinel; at/past it new indices would alias the
+                // sentinel then wrap, misattributing authors — degrade to authorless instead.
+                if self.npubs.len() >= NO_NPUB as usize {
+                    return NO_NPUB;
+                }
                 // New npub - add to both vectors
                 let new_idx = self.npubs.len() as u16;
                 self.npubs.push(npub.to_string());

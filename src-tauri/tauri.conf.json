@@ -27,7 +27,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' data: blob: https://gifverse.net asset: http://asset.localhost; media-src 'self' https://gifverse.net asset: http://asset.localhost http://127.0.0.1:* blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' https://gifverse.net asset: http://asset.localhost",
+      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' data: blob: https://gifverse.net asset: http://asset.localhost; media-src 'self' https://gifverse.net asset: http://asset.localhost http://127.0.0.1:* blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' https://gifverse.net asset: http://asset.localhost; base-uri 'self'; object-src 'none'",
       "assetProtocol": {
         "enable": true,
         "scope": {

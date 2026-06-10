@@ -710,6 +710,8 @@ pub async fn reset_session() {
     // account-agnostic, but holds privacy-adjacent metadata about every
     // contact account A messaged. Drop on swap.
     vector_core::inbox_relays::clear_inbox_relay_cache();
+    // Pack-author NIP-65 cache — same privacy parity as the inbox cache.
+    vector_core::emoji_packs::clear_nip65_cache();
 
     // PIVX address→balance cache — addresses derive from user keys, so
     // a cached entry from account A is meaningless (and slightly

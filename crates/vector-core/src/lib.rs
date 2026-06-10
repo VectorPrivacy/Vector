@@ -1370,6 +1370,10 @@ impl VectorCore {
         state::MY_SECRET_KEY.clear(&[&state::ENCRYPTION_KEY]);
         {
             use zeroize::Zeroize;
+            if let Ok(mut g) = state::MNEMONIC_SEED.lock() {
+                if let Some(s) = g.as_mut() { s.zeroize(); }
+                *g = None;
+            }
             if let Ok(mut g) = state::PENDING_NSEC.lock() {
                 if let Some(s) = g.as_mut() { s.zeroize(); }
                 *g = None;
@@ -1389,6 +1393,7 @@ impl VectorCore {
         state::set_active_chat(None);
         crate::profile::sync::clear_profile_sync_queue();
         crate::inbox_relays::clear_inbox_relay_cache();
+        crate::emoji_packs::clear_nip65_cache();
         // Chat/user row-id caches are PER-ACCOUNT (row ids belong to the prior account's DB). Not clearing
         // them here let a swapped-in account resolve a channel/npub to the WRONG (prior-account) row id →
         // saves FK-failed silently + reads hit the wrong row (e.g. a community member vanished post-swap).

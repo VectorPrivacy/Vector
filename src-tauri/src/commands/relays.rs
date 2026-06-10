@@ -143,7 +143,7 @@ where
     let was_deferring = defer_connect_for_bootstrap();
     let newly_added = client.pool().add_relay(url, make_opts()).await?;
 
-    // Promotion: the relay was already pooled — possibly a PING-only Community relay
+    // Promotion: the relay was already pooled — possibly a GOSSIP|PING Community relay
     // (`community_relay_options`). The user is now adding it as their OWN relay, so grant READ+WRITE
     // on the existing handle. Additive + in-place: keeps the single live connection and any Community
     // subscription intact (no disconnect), and lets pool-wide DM/profile ops use it.

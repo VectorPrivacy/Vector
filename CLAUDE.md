@@ -186,7 +186,7 @@ All commands return `Result<T, String>`. Errors are string-formatted for fronten
 
 - WebView `shouldInterceptRequest` threads have NO tokio runtime — `Handle::current()` will PANIC. Use `try_lock()` with retry loops for STATE access from JNI threads.
 - Localhost media server (`android/media_server.rs`) serves files because `asset://` doesn't support Range requests for audio/video.
-- rustls must use `ring` provider (not `aws-lc-rs`) — pkarr is patched in `src-tauri/patches/pkarr/`.
+- rustls must use `ring` provider (not `aws-lc-rs`) — currently satisfied naturally (no aws-lc in the lock); re-verify if a new dependency pulls rustls with default providers.
 
 ### Compact messages
 

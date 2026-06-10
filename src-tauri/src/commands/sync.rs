@@ -252,7 +252,9 @@ pub async fn fetch_messages<R: Runtime>(
                 println!("[Boot] Profile merge in {:?}", merge_start.elapsed());
 
                 // Spawn background task to cache profile images for offline support
-                tokio::spawn(async {
+                let img_session = vector_core::state::SessionGuard::capture();
+                tokio::spawn(async move {
+                    if !img_session.is_valid() { return; }
                     profile::cache_all_profile_images().await;
                 });
 
@@ -342,7 +344,9 @@ pub async fn fetch_messages<R: Runtime>(
                 state.db_loaded = true;
 
                 // Check filesystem integrity for downloaded attachments (queries DB directly)
+                let integrity_session = vector_core::state::SessionGuard::capture();
                 tokio::spawn(async move {
+                    if !integrity_session.is_valid() { return; }
                     if let Err(e) = db::check_downloaded_attachments_integrity().await {
                         eprintln!("[Integrity] Check failed: {}", e);
                     }
@@ -372,10 +376,13 @@ pub async fn fetch_messages<R: Runtime>(
                 }
 
                 let emit_start = std::time::Instant::now();
-                handle.emit("init_finished", &InitPayload {
+                // A failed emit must not panic the boot task — the sync below still has to run.
+                if let Err(e) = handle.emit("init_finished", &InitPayload {
                     profiles: &slim_profiles,
                     chats: &serializable_chats,
-                }).unwrap();
+                }) {
+                    eprintln!("[Boot] init_finished emit failed: {e}");
+                }
                 println!("[Boot] Event emit in {:?}", emit_start.elapsed());
                 println!("[Boot] Total init time: {:?}", boot_start.elapsed());
             }
@@ -389,10 +396,14 @@ pub async fn fetch_messages<R: Runtime>(
 
             // Preload wrapper IDs for sync deduplication (non-blocking)
             // DB fallback in handle_event ensures correctness if this completes after sync starts
+            let wrapper_session = vector_core::state::SessionGuard::capture();
             tokio::spawn(async move {
                 let t = std::time::Instant::now();
                 let event_wrappers = db::load_recent_wrapper_ids(30).await.unwrap_or_default();
                 let processed_wrappers = db::load_processed_wrappers().unwrap_or_default();
+                // Re-validate after the DB reads — a swap mid-boot must not repopulate the
+                // just-cleared cache with the prior account's wrapper ids.
+                if !wrapper_session.is_valid() { return; }
                 let mut cache = WRAPPER_ID_CACHE.lock().await;
                 let total = event_wrappers.len() + processed_wrappers.len();
                 cache.load(event_wrappers);

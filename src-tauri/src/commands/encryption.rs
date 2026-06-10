@@ -845,6 +845,43 @@ mod xform_tests {
         }
     }
 
+    /// Sweep parity: every encrypted community_public_invites column must survive
+    /// enable → rekey → disable (a column missed by the sweep garbles on the first rekey).
+    #[test]
+    fn public_invite_label_survives_enable_rekey_disable() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE communities (community_id TEXT, server_root_key BLOB, name TEXT, relays TEXT, description TEXT, icon TEXT, banner TEXT, banlist TEXT, owner_attestation TEXT, roles TEXT, invite_registry TEXT);
+             CREATE TABLE community_channels (channel_id TEXT, channel_key BLOB, name TEXT);
+             CREATE TABLE community_epoch_keys (key BLOB);
+             CREATE TABLE community_message_keys (outer_event_id TEXT, ephemeral_secret BLOB, relays TEXT);
+             CREATE TABLE pending_community_invites (community_id TEXT, bundle_json TEXT, inviter_npub TEXT);
+             CREATE TABLE community_public_invites (token TEXT, url TEXT, label TEXT);
+             CREATE TABLE community_invite_link_sets (creator TEXT, locators TEXT);",
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO community_public_invites (token, url, label) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["ab".repeat(32), "https://vectorapp.io/invite#x", "Reddit"],
+        ).unwrap();
+        let read_label = |c: &rusqlite::Connection| -> String {
+            c.query_row("SELECT label FROM community_public_invites", [], |r| r.get(0)).unwrap()
+        };
+
+        let tx = conn.transaction().unwrap();
+        encrypt_community_in_tx(&tx, &K).unwrap();
+        tx.commit().unwrap();
+        assert_ne!(read_label(&conn), "Reddit", "label must be wrapped after enable");
+
+        let tx = conn.transaction().unwrap();
+        rekey_community_in_tx(&tx, &K, &K2).unwrap();
+        tx.commit().unwrap();
+
+        let tx = conn.transaction().unwrap();
+        decrypt_community_in_tx(&tx, &K2).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(read_label(&conn), "Reddit", "label must survive enable → rekey → disable");
+    }
+
     #[test]
     fn blob_roundtrip_and_idempotent() {
         let raw = [0x42u8; 32];
@@ -945,17 +982,18 @@ fn migrate_community_in_tx(
             .map_err(|e| format!("update pending: {e}"))?;
     }
 
-    // community_public_invites: token + url (rowid-keyed — token is itself wrapped).
-    let pubs: Vec<(i64, String, String)> = {
-        let mut stmt = tx.prepare("SELECT rowid, token, url FROM community_public_invites")
+    // community_public_invites: token + url + label (rowid-keyed — token is itself wrapped).
+    let pubs: Vec<(i64, String, String, Option<String>)> = {
+        let mut stmt = tx.prepare("SELECT rowid, token, url, label FROM community_public_invites")
             .map_err(|e| format!("prepare public invites: {e}"))?;
-        let mapped = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
-            .map_err(|e| format!("query public invites: {e}"))?;
+        let mapped = stmt.query_map([], |r| Ok((
+            r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?,
+        ))).map_err(|e| format!("query public invites: {e}"))?;
         mapped.filter_map(|r| r.ok()).collect()
     };
-    for (rowid, token, url) in pubs {
-        tx.execute("UPDATE community_public_invites SET token=?1, url=?2 WHERE rowid=?3",
-            rusqlite::params![xform_text(&token, enc, dec)?, xform_text(&url, enc, dec)?, rowid])
+    for (rowid, token, url, label) in pubs {
+        tx.execute("UPDATE community_public_invites SET token=?1, url=?2, label=?3 WHERE rowid=?4",
+            rusqlite::params![xform_text(&token, enc, dec)?, xform_text(&url, enc, dec)?, xform_text_opt(&label, enc, dec)?, rowid])
             .map_err(|e| format!("update public invite: {e}"))?;
     }
 

@@ -761,6 +761,14 @@ fn cached_write_relays(pubkey: &PublicKey) -> Option<Vec<RelayUrl>> {
     }
 }
 
+/// Drop every cached relay list (account swap — entries hold contact-graph metadata
+/// from the prior session, mirroring the inbox-relay cache's swap hygiene).
+pub fn clear_nip65_cache() {
+    if let Ok(mut cache) = nip65_cache().write() {
+        cache.clear();
+    }
+}
+
 /// Store a freshly-resolved write-relay list for `pubkey` in the cache.
 fn cache_write_relays(pubkey: PublicKey, relays: Vec<RelayUrl>) {
     if let Ok(mut cache) = nip65_cache().write() {
