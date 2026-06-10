@@ -503,7 +503,10 @@ impl VectorCore {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let community = service::accept_public_invite(&bundle, now).map_err(VectorError::Other)?;
-        self.finalize_member_join(community, &transport).await
+        // Attribute our join presence to the link we used (creator + label) so the owner's per-link
+        // counter ticks. Mirrors the desktop public-join path.
+        let attribution = bundle.creator_npub.clone().map(|by| (by, bundle.label.clone()));
+        self.finalize_member_join(community, &transport, attribution).await
     }
 
     /// List the parked private invites (giftwrapped) awaiting acceptance. Each entry is the
@@ -532,7 +535,8 @@ impl VectorCore {
         let invite = CommunityInvite::from_json(&bundle_json).map_err(VectorError::Other)?;
         let community = accept_invite(&invite).map_err(VectorError::Other)?;
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-        let summary = self.finalize_member_join(community, &transport).await?;
+        // Private invites carry no public-link label; the inviter attribution metric is link-only.
+        let summary = self.finalize_member_join(community, &transport, None).await?;
         let _ = crate::db::community::delete_pending_invite(community_id);
         Ok(summary)
     }
@@ -545,6 +549,7 @@ impl VectorCore {
         &self,
         community: crate::community::Community,
         transport: &T,
+        attribution: Option<(String, Option<String>)>,
     ) -> Result<serde_json::Value> {
         use crate::community::service;
         // Persist the member-view row up front: the catch-up, the control fold, and chat registration all
@@ -599,7 +604,7 @@ impl VectorCore {
         // Best-effort join announcement (kind 3306) into the primary channel so honest peers
         // see us in their member list even before we post. Failure must not fail the join.
         if let Some(primary) = community.channels.first() {
-            let _ = service::publish_presence(transport, &community, primary, true, None).await;
+            let _ = service::publish_presence(transport, &community, primary, true, attribution).await;
         }
         Ok(serde_json::json!({
             "community_id": community.id.to_hex(),
@@ -892,7 +897,7 @@ impl VectorCore {
                         Some(l) if !l.is_empty() => format!("{by}|{l}"),
                         _ => by.clone(),
                     });
-                    let _ = crate::db::events::save_system_event_at(event_id, channel_id, et, npub, note.as_deref(), *created_at).await;
+                    let _ = crate::db::events::save_system_event_at(event_id, channel_id, et, npub, note.as_deref(), *created_at, invited_by.as_deref(), invited_label.as_deref()).await;
                 }
                 inbound::IncomingEvent::WebxdcPeer { npub, topic_id, node_addr, event_id, created_at } => {
                     // Persist only (DM-parity row) — the miniapp layer bootstraps from the DB at
@@ -1006,7 +1011,7 @@ impl VectorCore {
         let community = Self::load_community_hex(community_id)?;
         let channel = community.channels.first().ok_or_else(|| VectorError::Other("community has no channel".into()))?;
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-        service::publish_kick(&transport, &community, channel, &hex).await.map_err(VectorError::Other)
+        service::publish_kick(&transport, &community, channel, &hex).await.map(|_| ()).map_err(VectorError::Other)
     }
 
     /// Ban (`true`) or unban (`false`) a member. Ban is terminal (no rejoin); in a private community it also

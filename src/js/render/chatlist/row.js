@@ -204,6 +204,10 @@ function renderCommunityInviteItem(invite) {
     const divAvatarContainer = document.createElement('div');
     divAvatarContainer.style.position = 'relative';
     divAvatarContainer.appendChild(createPlaceholderAvatar(true, 50));
+    // Green "new" dot flags the pending invite at a glance.
+    const newDot = document.createElement('span');
+    newDot.className = 'chatlist-invite-badge';
+    divAvatarContainer.appendChild(newDot);
     divInvite.appendChild(divAvatarContainer);
 
     const divPreviewContainer = document.createElement('div');

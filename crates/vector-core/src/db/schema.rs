@@ -674,5 +674,17 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // =========================================================================
+    // Migration 43: Persist the optional label on a minted public invite
+    // =========================================================================
+    // The label set at mint time rides in the relay-published bundle (join attribution) but wasn't
+    // stored locally, so the owner's invite-links list had no label to show. Encrypted-at-rest like
+    // the sibling columns; NULL when no label was set.
+    run_atomic_migration(conn, 43, "Add label to community_public_invites", |tx| {
+        tx.execute_batch("ALTER TABLE community_public_invites ADD COLUMN label TEXT;")
+            .map_err(|e| format!("Failed to add label column: {}", e))?;
+        Ok(())
+    })?;
+
     Ok(())
 }

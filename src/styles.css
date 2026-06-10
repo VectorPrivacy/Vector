@@ -2339,6 +2339,20 @@ html, body {
 .invite-decline-btn .icon {
   background-color: var(--danger-color);
 }
+/* Green "new" dot on a pending invite's avatar (top-right, to distinguish from
+ * the bottom-right online-status dot). Black border matches .avatar-status-icon. */
+.chatlist-invite-badge {
+  position: absolute;
+  top: 0px;
+  right: 0px;
+  width: 13px;
+  height: 13px;
+  border-radius: 100%;
+  background: var(--accent-color, #59fcb3);
+  border: 3px solid black;
+  box-shadow: 0 0 6px var(--accent-color, #59fcb3);
+  box-sizing: border-box;
+}
 
 /* Ping pill — negative space (solid accent fill, dark numeral) so it cuts
  * through the row visually. Every count represents pings: full unread set
@@ -15922,12 +15936,43 @@ body.profile-switcher-editing .profile-switcher-add {
 .cmt-link-url {
   flex: 1;
   min-width: 0;
-  font-size: 12px;
-  font-family: monospace;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  opacity: 0.8;
+  opacity: 0.9;
+}
+.cmt-link-glyph {
+  /* Inline (not the base .icon's absolute fill) so it sits in the chip, not the panel corner. */
+  position: relative;
+  top: auto; left: auto; right: auto; bottom: auto;
+  display: inline-block;
+  margin: 0;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  background-color: var(--accent-color, #59fcb3);
+  opacity: 0.85;
+}
+.cmt-link-count {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 6px;
+  font-size: 12px;
+  opacity: 0.7;
+}
+.cmt-link-count-ico {
+  position: relative;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  display: inline-block;
 }
 .cmt-icon-btn {
   width: 30px; height: 30px; flex-shrink: 0;

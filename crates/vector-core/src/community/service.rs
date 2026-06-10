@@ -375,7 +375,7 @@ pub async fn publish_kick<T: Transport + ?Sized>(
     community: &Community,
     channel: &Channel,
     target_hex: &str,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let author_pk = crate::state::my_public_key().ok_or("not logged in")?;
     let me = author_pk.to_hex();
     let cid = community.id.to_hex();
@@ -400,11 +400,12 @@ pub async fn publish_kick<T: Transport + ?Sized>(
     );
     let signer = active_signer().await?;
     let inner = unsigned.sign(&signer).await.map_err(|e| format!("Failed to sign kick: {e}"))?;
-    let _ = publish_signed_message(transport, community, channel, &inner, true).await?;
+    publish_signed_message(transport, community, channel, &inner, true).await?;
     // Removal strips authority: revoke the kicked member's roles too (best-effort) so a kicked admin
     // doesn't rejoin (fresh invite) silently still admin, and no non-member lingers in the roster.
     strip_member_roles_on_removal(transport, community, target_hex).await;
-    Ok(())
+    // Return the inner id so the caller can record a local "Member Left" that dedups with the relay echo.
+    Ok(inner.id.to_hex())
 }
 
 
@@ -1377,6 +1378,15 @@ pub async fn republish_channel_metadata<T: Transport + ?Sized>(
 ///
 /// Owner-only: the bundle grants the @everyone base (server-root) key, and minting the
 /// canonical link is an owner action. `SessionGuard`-gated around the token persist.
+/// A short, human-typable label for an unlabeled invite link. Crockford-ish base32 (no 0/1/I/O)
+/// so it's unambiguous to read and share aloud; 6 chars ≈ 1B combinations (collision-improbable).
+fn generate_invite_label() -> String {
+    use rand::Rng;
+    const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let mut rng = rand::thread_rng();
+    (0..6).map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char).collect()
+}
+
 pub async fn create_public_invite<T: Transport + ?Sized>(
     transport: &T,
     community: &Community,
@@ -1388,11 +1398,36 @@ pub async fn create_public_invite<T: Transport + ?Sized>(
     }
     let session = SessionGuard::capture();
 
+    // Every link gets a label: use the one provided, else mint a random 6-char handle. A stable label
+    // makes the link identifiable in the UI and keys per-link join attribution off (creator, label),
+    // so it must be unique among THIS creator's links (else two links share a join bucket).
+    let existing = crate::db::community::list_public_invites(&community.id.to_hex()).unwrap_or_default();
+    let label_taken = |cand: &str| {
+        existing.iter().any(|r| r.label.as_deref().map(|e| e.eq_ignore_ascii_case(cand)).unwrap_or(false))
+    };
+    let label = match label {
+        Some(l) if !l.trim().is_empty() => {
+            let l = l.trim().to_string();
+            if label_taken(&l) {
+                return Err(format!("You already have an invite link labeled \u{201c}{l}\u{201d}. Pick a different label."));
+            }
+            Some(l)
+        }
+        // Random handle — regenerate on the (astronomically unlikely) collision.
+        _ => {
+            let mut l = generate_invite_label();
+            while label_taken(&l) {
+                l = generate_invite_label();
+            }
+            Some(l)
+        }
+    };
+
     // Attribution (metrics): stamp the bundle with who minted it (my npub) + the creator's label, so
     // a joiner's Presence can announce "invited by me via <label>".
     let creator_npub = crate::state::my_public_key().and_then(|pk| pk.to_bech32().ok());
     let token = public_invite::new_token();
-    let event = build_public_invite_event(community, &token, expires_at, creator_npub, label).map_err(|e| e.to_string())?;
+    let event = build_public_invite_event(community, &token, expires_at, creator_npub, label.clone()).map_err(|e| e.to_string())?;
     transport.publish_durable(&event, &community.relays).await?;
 
     // Published — retain the token so the owner can list + revoke. Bail if the account
@@ -1407,6 +1442,7 @@ pub async fn create_public_invite<T: Transport + ?Sized>(
         &community.id.to_hex(),
         &url,
         expires_at.map(|e| e as i64),
+        label.as_deref(),
     )?;
     // Publish MY updated invite-link set so every member's computed mode flips to Public — the link
     // now exists in the signed, foldable per-creator source of truth, not just my local token store.
@@ -1946,7 +1982,7 @@ async fn observe_channel_activity<T: Transport + ?Sized>(
                         Some(l) if !l.is_empty() => format!("{by}|{l}"),
                         _ => by.clone(),
                     });
-                    let _ = crate::db::events::save_system_event_at(event_id, &ch_hex, et, npub, note.as_deref(), *created_at).await;
+                    let _ = crate::db::events::save_system_event_at(event_id, &ch_hex, et, npub, note.as_deref(), *created_at, invited_by.as_deref(), invited_label.as_deref()).await;
                 }
                 super::inbound::IncomingEvent::WebxdcPeer { npub, topic_id, node_addr, event_id, created_at } => {
                     persist_webxdc_signal(&ch_hex, npub, topic_id, node_addr.as_deref(), event_id, *created_at).await;
@@ -6565,7 +6601,7 @@ mod tests {
         // A different identity joins.
         become_local(&Keys::generate());
 
-        crate::VectorCore.finalize_member_join(community.clone(), &relay).await.unwrap();
+        crate::VectorCore.finalize_member_join(community.clone(), &relay, None).await.unwrap();
 
         assert!(crate::db::community::load_community(&community.id).unwrap().is_some(), "community persisted on join");
         assert!(!crate::state::STATE.lock().await.chats.is_empty(), "the channel is registered as a chat");
@@ -6589,7 +6625,7 @@ mod tests {
         become_local(&joiner);
         assert!(crate::db::community::load_community(&community.id).unwrap().is_some(), "community present pre-join");
 
-        let result = crate::VectorCore.finalize_member_join(community.clone(), &relay).await;
+        let result = crate::VectorCore.finalize_member_join(community.clone(), &relay, None).await;
         assert!(result.is_err(), "a banned joiner's finalize must fail");
         assert!(result.unwrap_err().to_string().contains("banned"), "the error names the ban");
         assert!(
@@ -6612,7 +6648,7 @@ mod tests {
 
         // Populate every community-scoped table.
         crate::db::community::store_epoch_key(&cid, crate::community::SERVER_ROOT_SCOPE_HEX, 1, &[0x11u8; 32]).unwrap();
-        crate::db::community::save_public_invite("tok", &cid, "https://x/invite#y", None).unwrap();
+        crate::db::community::save_public_invite("tok", &cid, "https://x/invite#y", None, None).unwrap();
         crate::db::community::save_pending_invite(&cid, "{}", "npub1inviter").unwrap();
         crate::db::community::set_edition_head(&cid, &cid, 1, &[0x22u8; 32]).unwrap();
         crate::db::community::set_community_banlist(&cid, &["cc".repeat(32)], 100).unwrap();

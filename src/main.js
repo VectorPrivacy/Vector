@@ -2146,6 +2146,12 @@ async function refreshCommunityMemberCount(communityId, force = false) {
     }
     if (domGroupOverview.getAttribute('data-group-id') === communityId) {
         domGroupOverviewStatus.textContent = communityMemberSubtext(communityId);
+        // The member SET changed while the overview is open — re-render the rows live so a
+        // join/leave/new-speaker appears without closing and reopening (preserve any active search).
+        if (domGroupOverview.style.display !== 'none') {
+            const chat = arrChats.find(c => c.metadata?.custom_fields?.community_id === communityId);
+            if (chat) renderCommunityOverview(chat, true);
+        }
     }
 }
 
@@ -4640,8 +4646,8 @@ function renderProfileTab(cProfile) {
     domProfileAvatar.classList.add('profile-avatar');
     domProfileAvatar.onclick = null;
 
-    // Secondary Display Name - use profile's npub as fallback
-    const strNamePlaceholder = cProfile.mine ? 'Set a Display Name' : (cProfile?.id ? cProfile.id.substring(0, 10) + '…' : '');
+    // Secondary Display Name — "Anonymous" for our own un-named profile; npub prefix for others.
+    const strNamePlaceholder = cProfile.mine ? 'Anonymous' : (cProfile?.id ? cProfile.id.substring(0, 10) + '…' : '');
     domProfileNameSecondary.textContent = cProfile?.nickname || cProfile?.name || strNamePlaceholder;
     if (cProfile?.nickname || cProfile?.name) twemojify(domProfileNameSecondary);
 
@@ -4682,9 +4688,10 @@ function renderProfileTab(cProfile) {
         document.getElementById('profile-npub-label').textContent = cProfile.mine ? 'My nPub Key' : 'nPub Key';
     }
 
-    // Description
-    const strDescriptionPlaceholder = cProfile.mine ? (cProfile?.about || 'Set an About Me') : '';
-    domProfileDescription.textContent = cProfile?.about || strDescriptionPlaceholder;
+    // Description — muted, non-interactive placeholder when empty (editing lives in Edit Mode).
+    const hasAbout = !!(cProfile?.about);
+    domProfileDescription.textContent = hasAbout ? cProfile.about : 'No description yet';
+    domProfileDescription.classList.toggle('group-placeholder', !hasAbout);
     twemojify(domProfileDescription);
 
     // npub
@@ -4755,15 +4762,20 @@ function renderProfileTab(cProfile) {
         document.getElementById('profile-name').textContent = 'My Profile';
         document.getElementById('profile-status').style.display = 'none';
 
-        // Configure other clickables
-        domProfileName.classList.add('btn');
+        // Name + description display fields are NOT click-to-edit — editing lives in Edit Mode
+        // (the pencil), which swaps these for dedicated inputs. Strip the clickable affordance
+        // so first-time users aren't misled into clicking them. Status stays click-to-edit.
+        domProfileName.classList.remove('btn');
+        domProfileNameSecondary.classList.remove('btn');
+        domProfileDescription.classList.remove('btn');
+        domProfileName.onclick = null;
+        domProfileNameSecondary.onclick = null;
+        domProfileDescription.onclick = null;
+        // Status is the one quick-set field that stays clickable on the profile view.
         domProfileStatus.classList.add('btn');
-        domProfileName.onclick = () => { if (fProfileEditMode) askForUsername(); };
-        domProfileStatus.onclick = () => { if (fProfileEditMode) askForStatus(); };
-        domProfileNameSecondary.onclick = () => { if (fProfileEditMode) askForUsername(); };
-        domProfileStatusSecondary.onclick = () => { if (fProfileEditMode) askForStatus(); };
-        domProfileDescription.onclick = () => { if (fProfileEditMode) editProfileDescription(); };
-        domProfileDescription.classList.add('btn');
+        domProfileStatusSecondary.classList.add('btn');
+        domProfileStatus.onclick = () => askForStatus();
+        domProfileStatusSecondary.onclick = () => askForStatus();
     } else {
         document.getElementById('profile').classList.remove('is-own-profile');
         // Show Contact Options
@@ -7485,7 +7497,7 @@ async function removeCommunityFromUI(communityId) {
     if (wasViewing) openChatlist();
 }
 
-async function renderCommunityOverview(chat) {
+async function renderCommunityOverview(chat, preserveSearch = false) {
     const cf = chat.metadata?.custom_fields || {};
     const communityId = cf.community_id;
     const isOwner = cf.is_owner === 'true';
@@ -7799,6 +7811,8 @@ async function renderCommunityOverview(chat) {
                             await invoke('kick_community_member', { communityId, npub: m.npub });
                             memberList = memberList.filter(x => x.npub !== m.npub);
                             renderMembers(searchEl?.value || '');
+                            // Sync the "N members" subtext (the backend recorded the leave; this re-fetches).
+                            refreshCommunityMemberCount(communityId, true);
                         } catch (err) {
                             kickBtn.disabled = false;
                             kickBtn.innerHTML = '<span class="icon icon-x"></span>Kick';
@@ -7825,6 +7839,8 @@ async function renderCommunityOverview(chat) {
                             await invoke('ban_community_member', { communityId, npub: m.npub });
                             memberList = memberList.filter(x => x.npub !== m.npub);
                             renderMembers(searchEl?.value || '');
+                            // Sync the "N members" subtext (banned members are excluded by the fold).
+                            refreshCommunityMemberCount(communityId, true);
                         } catch (err) {
                             banBtn.disabled = false;
                             banBtn.innerHTML = '<span class="icon icon-x-user"></span>Ban';
@@ -7898,7 +7914,8 @@ async function renderCommunityOverview(chat) {
                 }
             }
         };
-        renderMembers();
+        // On a live refresh (preserveSearch), keep the active filter; on a fresh open, start clean.
+        renderMembers(preserveSearch && searchEl ? (searchEl.value || '') : '');
 
         // Resolve unknown member + banned-member profiles (name/avatar), then re-render once.
         const unknowns = [...memberList.map(m => m.npub), ...bannedList].filter(np => !arrProfiles.some(p => p.id === np) && !strangerProfileRequested.has(np));
@@ -7914,7 +7931,7 @@ async function renderCommunityOverview(chat) {
             // hovers orphaned above an empty member list.
             const searchContainer = searchEl.parentElement;
             if (searchContainer) searchContainer.style.display = memberList.length ? '' : 'none';
-            searchEl.value = '';
+            if (!preserveSearch) searchEl.value = '';
             searchEl.oninput = () => renderMembers(searchEl.value || '');
         }
     }
@@ -8168,7 +8185,21 @@ async function openCommunityInvitePanel(chat) {
             row.className = 'cmt-link-row';
             const url = document.createElement('span');
             url.className = 'cmt-link-url';
-            url.textContent = link.url;
+            // Labeled chip: glyph + the link's label (e.g. "Twitter"), falling back to a short id when no
+            // label was set. A bare token tail looked like gibberish. Full URL stays for copy + hover.
+            url.innerHTML = '<span class="icon icon-share cmt-link-glyph"></span>';
+            const lbl = (link.label || '').trim();
+            url.append(lbl || `Invite · ${(link.token || link.url).slice(-8)}`);
+            url.title = link.url;
+            // Join counter: distinct members who joined via this link.
+            const joins = link.join_count || 0;
+            const count = document.createElement('span');
+            count.className = 'cmt-link-count';
+            count.title = `${joins} member${joins === 1 ? '' : 's'} joined via this link`;
+            // The base .icon is position:absolute and fills its nearest positioned box at 65% — so it
+            // needs a sized, relative container or it escapes to the panel corner.
+            count.innerHTML = '<span class="cmt-link-count-ico"><span class="icon icon-users-multi"></span></span>';
+            count.append(String(joins));
             const copyBtn = document.createElement('button');
             copyBtn.className = 'cmt-icon-btn'; copyBtn.title = 'Copy link';
             copyBtn.innerHTML = '<span class="icon icon-copy"></span>';
@@ -8218,7 +8249,7 @@ async function openCommunityInvitePanel(chat) {
                     }
                 }
             };
-            row.append(url, copyBtn, revokeBtn);
+            row.append(url, count, copyBtn, revokeBtn);
             linksDiv.appendChild(row);
         }
     };
@@ -11054,22 +11085,8 @@ function renderCreateGroupList(filterText = '') {
         if (name) twemojify(nameSpan);
         row.appendChild(nameSpan);
 
-        const isAdmin = arrSelectedGroupAdmins.includes(npub);
-        const adminToggle = document.createElement('div');
-        adminToggle.className = 'member-pick-admin' + (isAdmin ? ' active' : '');
-        adminToggle.style.display = isSelected ? '' : 'none';
-        adminToggle.innerHTML = '<span class="icon icon-crown"></span>';
-        adminToggle.addEventListener('click', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            if (arrSelectedGroupAdmins.includes(npub)) {
-                arrSelectedGroupAdmins = arrSelectedGroupAdmins.filter(n => n !== npub);
-            } else {
-                arrSelectedGroupAdmins.push(npub);
-            }
-            renderCreateGroupList(domCreateGroupFilter?.value || '');
-        });
-        row.appendChild(adminToggle);
+        // No admin toggle at create: invitees haven't joined yet, so a role grant has no
+        // member to bind to (you promote them from Group Info after they accept).
 
         const indicator = document.createElement('div');
         indicator.className = 'member-pick-indicator' + (isSelected ? ' selected' : '');
@@ -11135,8 +11152,8 @@ function renderCreateGroupList(filterText = '') {
  */
 function updateCreateGroupValidation(showInline = false) {
     if (!domCreateGroupCreateBtn) return;
-    // A Community needs only a name — members aren't added at creation (you invite via
-    // link/npub afterward), so there's no member-selection requirement.
+    // A Community needs only a name — picking contacts to invite is optional, so there's
+    // no member-selection requirement.
     const nameOk = !!domCreateGroupName?.value.trim();
 
     domCreateGroupCreateBtn.disabled = !nameOk;
@@ -11192,10 +11209,11 @@ function openCreateGroup() {
     if (domCreateGroupAvatarPlaceholder) domCreateGroupAvatarPlaceholder.style.display = '';
     if (domCreateGroupAvatarPicker) domCreateGroupAvatarPicker.classList.remove('has-image');
 
-    // Communities don't pick members at creation (invite via link/npub afterward) — hide
-    // the member filter + list so the create panel is just name + description + avatar.
-    if (domCreateGroupFilter) domCreateGroupFilter.style.display = 'none';
-    if (domCreateGroupList) domCreateGroupList.style.display = 'none';
+    // Optional direct invites: show the contact picker so the creator can pick people to
+    // send a private invite to once the Community is created (a name is still all that's required).
+    if (domCreateGroupFilter) domCreateGroupFilter.style.display = '';
+    if (domCreateGroupList) domCreateGroupList.style.display = '';
+    renderCreateGroupList('');
     updateCreateGroupValidation(false);
 
     // Focus name
@@ -11271,6 +11289,9 @@ async function closeCreateGroup() {
             return;
         }
 
+        // Snapshot the picked direct-invite contacts now — openCreateGroup resets the array.
+        const inviteeNpubs = [...arrSelectedGroupMembers];
+
         // Loading state
         const prevTxt = domCreateGroupCreateBtn.textContent;
         domCreateGroupCreateBtn.textContent = 'Creating...';
@@ -11290,19 +11311,8 @@ async function closeCreateGroup() {
             const communityId = created.community_id;
             const channelId = created.channel_id;
 
-            // Description + avatar are set after creation (the Community must exist first).
-            if (description) {
-                try { await invoke('update_community_metadata', { communityId, name: null, description }); }
-                catch (err) { console.error('Set community description failed:', err); showToast('Community created, but the description failed to save'); }
-            }
-            if (strCreateGroupAvatarPath) {
-                if (domCreateGroupStatus) domCreateGroupStatus.textContent = 'Uploading avatar...';
-                try { await invoke('set_community_image', { communityId, filepath: strCreateGroupAvatarPath, isBanner: false }); }
-                catch (err) { console.error('Set community avatar failed:', err); showToast('Community created, but the avatar upload failed'); }
-            }
-
-            // Surface the new channel chat in the running session (mirrors what the
-            // unified load would produce at next startup).
+            // Surface the new channel chat immediately — BEFORE the avatar upload, which
+            // can take seconds and must not delay the group appearing in the list.
             const chat = getOrCreateChat(channelId, 'Community');
             chat.metadata = chat.metadata || {};
             chat.metadata.custom_fields = chat.metadata.custom_fields || {};
@@ -11310,20 +11320,49 @@ async function closeCreateGroup() {
             chat.metadata.custom_fields.description = description || '';
             chat.metadata.custom_fields.community_id = communityId;
             chat.metadata.custom_fields.is_owner = 'true';
+            // Stamp the proven owner npub so the crown/Owner tag shows now, not after reload.
+            if (created.owner_npub) chat.metadata.custom_fields.owner_npub = created.owner_npub;
             // Stamp creation time so the empty community sorts to the TOP right away (mirrors the join
             // path); reloads re-source this from the persisted DB created_at.
             chat.metadata.custom_fields.created_at = String(Date.now());
             if (strCreateGroupAvatarPath) {
+                // Show the locally-picked avatar instantly (convertFileSrc, no remote fetch);
+                // the backend re-caches authoritatively once the upload lands below.
                 chat.metadata.custom_fields.icon = '1';
-                invoke('cache_community_image', { communityId, isBanner: false })
-                    .then(path => { if (path) { chat.metadata.avatar_cached = path; renderChatlist(); } })
-                    .catch(() => {});
+                chat.metadata.avatar_cached = convertFileSrc(strCreateGroupAvatarPath);
             }
             renderChatlist();
 
             // Navigate to the new channel + hide the panel.
             openChat(channelId);
             domCreateGroup.style.display = 'none';
+
+            // Persist description, then upload the avatar — both republish metadata, so chain
+            // them (no concurrent GroupRoot republish). Detached: the group is already visible.
+            (async () => {
+                if (description) {
+                    try { await invoke('update_community_metadata', { communityId, name: null, description }); }
+                    catch (err) { console.error('Set community description failed:', err); showToast('Community created, but the description failed to save'); }
+                }
+                // Post-creation: loop a private invite out to each picked contact.
+                if (inviteeNpubs.length) {
+                    let ok = 0;
+                    for (const np of inviteeNpubs) {
+                        try { await invoke('invite_to_community', { communityId, inviteeNpub: np }); ok++; }
+                        catch (err) { console.error('Invite failed for', np, err); }
+                    }
+                    if (ok) showToast(`Invited ${ok} ${ok === 1 ? 'person' : 'people'} to ${name}`);
+                    const failed = inviteeNpubs.length - ok;
+                    if (failed) showToast(`${failed} invite${failed === 1 ? '' : 's'} failed to send`);
+                }
+                if (strCreateGroupAvatarPath) {
+                    try {
+                        await invoke('set_community_image', { communityId, filepath: strCreateGroupAvatarPath, isBanner: false });
+                        const path = await invoke('cache_community_image', { communityId, isBanner: false });
+                        if (path) { chat.metadata.avatar_cached = path; renderChatlist(); }
+                    } catch (err) { console.error('Set community avatar failed:', err); showToast('Community created, but the avatar upload failed'); }
+                }
+            })();
         } catch (e) {
             const friendly = typeof e === 'string' ? e : (e?.message || e || '').toString();
             popupConfirm('Community creation failed', friendly, true, '', 'vector_warning.svg');

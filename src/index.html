@@ -779,7 +779,7 @@
     </div>
   </div>
   <div>
-        <h3 id="profile-secondary-name" class="chat-contact-with-status btn"></h3>
+        <h3 id="profile-secondary-name" class="chat-contact-with-status"></h3>
 <span id="profile-secondary-status" class="cutoff chat-contact-status btn" style="width: 90%;"></span>
 <div id="profile-edit-fields" style="display: none; flex-direction: column; gap: 12px; width: 90%; margin: 16px auto 0;">
   <label class="profile-edit-label">Username</label>
@@ -1064,10 +1064,10 @@
             </div>
           </center>
 
-          <!-- Hidden for now: Communities invite members post-creation (npub invites / links).
-               Kept intact so we can revive in-create member selection (e.g. auto-send npub invites). -->
-          <center id="create-group-members-section" class="chat-new-center-content" style="display: none; padding: 0 15px; box-sizing: border-box; width: 100%;">
-            <h2 class="chat-new-subtitle">Select Members</h2>
+          <!-- Optional in-create direct invites: pick contacts (or paste an npub) to send a
+               private invite to once the Community is created. Not the public-link system. -->
+          <center id="create-group-members-section" class="chat-new-center-content" style="padding: 0 15px; box-sizing: border-box; width: 100%;">
+            <h2 class="chat-new-subtitle">Invite Members <span style="opacity: 0.55; font-weight: 400;">(optional)</span></h2>
             <hr class="divider chat-new-subtitle-divider" style="width: 100%; max-width: 325px;">
             <div class="chat-new-content" style="width: 100%; box-sizing: border-box; margin-left: 0;">
               <div class="emoji-search-container" style="padding: 0; background: transparent;">

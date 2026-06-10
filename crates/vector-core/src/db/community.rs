@@ -723,6 +723,11 @@ pub struct PublicInviteRecord {
     pub url: String,
     pub expires_at: Option<i64>,
     pub created_at: i64,
+    /// Optional human label set at mint time (e.g. "Twitter", "Discord"). None if unset.
+    pub label: Option<String>,
+    /// Distinct members who joined via this link (by label attribution). 0 if none/unknown.
+    #[serde(default)]
+    pub join_count: u64,
 }
 
 /// Retain a minted public-invite token so the owner can later list + revoke it.
@@ -731,17 +736,20 @@ pub fn save_public_invite(
     community_id: &str,
     url: &str,
     expires_at: Option<i64>,
+    label: Option<&str>,
 ) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
     // token + url are the link's secret; encrypted, the token PK becomes per-write-unique (random
     // nonce) so this is effectively an INSERT — fine, mints generate a fresh token each time.
     let enc_token = enc_txt(token)?;
     let enc_url = enc_txt(url)?;
+    // Encrypt the label at rest like the url; NULL when no label was set.
+    let enc_label = label.map(enc_txt).transpose()?;
     conn.execute(
         "INSERT OR REPLACE INTO community_public_invites
-            (token, community_id, url, expires_at, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![enc_token, community_id, enc_url, expires_at, now_secs()],
+            (token, community_id, url, expires_at, created_at, label)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![enc_token, community_id, enc_url, expires_at, now_secs(), enc_label],
     )
     .map_err(|e| format!("save public invite: {e}"))?;
     Ok(())
@@ -752,7 +760,7 @@ pub fn list_public_invites(community_id: &str) -> Result<Vec<PublicInviteRecord>
     let conn = super::get_db_connection_guard_static()?;
     let mut stmt = conn
         .prepare(
-            "SELECT token, community_id, url, expires_at, created_at
+            "SELECT token, community_id, url, expires_at, created_at, label
                FROM community_public_invites WHERE community_id = ?1 ORDER BY created_at DESC",
         )
         .map_err(|e| e.to_string())?;
@@ -764,12 +772,24 @@ pub fn list_public_invites(community_id: &str) -> Result<Vec<PublicInviteRecord>
                 url: dec_txt(&r.get::<_, String>(2)?),
                 expires_at: r.get(3)?,
                 created_at: r.get(4)?,
+                label: r.get::<_, Option<String>>(5)?.map(|s| dec_txt(&s)),
+                join_count: 0,
             })
         })
         .map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     for row in rows {
         out.push(row.map_err(|e| e.to_string())?);
+    }
+    // Fill per-link join counts (distinct joiners via each label, attributed to me).
+    if let Some(me) = crate::state::my_public_key().and_then(|pk| pk.to_bech32().ok()) {
+        if let Ok(counts) = community_invite_join_counts(community_id, &me) {
+            for rec in &mut out {
+                if let Some(l) = rec.label.as_deref() {
+                    rec.join_count = counts.get(l).copied().unwrap_or(0);
+                }
+            }
+        }
     }
     Ok(out)
 }
@@ -996,6 +1016,68 @@ pub fn community_member_activity(community_id: &str) -> Result<Vec<(String, u64)
     out.sort_by(|a, b| b.1.cmp(&a.1));
     out.truncate(COMMUNITY_MEMBER_CAP);
     Ok(out)
+}
+
+/// Per-link join counts for the owner's public invites: `label -> distinct joiners` who joined
+/// via a link minted by `inviter_npub` (bech32). Reads the `invited-by` / `invited-label` tags on
+/// MemberJoined system events; distinct by joiner npub so a rejoin isn't double-counted. Labels are
+/// unique per creator (random fallback ensures it), so (inviter, label) keys a single link.
+pub fn community_invite_join_counts(
+    community_id: &str,
+    inviter_npub: &str,
+) -> Result<std::collections::HashMap<String, u64>, String> {
+    use std::collections::{HashMap, HashSet};
+    let community = match load_community(&CommunityId(hex_id_to_32(community_id)?))? {
+        Some(c) => c,
+        None => return Ok(HashMap::new()),
+    };
+    let mut chat_ints: Vec<i64> = Vec::new();
+    for ch in &community.channels {
+        if let Ok(cid) = super::id_cache::get_chat_id_by_identifier(&ch.id.to_hex()) {
+            chat_ints.push(cid);
+        }
+    }
+    if chat_ints.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let sys = crate::stored_event::event_kind::APPLICATION_SPECIFIC;
+    let conn = super::get_db_connection_guard_static()?;
+    let placeholders = chat_ints.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT npub, tags FROM events \
+         WHERE chat_id IN ({placeholders}) AND kind = {sys} AND npub IS NOT NULL AND npub != ''"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(chat_ints.iter()), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    // label -> set of distinct joiner npubs
+    let mut per_label: HashMap<String, HashSet<String>> = HashMap::new();
+    for row in rows {
+        let (joiner, tags_json) = row.map_err(|e| e.to_string())?;
+        let tags = match serde_json::from_str::<Vec<Vec<String>>>(&tags_json) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let tag_val = |key: &str| -> Option<String> {
+            tags.iter()
+                .find(|t| t.first().map(|s| s == key).unwrap_or(false))
+                .and_then(|t| t.get(1).cloned())
+        };
+        // MemberJoined (event-type "1") attributed to THIS owner's link, with a label.
+        if tag_val("event-type").as_deref() != Some("1") {
+            continue;
+        }
+        if tag_val("invited-by").as_deref() != Some(inviter_npub) {
+            continue;
+        }
+        if let Some(label) = tag_val("invited-label") {
+            per_label.entry(label).or_default().insert(joiner);
+        }
+    }
+    Ok(per_label.into_iter().map(|(k, v)| (k, v.len() as u64)).collect())
 }
 
 /// Replace a Community's stored banlist (JSON array of hex pubkeys) + the `created_at` (secs) of
@@ -1937,7 +2019,7 @@ mod tests {
         let c = Community::create("HQ", "general", vec!["r1".into()]);
         save_community(&c).unwrap();
         let cid = c.id.to_hex();
-        save_public_invite(&"ab".repeat(32), &cid, "url", None).unwrap();
+        save_public_invite(&"ab".repeat(32), &cid, "url", None, None).unwrap();
         save_pending_invite(&"cd".repeat(32), "{}", "npub1x").unwrap();
         set_edition_head(&cid, &"a".repeat(64), 3, &[0x11u8; 32]).unwrap();
 
@@ -1960,7 +2042,7 @@ mod tests {
         let c = Community::create("HQ", "general", vec!["r1".into()]);
         save_community(&c).unwrap();
         let cid = c.id.to_hex();
-        save_public_invite(&"ab".repeat(32), &cid, "url", None).unwrap();
+        save_public_invite(&"ab".repeat(32), &cid, "url", None, None).unwrap();
         set_edition_head(&cid, &"a".repeat(64), 3, &[0x11u8; 32]).unwrap();
 
         let base_before = held_epoch_keys(&cid, crate::community::SERVER_ROOT_SCOPE_HEX).unwrap();

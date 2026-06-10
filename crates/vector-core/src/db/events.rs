@@ -232,7 +232,7 @@ pub async fn save_system_event_by_id(
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs()).unwrap_or(0);
-    save_system_event_at(event_id, conversation_id, event_type, member_npub, member_name, now_secs).await
+    save_system_event_at(event_id, conversation_id, event_type, member_npub, member_name, now_secs, None, None).await
 }
 
 /// Like [`save_system_event_by_id`] but stamps `created_at` from the event's own authenticated timestamp
@@ -245,6 +245,10 @@ pub async fn save_system_event_at(
     member_npub: &str,
     member_name: Option<&str>,
     created_at_secs: u64,
+    // Join attribution (public invites): who minted the link the member joined via, and its label.
+    // Stored as queryable tags so per-link join counts fall out of a tag scan.
+    invited_by: Option<&str>,
+    invited_label: Option<&str>,
 ) -> Result<bool, String> {
     let chat_id = super::id_cache::get_or_create_chat_id(conversation_id)?;
 
@@ -257,11 +261,17 @@ pub async fn save_system_event_at(
     let display_name = member_name.unwrap_or(member_npub);
     let content = event_type.display_message(display_name);
 
-    let tags: Vec<Vec<String>> = vec![
+    let mut tags: Vec<Vec<String>> = vec![
         vec!["d".to_string(), "system-event".to_string()],
         vec!["event-type".to_string(), event_type.as_u8().to_string()],
         vec!["member".to_string(), member_npub.to_string()],
     ];
+    if let Some(by) = invited_by {
+        tags.push(vec!["invited-by".to_string(), by.to_string()]);
+        if let Some(l) = invited_label.filter(|l| !l.is_empty()) {
+            tags.push(vec!["invited-label".to_string(), l.to_string()]);
+        }
+    }
     let tags_json = serde_json::to_string(&tags)
         .map_err(|e| format!("Failed to serialize tags: {}", e))?;
 
@@ -1139,8 +1149,8 @@ mod tests {
         let before = now_secs();
         let past = before - 100_000;
 
-        save_system_event_at("ev_past", chat, SystemEventType::MemberJoined, "npubX", None, past).await.unwrap();
-        save_system_event_at("ev_future", chat, SystemEventType::MemberJoined, "npubX", None, before + 100_000).await.unwrap();
+        save_system_event_at("ev_past", chat, SystemEventType::MemberJoined, "npubX", None, past, None, None).await.unwrap();
+        save_system_event_at("ev_future", chat, SystemEventType::MemberJoined, "npubX", None, before + 100_000, None, None).await.unwrap();
         let after = now_secs();
 
         let evs = get_system_events_for_chat(chat).unwrap();

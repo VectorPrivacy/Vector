@@ -196,8 +196,14 @@ pub async fn kick_community_member(community_id: String, npub: String) -> Result
     if !session.is_valid() {
         return Err("account changed during kick".to_string());
     }
+    let channel_id = channel.id.to_hex();
     let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-    vector_core::community::service::publish_kick(&transport, &community, channel, &hex).await
+    let kick_id = vector_core::community::service::publish_kick(&transport, &community, channel, &hex).await?;
+    // We don't process our OWN kick, so record it locally as a "Member Left" — folds the target out of our
+    // member list durably (kick already stripped their grant, so the roster re-assert won't resurrect them)
+    // and renders "X left" in chat, matching what peers see on receipt. The inner id dedups with the echo.
+    apply_community_presence(&channel_id, &npub, false, &kick_id, now_secs(), None, None).await;
+    Ok(())
 }
 
 /// The Community's current banlist as npubs (bech32), for the owner's manage-bans UI.
@@ -681,13 +687,23 @@ pub async fn create_community(
     // Start receiving on the new channel.
     crate::services::subscription_handler::refresh_community_subscription().await;
 
-    Ok(CreatedCommunity { community_id: community.id.to_hex(), channel_id })
+    // Proven owner npub (verified attestation) so the frontend can stamp the crown
+    // immediately, rather than waiting for the next reload to re-derive it.
+    let community_id = community.id.to_hex();
+    let owner_npub = community
+        .owner_attestation
+        .as_ref()
+        .and_then(|att| vector_core::community::owner::verify_owner_attestation(att, &community_id))
+        .and_then(|pk| pk.to_bech32().ok());
+
+    Ok(CreatedCommunity { community_id, channel_id, owner_npub })
 }
 
 #[derive(serde::Serialize)]
 pub struct CreatedCommunity {
     pub community_id: String,
     pub channel_id: String,
+    pub owner_npub: Option<String>,
 }
 
 /// Post a text message to a Community channel (addressed by its `channel_id`). Drives the
@@ -2026,7 +2042,7 @@ pub(crate) async fn apply_community_presence(
         Some(l) if !l.is_empty() => format!("{by}|{l}"),
         _ => by.to_string(),
     });
-    let inserted = vector_core::db::events::save_system_event_at(event_id, channel_id, et, npub, note.as_deref(), created_at)
+    let inserted = vector_core::db::events::save_system_event_at(event_id, channel_id, et, npub, note.as_deref(), created_at, invited_by, invited_label)
         .await
         .unwrap_or(false);
     if inserted {
@@ -2502,10 +2518,11 @@ async fn download_decrypt_cache_image<R: tauri::Runtime>(
     }
 }
 
-/// Set a Community's logo or banner (owner only): encrypt the image at `filepath` with a
+/// Set a Community's logo or banner: encrypt the image at `filepath` with a
 /// fresh per-file key (NIP-17 attachment technique), upload the ciphertext to Blossom,
 /// store the ref (key gated by the server-root inside the GroupRoot), and republish.
-/// `is_banner` targets the banner instead of the icon.
+/// `is_banner` targets the banner instead of the icon. Authority (MANAGE_METADATA,
+/// the same as name/description edits) is enforced downstream by republish_community_metadata.
 #[tauri::command]
 pub async fn set_community_image(
     community_id: String,
@@ -2518,9 +2535,6 @@ pub async fn set_community_image(
     let id_bytes = hex_to_id32(&community_id)?;
     let mut community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
         .ok_or("Community not found")?;
-    if !vector_core::community::service::is_proven_owner(&community) {
-        return Err("only the Community owner can set images".to_string());
-    }
 
     let bytes = std::fs::read(&filepath).map_err(|e| format!("read image: {e}"))?;
     let ext = std::path::Path::new(&filepath)

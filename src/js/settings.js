@@ -1120,12 +1120,13 @@ async function askForAvatar() {
     cProfile.avatar_cached = '';
 
     if (inEditMode) {
-        // Surgical swap — see askForBanner for rationale. Preview via the
-        // backend cache (the WebView must never fetch remote, even our own
-        // fresh Blossom upload — Tor bypass).
+        // Preview from the locally-picked file — instant and animation-safe.
+        // A fresh Blossom GIF can take >15s to fetch back, and the WebView must
+        // never point at a remote URL anyway (Tor bypass). Mirrors the
+        // profile-edit avatar click handler.
         const imgEl = document.getElementById('profile-avatar');
         if (imgEl && imgEl.tagName === 'IMG') {
-            bindBackendCachedImg(imgEl, strUploadURL);
+            imgEl.src = convertFileSrc(file);
         }
     } else {
         renderCurrentProfile(cProfile);
@@ -1228,13 +1229,13 @@ async function askForBanner() {
         // Surgical img.src swap. renderProfileTab would tear down the
         // edit-bar overlay; Save's exit handler paints the final state.
         if (domProfileBanner.tagName === 'IMG') {
-            bindBackendCachedImg(domProfileBanner, strUploadURL);
+            domProfileBanner.src = convertFileSrc(file);
         } else {
             // Currently a placeholder <div>; swap to a real <img>.
             const img = document.createElement('img');
             img.id = 'profile-banner';
             img.className = domProfileBanner.className;
-            bindBackendCachedImg(img, strUploadURL);
+            img.src = convertFileSrc(file);
             domProfileBanner.replaceWith(img);
             domProfileBanner = img;
         }
