@@ -864,7 +864,7 @@
       <span id="group-overview-avatar" class="icon icon-chat-circle" style="width: 100px; height: 100px; border-radius: initial; display: inline-block;"></span>
     </div>
     <div style="padding-bottom: 75px;">
-      <h3 id="group-overview-secondary-name" class="chat-contact-with-status btn"></h3>
+      <h3 id="group-overview-secondary-name" class="chat-contact-with-status btn cutoff" style="max-width: 90%; margin-left: auto; margin-right: auto;"></h3>
       <span id="group-overview-description" class="chat-contact-status" style="width: 90%; white-space: pre-line; overflow-y: auto; max-height: 225px; font-style: normal; margin-top: 10px;"></span>
       <div style="margin-top: 40px; width: 90%; margin-left: auto; margin-right: auto;">
         <div style="display: flex; justify-content: center; margin-bottom: 10px;">
@@ -1057,7 +1057,7 @@
                   <span id="create-group-avatar-edit-icon" class="icon icon-plus-circle"></span>
                 </div>
               </div>
-              <input id="create-group-name" placeholder="Group name..." class="chat-input-container chat-new-input" />
+              <input id="create-group-name" placeholder="Group name..." maxlength="32" class="chat-input-container chat-new-input" />
             </div>
             <div style="padding: 0 15px; margin-top: 8px;">
               <textarea id="create-group-description" placeholder="Group description (optional)" class="create-group-description" rows="2"></textarea>

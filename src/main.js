@@ -7820,7 +7820,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         domGroupOverviewNameSecondary.classList.add('group-editable');
         domGroupOverviewNameSecondary.onclick = () => {
             const input = document.createElement('input');
-            input.type = 'text'; input.className = 'group-name-input'; input.value = name; input.maxLength = 100;
+            input.type = 'text'; input.className = 'group-name-input'; input.value = name; input.maxLength = 32;
             domGroupOverviewNameSecondary.replaceWith(input);
             input.focus(); input.select();
             let saved = false;

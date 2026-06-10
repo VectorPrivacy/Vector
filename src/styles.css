@@ -10308,6 +10308,15 @@ select:disabled:hover {
 .group-editable:hover::after {
   opacity: 0.6;
 }
+/* Multi-line description: the shared pencil's mid-height absolute anchor floats it
+   mid-paragraph on a tall block (and the span's overflow clips any outside pin) —
+   let it FLOW inline instead, landing right after the last character of the text. */
+#group-overview-description.group-editable::after {
+  position: static;
+  display: inline-block;
+  transform: none;
+  vertical-align: -1px;
+}
 .group-desc-empty {
   color: rgba(255, 255, 255, 0.35) !important;
   font-style: italic !important;
