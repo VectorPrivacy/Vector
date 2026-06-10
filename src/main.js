@@ -2684,6 +2684,14 @@ async function setupRustListeners() {
         adjustSize();
     });
 
+    // Cross-device: boot reconcile purged parked invites for communities we already joined elsewhere.
+    // Re-pull the (now-pruned) list so those stale invite rows vanish without a restart.
+    _on('community_invites_purged', async () => {
+        await loadCommunityInvites();
+        renderChatlist();
+        adjustSize();
+    });
+
     // §6.2 self-removal: a cooperative kick of us, a ban-rekey exclusion, OR a leave another device
     // authored. The backend already wiped this community's local data (retaining the epoch keys for a
     // later self-scrub). Silently mirror it in the UI — close the view + drop it from the list — with no

@@ -647,6 +647,23 @@ pub fn save_pending_invite(
     Ok(changed > 0)
 }
 
+/// Drop every parked invite for a community we ALREADY hold — once joined on any device, the
+/// invite must never resurface. Ordering-independent: covers the cross-device case where the
+/// historical gift-wrapped invites are ingested BEFORE the synced membership list rehydrates
+/// those communities (so the ingest-time `community_exists` guard saw nothing yet). Returns the
+/// count purged.
+pub fn purge_pending_invites_for_held_communities() -> Result<usize, String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let n = conn
+        .execute(
+            "DELETE FROM pending_community_invites
+               WHERE community_id IN (SELECT community_id FROM communities)",
+            [],
+        )
+        .map_err(|e| format!("purge held pending invites: {e}"))?;
+    Ok(n)
+}
+
 /// All parked invites, newest first.
 pub fn list_pending_invites() -> Result<Vec<PendingCommunityInvite>, String> {
     let conn = super::get_db_connection_guard_static()?;
@@ -2104,6 +2121,25 @@ mod tests {
         delete_pending_invite(&cid).unwrap();
         assert!(!pending_invite_exists(&cid).unwrap());
         assert!(get_pending_invite(&cid).unwrap().is_none());
+    }
+
+    #[test]
+    fn purge_drops_invites_for_held_communities_only() {
+        let (_tmp, _guard) = init_test_db();
+        // A community we hold + a parked invite for it (the cross-device race: invite landed
+        // before the membership list rehydrated the community).
+        let held = Community::create("Held", "general", vec![]);
+        save_community(&held).unwrap();
+        let held_hex = held.id.to_hex();
+        save_pending_invite(&held_hex, "{\"bundle\":1}", "npub1inviter").unwrap();
+        // An invite for a community we do NOT hold must survive the purge.
+        let stranger = "ab".repeat(32);
+        save_pending_invite(&stranger, "{\"bundle\":2}", "npub1inviter").unwrap();
+
+        let n = purge_pending_invites_for_held_communities().unwrap();
+        assert_eq!(n, 1, "only the held community's invite is purged");
+        assert!(!pending_invite_exists(&held_hex).unwrap(), "held → invite gone");
+        assert!(pending_invite_exists(&stranger).unwrap(), "unknown community → invite kept");
     }
 
     #[test]

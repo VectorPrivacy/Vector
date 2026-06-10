@@ -1720,6 +1720,33 @@ pub(crate) async fn reconcile_community_list_boot() {
     // page_messages = false: the boot channel sweep (sync_communities_boot) pages every community right after
     // this, so paging here too would double-fetch the latest page (anti-stampede only dedups CONCURRENT syncs).
     rehydrate_listed_communities(&list, &session, false).await;
+    if session.is_valid() {
+        purge_stale_pending_invites(&list.tombstones);
+    }
+}
+
+/// Drop parked invites the synced membership list proves STALE: any invite whose community we
+/// HOLD (joined on some device) or that is TOMBSTONED (left / kicked / banned / dissolved on
+/// some device). Cross-device truth: an accepted-or-departed community's invite must never
+/// resurface anywhere. Re-downloaded gift wraps are stamped received_at = now, so membership —
+/// not time — is the only reliable signal. Emits `community_invites_purged` when anything
+/// dropped so the open UI re-pulls its invite rows live.
+fn purge_stale_pending_invites(tombstones: &[vector_core::community::list::CommunityRemoval]) {
+    let mut purged_any = false;
+    for t in tombstones {
+        if vector_core::db::community::pending_invite_exists(&t.community_id).unwrap_or(false) {
+            let _ = vector_core::db::community::delete_pending_invite(&t.community_id);
+            purged_any = true;
+        }
+    }
+    if let Ok(n) = vector_core::db::community::purge_pending_invites_for_held_communities() {
+        if n > 0 {
+            purged_any = true;
+        }
+    }
+    if purged_any {
+        vector_core::emit_event("community_invites_purged", &serde_json::json!({}));
+    }
 }
 
 /// A remote device edited our Community List (the live self-sync path): fold the received event into the
@@ -1755,6 +1782,9 @@ pub(crate) async fn ingest_community_list_update(event: nostr_sdk::Event) {
     // page_messages = true: the live ingest path has NO boot sweep after it, so we must page the latest here
     // for a community that just appeared, or it would render empty until the user opens it.
     rehydrate_listed_communities(&merged, &session, true).await;
+    if session.is_valid() {
+        purge_stale_pending_invites(&merged.tombstones);
+    }
 }
 
 /// Rehydrate + surface every listed community this device doesn't hold yet (auto-join silently); tombstone
