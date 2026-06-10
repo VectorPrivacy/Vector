@@ -125,6 +125,11 @@ pub trait Transport {
 /// NIP-17 deletable-DM durability). High enough to ride out a transient relay/local-network blip.
 pub const MAX_PUBLISH_ATTEMPTS: usize = 30;
 
+/// Union grace window: how long past the FIRST response the live transport keeps unioning
+/// slower relays before returning. Long enough for a healthy-but-slower relay on a
+/// high-latency link; short enough that a dead relay doesn't stall every sync.
+pub const FETCH_UNION_GRACE_MS: u64 = 3500;
+
 /// Hard ceiling on the initial confirmation: at least one relay must ACK within this window or the publish
 /// is a failure (we throw rather than spin on a dead/unreachable relay set forever). Once ONE relay accepts,
 /// the slow/ratelimited stragglers are threaded in the background (capped at MAX_PUBLISH_ATTEMPTS).
@@ -384,26 +389,14 @@ impl Transport for LiveTransport {
             })
             .collect();
 
-        // Back-paging (`until`-bounded) queries: the caller judges "history start" from what
-        // comes back, so a single fast-but-shallow relay must not decide that verdict — drain
-        // EVERY relay and union (each still bounded by the per-relay timeout). Latency-critical
-        // latest/control fetches keep the first-wins race below.
-        if query.until.is_some() {
-            let mut union: Vec<Event> = Vec::new();
-            let mut seen: std::collections::HashSet<EventId> = std::collections::HashSet::new();
-            while let Some(joined) = fetches.next().await {
-                if let Ok(evs) = joined {
-                    for e in evs {
-                        if seen.insert(e.id) {
-                            union.push(e);
-                        }
-                    }
-                }
-            }
-            return Ok(union);
-        }
-
-        // Block for the first relay to finish — a baseline, even if it's empty.
+        // UNION every relay that answers — ALWAYS. A single fast-but-shallow relay must never be
+        // the sole input to what comes back: fail-closed folds gap-quarantine on a partial plane
+        // (seats wedge on stale names/roles), the re-founding coverage gate aborts on a missing
+        // head, and the history-start verdict latches scroll-back dead. All three happened live
+        // off the same first-relay-wins race. Back-paging (`until`) drains to completion (its
+        // verdict must be authoritative; bounded by the per-relay timeout); everything else
+        // drains up to a grace window past the FIRST response — so one dead relay costs the
+        // grace, not the full timeout. Relays slower than the grace still background-merge below.
         let mut result: Vec<Event> = Vec::new();
         loop {
             match fetches.next().await {
@@ -415,22 +408,32 @@ impl Transport for LiveTransport {
                 None => break,            // every relay failed
             }
         }
-
-        // If the fastest relay came back EMPTY, briefly wait for a relay that actually HOLDS events
-        // before returning — a fast-but-empty relay must not win over one with the data (and control
-        // folds fail-closed on an empty plane). Bounded so an unreachable straggler can't stall us.
-        // SKIPPED for `since`-bounded queries (the steady-state message page): a `since`-floored empty
-        // is almost always a true "nothing new", so paying 800ms on the most common sync isn't worth
-        // it — and the background-merge below still folds in anything a slower relay alone holds.
-        if result.is_empty() && !fetches.is_empty() && query.since.is_none() {
-            let grace = tokio::time::sleep(std::time::Duration::from_millis(800));
+        let mut union_ids: std::collections::HashSet<EventId> = result.iter().map(|e| e.id).collect();
+        if query.until.is_some() {
+            while let Some(joined) = fetches.next().await {
+                if let Ok(evs) = joined {
+                    for e in evs {
+                        if union_ids.insert(e.id) {
+                            result.push(e);
+                        }
+                    }
+                }
+            }
+        } else if !fetches.is_empty() {
+            let grace = tokio::time::sleep(std::time::Duration::from_millis(FETCH_UNION_GRACE_MS));
             tokio::pin!(grace);
             loop {
                 tokio::select! {
                     _ = &mut grace => break,
                     next = fetches.next() => match next {
-                        Some(Ok(evs)) if !evs.is_empty() => { result = evs; break; }
-                        Some(_) => continue,
+                        Some(Ok(evs)) => {
+                            for e in evs {
+                                if union_ids.insert(e.id) {
+                                    result.push(e);
+                                }
+                            }
+                        }
+                        Some(Err(_)) => continue,
                         None => break,
                     }
                 }

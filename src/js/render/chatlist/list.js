@@ -64,6 +64,11 @@ function generateChatlistStateHash() {
 function renderChatlist() {
     if (fInit) return;
 
+    // Newest-first with creation/join-time fallback for message-less communities — the one
+    // chokepoint that guarantees order no matter which path added a chat (create, join,
+    // boot, message). Without it a freshly-surfaced chat stays wherever it was appended.
+    arrChats.sort((a, b) => getChatSortTimestamp(b) - getChatSortTimestamp(a));
+
     // Generate a hash of the current RENDERABLE state
     const currentStateHash = generateChatlistStateHash();
 

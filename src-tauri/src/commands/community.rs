@@ -165,20 +165,33 @@ pub async fn unban_community_member(community_id: String, npub: String) -> Resul
 }
 
 /// Owner dissolution / "Delete Community": publish the terminal GroupDissolved tombstone at the
-/// rotation-stable coordinate (and best-effort retire the owner's own invite links, no rekey), then seal
-/// the community locally — it can never advance again. OWNER-ONLY (enforced in vector-core). The frontend
-/// gates the button on ownership + a type-to-confirm; this re-verifies authority cryptographically.
+/// rotation-stable coordinate (and best-effort retire the owner's own invite links, no rekey), then
+/// tear the community down locally — the DISSOLVER forgets it entirely (members fold the tombstone
+/// and see the sealed husk instead). OWNER-ONLY (enforced in vector-core). The frontend gates the
+/// button on ownership + a type-to-confirm; this re-verifies authority cryptographically.
 #[tauri::command]
 pub async fn delete_community(community_id: String) -> Result<(), String> {
     let session = vector_core::state::SessionGuard::capture();
     let id_bytes = hex_to_id32(&community_id)?;
     let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
         .ok_or("Community not found")?;
+    let channel_ids: Vec<String> = community.channels.iter().map(|ch| ch.id.to_hex()).collect();
     if !session.is_valid() {
         return Err("account changed during dissolution".to_string());
     }
-    let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-    vector_core::community::service::dissolve_community(&transport, &community).await
+    // An already-sealed husk (dissolved before teardown existed) skips the publish — the
+    // tombstone is out there; this call is just the local cleanup.
+    if !vector_core::db::community::get_community_dissolved(&community_id).unwrap_or(false) {
+        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+        vector_core::community::service::dissolve_community(&transport, &community).await?;
+    }
+    // Full local teardown + cross-device list tombstone — a sealed husk lingering in the
+    // owner's own DB just re-registers its chat row at every boot ("dissolved group came back").
+    if !session.is_valid() {
+        return Ok(());
+    }
+    teardown_community_local(&community_id, &channel_ids, true).await;
+    Ok(())
 }
 
 /// Kick a member: publish a cooperative kick (3309) into the primary channel. The kicked client

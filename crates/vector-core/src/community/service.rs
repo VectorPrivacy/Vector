@@ -589,6 +589,9 @@ async fn fetch_control_folded<T: Transport + ?Sized>(
     // (NOT a 0..=epoch range — a post-rotation joiner can't derive prior-epoch pseudonyms; the re-anchor
     // guarantees the complete current plane is reachable here).
     let z_tags = vec![super::roster::control_pseudonym(&community.server_root_key, &community.id, community.server_root_epoch)];
+    // The fold is fail-closed on version-chain gaps; the live transport unions all relays
+    // (a single fast-but-partial relay would otherwise gap-quarantine the head and wedge
+    // this seat on a stale plane forever).
     let query = Query { kinds: vec![event_kind::COMMUNITY_CONTROL], z_tags, ..Default::default() };
     let raw = transport.fetch(&query, &community.relays).await?;
     // Bound the AEAD work too (fold_roster re-caps the verify/fold): a relay

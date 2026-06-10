@@ -33,6 +33,7 @@ fn prefix(b: &[u8]) -> String {
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
     let relay = args.iter().any(|a| a == "--relay");
+    let editions = args.iter().any(|a| a == "--editions");
     let invites = args.iter().any(|a| a == "--invites");
     // `--from <hex|npub>` narrows the invite probe to one sender; `--since-hours N` widens the window
     // (gift wraps backdate their outer timestamp up to ~2 days, so default generously).
@@ -110,6 +111,9 @@ async fn main() {
             print_local(&c);
             if relay {
                 print_relay(&c).await;
+            }
+            if editions {
+                print_editions(&c).await;
             }
             shown += 1;
         }
@@ -390,6 +394,53 @@ fn hexpref(b: &[u8]) -> String {
 }
 
 /// Value of a `--flag value` pair on the command line, if present.
+/// Census of CONTROL EDITIONS (kind 3308) per relay at the community's CURRENT-epoch control
+/// coordinate — the exact data the metadata/roles fold consumes. Attributes a "seat stuck at an
+/// old name": relay starvation (newer editions missing from every reachable relay) vs
+/// gap-quarantine (head present but a chain prerequisite missing).
+async fn print_editions(c: &vector_core::community::Community) {
+    use nostr_sdk::{Alphabet, Client, Filter, Kind, SingleLetterTag};
+    use std::time::Duration;
+    use vector_core::stored_event::event_kind::COMMUNITY_CONTROL;
+
+    let z = vector_core::community::roster::control_pseudonym(&c.server_root_key, &c.id, c.server_root_epoch);
+    println!("\n  ── CONTROL EDITIONS per relay (epoch {} coordinate) ──", c.server_root_epoch.0);
+    for r in &c.relays {
+        let client = Client::default();
+        let _ = client.add_relay(r.as_str()).await;
+        client.try_connect(Duration::from_secs(15)).await;
+        let filter = Filter::new()
+            .kind(Kind::Custom(COMMUNITY_CONTROL))
+            .custom_tags(SingleLetterTag::lowercase(Alphabet::Z), vec![z.clone()])
+            .limit(250);
+        let res = client.fetch_events_from(vec![r.clone()], filter, Duration::from_secs(15)).await;
+        match res {
+            Ok(events) => {
+                println!("    {r}  ({} events)", events.len());
+                let mut rows: Vec<(u64, String)> = Vec::new();
+                for outer in events.into_iter() {
+                    match vector_core::community::roster::open_control_edition(&outer, &c.server_root_key) {
+                        Ok(inner) => {
+                            let head: String = inner.content.chars().take(110).collect();
+                            rows.push((
+                                inner.created_at.as_secs(),
+                                format!("      {}  by {}  {}", inner.created_at.as_secs(), &inner.pubkey.to_hex()[..8], head),
+                            ));
+                        }
+                        Err(_) => rows.push((0, format!("      (undecryptable outer {})", &outer.id.to_hex()[..8]))),
+                    }
+                }
+                rows.sort();
+                for (_, line) in rows {
+                    println!("{line}");
+                }
+            }
+            Err(e) => println!("    {r}  FETCH FAILED: {e}"),
+        }
+        let _ = client.shutdown().await;
+    }
+}
+
 fn arg_value(args: &[String], flag: &str) -> Option<String> {
     args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
 }

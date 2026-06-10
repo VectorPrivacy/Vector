@@ -88,7 +88,7 @@ function generateChatPreviewText(chat) {
         if (isGroup) {
             const memberCount = chat.metadata?.custom_fields?.member_count ? parseInt(chat.metadata.custom_fields.member_count) : null;
             return {
-                text: (memberCount != null) ? `${memberCount} ${memberCount === 1 ? 'member' : 'members'}` : 'No messages yet',
+                text: (memberCount != null) ? `${memberCount} ${memberCount === 1 ? 'Member' : 'Members'}` : 'No messages yet',
                 isTyping: false,
                 needsTwemoji: false
             };

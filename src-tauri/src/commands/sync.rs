@@ -343,6 +343,32 @@ pub async fn fetch_messages<R: Runtime>(
 
                 state.db_loaded = true;
 
+                // Orphan sweep: a Community chat row whose communities row is GONE (partial
+                // teardown from older builds) renders as an un-deletable ghost — every community
+                // command starts at load_community and errors "not found". Drop STATE + DB rows.
+                {
+                    let held: std::collections::HashSet<String> =
+                        vector_core::db::community::list_community_ids()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter_map(|id| vector_core::db::community::load_community(&id).ok().flatten())
+                            .flat_map(|c| c.channels.iter().map(|ch| ch.id.to_hex()).collect::<Vec<_>>())
+                            .collect();
+                    let orphans: Vec<String> = state
+                        .chats
+                        .iter()
+                        .filter(|c| matches!(c.chat_type, vector_core::chat::ChatType::Community) && !held.contains(&c.id))
+                        .map(|c| c.id.clone())
+                        .collect();
+                    if !orphans.is_empty() {
+                        println!("[Boot] pruning {} orphaned community chat row(s)", orphans.len());
+                        state.chats.retain(|c| !orphans.contains(&c.id));
+                        for id in &orphans {
+                            let _ = vector_core::db::chats::delete_chat(id);
+                        }
+                    }
+                }
+
                 // Check filesystem integrity for downloaded attachments (queries DB directly)
                 let integrity_session = vector_core::state::SessionGuard::capture();
                 tokio::spawn(async move {

@@ -1659,12 +1659,16 @@ function getChatSortTimestamp(chat) {
     if (!lastActivity) {
         // No real messages yet — fall back to join/creation time so a fresh community
         // sorts by when we joined, not to the bottom. custom_fields values are strings.
-        lastActivity = Number(
+        let t = Number(
             chat.metadata?.created_at ||
             chat.metadata?.custom_fields?.created_at ||
             chat.created_at ||
             0
         );
+        // Mixed clocks: custom_fields.created_at is ms, the chat row's created_at is
+        // SECONDS — unnormalized seconds sort 1000× older than every ms timestamp.
+        if (t > 0 && t < 1e12) t *= 1000;
+        lastActivity = t;
     }
 
     return lastActivity || 0;
@@ -2348,7 +2352,7 @@ const _communityCountInFlight = new Set();
 /** Render text for a community's member count, or '' if not yet known. */
 function communityMemberSubtext(communityId) {
     const n = communityMemberCounts.get(communityId);
-    return (n == null) ? '' : `${n} member${n === 1 ? '' : 's'}`;
+    return (n == null) ? '' : `${n} Member${n === 1 ? '' : 's'}`;
 }
 
 /**
@@ -4833,7 +4837,7 @@ function renderProfileTab(cProfile) {
         // On error, replace with solid color placeholder
         domProfileBanner.onerror = function() {
             const placeholder = document.createElement('div');
-            placeholder.style.backgroundColor = 'rgb(27, 27, 27)';
+            placeholder.style.backgroundColor = '#0a0a0a';
             placeholder.classList.add('profile-banner');
             if (cProfile.mine) {
                 placeholder.classList.add('btn');
@@ -4845,7 +4849,7 @@ function renderProfileTab(cProfile) {
     } else {
         if (domProfileBanner.tagName === 'IMG') {
             const newBanner = document.createElement('div');
-            newBanner.style.backgroundColor = 'rgb(27, 27, 27)';
+            newBanner.style.backgroundColor = '#0a0a0a';
             domProfileBanner.replaceWith(newBanner);
             domProfileBanner = newBanner;
         }
@@ -8374,8 +8378,9 @@ async function openCommunityInvitePanel(chat) {
     // Track the GLOBAL link state (across every creator, §10) so the create/revoke handlers know when a
     // click crosses the Public⇄Private boundary. The mode is the folded registry, NOT just my own links —
     // another admin's live link keeps the community Public even when I hold none.
-    let currentLinkCount = 0;   // MY own links (drives the per-row revoke confirm)
-    let globalLinkCount = 0;    // every creator's links combined (drives the mode boundary)
+    let currentLinkCount = 0;     // MY own links — LOCAL DB, never lags a fresh create/revoke
+    let globalLinkCount = 0;      // every creator's links combined (drives empty-state copy)
+    let otherCreatorLinkCount = 0; // OTHER creators' links per the folded registry (the remote part)
     const renderLinks = async () => {
         linksDiv.innerHTML = '';
         let links = [];
@@ -8385,6 +8390,9 @@ async function openCommunityInvitePanel(chat) {
         let summary = { is_public: links.length > 0, creators: [] };
         try { summary = await invoke('get_community_invite_summary', { communityId }); } catch (_) {}
         globalLinkCount = (summary.creators || []).reduce((n, c) => n + (c.count || 0), 0);
+        otherCreatorLinkCount = (summary.creators || [])
+            .filter(c => c.npub !== strPubkey)
+            .reduce((n, c) => n + (c.count || 0), 0);
         const modeEl = box.querySelector('#cmt-mode');
         if (modeEl) {
             const pub = !!summary.is_public;
@@ -8447,7 +8455,10 @@ async function openCommunityInvitePanel(chat) {
                 // Revoking the last GLOBAL link (across every creator) flips the community back to Private —
                 // a re-founding rekey that cuts off link-joined lurkers. Confirm + warn (it's slow). If
                 // another creator still has a link, this revoke is a quiet, instant edit (mode stays Public).
-                const wouldPrivatize = globalLinkCount === 1;
+                // Mirror the backend's would_empty_aggregate: my-last-link is LOCAL truth (currentLinkCount,
+                // never lags a fresh create), others' links are the folded-registry remote part — predicting
+                // off the registry's count of MY OWN links would miss the modal when the fold lags my create.
+                const wouldPrivatize = currentLinkCount === 1 && otherCreatorLinkCount === 0;
                 if (wouldPrivatize) {
                     const ok = await popupConfirm('Make community private?',
                         'Revoking the last invite link makes this community <b>private</b> again. This can take a few seconds.',
@@ -8471,7 +8482,7 @@ async function openCommunityInvitePanel(chat) {
                     if (prog) prog.close();
                     revokeBtn.innerHTML = '<span class="icon icon-trash"></span>';
                     setStatus('');
-                    if (isLast) {
+                    if (wouldPrivatize) {
                         // Privatizing re-keys; on a bunker account that fails with a long explanation —
                         // show it as a persistent notice rather than a one-line status that scrolls away.
                         await popupConfirm("Couldn't make private", escapeHtml(String(e)), true, '', 'vector_warning.svg');
@@ -8861,7 +8872,10 @@ function enterProfileEditMode() {
         updateProfileEditLabel();
         if (domProfileBanner.tagName === 'DIV') {
             const newBanner = document.createElement('img');
+            newBanner.id = 'profile-banner';
             newBanner.className = domProfileBanner.className;
+            // Carry the click-to-repick handler — a bare <img> swap left the second pick dead.
+            newBanner.onclick = domProfileBanner.onclick;
             domProfileBanner.replaceWith(newBanner);
             domProfileBanner = newBanner;
         }
@@ -8918,6 +8932,16 @@ function enterProfileEditMode() {
         if (!file) return;
         strPendingProfileAvatarPath = file;
         updateProfileEditLabel();
+        // An avatar-less profile renders a placeholder <div> — swap it for a real <img>
+        // (carrying the click-to-repick handler) or the preview is a silent no-op.
+        if (domProfileAvatar.tagName !== 'IMG') {
+            const img = document.createElement('img');
+            img.id = 'profile-avatar';
+            img.className = 'profile-avatar btn';
+            img.onclick = domProfileAvatar.onclick;
+            domProfileAvatar.replaceWith(img);
+            domProfileAvatar = img;
+        }
         domProfileAvatar.src = convertFileSrc(file);
     };
 
@@ -11582,7 +11606,7 @@ async function closeCreateGroup() {
                         try { await invoke('invite_to_community', { communityId, inviteeNpub: np }); ok++; }
                         catch (err) { console.error('Invite failed for', np, err); }
                     }
-                    if (ok) showToast(`Invited ${ok} ${ok === 1 ? 'person' : 'people'} to ${name}`);
+                    // Success is silent (the invitees just appear); only failures surface.
                     const failed = inviteeNpubs.length - ok;
                     if (failed) showToast(`${failed} invite${failed === 1 ? '' : 's'} failed to send`);
                 }

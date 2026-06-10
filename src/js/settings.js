@@ -1119,14 +1119,22 @@ async function askForAvatar() {
     cProfile.avatar = strUploadURL;
     cProfile.avatar_cached = '';
 
-    if (inEditMode) {
+    if (inEditMode && domProfileAvatar) {
         // Preview from the locally-picked file — instant and animation-safe.
         // A fresh Blossom GIF can take >15s to fetch back, and the WebView must
-        // never point at a remote URL anyway (Tor bypass). Mirrors the
-        // profile-edit avatar click handler.
-        const imgEl = document.getElementById('profile-avatar');
-        if (imgEl && imgEl.tagName === 'IMG') {
-            imgEl.src = convertFileSrc(file);
+        // never point at a remote URL anyway (Tor bypass). Mirrors the banner
+        // branch: an avatar-less profile renders a placeholder <div> and the
+        // #profile-avatar id doesn't survive re-renders, so go via the tracked
+        // element and swap the placeholder for a real <img>.
+        if (domProfileAvatar.tagName === 'IMG') {
+            domProfileAvatar.src = convertFileSrc(file);
+        } else {
+            const img = document.createElement('img');
+            img.id = 'profile-avatar';
+            img.className = 'profile-avatar';
+            img.src = convertFileSrc(file);
+            domProfileAvatar.replaceWith(img);
+            domProfileAvatar = img;
         }
     } else {
         renderCurrentProfile(cProfile);

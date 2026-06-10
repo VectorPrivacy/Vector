@@ -2339,21 +2339,6 @@ html, body {
 .invite-decline-btn .icon {
   background-color: var(--danger-color);
 }
-/* Green "new" dot on a pending invite's avatar (top-right, to distinguish from
- * the bottom-right online-status dot). Black border matches .avatar-status-icon. */
-.chatlist-invite-badge {
-  position: absolute;
-  top: 0px;
-  right: 0px;
-  width: 13px;
-  height: 13px;
-  border-radius: 100%;
-  background: var(--accent-color, #59fcb3);
-  border: 3px solid black;
-  box-shadow: 0 0 6px var(--accent-color, #59fcb3);
-  box-sizing: border-box;
-}
-
 /* Ping pill — negative space (solid accent fill, dark numeral) so it cuts
  * through the row visually. Every count represents pings: full unread set
  * on unmuted chats, @mentions only on muted groups, nothing on muted DMs. */
