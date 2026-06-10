@@ -16165,6 +16165,8 @@ body.profile-switcher-editing .profile-switcher-add {
 .cmt-status.cmt-ok { color: var(--accent-color, #59fcb3); opacity: 1; }
 .cmt-status.cmt-err { color: var(--danger-color); opacity: 1; }
 .cmt-close { width: 100%; }
+/* Top-right X (shares the relay dialog's button styling) — pushed to the header's far edge. */
+.cmt-close-x { margin-left: auto; align-self: flex-start; }
 
 /* Invite panel locked during a critical op (create / revoke+rekey / direct invite) — dim + wait cursor. */
 .cmt-busy { cursor: wait; }

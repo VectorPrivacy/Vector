@@ -8321,6 +8321,7 @@ async function openCommunityInvitePanel(chat) {
                 <h3 class="cmt-title">Invite to ${escapeHtml(chat.metadata.custom_fields.name || 'Community')}</h3>
                 <p class="cmt-subtitle">Bring people into your community.</p>
             </div>
+            <button id="cmt-close-x" class="relay-dialog-close cmt-close-x">&times;</button>
         </div>
 
         <section class="cmt-section">
@@ -8363,6 +8364,7 @@ async function openCommunityInvitePanel(chat) {
         status.classList.toggle('cmt-ok', !!msg && !isError);
     };
     box.querySelector('#cmt-close').onclick = () => { if (busy) return; popBack('community-invite'); dismiss(); };
+    box.querySelector('#cmt-close-x').onclick = () => { if (busy) return; popBack('community-invite'); dismiss(); };
     // Lock the ENTIRE panel during a critical op: disable every control + block close/backdrop-dismiss, so a
     // link create / revoke (which re-keys) / direct invite can't be raced or interrupted half-applied. Restores
     // each control's prior disabled state on release (e.g. the Invite button stays disabled if nothing's picked).
