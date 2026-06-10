@@ -233,6 +233,16 @@ pub struct MiniAppInstance {
     pub window_label: String,
     /// Topic ID for realtime channel (from the webxdc-topic tag in the Nostr event)
     pub realtime_topic: Option<TopicId>,
+    /// Unique per-open generation (see [`next_instance_id`]). A rapid close→reopen
+    /// re-registers the SAME label with a new instance; the old close's async
+    /// teardown must only remove the instance it was started for.
+    pub instance_id: u64,
+}
+
+/// Monotonic id for [`MiniAppInstance::instance_id`].
+pub fn next_instance_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Realtime channel state for a Mini App instance
@@ -401,10 +411,22 @@ impl MiniAppsState {
     
     /// Remove an instance by window label
     /// Also cleans up any associated realtime channel state
+    /// Remove an instance ONLY if it is still the given generation. A stale
+    /// async teardown (close races a rapid reopen of the same label) must not
+    /// delete the successor instance out from under its live session.
+    pub async fn remove_instance_if(&self, window_label: &str, instance_id: u64) -> Option<MiniAppInstance> {
+        let mut instances = self.instances.write().await;
+        if instances.get(window_label).is_some_and(|i| i.instance_id == instance_id) {
+            instances.remove(window_label)
+        } else {
+            None
+        }
+    }
+
     pub async fn remove_instance(&self, window_label: &str) -> Option<MiniAppInstance> {
         // Clean up realtime channel state first
         self.remove_realtime_channel(window_label).await;
-        
+
         let mut instances = self.instances.write().await;
         instances.remove(window_label)
     }

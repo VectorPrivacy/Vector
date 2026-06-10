@@ -807,6 +807,7 @@ pub async fn miniapp_open(
         message_id: message_id.clone(),
         window_label: window_label.clone(),
         realtime_topic,
+        instance_id: super::state::next_instance_id(),
     };
     
     // Register the instance before creating the window
@@ -1085,14 +1086,20 @@ pub async fn miniapp_open(
                 tauri::async_runtime::spawn(async move {
                     let state = app_handle.state::<MiniAppsState>();
 
+                    // Snapshot the instance THIS destroy is for — a rapid reopen of the
+                    // same message re-registers the label with a NEW instance, and this
+                    // async teardown must not delete it (see remove_instance_if below).
+                    let closing_instance = state.get_instance(&label).await;
+
                     // Full teardown: remove channel state, leave QUIC, clean session peers
                     let channel_state = state.remove_realtime_channel(&label).await;
 
                     if let Some(channel) = channel_state {
                         let topic_encoded = super::realtime::encode_topic_id(&channel.topic);
 
-                        // Tear down the QUIC channel completely (close connections, abort tasks)
-                        if let Ok(iroh) = state.realtime.get_or_init().await {
+                        // Tear down the QUIC channel completely (close connections, abort tasks).
+                        // try_get, NOT get_or_init: teardown must never resurrect a fresh endpoint.
+                        if let Some(iroh) = state.realtime.try_get().await {
                             if let Err(e) = iroh.leave_channel(channel.topic, &label).await {
                                 log_warn!("[WEBXDC] Failed to leave channel on close: {}", e);
                             }
@@ -1118,7 +1125,9 @@ pub async fn miniapp_open(
                         }
 
                         // Send peer-left via Nostr so other clients update their lobby state
-                        if let Some(instance) = state.get_instance(&label).await {
+                        // (from the CLOSING instance — a live lookup could return a
+                        // reopened successor's instance instead)
+                        if let Some(ref instance) = closing_instance {
                             let chat_id = instance.chat_id.clone();
                             let topic_for_left = topic_encoded.clone();
                             // chat_id belongs to the account current NOW — bail if it swaps.
@@ -1132,8 +1141,10 @@ pub async fn miniapp_open(
                         }
                     }
 
-                    // Remove the instance
-                    state.remove_instance(&label).await;
+                    // Remove the instance — ONLY if it's still the one this destroy was for.
+                    if let Some(instance) = closing_instance {
+                        state.remove_instance_if(&label, instance.instance_id).await;
+                    }
                 });
             }
             tauri::WindowEvent::CloseRequested { api, .. } => {
@@ -1382,6 +1393,12 @@ pub async fn miniapp_join_realtime_channel(
         ).await;
     }
 
+    // The window can close while this join is in flight (its teardown removes the
+    // instance); a dead game must not re-create the gossip channel as a zombie.
+    if state.get_instance(label).await.is_none() {
+        return Err(Error::InstanceNotFoundByLabel(label.to_string()));
+    }
+
     // Iroh is pre-initialized by preconnect — this is instant (~5ns atomic load)
     let iroh = state.realtime.get_or_init().await
         .map_err(|e| Error::RealtimeError(e.to_string()))?;
@@ -1518,18 +1535,21 @@ pub async fn miniapp_leave_realtime_channel(
         return Err(Error::InstanceNotFoundByLabel(label.to_string()));
     }
     
-    // Get and remove the channel state
+    // Get and remove the channel state. Best-effort teardown: this races the
+    // native close path (Android JNI removes the channel + fully shuts Iroh
+    // down), and the loser must NOT error back to the game's JS as a toast —
+    // and must never get_or_init, which would resurrect a fresh endpoint just
+    // to leave a topic it doesn't hold.
     if let Some(channel_state) = state.remove_realtime_channel(label).await {
-        // Leave the Iroh channel
-        let iroh = state.realtime.get_or_init().await
-            .map_err(|e| Error::RealtimeError(e.to_string()))?;
-        
-        iroh.leave_channel(channel_state.topic, label).await
-            .map_err(|e| Error::RealtimeError(e.to_string()))?;
-        
-        log_info!("Left realtime channel for Mini App: {} (topic: {})", label, encode_topic_id(&channel_state.topic));
+        if let Some(iroh) = state.realtime.try_get().await {
+            if let Err(e) = iroh.leave_channel(channel_state.topic, label).await {
+                log_warn!("[WEBXDC] leave_channel during teardown: {e} (already gone — ignoring)");
+            } else {
+                log_info!("Left realtime channel for Mini App: {} (topic: {})", label, encode_topic_id(&channel_state.topic));
+            }
+        }
     }
-    
+
     Ok(())
 }
 

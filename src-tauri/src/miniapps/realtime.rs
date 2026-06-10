@@ -904,6 +904,12 @@ impl RealtimeManager {
         Ok(iroh)
     }
 
+    /// Current Iroh instance WITHOUT creating one — for teardown paths, which
+    /// must never resurrect a freshly-shut-down endpoint just to leave a topic.
+    pub async fn try_get(&self) -> Option<Arc<IrohState>> {
+        self.iroh.read().await.clone()
+    }
+
     /// Fully shut down Iroh: leave all topics, close endpoint, clear state.
     /// Next `get_or_init()` will create a completely fresh instance.
     pub async fn shutdown_iroh(&self) {
@@ -921,6 +927,24 @@ impl RealtimeManager {
         if let Some(iroh) = iroh {
             iroh.shutdown().await;
         }
+    }
+
+    /// Shut down Iroh ONLY if the live instance is still `expected`. A stale async
+    /// teardown (close racing a rapid reopen) must not kill the successor session's
+    /// freshly-created endpoint. Returns whether a shutdown actually happened.
+    pub async fn shutdown_iroh_if_current(&self, expected: &Arc<IrohState>) -> bool {
+        let iroh = {
+            let mut guard = self.iroh.write().await;
+            match &*guard {
+                Some(cur) if Arc::ptr_eq(cur, expected) => guard.take(),
+                _ => None,
+            }
+        };
+        let Some(iroh) = iroh else { return false };
+        self.send_handles.write().unwrap_or_else(|e| e.into_inner()).clear();
+        self.ws_senders.write().unwrap_or_else(|e| e.into_inner()).clear();
+        iroh.shutdown().await;
+        true
     }
 
     /// Start the WS server if not already running.

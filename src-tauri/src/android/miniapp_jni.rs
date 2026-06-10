@@ -95,8 +95,18 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppManager_onMiniAppClosed(
     if let Some(app) = TAURI_APP.get() {
         let app = app.clone();
         let miniapp_id_owned = miniapp_id.clone();
+        // chat_id belongs to the account current NOW — bail in the task if it swaps.
+        let session = vector_core::state::SessionGuard::capture();
         tauri::async_runtime::spawn(async move {
             let state = app.state::<crate::miniapps::state::MiniAppsState>();
+
+            // Snapshot what THIS teardown owns, FIRST: a rapid reopen of the same
+            // label re-registers a NEW instance and may create a NEW Iroh while
+            // this task is still mid-shutdown (it can sit 5s in shutdown alone).
+            // Every destructive step below is gated on these snapshots so a stale
+            // teardown can't delete the successor session out from under itself.
+            let closing_instance = state.get_instance(&miniapp_id_owned).await;
+            let iroh_at_close = state.realtime.try_get().await;
 
             // Grab channel info before teardown (for peer-left signal + status update)
             let channel_state = state.remove_realtime_channel(&miniapp_id_owned).await;
@@ -123,31 +133,39 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppManager_onMiniAppClosed(
                     }));
                 }
 
-                // Send peer-left signal
-                if let Some(instance) = state.get_instance(&miniapp_id_owned).await {
+                // Send peer-left signal (from the CLOSING instance's chat — the live
+                // lookup could return a reopened successor's instance instead)
+                if let Some(ref instance) = closing_instance {
                     let chat_id = instance.chat_id.clone();
                     let topic_for_left = topic_encoded.clone();
-                    tokio::spawn(async move {
-                        if !crate::commands::realtime::send_webxdc_peer_left(chat_id, topic_for_left).await {
-                            log_warn!("[WEBXDC] Failed to send peer-left signal");
-                        }
-                    });
+                    if session.is_valid() {
+                        tokio::spawn(async move {
+                            if !crate::commands::realtime::send_webxdc_peer_left(chat_id, topic_for_left).await {
+                                log_warn!("[WEBXDC] Failed to send peer-left signal");
+                            }
+                        });
+                    }
                 }
             }
 
-            // NUCLEAR OPTION: Shut down the entire Iroh instance.
-            // This closes all QUIC connections, leaves all gossip topics,
-            // and stops the gossip actor. Next miniapp_open creates a fresh one.
-            match tokio::time::timeout(
-                tokio::time::Duration::from_secs(5),
-                state.realtime.shutdown_iroh(),
-            ).await {
-                Ok(()) => log_info!("[WEBXDC] Iroh fully shut down on Mini App close"),
-                Err(_) => log_warn!("[WEBXDC] Iroh shutdown timed out (5s) — forcing drop"),
+            // Shut down the Iroh instance THIS close owns (closes QUIC connections,
+            // leaves gossip topics, stops the actor) — but never a successor's
+            // freshly-created one. Next miniapp_open creates a fresh instance.
+            if let Some(expected) = iroh_at_close {
+                match tokio::time::timeout(
+                    tokio::time::Duration::from_secs(5),
+                    state.realtime.shutdown_iroh_if_current(&expected),
+                ).await {
+                    Ok(true) => log_info!("[WEBXDC] Iroh fully shut down on Mini App close"),
+                    Ok(false) => log_info!("[WEBXDC] Iroh already replaced by a newer session — leaving it running"),
+                    Err(_) => log_warn!("[WEBXDC] Iroh shutdown timed out (5s) — forcing drop"),
+                }
             }
 
-            // Remove the instance
-            state.remove_instance(&miniapp_id_owned).await;
+            // Remove the instance — ONLY if it's still the one this close was for.
+            if let Some(instance) = closing_instance {
+                state.remove_instance_if(&miniapp_id_owned, instance.instance_id).await;
+            }
 
             log_info!("[WEBXDC] Mini App cleanup complete: {}", miniapp_id_owned);
         });
@@ -438,6 +456,14 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
             ).await;
         }
 
+        // The user can close the overlay while this join is still in flight; the
+        // close teardown removes the channel state. A dead game must not proceed —
+        // get_or_init below would RESURRECT Iroh and advertise a ghost player.
+        if !state.has_realtime_channel(&miniapp_id_for_join).await {
+            log_info!("[WEBXDC] Android: game closed before join completed — aborting join for {}", miniapp_id_for_join);
+            return;
+        }
+
         // Initialize Iroh (instant if preconnect already ran)
         let iroh = match state.realtime.get_or_init().await {
             Ok(iroh) => iroh,
@@ -577,20 +603,16 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_leaveRealtimeChannelNativ
     tauri::async_runtime::spawn(async move {
         let state = app.state::<crate::miniapps::state::MiniAppsState>();
 
-        // Remove and leave the realtime channel
+        // Remove and leave the realtime channel. try_get, NOT get_or_init: this
+        // races the overlay-close full shutdown, and the loser must not resurrect
+        // a fresh endpoint just to leave a topic it doesn't hold.
         if let Some(channel_state) = state.remove_realtime_channel(&miniapp_id_owned).await {
-            let iroh = match state.realtime.get_or_init().await {
-                Ok(iroh) => iroh,
-                Err(e) => {
-                    log_error!("[WEBXDC] Android leaveRealtimeChannel: failed to get Iroh: {}", e);
-                    return;
+            if let Some(iroh) = state.realtime.try_get().await {
+                if let Err(e) = iroh.leave_channel(channel_state.topic, &miniapp_id_owned).await {
+                    log_warn!("[WEBXDC] Android leaveRealtimeChannel: {} (already gone — ignoring)", e);
+                } else {
+                    log_info!("[WEBXDC] Android: Left realtime channel for {}", miniapp_id_owned);
                 }
-            };
-
-            if let Err(e) = iroh.leave_channel(channel_state.topic, &miniapp_id_owned).await {
-                log_error!("[WEBXDC] Android leaveRealtimeChannel: failed to leave: {}", e);
-            } else {
-                log_info!("[WEBXDC] Android: Left realtime channel for {}", miniapp_id_owned);
             }
         }
     });
@@ -763,11 +785,13 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppWebViewClient_handleMiniAppRe
 
     log_debug!("[{}] handleMiniAppRequest: {}", miniapp_id, path);
 
-    // Serve file from .xdc package
+    // Serve file from .xdc package. A miss is a plain 404 to the game's WebView —
+    // browsers probe paths the package never shipped (/favicon.ico on every load),
+    // and log_error would toast "Something went wrong" at the user for each one.
     match serve_file_from_package(&mut env, &package_path, &path) {
         Ok(response) => response,
         Err(e) => {
-            log_error!("[{}] Failed to serve {}: {}", miniapp_id, path, e);
+            log_warn!("[{}] Failed to serve {}: {}", miniapp_id, path, e);
             std::ptr::null_mut()
         }
     }

@@ -8944,6 +8944,20 @@ select:disabled:hover {
     margin-bottom: 6px;
 }
 
+/* Mini App boxes are tap-to-launch buttons — size to content so the visible
+   border matches the click target (the audio width would leave a wide blank
+   strip that still opens the app when tapped). The wrapper carries the click
+   handler, so it must hug the box too — a block-width wrapper would keep the
+   dead strip tappable even with the inner box shrunk. */
+.miniapp-attachment {
+    width: fit-content;
+}
+.miniapp-attachment .custom-audio-player {
+    width: fit-content;
+    min-width: 240px;
+    max-width: min(500px, calc(100vw - 100px));
+}
+
 .custom-audio-player-inner {
     display: flex;
     align-items: center;
