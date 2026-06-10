@@ -367,14 +367,18 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
 
         let topic_encoded = crate::miniapps::realtime::encode_topic_id(&topic);
 
-        // If channel already active, just return the topic (skip re-join)
+        // NOTE: even when the channel is already active (preconnect won the race and
+        // created it with NO event target — inbound data is buffering), we MUST proceed:
+        // iroh's join_channel rejoin branch attaches this call's event target + flushes
+        // the buffered backlog, and the delivery loop below pumps it to the WebView.
+        // The old "already active → return early" shortcut left the target unset, so
+        // Android SENT fine but NEVER RECEIVED whenever preconnect finished first —
+        // the long-standing "twitchy on Android" coin flip.
         if state.has_realtime_channel(&miniapp_id).await {
-            log_info!("[WEBXDC] Android: Realtime channel already active for: {}", miniapp_id);
-            let ws_url = state.realtime.ws_url();
-            return Ok((None, topic, topic_encoded, ws_url));
+            log_info!("[WEBXDC] Android: Realtime channel already active for {} — attaching event target", miniapp_id);
         }
 
-        // Set channel state immediately
+        // Set channel state immediately (idempotent re-set on the already-active path)
         state.set_realtime_channel(&miniapp_id, crate::miniapps::state::RealtimeChannelState {
             topic,
             active: true,

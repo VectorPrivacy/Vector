@@ -95,6 +95,13 @@ pub mod event_kind {
     /// OwnerAttestation, distinguished by the `vsk` tag), signed INSIDE the encryption by the
     /// actor's REAL npub and folded by its per-entity version chain.
     pub const COMMUNITY_CONTROL: u16 = 3308;
+    /// WebXDC realtime peer signal: an inner event signed by the playing member's identity,
+    /// JSON content `{"op":"ad","topic":...,"addr":...}` (Iroh node advertisement) or
+    /// `{"op":"left","topic":...}` (stopped playing). The Community-transport twin of the
+    /// NIP-17 `peer-advertisement` / `peer-left` DM rumors: persisted on receipt (kind-30078
+    /// row keyed by topic) so a member who reopens Vector mid-session still discovers the
+    /// active players, exactly like the DM path.
+    pub const COMMUNITY_WEBXDC: u16 = 3310;
 }
 
 /// System event types for group member changes (stored as integers).

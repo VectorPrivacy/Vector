@@ -29,7 +29,7 @@ pub use miniapps::{
     get_miniapp_granted_permissions, set_miniapp_permission, set_miniapp_permissions,
     has_miniapp_permission_prompt, revoke_all_miniapp_permissions, copy_miniapp_permissions,
     save_marketplace_cache, load_marketplace_cache,
-    get_active_peer_advertisements,
+    get_active_peer_advertisements, peer_signal_is_current,
 };
 // ID cache — delegates to vector-core
 pub use vector_core::db::id_cache::{

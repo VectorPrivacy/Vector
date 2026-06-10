@@ -165,6 +165,7 @@ pub async fn fetch_channel_events<T: Transport + ?Sized>(
             event_kind::COMMUNITY_DELETE,
             event_kind::COMMUNITY_PRESENCE,
             event_kind::COMMUNITY_KICK,
+            event_kind::COMMUNITY_WEBXDC,
         ],
         z_tags: channel_read_pseudonyms(channel),
         since: None,
@@ -195,6 +196,7 @@ pub async fn fetch_channel_page<T: Transport + ?Sized>(
             event_kind::COMMUNITY_DELETE,
             event_kind::COMMUNITY_PRESENCE,
             event_kind::COMMUNITY_KICK,
+            event_kind::COMMUNITY_WEBXDC,
         ],
         // OR-set over every held epoch pseudonym: the relay returns the newest `limit` events ACROSS
         // epochs for this `until`, so a "latest 20" page naturally spans rekeys (newest epoch fills

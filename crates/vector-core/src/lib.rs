@@ -66,6 +66,7 @@ pub mod blossom_capabilities;
 pub mod inbox_relays;
 pub mod emoji_packs;
 pub mod badges;
+pub mod webxdc;
 #[cfg(feature = "tor")]
 pub mod tor;
 
@@ -887,6 +888,13 @@ impl VectorCore {
                         _ => by.clone(),
                     });
                     let _ = crate::db::events::save_system_event_at(event_id, channel_id, et, npub, note.as_deref(), *created_at).await;
+                }
+                inbound::IncomingEvent::WebxdcPeer { npub, topic_id, node_addr, event_id, created_at } => {
+                    // Persist only (DM-parity row) — the miniapp layer bootstraps from the DB at
+                    // game-open. Live gossip-feed pokes are the realtime subscription's job.
+                    community::service::persist_webxdc_signal(
+                        channel_id, npub, topic_id, node_addr.as_deref(), event_id, *created_at,
+                    ).await;
                 }
                 inbound::IncomingEvent::Kicked { community_id }
                 | inbound::IncomingEvent::SelfLeft { community_id } => {

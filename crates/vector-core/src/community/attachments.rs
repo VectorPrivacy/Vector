@@ -37,6 +37,11 @@ pub fn attachment_to_imeta(att: &Attachment) -> Tag {
         }
         fields.push(format!("dim {}x{}", meta.width, meta.height));
     }
+    // Mini Apps: the send-time-minted realtime topic rides the imeta so every
+    // member joins the same gossip topic (see `crate::webxdc::mint_topic_id`).
+    if let Some(topic) = att.webxdc_topic.as_deref().filter(|t| !t.is_empty()) {
+        fields.push(format!("webxdc-topic {}", topic));
+    }
     Tag::custom(TagKind::Custom(IMETA.into()), fields)
 }
 
@@ -104,6 +109,12 @@ pub fn attachment_from_imeta(tag: &Tag, download_dir: &Path) -> Option<Attachmen
     let path = download_dir.join(format!("{}.{}", basis, extension));
     let downloaded = path.exists();
 
+    // Bounded sanity on the author-controlled topic: base32 alphabet only, 32-byte
+    // payload (52 chars). Anything else is dropped, not propagated to the realtime layer.
+    let webxdc_topic = field(body, "webxdc-topic")
+        .filter(|t| t.len() == 52 && t.bytes().all(|b| b.is_ascii_uppercase() || (b'2'..=b'7').contains(&b)))
+        .map(|t| t.to_string());
+
     Some(Attachment {
         id: basis,
         key,
@@ -116,7 +127,7 @@ pub fn attachment_from_imeta(tag: &Tag, download_dir: &Path) -> Option<Attachmen
         img_meta,
         downloading: false,
         downloaded,
-        webxdc_topic: None,
+        webxdc_topic,
         group_id: None, // Community attachments use explicit key/nonce (NIP-17 technique).
         original_hash,
         scheme_version: None,
@@ -295,6 +306,24 @@ mod tests {
             format!("ox {}", "a".repeat(64)),
         ]);
         assert!(attachment_from_imeta(&good, dir).is_some(), "hex ox accepted");
+    }
+
+    #[test]
+    fn webxdc_topic_round_trips_imeta_and_garbage_is_dropped() {
+        let dir = std::env::temp_dir();
+        let topic = crate::webxdc::mint_topic_id("hash", "sender");
+        let mut att = sample("game.xdc", "xdc", false);
+        att.webxdc_topic = Some(topic.clone());
+        let back = attachment_from_imeta(&attachment_to_imeta(&att), &dir).expect("parses");
+        assert_eq!(back.webxdc_topic.as_deref(), Some(topic.as_str()));
+
+        // Author-controlled: wrong-length / off-alphabet topics are dropped, not propagated.
+        for bad in ["short", &"A".repeat(53), &"a".repeat(52), &format!("{}!", "A".repeat(51))] {
+            let mut att = sample("game.xdc", "xdc", false);
+            att.webxdc_topic = Some(bad.to_string());
+            let back = attachment_from_imeta(&attachment_to_imeta(&att), &dir).expect("parses");
+            assert_eq!(back.webxdc_topic, None, "bad topic {:?} must be dropped", bad);
+        }
     }
 
     #[test]

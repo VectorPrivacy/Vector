@@ -76,6 +76,9 @@ pub async fn send_webxdc_peer_advertisement(
     topic_id: String,
     node_addr: String,
 ) -> bool {
+    // The receiver/chat_id was captured by the caller under the CURRENT account; a swap
+    // mid-await would sign + publish the NEW account's identity into the OLD account's chat.
+    let session = vector_core::state::SessionGuard::capture();
     let Some(client) = nostr_client() else { return false; };
     let Some(my_public_key) = crate::my_public_key() else { return false; };
 
@@ -94,31 +97,29 @@ pub async fn send_webxdc_peer_advertisement(
                 .tag(Tag::custom(TagKind::custom("webxdc-node-addr"), vec![node_addr]))
                 .build(my_public_key);
 
+            let relays = active_trusted_relays().await;
+            if !session.is_valid() {
+                return false;
+            }
             // Gift Wrap and send to receiver via our Trusted Relays
-            match client
-                .gift_wrap_to(
-                    active_trusted_relays().await.into_iter(),
-                    &pubkey,
-                    rumor,
-                    [],
-                )
-                .await
-            {
+            match client.gift_wrap_to(relays.into_iter(), &pubkey, rumor, []).await {
                 Ok(_) => true,
                 Err(_) => false,
             }
         }
-        // Non-DM (hex) targets have no WebXDC peer transport.
-        Err(_) => false,
+        // Non-bech32 target = a Community channel id → the Concord carrier (kind 3310).
+        Err(_) => send_community_webxdc_signal(&receiver, &topic_id, Some(&node_addr), &session).await,
     }
 }
 
 /// Send a "peer-left" signal so other clients know we've stopped playing.
-/// Same transport as peer advertisements (NIP-17 DM gift wrap).
+/// Same transports as peer advertisements (NIP-17 DM gift wrap / Concord 3310).
 pub async fn send_webxdc_peer_left(
     receiver: String,
     topic_id: String,
 ) -> bool {
+    // Same swap exposure as the advertisement — see send_webxdc_peer_advertisement.
+    let session = vector_core::state::SessionGuard::capture();
     let Some(client) = nostr_client() else { return false; };
     let Some(my_public_key) = crate::my_public_key() else { return false; };
 
@@ -132,21 +133,49 @@ pub async fn send_webxdc_peer_left(
                 .tag(Tag::custom(TagKind::custom("webxdc-topic"), vec![topic_id]))
                 .build(my_public_key);
 
-            match client
-                .gift_wrap_to(
-                    active_trusted_relays().await.into_iter(),
-                    &pubkey,
-                    rumor,
-                    [],
-                )
-                .await
-            {
+            let relays = active_trusted_relays().await;
+            if !session.is_valid() {
+                return false;
+            }
+            match client.gift_wrap_to(relays.into_iter(), &pubkey, rumor, []).await {
                 Ok(_) => true,
                 Err(_) => false,
             }
         }
-        // Non-DM (hex) targets have no WebXDC peer transport.
-        Err(_) => false,
+        // Non-bech32 target = a Community channel id → the Concord carrier (kind 3310).
+        Err(_) => send_community_webxdc_signal(&receiver, &topic_id, None, &session).await,
+    }
+}
+
+/// Publish a WebXDC peer signal into a Community channel (kind 3310, sealed under the channel
+/// epoch key). `node_addr` Some = advertisement, None = peer-left. Best-effort bool to match
+/// the DM twin — a missed ad only delays discovery until the auto re-advertise.
+async fn send_community_webxdc_signal(
+    channel_id: &str,
+    topic_id: &str,
+    node_addr: Option<&str>,
+    session: &vector_core::state::SessionGuard,
+) -> bool {
+    use vector_core::community::{service, transport::LiveTransport};
+    let (community, channel) = match crate::commands::community::resolve_community_channel(channel_id) {
+        Ok(rc) => rc,
+        Err(e) => {
+            log_warn!("[WEBXDC] No Community channel for peer signal target {}: {}", channel_id, e);
+            return false;
+        }
+    };
+    // Re-check after the DB resolve: a swap here would publish the NEW account's identity
+    // (both accounts can be members of the same community) under the OLD caller's intent.
+    if !session.is_valid() {
+        return false;
+    }
+    let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+    match service::publish_webxdc_signal(&transport, &community, &channel, topic_id, node_addr).await {
+        Ok(()) => true,
+        Err(e) => {
+            log_warn!("[WEBXDC] Community peer signal publish failed: {}", e);
+            false
+        }
     }
 }
 

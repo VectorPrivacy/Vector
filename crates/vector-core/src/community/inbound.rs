@@ -124,6 +124,18 @@ pub enum IncomingEvent {
     /// presence inner is real-npub-signed (only my own devices can author a leave for my npub). The
     /// teardown is idempotent, so the publishing device tearing down on its own echoed leave is a no-op.
     SelfLeft { community_id: String },
+    /// A WebXDC realtime peer signal (3310): a member advertising their Iroh node for a Mini App
+    /// session (`node_addr` = Some) or announcing they stopped playing (`node_addr` = None). The
+    /// caller persists it (kind-30078 row keyed by `topic_id`, the DM-parity shape) and — when a
+    /// realtime channel for the topic is live — feeds the peer to the gossip layer. Not a message.
+    WebxdcPeer {
+        npub: String,
+        topic_id: String,
+        /// Base32 iroh node address — `Some` for an advertisement, `None` for peer-left.
+        node_addr: Option<String>,
+        event_id: String,
+        created_at: u64,
+    },
 }
 
 /// Open a single incoming wire event against `channel`, verify the binding, and apply
@@ -183,6 +195,7 @@ pub fn process_incoming(
         k if k == event_kind::COMMUNITY_DELETE => apply_delete(state, &opened, channel, my_pubkey),
         k if k == event_kind::COMMUNITY_PRESENCE => apply_presence(&opened, channel, my_pubkey),
         k if k == event_kind::COMMUNITY_KICK => apply_kick(&opened, channel, my_pubkey),
+        k if k == event_kind::COMMUNITY_WEBXDC => apply_webxdc(&opened, my_pubkey),
         _ => None,
     };
     // Record the outer id in the shared ledger for NON-message sub-kinds, which have no inner row to
@@ -251,6 +264,37 @@ fn apply_presence(opened: &OpenedMessage, channel: &Channel, my_pubkey: &PublicK
         created_at: opened.created_at.as_secs(),
         invited_by,
         invited_label,
+    })
+}
+
+/// Interpret a WebXDC peer signal (3310). JSON content: `{"op":"ad","topic":...,"addr":...}` for an
+/// advertisement, `{"op":"left","topic":...}` for a departure. The inner author is the player (real-npub
+/// signed, so a member can't forge another's presence). Own-device echoes are dropped — the local
+/// realtime layer already tracks itself. Both fields are author-controlled: the topic must be a
+/// 52-char base32 TopicId and the addr is size-bounded (the realtime layer's decode is the final word).
+fn apply_webxdc(opened: &OpenedMessage, my_pubkey: &PublicKey) -> Option<IncomingEvent> {
+    if opened.author == *my_pubkey {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(&opened.content).ok()?;
+    let topic_id = v.get("topic").and_then(|t| t.as_str())
+        .filter(|t| t.len() == 52 && t.bytes().all(|b| b.is_ascii_uppercase() || (b'2'..=b'7').contains(&b)))?
+        .to_string();
+    let node_addr = match v.get("op").and_then(|o| o.as_str())? {
+        "ad" => Some(
+            v.get("addr").and_then(|a| a.as_str())
+                .filter(|a| !a.is_empty() && a.len() <= 2048)?
+                .to_string(),
+        ),
+        "left" => None,
+        _ => return None,
+    };
+    Some(IncomingEvent::WebxdcPeer {
+        npub: opened.author.to_bech32().ok()?,
+        topic_id,
+        node_addr,
+        event_id: opened.message_id.to_hex(),
+        created_at: opened.created_at.as_secs(),
     })
 }
 
@@ -1067,6 +1111,57 @@ mod tests {
         assert!(process_incoming(&mut state, &kick, &channel, &member.public_key()).is_none(),
             "a kick older than the current join is dropped");
         crate::db::close_database();
+    }
+
+    #[test]
+    fn webxdc_signals_parse_ad_and_left_and_reject_garbage() {
+        use crate::stored_event::event_kind;
+        use nostr_sdk::ToBech32;
+        let mut state = ChatState::new();
+        let alice = Keys::generate();
+        let c = test_channel();
+        let viewer = Keys::generate();
+        let mk = |content: &str, ms: u64| {
+            let inner = build_inner_typed(alice.public_key(), &c.id, c.epoch, event_kind::COMMUNITY_WEBXDC, content, ms, None, &[])
+                .sign_with_keys(&alice).unwrap();
+            seal_with_signed_inner(&Keys::generate(), &inner, &c.key, &c.id, c.epoch).unwrap()
+        };
+        let topic = crate::webxdc::mint_topic_id("game-hash", "sender");
+
+        // Advertisement: topic + addr surface, author attributed.
+        let ad = serde_json::json!({ "op": "ad", "topic": topic, "addr": "BASE32NODEADDR" }).to_string();
+        match process_incoming(&mut state, &mk(&ad, 1), &c, &viewer.public_key()) {
+            Some(IncomingEvent::WebxdcPeer { npub, topic_id, node_addr, .. }) => {
+                assert_eq!(npub, alice.public_key().to_bech32().unwrap(), "player is the inner author");
+                assert_eq!(topic_id, topic);
+                assert_eq!(node_addr.as_deref(), Some("BASE32NODEADDR"));
+            }
+            _ => panic!("expected a webxdc advertisement"),
+        }
+
+        // Peer-left: no addr.
+        let left = serde_json::json!({ "op": "left", "topic": topic }).to_string();
+        match process_incoming(&mut state, &mk(&left, 2), &c, &viewer.public_key()) {
+            Some(IncomingEvent::WebxdcPeer { node_addr, .. }) => {
+                assert!(node_addr.is_none(), "peer-left carries no addr");
+            }
+            _ => panic!("expected a webxdc peer-left"),
+        }
+
+        // Own echo is dropped — the local realtime layer already tracks itself.
+        assert!(
+            process_incoming(&mut state, &mk(&ad, 3), &c, &alice.public_key()).is_none(),
+            "own webxdc signal must be ignored"
+        );
+
+        // Garbage: malformed topic (author-controlled), unknown op, ad missing addr, non-JSON.
+        let bad_topic = serde_json::json!({ "op": "ad", "topic": "../../etc", "addr": "X" }).to_string();
+        assert!(process_incoming(&mut state, &mk(&bad_topic, 4), &c, &viewer.public_key()).is_none());
+        let bad_op = serde_json::json!({ "op": "explode", "topic": topic }).to_string();
+        assert!(process_incoming(&mut state, &mk(&bad_op, 5), &c, &viewer.public_key()).is_none());
+        let no_addr = serde_json::json!({ "op": "ad", "topic": topic }).to_string();
+        assert!(process_incoming(&mut state, &mk(&no_addr, 6), &c, &viewer.public_key()).is_none());
+        assert!(process_incoming(&mut state, &mk("not json", 7), &c, &viewer.public_key()).is_none());
     }
 
     #[test]

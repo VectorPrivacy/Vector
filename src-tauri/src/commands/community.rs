@@ -930,6 +930,15 @@ async fn process_outbound_community_attachment_bytes(
     let encrypted_size = encrypted.len() as u64;
     let mime = vector_core::crypto::mime_from_extension(&extension).to_string();
 
+    // Mini Apps: mint the realtime topic at send time so every member joins the
+    // same gossip topic — it rides the imeta (see vector_core::webxdc).
+    let webxdc_topic = extension.eq_ignore_ascii_case("xdc").then(|| {
+        let sender = vector_core::state::my_public_key()
+            .map(|pk| pk.to_hex())
+            .unwrap_or_default();
+        vector_core::webxdc::mint_topic_id(&plaintext_hash, &sender)
+    });
+
     let attachment = Attachment {
         id: plaintext_hash.clone(),
         key: params.key,
@@ -942,7 +951,7 @@ async fn process_outbound_community_attachment_bytes(
         img_meta,
         downloading: false,
         downloaded: true, // plaintext already on disk for the sender
-        webxdc_topic: None,
+        webxdc_topic,
         group_id: None,
         original_hash: Some(plaintext_hash),
         scheme_version: None,
@@ -964,7 +973,7 @@ pub async fn send_community_files(
     name_overrides: Vec<String>,
     use_compression: bool,
     replied_to: Option<String>,
-) -> Result<(), String> {
+) -> Result<CommunityAttachmentSendResult, String> {
     if file_paths.is_empty() {
         return Err("No files to send".to_string());
     }
@@ -989,7 +998,7 @@ pub async fn send_community_file_bytes(
     file_name: String,
     use_compression: bool,
     replied_to: Option<String>,
-) -> Result<(), String> {
+) -> Result<CommunityAttachmentSendResult, String> {
     let session = vector_core::state::SessionGuard::capture();
     let prepared = vec![process_outbound_community_attachment_bytes(file_bytes, &file_name, use_compression).await?];
     dispatch_community_attachment_message(channel_id, content, replied_to, session, prepared).await
@@ -1007,7 +1016,7 @@ pub(crate) async fn send_community_voice_bytes(
     let session = vector_core::state::SessionGuard::capture();
     let mut prepared = process_outbound_community_attachment_bytes(bytes, "voice-message.wav", false).await?;
     prepared.attachment.name = String::new();
-    dispatch_community_attachment_message(channel_id, String::new(), replied_to, session, vec![prepared]).await
+    dispatch_community_attachment_message(channel_id, String::new(), replied_to, session, vec![prepared]).await.map(|_| ())
 }
 
 /// Send the JS-cached paste bytes (populated by `cache_file_bytes` on clipboard paste,
@@ -1033,7 +1042,7 @@ pub async fn send_community_cached_file(
     // A non-empty override (spoiler / rename) wins over the cached source name.
     let name = name_override.filter(|s| !s.is_empty()).unwrap_or(cache_name);
     let prepared = vec![process_outbound_community_attachment_bytes(bytes, &name, use_compression).await?];
-    dispatch_community_attachment_message(channel_id, content, replied_to, session, prepared).await
+    dispatch_community_attachment_message(channel_id, content, replied_to, session, prepared).await.map(|_| ())
 }
 
 /// Shared tail for the Community file-send commands: resolve the channel, show an optimistic
@@ -1042,13 +1051,22 @@ pub async fn send_community_cached_file(
 /// temp id → real id. Mirrors the DM `send_file_dm` lifecycle so Communities get the same
 /// progress ring / cancel button / instant preview. `prepared` is the encrypted-but-not-yet-
 /// uploaded attachment set.
+/// Returned by the community file-send commands. `webxdc_topic` is the realtime topic minted
+/// for a `.xdc` attachment (None otherwise) — lets "Play & Invite" open the Mini App on the
+/// exact message+topic it just sent without racing the optimistic-state events.
+#[derive(serde::Serialize)]
+pub struct CommunityAttachmentSendResult {
+    pub message_id: String,
+    pub webxdc_topic: Option<String>,
+}
+
 async fn dispatch_community_attachment_message(
     channel_id: String,
     content: String,
     replied_to: Option<String>,
     session: vector_core::state::SessionGuard,
     prepared: Vec<PreparedCommunityAttachment>,
-) -> Result<(), String> {
+) -> Result<CommunityAttachmentSendResult, String> {
     use vector_core::sending::SendCallback;
     use vector_core::Message;
 
@@ -1212,7 +1230,8 @@ async fn dispatch_community_attachment_message(
                 callback.on_sent(&channel_id, &pending_id, msg);
                 callback.on_persist(&channel_id, msg);
             }
-            Ok(())
+            let webxdc_topic = uploaded.iter().find_map(|a| a.webxdc_topic.clone());
+            Ok(CommunityAttachmentSendResult { message_id: real_id, webxdc_topic })
         }
         Err(e) => {
             let _ = mark_attachment_send_failed(&callback, &channel_id, &pending_id).await;
@@ -1526,6 +1545,22 @@ async fn sync_community_channel_inner(
             }
             IncomingEvent::Presence { npub, joined, event_id, created_at, invited_by, invited_label } => {
                 apply_community_presence(channel_id, npub, *joined, event_id, *created_at, invited_by.as_deref(), invited_label.as_deref()).await;
+            }
+            IncomingEvent::WebxdcPeer { npub, topic_id, node_addr, event_id, created_at } => {
+                // Full DM-parity handling: persist (rejoin discovery), feed the live gossip
+                // channel if this Mini App is open, else cache + surface the lobby status.
+                match node_addr {
+                    Some(addr) => {
+                        crate::services::event_handler::handle_webxdc_peer_advertisement(
+                            event_id, topic_id, addr, npub, *created_at, channel_id,
+                        ).await;
+                    }
+                    None => {
+                        crate::services::event_handler::handle_webxdc_peer_left(
+                            event_id, topic_id, npub, *created_at, channel_id,
+                        ).await;
+                    }
+                }
             }
             IncomingEvent::Kicked { community_id } | IncomingEvent::SelfLeft { community_id } => {
                 // self-removal (kick of us, or a leave another device authored) — received, not
@@ -2649,6 +2684,25 @@ fn now_secs() -> u64 {
 }
 
 /// Decode a 64-char hex Community id to 32 bytes (rejects malformed input).
+/// Resolve a channel id (hex) to its owning Community + Channel — the shared front half of
+/// every channel-addressed send.
+pub(crate) fn resolve_community_channel(
+    channel_id: &str,
+) -> Result<(vector_core::community::Community, vector_core::community::Channel), String> {
+    let community_id = vector_core::db::community::community_id_for_channel(channel_id)?
+        .ok_or("Unknown Community channel")?;
+    let id_bytes = hex_to_id32(&community_id)?;
+    let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
+        .ok_or("Community not found")?;
+    let channel = community
+        .channels
+        .iter()
+        .find(|c| c.id.to_hex() == channel_id)
+        .ok_or("Channel not found in Community")?
+        .clone();
+    Ok((community, channel))
+}
+
 fn hex_to_id32(hex: &str) -> Result<[u8; 32], String> {
     if hex.len() != 64 {
         return Err(format!("expected 64 hex chars, got {}", hex.len()));

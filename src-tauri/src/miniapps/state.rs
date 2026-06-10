@@ -278,6 +278,15 @@ impl MiniAppsState {
         }
     }
     
+    /// Drop the account-scoped realtime lobby state (session npubs + cached peer addrs).
+    /// Called from the session-swap teardown — the maps are keyed by game topic and hold
+    /// the OLD account's players/addresses. Instances/channels are left to their own
+    /// window lifecycle; the SessionGuard checks on their send paths bail post-swap.
+    pub async fn clear_account_scoped(&self) {
+        self.session_peers.write().await.clear();
+        self.peer_addrs.write().await.clear();
+    }
+
     /// Get or set the realtime channel for an instance
     pub async fn set_realtime_channel(&self, window_label: &str, state: RealtimeChannelState) {
         let mut channels = self.realtime_channels.write().await;

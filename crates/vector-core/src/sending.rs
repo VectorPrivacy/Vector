@@ -439,6 +439,13 @@ pub async fn send_file_dm(
     let file_hash = crypto::sha256_hex(&file_bytes);
     let mime_type = crypto::mime_from_extension(extension);
 
+    // WebXDC Mini Apps: mint the realtime-channel topic at send time and carry
+    // it on the rumor — locally-derived topics are asymmetric in DMs (each
+    // side's chat_id is the other party's npub), splitting players onto
+    // disjoint gossip topics.
+    let webxdc_topic = (extension.eq_ignore_ascii_case("xdc"))
+        .then(|| crate::webxdc::mint_topic_id(&file_hash, &my_pk.to_hex()));
+
     // Save file locally so the attachment is immediately viewable
     let download_dir = crate::db::get_download_dir();
     let _ = std::fs::create_dir_all(&download_dir);
@@ -475,6 +482,7 @@ pub async fn send_file_dm(
         extension: extension.to_string(), name: filename.to_string(),
         url: String::new(), path: local_path_str.clone(), size: encrypted_size,
         img_meta: img_meta.clone(), downloading: false, downloaded: true,
+        webxdc_topic: webxdc_topic.clone(),
         ..Default::default()
     };
     let msg = Message {
@@ -548,6 +556,9 @@ pub async fn send_file_dm(
         .tag(Tag::custom(TagKind::custom("ox"), [file_hash.clone()]));
     if !filename.is_empty() {
         file_rumor = file_rumor.tag(Tag::custom(TagKind::custom("name"), [filename]));
+    }
+    if let Some(ref topic) = webxdc_topic {
+        file_rumor = file_rumor.tag(Tag::custom(TagKind::custom("webxdc-topic"), [topic.as_str()]));
     }
     // Include image preview metadata for compatible rendering across all clients
     if let Some(ref meta) = img_meta {

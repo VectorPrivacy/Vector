@@ -142,6 +142,7 @@ pub(crate) async fn refresh_community_subscription() {
                 Kind::Custom(ek::COMMUNITY_DELETE),
                 Kind::Custom(ek::COMMUNITY_PRESENCE),
                 Kind::Custom(ek::COMMUNITY_KICK),
+                Kind::Custom(ek::COMMUNITY_WEBXDC),
                 Kind::Custom(ek::COMMUNITY_CONTROL),
                 Kind::Custom(ek::COMMUNITY_REKEY),
             ])
@@ -307,6 +308,22 @@ async fn handle_community_event(
             // Join/leave (3306) → a MemberJoined/MemberLeft system event (feeds the member list), with 
             // invite attribution when present.
             crate::commands::community::apply_community_presence(&chat_id, &npub, joined, &event_id, created_at, invited_by.as_deref(), invited_label.as_deref()).await;
+        }
+        Some(vector_core::community::inbound::IncomingEvent::WebxdcPeer { npub, topic_id, node_addr, event_id, created_at }) => {
+            // WebXDC peer signal (3310) → same handling as the NIP-17 DM twin: persist for
+            // rejoin discovery, feed the live gossip channel / lobby UI.
+            match node_addr {
+                Some(addr) => {
+                    crate::services::event_handler::handle_webxdc_peer_advertisement(
+                        &event_id, &topic_id, &addr, &npub, created_at, &chat_id,
+                    ).await;
+                }
+                None => {
+                    crate::services::event_handler::handle_webxdc_peer_left(
+                        &event_id, &topic_id, &npub, created_at, &chat_id,
+                    ).await;
+                }
+            }
         }
         Some(vector_core::community::inbound::IncomingEvent::Kicked { community_id })
         | Some(vector_core::community::inbound::IncomingEvent::SelfLeft { community_id }) => {

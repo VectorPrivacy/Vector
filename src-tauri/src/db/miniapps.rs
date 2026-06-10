@@ -481,16 +481,20 @@ pub fn get_active_peer_advertisements(
 ) -> Result<Vec<PeerAdvertisementRecord>, String> {
     let conn = crate::account_manager::get_db_connection_guard_static()?;
 
+    // Latest ad per npub, dropped when a peer-left exists at the SAME OR LATER second —
+    // timestamps are second-granular, so an open-then-instant-close lands ad and left in
+    // the same second and the tombstone must win the tie (else a phantom "active" player
+    // survives for the hours-later rediscovery this table exists for).
     let mut stmt = conn.prepare(
         r#"
-        SELECT e.npub, e.tags, e.created_at
+        SELECT e.npub, e.tags
         FROM events e
         INNER JOIN (
             SELECT npub, MAX(created_at) as max_ts
             FROM events
             WHERE kind = 30078
               AND reference_id = ?1
-              AND content IN ('peer-advertisement', 'peer-left')
+              AND content = 'peer-advertisement'
               AND npub IS NOT NULL
               AND npub != ?2
             GROUP BY npub
@@ -498,6 +502,14 @@ pub fn get_active_peer_advertisements(
         WHERE e.kind = 30078
           AND e.reference_id = ?1
           AND e.content = 'peer-advertisement'
+          AND NOT EXISTS (
+              SELECT 1 FROM events l
+              WHERE l.kind = 30078
+                AND l.reference_id = ?1
+                AND l.npub = e.npub
+                AND l.content = 'peer-left'
+                AND l.created_at >= e.created_at
+          )
         "#
     ).map_err(|e| format!("Failed to prepare peer advertisement query: {}", e))?;
 
@@ -506,7 +518,6 @@ pub fn get_active_peer_advertisements(
         |row| {
             let npub: String = row.get(0)?;
             let tags_json: String = row.get(1)?;
-            let _: i64 = row.get(2)?; // created_at consumed by query join
 
             // Extract node_addr from tags JSON
             let tags: Vec<Vec<String>> = serde_json::from_str(&tags_json).unwrap_or_default();
@@ -516,8 +527,6 @@ pub fn get_active_peer_advertisements(
                 .cloned()
                 .unwrap_or_default();
 
-            let _: i64 = row.get(2)?; // created_at used by query ordering
-
             Ok(PeerAdvertisementRecord {
                 npub,
                 node_addr_encoded: node_addr,
@@ -526,4 +535,38 @@ pub fn get_active_peer_advertisements(
     ).map_err(|e| format!("Failed to query peer advertisements: {}", e))?;
 
     Ok(records.filter_map(|r| r.ok()).filter(|r| !r.node_addr_encoded.is_empty()).collect())
+}
+
+/// Is this peer signal still the CURRENT word on `npub`'s participation in `topic`?
+/// Gates the LIVE side of signal handling (session-peer add/remove, Iroh feed, lobby
+/// emit) so a replayed or out-of-order historical event can't resurrect a departed
+/// player (ad after left) or evict an active one (stale left after a newer ad).
+/// Tie-break mirrors `get_active_peer_advertisements`: on equal seconds the tombstone wins.
+pub fn peer_signal_is_current(
+    topic_encoded: &str,
+    npub: &str,
+    created_at: u64,
+    is_advertisement: bool,
+) -> Result<bool, String> {
+    let conn = crate::account_manager::get_db_connection_guard_static()?;
+    // An AD is superseded by ANY strictly-newer signal or a same-second left;
+    // a LEFT only by a strictly-newer ad.
+    let sql = if is_advertisement {
+        r#"SELECT EXISTS(
+            SELECT 1 FROM events
+            WHERE kind = 30078 AND reference_id = ?1 AND npub = ?2
+              AND ((content IN ('peer-advertisement','peer-left') AND created_at > ?3)
+                   OR (content = 'peer-left' AND created_at = ?3))
+        )"#
+    } else {
+        r#"SELECT EXISTS(
+            SELECT 1 FROM events
+            WHERE kind = 30078 AND reference_id = ?1 AND npub = ?2
+              AND content = 'peer-advertisement' AND created_at > ?3
+        )"#
+    };
+    let superseded: bool = conn
+        .query_row(sql, rusqlite::params![topic_encoded, npub, created_at as i64], |row| row.get(0))
+        .map_err(|e| format!("Failed to check peer signal currency: {}", e))?;
+    Ok(!superseded)
 }

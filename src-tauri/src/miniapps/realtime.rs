@@ -155,7 +155,13 @@ impl IrohState {
         struct RelayOnly;
         impl Preset for RelayOnly {
             fn apply(self, builder: iroh::endpoint::Builder) -> iroh::endpoint::Builder {
-                builder.relay_mode(RelayMode::Default)
+                builder
+                    .relay_mode(RelayMode::Default)
+                    // iroh ≥0.98: supplying the crypto provider is the PRESET's job
+                    // (builder starts with None and bind() hard-fails at runtime —
+                    // it compiles, so only a live test catches it). Ring, matching
+                    // the app-wide rustls provider installed at startup.
+                    .crypto_provider(Arc::new(rustls::crypto::ring::default_provider()))
             }
         }
 
@@ -800,8 +806,12 @@ async fn run_subscribe_loop(
                     let app = app.clone();
                     let te = topic_encoded.clone();
                     let topic_copy = topic;
+                    // Capture BEFORE the sleep: the topic→chat_id mapping belongs to the
+                    // account current now, and 2s is plenty of time for a swap.
+                    let session = vector_core::state::SessionGuard::capture();
                     tokio::spawn(async move {
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        if !session.is_valid() { return; }
                         let state = app.state::<crate::miniapps::state::MiniAppsState>();
                         if !state.has_realtime_channel_for_topic(&topic_copy).await { return; }
                         if let Ok(iroh) = state.realtime.get_or_init().await {

@@ -738,7 +738,10 @@ pub async fn miniapp_open(
                         }
                     }
                     let chat_id_clone = chat_id.clone();
+                    // chat_id belongs to the account current NOW — bail in the task if it swaps.
+                    let session = vector_core::state::SessionGuard::capture();
                     tokio::spawn(async move {
+                        if !session.is_valid() { return; }
                         crate::commands::realtime::send_webxdc_peer_left(chat_id_clone, topic_encoded).await;
                     });
                 }
@@ -823,6 +826,9 @@ pub async fn miniapp_open(
         let topic_str = topic_id.clone();
         let rt_topic = instance.realtime_topic;
         let label_pc = window_label.clone();
+        // chat_id_pc belongs to the account current NOW; preconnect spans Iroh init
+        // (seconds) — bail before the session-scoped writes/sends if the account swaps.
+        let pc_session = vector_core::state::SessionGuard::capture();
         tokio::spawn(async move {
             log_info!("[WEBXDC] Preconnect: scanning '{}' for realtime API (path: {:?})", pkg_name, pkg_path);
             let uses_rt = tokio::task::spawn_blocking(move || {
@@ -885,7 +891,9 @@ pub async fn miniapp_open(
                 topic, active: true,
             }).await;
 
-            // Send advertisement so peers know we're online
+            // Send advertisement so peers know we're online (skip if the account
+            // swapped during Iroh init — chat_id_pc belongs to the old session).
+            if !pc_session.is_valid() { return; }
             let node_addr = iroh.get_node_addr();
             if let Ok(encoded) = super::realtime::encode_node_addr(&node_addr) {
                 crate::commands::realtime::send_webxdc_peer_advertisement(
@@ -932,8 +940,12 @@ pub async fn miniapp_open(
                     }).collect();
                     for addr in peers {
                         let peer_id = addr.id;
+                        // 15s, not less: a freshly-created Iroh node (game reopen on
+                        // Android = full shutdown + recreate) spends 3-5s on the relay
+                        // handshake alone before the dial can start — a tight timeout
+                        // strands the node neighborless on the topic.
                         match tokio::time::timeout(
-                            std::time::Duration::from_secs(5),
+                            std::time::Duration::from_secs(15),
                             iroh.try_add_peer(&topic, &addr),
                         ).await {
                             Ok(Ok(_)) => log_info!("[WEBXDC] Preconnect: connected to peer {}", peer_id),
@@ -947,7 +959,7 @@ pub async fn miniapp_open(
             let cached = state.take_peer_addrs(&topic).await;
             for addr in cached.into_iter().filter(|a| !connected_ids.contains(&a.id)) {
                 let _ = tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
+                    std::time::Duration::from_secs(15),
                     iroh.try_add_peer(&topic, &addr),
                 ).await;
             }
@@ -1109,7 +1121,10 @@ pub async fn miniapp_open(
                         if let Some(instance) = state.get_instance(&label).await {
                             let chat_id = instance.chat_id.clone();
                             let topic_for_left = topic_encoded.clone();
+                            // chat_id belongs to the account current NOW — bail if it swaps.
+                            let session = vector_core::state::SessionGuard::capture();
                             tokio::spawn(async move {
+                                if !session.is_valid() { return; }
                                 if !crate::commands::realtime::send_webxdc_peer_left(chat_id, topic_for_left).await {
                                     log_warn!("[WEBXDC] Failed to send peer-left signal");
                                 }
@@ -1215,7 +1230,10 @@ pub async fn miniapp_close(
 
             // Send peer-left via Nostr
             let chat_id_clone = chat_id.clone();
+            // chat_id belongs to the account current NOW — bail in the task if it swaps.
+            let session = vector_core::state::SessionGuard::capture();
             tokio::spawn(async move {
+                if !session.is_valid() { return; }
                 crate::commands::realtime::send_webxdc_peer_left(chat_id_clone, topic_encoded).await;
             });
         }
@@ -1406,7 +1424,7 @@ pub async fn miniapp_join_realtime_channel(
                 for addr in peers {
                     let peer_id = addr.id;
                     match tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
+                        std::time::Duration::from_secs(15),
                         iroh.try_add_peer(&topic, &addr),
                     ).await {
                         Ok(Ok(_)) => log_info!("[WEBXDC] Connected to persisted peer {}", peer_id),
@@ -1420,7 +1438,7 @@ pub async fn miniapp_join_realtime_channel(
         let cached_addrs = state.take_peer_addrs(&topic).await;
         for addr in cached_addrs.into_iter().filter(|a| !connected_ids.contains(&a.id)) {
             let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(15),
                 iroh.try_add_peer(&topic, &addr),
             ).await;
         }
@@ -1432,7 +1450,10 @@ pub async fn miniapp_join_realtime_channel(
         if let Ok(encoded) = encode_node_addr(&node_addr) {
             let chat_id = instance.chat_id.clone();
             let te = topic_encoded.clone();
+            // chat_id belongs to the account current NOW — bail in the task if it swaps.
+            let session = vector_core::state::SessionGuard::capture();
             tokio::spawn(async move {
+                if !session.is_valid() { return; }
                 crate::commands::realtime::send_webxdc_peer_advertisement(chat_id, te, encoded).await;
             });
         }

@@ -898,36 +898,57 @@ async function playMiniAppAndInvite() {
     };
 
     try {
-        // Send the Mini App file to the current chat — awaits upload + relay send
-        const result = await invoke('file_message', {
-            receiver: targetChatId,
-            repliedTo: '',
-            filePath: app.src_url,
-            nameOverride: '',
-        });
-
-        if (!result || !result.event_id) {
-            console.error('Play & Invite: file_message returned no event_id');
-            finishAndClose();
-            return;
-        }
-
-        // Finalize the pending message in local state
-        finalizePendingMessage(targetChatId, result.pending_id, result.event_id);
-
-        // Find the message in local state to get the topic ID from the attachment
-        const chat = getChat(targetChatId);
+        // Send the Mini App file to the current chat — awaits upload + relay send.
+        // Community channels ride their own send pipeline (file_message is DM-only).
+        let messageId = null;
         let topicId = null;
         let filePath = app.src_url;
-        if (chat) {
-            const msg = chat.messages.find(m => m.id === result.event_id);
-            if (msg && msg.attachments) {
-                const xdcAtt = msg.attachments.find(a =>
-                    a.extension === 'xdc' || (a.path && a.path.endsWith('.xdc'))
-                );
-                if (xdcAtt) {
-                    topicId = xdcAtt.webxdc_topic || null;
-                    if (xdcAtt.path) filePath = xdcAtt.path;
+        if (chatIsGroup(getChat(targetChatId))) {
+            const result = await invoke('send_community_files', {
+                channelId: targetChatId,
+                content: '',
+                filePaths: [app.src_url],
+                nameOverrides: [''],
+                useCompression: false,
+                repliedTo: '',
+            });
+            if (!result || !result.message_id) {
+                console.error('Play & Invite: send_community_files returned no message_id');
+                finishAndClose();
+                return;
+            }
+            messageId = result.message_id;
+            topicId = result.webxdc_topic || null;
+        } else {
+            const result = await invoke('file_message', {
+                receiver: targetChatId,
+                repliedTo: '',
+                filePath: app.src_url,
+                nameOverride: '',
+            });
+
+            if (!result || !result.event_id) {
+                console.error('Play & Invite: file_message returned no event_id');
+                finishAndClose();
+                return;
+            }
+            messageId = result.event_id;
+
+            // Finalize the pending message in local state
+            finalizePendingMessage(targetChatId, result.pending_id, result.event_id);
+
+            // Find the message in local state to get the topic ID from the attachment
+            const chat = getChat(targetChatId);
+            if (chat) {
+                const msg = chat.messages.find(m => m.id === messageId);
+                if (msg && msg.attachments) {
+                    const xdcAtt = msg.attachments.find(a =>
+                        a.extension === 'xdc' || (a.path && a.path.endsWith('.xdc'))
+                    );
+                    if (xdcAtt) {
+                        topicId = xdcAtt.webxdc_topic || null;
+                        if (xdcAtt.path) filePath = xdcAtt.path;
+                    }
                 }
             }
         }
@@ -936,7 +957,7 @@ async function playMiniAppAndInvite() {
         await invoke('miniapp_open', {
             filePath,
             chatId: targetChatId,
-            messageId: result.event_id,
+            messageId,
             href: null,
             topicId,
         });

@@ -237,6 +237,94 @@ pub async fn publish_presence<T: Transport + ?Sized>(
     publish_presence_event(transport, community, channel, &inner).await
 }
 
+/// Publish a WebXDC realtime peer signal (3310) into a channel: an advertisement of the local
+/// Iroh node for a Mini App session (`node_addr` = Some) or a peer-left (`node_addr` = None).
+/// The Community-transport twin of the NIP-17 peer-advertisement/peer-left DM rumors — signed
+/// by the member's real identity (a member can't forge another player's presence), sealed under
+/// the channel epoch key like presence. Callers treat failure as non-fatal (a missed ad only
+/// delays discovery; the next re-advertise covers it).
+pub async fn publish_webxdc_signal<T: Transport + ?Sized>(
+    transport: &T,
+    community: &Community,
+    channel: &Channel,
+    topic_id: &str,
+    node_addr: Option<&str>,
+) -> Result<(), String> {
+    let author_pk = crate::state::my_public_key().ok_or("not logged in")?;
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let content = match node_addr {
+        Some(addr) => serde_json::json!({ "op": "ad", "topic": topic_id, "addr": addr }).to_string(),
+        None => serde_json::json!({ "op": "left", "topic": topic_id }).to_string(),
+    };
+    let unsigned = super::envelope::build_inner_typed(
+        author_pk, &channel.id, channel.epoch, event_kind::COMMUNITY_WEBXDC, &content, ms, None, &[],
+    );
+    let signer = active_signer().await?;
+    let inner = unsigned.sign(&signer).await.map_err(|e| format!("Failed to sign webxdc signal: {e}"))?;
+    let _ = publish_signed_message(transport, community, channel, &inner, true).await?;
+    Ok(())
+}
+
+/// Persist an inbound WebXDC peer signal as a kind-30078 event row — the SAME shape the DM
+/// peer-advertisement handler writes (content `peer-advertisement`/`peer-left`, `reference_id`
+/// = topic, `webxdc-topic`/`webxdc-node-addr` tags) — so the miniapp layer's
+/// `get_active_peer_advertisements` (latest-per-npub, left-tombstone-aware) reads both
+/// transports identically. This is what lets a member who closed Vector mid-session rediscover
+/// the active players on reopen. Idempotent via `event_exists`.
+pub async fn persist_webxdc_signal(
+    channel_hex: &str,
+    npub: &str,
+    topic_id: &str,
+    node_addr: Option<&str>,
+    event_id: &str,
+    created_at: u64,
+) {
+    if crate::db::events::event_exists(event_id).unwrap_or(true) {
+        return;
+    }
+    // Sender-claimed timestamp: clamp into the near future so a forged far-future ad
+    // can't outrank every later genuine peer-left in the latest-per-npub read.
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let created_at = created_at.min(now_secs + 300);
+    let Ok(chat_id) = crate::db::id_cache::get_or_create_chat_id(channel_hex) else { return };
+    let mut tags = vec![
+        vec!["webxdc-topic".to_string(), topic_id.to_string()],
+        vec!["d".to_string(), "vector-webxdc-peer".to_string()],
+    ];
+    if let Some(addr) = node_addr {
+        tags.push(vec!["webxdc-node-addr".to_string(), addr.to_string()]);
+    }
+    let event = crate::stored_event::StoredEvent {
+        id: event_id.to_string(),
+        kind: crate::stored_event::event_kind::APPLICATION_SPECIFIC,
+        chat_id,
+        user_id: None,
+        content: if node_addr.is_some() { "peer-advertisement" } else { "peer-left" }.to_string(),
+        tags,
+        reference_id: Some(topic_id.to_string()),
+        created_at,
+        received_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+        mine: false,
+        pending: false,
+        failed: false,
+        wrapper_event_id: None,
+        npub: Some(npub.to_string()),
+        preview_metadata: None,
+    };
+    if let Err(e) = crate::db::events::save_event(&event).await {
+        crate::log_warn!("[community] failed to persist webxdc peer signal: {e}");
+    }
+}
+
 /// Publish a cooperative kick (3309) of `target_hex` into `channel`: a real-npub-signed inner directive
 /// (content = the target's hex pubkey) carrying the actor's `vac` authority citation. NOT a rekey and NOT
 /// folded — the kicked client self-removes on receipt (drops the community keys + wipes local chat data);
@@ -1831,6 +1919,9 @@ async fn observe_channel_activity<T: Transport + ?Sized>(
                         _ => by.clone(),
                     });
                     let _ = crate::db::events::save_system_event_at(event_id, &ch_hex, et, npub, note.as_deref(), *created_at).await;
+                }
+                super::inbound::IncomingEvent::WebxdcPeer { npub, topic_id, node_addr, event_id, created_at } => {
+                    persist_webxdc_signal(&ch_hex, npub, topic_id, node_addr.as_deref(), event_id, *created_at).await;
                 }
                 _ => {}
             }

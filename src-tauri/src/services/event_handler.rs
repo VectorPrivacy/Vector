@@ -297,6 +297,30 @@ pub(crate) async fn handle_webxdc_peer_advertisement(
 
     log_info!("[WEBXDC] Received peer advertisement for topic {}", topic_id);
 
+    // Validate BEFORE persisting — both fields are sender-controlled, and a garbage
+    // row would otherwise sit in the events table forever.
+    let topic = match decode_topic_id(topic_id) {
+        Ok(t) => t,
+        Err(e) => {
+            log_warn!("Failed to decode topic ID in peer advertisement: {}", e);
+            return false;
+        }
+    };
+    let node_addr = match decode_node_addr(node_addr_encoded) {
+        Ok(addr) => addr,
+        Err(e) => {
+            log_warn!("Failed to decode node address in peer advertisement: {}", e);
+            return false;
+        }
+    };
+    // Sender-claimed timestamp: clamp into the near future so a forged far-future ad
+    // can't outrank every later genuine peer-left forever.
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let created_at = created_at.min(now_secs + 300);
+
     // Persist to SQLite for offline->online peer discovery
     if !db::event_exists(event_id).unwrap_or(true) {
         if let Ok(chat_id) = db::get_or_create_chat_id(conversation_id) {
@@ -331,23 +355,14 @@ pub(crate) async fn handle_webxdc_peer_advertisement(
         }
     }
 
-    // Decode the topic ID
-    let topic = match decode_topic_id(topic_id) {
-        Ok(t) => t,
-        Err(e) => {
-            log_warn!("Failed to decode topic ID in peer advertisement: {}", e);
-            return false;
-        }
-    };
-
-    // Decode the node address
-    let node_addr = match decode_node_addr(node_addr_encoded) {
-        Ok(addr) => addr,
-        Err(e) => {
-            log_warn!("Failed to decode node address in peer advertisement: {}", e);
-            return false;
-        }
-    };
+    // Recency gate for everything LIVE below (session peers, Iroh feed, lobby emit):
+    // a replayed or historically-synced ad that's no longer this sender's latest word
+    // (a newer signal exists, or a same-second left — tombstone wins ties) must not
+    // resurrect a departed player. History stays persisted; the lobby follows the present.
+    if !db::peer_signal_is_current(topic_id, sender_npub, created_at, true).unwrap_or(false) {
+        log_info!("[WEBXDC] Stale peer advertisement for topic {} from {} — persisted, not surfaced", topic_id, sender_npub);
+        return true;
+    }
 
     // Get the MiniApps state and add the peer
     if let Some(handle) = TAURI_APP.get() {
@@ -444,6 +459,20 @@ pub(crate) async fn handle_webxdc_peer_left(
 
     log_info!("[WEBXDC] Received peer-left from {} for topic {}", sender_npub, topic_id);
 
+    // Validate BEFORE persisting (sender-controlled field).
+    let topic = match decode_topic_id(topic_id) {
+        Ok(t) => t,
+        Err(e) => {
+            log_warn!("Failed to decode topic ID in peer-left: {}", e);
+            return false;
+        }
+    };
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let created_at = created_at.min(now_secs + 300);
+
     // Persist to SQLite
     if !db::event_exists(event_id).unwrap_or(true) {
         if let Ok(chat_id) = db::get_or_create_chat_id(conversation_id) {
@@ -477,13 +506,13 @@ pub(crate) async fn handle_webxdc_peer_left(
         }
     }
 
-    let topic = match decode_topic_id(topic_id) {
-        Ok(t) => t,
-        Err(e) => {
-            log_warn!("Failed to decode topic ID in peer-left: {}", e);
-            return false;
-        }
-    };
+    // Recency gate (mirror of the advertisement side): a STALE left — one already
+    // superseded by a newer ad — must not evict an actively-playing peer from the
+    // lobby. Out-of-order page syncs deliver exactly this shape.
+    if !db::peer_signal_is_current(topic_id, sender_npub, created_at, false).unwrap_or(false) {
+        log_info!("[WEBXDC] Stale peer-left for topic {} from {} — persisted, not surfaced", topic_id, sender_npub);
+        return true;
+    }
 
     if let Some(handle) = TAURI_APP.get() {
         let state = handle.state::<miniapps::state::MiniAppsState>();

@@ -662,6 +662,15 @@ pub async fn reset_session() {
     // generation checks self-reset too; this is the explicit teardown.)
     vector_core::community::cache::clear();
 
+    // Mini App realtime lobby state is account-scoped (session npubs + cached peer addrs
+    // keyed by game topic). Carried across a swap it would show account A's players in
+    // account B's lobby and bootstrap-connect B into A's sessions.
+    if let Some(handle) = crate::TAURI_APP.get() {
+        use tauri::Manager;
+        handle.state::<crate::miniapps::state::MiniAppsState>()
+            .clear_account_scoped().await;
+    }
+
     // Pending invite captured during account creation (must NOT auto-execute
     // on the next account).
     crate::state::clear_pending_invite();
