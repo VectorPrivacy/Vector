@@ -187,6 +187,13 @@ pub async fn fetch_msg_metadata(chat_id: String, msg_id: String) -> bool {
 
     // Only try the first few URLs
     for url in urls.into_iter().take(MAX_URLS_TO_TRY) {
+        // Community invite links render as a dedicated in-chat card — an OG preview
+        // would stack a duplicate website-style card under it.
+        if url.starts_with("https://vectorapp.io/invite")
+            || url.starts_with("https://www.vectorapp.io/invite")
+        {
+            continue;
+        }
         match net::fetch_site_metadata(&url).await {
             Ok(metadata) => {
                 let has_content = metadata.og_title.is_some()

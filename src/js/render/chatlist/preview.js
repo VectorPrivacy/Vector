@@ -133,5 +133,10 @@ function generateChatPreviewText(chat) {
 
     // Regular text message — strip HTML/markdown, render inline formatting, resolve @npub mentions.
     // emojiTags lets the renderer swap :shortcode: for inline custom emojis (like in-chat).
-    return { text: escapeHtml(senderPrefix) + contentToPreviewHtml(resolveMentionText(cLastMsg.content)), isTyping: false, needsTwemoji: true, isHtml: true, emojiTags: cLastMsg.emoji_tags };
+    let previewSource = cLastMsg.content;
+    // Invite links render as a card in-chat; the snippet shows a friendly tag, not the raw URL.
+    if (typeof replaceCommunityInviteUrlsForPreview === 'function') {
+        previewSource = replaceCommunityInviteUrlsForPreview(previewSource);
+    }
+    return { text: escapeHtml(senderPrefix) + contentToPreviewHtml(resolveMentionText(previewSource)), isTyping: false, needsTwemoji: true, isHtml: true, emojiTags: cLastMsg.emoji_tags };
 }

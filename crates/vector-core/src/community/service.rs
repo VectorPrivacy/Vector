@@ -1450,6 +1450,36 @@ pub async fn create_public_invite<T: Transport + ?Sized>(
     Ok((token_hex, url))
 }
 
+/// Read-only freshen for an invite preview: build the bundle's ephemeral community, fold the live
+/// control plane, and return the LATEST authorized display metadata — never the bundle's mint-time
+/// snapshot (which goes stale the moment metadata is edited; mirrors the website preview). No DB
+/// floors and no persistence: the previewer isn't a member, so there is no local state to anchor.
+/// Any failure falls back to the snapshot so a flaky relay can't blank the preview.
+pub async fn latest_invite_preview<T: Transport + ?Sized>(
+    transport: &T,
+    bundle: &public_invite::PublicInviteBundle,
+) -> public_invite::PublicInvitePreview {
+    let snapshot = bundle.preview.clone();
+    let Ok(community) = super::invite::accept_invite(&bundle.join) else {
+        return snapshot;
+    };
+    let Ok(folded) = fetch_control_folded(transport, &community).await else {
+        return snapshot;
+    };
+    let owner = proven_owner_hex(&community);
+    let authorized = super::roster::authorize_delegation(&folded, owner.as_deref());
+    match folded.root_candidates.iter().find(|c| {
+        authorized.is_authorized(&c.author.to_hex(), owner.as_deref(), super::roles::Permissions::MANAGE_METADATA)
+    }) {
+        Some(c) => public_invite::PublicInvitePreview {
+            name: c.meta.name.clone(),
+            description: c.meta.description.clone(),
+            icon: c.meta.icon.clone(),
+        },
+        None => snapshot,
+    }
+}
+
 /// Fetch + decrypt the bundle for a public-invite token from the given bootstrap relays.
 /// Queries the addressable coordinate (`d` = token locator, author = token signer) and
 /// verifies the signer, so an impostor squatting the locator is rejected.

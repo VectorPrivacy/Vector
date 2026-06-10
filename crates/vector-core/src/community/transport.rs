@@ -267,7 +267,7 @@ impl LiveTransport {
         }
 
         // `add_relay` returns Ok(true) if NEWLY added, Ok(false) if the pool already held it.
-        // Community relays join PING-only (see `community_relay_options`) so they stay 24/7 warm
+        // Community relays join GOSSIP|PING (see `community_relay_options`) so they stay 24/7 warm
         // without pulling the user's DM/profile traffic onto relays they don't own. An overlap
         // relay already in the pool as a user relay keeps its READ+WRITE flags (add_relay no-ops).
         let mut added_new = false;
@@ -384,6 +384,25 @@ impl Transport for LiveTransport {
             })
             .collect();
 
+        // Back-paging (`until`-bounded) queries: the caller judges "history start" from what
+        // comes back, so a single fast-but-shallow relay must not decide that verdict — drain
+        // EVERY relay and union (each still bounded by the per-relay timeout). Latency-critical
+        // latest/control fetches keep the first-wins race below.
+        if query.until.is_some() {
+            let mut union: Vec<Event> = Vec::new();
+            let mut seen: std::collections::HashSet<EventId> = std::collections::HashSet::new();
+            while let Some(joined) = fetches.next().await {
+                if let Ok(evs) = joined {
+                    for e in evs {
+                        if seen.insert(e.id) {
+                            union.push(e);
+                        }
+                    }
+                }
+            }
+            return Ok(union);
+        }
+
         // Block for the first relay to finish — a baseline, even if it's empty.
         let mut result: Vec<Event> = Vec::new();
         loop {
@@ -423,6 +442,9 @@ impl Transport for LiveTransport {
         // distinct ids, so the protocol's convergence engine resolves them — not the transport.
         if !fetches.is_empty() {
             let seen: std::collections::HashSet<EventId> = result.iter().map(|e| e.id).collect();
+            // Captured BEFORE the drain spawn: the drain can outlive an account swap, and
+            // stragglers fetched under the prior session must not feed the new one's ingest.
+            let session = crate::state::SessionGuard::capture();
             tokio::spawn(async move {
                 let mut extra: Vec<Event> = Vec::new();
                 let mut extra_ids: std::collections::HashSet<EventId> = std::collections::HashSet::new();
@@ -434,6 +456,9 @@ impl Transport for LiveTransport {
                             }
                         }
                     }
+                }
+                if !session.is_valid() {
+                    return;
                 }
                 submit_stragglers(extra);
             });

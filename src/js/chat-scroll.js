@@ -294,6 +294,10 @@ function initProceduralScrollWithCache(chatId, initialCount, totalCount) {
     proceduralScrollState.isLoading = false;
     proceduralScrollState.isLoadingOlderMessages = false;
     proceduralScrollState.lastScrollHeight = 0;
+    // Re-arm network back-paging each open: if history truly ended, the backend's
+    // history-start short-circuit answers instantly (no network) and we re-latch; if it
+    // grew reachable again (rejoin, epoch backfill), scroll-up probes instead of staying dead.
+    _communityOlderExhausted.delete(chatId);
 }
 
 /**

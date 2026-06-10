@@ -122,7 +122,7 @@ pub(crate) async fn refresh_community_subscription() {
 
     if !pseudonyms.is_empty() {
         // Community events live on the Community's relays, which may differ from the user's own DM
-        // relays. Add them PING-only (24/7 warm, but excluded from pool-wide DM/profile ops — the
+        // relays. Add them GOSSIP|PING (24/7 warm, but excluded from pool-wide DM/profile ops — the
         // user's traffic never touches relays they don't own) and subscribe to them by TARGET, since
         // a non-READ relay is skipped by the pool-wide `subscribe(None)`. An overlap relay that's
         // also a user relay keeps its READ+WRITE flags and its single existing connection.
@@ -149,7 +149,7 @@ pub(crate) async fn refresh_community_subscription() {
             .custom_tags(SingleLetterTag::lowercase(Alphabet::Z), pseudonyms)
             .limit(0);
         // Targeted at the Community relays (flag-independent) — NOT pool-wide, which would skip the
-        // PING-only Community relays and uselessly REQ the user's own relays that lack these events.
+        // GOSSIP|PING Community relays and uselessly REQ the user's own relays that lack these events.
         match client.subscribe_to(relays.iter().cloned(), filter, None).await {
             Ok(output) => { *sub_guard = Some(output.val); }
             Err(e) => eprintln!("[community] Failed to subscribe: {:?}", e),
@@ -346,10 +346,10 @@ pub struct CommunityStragglerSink;
 impl vector_core::community::transport::CommunityIngestSink for CommunityStragglerSink {
     fn ingest_stragglers(&self, events: Vec<Event>) {
         // Called from inside the transport's background drain task (always within the tokio runtime).
-        // SessionGuard so a mid-flight account swap doesn't fold the previous account's stragglers
-        // into the new account's state.
+        // SessionGuard captured BEFORE the spawn boundary (a capture inside the task would validate
+        // against whatever generation is current by then) — re-checked per event across the fold loop.
+        let session = vector_core::state::SessionGuard::capture();
         tokio::spawn(async move {
-            let session = vector_core::state::SessionGuard::capture();
             for event in events {
                 if !session.is_valid() {
                     return;

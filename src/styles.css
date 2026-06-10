@@ -4945,6 +4945,147 @@ img.emoji-img-loading {
    Emoji pack preview card (in-chat, triggered by naddr paste)
    ============================================================================ */
 
+/* ── In-chat Community invite card ──
+   A pasted invite link renders as this card instead of a raw URL + generic OG
+   preview (the link itself is stripped from the message body). Skeleton-loads,
+   then pops to the resolved community + a Join / Open action. */
+.community-invite-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 12px;
+  background-color: rgba(10, 10, 10, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  max-width: 420px;
+}
+
+.community-invite-card.cic-ready {
+  animation: cic-pop-in 0.28s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes cic-pop-in {
+  0%   { transform: scale(0.97); opacity: 0.6; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.cic-eyebrow {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.cic-body {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.cic-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+  background-color: rgba(255, 255, 255, 0.05);
+}
+
+.community-invite-card.is-invalid .cic-icon {
+  filter: grayscale(1);
+  opacity: 0.5;
+}
+
+.cic-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cic-name {
+  font-weight: 600;
+  font-size: 14px;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.community-invite-card.is-invalid .cic-name {
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.cic-desc {
+  font-size: 11px;
+  line-height: 1.35;
+  color: rgba(255, 255, 255, 0.55);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+
+.cic-btn {
+  flex-shrink: 0;
+  border: none;
+  border-radius: 8px;
+  padding: 9px 18px;
+  font-weight: 600;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  color: #0e0e0e;
+  background-color: var(--accent-color, #59fcb3);
+  transition: filter 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.cic-btn:hover:not(:disabled) {
+  filter: brightness(1.1);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--accent-color, #59fcb3) 45%, transparent);
+}
+
+.cic-btn:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.cic-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.cic-btn.cic-btn-open {
+  background-color: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  border: 1px solid color-mix(in srgb, var(--accent-color, #59fcb3) 60%, transparent);
+}
+
+.cic-btn.cic-btn-open:hover:not(:disabled) {
+  background-color: color-mix(in srgb, var(--accent-color, #59fcb3) 18%, transparent);
+  box-shadow: none;
+}
+
+/* Loading skeleton shapes (shimmer via the shared .pack-skel base) */
+.cic-skel-name {
+  display: block;
+  height: 14px;
+  width: 55%;
+  border-radius: 4px;
+}
+
+.cic-skel-desc {
+  display: block;
+  height: 11px;
+  width: 80%;
+  border-radius: 4px;
+  margin-top: 4px;
+}
+
 .emoji-pack-preview {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 140px;

@@ -2051,7 +2051,7 @@ async function previewAndJoinCommunityLink(url) {
         const descHtml = preview.description ? `<br><br><span style="opacity:0.8;">${escapeHtml(preview.description)}</span>` : '';
         // Show the community's own logo when it has one, else the same placeholder the chat list
         // uses for logo-less communities (group-placeholder.svg).
-        let iconSrc = 'group-placeholder.svg';
+        let iconSrc = 'icons/group-placeholder.svg';
         if (preview.icon) {
             try {
                 const path = await invoke('cache_invite_logo', { image: preview.icon });
@@ -2087,6 +2087,237 @@ async function previewAndJoinCommunityLink(url) {
 /** Detect a Vector community invite URL (or bare fragment) in pasted/typed text. */
 function isCommunityInviteUrl(text) {
     return typeof text === 'string' && /vectorapp\.io\/invite\/?#|^#?[A-Za-z0-9_-]{40,}$/.test(text.trim()) && text.includes('#');
+}
+
+// ============================================================================
+// In-chat Community Invite cards
+// ============================================================================
+
+// Matches a shareable Community invite link in either form (https share URL or vector://
+// deep link). The base64url fragment is the entire invite payload — it keys the preview
+// cache and reconstructs a canonical URL for the backend.
+const COMMUNITY_INVITE_URL_REGEX = /(?:https?:\/\/(?:www\.)?vectorapp\.io\/invite\/?|vector:\/\/invite\/?)#([A-Za-z0-9_-]{20,})/gi;
+
+/** Strip Community invite links from `text` — the invite card carries the affordance. */
+function stripCommunityInviteUrls(text) {
+    if (!text) return text;
+    COMMUNITY_INVITE_URL_REGEX.lastIndex = 0;
+    if (!COMMUNITY_INVITE_URL_REGEX.test(text)) return text;
+    return text
+        .replace(COMMUNITY_INVITE_URL_REGEX, '')
+        .replace(/[ \t]{2,}/g, ' ')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+}
+
+/** Chat-list / reply snippets: swap raw invite URLs for a friendly tag. */
+function replaceCommunityInviteUrlsForPreview(text) {
+    if (!text) return text;
+    COMMUNITY_INVITE_URL_REGEX.lastIndex = 0;
+    return text.replace(COMMUNITY_INVITE_URL_REGEX, 'Community Invite');
+}
+
+// Resolved previews keyed by URL fragment: { state: 'ok', info, iconSrc, ts } or
+// { state: 'err', error, ts } or { state: 'loading', promise }. Errors expire so a chat
+// reopen after a slow relay retries instead of inheriting a stale "Invite Unavailable".
+// Ok entries expire too (non-members track metadata edits via the backend's live fold) —
+// EXCEPT when the community is joined: then the entry only supplies the immutable
+// token→community mapping and the card reads display data live from the chat itself.
+const _invitePreviewCache = new Map();
+const INVITE_PREVIEW_ERR_TTL_MS = 10_000;
+const INVITE_PREVIEW_OK_TTL_MS = 300_000;
+const INVITE_PREVIEW_CACHE_MAX = 64;
+// Each distinct card costs a relay fetch — cap per message.
+const INVITE_CARDS_PER_MSG = 3;
+
+/**
+ * Find every Community invite link inside `text` and append a Join/Open card per unique
+ * invite under `target`. Cards build instantly in a skeleton state and fill when the
+ * backend preview resolves — which also warms the join preload cache, so an eventual
+ * Join opens populated (same path the deep-link flow uses).
+ */
+function renderCommunityInvitePreviews(target, text) {
+    if (!text) return;
+    COMMUNITY_INVITE_URL_REGEX.lastIndex = 0;
+    const seen = new Set();
+    let match;
+    while ((match = COMMUNITY_INVITE_URL_REGEX.exec(text)) !== null) {
+        const frag = match[1];
+        if (seen.has(frag)) continue;
+        if (seen.size >= INVITE_CARDS_PER_MSG) break;
+        seen.add(frag);
+        target.appendChild(_buildCommunityInviteCard(frag));
+    }
+}
+
+function _buildCommunityInviteCard(frag) {
+    const card = document.createElement('div');
+    card.className = 'community-invite-card is-loading';
+
+    const eyebrow = document.createElement('div');
+    eyebrow.className = 'cic-eyebrow';
+    eyebrow.textContent = 'Community Invite';
+    card.appendChild(eyebrow);
+
+    const body = document.createElement('div');
+    body.className = 'cic-body';
+    card.appendChild(body);
+
+    const icon = document.createElement('img');
+    icon.className = 'cic-icon';
+    icon.src = 'icons/group-placeholder.svg';
+    body.appendChild(icon);
+
+    const meta = document.createElement('div');
+    meta.className = 'cic-meta';
+    body.appendChild(meta);
+
+    const name = document.createElement('div');
+    name.className = 'cic-name';
+    name.innerHTML = '<span class="pack-skel cic-skel-name"></span>';
+    meta.appendChild(name);
+
+    const desc = document.createElement('div');
+    desc.className = 'cic-desc';
+    desc.innerHTML = '<span class="pack-skel cic-skel-desc"></span>';
+    meta.appendChild(desc);
+
+    const btn = document.createElement('button');
+    btn.className = 'cic-btn';
+    btn.type = 'button';
+    btn.textContent = 'Join';
+    btn.disabled = true;
+    body.appendChild(btn);
+
+    // Re-renders (scroll, reactions landing) hit the settled cache — fill instantly,
+    // no pop animation; only a genuinely fresh resolve animates in.
+    const settled = _invitePreviewCache.get(frag);
+    const animate = !(settled && settled.state !== 'loading');
+    _resolveCommunityInvitePreview(frag).then((res) => {
+        _fillCommunityInviteCard(card, frag, res, { icon, name, desc, btn }, animate);
+    });
+    return card;
+}
+
+function _resolveCommunityInvitePreview(frag) {
+    const cached = _invitePreviewCache.get(frag);
+    if (cached) {
+        if (cached.state === 'loading') return cached.promise;
+        if (cached.state === 'ok') {
+            const joined = cached.info.community_id
+                && arrChats.some(c => c.metadata?.custom_fields?.community_id === cached.info.community_id);
+            if (joined || (Date.now() - cached.ts) < INVITE_PREVIEW_OK_TTL_MS) return Promise.resolve(cached);
+        } else if (Date.now() - cached.ts < INVITE_PREVIEW_ERR_TTL_MS) {
+            return Promise.resolve(cached);
+        }
+    }
+    const prior = (cached && cached.state === 'ok') ? cached : null;
+    const promise = (async () => {
+        let entry;
+        try {
+            const info = await invoke('preview_public_invite', { url: `https://vectorapp.io/invite#${frag}` });
+            // Decrypt + disk-cache the logo up-front; the card binds the local asset path
+            // (the frontend never fetches the remote blob itself).
+            let iconSrc = '';
+            if (info.icon) {
+                try {
+                    const path = await invoke('cache_invite_logo', { image: info.icon });
+                    if (path) iconSrc = convertFileSrc(path);
+                } catch (e) { console.debug('invite logo decrypt failed, using placeholder', e); }
+            }
+            entry = { state: 'ok', info, iconSrc, ts: Date.now() };
+        } catch (e) {
+            // A failed refresh must not downgrade a previously-good preview.
+            entry = prior ? { ...prior, ts: Date.now() } : { state: 'err', error: String(e), ts: Date.now() };
+        }
+        if (_invitePreviewCache.size >= INVITE_PREVIEW_CACHE_MAX) {
+            const oldest = _invitePreviewCache.keys().next().value;
+            if (oldest !== undefined) _invitePreviewCache.delete(oldest);
+        }
+        _invitePreviewCache.set(frag, entry);
+        return entry;
+    })();
+    _invitePreviewCache.set(frag, { state: 'loading', promise });
+    return promise;
+}
+
+function _fillCommunityInviteCard(card, frag, res, els, animate) {
+    card.classList.remove('is-loading');
+    if (res.state !== 'ok') {
+        card.classList.add('is-invalid');
+        els.name.textContent = 'Invite Unavailable';
+        els.desc.textContent = 'This invite could not be loaded — it may be revoked or expired.';
+        els.btn.style.display = 'none';
+        return;
+    }
+    // Already a member → render from the chat we're syncing, NOT the fetched preview: the
+    // community's own sync is the single source of truth, so the card can never diverge.
+    const joined = res.info.community_id
+        ? arrChats.find(c => c.metadata?.custom_fields?.community_id === res.info.community_id)
+        : null;
+    const name = (joined && joined.metadata?.custom_fields?.name) || res.info.name || 'Community';
+    const desc = joined ? (joined.metadata?.custom_fields?.description || '') : (res.info.description || '');
+    els.name.textContent = name;
+    if (desc) {
+        els.desc.textContent = desc;
+    } else {
+        els.desc.remove();
+    }
+    const localIcon = joined?.metadata?.avatar_cached;
+    if (localIcon) {
+        els.icon.src = convertFileSrc(localIcon);
+    } else if (res.iconSrc) {
+        els.icon.src = res.iconSrc;
+    }
+    _setInviteCardAction(els.btn, frag, res.info.community_id);
+    if (animate) card.classList.add('cic-ready');
+}
+
+/** Point the card's button at the right action: Open when already a member, else Join. */
+function _setInviteCardAction(btn, frag, communityId) {
+    const joined = communityId && arrChats.find(c => c.metadata?.custom_fields?.community_id === communityId);
+    btn.disabled = false;
+    if (joined) {
+        btn.textContent = 'Open';
+        btn.classList.add('cic-btn-open');
+        btn.onclick = (e) => { e.stopPropagation(); openChat(joined.id); };
+    } else {
+        btn.textContent = 'Join';
+        btn.classList.remove('cic-btn-open');
+        btn.onclick = (e) => { e.stopPropagation(); _joinCommunityFromCard(frag, btn, communityId); };
+    }
+}
+
+async function _joinCommunityFromCard(frag, btn, communityId) {
+    // Shares the deep-link flow's guard: one join at a time, app-wide.
+    if (_communityJoinInFlight) return;
+    _communityJoinInFlight = true;
+    btn.disabled = true;
+    btn.textContent = 'Joining…';
+    btn.classList.add('is-joining');
+    try {
+        const summary = await invoke('accept_public_invite', { url: `https://vectorapp.io/invite#${frag}` });
+        // Await the first-page sync so the chat lands populated + in the right list slot.
+        const channelId = await surfaceCommunitySummary(summary);
+        btn.classList.remove('is-joining');
+        if (channelId) {
+            btn.textContent = 'Open';
+            btn.classList.add('cic-btn-open');
+            btn.disabled = false;
+            btn.onclick = (e) => { e.stopPropagation(); openChat(channelId); };
+            // Joining IS the navigation intent — land in the new community, same as hitting Open.
+            openChat(channelId);
+        } else {
+            _setInviteCardAction(btn, frag, communityId);
+        }
+    } catch (e) {
+        btn.classList.remove('is-joining');
+        btn.disabled = false;
+        btn.textContent = 'Join';
+        popupConfirm('Failed to Join', escapeHtml(String(e)), true, '', 'vector_warning.svg');
+    } finally {
+        _communityJoinInFlight = false;
+    }
 }
 
 /**

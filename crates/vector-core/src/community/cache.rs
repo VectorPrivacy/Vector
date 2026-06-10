@@ -106,6 +106,16 @@ pub fn clear_channel_floors(channel_id: &str) {
     cache.oldest_cursor.remove(channel_id);
 }
 
+/// Drop ALL of a channel's sync state (floors + the latest-page `since` cursor) — community
+/// teardown. A surviving `since` cursor makes a same-session REJOIN sync "since I left"
+/// instead of cold, so the rejoined chat opens empty despite plenty of history.
+pub fn clear_channel_sync_state(channel_id: &str) {
+    let mut cache = locked();
+    cache.history_start.remove(channel_id);
+    cache.oldest_cursor.remove(channel_id);
+    cache.newest_cursor.remove(channel_id);
+}
+
 // ── Invite preload ──────────────────────────────────────────────────────────
 // Warmed-ahead-of-Join state: the primary channel's first page, fetched at invite-receive /
 // public-preview time so a Join can open to a populated chat instead of a ~10s sync. RAM-only —
@@ -165,10 +175,19 @@ pub fn begin_preload(community_id: &str) {
 pub fn finish_preload(community_id: &str, page: Vec<Event>) {
     let generation = crate::state::current_session_generation();
     let mut map = preload_locked();
-    if let Some(p) = map.get_mut(community_id) {
-        p.state = PreloadState::Ready(page);
-        p.fetched_at = Instant::now();
-        p.generation = generation;
+    // A warm-up begun under a previous session must not be re-stamped into this one —
+    // drop it instead (the new account fetches its own page if it ever joins).
+    let stale = match map.get_mut(community_id) {
+        Some(p) if p.generation == generation => {
+            p.state = PreloadState::Ready(page);
+            p.fetched_at = Instant::now();
+            false
+        }
+        Some(_) => true,
+        None => false,
+    };
+    if stale {
+        map.remove(community_id);
     }
 }
 

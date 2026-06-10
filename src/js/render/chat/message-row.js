@@ -243,6 +243,11 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         renderEmojiPackPreviews(content, msg.content);
     }
 
+    // ---- Community invite card (vectorapp.io/invite share links) -----------
+    if (msg.content && typeof renderCommunityInvitePreviews === 'function') {
+        renderCommunityInvitePreviews(content, msg.content);
+    }
+
     // ---- Nostr profile preview ---------------------------------------------
     if (npubInfoEarly) {
         const isOnlyNpub = msg.content.trim() === npubInfoEarly.originalMatch;
@@ -536,6 +541,10 @@ function _dmsgBuildText(msg, displayContent, fEmojiOnly, isGroupChat, currentCha
     let textBody = (displayContent || '').trim();
     if (typeof stripEmojiPackNaddrs === 'function') {
         textBody = stripEmojiPackNaddrs(textBody);
+    }
+    // Community invite links likewise render as their own card.
+    if (typeof stripCommunityInviteUrls === 'function') {
+        textBody = stripCommunityInviteUrls(textBody);
     }
     // Defensive: displayContent can be null/undefined for attachment-only messages.
     span.innerHTML = parseMarkdown(textBody);
@@ -1028,6 +1037,12 @@ function _dmsgBuildLinkPreview(msg) {
     if (msg.preview_metadata && isPackShareUrl(msg.preview_metadata.og_url)) {
         return null;
     }
+    // Community invite links likewise render their own dedicated card.
+    const isInviteShareUrl = (url) => typeof url === 'string'
+        && /https?:\/\/(?:www\.)?vectorapp\.io\/invite(?:\/|$|#|\?)/i.test(url);
+    if (msg.preview_metadata && isInviteShareUrl(msg.preview_metadata.og_url)) {
+        return null;
+    }
 
     const hasMetadata = msg.preview_metadata && (
         msg.preview_metadata.og_image
@@ -1044,7 +1059,8 @@ function _dmsgBuildLinkPreview(msg) {
             // refs only has no "real" link to preview.
             const contentForPreview = msg.content
                 .replace(/<https?:\/\/[^\s>]+>/g, '')
-                .replace(/(?:https?:\/\/(?:www\.)?vectorapp\.io\/emojis\/pack\/|nostr:)?naddr1[ac-hj-np-z02-9]{20,}(?:\.html)?\/?/gi, '');
+                .replace(/(?:https?:\/\/(?:www\.)?vectorapp\.io\/emojis\/pack\/|nostr:)?naddr1[ac-hj-np-z02-9]{20,}(?:\.html)?\/?/gi, '')
+                .replace(/(?:https?:\/\/(?:www\.)?vectorapp\.io\/invite\/?|vector:\/\/invite\/?)#[A-Za-z0-9_-]+/gi, '');
             if (contentForPreview.includes('https') && !isImageUrl(msg.content)) {
                 // Dedupe — every re-render (e.g., reactions update) of a
                 // metadata-less message would otherwise re-fire this invoke.

@@ -199,6 +199,10 @@ pub async fn kick_community_member(community_id: String, npub: String) -> Result
     let channel_id = channel.id.to_hex();
     let transport = LiveTransport::with_timeout(Duration::from_secs(12));
     let kick_id = vector_core::community::service::publish_kick(&transport, &community, channel, &hex).await?;
+    // The publish above is network-bound (12s timeout) — re-validate before the local write.
+    if !session.is_valid() {
+        return Ok(());
+    }
     // We don't process our OWN kick, so record it locally as a "Member Left" — folds the target out of our
     // member list durably (kick already stripped their grant, so the roster re-assert won't resurrect them)
     // and renders "X left" in chat, matching what peers see on receipt. The inner id dedups with the echo.
@@ -429,7 +433,11 @@ pub(crate) async fn teardown_community_local(community_id: &str, channel_ids: &[
     }
     for cid in channel_ids {
         let _ = vector_core::db::chats::delete_chat(cid);
+        // Reset the RAM sync state to cold — a surviving `since` cursor would make a
+        // same-session rejoin fetch only "new since I left" (empty chat despite history).
+        vector_core::community::cache::clear_channel_sync_state(cid);
     }
+    vector_core::community::cache::abort_preload(community_id);
 
     // Drop the left community's now-orphaned relays from the pool (bounds growth).
     prune_orphaned_community_relays(&left_relays).await;
@@ -439,7 +447,7 @@ pub(crate) async fn teardown_community_local(community_id: &str, channel_ids: &[
 /// else needs. Three protections, any of which keeps a relay:
 ///   1. another community still lists it (`still_needed`);
 ///   2. the user reads/writes it — their own primary/imported relay, or a relay that's BOTH theirs
-///      and a community's (READ/WRITE flag set; community relays are PING-only — see
+///      and a community's (READ/WRITE flag set; community relays are GOSSIP|PING — see
 ///      `community_relay_options`). DM recipient inbox relays are added READ+WRITE too, so this
 ///      also shields any transient chat relay;
 ///   3. it's a NIP-65 GOSSIP relay (the pool itself refuses to remove those).
@@ -2227,11 +2235,11 @@ pub async fn list_community_invites() -> Result<Vec<vector_core::db::community::
     vector_core::db::community::list_pending_invites()
 }
 
-/// Ingest a warmed preload page into STATE + DB so a just-accepted community opens populated.
-/// Mirrors the sync's persistence (`process_channel_batch` → save outcomes) MINUS the UI emits —
-/// the chat isn't open yet, so the frontend reads this from STATE on open; the background sync
-/// trues it up (presence/system events included). Seeds the newest cursor so that sync only pulls
-/// genuinely-new events.
+/// Ingest a warmed preload page into STATE + DB so a just-accepted community opens populated,
+/// emitting message_new/update so the (optimistic, locked) chat row paints + unlocks NOW.
+/// Presence/membership outcomes are deliberately left to the background true-up sync — it
+/// re-fetches the page and applies them deduped, which is why the newest cursor is NOT
+/// seeded here (a seeded cursor would skip that re-fetch and silently drop them).
 /// Returns `true` if it painted ≥1 message (so the caller can flag the summary `preloaded` and the
 /// frontend opens immediately instead of awaiting the first sync).
 async fn promote_preloaded_page(community: &vector_core::community::Community, page: Vec<nostr_sdk::Event>) -> bool {
@@ -2277,16 +2285,6 @@ async fn promote_preloaded_page(community: &vector_core::community::Community, p
             // the same page and applies them, deduped) — promotion only paints the message content.
             _ => {}
         }
-    }
-    // Authenticated wire times only (see sync_community_channel): a junk event with a
-    // forged far-future created_at must not seed the since-floor.
-    if let Some(newest) = page
-        .iter()
-        .filter(|e| vector_core::community::inbound::event_authenticates(e, &channel))
-        .map(|e| e.created_at.as_secs())
-        .max()
-    {
-        vector_core::community::cache::advance_newest_cursor(&channel_id, newest);
     }
     painted > 0
 }
@@ -2338,10 +2336,13 @@ pub async fn accept_community_invite(community_id: String) -> Result<CommunitySu
     if let Some(primary) = community.channels.first() {
         if let Ok(inner) = vector_core::community::service::build_presence(primary, true, None).await {
             if let Some(my_npub) = vector_core::my_public_key().and_then(|pk| pk.to_bech32().ok()) {
-                apply_community_presence(
-                    &primary.id.to_hex(), &my_npub, true,
-                    &inner.id.to_hex(), inner.created_at.as_secs(), None, None,
-                ).await;
+                // Presence signing can be slow (bunker) — re-validate before the local write.
+                if session.is_valid() {
+                    apply_community_presence(
+                        &primary.id.to_hex(), &my_npub, true,
+                        &inner.id.to_hex(), inner.created_at.as_secs(), None, None,
+                    ).await;
+                }
             }
             let bg_pub = vector_core::state::SessionGuard::capture();
             let community_pub = community.clone();
@@ -2603,12 +2604,38 @@ pub async fn create_public_invite(
     Ok(url)
 }
 
+/// Preview payload for the GUI: the bundle's public preview plus the community id, so a
+/// rendered invite (chat card, join dialog) can tell "already joined" from "new".
+#[derive(serde::Serialize)]
+pub struct PublicInvitePreviewInfo {
+    #[serde(flatten)]
+    pub preview: PublicInvitePreview,
+    pub community_id: String,
+}
+
 /// Fetch + decrypt the preview for a public-invite URL (shown before joining). Read-only.
 #[tauri::command]
-pub async fn preview_public_invite(url: String) -> Result<PublicInvitePreview, String> {
+pub async fn preview_public_invite(url: String) -> Result<PublicInvitePreviewInfo, String> {
     let (relays, token) = parse_invite_url(&url).map_err(|e| e.to_string())?;
     let transport = LiveTransport::with_timeout(Duration::from_secs(12));
     let bundle = service::fetch_public_invite(&transport, &relays, &token).await?;
+    let community_id = bundle.join.community_id.clone();
+
+    // Already a member → local state IS the preview (the community's own sync keeps it fresh).
+    // No fold, no preload, no snapshot: one source of truth, zero divergence.
+    if let Ok(id_bytes) = hex_to_id32(&community_id) {
+        if let Ok(Some(local)) = vector_core::db::community::load_community(&CommunityId(id_bytes)) {
+            return Ok(PublicInvitePreviewInfo {
+                preview: PublicInvitePreview {
+                    name: local.name.clone(),
+                    description: local.description.clone(),
+                    icon: local.icon.clone(),
+                },
+                community_id,
+            });
+        }
+    }
+
     // Warm the community's first page in the background while the user reads the preview, so an
     // Accept opens populated. RAM-only + best-effort; promotion on Join re-validates freshness.
     let invite_warm = bundle.join.clone();
@@ -2619,7 +2646,10 @@ pub async fn preview_public_invite(url: String) -> Result<PublicInvitePreview, S
         }
         vector_core::community::service::preload_community(&invite_warm).await;
     });
-    Ok(bundle.preview)
+    // Not a member: fold the live plane for the LATEST display metadata — the bundle's
+    // mint-time snapshot is only the fallback.
+    let preview = service::latest_invite_preview(&transport, &bundle).await;
+    Ok(PublicInvitePreviewInfo { preview, community_id })
 }
 
 /// Accept a public-invite URL: fetch the bundle, join as a member (expiry + id-collision
@@ -2659,10 +2689,13 @@ pub async fn accept_public_invite(url: String) -> Result<CommunitySummary, Strin
                     Some((b, l)) => (Some(b.as_str()), l.as_deref()),
                     None => (None, None),
                 };
-                apply_community_presence(
-                    &primary.id.to_hex(), &my_npub, true,
-                    &inner.id.to_hex(), inner.created_at.as_secs(), by, label,
-                ).await;
+                // Presence signing can be slow (bunker) — re-validate before the local write.
+                if session.is_valid() {
+                    apply_community_presence(
+                        &primary.id.to_hex(), &my_npub, true,
+                        &inner.id.to_hex(), inner.created_at.as_secs(), by, label,
+                    ).await;
+                }
             }
             let bg_pub = vector_core::state::SessionGuard::capture();
             let community_pub = community.clone();
@@ -2692,6 +2725,18 @@ pub async fn accept_public_invite(url: String) -> Result<CommunitySummary, Strin
             .ok()
             .flatten()
             .unwrap_or(community_bg);
+        // Public bans mint no rekey — fold control + check the banlist HERE too (not only the
+        // frontend-fired first sync), so a banned link-holder tears down even if that sync never runs.
+        let _ = service::fetch_and_apply_control(&bt, &community_bg).await;
+        let community_bg = vector_core::db::community::load_community(&community_bg.id)
+            .ok()
+            .flatten()
+            .unwrap_or(community_bg);
+        if service::am_i_banned(&community_bg) {
+            self_remove_from_community(&community_bg.id.to_hex(), false).await;
+            return;
+        }
+        if !bg.is_valid() { return; }
         vector_core::community::list::add_membership(&community_bg);
         crate::services::subscription_handler::refresh_community_subscription().await;
     });
