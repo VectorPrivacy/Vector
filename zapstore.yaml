@@ -5,7 +5,12 @@ description: |
     Privacy by Principle. No KYC, no metadata, no compromises.
 
     - End-to-end encrypted DMs using NIP-17
-    - Scalable encrypted group chats using the Marmot protocol (MLS)
+    - Encrypted Communities powered by the Concord protocol: channels, roles, and moderation with zero metadata leakage
+    - Built-in Tor integration
+    - Multi-Device and Multi-Account support
+    - Remote signing (NIP-46 bunker) login
+    - Public community invite links
+    - Custom emoji packs and chat wallpapers
     - Voice messaging
     - Private local AI for multilingual translations
     - Zero metadata leakage
@@ -22,7 +27,9 @@ tags:
     - end-to-end-encryption
     - decentralized
     - security
-    - MLS
+    - tor
+    - communities
+    - concord
     - E2EE
     - freedom-tech
     - cryptography
@@ -46,8 +53,11 @@ supported_nips:
     - "17"
     - "24"
     - "25"
+    - "30"
     - "38"
-    - "60"
+    - "44"
+    - "46"
+    - "59"
     - "65"
     - "77"
     - "78"
