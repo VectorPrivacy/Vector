@@ -1,5 +1,5 @@
 repository: https://github.com/VectorPrivacy/Vector
-match: Vector\.apk$
+match: Vector-arm64-v8a\.apk$
 name: Vector
 description: |
     Privacy by Principle. No KYC, no metadata, no compromises.
