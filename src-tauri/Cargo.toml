@@ -57,7 +57,7 @@ tauri-plugin-dialog = "2.6.0"
 tauri-plugin-fs = "2.4.5"
 tauri-plugin-clipboard-manager = "2.3.2"
 tauri-plugin-process = "2.3.1"
-tauri-plugin-deep-link = "2.4.7"
+tauri-plugin-deep-link = "2.4.9"
 image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp", "tiff", "ico"] }
 # libwebp bindings — `image-webp` 0.2.x mishandles ANIM disposal/blend
 # composition (transparent frames flicker as previous-frame residue).

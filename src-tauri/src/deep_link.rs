@@ -213,3 +213,39 @@ pub fn get_pending_deep_link() -> Option<DeepLinkAction> {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The community-invite catch matches `ends_with("/invite")` BEFORE the
+    // path parsers strip the fragment — both URL shapes must survive intact.
+    #[test]
+    fn invite_fragment_parses_from_both_url_shapes() {
+        for url in [
+            "vector://invite#AgEs3q1MZz0",
+            "https://vectorapp.io/invite#AgEs3q1MZz0",
+        ] {
+            let action = parse_deep_link(url).expect(url);
+            assert_eq!(action.action_type, "community_invite");
+            assert_eq!(action.target, url, "join flow re-parses the full URL");
+        }
+    }
+
+    #[test]
+    fn invite_without_fragment_is_not_an_invite() {
+        assert!(parse_deep_link("vector://invite").is_none());
+        assert!(parse_deep_link("vector://invite#").is_none());
+    }
+
+    #[test]
+    fn fragment_on_non_invite_paths_does_not_hijack() {
+        // A fragment elsewhere must not classify as an invite, and the
+        // legitimate profile shape must keep working.
+        assert!(parse_deep_link("vector://profile/notanpub#x").is_none());
+        let npub = format!("npub1{}", "q".repeat(58));
+        let action = parse_deep_link(&format!("vector://profile/{npub}")).unwrap();
+        assert_eq!(action.action_type, "profile");
+        assert_eq!(action.target, npub);
+    }
+}

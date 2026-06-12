@@ -463,6 +463,32 @@ pub fn run() {
                     deep_link::handle_deep_link(&handle_for_deep_link, urls);
                 });
             }
+
+            // Windows/Linux receive deep links as CLI args, not events.
+            // Warm start (app already running) is covered by the single-instance
+            // plugin above; these two cover everything else.
+            #[cfg(any(windows, target_os = "linux"))]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+
+                // MSI installs (Windows) and AppImages (Linux) never register the
+                // vector:// scheme at install time — only NSIS and deb/rpm do.
+                // Runtime registration is user-scoped (HKCU / ~/.local .desktop),
+                // needs no admin, and self-heals on every boot (e.g. a moved AppImage).
+                if let Err(e) = app.deep_link().register_all() {
+                    println!("[DeepLink] Runtime scheme registration failed: {e}");
+                }
+
+                // Cold start: the OS launches us with the URL in argv and no event
+                // ever fires for it.
+                match app.deep_link().get_current() {
+                    Ok(Some(urls)) if !urls.is_empty() => {
+                        let urls: Vec<String> = urls.iter().map(|u| u.to_string()).collect();
+                        deep_link::handle_deep_link(&handle, urls);
+                    }
+                    _ => {}
+                }
+            }
             
             Ok(())
         })
