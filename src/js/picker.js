@@ -3848,6 +3848,7 @@ function renderEmojiPanel() {
         } else {
             const span = document.createElement('span');
             span.textContent = item.emoji;
+            span.dataset.emoji = item.emoji;
             span.dataset.emojiTooltip = stockEmojiTitle(item);
             recentsFragment.appendChild(span);
         }
@@ -3891,6 +3892,7 @@ function renderAllEmojisGrid(allGrid) {
     arrEmojis.forEach((emoji, i) => {
         const span = document.createElement('span');
         span.textContent = emoji.emoji;
+        span.dataset.emoji = emoji.emoji;
         span.dataset.emojiTooltip = stockEmojiTitle(emoji);
         allFragment.appendChild(span);
 
@@ -3904,7 +3906,7 @@ function renderAllEmojisGrid(allGrid) {
     allGrid.appendChild(allFragment);
 
     // Build an array of all emoji spans (excluding non-emoji children) for slicing
-    const allSpans = Array.from(allGrid.querySelectorAll('span[title]'));
+    const allSpans = Array.from(allGrid.querySelectorAll('span[data-emoji]'));
 
     // Set up IntersectionObserver on the scroll container
     const scrollContainer = document.querySelector('.emoji-main');
@@ -3946,6 +3948,7 @@ function loadFavoritesSection() {
     arrFavoriteEmojis.slice(0, 24).forEach(emoji => {
         const span = document.createElement('span');
         span.textContent = emoji.emoji;
+        span.dataset.emoji = emoji.emoji;
         span.dataset.emojiTooltip = stockEmojiTitle(emoji);
         favoritesFragment.appendChild(span);
     });
@@ -4063,6 +4066,7 @@ emojiSearch.addEventListener('input', (e) => {
         const renderStockCell = (emoji) => {
             const span = document.createElement('span');
             span.textContent = emoji.emoji;
+            span.dataset.emoji = emoji.emoji;
             span.dataset.emojiTooltip = stockEmojiTitle(emoji);
             return span;
         };
@@ -4174,8 +4178,8 @@ picker.addEventListener('click', (e) => {
 // Emoji selection handler
 picker.addEventListener('click', (e) => {
     if (e.target.tagName === 'SPAN' && e.target.parentElement.classList.contains('emoji-grid')) {
-        const emoji = e.target.getAttribute('title');
-        const cEmoji = arrEmojis.find(e => e.name === emoji);
+        const char = e.target.dataset.emoji;
+        const cEmoji = arrEmojis.find(e => e.emoji === char);
 
         if (cEmoji) {
             // Register usage
@@ -4246,7 +4250,7 @@ emojiSearch.onkeydown = async (e) => {
         if (!emojiElement) return;
 
         // Register the selection in the emoji-dex
-        const cEmoji = arrEmojis.find(a => a.name === emojiElement.getAttribute('title'));
+        const cEmoji = arrEmojis.find(a => a.emoji === emojiElement.dataset.emoji);
         if (!cEmoji) return;
 
         cEmoji.used++;
