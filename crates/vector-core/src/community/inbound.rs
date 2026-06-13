@@ -136,6 +136,10 @@ pub enum IncomingEvent {
         event_id: String,
         created_at: u64,
     },
+    /// A typing indicator (3311): a member is composing in this channel. Ephemeral — never persisted
+    /// or folded; the caller feeds it to the live typing tracker and emits `typing-update`. `until` is
+    /// the unix-secs the typer should stop being shown as active (receiver-computed, ~30s out).
+    Typing { npub: String, until: u64 },
 }
 
 /// Open a single incoming wire event against `channel`, verify the binding, and apply
@@ -196,14 +200,16 @@ pub fn process_incoming(
         k if k == event_kind::COMMUNITY_PRESENCE => apply_presence(&opened, channel, my_pubkey),
         k if k == event_kind::COMMUNITY_KICK => apply_kick(&opened, channel, my_pubkey),
         k if k == event_kind::COMMUNITY_WEBXDC => apply_webxdc(&opened, my_pubkey),
+        k if k == event_kind::COMMUNITY_TYPING => apply_typing(&opened, my_pubkey),
         _ => None,
     };
     // Record the outer id in the shared ledger for NON-message sub-kinds, which have no inner row to
     // carry a `wrapper_event_id` (messages are covered atomically by that column on save). These are
     // idempotent on replay, so recording at process time is safe. Gives every sub-kind the same
-    // pre-decryption skip on a re-fetch that messages already get.
+    // pre-decryption skip on a re-fetch that messages already get. Typing is exempt — it's a frequent,
+    // realtime-only ephemeral signal; recording every keystroke ping would bloat the ledger for no gain.
     if let Some(ref evt) = outcome {
-        if !matches!(evt, IncomingEvent::NewMessage(_)) {
+        if !matches!(evt, IncomingEvent::NewMessage(_) | IncomingEvent::Typing { .. }) {
             let _ = crate::db::wrappers::save_processed_wrapper(
                 &outer_bytes, event.created_at.as_secs(), crate::db::wrappers::TRANSPORT_CONCORD,
             );
@@ -306,6 +312,27 @@ fn apply_webxdc(opened: &OpenedMessage, my_pubkey: &PublicKey) -> Option<Incomin
         node_addr,
         event_id: opened.message_id.to_hex(),
         created_at: opened.created_at.as_secs(),
+    })
+}
+
+/// Interpret a typing indicator (3311). Content is "typing"; the inner author is the typer (real-npub
+/// signed). Own-device echoes are dropped. `until` is computed receiver-side (now + 30s) rather than
+/// trusting the sender's clock — typing is realtime, so a fixed local window is both simpler and immune
+/// to a forged far-future timestamp pinning a phantom typer.
+fn apply_typing(opened: &OpenedMessage, my_pubkey: &PublicKey) -> Option<IncomingEvent> {
+    if opened.author == *my_pubkey {
+        return None;
+    }
+    if opened.content != "typing" {
+        return None;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Some(IncomingEvent::Typing {
+        npub: opened.author.to_bech32().ok()?,
+        until: now + 30,
     })
 }
 
@@ -1217,6 +1244,41 @@ mod tests {
         let no_addr = serde_json::json!({ "op": "ad", "topic": topic }).to_string();
         assert!(process_incoming(&mut state, &mk(&no_addr, 6), &c, &viewer.public_key()).is_none());
         assert!(process_incoming(&mut state, &mk("not json", 7), &c, &viewer.public_key()).is_none());
+    }
+
+    #[test]
+    fn typing_indicator_parses_drops_own_echo_and_rejects_garbage() {
+        use crate::stored_event::event_kind;
+        use nostr_sdk::ToBech32;
+        let mut state = ChatState::new();
+        let alice = Keys::generate();
+        let c = test_channel();
+        let viewer = Keys::generate();
+        let mk = |content: &str, ms: u64| {
+            let inner = build_inner_typed(alice.public_key(), &c.id, c.epoch, event_kind::COMMUNITY_TYPING, content, ms, None, &[])
+                .sign_with_keys(&alice).unwrap();
+            seal_with_signed_inner(&Keys::generate(), &inner, &c.key, &c.id, c.epoch).unwrap()
+        };
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+
+        // A "typing" signal from another member surfaces, attributed to the inner author, with a
+        // receiver-computed near-future `until` (not the sender's clock).
+        match process_incoming(&mut state, &mk("typing", 1), &c, &viewer.public_key()) {
+            Some(IncomingEvent::Typing { npub, until }) => {
+                assert_eq!(npub, alice.public_key().to_bech32().unwrap(), "typer is the inner author");
+                assert!(until >= now && until <= now + 31, "until is receiver-computed (~now + 30s)");
+            }
+            _ => panic!("expected a typing indicator"),
+        }
+
+        // Own echo is dropped — we never show ourselves typing.
+        assert!(
+            process_incoming(&mut state, &mk("typing", 2), &c, &alice.public_key()).is_none(),
+            "own typing signal must be ignored"
+        );
+
+        // Wrong content (a 3311 carrying anything but "typing") is rejected.
+        assert!(process_incoming(&mut state, &mk("nope", 3), &c, &viewer.public_key()).is_none());
     }
 
     #[test]

@@ -913,6 +913,9 @@ impl VectorCore {
                     let _ = crate::db::community::delete_community_retain_keys(community_id);
                     break;
                 }
+                inbound::IncomingEvent::Typing { .. } => {
+                    // Realtime-only ephemeral signal; never fetched in a sync batch. No-op.
+                }
             }
         }
         Ok((new, warnings))

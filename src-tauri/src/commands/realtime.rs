@@ -59,8 +59,8 @@ pub async fn start_typing(receiver: String) -> bool {
                 Err(_) => false,
             }
         }
-        // Non-DM (hex) targets have no ephemeral typing transport.
-        Err(_) => false,
+        // A hex target is a Community channel — publish an ephemeral typing signal over Concord.
+        Err(_) => crate::commands::community::send_community_typing(receiver.as_str()).await,
     }
 }
 

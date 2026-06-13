@@ -268,6 +268,30 @@ pub async fn publish_webxdc_signal<T: Transport + ?Sized>(
     Ok(())
 }
 
+/// Publish a typing indicator (3311) into a channel: an inner "typing" event signed by the member,
+/// sealed under the channel epoch key like presence. The Community-transport twin of the NIP-17
+/// typing rumor. Ephemeral — never persisted/folded; the latency-sensitive single-attempt path
+/// (`durable = false`), and callers treat failure as non-fatal (a dropped keystroke ping is harmless;
+/// the next one ~every few seconds covers it).
+pub async fn publish_typing_signal<T: Transport + ?Sized>(
+    transport: &T,
+    community: &Community,
+    channel: &Channel,
+) -> Result<(), String> {
+    let author_pk = crate::state::my_public_key().ok_or("not logged in")?;
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let unsigned = super::envelope::build_inner_typed(
+        author_pk, &channel.id, channel.epoch, event_kind::COMMUNITY_TYPING, "typing", ms, None, &[],
+    );
+    let signer = active_signer().await?;
+    let inner = unsigned.sign(&signer).await.map_err(|e| format!("Failed to sign typing signal: {e}"))?;
+    let _ = publish_signed_message(transport, community, channel, &inner, false).await?;
+    Ok(())
+}
+
 /// Persist an inbound WebXDC peer signal as a kind-30078 event row — the SAME shape the DM
 /// peer-advertisement handler writes (content `peer-advertisement`/`peer-left`, `reference_id`
 /// = topic, `webxdc-topic`/`webxdc-node-addr` tags) — so the miniapp layer's

@@ -243,15 +243,16 @@ pub fn seal_with_signed_inner(
     epoch: Epoch,
 ) -> Result<Event, EnvelopeError> {
     // Only the community append-plane sub-kinds (message/reaction/edit + cooperative delete +
-    // presence + cooperative kick + webxdc peer signal) may be sealed. Rekey (3303) and InviteBundle
-    // (3304) have their own carriers, so the contiguous 3300..=3302 range is admitted alongside the
-    // explicit 3305/3306/3309/3310.
+    // presence + cooperative kick + webxdc peer signal + typing) may be sealed. Rekey (3303) and
+    // InviteBundle (3304) have their own carriers, so the contiguous 3300..=3302 range is admitted
+    // alongside the explicit 3305/3306/3309/3310/3311.
     let inner_kind = inner.kind.as_u16();
     let allowed = (event_kind::COMMUNITY_MESSAGE..=event_kind::COMMUNITY_EDIT).contains(&inner_kind)
         || inner_kind == event_kind::COMMUNITY_DELETE
         || inner_kind == event_kind::COMMUNITY_PRESENCE
         || inner_kind == event_kind::COMMUNITY_KICK
-        || inner_kind == event_kind::COMMUNITY_WEBXDC;
+        || inner_kind == event_kind::COMMUNITY_WEBXDC
+        || inner_kind == event_kind::COMMUNITY_TYPING;
     if !allowed {
         return Err(EnvelopeError::KindMismatch {
             outer: event_kind::COMMUNITY_MESSAGE,

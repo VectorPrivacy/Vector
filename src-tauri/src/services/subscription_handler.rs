@@ -325,6 +325,18 @@ async fn handle_community_event(
                 }
             }
         }
+        Some(vector_core::community::inbound::IncomingEvent::Typing { npub, until }) => {
+            // Typing indicator (3311) → feed the live typing tracker + emit the same `typing-update`
+            // shape the DM path uses, so the (already group-aware) frontend renders it identically.
+            let typers = {
+                let mut state = crate::STATE.lock().await;
+                state.update_typing_and_get_active(&chat_id, &npub, until)
+            };
+            vector_core::emit_event(
+                "typing-update",
+                &serde_json::json!({ "conversation_id": &chat_id, "typers": typers }),
+            );
+        }
         Some(vector_core::community::inbound::IncomingEvent::Kicked { community_id })
         | Some(vector_core::community::inbound::IncomingEvent::SelfLeft { community_id }) => {
             // self-removal (cooperative kick of us, or a leave another device authored) → wipe local

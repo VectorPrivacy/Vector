@@ -688,6 +688,26 @@ pub struct CreatedCommunity {
     pub owner_npub: Option<String>,
 }
 
+/// Publish an ephemeral typing indicator into a Community channel. Best-effort fire-and-forget — a
+/// dropped keystroke ping is harmless. `channel_id` is the channel hex id (the open-chat id the
+/// frontend already hands `start_typing`). Returns false if it isn't a known Community channel.
+pub(crate) async fn send_community_typing(channel_id: &str) -> bool {
+    let session = vector_core::state::SessionGuard::capture();
+    let Ok(Some(community_id)) = vector_core::db::community::community_id_for_channel(channel_id) else {
+        return false;
+    };
+    let Ok(id_bytes) = hex_to_id32(&community_id) else { return false; };
+    let Ok(Some(community)) = vector_core::db::community::load_community(&CommunityId(id_bytes)) else {
+        return false;
+    };
+    let Some(channel) = community.channels.iter().find(|c| c.id.to_hex() == channel_id).cloned() else {
+        return false;
+    };
+    if !session.is_valid() { return false; }
+    let transport = LiveTransport::with_timeout(Duration::from_secs(8));
+    service::publish_typing_signal(&transport, &community, &channel).await.is_ok()
+}
+
 /// Post a text message to a Community channel (addressed by its `channel_id`). Drives the
 /// same pending → sent/failed lifecycle as DMs (via `TauriSendCallback`): an optimistic
 /// message renders instantly, then flips to sent on relay ACK or failed (with retry) on
@@ -1546,6 +1566,9 @@ async fn sync_community_channel_inner(
                 // presence) would orphan rows under a now-deleted chat. Teardown retains the held epoch keys.
                 self_remove_from_community(community_id, false).await;
                 return Ok(CommunitySyncResult { new_messages, reached_start: false });
+            }
+            IncomingEvent::Typing { .. } => {
+                // Realtime-only ephemeral signal; never fetched in a sync/straggler batch. No-op.
             }
         }
     }

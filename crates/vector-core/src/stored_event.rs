@@ -95,6 +95,10 @@ pub mod event_kind {
     /// row keyed by topic) so a member who reopens Vector mid-session still discovers the
     /// active players, exactly like the DM path.
     pub const COMMUNITY_WEBXDC: u16 = 3310;
+    /// Typing indicator: an inner event signed by the typing member, content "typing", sealed under
+    /// the channel epoch key like presence. Ephemeral and never persisted/folded — the Community-transport
+    /// twin of the NIP-17 typing rumor. Receivers show the typer for a short window, then it expires.
+    pub const COMMUNITY_TYPING: u16 = 3311;
 }
 
 /// System event types for group member changes (stored as integers).
