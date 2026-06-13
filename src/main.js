@@ -3203,10 +3203,11 @@ async function setupRustListeners() {
             const id = evt.payload.id;
             const newName = evt.payload.nickname || evt.payload.name || (id.substring(0, 12) + '…');
             document.querySelectorAll(`.dmsg-author[data-npub="${id}"]`).forEach(a => {
-                // Replace only the leading name text node — preserve appended bot/admin/owner badges.
-                const textNode = Array.from(a.childNodes).find(n => n.nodeType === Node.TEXT_NODE);
-                if (textNode) textNode.textContent = newName;
-                else a.insertBefore(document.createTextNode(newName), a.firstChild);
+                // .dmsg-author holds ONLY the name — bot/admin/owner badges are siblings in the parent
+                // .dmsg-header — so reset + re-twemojify the whole element. (Patching the first text node
+                // left the original twemoji <img>s behind, duplicating emoji as raw text + image.)
+                a.textContent = newName;
+                twemojify(a);
             });
             const newAvatarSrc = getProfileAvatarSrc(evt.payload);
             document.querySelectorAll(`.dmsg-avatar[data-npub="${id}"]`).forEach(av => {
