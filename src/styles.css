@@ -2702,6 +2702,16 @@ body.chat-bg-disabled .chat-messages::before {
 .system-event-text {
   cursor: pointer;
 }
+.system-event-avatar {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  object-fit: cover;
+  vertical-align: middle;
+  margin-right: 5px;
+  position: relative;
+  top: -1px;
+}
 .system-event-name {
   font-weight: 600;
 }

@@ -3173,6 +3173,13 @@ async function setupRustListeners() {
                         const nameEl = el.querySelector('.system-event-name');
                         if (nameEl) nameEl.textContent = systemEventName(evt.payload.id);
                         else el.textContent = m.content;
+                        // Swap the placeholder avatar for the now-cached one.
+                        const avatarEl = el.querySelector('.system-event-avatar');
+                        if (avatarEl) {
+                            const fresh = createAvatarImg(getProfileAvatarSrc(getProfile(evt.payload.id)), 16);
+                            fresh.classList.add('system-event-avatar');
+                            avatarEl.replaceWith(fresh);
+                        }
                     }
                 }
             }
@@ -6184,10 +6191,16 @@ function insertSystemEvent(content, parent = null, npub = null, eventType = null
         // (two bare flex items would collapse the gap between them).
         const inner = document.createElement('span');
         inner.className = 'system-event-text';
+        // Small avatar to the left of the name — same cached/asset-only source as chat rows
+        // (createAvatarImg falls back to a placeholder when no avatar is cached yet; the
+        // retro-resolver below swaps in the real one once the profile lands).
+        const avatar = createAvatarImg(getProfileAvatarSrc(getProfile(npub)), 16);
+        avatar.classList.add('system-event-avatar');
         const nameSpan = document.createElement('span');
         nameSpan.className = 'system-event-name';
         nameSpan.dataset.npub = npub;
         nameSpan.textContent = systemEventName(npub);
+        inner.appendChild(avatar);
         inner.appendChild(nameSpan);
         inner.appendChild(document.createTextNode(systemEventSuffix(eventType)));
         // Direct listener (system events are few — no delegation needed) so the affordance works
