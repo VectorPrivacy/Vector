@@ -62,8 +62,9 @@ pub async fn mark_as_read(chat_id: String, message_id: Option<String>) -> bool {
     };
 
     if result {
-        crate::commands::messaging::update_unread_counter(handle.clone()).await;
-
+        // Persist the new last_read to the DB FIRST — update_unread_counter now counts unread from
+        // the DB (not in-memory state), so the badge would otherwise be computed against the stale,
+        // pre-read last_read and never clear.
         if let Some(chat_id) = chat_id_for_save {
             let slim = {
                 let state = crate::STATE.lock().await;
@@ -75,6 +76,8 @@ pub async fn mark_as_read(chat_id: String, message_id: Option<String>) -> bool {
                 let _ = crate::db::chats::save_slim_chat(slim).await;
             }
         }
+
+        crate::commands::messaging::update_unread_counter(handle.clone()).await;
     }
 
     result

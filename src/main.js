@@ -2553,6 +2553,9 @@ function markAsRead(chat, message) {
     // If we have a chat, and we haven't already marked as read, update its last_read and notify backend
     if (chat && message.id !== chat.last_read) {
         chat.last_read = message.id;
+        // Optimistic clear so the badge drops instantly on read; the debounced DB refresh below
+        // is authoritative (corrects the rare case where a newer non-mine message remains unread).
+        chat.unread = 0;
 
         // Persist via backend using chat-based API
         invoke("mark_as_read", { chatId: chat.id, messageId: message.id });
