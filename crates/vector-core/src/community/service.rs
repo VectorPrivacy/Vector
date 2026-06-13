@@ -974,6 +974,17 @@ fn proven_owner_hex(community: &Community) -> Option<String> {
         .map(|pk| pk.to_hex())
 }
 
+/// Can `actor_hex` moderation-hide a message authored by `author_hex` in this community? True iff
+/// the actor holds MANAGE_MESSAGES and strictly outranks the author (the owner is unhideable). This
+/// is the SINGLE source of truth for moderation authority — both the publish gate
+/// (`publish_owner_hide`) and the UI affordance (`get_message_delete_options`) call it, so the
+/// button shown can never disagree with what the publish will actually allow.
+pub fn can_moderation_hide(community: &Community, actor_hex: &str, author_hex: &str) -> bool {
+    let owner = proven_owner_hex(community);
+    let roster = crate::db::community::get_community_roles(&community.id.to_hex()).unwrap_or_default();
+    roster.can_act_on_member(actor_hex, owner.as_deref(), author_hex, super::roles::Permissions::MANAGE_MESSAGES)
+}
+
 /// Rekey-plane authority with §6 banlist precedence: a positive authority
 /// lookup can never honor a banned identity. The banlist and the grant-revoke
 /// are SEPARATE editions a withholding relay can split — without this, a
@@ -1155,9 +1166,7 @@ pub async fn publish_owner_hide<T: Transport + ?Sized>(
         };
         let author = target_author
             .ok_or("can't resolve the target message's author to authorize the hide")?;
-        let owner = proven_owner_hex(community);
-        let roster = crate::db::community::get_community_roles(&community.id.to_hex()).unwrap_or_default();
-        if !roster.can_act_on_member(&me, owner.as_deref(), &author, super::roles::Permissions::MANAGE_MESSAGES) {
+        if !can_moderation_hide(community, &me, &author) {
             return Err("you can't hide a message from a member who outranks you (or the owner)".to_string());
         }
     }

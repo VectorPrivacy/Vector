@@ -165,7 +165,7 @@ pub async fn get_message_delete_options(message_id: String) -> Result<MessageDel
     use nostr_sdk::EventId;
     use vector_core::ChatType;
 
-    let (chat_type, chat_id, mine, has_attachments) = {
+    let (chat_type, chat_id, mine, has_attachments, author) = {
         let state = STATE.lock().await;
         match state.find_message(&message_id) {
             Some((chat, msg)) => (
@@ -173,24 +173,30 @@ pub async fn get_message_delete_options(message_id: String) -> Result<MessageDel
                 chat.id.clone(),
                 msg.mine,
                 msg.attachments.iter().any(|a| !a.url.is_empty()),
+                msg.npub.clone(),
             ),
             None => return Ok(MessageDeleteOptions::default()),
         }
     };
 
-    // Owner moderation-hide: on someone ELSE's Community message, offer "Hide" iff we're the
-    // proven owner of that community.
+    // Moderation-hide: on someone ELSE's Community message, offer "Hide" iff we hold the authority
+    // to actually publish it — MANAGE_MESSAGES + outrank the author (owner OR admin). Mirrors the
+    // publish gate via the same shared `can_moderation_hide`, so the button can't disagree with what
+    // the publish allows. (Was owner-only, hiding the option from authorized admins.)
     let can_admin_hide = !mine
         && matches!(chat_type, ChatType::Community)
-        && vector_core::db::community::community_id_for_channel(&chat_id)
-            .ok()
-            .flatten()
-            .and_then(|cid| {
-                let bytes = vector_core::simd::hex::hex_to_bytes_32(&cid);
-                vector_core::db::community::load_community(&vector_core::community::CommunityId(bytes)).ok().flatten()
-            })
-            .map(|c| vector_core::community::service::is_proven_owner(&c))
-            .unwrap_or(false);
+        && match (author.as_deref(), vector_core::state::my_public_key()) {
+            (Some(author_hex), Some(me_pk)) => vector_core::db::community::community_id_for_channel(&chat_id)
+                .ok()
+                .flatten()
+                .and_then(|cid| {
+                    let bytes = vector_core::simd::hex::hex_to_bytes_32(&cid);
+                    vector_core::db::community::load_community(&vector_core::community::CommunityId(bytes)).ok().flatten()
+                })
+                .map(|c| vector_core::community::service::can_moderation_hide(&c, &me_pk.to_hex(), author_hex))
+                .unwrap_or(false),
+            _ => false,
+        };
 
     let has_retained_keys = if mine {
         match chat_type {
