@@ -10988,7 +10988,7 @@ domChatMessageInput.oninput = async () => {
         domSettingsEmoticonSuggestionsInfo.onclick = (e) => {
             e.preventDefault();
             e.stopPropagation();
-            popupConfirm('Emoticon Suggestions', 'When enabled, text emoticons suggest the matching emoji as you type — <b>:)</b> → 🙂, <b>:D</b> → 😄, <b>:P</b> → 😛, <b>:3</b> → 😺.<br><br>Turn it off to type emoticons as plain text (e.g. <b>:3</b>) without the emoji selector getting in the way.', true);
+            popupConfirm('Emoticon Suggestions', 'When enabled, text emoticons suggest the matching emoji as you type:<br><br><b>:)</b> → 🙂&nbsp;&nbsp; <b>:D</b> → 😄&nbsp;&nbsp; <b>:P</b> → 😛&nbsp;&nbsp; <b>:3</b> → 😺<br><br>Turn it off to type emoticons as plain text (e.g. <b>:3</b>) without the emoji selector getting in the way.', true);
         };
     }
     const domSettingsBatteryBgServiceInfo = document.getElementById('battery-bg-service-info');
