@@ -1449,8 +1449,14 @@ function getTextContentWithoutImages(element) {
  * Uses a TreeWalker over text nodes (same approach as linkifyUrls).
  * @param {HTMLElement} element - The message span to process
  */
-function renderMentions(element, senderIsAdmin = false) {
-    const mentionPattern = /@(npub1[a-z0-9]{58})/g;
+function renderMentions(element, senderIsAdmin = false, opts = {}) {
+    // allowBare: also linkify a raw `npub1…` (optionally `@`/`nostr:`-prefixed) that isn't preceded
+    // by a word char or `/` — so npubs pasted plainly in a profile bio become tags, while npubs inside
+    // URLs are left alone. queueSync: fetch an uncached tagged profile so its name can fill in.
+    const { allowBare = false, queueSync = false } = opts;
+    const mentionPattern = allowBare
+        ? /(?<![\w/])(?:@|nostr:)?(npub1[a-z0-9]{58})\b/g
+        : /@(npub1[a-z0-9]{58})/g;
     const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, {
         acceptNode(node) {
             // Skip text inside anchors, code blocks, or existing mention spans
@@ -1481,8 +1487,12 @@ function renderMentions(element, senderIsAdmin = false) {
                 frag.appendChild(document.createTextNode(node.textContent.slice(lastIdx, match.index)));
             }
             const npub = match[1];
-            const profile = typeof getProfile === 'function' ? getProfile(npub) : null;
+            const profile = getProfile(npub);
             const displayName = profile?.nickname || profile?.name || npub.substring(0, 12) + '...';
+            if (queueSync && !profile) {
+                // Uncached tagged profile → fetch it; the profile_update handler refreshes this chip's name.
+                invoke('queue_profile_sync', { npub, priority: 'high', forceRefresh: false }).catch(() => {});
+            }
 
             const span = document.createElement('span');
             span.className = 'mention';
@@ -1492,10 +1502,8 @@ function renderMentions(element, senderIsAdmin = false) {
                 // Open the mini-profile (same popup as a name/avatar tap), not the full screen.
                 // stopPropagation so the opening click doesn't hit the document outside-click
                 // dismiss. Works even for an uncached npub — showMiniProfile fetches + placeholders.
-                if (typeof showMiniProfile === 'function') {
-                    e.stopPropagation();
-                    showMiniProfile(npub, span);
-                }
+                e.stopPropagation();
+                showMiniProfile(npub, span);
             });
             frag.appendChild(span);
             lastIdx = match.index + match[0].length;

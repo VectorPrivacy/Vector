@@ -3216,6 +3216,10 @@ async function setupRustListeners() {
                 fresh.style.margin = '0';
                 av.replaceWith(fresh);
             });
+            // Mention chips (@tags in chat + npub tags in profile bios) resolve their display name here too.
+            document.querySelectorAll(`.mention[data-npub="${id}"]`).forEach(span => {
+                span.textContent = '@' + newName;
+            });
         }
         
         // Skip Expanded Profile View repaints during our own edit mode —
@@ -5068,6 +5072,11 @@ function renderProfileTab(cProfile) {
     domProfileDescription.textContent = hasAbout ? cProfile.about : 'No description yet';
     domProfileDescription.classList.toggle('group-placeholder', !hasAbout);
     twemojify(domProfileDescription);
+    // Linkify any npubs in the bio into @tags (cached name or truncated npub), same mini-profile tap
+    // as in-chat. Bare/`@`/`nostr:`-prefixed npubs all match; uncached ones are fetched so the name fills in.
+    if (hasAbout) {
+        renderMentions(domProfileDescription, false, { allowBare: true, queueSync: true });
+    }
 
     // npub
     domProfileId.textContent = cProfile.id;
