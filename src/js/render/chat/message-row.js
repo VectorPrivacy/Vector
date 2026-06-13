@@ -606,6 +606,27 @@ function _dmsgBuildAttachments(target, msg, sender, isGroupChat, isRevealedBlock
     }
 }
 
+/**
+ * Size a thumbhash placeholder <img> to the SAME box its real image will occupy — fit within
+ * 450×350 preserving aspect, matching `.dmsg-image-attachment`. So the real image swaps in with zero
+ * resize (no jagged jump), and a centered download/upload spinner lands on the actual image rather
+ * than a full-bleed blur. Driven by width/height attrs + aspect-ratio because the thumbhash's tiny
+ * intrinsic size means CSS `width:auto` would collapse it back to ~32px.
+ */
+function _sizeThumbhashPlaceholder(imgEl, imgMeta) {
+    if (imgMeta && imgMeta.width && imgMeta.height) {
+        const iw = imgMeta.width, ih = imgMeta.height;
+        const scale = Math.min(450 / iw, 350 / ih, 1);
+        imgEl.width = Math.round(iw * scale);
+        imgEl.height = Math.round(ih * scale);
+        imgEl.style.aspectRatio = `${iw} / ${ih}`;
+    }
+    imgEl.style.maxWidth = 'min(100%, 450px)';
+    imgEl.style.maxHeight = '350px';
+    imgEl.style.height = 'auto';
+    imgEl.style.borderRadius = '8px';
+}
+
 function _dmsgRenderImageAttachment(target, msg, sender, isGroupChat, cAttachment, assetUrl) {
     const imgContainer = document.createElement('div');
     imgContainer.style.position = 'relative';
@@ -847,24 +868,30 @@ function _dmsgAttachUploadProgress(target, msg) {
     const mediaEl = target.querySelector('img:not(.emoji), video');
     if (!hasSpinner && mediaEl) {
         hasSpinner = true;
-        let container = mediaEl.parentElement;
-        if (container === target) {
-            const wrapper = document.createElement('div');
-            wrapper.style.position = 'relative';
-            // Shrink-wrap the wrapper to the media's actual rendered size so the
-            // absolutely-positioned progress overlay centers on the video, not
-            // on the wider message body. Portrait videos clamp to max-height
-            // and render narrower than the bubble — without fit-content the
-            // wrapper stays bubble-width and the spinner drifts to the side.
-            wrapper.style.width = 'fit-content';
-            wrapper.style.maxWidth = '100%';
-            target.replaceChild(wrapper, mediaEl);
-            wrapper.appendChild(mediaEl);
-            container = wrapper;
-        }
-        container.style.opacity = '';
+        // Wrap the media in a relative box and PIN it to the media's actual rendered width so the
+        // absolutely-positioned overlay/spinner centers exactly on the media. The real image has
+        // `width:auto` + percentage `max-width` (.dmsg-image-attachment), which no auto-sized container
+        // (inline-block OR fit-content) reliably shrink-wraps — it drifts to the row width, leaving the
+        // image left and the centered spinner off to the right. `offsetWidth` after layout is the truth
+        // and handles landscape, small, and height-clamped portrait alike. `line-height:0` drops the
+        // inline descender gap so the height matches too.
+        const parent = mediaEl.parentElement;
+        const wrapper = document.createElement('div');
+        wrapper.style.position = 'relative';
+        wrapper.style.display = 'inline-block';
+        wrapper.style.lineHeight = '0';
+        wrapper.style.maxWidth = '100%';
+        parent.replaceChild(wrapper, mediaEl);
+        wrapper.appendChild(mediaEl);
         mediaEl.style.opacity = '0.25';
         if (mediaEl.tagName === 'VIDEO') mediaEl.removeAttribute('controls');
+        const pinWrapperToMedia = () => {
+            const w = mediaEl.offsetWidth;
+            if (w) wrapper.style.width = w + 'px';
+        };
+        pinWrapperToMedia();
+        mediaEl.addEventListener('load', pinWrapperToMedia, { once: true });
+        mediaEl.addEventListener('loadedmetadata', pinWrapperToMedia, { once: true });
         const overlay = document.createElement('div');
         overlay.className = 'attachment-progress-overlay';
         const spinner = document.createElement('div');
@@ -881,7 +908,7 @@ function _dmsgAttachUploadProgress(target, msg) {
             invoke('cancel_upload', { pendingId: uploadMsgId });
         });
         overlay.appendChild(cancelBtn);
-        container.appendChild(overlay);
+        wrapper.appendChild(overlay);
     }
 
     const hasSpoilerUpload = target.querySelector('[data-spoiler-upload]');
@@ -897,13 +924,7 @@ function _dmsgRenderDownloadingAttachment(target, msg, sender, isGroupChat, cAtt
             .then(base64Image => {
                 if (!target.isConnected) return;
                 const imgPreview = document.createElement('img');
-                if (cAttachment.img_meta) {
-                    imgPreview.width = cAttachment.img_meta.width;
-                    imgPreview.height = cAttachment.img_meta.height;
-                }
-                imgPreview.style.maxWidth = '100%';
-                imgPreview.style.height = 'auto';
-                imgPreview.style.borderRadius = '8px';
+                _sizeThumbhashPlaceholder(imgPreview, cAttachment.img_meta);
                 imgPreview.style.opacity = '0.7';
                 imgPreview.src = base64Image;
                 imgPreview.addEventListener('load', () => {
@@ -911,8 +932,13 @@ function _dmsgRenderDownloadingAttachment(target, msg, sender, isGroupChat, cAtt
                     else softChatScroll();
                 }, { once: true });
 
+                // inline-block + line-height:0 so the container shrink-wraps the (correctly-sized)
+                // placeholder exactly — the absolutely-positioned spinner overlay then centers on the
+                // image, not a full-width box (and with no inline descender gap nudging it down).
                 const container = document.createElement('div');
                 container.style.position = 'relative';
+                container.style.display = 'inline-block';
+                container.style.lineHeight = '0';
                 container.appendChild(imgPreview);
 
                 const dlOverlay = document.createElement('div');
@@ -948,13 +974,7 @@ function _dmsgRenderUndownloadedAttachment(target, msg, sender, isGroupChat, cAt
             .then(base64Image => {
                 if (!target.isConnected) return;
                 const imgPreview = document.createElement('img');
-                if (cAttachment.img_meta) {
-                    imgPreview.width = cAttachment.img_meta.width;
-                    imgPreview.height = cAttachment.img_meta.height;
-                }
-                imgPreview.style.maxWidth = '100%';
-                imgPreview.style.height = 'auto';
-                imgPreview.style.borderRadius = '8px';
+                _sizeThumbhashPlaceholder(imgPreview, cAttachment.img_meta);
                 imgPreview.style.opacity = willAutoDownload ? '0.8' : '0.6';
                 imgPreview.src = base64Image;
                 imgPreview.addEventListener('load', () => {
@@ -962,8 +982,12 @@ function _dmsgRenderUndownloadedAttachment(target, msg, sender, isGroupChat, cAt
                     else softChatScroll();
                 }, { once: true });
 
+                // inline-block so the container shrink-wraps the placeholder — the centered spinner
+                // (auto-download) or Download button then lands on the image, not a full-width box.
+                // (No line-height:0 here: this container also hosts the text Download button.)
                 const container = document.createElement('div');
                 container.style.position = 'relative';
+                container.style.display = 'inline-block';
                 container.appendChild(imgPreview);
 
                 if (!willAutoDownload) {
