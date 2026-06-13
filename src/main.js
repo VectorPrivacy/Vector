@@ -7292,6 +7292,9 @@ async function openChat(contact) {
     domChatNew.style.display = 'none';
     domChats.style.display = 'none';
     domGroupOverview.style.display = 'none';
+    // Jumping to a chat (e.g. mini-profile "Send Message" from the member list) closes Group
+    // Details for good — drop its back entry so back-nav doesn't land on a dead re-hide step.
+    popBack('group-overview');
     domChat.style.display = '';
     // Match the fade transition the navbar/account tabs use for visual cohesion.
     domChat.classList.add('fadein-anim');
@@ -7706,6 +7709,9 @@ async function openProfile(cProfile) {
     domSettings.style.display = 'none';
     domInvites.style.display = 'none';
     domGroupOverview.style.display = 'none';
+    // "View Profile" from the member-list mini-profile closes Group Details for good — drop its
+    // back entry so back-nav doesn't land on a dead re-hide step.
+    popBack('group-overview');
     domChat.style.display = 'none'; // Hide the chat view when opening profile
     domSettingsBtn.style.display = ''; // Ensure settings button is visible (may have been hidden by openChat)
 
