@@ -2181,6 +2181,24 @@ function isoToFlagEmoji(isoCode) {
  *        once it resolves. Off by default — picker grids and other contexts
  *        size emojis via dedicated CSS rules.
  */
+/** Lazy char → shortcode map for stock emojis. Keys include the FE0F-stripped
+ *  form, since twemoji `alt` and our dataset disagree on variation selectors
+ *  for some sequences. */
+let _emojiCodeMap = null;
+function stockEmojiCodeFor(char) {
+    if (!char) return null;
+    if (!_emojiCodeMap) {
+        _emojiCodeMap = new Map();
+        for (const e of arrEmojis) {
+            if (!e.shortcode) continue;
+            if (!_emojiCodeMap.has(e.emoji)) _emojiCodeMap.set(e.emoji, e.shortcode);
+            const stripped = e.emoji.replace(/\uFE0F/g, '');
+            if (!_emojiCodeMap.has(stripped)) _emojiCodeMap.set(stripped, e.shortcode);
+        }
+    }
+    return _emojiCodeMap.get(char) || _emojiCodeMap.get(char.replace(/\uFE0F/g, '')) || null;
+}
+
 function twemojify(domElement, opts) {
     // Strip skin tone modifiers from text nodes — our Twemoji set only has neutral/yellow variants.
     // Also normalize ZWJ sequences whose Twemoji regex entry omits FE0F variation selectors
@@ -2195,6 +2213,12 @@ function twemojify(domElement, opts) {
         if (next !== node.textContent) node.textContent = next;
     }
     twemoji.parse(domElement, { callback: (icon, _) => '/twemoji/svg/' + icon + '.svg' });
+    // Stock emojis get the same shared HTML tooltip as custom ones — twemoji
+    // keeps the original char in `alt`, so every render path gets it for free.
+    for (const img of domElement.querySelectorAll('img.emoji:not([data-emoji-tooltip])')) {
+        const code = stockEmojiCodeFor(img.alt);
+        if (code) img.dataset.emojiTooltip = `:${code}:`;
+    }
     if (!opts || !opts.layoutHint) return;
     const imgs = domElement.querySelectorAll('img.emoji:not([data-sized])');
     for (const img of imgs) {

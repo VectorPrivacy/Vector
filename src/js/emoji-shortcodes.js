@@ -119,7 +119,7 @@ function initEmojiShortcodeSelector(textarea, anchorEl) {
 
             const label = document.createElement('span');
             label.className = 'emoji-shortcode-item-label';
-            label.textContent = item.isCustom
+            label.textContent = item.shortcode
                 ? `:${item.shortcode}:`
                 : shortLabel(item.name);
             row.appendChild(label);

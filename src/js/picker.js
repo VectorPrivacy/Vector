@@ -2349,7 +2349,7 @@ function _pcRenderGrid() {
             }
             _pcRenameEmoji(idx);
         });
-        cell.title = `:${e.shortcode}:`;
+        cell.dataset.emojiTooltip = `:${e.shortcode}:`;
 
         // Right-click (desktop) + long-press (mobile) context menu.
         // Mobile users have no hover-× to reach, so this is the only
@@ -3778,7 +3778,7 @@ function renderEmojiPackSections() {
                 span.dataset.packShortcode = emoji.dispCode || emoji.shortcode;
                 span.dataset.packUrl = emoji.url;
                 span.dataset.packId = pack.id;
-                span.title = `:${emoji.dispCode || emoji.shortcode}:`;
+                span.dataset.emojiTooltip = `:${emoji.dispCode || emoji.shortcode}:`;
                 grid.appendChild(span);
                 pendingCells.push({ span, emoji });
             }
@@ -3803,6 +3803,14 @@ function renderEmojiPackSections() {
         // IO's first callback (unreliable when this runs mid-open-transition).
         _rearmVisiblePackCanvases();
     }
+}
+
+/**
+ * Discord-style tooltip for a stock emoji: the canonical `:shortcode:`,
+ * never the keyword soup in `name` (that field exists for search only).
+ */
+function stockEmojiTitle(e) {
+    return e.shortcode ? `:${e.shortcode}:` : (e.display || e.name || '');
 }
 
 /**
@@ -3840,7 +3848,7 @@ function renderEmojiPanel() {
         } else {
             const span = document.createElement('span');
             span.textContent = item.emoji;
-            span.title = item.name;
+            span.dataset.emojiTooltip = stockEmojiTitle(item);
             recentsFragment.appendChild(span);
         }
     });
@@ -3883,7 +3891,7 @@ function renderAllEmojisGrid(allGrid) {
     arrEmojis.forEach((emoji, i) => {
         const span = document.createElement('span');
         span.textContent = emoji.emoji;
-        span.title = emoji.name;
+        span.dataset.emojiTooltip = stockEmojiTitle(emoji);
         allFragment.appendChild(span);
 
         // Mark the first span of each chunk as the observation target
@@ -3938,7 +3946,7 @@ function loadFavoritesSection() {
     arrFavoriteEmojis.slice(0, 24).forEach(emoji => {
         const span = document.createElement('span');
         span.textContent = emoji.emoji;
-        span.title = emoji.name;
+        span.dataset.emojiTooltip = stockEmojiTitle(emoji);
         favoritesFragment.appendChild(span);
     });
 
@@ -4055,7 +4063,7 @@ emojiSearch.addEventListener('input', (e) => {
         const renderStockCell = (emoji) => {
             const span = document.createElement('span');
             span.textContent = emoji.emoji;
-            span.title = emoji.name;
+            span.dataset.emojiTooltip = stockEmojiTitle(emoji);
             return span;
         };
 
