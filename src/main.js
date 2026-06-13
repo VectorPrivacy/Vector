@@ -7361,6 +7361,10 @@ async function openChat(contact) {
     domChatNew.style.display = 'none';
     domChats.style.display = 'none';
     domGroupOverview.style.display = 'none';
+    // Hide the Settings/Invites tabs too — a chat opened from inside one of them (deep-link join,
+    // notification tap) must fully take over, not paint underneath the still-visible menu.
+    domSettings.style.display = 'none';
+    domInvites.style.display = 'none';
     // Jumping to a chat (e.g. mini-profile "Send Message" from the member list) closes Group
     // Details for good — drop its back entry so back-nav doesn't land on a dead re-hide step.
     popBack('group-overview');
