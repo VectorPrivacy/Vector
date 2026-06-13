@@ -633,6 +633,11 @@ pub fn save_pending_invite(
     bundle_json: &str,
     inviter_npub: &str,
 ) -> Result<bool, String> {
+    /// Cap on parked invites. Each row is one gift-wrapped invite from an arbitrary sender, so an
+    /// attacker fabricating unbounded community_ids could otherwise grow this table without limit
+    /// (#298). Newest-wins: a stale months-old park is the safe thing to shed.
+    const MAX_PENDING_INVITES: usize = 100;
+
     let conn = super::get_write_connection_guard_static()?;
     let enc_bundle = enc_txt(bundle_json)?;
     let enc_inviter = enc_txt(inviter_npub)?;
@@ -644,6 +649,19 @@ pub fn save_pending_invite(
             params![community_id, enc_bundle, enc_inviter, now_secs()],
         )
         .map_err(|e| format!("save pending invite: {e}"))?;
+    // Only growth can breach the cap. Evict everything past the newest MAX rows
+    // (LIMIT -1 OFFSET cap = "all rows after the first cap"); community_id tie-breaks equal times.
+    if changed > 0 {
+        let _ = conn.execute(
+            "DELETE FROM pending_community_invites
+               WHERE community_id IN (
+                 SELECT community_id FROM pending_community_invites
+                 ORDER BY received_at DESC, community_id DESC
+                 LIMIT -1 OFFSET ?1
+               )",
+            params![MAX_PENDING_INVITES],
+        );
+    }
     Ok(changed > 0)
 }
 
@@ -2149,5 +2167,26 @@ mod tests {
         save_pending_invite(&cid, "{}", "npub1x").unwrap();
         delete_pending_invite(&cid).unwrap();
         assert!(!pending_invite_exists(&cid).unwrap());
+    }
+
+    #[test]
+    fn pending_invites_are_capped_keeping_the_newest() {
+        let (_tmp, _guard) = init_test_db();
+        // 150 distinct invites with strictly increasing received_at (the helper stamps now_secs(),
+        // so vary the id and rely on insertion order; to make ordering deterministic we bump the
+        // stored time directly after each insert isn't needed — received_at ties break on id DESC).
+        // Insert 150; the table must cap at 100.
+        for i in 0..150u32 {
+            let cid = format!("{:064x}", i);
+            save_pending_invite(&cid, "{}", "npub1x").unwrap();
+        }
+        let all = list_pending_invites().unwrap();
+        assert_eq!(all.len(), 100, "table capped at MAX_PENDING_INVITES");
+        // A spam flood can't grow it past the cap regardless of how many arrive.
+        for i in 150..400u32 {
+            let cid = format!("{:064x}", i);
+            save_pending_invite(&cid, "{}", "npub1x").unwrap();
+        }
+        assert_eq!(list_pending_invites().unwrap().len(), 100, "cap holds under flood");
     }
 }
