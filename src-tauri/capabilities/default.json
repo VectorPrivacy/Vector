@@ -175,6 +175,7 @@
     "allow-start-recording",
     "allow-stop-recording",
     "allow-update-unread-counter",
+    "allow-get-unread-counts",
     "allow-set-active-chat",
     "allow-logout",
     "allow-create-account",

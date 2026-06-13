@@ -66,6 +66,7 @@ pub use events::{
     save_event, save_pivx_payment_event,
     save_edit_event, event_exists, delete_event,
     get_message_views, get_all_chats_last_messages,
+    unread_counts,
 };
 // Async wrappers for sync vector-core read functions
 pub async fn get_pivx_payments_for_chat(id: &str) -> Result<Vec<vector_core::StoredEvent>, String> {

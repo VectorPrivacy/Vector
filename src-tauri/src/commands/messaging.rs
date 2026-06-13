@@ -209,10 +209,13 @@ pub async fn evict_chat_messages(chat_id: String, keep_count: usize) -> Result<(
 /// Returns the unread message count
 #[tauri::command]
 pub async fn update_unread_counter<R: Runtime>(handle: AppHandle<R>) -> u32 {
-    // Get the count of unread messages from the state
+    // Count from the DB (correct even when only the last message per chat is in RAM — the boot
+    // state), then apply the cheap in-RAM muted/blocked filters. Walking STATE messages would
+    // under-count an unopened chat's backlog after a restart.
+    let counts = crate::db::unread_counts().await.unwrap_or_default();
     let unread_count = {
         let state = STATE.lock().await;
-        state.count_unread_messages()
+        state.sum_unread_from(&counts)
     };
 
     // Get the main window (only used on desktop for badge handling)
@@ -249,6 +252,14 @@ pub async fn update_unread_counter<R: Runtime>(handle: AppHandle<R>) -> u32 {
     }
 
     unread_count
+}
+
+/// Per-chat unread counts straight from the DB (`chat_identifier` → count), for seeding the
+/// chatlist badges at boot — correct even when only the last message per chat is in RAM. Chats
+/// with 0 unread are omitted (the frontend treats a missing entry as 0).
+#[tauri::command]
+pub async fn get_unread_counts() -> std::collections::HashMap<String, u32> {
+    crate::db::unread_counts().await.unwrap_or_default()
 }
 
 /// Tell the backend which chat the user is actively watching, so inbound

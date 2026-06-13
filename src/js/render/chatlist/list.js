@@ -267,7 +267,10 @@ function computeRowBadgeCount(chat) {
     if (chat.muted) {
         return chatIsGroup(chat) ? countPingMessages(chat) : 0;
     }
-    return countUnreadMessages(chat);
+    // DB-sourced count (set by refreshUnreadCounts) is authoritative across restarts, when only
+    // the last message per chat is in RAM. Fall back to the in-memory walk before the first
+    // refresh lands (or if it ever failed).
+    return (typeof chat.unread === 'number') ? chat.unread : countUnreadMessages(chat);
 }
 
 function countPingMessages(chat) {

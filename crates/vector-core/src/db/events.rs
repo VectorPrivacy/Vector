@@ -1089,6 +1089,43 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
     Ok(result)
 }
 
+/// Per-chat unread count, computed straight from the DB so it's correct even when only the last
+/// message is in RAM (the boot state). Mirrors the in-memory walk-back exactly: unread = non-mine
+/// messages newer than the most recent "anchor" (our own message OR the `last_read` marker,
+/// whichever is latest). A never-read chat (empty `last_read`, no own message) counts all its
+/// non-mine messages. Returns `chat_identifier → count`; chats with 0 unread are omitted.
+/// Muted/blocked filtering is left to the caller (it lives in RAM state, cheaply).
+pub async fn unread_counts() -> Result<std::collections::HashMap<String, u32>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT c.chat_identifier, COUNT(*) AS unread \
+             FROM events e JOIN chats c ON e.chat_id = c.id \
+             WHERE e.kind IN (?1, ?2, ?3) AND e.mine = 0 \
+               AND e.created_at > COALESCE(( \
+                     SELECT MAX(e2.created_at) FROM events e2 \
+                     WHERE e2.chat_id = c.id AND e2.kind IN (?1, ?2, ?3) \
+                       AND (e2.mine = 1 OR e2.id = c.last_read)), 0) \
+             GROUP BY c.chat_identifier",
+        )
+        .map_err(|e| format!("prepare unread_counts: {e}"))?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![
+                event_kind::MLS_CHAT_MESSAGE as i32,
+                event_kind::PRIVATE_DIRECT_MESSAGE as i32,
+                event_kind::FILE_ATTACHMENT as i32
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u32)),
+        )
+        .map_err(|e| format!("query unread_counts: {e}"))?;
+    let mut out = std::collections::HashMap::new();
+    for r in rows.flatten() {
+        out.insert(r.0, r.1);
+    }
+    Ok(out)
+}
+
 /// Batch save messages for a chat.
 pub async fn save_chat_messages(chat_id: &str, messages: &[Message]) -> Result<(), String> {
     if messages.is_empty() {
@@ -1160,5 +1197,51 @@ mod tests {
         let fut_ev = evs.iter().find(|e| e.id == "ev_future").expect("future event saved");
         assert!(fut_ev.created_at >= before && fut_ev.created_at <= after,
             "future-dated event clamped to local now ({} not in {}..={})", fut_ev.created_at, before, after);
+    }
+
+    // The reported bug: unread must accumulate across a restart (when only the last message per
+    // chat is in RAM). The DB cutoff count must mirror the in-memory walk-back exactly.
+    #[tokio::test]
+    async fn unread_counts_match_walk_back_semantics() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "npub1contactdm";
+        // `at` is ms (created_at = at/1000); use distinct seconds.
+        let mk = |id: &str, secs: u64, mine: bool| Message {
+            id: id.into(), content: "x".into(), at: secs * 1000, mine,
+            npub: (!mine).then(|| "npub1sender".to_string()),
+            ..Default::default()
+        };
+        let unread = || async { unread_counts().await.unwrap().get(chat).copied().unwrap_or(0) };
+
+        // 6 contact messages, never opened/read, no own reply → all 6 unread.
+        for i in 0..6u64 {
+            save_message(chat, &mk(&format!("m{i}"), 1000 + i, false)).await.unwrap();
+        }
+        assert_eq!(unread().await, 6, "never-read backlog counts all 6");
+
+        // 2 more arrive → 8, NOT replaced by 2 (the exact reported symptom).
+        save_message(chat, &mk("m6", 2000, false)).await.unwrap();
+        save_message(chat, &mk("m7", 2001, false)).await.unwrap();
+        assert_eq!(unread().await, 8, "6 backlog + 2 new = 8");
+
+        // Our own reply clears it (walk-back stops at the newest mine).
+        save_message(chat, &mk("mine", 2002, true)).await.unwrap();
+        assert_eq!(unread().await, 0, "own message = read up to here");
+
+        // A contact message after our send is unread again.
+        save_message(chat, &mk("m8", 2003, false)).await.unwrap();
+        assert_eq!(unread().await, 1, "one new after our send");
+
+        // last_read marker advances the cutoff just like an own message.
+        {
+            let conn = crate::db::get_write_connection_guard_static().unwrap();
+            conn.execute(
+                "UPDATE chats SET last_read = ?1 WHERE chat_identifier = ?2",
+                rusqlite::params!["m8", chat],
+            ).unwrap();
+        }
+        assert_eq!(unread().await, 0, "last_read=m8 clears all");
+        save_message(chat, &mk("m9", 2004, false)).await.unwrap();
+        assert_eq!(unread().await, 1, "one arrival after last_read");
     }
 }

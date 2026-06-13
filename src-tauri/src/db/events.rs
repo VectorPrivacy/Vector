@@ -4,4 +4,5 @@ pub use vector_core::db::events::{
     save_event, event_exists,
     save_pivx_payment_event, save_edit_event, delete_event,
     get_message_views, get_all_chats_last_messages,
+    unread_counts,
 };

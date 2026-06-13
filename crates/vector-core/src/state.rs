@@ -856,6 +856,28 @@ impl ChatState {
     // Unread Count
     // ========================================================================
 
+    /// Sum DB-computed per-chat unread counts, applying the same muted/blocked filters as
+    /// [`count_unread_messages`] but sourcing each COUNT from `counts` (chat_identifier → unread)
+    /// rather than walking in-memory messages — so it's correct even when only the last message per
+    /// chat is in RAM (the boot state). Muted chats and blocked-DM contacts contribute 0.
+    pub fn sum_unread_from(&self, counts: &std::collections::HashMap<String, u32>) -> u32 {
+        let mut total = 0u32;
+        for chat in &self.chats {
+            if chat.muted {
+                continue;
+            }
+            if !chat.is_community() {
+                if let Some(id) = self.interner.lookup(&chat.id) {
+                    if self.get_profile_by_id(id).map_or(false, |p| p.flags.is_blocked()) {
+                        continue;
+                    }
+                }
+            }
+            total += counts.get(&chat.id).copied().unwrap_or(0);
+        }
+        total
+    }
+
     pub fn count_unread_messages(&self) -> u32 {
         let mut total_unread = 0;
         for chat in &self.chats {

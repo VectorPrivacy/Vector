@@ -570,6 +570,7 @@ pub fn run() {
             commands::media::transcribe,
             commands::media::download_whisper_model,
             commands::messaging::update_unread_counter,
+            commands::messaging::get_unread_counts,
             commands::messaging::set_active_chat,
             commands::system::get_platform_features,
             commands::system::get_device_memory,

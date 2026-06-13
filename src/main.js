@@ -2556,7 +2556,39 @@ function markAsRead(chat, message) {
 
         // Persist via backend using chat-based API
         invoke("mark_as_read", { chatId: chat.id, messageId: message.id });
+
+        // The read advanced — re-derive this chat's unread from the DB (authoritative).
+        scheduleUnreadRefresh();
     }
+}
+
+/**
+ * Per-chat unread badges are sourced from the DB (`chat.unread`), not by walking in-memory
+ * messages — so they're correct even after a restart, when only the last message per chat is in
+ * RAM. This fetches the authoritative counts and updates every chat. Awaited at boot; elsewhere use
+ * the debounced `scheduleUnreadRefresh` so a burst of arrivals coalesces into one query.
+ */
+async function refreshUnreadCounts() {
+    let counts;
+    try {
+        counts = await invoke('get_unread_counts');
+    } catch (e) {
+        return; // keep prior chat.unread on failure
+    }
+    let changed = false;
+    for (const chat of arrChats) {
+        const n = counts[chat.id] || 0;
+        if (chat.unread !== n) { chat.unread = n; changed = true; }
+    }
+    if (changed && !strOpenChat) renderChatlist();
+}
+
+let _unreadRefreshTimer = null;
+function scheduleUnreadRefresh() {
+    if (_unreadRefreshTimer) clearTimeout(_unreadRefreshTimer);
+    // Trailing debounce: run AFTER the burst settles so the DB reflects every just-persisted
+    // message/read, avoiding a stale snapshot mid-flight.
+    _unreadRefreshTimer = setTimeout(() => { _unreadRefreshTimer = null; refreshUnreadCounts(); }, 200);
 }
 
 /**
@@ -3378,6 +3410,10 @@ async function setupRustListeners() {
         // Render the Chat List (only when user is viewing it)
         if (!strOpenChat) renderChatlist();
 
+        // Re-derive unread badges from the DB (a new arrival, or an open-chat auto-read, both move
+        // the count). Debounced so a burst of arrivals is one query.
+        scheduleUnreadRefresh();
+
         // Update the back button notification dot (for unread messages in other chats)
         updateChatBackNotification();
     });
@@ -3559,6 +3595,9 @@ async function setupRustListeners() {
         const cChat = getChat(chat_id);
         if (cChat && last_read) {
             cChat.last_read = last_read;
+            // Re-derive the unread badge from the DB (the read just advanced, possibly to a
+            // non-latest message on another device).
+            scheduleUnreadRefresh();
             // Re-render the chat preview element in-place (border, font color, etc. all depend on unread state)
             const oldEl = document.getElementById(`chatlist-${chat_id}`);
             if (oldEl) {
@@ -4592,6 +4631,11 @@ async function login(skipAnimations = false) {
             // The backend now sends both profiles (without messages) and chats (with messages)
             arrProfiles = evt.payload.profiles || [];
             arrChats = evt.payload.chats || [];
+
+            // Seed unread badges from the DB — boot loads only the last message per chat into RAM,
+            // so the in-memory walk can't see a backlog received in a prior session. Fire-and-render
+            // (re-renders the chatlist when it lands; the first paint uses the RAM-walk fallback).
+            refreshUnreadCounts();
 
             // Resolve Community logos in the background (Community metadata rides the
             // chat payload; only the encrypted logo needs a lazy cache step).
