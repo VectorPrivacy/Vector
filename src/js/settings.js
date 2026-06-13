@@ -1451,6 +1451,9 @@ let fSendTypingIndicators = true;
 
 // Display Settings - Simple global variables
 let fDisplayImageTypes = false;
+// Emoticon suggestions (`:)` → 🙂, …). Read by the `:` shortcode selector; default on. Loaded
+// from the DB in initSettings (runs at boot) so the value is live before Settings is ever opened.
+let emoticonSuggestionsEnabled = true;
 
 // Security Settings - Encryption state
 let fEncryptionEnabled = true;
@@ -2247,6 +2250,17 @@ async function initSettings() {
             }
             // Re-evaluate the open chat's wallpaper against the new toggle state.
             refreshChatWallpaper();
+        });
+    }
+
+    // Emoticon Suggestions toggle (:) → 🙂, :D → 😄, …; off = leave emoticons as literal text)
+    const emoticonToggle = document.getElementById('emoticon-suggestions-toggle');
+    if (emoticonToggle) {
+        emoticonSuggestionsEnabled = await loadEmoticonSuggestions();
+        emoticonToggle.checked = emoticonSuggestionsEnabled;
+        emoticonToggle.addEventListener('change', async (e) => {
+            emoticonSuggestionsEnabled = e.target.checked;
+            await saveEmoticonSuggestions(e.target.checked);
         });
     }
 

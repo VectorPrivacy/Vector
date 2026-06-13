@@ -8,6 +8,21 @@
  *   // ctrl.destroy() → remove DOM + listeners
  */
 
+// Text emoticon → emoji. Keys are the chars AFTER the ':' trigger (so `:)` → key `)`), since the
+// selector already keys off the leading ':'. Gated by the "Emoticon Suggestions" display setting
+// (`emoticonSuggestionsEnabled`): when off, these are left as literal text so e.g. `:3` is typeable.
+const EMOTICON_MAP = {
+    ')': '🙂', '-)': '🙂',
+    '(': '🙁', '-(': '🙁', "'(": '😢',
+    'D': '😄', '-D': '😄',
+    'P': '😛', 'p': '😛', '-P': '😛', '-p': '😛',
+    '3': '😺',
+    'o': '😮', 'O': '😮', '-o': '😮', '-O': '😮',
+    '|': '😐', '-|': '😐',
+    '/': '😕', '\\': '😕',
+    '*': '😘', '-*': '😘',
+};
+
 // eslint-disable-next-line no-unused-vars
 function initEmojiShortcodeSelector(textarea, anchorEl) {
     // --- State ---
@@ -17,6 +32,8 @@ function initEmojiShortcodeSelector(textarea, anchorEl) {
     let panel = null;
     let skipNextInput = false;
     let cachedResults = {};    // query → results cache
+    let lastItems = [];        // exact list currently rendered (keyboard nav + Enter use this,
+                               // since the emoticon path renders a different list than getFiltered)
 
     // --- Twemoji URL helper (delegates to twemoji's own parsing, cached) ---
     const twemojiUrlCache = {};
@@ -63,6 +80,7 @@ function initEmojiShortcodeSelector(textarea, anchorEl) {
         colonStart = -1;
         activeIndex = 0;
         cachedResults = {};
+        lastItems = [];
     }
 
     function position() {
@@ -76,6 +94,7 @@ function initEmojiShortcodeSelector(textarea, anchorEl) {
     }
 
     function renderItems(items) {
+        lastItems = items;
         panel.innerHTML = '';
         if (!items.length) { hide(); return; }
 
@@ -223,6 +242,22 @@ function initEmojiShortcodeSelector(textarea, anchorEl) {
         if (q.endsWith(':')) q = q.slice(0, -1);
         query = q;
 
+        // Text emoticon (`:)`, `:D`, `:3`, …): suggest the matching emoji on top — unless the user
+        // disabled it, in which case leave it as literal text (don't hijack `:3` etc.).
+        if (Object.prototype.hasOwnProperty.call(EMOTICON_MAP, query)) {
+            if (typeof emoticonSuggestionsEnabled !== 'undefined' && !emoticonSuggestionsEnabled) {
+                if (isVisible()) hide();
+                return;
+            }
+            const char = EMOTICON_MAP[query];
+            const canonical = (typeof arrEmojis !== 'undefined' && arrEmojis.find(e => e.emoji === char))
+                || { emoji: char, name: char };
+            const rest = getFiltered().filter(it => it.emoji !== char);
+            activeIndex = 0;
+            renderItems([canonical, ...rest].slice(0, 5));
+            return;
+        }
+
         const items = getFiltered();
         activeIndex = 0;
         renderItems(items);
@@ -231,7 +266,7 @@ function initEmojiShortcodeSelector(textarea, anchorEl) {
     // --- Keyboard navigation ---
     function onKeyDown(e) {
         if (!isVisible()) return;
-        const items = getFiltered();
+        const items = lastItems;
         if (!items.length) return;
 
         if (e.key === 'ArrowDown') {

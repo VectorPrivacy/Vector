@@ -161,6 +161,25 @@ async function saveDisplayImageTypes(bool) {
     return await invoke('set_sql_setting', { key: 'display_image_types', value: bool ? 'true' : 'false' });
 }
 
+/**
+ * Load the user's Emoticon Suggestions setting (`:)` → 🙂, `:D` → 😄, …).
+ * @returns {Promise<boolean>}
+ */
+async function loadEmoticonSuggestions() {
+    const value = await invoke('get_sql_setting', { key: 'emoticon_suggestions' });
+    if (value === null || value === undefined) return true; // Default to enabled
+    return value === 'true' || value === '1';
+}
+
+/**
+ * Set the user's Emoticon Suggestions setting. When off, text emoticons like
+ * `:3` are left as literal text (the shortcode selector won't grab them).
+ * @param {boolean} bool - `true` to enable, `false` to disable
+ */
+async function saveEmoticonSuggestions(bool) {
+    return await invoke('set_sql_setting', { key: 'emoticon_suggestions', value: bool ? 'true' : 'false' });
+}
+
 // ============================================================================
 // Notification Sound Settings
 // ============================================================================

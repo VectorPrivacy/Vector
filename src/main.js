@@ -10983,6 +10983,14 @@ domChatMessageInput.oninput = async () => {
         e.stopPropagation();
         popupConfirm('Background Wallpaper', 'This feature enables and disables background images inside of Chats (Private & Group Chats).<br><br>Only applies to certain themes.', true);
     };
+    const domSettingsEmoticonSuggestionsInfo = document.getElementById('emoticon-suggestions-info');
+    if (domSettingsEmoticonSuggestionsInfo) {
+        domSettingsEmoticonSuggestionsInfo.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            popupConfirm('Emoticon Suggestions', 'When enabled, text emoticons suggest the matching emoji as you type — <b>:)</b> → 🙂, <b>:D</b> → 😄, <b>:P</b> → 😛, <b>:3</b> → 😺.<br><br>Turn it off to type emoticons as plain text (e.g. <b>:3</b>) without the emoji selector getting in the way.', true);
+        };
+    }
     const domSettingsBatteryBgServiceInfo = document.getElementById('battery-bg-service-info');
     if (domSettingsBatteryBgServiceInfo) {
         domSettingsBatteryBgServiceInfo.onclick = (e) => {
