@@ -233,7 +233,11 @@ pub async fn get_invited_users(npub: String) -> Result<u32, String> {
 #[tauri::command]
 pub async fn check_fawkes_badge(npub: String) -> Result<bool, String> {
     let user_pubkey = PublicKey::from_bech32(&npub).map_err(|e| e.to_string())?;
-    vector_core::badges::has_fawkes_badge(&user_pubkey).await
+    let has = vector_core::badges::has_fawkes_badge(&user_pubkey).await?;
+    // If this confirms our OWN badge, persist it + lift perks — the safety net for a
+    // post-sync refresh that missed the claim and is in its re-check cooldown.
+    vector_core::badges::note_own_badge_confirmed(&user_pubkey, has);
+    Ok(has)
 }
 
 /// Return our own cached badge flags (filled post-sync by refresh_own_badges).

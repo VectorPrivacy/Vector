@@ -924,16 +924,32 @@ let _myBadges = null;
 // permanent, so a session-lifetime cache is safe; next launch re-resolves.
 const _fawkesBadgeCache = new Map();
 
+// One-shot guard: we only do the live own-badge fallback check once per session
+// (so non-holders don't re-hit the relay on every own-profile open).
+let _ownBadgeLiveChecked = false;
+
 /** Resolve whether `npub` holds the V for Vector badge, with caching.
- *  Own profile → the persisted `badge_vector` flag (no network). Others →
+ *  Own profile → the persisted `badge_vector` flag (fast path). Others →
  *  fetched once per session via check_fawkes_badge, then cached. */
 async function resolveFawkesBadge(npub, isMine) {
     if (isMine) {
-        if (_myBadges) return !!_myBadges.vector;
+        if (_myBadges?.vector) return true;                 // sticky flag set — no network
+        if (_myBadges === null) {
+            try { _myBadges = await invoke('get_my_badges'); } catch {}
+            if (_myBadges?.vector) return true;
+        }
+        // Flag not set yet — the post-sync refresh may have missed the claim (the
+        // holding relay is often flaky during the saturated sync window → it backs
+        // off for hours). A live check at this quiet moment confirms it; on success
+        // the backend self-persists + emits badges_updated, which lifts the
+        // emoji-pack perks. One attempt per session.
+        if (_ownBadgeLiveChecked) return !!_myBadges?.vector;
+        _ownBadgeLiveChecked = true;
         try {
-            _myBadges = await invoke('get_my_badges');
-            return !!_myBadges?.vector;
-        } catch { return false; }
+            const has = await invoke('check_fawkes_badge', { npub });
+            if (has) _myBadges = { vector: true };
+            return has;
+        } catch { return !!_myBadges?.vector; }
     }
     if (_fawkesBadgeCache.has(npub)) return _fawkesBadgeCache.get(npub);
     try {

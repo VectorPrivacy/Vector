@@ -897,15 +897,22 @@ pub async fn fetch_messages<R: Runtime>(
 
             let _ = handle_bg.emit("sync_finished", ());
 
-            // Resolve + cache our own badges in an independent task so it is NOT
-            // serialised behind the (often multi-minute) MLS group sync below.
-            // refresh_own_badges captures its own SessionGuard, so it's safe to
-            // detach. Badge-gated perks (raised emoji-pack limits) apply as soon
-            // as it lands, without waiting for MLS.
+            // Resolve + cache our own badges AFTER boot/init settles — not during.
+            // The claim's holding relay (often the user's own) is saturated through
+            // the DM archive + concurrent community sweep + MLS window, so a fetch
+            // fired now routinely misses and trips the multi-hour re-check cooldown.
+            // A short settle delay lets the pool go quiet first, giving the 10s fetch
+            // a clean shot. Detached + session-gated across the sleep so a mid-wait
+            // account swap can't emit the wrong account's badge state. (On-demand
+            // profile checks are the other, self-persisting path — see badges.rs.)
             {
                 let badge_handle = handle_bg.clone();
+                let badge_session = vector_core::state::SessionGuard::capture();
                 tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    if !badge_session.is_valid() { return; }
                     vector_core::badges::refresh_own_badges().await;
+                    if !badge_session.is_valid() { return; }
                     let _ = badge_handle.emit("badges_updated", serde_json::json!({
                         "vector": vector_core::badges::has_vector_badge(),
                     }));

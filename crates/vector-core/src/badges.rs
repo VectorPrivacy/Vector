@@ -77,6 +77,29 @@ pub fn has_vector_badge() -> bool {
         .unwrap_or(false)
 }
 
+/// Record the result of an on-demand badge check. When the checked key is our
+/// own and the badge is present, persist it (sticky) and emit `badges_updated`
+/// so badge-gated perks (raised emoji-pack limits) turn on immediately — this is
+/// the safety net for a post-sync `refresh_own_badges` that missed the claim
+/// (the holding relay is often flaky during the saturated sync window) and is now
+/// sitting in its multi-hour re-check cooldown. An on-demand check runs at a
+/// quiet moment, so it lands where the sync-time sweep didn't.
+///
+/// No-op for other users, a negative result, or an account swap mid-check (the
+/// own-key comparison re-reads the *current* account, so a stale key never
+/// writes the wrong DB). No awaits, so the read + write stay on one account.
+pub fn note_own_badge_confirmed(pubkey: &PublicKey, has_badge: bool) {
+    if !has_badge || has_vector_badge() {
+        return;
+    }
+    if crate::state::my_public_key().as_ref() != Some(pubkey) {
+        return;
+    }
+    let _ = crate::db::set_sql_setting(BADGE_VECTOR_KEY.to_string(), "true".to_string());
+    crate::log_info!("[Badges] vector badge confirmed via on-demand check");
+    crate::traits::emit_event_json("badges_updated", serde_json::json!({ "vector": true }));
+}
+
 /// Fetch our own badges and persist to the per-account cache. Called once
 /// after initial sync. The SessionGuard straddles the network fetch so a
 /// mid-fetch account swap can't write account A's badge into account B's DB.
