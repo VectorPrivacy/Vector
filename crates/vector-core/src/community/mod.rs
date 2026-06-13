@@ -236,6 +236,28 @@ pub struct Community {
     pub dissolved: bool,
 }
 
+/// Protocol cap on a Community's relay set (§ transport). More relays are needless and
+/// amplify resource + metadata-exposure cost; 5 gives redundancy without centralisation.
+/// Enforced by truncate-on-read at every Community/CommunityInvite construction boundary, so a
+/// hostile or legacy bundle degrades to ≤5 distinct relays rather than being honored or rejected.
+pub const MAX_COMMUNITY_RELAYS: usize = 5;
+
+/// Dedupe (order-preserving) + truncate a relay set to [`MAX_COMMUNITY_RELAYS`]. Dedup first so the
+/// cap means "up to 5 DISTINCT relays" — a bundle padding one relay 5× can't waste the budget.
+pub fn cap_relays(relays: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(relays.len().min(MAX_COMMUNITY_RELAYS));
+    for r in relays {
+        if out.len() >= MAX_COMMUNITY_RELAYS {
+            break;
+        }
+        if seen.insert(r.clone()) {
+            out.push(r);
+        }
+    }
+    out
+}
+
 impl Community {
     /// Mint a brand-new Community with one default channel, owned by the creator.
     /// All ids are random opaque 32-byte values (NOT timestamp snowflakes), and the
@@ -264,7 +286,7 @@ impl Community {
             description: None,
             icon: None,
             banner: None,
-            relays,
+            relays: cap_relays(relays),
             channels: vec![channel],
             // Signed asynchronously by `service::create_community` (needs the owner's identity
             // signer); a freshly-minted in-memory Community has none yet.

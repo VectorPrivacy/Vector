@@ -47,24 +47,25 @@ pub struct CommunityInvite {
 /// list to force mass allocation + per-channel DB writes + relay connections. Reject
 /// anything past a sane MVP ceiling before allocating.
 const MAX_INVITE_CHANNELS: usize = 256;
-const MAX_INVITE_RELAYS: usize = 32;
 
 impl CommunityInvite {
     pub fn to_json(&self) -> Result<String, String> {
         serde_json::to_string(self).map_err(|e| e.to_string())
     }
     pub fn from_json(json: &str) -> Result<Self, String> {
-        serde_json::from_str(json).map_err(|e| e.to_string())
+        let mut inv: Self = serde_json::from_str(json).map_err(|e| e.to_string())?;
+        // Truncate-on-read: an inbound bundle is unauthenticated, so enforce the relay cap as it
+        // enters rather than trusting (or rejecting on) the sender's count.
+        inv.relays = super::cap_relays(inv.relays);
+        Ok(inv)
     }
 
-    /// Reject a bundle whose channel/relay counts exceed the MVP ceiling (DoS guard for
-    /// inbound, attacker-controlled bundles).
+    /// Reject a bundle whose channel count exceeds the MVP ceiling (DoS guard for inbound,
+    /// attacker-controlled bundles). Relays are capped by truncation (`cap_relays`), not rejection,
+    /// so a >5 or legacy bundle degrades to the cap rather than failing the whole join.
     pub fn validate(&self) -> Result<(), String> {
         if self.channels.len() > MAX_INVITE_CHANNELS {
             return Err(format!("invite declares too many channels ({})", self.channels.len()));
-        }
-        if self.relays.len() > MAX_INVITE_RELAYS {
-            return Err(format!("invite declares too many relays ({})", self.relays.len()));
         }
         Ok(())
     }
@@ -94,7 +95,7 @@ pub fn build_invite(community: &Community) -> CommunityInvite {
         name: community.name.clone(),
         server_root_key: crate::simd::hex::bytes_to_hex_32(community.server_root_key.as_bytes()),
         server_root_epoch: community.server_root_epoch.0,
-        relays: community.relays.clone(),
+        relays: super::cap_relays(community.relays.clone()),
         channels: community
             .channels
             .iter()
@@ -151,7 +152,7 @@ pub fn accept_invite(invite: &CommunityInvite) -> Result<Community, String> {
         description: None,
         icon: None,
         banner: None,
-        relays: invite.relays.clone(),
+        relays: super::cap_relays(invite.relays.clone()),
         channels,
         owner_attestation,
         // A fresh join starts alive; the first control fold detects + seals if a tombstone is present.
@@ -185,6 +186,31 @@ mod tests {
     use super::*;
     use crate::community::envelope::{open_message, seal_message};
     use nostr_sdk::prelude::Keys;
+
+    #[test]
+    fn relay_cap_truncates_dedups_and_holds_at_every_boundary() {
+        // 7 entries, 2 of them duplicates → dedup to 6 distinct, truncate to 5.
+        let many: Vec<String> = vec![
+            "wss://a".into(), "wss://b".into(), "wss://a".into(), "wss://c".into(),
+            "wss://d".into(), "wss://e".into(), "wss://f".into(),
+        ];
+        let capped = super::super::cap_relays(many.clone());
+        assert_eq!(capped, vec!["wss://a", "wss://b", "wss://c", "wss://d", "wss://e"]);
+
+        // Mint honors the cap.
+        let owner = Community::create("HQ", "general", many.clone());
+        assert!(owner.relays.len() <= super::super::MAX_COMMUNITY_RELAYS);
+
+        // A hostile bundle declaring >5 relays parses (truncate-on-read), not rejects,
+        // and the accepted member view is capped too.
+        let mut bundle = build_invite(&owner);
+        bundle.relays = many; // force an over-cap bundle past build_invite
+        let json = bundle.to_json().unwrap();
+        let parsed = CommunityInvite::from_json(&json).unwrap();
+        assert!(parsed.relays.len() <= super::super::MAX_COMMUNITY_RELAYS);
+        let member = accept_invite(&parsed).unwrap();
+        assert!(member.relays.len() <= super::super::MAX_COMMUNITY_RELAYS);
+    }
 
     #[test]
     fn invite_round_trips_to_member_view() {
@@ -233,12 +259,14 @@ mod tests {
 
     #[test]
     fn accept_rejects_a_bundle_exceeding_the_caps() {
-        // DoS guard: an attacker-controlled bundle declaring a huge relay/channel list is rejected
-        // before any allocation/connection — never a connect-loop or mass-write.
+        // DoS guard: an attacker-controlled bundle declaring a huge channel list is rejected
+        // before any allocation/connection. Relays are CAPPED by truncation (cap_relays) rather
+        // than rejected, so a >5 relay bundle still joins — just at ≤5 relays.
         let owner = Community::create("HQ", "general", vec![]);
         let mut over_relays = build_invite(&owner);
         over_relays.relays = (0..100).map(|i| format!("wss://r{i}")).collect();
-        assert!(accept_invite(&over_relays).is_err(), "too many relays → rejected");
+        let member = accept_invite(&over_relays).expect("over-relay bundle truncates, not rejects");
+        assert!(member.relays.len() <= super::super::MAX_COMMUNITY_RELAYS, "relays truncated to cap");
 
         let mut over_channels = build_invite(&owner);
         over_channels.channels = (0..500)
