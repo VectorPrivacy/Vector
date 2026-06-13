@@ -280,10 +280,6 @@ fn process_unknown_event(
 /// Process a text message rumor
 ///
 /// Extracts text content, reply references, and millisecond-precision timestamps.
-///
-/// Note: MLS imeta attachments (MIP-04) are NOT parsed here — they require
-/// MDK/MlsService which is Tauri-specific. The caller should handle MLS imeta
-/// parsing separately and patch the result if needed.
 fn process_text_message(
     rumor: RumorEvent,
     context: RumorContext,
@@ -499,7 +495,7 @@ fn process_file_attachment(
         downloading: false,
         downloaded,
         webxdc_topic,
-        group_id: None,       // Kind 15 attachments use explicit key/nonce, not MLS
+        group_id: None,       // Kind 15 attachments use explicit key/nonce
         original_hash: Some(file_hash), // ox tag value (original file hash)
         scheme_version: None, // Kind 15 uses explicit encryption, not MIP-04
         mls_filename: None,   // Kind 15 uses explicit encryption, not MIP-04

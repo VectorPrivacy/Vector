@@ -241,7 +241,7 @@ pub(crate) async fn handle_event_with_context(
 
 /// Commit a prepared event with Tauri-specific handling.
 ///
-/// Intercepts WebXDC and MLS Welcome events (deeply platform-specific),
+/// Intercepts WebXDC events (deeply platform-specific),
 /// then delegates everything else to vector-core's commit pipeline.
 pub(crate) async fn tauri_commit_prepared_event(
     prepared: vector_core::PreparedEvent,
@@ -274,7 +274,7 @@ pub(crate) async fn tauri_commit_prepared_event(
         }
     }
 
-    // MLS Welcomes + everything else: vector-core handles processing.
+    // Everything else: vector-core handles processing.
     // TauriEventHandler hooks fire callbacks for notifications/badges.
     static HANDLER: TauriEventHandler = TauriEventHandler;
     core_handler::commit_prepared_event(prepared, is_new, &HANDLER).await

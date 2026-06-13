@@ -104,7 +104,7 @@ pub fn nostr_client_options() -> nostr_sdk::ClientOptions {
 
 /// Augment a `RelayOptions` with the Tor connection mode when active. Used
 /// by every site that adds a relay to the pool — default relays at boot,
-/// custom user relays, MLS group relays, NIP-17 inbox relays — so they all
+/// custom user relays, community relays, NIP-17 inbox relays — so they all
 /// come up through Tor when the toggle is on.
 ///
 /// Without this, `RelayOptions::new()` (or the per-mode helper) defaults to
@@ -165,9 +165,7 @@ pub mod deletion;
 // === SIMD Operations ===
 pub mod simd;
 
-// === MLS Group Encryption ===
-
-// === Community protocol (MLS successor — GROUP_PROTOCOL.md) ===
+// === Community protocol (GROUP_PROTOCOL.md) ===
 pub mod community;
 
 // === Event Handler ===

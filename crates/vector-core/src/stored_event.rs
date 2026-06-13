@@ -34,7 +34,7 @@
 //! - **Protocol alignment**: Matches Nostr's event-centric model
 //! - **Future-proof**: Unknown event types are stored, not dropped
 //! - **Easy extensibility**: New event types need no schema changes
-//! - **Uniform storage**: DMs, MLS groups, and public events all stored the same way
+//! - **Uniform storage**: DMs, community channels, and public events all stored the same way
 
 use serde::{Deserialize, Serialize};
 
@@ -43,11 +43,10 @@ use serde::{Deserialize, Serialize};
 /// These are the standard Nostr kinds plus Vector-specific extensions.
 /// Unknown kinds are stored but rendered as placeholders.
 pub mod event_kind {
-    /// MLS Group Chat Message (text content) - White Noise compatible
-    /// Used for text messages inside MLS groups (Kind 9)
-    pub const MLS_CHAT_MESSAGE: u16 = 9;
+    /// Chat message text content (Kind 9). The internal storage kind for every
+    /// text message — DMs and community channels alike.
+    pub const CHAT_MESSAGE: u16 = 9;
     /// NIP-14: Private Direct Message (text content)
-    /// Used for DMs and legacy MLS messages
     pub const PRIVATE_DIRECT_MESSAGE: u16 = 14;
     /// Vector-specific: File attachment with encryption metadata
     pub const FILE_ATTACHMENT: u16 = 15;
@@ -57,12 +56,6 @@ pub mod event_kind {
     pub const REACTION: u16 = 7;
     /// NIP-78: Application-specific data (typing indicators, peer ads, etc.)
     pub const APPLICATION_SPECIFIC: u16 = 30078;
-    /// MLS Welcome message
-    pub const MLS_WELCOME: u16 = 443;
-    /// MLS Group message (wrapper)
-    pub const MLS_GROUP_MESSAGE: u16 = 444;
-    /// MLS Key Package
-    pub const MLS_KEY_PACKAGE: u16 = 443;
 
     // Community protocol append-plane kinds (GROUP_PROTOCOL.md). Vector-claimed
     // block 3300-3399 in the verified-empty 3000-3999 regular range. One kind per

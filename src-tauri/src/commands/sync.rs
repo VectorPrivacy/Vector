@@ -774,9 +774,8 @@ pub async fn fetch_messages<R: Runtime>(
         // Pin this archive task to the session that started it. After an
         // account swap, downstream commits go through `commit_prepared_event`
         // which is session-gated, but the negentropy + fetch loop above
-        // still burns relay bandwidth pointlessly and the post-sync
-        // `sync_mls_groups_now` call would re-enter MLS sync against the
-        // new account. Bail early on swap.
+        // still burns relay bandwidth pointlessly and any post-sync
+        // community sweep would run against the new account. Bail early on swap.
         let archive_session = vector_core::state::SessionGuard::capture();
         tokio::spawn(async move {
             if !archive_session.is_valid() { return; }
@@ -899,7 +898,7 @@ pub async fn fetch_messages<R: Runtime>(
 
             // Resolve + cache our own badges AFTER boot/init settles — not during.
             // The claim's holding relay (often the user's own) is saturated through
-            // the DM archive + concurrent community sweep + MLS window, so a fetch
+            // the DM archive + concurrent community sweep, so a fetch
             // fired now routinely misses and trips the multi-hour re-check cooldown.
             // A short settle delay lets the pool go quiet first, giving the 10s fetch
             // a clean shot. Detached + session-gated across the sleep so a mid-wait

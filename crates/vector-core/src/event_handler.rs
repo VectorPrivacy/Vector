@@ -4,7 +4,7 @@
 //! - **Phase 1** (`prepare_event`): Parallel-safe — dedup, unwrap, process_rumor
 //! - **Phase 2** (`commit_prepared_event`): Sequential — save DB, update STATE, emit
 //!
-//! Platform-specific behavior (notifications, MLS) handled by `InboundEventHandler` trait.
+//! Platform-specific behavior (notifications) handled by `InboundEventHandler` trait.
 
 use nostr_sdk::prelude::*;
 
@@ -245,7 +245,7 @@ pub async fn commit_prepared_event(
                     // If the sender's client (e.g. 0xChat) didn't ship `size` in
                     // the imeta tag, probe the URL via Content-Length so the
                     // frontend's auto-download gate has accurate metadata to
-                    // decide on. Mirrors the MLS path in mls/service.rs.
+                    // decide on.
                     //
                     // Skip for self-echoes (is_mine): we just uploaded these
                     // files, the local Attachment.size is authoritative, and
@@ -389,7 +389,7 @@ pub async fn commit_prepared_event(
             }
 
             // Park for explicit consent — do NOT join, subscribe, or dial the bundle's
-            // relays here. The user accepts via the command layer (mirrors MLS welcomes).
+            // relays here. The user accepts via the command layer.
             let bundle_json = match invite.to_json() {
                 Ok(j) => j,
                 Err(e) => { log_warn!("[community] invite re-serialize failed: {}", e); return false; }

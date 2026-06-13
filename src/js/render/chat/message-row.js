@@ -113,19 +113,27 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
     const currentChat = arrChats.find(c => c.id === strOpenChat);
     const isGroupChat = chatIsGroup(currentChat);
 
-    // ---- Pinged highlight (mention of self, or @everyone from a group admin).
+    // ---- Pinged highlight (mention of self, a reply to me, or @everyone from a group admin).
     // msg.mentions_me() is a Rust method on the backend Message type and does
     // NOT survive Tauri IPC serialization — we have to detect mentions on the
     // raw content here. Mentions are stamped as `@npub1...` in the content
     // (the frontend resolves @display-name → @npub before sending), so a
     // simple substring match is reliable.
-    if (!msg.mine && msg.content) {
-        const mentionedMe = strPubkey && msg.content.includes('@' + strPubkey);
+    if (!msg.mine) {
+        const mentionedMe = strPubkey && msg.content && msg.content.includes('@' + strPubkey);
         const senderNpub = msg.npub || '';
         const senderIsAdmin = isGroupChat && (currentChat?.metadata?.admins?.includes(senderNpub)
         || currentChat?.metadata?.custom_fields?.owner_npub === senderNpub);
-        const mentionedEveryone = senderIsAdmin && /@everyone\b/.test(msg.content);
-        if (mentionedMe || mentionedEveryone) row.dataset.pinged = 'true';
+        const mentionedEveryone = senderIsAdmin && msg.content && /@everyone\b/.test(msg.content);
+        // A reply to one of my own messages is an implicit ping. Prefer the in-memory
+        // target's `mine` flag (DMs don't populate replied_to_npub); fall back to the
+        // backend-resolved reply author for history not held in memory.
+        let repliedToMe = false;
+        if (msg.replied_to) {
+            const tgt = currentChat?.messages?.find(m => m.id === msg.replied_to);
+            repliedToMe = tgt ? !!tgt.mine : (msg.replied_to_npub === strPubkey);
+        }
+        if (mentionedMe || mentionedEveryone || repliedToMe) row.dataset.pinged = 'true';
     }
 
     // ---- Author profile ------------------------------------------------------

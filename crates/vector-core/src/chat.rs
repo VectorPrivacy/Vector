@@ -327,7 +327,7 @@ impl SerializableChat {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum ChatType {
     DirectMessage,
-    /// A Community channel (GROUP_PROTOCOL.md — the MLS successor). The chat `id`
+    /// A Community channel (GROUP_PROTOCOL.md). The chat `id`
     /// is the channel's stable random id.
     Community,
 }
@@ -710,7 +710,7 @@ mod tests {
 
         assert!(
             !chat.is_dm_with("npub1alice", &interner),
-            "MLS group should not match is_dm_with even if participant matches"
+            "community channel should not match is_dm_with even if participant matches"
         );
     }
 
@@ -738,7 +738,7 @@ mod tests {
 
         assert!(
             chat.get_other_participant("npub1alice", &interner).is_none(),
-            "MLS group should return None for get_other_participant"
+            "community channel should return None for get_other_participant"
         );
     }
 

@@ -67,7 +67,7 @@ pub async fn debug_hot_reload_sync() -> Result<serde_json::Value, String> {
     let state = STATE.lock().await;
 
     // Verify we have state from a full app session, not partial state from
-    // standalone background sync (which only preloads MLS groups + notification profiles).
+    // standalone background sync (which only preloads community channels + notification profiles).
     if state.profiles.is_empty() && state.chats.is_empty() {
         return Err("Backend state is empty - perform normal login".to_string());
     }
@@ -734,12 +734,6 @@ pub async fn connect_bunker<R: Runtime>(
         return Err(format!("Bunker setup failed: {}", e));
     }
 
-    // MLS keypackage bootstrap is deferred to the encryption-flow commit
-    // (setup_encryption / skip_encryption). regenerate_device_keypackage
-    // writes to the active-account DB, but we haven't set the active marker
-    // yet — the commit step does that and will spawn the keypackage publish
-    // after marker write.
-
     Ok(LoginResult { public: remote_npub, existing: false })
 }
 
@@ -1246,7 +1240,7 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
             let _ = client.remove_relay(url.as_str()).await;
         }
 
-        // bg-sync only preloads MLS groups + notification profiles —
+        // bg-sync only preloads community channels + notification profiles —
         // partial state that would trick `debug_hot_reload_sync` into
         // skipping login and showing only group chats. Clear it so the
         // frontend goes through the full boot flow.

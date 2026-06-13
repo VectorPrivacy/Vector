@@ -361,9 +361,9 @@ impl vector_core::community::transport::CommunityIngestSink for CommunityStraggl
 }
 
 /// OS notification for a realtime Community message, mirroring the DM/group rules: a normal message
-/// notifies only when the channel isn't muted; a direct @mention or an authorized @everyone (owner
-/// or admin) breaks through a muted channel — unless the SENDER's DM is muted, they're blocked, or
-/// @everyone pings are globally disabled. `chat_id` is the channel id.
+/// notifies only when the channel isn't muted; a direct @mention, a reply to one of our own messages,
+/// or an authorized @everyone (owner or admin) breaks through a muted channel — unless the SENDER's DM
+/// is muted, they're blocked, or @everyone pings are globally disabled. `chat_id` is the channel id.
 async fn show_community_notification(chat_id: &str, msg: &vector_core::Message) {
     if msg.mine { return; }
     let sender_npub = msg.npub.as_deref().unwrap_or_default();
@@ -378,6 +378,11 @@ async fn show_community_notification(chat_id: &str, msg: &vector_core::Message) 
         false
     };
 
+    // A reply to our own message is an implicit ping (same as a direct @mention). The inbound parse
+    // doesn't resolve the reply's author, so check the target event's `mine` flag directly.
+    let reply_ping = !msg.replied_to.is_empty()
+        && vector_core::db::events::is_own_event(&msg.replied_to);
+
     let should_notify = {
         let state = crate::STATE.lock().await;
         let mentions_me = msg.mentions_me();
@@ -385,7 +390,7 @@ async fn show_community_notification(chat_id: &str, msg: &vector_core::Message) 
         let sender_dm_muted = state.get_chat(sender_npub).map_or(false, |c| c.muted);
         if sender_blocked {
             false
-        } else if mentions_me || everyone_ping {
+        } else if mentions_me || reply_ping || everyone_ping {
             // Pings bypass a muted CHANNEL, but never a muted/blocked sender.
             !sender_dm_muted
         } else {

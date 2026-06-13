@@ -392,7 +392,7 @@ fn disable_encryption_transactional<R: Runtime>(
 
         let rows = stmt.query_map(
             rusqlite::params![
-                event_kind::MLS_CHAT_MESSAGE as i32,
+                event_kind::CHAT_MESSAGE as i32,
                 event_kind::PRIVATE_DIRECT_MESSAGE as i32,
                 event_kind::MESSAGE_EDIT as i32,
             ],
@@ -527,7 +527,7 @@ fn enable_encryption_transactional<R: Runtime>(
 
         let rows = stmt.query_map(
             rusqlite::params![
-                event_kind::MLS_CHAT_MESSAGE as i32,
+                event_kind::CHAT_MESSAGE as i32,
                 event_kind::PRIVATE_DIRECT_MESSAGE as i32,
                 event_kind::MESSAGE_EDIT as i32,
             ],
@@ -1336,7 +1336,7 @@ fn rekey_encryption_transactional<R: Runtime>(
 
         let rows = stmt.query_map(
             rusqlite::params![
-                event_kind::MLS_CHAT_MESSAGE as i32,
+                event_kind::CHAT_MESSAGE as i32,
                 event_kind::PRIVATE_DIRECT_MESSAGE as i32,
                 event_kind::MESSAGE_EDIT as i32,
             ],

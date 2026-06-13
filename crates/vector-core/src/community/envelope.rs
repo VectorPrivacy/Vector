@@ -591,7 +591,7 @@ mod tests {
         assert_eq!(opened.attachments[0].key, "0".repeat(64));
         assert_eq!(opened.attachments[0].extension, "png");
         assert!(opened.attachments[0].img_meta.is_some(), "image carries thumbhash/dim");
-        assert!(opened.attachments[0].group_id.is_none(), "Community attachment uses key/nonce, not MLS");
+        assert!(opened.attachments[0].group_id.is_none(), "Community attachment uses explicit key/nonce");
         assert_eq!(opened.attachments[1].name, "notes.pdf");
         assert_eq!(opened.attachments[1].extension, "pdf");
         assert!(opened.attachments[1].img_meta.is_none());

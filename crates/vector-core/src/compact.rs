@@ -606,7 +606,7 @@ impl AttachmentFlags {
     pub const NONE: Self = Self(0);
     const DOWNLOADING: u8 = 0b0001;
     const DOWNLOADED: u8  = 0b0010;
-    const SHORT_NONCE: u8 = 0b0100; // 12-byte nonce (MLS) vs 16-byte (DM)
+    const SHORT_NONCE: u8 = 0b0100; // 12-byte nonce (legacy) vs 16-byte (DM)
 
     #[inline]
     pub fn is_downloading(self) -> bool { self.0 & Self::DOWNLOADING != 0 }
@@ -651,7 +651,7 @@ pub struct CompactAttachment {
     // === Fixed binary fields ===
     /// SHA256 file hash as binary (was hex String)
     pub id: [u8; 32],
-    /// Encryption key - 32 bytes (empty = MLS derived)
+    /// Encryption key - 32 bytes (empty = legacy derived)
     pub key: [u8; 32],
     /// Encryption nonce - 16 bytes (AES-256-GCM with 0xChat compatibility)
     pub nonce: [u8; 16],
@@ -671,13 +671,13 @@ pub struct CompactAttachment {
     // === Optional fields - boxed to save space when None ===
     /// Image metadata (only for images/videos)
     pub img_meta: Option<Box<ImageMetadata>>,
-    /// MLS group ID for key derivation
+    /// Legacy group ID for key derivation
     pub group_id: Option<Box<[u8; 32]>>,
     /// Original file hash before encryption
     pub original_hash: Option<Box<[u8; 32]>>,
     /// WebXDC topic (Mini Apps only - very rare)
     pub webxdc_topic: Option<Box<str>>,
-    /// MLS filename for AAD
+    /// Legacy filename for AAD
     pub mls_filename: Option<Box<str>>,
     /// Scheme version (e.g., "mip04-v1")
     pub scheme_version: Option<Box<str>>,
@@ -722,7 +722,7 @@ impl CompactAttachment {
         if self.nonce == [0u8; 16] {
             String::new()
         } else if self.flags.is_short_nonce() {
-            // 12-byte nonce (MLS/MIP-04)
+            // 12-byte nonce (legacy/MIP-04)
             bytes_to_hex_string(&self.nonce[..12])
         } else {
             // 16-byte nonce (DM/0xChat)
@@ -732,7 +732,7 @@ impl CompactAttachment {
 
     /// Convert from regular Attachment (borrowed)
     pub fn from_attachment(att: &Attachment) -> Self {
-        // Detect short nonce (12 bytes = 24 hex chars) for MLS attachments
+        // Detect short nonce (12 bytes = 24 hex chars) for legacy attachments
         let is_short_nonce = att.nonce.len() == 24;
         let mut flags = AttachmentFlags::from_bools(att.downloading, att.downloaded);
         flags.set_short_nonce(is_short_nonce);
@@ -758,7 +758,7 @@ impl CompactAttachment {
 
     /// Convert from regular Attachment (owned) - zero-copy where possible
     pub fn from_attachment_owned(att: Attachment) -> Self {
-        // Detect short nonce (12 bytes = 24 hex chars) for MLS attachments
+        // Detect short nonce (12 bytes = 24 hex chars) for legacy attachments
         let is_short_nonce = att.nonce.len() == 24;
         let mut flags = AttachmentFlags::from_bools(att.downloading, att.downloaded);
         flags.set_short_nonce(is_short_nonce);
@@ -806,7 +806,7 @@ impl CompactAttachment {
 }
 
 /// Parse a hex nonce string into [u8; 16], left-aligned, zero-allocation.
-/// Both DM (32 hex chars) and MLS (24 hex chars) nonces are decoded.
+/// Both DM (32 hex chars) and legacy (24 hex chars) nonces are decoded.
 /// Short nonces are right-padded with '0' to reach 32 chars before decode.
 #[inline]
 fn parse_nonce(hex: &str) -> [u8; 16] {
@@ -3346,7 +3346,7 @@ mod tests {
     fn compact_attachment_key_nonce_zeros() {
         let att = Attachment {
             id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".into(),
-            key: "".into(), // empty key = MLS derived
+            key: "".into(), // empty key = legacy derived
             nonce: "".into(), // empty nonce
             ..Attachment::default()
         };
@@ -3361,7 +3361,7 @@ mod tests {
 
     #[test]
     fn compact_attachment_short_nonce_mls_12byte() {
-        // MLS nonce is 12 bytes = 24 hex chars
+        // Legacy short nonce is 12 bytes = 24 hex chars
         let att = Attachment {
             id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".into(),
             nonce: "aabbccddaabbccddaabbccdd".into(), // 24 hex chars = 12 bytes

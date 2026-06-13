@@ -17,7 +17,7 @@ pub async fn save_event(event: &StoredEvent) -> Result<(), String> {
         .unwrap_or_else(|_| "[]".to_string());
 
     // Conditionally encrypt message/edit content
-    let content = if event.kind == event_kind::MLS_CHAT_MESSAGE
+    let content = if event.kind == event_kind::CHAT_MESSAGE
         || event.kind == event_kind::PRIVATE_DIRECT_MESSAGE
         || event.kind == event_kind::MESSAGE_EDIT
     {
@@ -591,7 +591,7 @@ pub async fn get_events(
     // Decrypt message content
     let mut decrypted = Vec::with_capacity(events.len());
     for mut event in events {
-        if event.kind == event_kind::MLS_CHAT_MESSAGE || event.kind == event_kind::PRIVATE_DIRECT_MESSAGE {
+        if event.kind == event_kind::CHAT_MESSAGE || event.kind == event_kind::PRIVATE_DIRECT_MESSAGE {
             event.content = crate::crypto::maybe_decrypt(event.content).await
                 .unwrap_or_else(|_| "[Decryption failed]".to_string());
         }
@@ -707,7 +707,7 @@ pub async fn get_reply_contexts(
         let has_attachment = kind == event_kind::FILE_ATTACHMENT as i32;
         let content_to_decrypt = latest_edits.get(&id).cloned().unwrap_or(original_content);
 
-        let decrypted_content = if kind == event_kind::MLS_CHAT_MESSAGE as i32
+        let decrypted_content = if kind == event_kind::CHAT_MESSAGE as i32
             || kind == event_kind::PRIVATE_DIRECT_MESSAGE as i32
         {
             crate::crypto::maybe_decrypt(content_to_decrypt).await
@@ -738,6 +738,22 @@ pub async fn populate_reply_context(message: &mut Message) -> Result<(), String>
     }
 
     Ok(())
+}
+
+/// Whether `event_id` is one of our own messages (`mine = 1`). A reply to our
+/// own message is an implicit ping, so notifications treat it like a direct
+/// @mention (breaks through a muted channel). Missing row → not ours → false.
+pub fn is_own_event(event_id: &str) -> bool {
+    let Ok(conn) = super::get_db_connection_guard_static() else {
+        return false;
+    };
+    conn.query_row(
+        "SELECT mine FROM events WHERE id = ?1",
+        [event_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|mine| mine == 1)
+    .unwrap_or(false)
 }
 
 // ============================================================================
@@ -799,7 +815,7 @@ pub async fn get_message_views(
     use std::collections::HashMap;
 
     // Step 1: Get message events (kind 9, 14, 15)
-    let message_kinds = [event_kind::MLS_CHAT_MESSAGE, event_kind::PRIVATE_DIRECT_MESSAGE, event_kind::FILE_ATTACHMENT];
+    let message_kinds = [event_kind::CHAT_MESSAGE, event_kind::PRIVATE_DIRECT_MESSAGE, event_kind::FILE_ATTACHMENT];
     let message_events = get_events(chat_id, Some(&message_kinds), limit, offset).await?;
 
     if message_events.is_empty() {
@@ -845,7 +861,7 @@ pub async fn get_message_views(
     let mut events_needing_legacy_lookup: Vec<String> = Vec::new();
 
     for event in &message_events {
-        if event.kind != event_kind::FILE_ATTACHMENT && event.kind != event_kind::MLS_CHAT_MESSAGE {
+        if event.kind != event_kind::FILE_ATTACHMENT && event.kind != event_kind::CHAT_MESSAGE {
             continue;
         }
         if let Some(json) = event.get_tag("attachments") {
@@ -966,7 +982,7 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
 
         let rows = stmt.query_map(
             rusqlite::params![
-                event_kind::MLS_CHAT_MESSAGE as i32,
+                event_kind::CHAT_MESSAGE as i32,
                 event_kind::PRIVATE_DIRECT_MESSAGE as i32,
                 event_kind::FILE_ATTACHMENT as i32
             ],
@@ -1028,7 +1044,7 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
     // Step 3: Parse attachments
     let mut attachments_by_msg: HashMap<String, Vec<Attachment>> = HashMap::new();
     for (_, event, tags_json) in &message_events {
-        if event.kind != event_kind::FILE_ATTACHMENT && event.kind != event_kind::MLS_CHAT_MESSAGE {
+        if event.kind != event_kind::FILE_ATTACHMENT && event.kind != event_kind::CHAT_MESSAGE {
             continue;
         }
         if let Some(val) = extract_tag_from_json(tags_json, "attachments") {
@@ -1049,7 +1065,7 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
         let replied_to = extract_reply_tag_from_json(&tags_json).unwrap_or_default();
 
         // Decrypt content
-        let original_content = if event.kind == event_kind::MLS_CHAT_MESSAGE
+        let original_content = if event.kind == event_kind::CHAT_MESSAGE
             || event.kind == event_kind::PRIVATE_DIRECT_MESSAGE
         {
             crate::crypto::maybe_decrypt(event.content.clone()).await
@@ -1112,7 +1128,7 @@ pub async fn unread_counts() -> Result<std::collections::HashMap<String, u32>, S
     let rows = stmt
         .query_map(
             rusqlite::params![
-                event_kind::MLS_CHAT_MESSAGE as i32,
+                event_kind::CHAT_MESSAGE as i32,
                 event_kind::PRIVATE_DIRECT_MESSAGE as i32,
                 event_kind::FILE_ATTACHMENT as i32
             ],

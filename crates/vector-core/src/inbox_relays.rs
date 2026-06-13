@@ -439,8 +439,7 @@ pub fn trusted_relay_urls() -> Vec<RelayUrl> {
 /// id. Dependent operations (NIP-09 deletions, edits, reactions, replies)
 /// can look up the tracker via `get_publish_tracker(event_id)` and drive
 /// per-relay dispatch only after each relay confirms the parent — closing
-/// the publish/dependent race for any send that goes through here,
-/// including MLS kind-445 wrappers.
+/// the publish/dependent race for any send that goes through here.
 pub async fn send_event_first_ok(
     client: &Client,
     urls: Vec<RelayUrl>,

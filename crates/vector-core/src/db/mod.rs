@@ -676,7 +676,7 @@ impl Drop for WriteConnectionGuard {
 // ============================================================================
 
 /// Single source of truth for per-account directories. Every per-account
-/// subsystem (DB, MLS storage, Tor state) resolves its path through this;
+/// subsystem (DB, Tor state) resolves its path through this;
 /// compose further subpaths with `.join(...)` — never insert layers
 /// between `<app_data>` and `<npub>`.
 ///
@@ -725,7 +725,7 @@ pub fn get_db_connection_guard_static() -> Result<ConnectionGuard, String> {
 /// Process-wide serialization lock for tests that install into the global DB pool.
 /// Any test calling `init_database` must hold this for its whole body — otherwise
 /// concurrent inits race on `POOL_GENERATION` and clobber each other's connections.
-/// One shared guard across every module (community, mls, ...) so cross-module test
+/// One shared guard across every module (community, ...) so cross-module test
 /// parallelism can't collide.
 #[cfg(test)]
 pub(crate) static DB_TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());

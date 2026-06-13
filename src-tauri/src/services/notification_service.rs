@@ -38,7 +38,7 @@ pub struct NotificationData {
     pub sender_name: Option<String>,
     /// Optional cached avatar file path for the sender
     pub avatar_path: Option<String>,
-    /// Optional cached avatar file path for the group (MLS groups only)
+    /// Optional cached avatar file path for the group (community channels only)
     pub group_avatar_path: Option<String>,
     /// Chat identifier for notification tap navigation (npub for DMs, group_id for groups)
     pub chat_id: Option<String>,

@@ -1419,7 +1419,7 @@ mod tests {
         assert!(ingest_message(&mut state, &opened, &alice.public_key()).is_some());
         // A Community chat now exists, keyed by the channel id, typed Community.
         let chat = state.chats.iter().find(|c| c.id == opened.channel_id.to_hex()).expect("chat");
-        assert!(chat.is_community(), "channel chat must be ChatType::Community, not MlsGroup");
+        assert!(chat.is_community(), "channel chat must be ChatType::Community");
     }
 
     #[test]

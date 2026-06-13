@@ -905,7 +905,7 @@ async fn fetch_pack_from_relays(client: &Client, addr: &PackAddress) -> Option<E
     // 2) Outbox fallback (NIP-65): the pack lives wherever the creator
     //    publishes, which may sit outside our relays. Fetch through an
     //    ISOLATED throwaway client so these third-party relays never enter
-    //    the shared pool — the DM/MLS sync loops enumerate that pool and
+    //    the shared pool — the DM/community sync loops enumerate that pool and
     //    would otherwise reconcile against every pack author's relays.
     let outbox = fetch_author_write_relays(client, addr.pubkey).await;
     if outbox.is_empty() {

@@ -1,6 +1,6 @@
 //! Shared NIP-77 negentropy set reconciliation.
 //!
-//! One acquisition primitive for the whole app. DM and MLS sync differ only
+//! One acquisition primitive for the whole app. DM and community sync differ only
 //! in their fingerprint source and processing; the reconcile-against-relays
 //! step is identical, so it lives here.
 

@@ -50,15 +50,12 @@ pub fn has_event_emitter() -> bool {
     EVENT_EMITTER.get().is_some()
 }
 
-/// Refreshes the integration layer's live MLS subscription set.
+/// Refreshes the integration layer's live channel subscription set.
 ///
-/// vector-core mutates the local "groups I'm in" set when accepting a
-/// welcome, leaving, or being evicted. The integration layer (Tauri) keeps
-/// a relay subscription whose `#h` filter list mirrors that set. Without
-/// this hook, a kicked group stays subscribed and keeps receiving kind=445
-/// events at epochs we don't have keys for — MDK marks them Failed and
-/// they become permanently unrecoverable even after rejoin (MDK skips
-/// Failed entries on retry).
+/// vector-core mutates the local "channels I'm in" set when joining,
+/// leaving, or being removed. The integration layer (Tauri) keeps a relay
+/// subscription whose filter list mirrors that set; this hook tears down
+/// subscriptions for channels we no longer belong to.
 ///
 /// Implementations typically spawn the async refresh on the host runtime;
 /// the trait method is sync so vector-core can call it from anywhere.
