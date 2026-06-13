@@ -413,11 +413,17 @@ Vector can lock that down too. With **Local Encryption** on, your device's local
 ```mermaid
 flowchart LR
     relays[("Out in the world:<br/>relays see only<br/>scrambled blobs")]
-    vault["🔒 On your device:<br/>local store locked by your PIN<br/>(keys + history + metadata)"]
-    relays ---|"wire encryption"| vault
+    disk["🔒 On your disk:<br/>local store locked by your PIN<br/>(keys + history + metadata)"]
+    mem["🧠 In memory, while running:<br/>keys split + hidden among decoys,<br/>whole only for microseconds per use"]
+    relays ---|"wire encryption"| disk
+    disk ---|"memory hardening"| mem
 ```
 
-Two walls, not one: even the **community keys themselves** are locked away, so a thief can't lift them off your disk and use them to read the community from the relays either. Two honest notes: this protects data **at rest** — while the app is locked; once you unlock and use it, it's necessarily readable in memory — and it's only ever as strong as the PIN you choose. The cryptography is solid; pick a PIN worthy of it.
+Three walls, not one. The first two are what you'd expect: the relays only ever see scrambled blobs, and your on-disk store — including the **community keys themselves** — is locked by your PIN, so a thief can't lift the keys off your disk and read the community from the relays either.
+
+The third wall is the one most apps skip entirely. Even while Vector is **unlocked and running**, your keys don't just sit in memory waiting to be grabbed: each one is split into pieces and scattered among 128 look-alike decoy arrays, reassembled into a whole key only for the few microseconds it takes to sign or decrypt, then wiped. A memory scanner, an info-stealer, or a seized-and-imaged laptop finds noise — no 32 bytes to grep for. (Most messengers, Signal and Telegram included, leave the in-memory key sitting in the clear; see [`docs/security/memory-security.md`](../security/memory-security.md) for the full comparison and threat model.)
+
+Two honest notes. This wall shuts out an entire category outright: passive memory readers, forensic dumps, swap-file scraping, and ordinary info-stealer malware — *even something already running on your machine as you*. The platform protections stop it from reading Vector's memory at all, and the vault would hand it only noise if it did. What it does **not** stop is a *targeted, privileged* attacker — someone who has escalated to **root or kernel control** (or slipped code in before launch) and can then actively hook the app during the microsecond a key is whole. That's a serious, deliberate compromise, not the commodity "scan memory for 32 bytes" malware this defeats completely. And the disk wall is only ever as strong as the PIN you choose. The cryptography is solid; pick a PIN worthy of it.
 
 ---
 
