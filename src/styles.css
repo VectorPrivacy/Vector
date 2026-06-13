@@ -2703,6 +2703,9 @@ body.chat-bg-disabled .chat-messages::before {
   cursor: pointer;
 }
 .system-event-avatar {
+  /* inline-block so the placeholder variant (a display:flex div) flows inline beside the name
+     like the real <img> does, rather than breaking to its own line. */
+  display: inline-block;
   width: 16px;
   height: 16px;
   border-radius: 50%;
