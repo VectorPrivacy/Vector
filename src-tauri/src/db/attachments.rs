@@ -249,9 +249,11 @@ pub fn backfill_attachment_downloaded_status(
 
 /// Check all downloaded attachments in the database for missing files.
 /// Updates the database directly for any files that no longer exist.
-/// Returns (total_checked, missing_count, elapsed_time).
+/// Returns (total_checked, missing_count, elapsed_time, affected_event_ids). The caller reconciles
+/// the affected ids against in-memory STATE — boot preloads messages BEFORE this runs, so a missing
+/// file on a preloaded (e.g. latest) message would otherwise stay a broken image until a full reload.
 pub async fn check_downloaded_attachments_integrity(
-) -> Result<(usize, usize, std::time::Duration), String> {
+) -> Result<(usize, usize, std::time::Duration, Vec<String>), String> {
     let start = std::time::Instant::now();
 
     // Query all events with file attachments that have downloaded files
@@ -312,14 +314,16 @@ pub async fn check_downloaded_attachments_integrity(
         }
     }
 
-    // Batch update all modified events
+    // Batch update all modified events; collect their ids for the in-memory STATE reconcile.
+    let mut affected_ids: Vec<String> = Vec::with_capacity(updates.len());
     if !updates.is_empty() {
         let conn = crate::account_manager::get_db_connection_guard_static()?;
         for (event_id, tags_json) in updates {
             conn.execute(
                 "UPDATE events SET tags = ?1 WHERE id = ?2",
-                rusqlite::params![tags_json, event_id],
+                rusqlite::params![tags_json, &event_id],
             ).ok(); // Ignore individual errors
+            affected_ids.push(event_id);
         }
     }
 
@@ -329,5 +333,5 @@ pub async fn check_downloaded_attachments_integrity(
         total_checked, elapsed, missing_count
     );
 
-    Ok((total_checked, missing_count, elapsed))
+    Ok((total_checked, missing_count, elapsed, affected_ids))
 }

@@ -369,12 +369,20 @@ pub async fn fetch_messages<R: Runtime>(
                     }
                 }
 
-                // Check filesystem integrity for downloaded attachments (queries DB directly)
+                // Check filesystem integrity for downloaded attachments (queries DB directly), then
+                // reconcile any missing files against in-memory STATE + the frontend — boot preloads
+                // messages before this runs, so a missing file on a preloaded message would otherwise
+                // stay a broken image until a full reload.
                 let integrity_session = vector_core::state::SessionGuard::capture();
                 tokio::spawn(async move {
                     if !integrity_session.is_valid() { return; }
-                    if let Err(e) = db::check_downloaded_attachments_integrity().await {
-                        eprintln!("[Integrity] Check failed: {}", e);
+                    match db::check_downloaded_attachments_integrity().await {
+                        Ok((_, missing, _, affected)) if missing > 0 => {
+                            if !integrity_session.is_valid() { return; }
+                            crate::commands::attachments::reconcile_missing_attachments_in_state(&affected).await;
+                        }
+                        Ok(_) => {}
+                        Err(e) => eprintln!("[Integrity] Check failed: {}", e),
                     }
                 });
 

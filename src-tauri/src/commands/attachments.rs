@@ -535,6 +535,62 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
     }
 }
 
+/// Reconcile in-memory STATE against the boot integrity check. Boot preloads messages into STATE (and
+/// ships them to the frontend) BEFORE the integrity check runs, so a file that went missing while
+/// Vector was closed leaves the preloaded message (e.g. the latest one) painting a broken image — the
+/// DB was corrected but memory + UI weren't. For each message whose id is in `affected`, clear the
+/// now-missing attachment in STATE and emit `message_update` so the frontend swaps the broken image
+/// for the re-download affordance. No DB write — the integrity check already persisted the correction.
+pub(crate) async fn reconcile_missing_attachments_in_state(affected: &[String]) {
+    if affected.is_empty() {
+        return;
+    }
+    let affected: HashSet<&str> = affected.iter().map(|s| s.as_str()).collect();
+    let mut state = STATE.lock().await;
+    for chat_idx in 0..state.chats.len() {
+        // Pass 1 (mut): clear the missing attachments on matching messages.
+        let mut updated_ids: Vec<String> = Vec::new();
+        for msg in state.chats[chat_idx].messages.iter_mut() {
+            if msg.attachments.is_empty() {
+                continue;
+            }
+            let hex = msg.id_hex();
+            if !affected.contains(hex.as_str()) {
+                continue;
+            }
+            let mut changed = false;
+            for att in msg.attachments.iter_mut() {
+                if att.downloaded() && !att.path.is_empty()
+                    && !std::path::Path::new(&*att.path).exists()
+                {
+                    att.set_downloaded(false);
+                    att.set_downloading(false);
+                    att.path = String::new().into_boxed_str();
+                    changed = true;
+                }
+            }
+            if changed {
+                updated_ids.push(hex);
+            }
+        }
+        if updated_ids.is_empty() {
+            continue;
+        }
+        // Pass 2 (immut): serialize + emit (disjoint borrows of chats[idx] and interner).
+        let chat_id = state.chats[chat_idx].id().to_string();
+        for hex in &updated_ids {
+            if let Some(m) = state.chats[chat_idx].messages.find_by_hex_id(hex) {
+                let message = m.to_message(&state.interner);
+                vector_core::emit_event("message_update", &serde_json::json!({
+                    "old_id": &message.id,
+                    "message": &message,
+                    "chat_id": &chat_id,
+                }));
+            }
+        }
+    }
+}
+
 // Handler list for this module (for reference):
 // - generate_thumbhash_preview
 // - decode_thumbhash
