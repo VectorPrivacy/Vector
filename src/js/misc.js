@@ -1488,16 +1488,13 @@ function renderMentions(element, senderIsAdmin = false) {
             span.className = 'mention';
             span.setAttribute('data-npub', npub);
             span.textContent = '@' + displayName;
-            span.addEventListener('click', () => {
-                if (typeof openProfile === 'function') {
-                    const p = typeof getProfile === 'function' ? getProfile(npub) : null;
-                    if (p) {
-                        // Remember current chat so profile Back returns here
-                        if (typeof strOpenChat !== 'undefined' && strOpenChat) {
-                            previousChatBeforeProfile = strOpenChat;
-                        }
-                        openProfile(p);
-                    }
+            span.addEventListener('click', (e) => {
+                // Open the mini-profile (same popup as a name/avatar tap), not the full screen.
+                // stopPropagation so the opening click doesn't hit the document outside-click
+                // dismiss. Works even for an uncached npub — showMiniProfile fetches + placeholders.
+                if (typeof showMiniProfile === 'function') {
+                    e.stopPropagation();
+                    showMiniProfile(npub, span);
                 }
             });
             frag.appendChild(span);
