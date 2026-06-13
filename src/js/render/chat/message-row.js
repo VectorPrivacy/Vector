@@ -98,7 +98,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
 
     // ---- System event (centered timestamp-style line) -----------------------
     if (msg.system_event) {
-        const el = insertSystemEvent(msg.content);
+        const el = insertSystemEvent(msg.content, null, msg.system_event.member_npub, msg.system_event.event_type);
         // Tag with msg.id so updateChat's `document.getElementById(msg.id)`
         // dedup guard skips re-rendering it on the openChat pre-paint pass.
         // Without this, system events rendered twice on every chat reopen.
@@ -1445,5 +1445,8 @@ function _dmsgInjectReaction(rowEl, spanReaction) {
             showMiniProfile(npub, profileBtn);
             return;
         }
+
+        // (System-event user names open the mini-profile via a direct listener attached in
+        // insertSystemEvent — they aren't always children of this delegate's container.)
     });
 })();

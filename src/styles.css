@@ -2696,6 +2696,20 @@ body.chat-bg-disabled .chat-messages::before {
 .msg-inline-timestamp::before { margin-right: 12px; }
 .msg-inline-timestamp::after  { margin-left: 12px; }
 
+/* Clickable user name in a system event ("<name> has joined") — opens the same
+   mini-profile as a chat name/avatar tap. The whole name+suffix text is the hit area;
+   the name is a touch bolder than the dim line, brightening + underline on hover. */
+.system-event-text {
+  cursor: pointer;
+}
+.system-event-name {
+  font-weight: 600;
+}
+.system-event-text:hover .system-event-name {
+  text-decoration: underline;
+  opacity: 1;
+}
+
 /* "New" divider — same flexbox shape as inline timestamps but tinted with
    the active accent. Marks the boundary between read and unread messages. */
 .msg-inline-timestamp.unread-divider {

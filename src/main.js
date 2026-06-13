@@ -20,18 +20,25 @@ function systemEventName(npub) {
     return p?.nickname || p?.name || (npub ? npub.substring(0, 12) + '…' : 'Someone');
 }
 
-/** Build a system-event line, resolving the actor's CURRENT cached name (the stored content
- * was baked with the raw npub at receive time, before the profile was known). */
-function systemEventContent(eventType, npub) {
-    const name = systemEventName(npub);
+/** The non-name part of a system-event line (" has joined", etc.). Split from the name so the
+ * in-chat render can make the name a clickable profile affordance while keeping the rest plain. */
+function systemEventSuffix(eventType) {
     switch (eventType) {
-        case SystemEventType.MemberLeft: return `${name} has left`;
-        case SystemEventType.MemberJoined: return `${name} has joined`;
-        case SystemEventType.MemberRemoved: return `${name} was removed`;
-        case SystemEventType.WallpaperChanged: return `${name} changed the wallpaper`;
-        case SystemEventType.WallpaperRemoved: return `${name} removed the wallpaper`;
-        default: return name;
+        case SystemEventType.MemberLeft: return ' has left';
+        case SystemEventType.MemberJoined: return ' has joined';
+        case SystemEventType.MemberRemoved: return ' was removed';
+        case SystemEventType.WallpaperChanged: return ' changed the wallpaper';
+        case SystemEventType.WallpaperRemoved: return ' removed the wallpaper';
+        default: return '';
     }
+}
+
+/** Build a system-event line, resolving the actor's CURRENT cached name (the stored content
+ * was baked with the raw npub at receive time, before the profile was known). Plain-string form
+ * for notifications / chatlist previews; the in-chat DOM uses `insertSystemEvent` for the
+ * clickable-name variant. */
+function systemEventContent(eventType, npub) {
+    return systemEventName(npub) + systemEventSuffix(eventType);
 }
 
 /**
@@ -2807,7 +2814,7 @@ async function setupRustListeners() {
             if (strOpenChat === conversation_id && domChatMessages) {
                 const newestAt = (chat?.messages || []).reduce((mx, m) => (m.id !== event_id && m.at > mx ? m.at : mx), 0);
                 if (atMs >= newestAt) {
-                    const systemElement = insertSystemEvent(content);
+                    const systemElement = insertSystemEvent(content, null, member_pubkey, event_type);
                     // Tag with the event id so the profile_update retro-resolver can
                     // find + repaint this line in place when a stranger's name lands.
                     systemElement.id = event_id;
@@ -3160,7 +3167,13 @@ async function setupRustListeners() {
                 if (m.system_event?.member_npub === evt.payload.id) {
                     m.content = systemEventContent(m.system_event.event_type, evt.payload.id);
                     const el = document.getElementById(m.id);
-                    if (el) el.textContent = m.content;
+                    if (el) {
+                        // Patch only the clickable name span (preserves the affordance + suffix);
+                        // fall back to whole-line text for a legacy plain-rendered line.
+                        const nameEl = el.querySelector('.system-event-name');
+                        if (nameEl) nameEl.textContent = systemEventName(evt.payload.id);
+                        else el.textContent = m.content;
+                    }
                 }
             }
         }
@@ -6159,10 +6172,35 @@ function insertTimestamp(timestamp, parent = null) {
  * @param {HTMLElement} parent - Optional parent to append to
  * @returns {HTMLElement} - The created system event element
  */
-function insertSystemEvent(content, parent = null) {
+function insertSystemEvent(content, parent = null, npub = null, eventType = null) {
     const pSystemEvent = document.createElement('p');
     pSystemEvent.classList.add('msg-inline-timestamp'); // Reuse timestamp styling
-    pSystemEvent.textContent = content;
+
+    // When the user's npub is known, render the NAME as a clickable affordance (data-npub →
+    // the domChatMessages click delegate opens the same mini-profile as a chat name/avatar tap),
+    // with the rest as plain text. Falls back to the plain string otherwise.
+    if (npub && eventType !== null) {
+        // Single inline wrapper = one centered flex item, so the name↔suffix space survives
+        // (two bare flex items would collapse the gap between them).
+        const inner = document.createElement('span');
+        inner.className = 'system-event-text';
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'system-event-name';
+        nameSpan.dataset.npub = npub;
+        nameSpan.textContent = systemEventName(npub);
+        inner.appendChild(nameSpan);
+        inner.appendChild(document.createTextNode(systemEventSuffix(eventType)));
+        // Direct listener (system events are few — no delegation needed) so the affordance works
+        // regardless of which container the line is appended to. Opens the same mini-profile as a
+        // chat name/avatar tap. stopPropagation so it doesn't double-fire any ancestor delegate.
+        inner.addEventListener('click', (e) => {
+            e.stopPropagation();
+            showMiniProfile(npub, nameSpan);
+        });
+        pSystemEvent.appendChild(inner);
+    } else {
+        pSystemEvent.textContent = content;
+    }
 
     if (parent) {
         parent.appendChild(pSystemEvent);
