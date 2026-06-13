@@ -4249,6 +4249,30 @@ emojiSearch.onkeydown = async (e) => {
 
         if (!emojiElement) return;
 
+        // Custom (pack) emoji at the first position — mirror the pack-click path
+        // (insert the :shortcode: literal, or send a custom reaction). Stock lookup
+        // below keys on the emoji char, which a custom cell doesn't carry, so handle
+        // it here first.
+        const packShortcode = emojiElement.dataset.packShortcode;
+        if (packShortcode) {
+            bumpCustomEmojiUsage(packShortcode);
+            if (strCurrentReactionReference && _userAlreadyReacted(`:${packShortcode}:`)) {
+                // already reacted — just dismiss below
+            } else if (strCurrentReactionReference) {
+                _sendCustomEmojiReaction(packShortcode, emojiElement.dataset.packUrl);
+            } else {
+                insertAtCursor(`:${packShortcode}:`, true);
+            }
+            emojiSearch.value = '';
+            picker.classList.remove('visible');
+            strCurrentReactionReference = '';
+            domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
+            if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
+                domChatMessageInput.focus();
+            }
+            return;
+        }
+
         // Register the selection in the emoji-dex
         const cEmoji = arrEmojis.find(a => a.emoji === emojiElement.dataset.emoji);
         if (!cEmoji) return;
