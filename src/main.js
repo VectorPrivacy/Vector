@@ -8741,6 +8741,15 @@ async function openCommunityInvitePanel(chat) {
     // we lack the ban permission to read the list (then the backend refusal is the only guard).
     let bannedSet = new Set();
     try { bannedSet = new Set(await invoke('get_community_banlist', { communityId })); } catch (_) {}
+    // Existing members can't be invited again — hide them (they're already inside). Roster = observed
+    // members ∪ owner ∪ admins (owner/admins may predate activity-based membership).
+    const memberSet = new Set();
+    try {
+        for (const m of await invoke('get_community_members', { communityId })) memberSet.add(m.npub);
+    } catch (_) {}
+    const ownerNpub = chat.metadata?.custom_fields?.owner_npub;
+    if (ownerNpub) memberSet.add(ownerNpub);
+    for (const a of (chat.metadata?.admins || [])) memberSet.add(a);
 
     const buildContactRow = (npub, profile) => {
         const isSel = selectedInvitees.has(npub);
@@ -8781,16 +8790,17 @@ async function openCommunityInvitePanel(chat) {
         const dmIds = new Set(arrChats.filter(c => c.chat_type === 'DirectMessage').map(c => c.id));
         const frag = document.createDocumentFragment();
 
-        // Pasted strangers (show if selected, or matching the current filter npub) — never a banned npub.
+        // Pasted strangers (show if selected, or matching the current filter npub) — never a banned npub
+        // or an existing member.
         for (const npub of strangerInvitees) {
-            if (bannedSet.has(npub)) continue;
+            if (bannedSet.has(npub) || memberSet.has(npub)) continue;
             if (!selectedInvitees.has(npub) && filterNpub !== npub) continue;
             frag.appendChild(buildContactRow(npub, arrProfiles.find(p => p.id === npub) || null));
         }
 
-        // DM contacts: selected first, then most-recent conversation. Banned npubs are excluded.
+        // DM contacts: selected first, then most-recent conversation. Banned npubs + existing members excluded.
         const contacts = arrProfiles
-            .filter(p => p && p.id && p.id !== myNpub && !p.is_blocked && !bannedSet.has(p.id) && dmIds.has(p.id))
+            .filter(p => p && p.id && p.id !== myNpub && !p.is_blocked && !bannedSet.has(p.id) && !memberSet.has(p.id) && dmIds.has(p.id))
             .sort((a, b) => {
                 const aSel = selectedInvitees.has(a.id), bSel = selectedInvitees.has(b.id);
                 if (aSel !== bSel) return aSel ? -1 : 1;
@@ -8816,10 +8826,11 @@ async function openCommunityInvitePanel(chat) {
     };
     renderContacts();
 
-    // Typing filters; a pasted/typed valid npub gets added to the list and auto-selected.
+    // Typing filters; a pasted/typed valid npub gets added to the list and auto-selected — unless it's
+    // me, a banned npub, or someone already in the community (can't invite any of them).
     npubInput.oninput = () => {
         const np = extractNpub(npubInput.value || '');
-        if (np && np !== myNpub) {
+        if (np && np !== myNpub && !bannedSet.has(np) && !memberSet.has(np)) {
             if (!arrProfiles.some(p => p.id === np)) {
                 strangerInvitees.add(np);
                 if (!strangerProfileRequested.has(np)) {
