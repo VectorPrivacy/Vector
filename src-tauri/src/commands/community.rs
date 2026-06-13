@@ -2393,10 +2393,30 @@ pub async fn accept_community_invite(community_id: String) -> Result<CommunitySu
     Ok(CommunitySummary { preloaded, ..summarize(&community) })
 }
 
-/// Decline a parked invite (drop it without joining).
+/// Decline a parked invite. Drops it locally, writes a decline tombstone to the synced Community List
+/// (so a sibling device drops its copy too, and a re-delivered/older invite stays suppressed — a
+/// strictly-newer one resurfaces), and immediately sheds the relays this invite's preload warmed.
 #[tauri::command]
 pub async fn decline_community_invite(community_id: String) -> Result<(), String> {
-    vector_core::db::community::delete_pending_invite(&community_id)
+    // Grab the bundle's relays before dropping it, so we can shed what its preload warmed (the
+    // immediate counterpart to the TTL prune; an accepted invite would have kept them).
+    let relays: Vec<String> = vector_core::db::community::get_pending_invite(&community_id)
+        .ok()
+        .flatten()
+        .and_then(|j| vector_core::community::invite::CommunityInvite::from_json(&j).ok())
+        .map(|inv| inv.relays)
+        .unwrap_or_default();
+
+    vector_core::db::community::delete_pending_invite(&community_id)?;
+    // Cross-device + durable suppression: tombstone (reuses the leave path's publish/converge) so the
+    // un-deletable 3304 can't re-nag and other devices drop their parked copy.
+    vector_core::community::list::remove_membership(&community_id);
+    // Drop any lingering warm entry, then prune the relays no joined community needs.
+    vector_core::community::cache::abort_preload(&community_id);
+    if !relays.is_empty() {
+        vector_core::community::transport::prune_unneeded_community_relays(&relays).await;
+    }
+    Ok(())
 }
 
 // ============================================================================

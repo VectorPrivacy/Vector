@@ -380,6 +380,14 @@ pub async fn commit_prepared_event(
                 return false;
             }
 
+            // Supersession: a decline/leave tombstone suppresses any invite no newer than the
+            // decision (so the un-deletable 3304 can't re-nag, and a sibling's decline propagated via
+            // the synced list silences this device too). A STRICTLY-newer invite falls through and
+            // parks — a deliberate re-invite resurfaces. `wrapper_created_at` is outer-send seconds.
+            if crate::community::list::tombstone_suppresses(&community_id, wrapper_created_at) {
+                return false;
+            }
+
             // Park for explicit consent — do NOT join, subscribe, or dial the bundle's
             // relays here. The user accepts via the command layer (mirrors MLS welcomes).
             let bundle_json = match invite.to_json() {

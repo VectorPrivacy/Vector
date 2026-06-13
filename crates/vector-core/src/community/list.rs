@@ -140,6 +140,17 @@ impl CommunityList {
         self.entries.iter().any(|e| e.community_id == community_id)
     }
 
+    /// Timestamp-supersession test (pure): is a decline/leave tombstone for `community_id` at least as
+    /// new as an invite whose outer `created_at` is `invite_created_at_secs`? `true` = suppress (the
+    /// invite is a re-delivery or older); a strictly-newer invite returns `false` and resurfaces.
+    /// `removed_at` is ms, invite `created_at` is seconds — compared in ms.
+    pub fn tombstone_suppresses_at(&self, community_id: &str, invite_created_at_secs: u64) -> bool {
+        let invite_ms = invite_created_at_secs.saturating_mul(1000);
+        self.tombstones
+            .iter()
+            .any(|t| t.community_id == community_id && t.removed_at >= invite_ms)
+    }
+
     /// ADD/refresh a membership locally (call before republishing). If a newer entry already exists it
     /// keeps the earliest seed (stable) and freshest current_root; a re-add after a tombstone resurrects.
     pub fn upsert(&mut self, entry: CommunityListEntry) {
@@ -547,6 +558,16 @@ pub fn tombstone_local_only(community_id: &str) {
     }
 }
 
+/// True if a decline/leave tombstone for `community_id` is at least as new as an incoming invite
+/// (whose outer `created_at` is in SECONDS) — i.e. the invite is a re-delivery of, or older than, the
+/// decision to suppress this community. A STRICTLY-NEWER invite returns false so it resurfaces for an
+/// explicit Accept/Decline (the timestamp-supersession rule). This is what lets the un-deletable
+/// gift-wrapped invite stop re-nagging after a decline/leave — including on a fresh device, which folds
+/// the tombstone from the synced list before it parks the re-fetched bundle.
+pub fn tombstone_suppresses(community_id: &str, invite_created_at_secs: u64) -> bool {
+    load_local_list().tombstone_suppresses_at(community_id, invite_created_at_secs)
+}
+
 /// Follow a re-founding OR a rename forward: refresh an entry's `current` snapshot (latest root + channel
 /// keys + name) from the freshest community state, so a fresh device jumps STRAIGHT to the latest epoch with
 /// the current keys (no walk) and shows the current name. No-op if the community isn't in our list or the
@@ -753,6 +774,21 @@ mod tests {
         let m = a.merge(&b);
         assert!(!m.contains("X"), "a removal newer than the add buries the community");
         assert!(m.tombstones.iter().any(|t| t.community_id == "X"));
+    }
+
+    #[test]
+    fn decline_tombstone_suppresses_old_invite_not_newer() {
+        // Decline recorded at 5_000_000 ms (= 5000 s). removed_at is ms; invite created_at is secs.
+        let list = CommunityList { entries: vec![], tombstones: vec![CommunityRemoval {
+            community_id: "X".into(), removed_at: 5_000_000,
+        }] };
+        // A re-delivery of the same/older invite (≤ 5000 s) is suppressed...
+        assert!(list.tombstone_suppresses_at("X", 5000), "same-time re-delivery suppressed");
+        assert!(list.tombstone_suppresses_at("X", 4999), "older invite suppressed");
+        // ...a strictly-newer invite (deliberate re-invite) resurfaces.
+        assert!(!list.tombstone_suppresses_at("X", 5001), "newer invite resurfaces");
+        // An unrelated community is never suppressed.
+        assert!(!list.tombstone_suppresses_at("Y", 1), "other community unaffected");
     }
 
     #[test]
