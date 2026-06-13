@@ -2808,6 +2808,9 @@ async function setupRustListeners() {
                 const newestAt = (chat?.messages || []).reduce((mx, m) => (m.id !== event_id && m.at > mx ? m.at : mx), 0);
                 if (atMs >= newestAt) {
                     const systemElement = insertSystemEvent(content);
+                    // Tag with the event id so the profile_update retro-resolver can
+                    // find + repaint this line in place when a stranger's name lands.
+                    systemElement.id = event_id;
                     domChatMessages.appendChild(systemElement);
                     softChatScroll();
                 }
@@ -11029,7 +11032,18 @@ document.addEventListener('click', (e) => {
         const previewEl = e.target.closest('.dmsg-preview');
         if (previewEl) {
             const strURL = previewEl.getAttribute('url');
-            if (strURL) openUrl(strURL);
+            // og:url is attacker-settable (the linked page's own metadata), so gate
+            // the scheme to http/https before handing it to the OS opener — same
+            // allowlist the markdown/linkify paths enforce. A schemeless domain
+            // fallback is assumed https.
+            if (strURL) {
+                let safe = null;
+                try {
+                    const u = new URL(/^[a-z][a-z0-9+.-]*:/i.test(strURL) ? strURL : 'https://' + strURL);
+                    if (u.protocol === 'http:' || u.protocol === 'https:') safe = u.href;
+                } catch (_) { /* unparseable → don't open */ }
+                if (safe) openUrl(safe);
+            }
             return;
         }
     }

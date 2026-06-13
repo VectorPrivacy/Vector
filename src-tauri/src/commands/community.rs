@@ -2093,10 +2093,14 @@ pub(crate) async fn apply_community_presence(
         Some(l) if !l.is_empty() => format!("{by}|{l}"),
         _ => by.to_string(),
     });
+    // A swap can land during the save await; without this re-check the queue push
+    // below would seed account A's npub into account B's freshly-cleared profile
+    // queue, and the emit would surface A's join in B's open chat.
+    let session = vector_core::state::SessionGuard::capture();
     let inserted = vector_core::db::events::save_system_event_at(event_id, channel_id, et, npub, note.as_deref(), created_at, invited_by, invited_label)
         .await
         .unwrap_or(false);
-    if inserted {
+    if inserted && session.is_valid() {
         // A member we can't NAME renders as an npub stub everywhere (join/leave
         // line, member list, @mention pool) — queue their profile so the name
         // lands moments after the event. Gated on nameless-ness: a member we
