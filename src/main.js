@@ -8175,6 +8175,10 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                     }
                     row.appendChild(actions);
                 }
+                // Row → mini-profile (same popup as a chat name/avatar tap). The crown/kick/ban
+                // controls stopPropagation, so this only fires on the avatar/name/empty area.
+                row.style.cursor = 'pointer';
+                row.addEventListener('click', () => showMiniProfile(m.npub, avatar));
                 frag.appendChild(row);
                 shown++;
             }
@@ -8232,6 +8236,9 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                         }
                     };
                     row.appendChild(unbanBtn);
+                    // Banned rows open the profile too (the Unban button stopPropagation's).
+                    row.style.cursor = 'pointer';
+                    row.addEventListener('click', () => showMiniProfile(bnpub, av));
                     membersEl.appendChild(row);
                 }
             }
