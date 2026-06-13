@@ -2097,6 +2097,23 @@ pub(crate) async fn apply_community_presence(
         .await
         .unwrap_or(false);
     if inserted {
+        // A member we can't NAME renders as an npub stub everywhere (join/leave
+        // line, member list, @mention pool) — queue their profile so the name
+        // lands moments after the event. Gated on nameless-ness: a member we
+        // already show a name for refreshes on the profile system's own cadence.
+        let nameless = {
+            let state = vector_core::state::STATE.lock().await;
+            state.get_profile(npub).is_none_or(|p| {
+                p.nickname.is_empty() && p.display_name.is_empty() && p.name.is_empty()
+            })
+        };
+        if nameless {
+            vector_core::profile::sync::queue_profile_sync(
+                npub.to_string(),
+                vector_core::profile::sync::SyncPriority::High,
+                false,
+            );
+        }
         vector_core::emit_event(
             "system_event",
             &serde_json::json!({

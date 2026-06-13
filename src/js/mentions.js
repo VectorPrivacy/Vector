@@ -101,8 +101,10 @@ function initMentionSelector(textarea, candidatesFn, anchorEl) {
     function getFiltered() {
         if (!cachedCandidates) cachedCandidates = candidatesFn();
         const q = query.toLowerCase();
+        // Match display name OR npub — a member with no profile name yet (npub-stub
+        // entry) must still be findable by typing (part of) their npub.
         return cachedCandidates
-            .filter(c => c.name.toLowerCase().includes(q))
+            .filter(c => c.name.toLowerCase().includes(q) || c.npub.toLowerCase().includes(q))
             .slice(0, 5);
     }
 

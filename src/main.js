@@ -2346,6 +2346,9 @@ let statusHideTimeout = null;
 // Cached member count per community id, for the chat-header subtext + overview status. Membership is
 // derived from observed activity (best-effort), so this is refreshed live as people join/speak.
 const communityMemberCounts = new Map();
+// Full roster per community id ([{npub, last_active}]) — the @mention pool reads this
+// synchronously, so anyone the Member List shows is taggable (not just RAM-loaded senders).
+const communityMembersCache = new Map();
 const _communityCountLastFetch = new Map();
 const _communityCountInFlight = new Set();
 
@@ -2372,6 +2375,7 @@ async function refreshCommunityMemberCount(communityId, force = false) {
     }
     _communityCountInFlight.delete(communityId);
     _communityCountLastFetch.set(communityId, Date.now());
+    communityMembersCache.set(communityId, members);
     if (communityMemberCounts.get(communityId) === members.length) return; // unchanged, no re-render
     communityMemberCounts.set(communityId, members.length);
     // Live-update the open channel's header (its chat carries this community_id) + the overview status.
@@ -3143,6 +3147,26 @@ async function setupRustListeners() {
         // Refresh the mini profile popup if it's open for this npub.
         if (typeof refreshMiniProfileIfMatches === 'function') {
             refreshMiniProfileIfMatches(evt.payload.id);
+        }
+
+        // Retro-resolve system events (join/leave lines) that rendered with this
+        // npub's stub before the profile loaded — both the cached content and any
+        // already-painted DOM line, plus buffered (not-yet-revealed) events.
+        for (const chat of arrChats) {
+            for (const m of chat.messages || []) {
+                if (m.system_event?.member_npub === evt.payload.id) {
+                    m.content = systemEventContent(m.system_event.event_type, evt.payload.id);
+                    const el = document.getElementById(m.id);
+                    if (el) el.textContent = m.content;
+                }
+            }
+        }
+        for (const buffer of _systemEventBuffer.values()) {
+            for (const m of buffer) {
+                if (m.system_event?.member_npub === evt.payload.id) {
+                    m.content = systemEventContent(m.system_event.event_type, evt.payload.id);
+                }
+            }
         }
 
         // Re-render create group or invite modal if a stranger npub's profile resolved
@@ -7903,6 +7927,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         let memberList = [];
         try { memberList = await invoke('get_community_members', { communityId }); } catch (_) {}
         // Cache the count for the header/overview subtext (the overview's own authoritative fetch).
+        communityMembersCache.set(communityId, memberList);
         communityMemberCounts.set(communityId, memberList.length);
         _communityCountLastFetch.set(communityId, Date.now());
         domGroupOverviewStatus.textContent = communityMemberSubtext(communityId);
@@ -10493,12 +10518,20 @@ const mentionCtrl = typeof initMentionSelector === 'function' ? initMentionSelec
                 if (!lastActive[sender]) lastActive[sender] = m.at || 0;
             }
         }
-        // Taggable npubs = explicit participants ∪ (for communities) everyone who's posted.
-        // Community rosters aren't mirrored into `participants`, so observed senders are the
-        // reliable taggable set — without this the selector is empty in Community channels.
+        // Taggable npubs = explicit participants ∪ (for communities) the roster ∪ observed senders.
+        // The roster (cached from get_community_members) covers join-presence-only members the
+        // Member List already shows; observed senders cover anyone the roster fetch hasn't
+        // caught up with yet (it refreshes throttled while the chat is open).
         const npubs = new Set(chat.participants || []);
         if (isCommunity) {
             for (const np of Object.keys(lastActive)) npubs.add(np);
+            const communityId = chat.metadata?.custom_fields?.community_id;
+            for (const m of communityMembersCache.get(communityId) || []) {
+                npubs.add(m.npub);
+                // Roster last_active is SECONDS; message timestamps are ms. Only a
+                // fallback — a real message timestamp wins the recency sort.
+                if (!lastActive[m.npub]) lastActive[m.npub] = (m.last_active || 0) * 1000;
+            }
         }
         const candidates = [...npubs]
             .filter(npub => npub && npub !== strPubkey && npub.startsWith('npub1'))
