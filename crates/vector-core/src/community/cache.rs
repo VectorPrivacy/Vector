@@ -123,7 +123,7 @@ pub fn clear_channel_sync_state(channel_id: &str) {
 // trace. Generation-stamped (cleared on account swap) + TTL'd + capped.
 
 /// How long a warmed page stays promotable. Past this, Join falls back to a normal sync.
-const PRELOAD_TTL: Duration = Duration::from_secs(120);
+pub(crate) const PRELOAD_TTL: Duration = Duration::from_secs(120);
 /// Max communities warmed at once (bounds memory; oldest evicted on overflow).
 const PRELOAD_MAX: usize = 8;
 

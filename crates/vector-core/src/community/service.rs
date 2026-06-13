@@ -1268,6 +1268,27 @@ pub async fn preload_community(invite: &super::invite::CommunityInvite) {
         // Empty page or fetch error → drop the in-flight marker so an adopter falls back at once.
         _ => crate::community::cache::abort_preload(&cid),
     }
+
+    // Warming this invite added its (≤5, capped) relays to the pool. If it never becomes a join
+    // within the preload window, shed them — an unsolicited or declined invite must not park relays
+    // in the pool forever (#297). A genuine Join re-warms them via its subscription, so this is safe.
+    let prune_relays = community.relays.clone();
+    let prune_id = community.id;
+    let guard = crate::state::SessionGuard::capture();
+    tokio::spawn(async move {
+        tokio::time::sleep(crate::community::cache::PRELOAD_TTL).await;
+        if !guard.is_valid() {
+            return;
+        }
+        // Joined within the window? Its relays are legitimate now (and its preload entry was already
+        // taken on accept) — leave them.
+        if matches!(crate::db::community::load_community(&prune_id), Ok(Some(_))) {
+            return;
+        }
+        // Drop any lingering warm entry, then shed the relays no joined community needs.
+        crate::community::cache::abort_preload(&prune_id.to_hex());
+        super::transport::prune_unneeded_community_relays(&prune_relays).await;
+    });
 }
 
 /// Persist edited Community display metadata and republish the GroupRoot as a real-npub 3308 edition

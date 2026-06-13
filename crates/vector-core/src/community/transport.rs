@@ -224,6 +224,49 @@ pub fn forget_warmed_relay(url: &str) {
     WARMED_RELAYS.lock().unwrap_or_else(|e| e.into_inner()).1.remove(url);
 }
 
+/// Shed pooled Community relays from `candidates` that no JOINED community still needs. Used by both
+/// the leave path (relays of a community we left) and the invite-preload TTL cleanup (relays an
+/// unsolicited/declined invite warmed but never became a join, #297). Keep rules: a relay is kept if
+/// a remaining joined community lists it, OR it carries READ/WRITE (the user's own chat relays —
+/// Community relays are GOSSIP-only, so never READ/WRITE). A pruned relay re-warms automatically if
+/// its invite is later accepted (the join's subscription re-adds it), so pruning a still-pending
+/// invite's relay is safe.
+pub async fn prune_unneeded_community_relays(candidates: &[String]) {
+    if candidates.is_empty() {
+        return;
+    }
+    let Some(client) = crate::state::nostr_client() else { return };
+
+    let mut still_needed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Ok(ids) = crate::db::community::list_community_ids() {
+        for id in ids {
+            if let Ok(Some(c)) = crate::db::community::load_community(&id) {
+                for r in &c.relays {
+                    still_needed.insert(r.clone());
+                }
+            }
+        }
+    }
+
+    let pool = client.pool();
+    // all_relays(): community relays carry GOSSIP, so they're absent from `relays()` (READ/WRITE only).
+    let pooled = pool.all_relays().await;
+    for url in candidates {
+        if still_needed.contains(url) {
+            continue;
+        }
+        if let Ok(parsed) = nostr_sdk::RelayUrl::parse(url) {
+            if let Some(relay) = pooled.get(&parsed) {
+                if relay.flags().has_read() || relay.flags().has_write() {
+                    continue; // a real chat relay (or an overlap) — never sever
+                }
+            }
+            let _ = pool.force_remove_relay(parsed).await; // plain remove_relay refuses GOSSIP
+            forget_warmed_relay(url);
+        }
+    }
+}
+
 /// Production [`Transport`] over the live Nostr network.
 ///
 /// Reuses the app's persistent client (`state::nostr_client`) — already connected to the user's relays,

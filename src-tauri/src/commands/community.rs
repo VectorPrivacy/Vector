@@ -465,49 +465,10 @@ pub(crate) async fn teardown_community_local(community_id: &str, channel_ids: &[
 ///      also shields any transient chat relay;
 ///   3. it's a NIP-65 GOSSIP relay (the pool itself refuses to remove those).
 /// So leaving a community can never sever the user's own connectivity or another chat's relays.
+/// Delegates to the shared vector-core prune (same keep-set logic also used by the invite-preload
+/// TTL cleanup, #297) so the two paths can't drift.
 async fn prune_orphaned_community_relays(left_relays: &[String]) {
-    if left_relays.is_empty() {
-        return;
-    }
-    let Some(client) = vector_core::state::nostr_client() else { return; };
-
-    // Relays still claimed by a REMAINING community.
-    let mut still_needed: std::collections::HashSet<String> = std::collections::HashSet::new();
-    if let Ok(ids) = vector_core::db::community::list_community_ids() {
-        for id in ids {
-            if let Ok(Some(c)) = vector_core::db::community::load_community(&id) {
-                for r in &c.relays {
-                    still_needed.insert(r.clone());
-                }
-            }
-        }
-    }
-
-    let pool = client.pool();
-    // all_relays(): community relays carry the GOSSIP flag, so they're absent from `relays()`
-    // (which returns READ/WRITE only).
-    let pooled = pool.all_relays().await;
-    for url in left_relays {
-        if still_needed.contains(url) {
-            continue; // another community needs it
-        }
-        if let Ok(parsed) = nostr_sdk::RelayUrl::parse(url) {
-            if let Some(relay) = pooled.get(&parsed) {
-                // The user's own relay (or an overlap relay that's both theirs and a community's),
-                // or any READ/WRITE chat relay — never sever it. (Community relays are GOSSIP-only,
-                // so has_read()/has_write() are false for them — they remain eligible.)
-                if relay.flags().has_read() || relay.flags().has_write() {
-                    continue;
-                }
-            }
-            // Pure GOSSIP-only community relay nobody else needs → force-remove (plain remove_relay
-            // refuses GOSSIP relays) + disconnect. Also forget it from the warm-set, else a later
-            // warm_client for a community that shares this relay would fast-path-skip the re-add and
-            // target a relay the pool no longer holds.
-            let _ = pool.force_remove_relay(parsed).await;
-            vector_core::community::transport::forget_warmed_relay(url);
-        }
-    }
+    vector_core::community::transport::prune_unneeded_community_relays(left_relays).await;
 }
 
 /// Involuntary self-removal from a community — a cooperative KICK (3309) targeting us, OR detecting our
