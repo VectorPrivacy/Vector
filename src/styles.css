@@ -2681,11 +2681,18 @@ body.chat-bg-disabled .chat-messages::before {
   width: 100%;
   font-size: 12px;
   opacity: 0.7;
-  margin: 5px 0 0px 0;
+  /* Symmetric top + bottom so the divider is centered between its neighbours (flex column =
+   * margins sum, never collapse). The following row's top-margin is zeroed below. */
+  margin: var(--dmsg-system-gap) 0;
   display: flex;
   align-items: center;
   justify-content: center;
 }
+/* A divider owns the gap on BOTH sides — kill the next row's streak/continuation top-margin so it
+ * doesn't stack on the divider's bottom margin and re-introduce the lop-sidedness. The `.chat-messages >`
+ * prefix lifts specificity to (0,3,0) so it beats `.dmsg[data-streak="…"]` (0,2,0) regardless of order. */
+.chat-messages > .msg-inline-timestamp + .dmsg,
+.chat-messages > .msg-inline-timestamp + .msg-inline-timestamp { margin-top: 0; }
 .msg-inline-timestamp::before,
 .msg-inline-timestamp::after {
   content: '';
@@ -2732,7 +2739,8 @@ body.chat-bg-disabled .chat-messages::before {
   text-transform: uppercase;
   font-size: 11px;
   letter-spacing: 0.08em;
-  margin: 14px 0 6px;
+  /* Symmetric like the base divider (the following row's top-margin is zeroed). */
+  margin: var(--dmsg-system-gap) 0;
 }
 .msg-inline-timestamp.unread-divider::before,
 .msg-inline-timestamp.unread-divider::after {
@@ -14797,6 +14805,10 @@ hr {
   --dmsg-row-padding-x: 2px;
   --dmsg-streak-gap: 16px;
   --dmsg-continuation-gap: 3px;
+  /* Symmetric breathing room for inline separators (timestamps, date + unread dividers,
+   * system events). Applied top AND bottom so the divider sits centered between its
+   * neighbours — the following row's top-margin is zeroed so it doesn't double up. */
+  --dmsg-system-gap: 10px;
   --dmsg-gutter-width: 56px;
   --dmsg-avatar-size: 40px;
   --dmsg-author-color: #ffffff;
