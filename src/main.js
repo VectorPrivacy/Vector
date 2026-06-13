@@ -3179,6 +3179,28 @@ async function setupRustListeners() {
         profilePreviews.forEach(preview => {
             updateNostrProfilePreview(preview, evt.payload);
         });
+
+        // Update already-painted message rows authored by this npub — name + avatar — so chat
+        // history reflects the resolved profile without needing a reopen (matches the system-event
+        // and member-list retro-resolve).
+        {
+            const id = evt.payload.id;
+            const newName = evt.payload.nickname || evt.payload.name || (id.substring(0, 12) + '…');
+            document.querySelectorAll(`.dmsg-author[data-npub="${id}"]`).forEach(a => {
+                // Replace only the leading name text node — preserve appended bot/admin/owner badges.
+                const textNode = Array.from(a.childNodes).find(n => n.nodeType === Node.TEXT_NODE);
+                if (textNode) textNode.textContent = newName;
+                else a.insertBefore(document.createTextNode(newName), a.firstChild);
+            });
+            const newAvatarSrc = getProfileAvatarSrc(evt.payload);
+            document.querySelectorAll(`.dmsg-avatar[data-npub="${id}"]`).forEach(av => {
+                const fresh = createAvatarImg(newAvatarSrc, 40, false);
+                fresh.classList.add('dmsg-avatar', 'btn');
+                fresh.dataset.npub = id;
+                fresh.style.margin = '0';
+                av.replaceWith(fresh);
+            });
+        }
         
         // Skip Expanded Profile View repaints during our own edit mode —
         // backend may emit stale `banner_cached` and clobber the just-picked image.
