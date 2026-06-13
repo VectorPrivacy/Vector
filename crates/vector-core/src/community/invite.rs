@@ -71,18 +71,11 @@ impl CommunityInvite {
     }
 }
 
-/// Decode a 64-char hex string to 32 bytes, rejecting malformed input (never
-/// silently zero-fills — a corrupt invite must error, not fabricate keys).
+/// Decode a 64-char hex string to 32 bytes, rejecting malformed input (never silently zero-fills —
+/// a corrupt invite must error, not fabricate keys). Public input → SIMD-validated decode.
 fn hex32(hex: &str) -> Result<[u8; 32], String> {
-    if hex.len() != 64 {
-        return Err(format!("expected 64 hex chars, got {}", hex.len()));
-    }
-    let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
-            .map_err(|_| format!("invalid hex at byte {i}"))?;
-    }
-    Ok(out)
+    crate::simd::hex::hex_to_bytes_32_checked(hex)
+        .ok_or_else(|| format!("invalid or wrong-length 64-char hex ({} chars)", hex.len()))
 }
 
 /// Build an invite bundle granting ALL of a Community's channels (the MVP grants the

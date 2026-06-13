@@ -90,20 +90,19 @@ pub fn is_encryption_enabled() -> bool {
 /// Simple hex encode/decode (for crypto module internal use).
 mod hex {
     pub fn encode(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{:02x}", b)).collect()
+        // SIMD hex encode (NEON/SSE2, fast-pathing 32/16-byte). Identical lowercase output to the
+        // old per-byte format! loop, but it runs on every encrypt (ciphertext + nonce).
+        crate::simd::hex::bytes_to_hex_string(bytes)
     }
 
     pub fn decode(hex: &str) -> Result<Vec<u8>, String> {
         if hex.len() % 2 != 0 {
             return Err("Odd-length hex string".to_string());
         }
-        (0..hex.len())
-            .step_by(2)
-            .map(|i| {
-                u8::from_str_radix(&hex[i..i + 2], 16)
-                    .map_err(|e| format!("Invalid hex: {}", e))
-            })
-            .collect()
+        // SIMD-validated decode (NEON/SSE2 in-register hex validation). Runs on every message read
+        // (decrypt), so the recurring path stays fast; rejects non-hex like the old scalar loop.
+        crate::simd::hex::hex_string_to_bytes_checked(hex)
+            .ok_or_else(|| "Invalid hex character".to_string())
     }
 }
 

@@ -2870,16 +2870,16 @@ pub(crate) fn resolve_community_channel(
     Ok((community, channel))
 }
 
+/// Decode a deterministic 64-char hex id (DB-stored community/channel id, our own encrypted
+/// self-list, or a frontend-supplied command param — never a raw inbound-event field, which is
+/// validated at the network boundary in event_handler's invite parse) into 32 bytes via the SIMD
+/// hex path. The length guard keeps the fallible contract the call sites rely on; the decode is the
+/// benchmarked `hex_to_bytes_32` (which assumes well-formed input — guaranteed by the provenance above).
 fn hex_to_id32(hex: &str) -> Result<[u8; 32], String> {
     if hex.len() != 64 {
         return Err(format!("expected 64 hex chars, got {}", hex.len()));
     }
-    let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
-            .map_err(|_| format!("invalid hex at byte {i}"))?;
-    }
-    Ok(out)
+    Ok(vector_core::simd::hex::hex_to_bytes_32(hex))
 }
 
 // Handlers: list_communities, get_community, leave_community,

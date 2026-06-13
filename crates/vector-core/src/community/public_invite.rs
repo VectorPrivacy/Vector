@@ -351,14 +351,9 @@ fn parse_v1_fragment(json: &[u8]) -> Result<(Vec<String>, [u8; 32]), PublicInvit
             frag.relays.len()
         )));
     }
-    if frag.t.len() != 64 {
-        return Err(PublicInviteError::BadUrl("token must be 64 hex chars".into()));
-    }
-    let mut token = [0u8; 32];
-    for (i, byte) in token.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&frag.t[i * 2..i * 2 + 2], 16)
-            .map_err(|_| PublicInviteError::BadUrl("invalid hex in token".into()))?;
-    }
+    // SIMD-validated decode (public invite-URL token): rejects non-hex / wrong length in-register.
+    let token = crate::simd::hex::hex_to_bytes_32_checked(&frag.t)
+        .ok_or_else(|| PublicInviteError::BadUrl("token must be 64 hex chars".into()))?;
     Ok((frag.relays, token))
 }
 

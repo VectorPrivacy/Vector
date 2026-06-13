@@ -40,19 +40,6 @@ pub trait InboundEventHandler: Send + Sync {
 pub struct NoOpEventHandler;
 impl InboundEventHandler for NoOpEventHandler {}
 
-/// Decode a 64-char hex id to 32 bytes; `None` on any malformed input (never
-/// zero-fills). Used to validate an inbound invite's `community_id` before DB lookups.
-fn hex_to_id32(hex: &str) -> Option<[u8; 32]> {
-    if hex.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
-    }
-    Some(out)
-}
-
 /// Result of Phase 1 (prepare_event) — everything needed for sequential commit.
 pub enum PreparedEvent {
     /// Fully processed DM rumor — ready for state commit.
@@ -367,8 +354,10 @@ pub async fn commit_prepared_event(
             // or churn. If we already hold this Community, or already have it parked,
             // drop silently.
             let community_id = invite.community_id.clone();
+            // PUBLIC input: a signature-valid invite can still carry a malformed id, so decode through
+            // the SIMD-validated path (rejects non-hex / wrong length in-register).
             let already_held = crate::community::CommunityId(
-                match hex_to_id32(&community_id) {
+                match crate::simd::hex::hex_to_bytes_32_checked(&community_id) {
                     Some(b) => b,
                     None => { log_warn!("[community] invite has malformed id"); return false; }
                 },

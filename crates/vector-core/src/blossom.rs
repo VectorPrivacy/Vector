@@ -224,10 +224,11 @@ where
             HeaderValue::from_str(&total_size.to_string())
                 .map_err(|e| format!("Invalid X-Content-Length: {}", e))?,
         );
-        // BUD-06 requires lowercase hex.
+        // BUD-06 requires lowercase hex. SIMD encode of the 32-byte digest (sha256::Hash displays
+        // in forward byte order, matching to_byte_array — see the parity test).
         head_headers.insert(
             "X-SHA-256",
-            HeaderValue::from_str(&format!("{:x}", hash))
+            HeaderValue::from_str(&crate::simd::hex::bytes_to_hex_32(&hash.to_byte_array()))
                 .map_err(|e| format!("Invalid X-SHA-256: {}", e))?,
         );
         if let Some(ct) = mime_type {
@@ -882,5 +883,18 @@ mod hash_extract_tests {
         assert!(extract_hash_from_blossom_url("https://srv.example/").is_none());
         assert!(extract_hash_from_blossom_url("not a url").is_none());
         assert!(extract_hash_from_blossom_url("https://srv.example/notahash").is_none());
+    }
+
+    #[test]
+    fn x_sha256_simd_hex_matches_lowerhex() {
+        use nostr_sdk::hashes::{sha256::Hash as Sha256Hash, Hash};
+        // The X-SHA-256 header swapped format!("{:x}") for the SIMD encoder; they MUST agree
+        // byte-for-byte (sha256::Hash displays in forward order — a reversed-display hash type would
+        // silently corrupt the upload header).
+        let hash = Sha256Hash::hash(b"vector blossom x-sha-256 parity check");
+        assert_eq!(
+            crate::simd::hex::bytes_to_hex_32(&hash.to_byte_array()),
+            format!("{:x}", hash),
+        );
     }
 }

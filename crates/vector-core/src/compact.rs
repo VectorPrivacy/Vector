@@ -11,12 +11,7 @@
 //! - Compact timestamp (u32 seconds since 2020 epoch)
 
 use crate::types::{Attachment, EditEntry, ImageMetadata, Reaction, SiteMetadata};
-use crate::simd::hex::{bytes_to_hex_32, hex_to_bytes_32};
-
-/// Convert an arbitrary-length byte slice to a lowercase hex string.
-fn bytes_to_hex_string(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
-}
+use crate::simd::hex::{bytes_to_hex_32, bytes_to_hex_string, hex_to_bytes_32};
 
 /// Decode a hex string of up to 32 hex chars into [u8; 16], left-aligned.
 /// Pads short inputs with '0' on the right before decoding.

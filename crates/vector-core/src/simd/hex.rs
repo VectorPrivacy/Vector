@@ -571,6 +571,34 @@ unsafe fn hex_decode_32_neon(h: &[u8]) -> [u8; 32] {
     result
 }
 
+/// NEON: per-lane hex validity for a 16-char vector. Returns 0xFF iff EVERY lane is `[0-9A-Fa-f]`,
+/// else 0x00. Three parallel range tests (`[0-9]`, `[A-F]`, `[a-f]`) OR'd per lane; the horizontal
+/// min collapses "all lanes valid" to a single byte.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+unsafe fn neon_all_hex(c: uint8x16_t) -> u8 {
+    let is_digit = vandq_u8(vcgeq_u8(c, vdupq_n_u8(b'0')), vcleq_u8(c, vdupq_n_u8(b'9')));
+    let is_upper = vandq_u8(vcgeq_u8(c, vdupq_n_u8(b'A')), vcleq_u8(c, vdupq_n_u8(b'F')));
+    let is_lower = vandq_u8(vcgeq_u8(c, vdupq_n_u8(b'a')), vcleq_u8(c, vdupq_n_u8(b'f')));
+    vminvq_u8(vorrq_u8(vorrq_u8(is_digit, is_upper), is_lower))
+}
+
+/// NEON: validate + decode 64 hex chars to 32 bytes. Returns None if any char isn't `[0-9A-Fa-f]`.
+/// Validation reuses the same vector loads as the decode, so a clean id costs one extra range-test
+/// pass over the (L1-hot) bytes — same speed class as the unchecked decode.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+unsafe fn hex_decode_32_neon_checked(h: &[u8]) -> Option<[u8; 32]> {
+    let hex_0 = vld1q_u8(h.as_ptr());
+    let hex_1 = vld1q_u8(h.as_ptr().add(16));
+    let hex_2 = vld1q_u8(h.as_ptr().add(32));
+    let hex_3 = vld1q_u8(h.as_ptr().add(48));
+    if (neon_all_hex(hex_0) & neon_all_hex(hex_1) & neon_all_hex(hex_2) & neon_all_hex(hex_3)) != 0xFF {
+        return None;
+    }
+    Some(hex_decode_32_neon(h))
+}
+
 /// x86_64 SIMD implementation
 #[cfg(target_arch = "x86_64")]
 #[inline]
@@ -634,6 +662,35 @@ unsafe fn hex_decode_32_sse2(h: &[u8; 64]) -> [u8; 32] {
     }
 
     result
+}
+
+/// SSE2: whether all 16 lanes of `c` are hex `[0-9A-Fa-f]`. Every hex char is < 0x80, so signed
+/// `cmpgt` range tests are exact (`c > lo-1 && hi+1 > c`); movemask == 0xFFFF iff every lane valid.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+#[inline]
+unsafe fn sse2_chunk_all_hex(c: __m128i) -> bool {
+    let is_digit = _mm_and_si128(_mm_cmpgt_epi8(c, _mm_set1_epi8(0x2F)), _mm_cmpgt_epi8(_mm_set1_epi8(0x3A), c));
+    let is_upper = _mm_and_si128(_mm_cmpgt_epi8(c, _mm_set1_epi8(0x40)), _mm_cmpgt_epi8(_mm_set1_epi8(0x47), c));
+    let is_lower = _mm_and_si128(_mm_cmpgt_epi8(c, _mm_set1_epi8(0x60)), _mm_cmpgt_epi8(_mm_set1_epi8(0x67), c));
+    let valid = _mm_or_si128(_mm_or_si128(is_digit, is_upper), is_lower);
+    _mm_movemask_epi8(valid) == 0xFFFF
+}
+
+/// SSE2: validate + decode 64 hex chars to 32 bytes. None if any char isn't `[0-9A-Fa-f]`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+#[inline]
+unsafe fn hex_decode_32_sse2_checked(h: &[u8; 64]) -> Option<[u8; 32]> {
+    let mut chunk = 0;
+    while chunk < 4 {
+        let c = _mm_loadu_si128(h.as_ptr().add(chunk * 16) as *const __m128i);
+        if !sse2_chunk_all_hex(c) {
+            return None;
+        }
+        chunk += 1;
+    }
+    Some(hex_decode_32_sse2(h))
 }
 
 /// SSE2 implementation: decode 32 hex chars to 16 bytes
@@ -720,6 +777,45 @@ fn hex_to_bytes_32_scalar_padded(h: &[u8]) -> [u8; 32] {
         i += 2;
     }
     bytes
+}
+
+/// Validating decode of EXACTLY 64 hex chars → `[u8; 32]`, for PUBLICLY-obtained ids (inbound
+/// events). A valid signature attests authorship, NOT that a tag is well-formed hex, so a hostile
+/// peer can still ship garbage here — this returns `None` unless `hex` is precisely 64 ASCII hex
+/// digits. Validation runs in-register on the SIMD path (NEON / SSE2), keeping the network boundary
+/// in the same speed class as the unchecked decode. Deterministic/internal ids (DB rows, our own
+/// encrypted self-lists, frontend command params) should use the infallible [`hex_to_bytes_32`].
+#[cfg(target_arch = "aarch64")]
+#[inline]
+pub fn hex_to_bytes_32_checked(hex: &str) -> Option<[u8; 32]> {
+    let h = hex.as_bytes();
+    if h.len() != 64 {
+        return None;
+    }
+    unsafe { hex_decode_32_neon_checked(h) }
+}
+
+/// SSE2 variant — see the aarch64 `hex_to_bytes_32_checked` for semantics.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub fn hex_to_bytes_32_checked(hex: &str) -> Option<[u8; 32]> {
+    let h = hex.as_bytes();
+    if h.len() != 64 {
+        return None;
+    }
+    let arr: &[u8; 64] = h[..64].try_into().unwrap();
+    unsafe { hex_decode_32_sse2_checked(arr) }
+}
+
+/// Scalar fallback — see the aarch64 `hex_to_bytes_32_checked` for semantics.
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[inline]
+pub fn hex_to_bytes_32_checked(hex: &str) -> Option<[u8; 32]> {
+    let h = hex.as_bytes();
+    if h.len() != 64 || !h.iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    Some(hex_to_bytes_32(hex))
 }
 
 // ============================================================================
@@ -950,9 +1046,127 @@ pub fn hex_string_to_bytes(s: &str) -> Vec<u8> {
     result
 }
 
+/// Whether every byte of `h` is an ASCII hex digit. Full 16-byte chunks are checked in-register with
+/// the same lane-validator the fixed-32 path uses; the sub-16 remainder falls to a scalar scan.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+fn all_ascii_hex(h: &[u8]) -> bool {
+    let chunks = h.len() / 16;
+    unsafe {
+        let mut acc = 0xFFu8;
+        for i in 0..chunks {
+            acc &= neon_all_hex(vld1q_u8(h.as_ptr().add(i * 16)));
+        }
+        if acc != 0xFF {
+            return false;
+        }
+    }
+    h[chunks * 16..].iter().all(u8::is_ascii_hexdigit)
+}
+
+/// SSE2 twin of the NEON `all_ascii_hex` — 16-byte chunks validated in-register, scalar remainder.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn all_ascii_hex(h: &[u8]) -> bool {
+    let chunks = h.len() / 16;
+    unsafe {
+        for i in 0..chunks {
+            let c = _mm_loadu_si128(h.as_ptr().add(i * 16) as *const __m128i);
+            if !sse2_chunk_all_hex(c) {
+                return false;
+            }
+        }
+    }
+    h[chunks * 16..].iter().all(u8::is_ascii_hexdigit)
+}
+
+/// Scalar fallback validator.
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[inline]
+fn all_ascii_hex(h: &[u8]) -> bool {
+    h.iter().all(u8::is_ascii_hexdigit)
+}
+
+/// Validating arbitrary-length hex decode → `Some(bytes)` only when `s` is even-length and every char
+/// is `[0-9A-Fa-f]`, else `None`. The infallible [`hex_string_to_bytes`] silently maps non-hex to 0, so
+/// this is the variant for decoding hex that could be malformed (corrupt storage, untrusted input).
+/// Validation runs in-register on the SIMD path (full 16-char chunks), so the check is the same speed
+/// class as the decode it guards.
+#[inline]
+pub fn hex_string_to_bytes_checked(s: &str) -> Option<Vec<u8>> {
+    let h = s.as_bytes();
+    if h.len() % 2 != 0 || !all_ascii_hex(h) {
+        return None;
+    }
+    Some(hex_string_to_bytes(s))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checked_varlen_decode_accepts_valid_and_rejects_garbage() {
+        // Even-length hex of assorted lengths (incl. non-multiples of 16 chars, exercising the
+        // SIMD chunk + scalar remainder) decodes identically to the infallible path.
+        for len_bytes in [0usize, 1, 7, 8, 16, 39, 78, 256] {
+            let bytes: Vec<u8> = (0..len_bytes).map(|i| (i * 7 + 3) as u8).collect();
+            let hex = bytes_to_hex_string(&bytes);
+            assert_eq!(hex_string_to_bytes_checked(&hex), Some(hex_string_to_bytes(&hex)), "{len_bytes}B");
+            assert_eq!(hex_string_to_bytes_checked(&hex).unwrap(), bytes, "{len_bytes}B roundtrip");
+        }
+        // Uppercase accepted too.
+        assert!(hex_string_to_bytes_checked("DEADBEEF").is_some());
+        // Odd length → None.
+        assert_eq!(hex_string_to_bytes_checked("abc"), None);
+        // Non-hex in a FULL 16-char chunk (position 5) → None.
+        assert_eq!(hex_string_to_bytes_checked("00112g3344556677"), None, "bad char in SIMD chunk");
+        // Non-hex in the sub-16 REMAINDER (a 20-char string: 16-char chunk OK, bad char at 18) → None.
+        assert_eq!(hex_string_to_bytes_checked("00112233445566778z99"), None, "bad char in remainder");
+        // Empty → Some(empty).
+        assert_eq!(hex_string_to_bytes_checked(""), Some(Vec::new()));
+    }
+
+    #[test]
+    fn checked_decode_accepts_valid_and_rejects_garbage() {
+        // Valid lowercase, uppercase, and mixed all decode to the SAME bytes as the unchecked path.
+        let lower = "00112233445566778899aabbccddeeff0123456789abcdeffedcba9876543210";
+        let upper = lower.to_uppercase();
+        assert_eq!(hex_to_bytes_32_checked(lower), Some(hex_to_bytes_32(lower)));
+        assert_eq!(hex_to_bytes_32_checked(&upper), Some(hex_to_bytes_32(lower)));
+        assert_eq!(hex_to_bytes_32_checked(lower).unwrap()[0], 0x00);
+        assert_eq!(hex_to_bytes_32_checked(lower).unwrap()[31], 0x10);
+
+        // Wrong length → None (too short, too long, empty).
+        assert_eq!(hex_to_bytes_32_checked(&lower[..63]), None);
+        assert_eq!(hex_to_bytes_32_checked(&format!("{lower}0")), None);
+        assert_eq!(hex_to_bytes_32_checked(""), None);
+
+        // A single non-hex char anywhere → None (first, middle, last byte positions).
+        let mut bad = lower.to_string();
+        bad.replace_range(0..1, "g");
+        assert_eq!(hex_to_bytes_32_checked(&bad), None, "non-hex at start");
+        let mut bad = lower.to_string();
+        bad.replace_range(32..33, "Z");
+        assert_eq!(hex_to_bytes_32_checked(&bad), None, "non-hex in middle");
+        let mut bad = lower.to_string();
+        bad.replace_range(63..64, " ");
+        assert_eq!(hex_to_bytes_32_checked(&bad), None, "non-hex at end");
+
+        // Range-boundary chars: the byte just outside each valid run must be rejected.
+        // '/' (0x2F) | ':' (0x3A) | '@' (0x40) | 'G' (0x47) | '`' (0x60) | 'g' (0x67).
+        for bad_char in ['/', ':', '@', 'G', '`', 'g'] {
+            let mut s = lower.to_string();
+            s.replace_range(10..11, &bad_char.to_string());
+            assert_eq!(hex_to_bytes_32_checked(&s), None, "boundary char {bad_char:?} must reject");
+        }
+        // ...and the inclusive endpoints must be accepted.
+        for ok_char in ['0', '9', 'a', 'f', 'A', 'F'] {
+            let mut s = lower.to_string();
+            s.replace_range(10..11, &ok_char.to_string());
+            assert!(hex_to_bytes_32_checked(&s).is_some(), "valid char {ok_char:?} must accept");
+        }
+    }
 
     #[test]
     fn test_hex_encode_32() {

@@ -44,15 +44,8 @@ fn enc_txt_opt(s: &Option<String>) -> Result<Option<String>, String> {
 /// `simd::hex::hex_to_bytes_32`, this never silently zero-fills or truncates — a
 /// corrupted id row must error, not reconstruct a wrong-but-self-consistent id.
 pub(crate) fn hex_id_to_32(hex: &str) -> Result<[u8; 32], String> {
-    if hex.len() != 64 {
-        return Err(format!("expected 64 hex chars for id, got {}", hex.len()));
-    }
-    let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
-            .map_err(|_| format!("invalid hex in id at byte {i}"))?;
-    }
-    Ok(out)
+    crate::simd::hex::hex_to_bytes_32_checked(hex)
+        .ok_or_else(|| format!("corrupt or wrong-length 64-char hex id ({} chars)", hex.len()))
 }
 
 /// Persist a Community and all its channels (upsert). Secrets are stored as raw
