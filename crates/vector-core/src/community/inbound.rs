@@ -474,8 +474,8 @@ fn apply_reaction(state: &mut ChatState, opened: &OpenedMessage, my_pubkey: &Pub
 fn apply_edit(state: &mut ChatState, opened: &OpenedMessage, my_pubkey: &PublicKey) -> Option<IncomingEvent> {
     use crate::rumor::{process_rumor, RumorProcessingResult};
     let (rumor, ctx) = concord_rumor(opened, nostr_sdk::Kind::from(event_kind::MESSAGE_EDIT), my_pubkey);
-    let (target_id, new_content, edited_at) = match process_rumor(rumor, ctx, &crate::db::get_download_dir()) {
-        Ok(RumorProcessingResult::Edit { message_id, new_content, edited_at, .. }) => (message_id, new_content, edited_at),
+    let (target_id, new_content, edited_at, emoji_tags) = match process_rumor(rumor, ctx, &crate::db::get_download_dir()) {
+        Ok(RumorProcessingResult::Edit { message_id, new_content, edited_at, emoji_tags, .. }) => (message_id, new_content, edited_at, emoji_tags),
         _ => return None,
     };
     // Author-scoped: you can't edit someone else's message (not a parser concern — needs the resident
@@ -489,7 +489,7 @@ fn apply_edit(state: &mut ChatState, opened: &OpenedMessage, my_pubkey: &PublicK
     // The canonical edit applier seeds history with the original ONCE, dedups by `edited_at` (a
     // relay-replayed edit is a no-op, not history corruption), sorts, and swaps the content.
     let (_chat_id, message) = state.update_message(&target_id, |m| {
-        m.apply_edit(new_content.clone(), edited_at);
+        m.apply_edit(new_content.clone(), edited_at, emoji_tags.clone());
     })?;
     Some(IncomingEvent::Updated { target_id, message })
 }

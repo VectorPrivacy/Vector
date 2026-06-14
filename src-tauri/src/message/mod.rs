@@ -296,59 +296,42 @@ pub async fn edit_message(
         (chat_type, db_chat_id)
     };
 
-    // Build the edit rumor
+    // Community channel edits ride their own envelope path (kind-3302 over the
+    // Concord transport). Delegate rather than duplicate that pipeline.
+    if matches!(chat_type, ChatType::Community) {
+        crate::commands::community::edit_community_message(chat_id, message_id, new_content).await?;
+        return Ok(String::new());
+    }
+
+    // NIP-30: resolve `:shortcode:` in the edited content against subscribed
+    // packs so the edit carries `["emoji", ...]` tags — recipients render the
+    // image, not literal text. Mirrors the send pipeline.
+    let emoji_tags = vector_core::emoji_packs::resolve_outbound_emoji_tags(&new_content);
+
+    // Build the edit rumor (reply ref + emoji tags)
     let reference_event = EventId::from_hex(&message_id).map_err(|e| e.to_string())?;
-    let rumor = EventBuilder::new(Kind::from_u16(event_kind::MESSAGE_EDIT), &new_content)
-        .tag(Tag::event(reference_event))
-        .build(my_public_key);
+    let mut builder = EventBuilder::new(Kind::from_u16(event_kind::MESSAGE_EDIT), &new_content)
+        .tag(Tag::event(reference_event));
+    for et in &emoji_tags {
+        builder = builder.tag(Tag::custom(
+            TagKind::custom("emoji"),
+            [et.shortcode.clone(), et.url.clone()],
+        ));
+    }
+    let rumor = builder.build(my_public_key);
     let edit_id = rumor.id.ok_or("Failed to get edit rumor ID")?.to_hex();
     let created_at = rumor.created_at.as_secs();
-
-    match chat_type {
-        ChatType::DirectMessage => {
-            // For DMs, send gift-wrapped edit
-            let receiver_pubkey = PublicKey::from_bech32(&chat_id).map_err(|e| e.to_string())?;
-
-            // Send edit to the receiver (routed to their inbox relays if available)
-            crate::inbox_relays::send_gift_wrap(&client, &receiver_pubkey, rumor.clone(), [])
-                .await
-                .map_err(|e| e.to_string())?;
-
-            // Self-wrap for recovery (same pattern as react_to_message).
-            let self_wrap_client = client.clone();
-            let self_wrap_session = vector_core::state::SessionGuard::capture();
-            tokio::spawn(async move {
-                if !self_wrap_session.is_valid() { return; }
-                let _ = self_wrap_client.gift_wrap(&my_public_key, rumor, []).await;
-            });
-        }
-        ChatType::Community => {
-            return Err("Editing Community channel messages is not yet supported".to_string());
-        }
-    }
-
-    // Save edit event to database
-    if TAURI_APP.get().is_some() {
-        crate::db::save_edit_event(
-            &edit_id,
-            &message_id,
-            &new_content,
-            db_chat_id,
-            None, // user_id derived from npub stored in event
-            &my_npub,
-        ).await?;
-    }
-
-    // Update local state
     let edit_timestamp_ms = created_at * 1000;
+
+    // Optimistic local echo BEFORE the network send (matches send_dm's on_pending):
+    // the editor sees the rendered custom emoji instantly instead of waiting on the relay.
     let msg_for_emit = {
         let mut state = STATE.lock().await;
         state.update_message_in_chat(&chat_id, &message_id, |msg| {
-            msg.apply_edit(new_content, edit_timestamp_ms);
+            msg.apply_edit(new_content.clone(), edit_timestamp_ms, emoji_tags.clone());
             msg.preview_metadata = None;
         })
     };
-
     if let Some(msg) = msg_for_emit {
         if let Some(handle) = TAURI_APP.get() {
             handle.emit("message_update", serde_json::json!({
@@ -358,6 +341,35 @@ pub async fn edit_message(
             })).ok();
         }
     }
+
+    // Persist the edit (carrying its emoji tags so a reload still renders them)
+    if TAURI_APP.get().is_some() {
+        crate::db::save_edit_event(
+            &edit_id,
+            &message_id,
+            &new_content,
+            &emoji_tags,
+            db_chat_id,
+            None, // user_id derived from npub stored in event
+            &my_npub,
+        ).await?;
+    }
+
+    // DM gift-wrapped edit (Community already delegated above).
+    let receiver_pubkey = PublicKey::from_bech32(&chat_id).map_err(|e| e.to_string())?;
+
+    // Send edit to the receiver (routed to their inbox relays if available)
+    crate::inbox_relays::send_gift_wrap(&client, &receiver_pubkey, rumor.clone(), [])
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Self-wrap for recovery (same pattern as react_to_message).
+    let self_wrap_client = client.clone();
+    let self_wrap_session = vector_core::state::SessionGuard::capture();
+    tokio::spawn(async move {
+        if !self_wrap_session.is_valid() { return; }
+        let _ = self_wrap_client.gift_wrap(&my_public_key, rumor, []).await;
+    });
 
     Ok(edit_id)
 }

@@ -1012,8 +1012,12 @@ impl CompactMessage {
         timestamp_from_compact(self.at)
     }
 
-    /// Apply an edit to this message
-    pub fn apply_edit(&mut self, new_content: String, edited_at: u64) {
+    /// Apply an edit to this message.
+    ///
+    /// `emoji_tags` are the NIP-30 custom-emoji tags resolved from the new
+    /// content; they're adopted only when this edit is the newest revision so
+    /// an out-of-order older edit can't clobber the live content's emoji.
+    pub fn apply_edit(&mut self, new_content: String, edited_at: u64, emoji_tags: Vec<crate::types::EmojiTag>) {
         // Initialize edit history with original content if not present
         if self.edit_history.is_none() {
             self.edit_history = Some(Box::new(vec![EditEntry {
@@ -1022,6 +1026,7 @@ impl CompactMessage {
             }]));
         }
 
+        let mut is_latest = true;
         if let Some(ref mut history) = self.edit_history {
             // Deduplicate: skip if we already have this edit
             if history.iter().any(|e| e.edited_at == edited_at) {
@@ -1036,10 +1041,14 @@ impl CompactMessage {
 
             // Sort by timestamp
             history.sort_by_key(|e| e.edited_at);
+            is_latest = history.last().map(|e| e.edited_at == edited_at).unwrap_or(true);
         }
 
-        // Update current content (convert to Box<str>)
-        self.content = new_content.into_boxed_str();
+        // Only the newest revision drives the visible content + emoji.
+        if is_latest {
+            self.content = new_content.into_boxed_str();
+            self.emoji_tags = if emoji_tags.is_empty() { None } else { Some(Box::new(emoji_tags)) };
+        }
     }
 
     /// Get replied_to_has_attachment from flags

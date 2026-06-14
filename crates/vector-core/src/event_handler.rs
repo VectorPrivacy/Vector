@@ -262,8 +262,8 @@ pub async fn commit_prepared_event(
                 RumorProcessingResult::Reaction(reaction) => {
                     commit_reaction(reaction, &contact, is_mine, &wrapper_event_id, handler).await
                 }
-                RumorProcessingResult::Edit { message_id, new_content, edited_at, mut event } => {
-                    commit_edit(&mut event, &contact, &message_id, &new_content, edited_at, &wrapper_event_id).await
+                RumorProcessingResult::Edit { message_id, new_content, edited_at, emoji_tags, mut event } => {
+                    commit_edit(&mut event, &contact, &message_id, &new_content, edited_at, emoji_tags, &wrapper_event_id).await
                 }
                 RumorProcessingResult::TypingIndicator { profile_id, until } => {
                     let active_typers = {
@@ -522,6 +522,7 @@ async fn commit_edit(
     message_id: &str,
     new_content: &str,
     edited_at: u64,
+    emoji_tags: Vec<crate::types::EmojiTag>,
     wrapper_event_id: &str,
 ) -> bool {
     if crate::db::events::event_exists(&event.id).unwrap_or(false) {
@@ -536,7 +537,7 @@ async fn commit_edit(
     let msg_for_emit = {
         let mut state = crate::state::STATE.lock().await;
         state.update_message_in_chat(contact, message_id, |msg| {
-            msg.apply_edit(new_content.to_string(), edited_at);
+            msg.apply_edit(new_content.to_string(), edited_at, emoji_tags.clone());
         })
     };
     if let Some(msg) = msg_for_emit {

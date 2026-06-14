@@ -298,6 +298,7 @@ pub async fn save_edit_event(
     edit_id: &str,
     message_id: &str,
     new_content: &str,
+    emoji_tags: &[crate::types::EmojiTag],
     chat_id: i64,
     user_id: Option<i64>,
     npub: &str,
@@ -305,15 +306,22 @@ pub async fn save_edit_event(
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap();
 
+    // Carry NIP-30 emoji tags so a reload renders the edit's custom emoji image
+    // (the reload fold reads the latest edit's tags, not the original message's).
+    let mut tags = vec![
+        vec!["e".to_string(), message_id.to_string(), "".to_string(), "edit".to_string()],
+    ];
+    for et in emoji_tags {
+        tags.push(vec!["emoji".to_string(), et.shortcode.clone(), et.url.clone()]);
+    }
+
     let event = StoredEvent {
         id: edit_id.to_string(),
         kind: event_kind::MESSAGE_EDIT,
         chat_id,
         user_id,
         content: new_content.to_string(),
-        tags: vec![
-            vec!["e".to_string(), message_id.to_string(), "".to_string(), "edit".to_string()],
-        ],
+        tags,
         reference_id: Some(message_id.to_string()),
         created_at: now.as_secs(),
         received_at: now.as_millis() as u64,
@@ -827,7 +835,7 @@ pub async fn get_message_views(
     let related_events = get_related_events(&message_ids).await?;
 
     let mut reactions_by_msg: HashMap<String, Vec<Reaction>> = HashMap::new();
-    let mut edits_by_msg: HashMap<String, Vec<(u64, String)>> = HashMap::new();
+    let mut edits_by_msg: HashMap<String, Vec<(u64, String, Vec<crate::types::EmojiTag>)>> = HashMap::new();
 
     for event in related_events {
         if let Some(ref_id) = &event.reference_id {
@@ -845,7 +853,8 @@ pub async fn get_message_views(
                 k if k == event_kind::MESSAGE_EDIT => {
                     let decrypted = crate::crypto::maybe_decrypt(event.content.clone()).await
                         .unwrap_or_else(|_| event.content.clone());
-                    edits_by_msg.entry(ref_id.clone()).or_default().push((event.created_at * 1000, decrypted));
+                    let edit_emoji = crate::types::EmojiTag::extract_from_stored(&event.tags);
+                    edits_by_msg.entry(ref_id.clone()).or_default().push((event.created_at * 1000, decrypted, edit_emoji));
                 }
                 _ => {}
             }
@@ -853,7 +862,7 @@ pub async fn get_message_views(
     }
 
     for edits in edits_by_msg.values_mut() {
-        edits.sort_by_key(|(ts, _)| *ts);
+        edits.sort_by_key(|(ts, _, _)| *ts);
     }
 
     // Step 3: Parse attachments from event tags (+ legacy messages table fallback)
@@ -914,22 +923,26 @@ pub async fn get_message_views(
             event.content.clone()
         };
 
-        let (content, edited, edit_history) = if let Some(edits) = edits_by_msg.remove(&event.id) {
+        // Edits carry their own emoji tags; the newest edit's tags win so the
+        // displayed (latest) content renders its custom emoji, not the original's.
+        let original_emoji = crate::types::EmojiTag::extract_from_stored(&event.tags);
+        let (content, edited, edit_history, emoji_tags) = if let Some(edits) = edits_by_msg.remove(&event.id) {
             let mut history = Vec::with_capacity(edits.len() + 1);
             history.push(crate::types::EditEntry { content: original_content.clone(), edited_at: at });
-            for (ts, c) in &edits {
+            for (ts, c, _) in &edits {
                 history.push(crate::types::EditEntry { content: c.clone(), edited_at: *ts });
             }
-            let latest = edits.last().map(|(_, c)| c.clone()).unwrap_or(original_content);
-            (latest, true, Some(history))
+            let (latest, latest_emoji) = edits.last()
+                .map(|(_, c, e)| (c.clone(), e.clone()))
+                .unwrap_or_else(|| (original_content.clone(), original_emoji.clone()));
+            (latest, true, Some(history), latest_emoji)
         } else {
-            (original_content, false, None)
+            (original_content, false, None, original_emoji)
         };
 
         let preview_metadata = event.preview_metadata
             .and_then(|json| serde_json::from_str(&json).ok());
 
-        let emoji_tags = crate::types::EmojiTag::extract_from_stored(&event.tags);
         messages.push(Message {
             id: event.id, content, replied_to,
             replied_to_content: None, replied_to_npub: None, replied_to_has_attachment: None,
@@ -1014,7 +1027,7 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
     let related_events = get_related_events(&message_ids).await?;
 
     let mut reactions_by_msg: HashMap<String, Vec<Reaction>> = HashMap::new();
-    let mut edits_by_msg: HashMap<String, Vec<(u64, String)>> = HashMap::new();
+    let mut edits_by_msg: HashMap<String, Vec<(u64, String, Vec<crate::types::EmojiTag>)>> = HashMap::new();
 
     for event in related_events {
         if let Some(ref_id) = &event.reference_id {
@@ -1031,14 +1044,15 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
                 k if k == event_kind::MESSAGE_EDIT => {
                     let decrypted = crate::crypto::maybe_decrypt(event.content.clone()).await
                         .unwrap_or_else(|_| event.content.clone());
-                    edits_by_msg.entry(ref_id.clone()).or_default().push((event.created_at * 1000, decrypted));
+                    let edit_emoji = crate::types::EmojiTag::extract_from_stored(&event.tags);
+                    edits_by_msg.entry(ref_id.clone()).or_default().push((event.created_at * 1000, decrypted, edit_emoji));
                 }
                 _ => {}
             }
         }
     }
     for edits in edits_by_msg.values_mut() {
-        edits.sort_by_key(|(ts, _)| *ts);
+        edits.sort_by_key(|(ts, _, _)| *ts);
     }
 
     // Step 3: Parse attachments
@@ -1074,23 +1088,26 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
             String::new()
         };
 
-        let (content, edited, edit_history) = if let Some(edits) = edits_by_msg.remove(&event.id) {
-            let latest = edits.last().map(|(_, c)| c.clone()).unwrap_or_else(|| original_content.clone());
+        let original_emoji = serde_json::from_str::<Vec<Vec<String>>>(&tags_json)
+            .map(|t| crate::types::EmojiTag::extract_from_stored(&t))
+            .unwrap_or_default();
+        // Newest edit's emoji tags win so the latest content renders correctly.
+        let (content, edited, edit_history, emoji_tags) = if let Some(edits) = edits_by_msg.remove(&event.id) {
+            let (latest, latest_emoji) = edits.last()
+                .map(|(_, c, e)| (c.clone(), e.clone()))
+                .unwrap_or_else(|| (original_content.clone(), original_emoji.clone()));
             let history: Vec<crate::types::EditEntry> = std::iter::once(crate::types::EditEntry {
                 content: original_content, edited_at: event.created_at * 1000,
-            }).chain(edits.into_iter().map(|(ts, c)| crate::types::EditEntry { content: c, edited_at: ts }))
+            }).chain(edits.into_iter().map(|(ts, c, _)| crate::types::EditEntry { content: c, edited_at: ts }))
             .collect();
-            (latest, true, Some(history))
+            (latest, true, Some(history), latest_emoji)
         } else {
-            (original_content, false, None)
+            (original_content, false, None, original_emoji)
         };
 
         let preview_metadata = event.preview_metadata
             .and_then(|json| serde_json::from_str(&json).ok());
 
-        let emoji_tags = serde_json::from_str::<Vec<Vec<String>>>(&tags_json)
-            .map(|t| crate::types::EmojiTag::extract_from_stored(&t))
-            .unwrap_or_default();
         result.entry(chat_identifier).or_default().push(Message {
             id: event.id, content, replied_to,
             replied_to_content: None, replied_to_npub: None, replied_to_has_attachment: None,

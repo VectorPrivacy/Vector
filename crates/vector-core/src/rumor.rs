@@ -179,6 +179,8 @@ pub enum RumorProcessingResult {
         new_content: String,
         /// Timestamp of the edit (milliseconds)
         edited_at: u64,
+        /// NIP-30 custom-emoji tags resolved from the new content
+        emoji_tags: Vec<crate::types::EmojiTag>,
         /// The stored event for persistence
         event: StoredEvent,
     },
@@ -608,6 +610,10 @@ fn process_edit_event(
 
     let edited_at = extract_millisecond_timestamp(&rumor);
 
+    // NIP-30 custom-emoji tags ride the edit so a `:shortcode:` introduced (or
+    // kept) by the edit renders as its image rather than literal text.
+    let emoji_tags = crate::types::EmojiTag::extract_from_tags(rumor.tags.iter());
+
     let tags: Vec<Vec<String>> = rumor.tags.iter()
         .map(|tag| {
             tag.as_slice().iter().map(|s| s.to_string()).collect()
@@ -629,6 +635,7 @@ fn process_edit_event(
         message_id,
         new_content: rumor.content,
         edited_at,
+        emoji_tags,
         event,
     })
 }
