@@ -10523,22 +10523,43 @@ window.addEventListener("DOMContentLoaded", async () => {
     // Hook up an in-chat File Paste listener
     document.onpaste = async (evt) => {
         if (strOpenChat) {
+            const dt = evt.clipboardData;
             // clipboardData is only valid during synchronous dispatch — capture the
             // image item + its blob NOW, since the await below would invalidate it.
-            const arrItems = Array.from(evt.clipboardData?.items || []);
+            const arrItems = Array.from(dt?.items || []);
             const imageItem = arrItems.find(item => item.type.startsWith('image/'));
             const imageBlob = imageItem ? imageItem.getAsFile() : null;
             const imageType = imageItem ? imageItem.type : '';
 
-            // Native file paste first: Finder/Explorer "Copy file" puts file
-            // references on the OS clipboard that the WebView never exposes to JS,
-            // so ask the backend. Any real file routes through the same path as a
-            // drag-drop (preview → send). Falls through to the image-bytes path
-            // below when the clipboard holds raw image data (e.g. a screenshot).
+            // A file copy (Finder/Explorer) also carries a text representation of the
+            // path, so the default paste inserts the filename into the input. We must
+            // preventDefault SYNCHRONOUSLY (before any await) to stop that — a late
+            // call is ignored. Detect a file from the synchronous clipboard signals.
+            const dtTypes = Array.from(dt?.types || []);
+            const hasFile = (dt?.files && dt.files.length > 0)
+                || arrItems.some(it => it.kind === 'file')
+                || dtTypes.includes('Files');
+            if (hasFile || imageBlob) evt.preventDefault();
+
+            // Snapshot the composer so we can scrub any filename text that still
+            // slipped in (e.g. a folder copy whose sync signal we couldn't read).
+            const inputBefore = domChatMessageInput ? domChatMessageInput.value : null;
+            const restoreInput = () => {
+                if (domChatMessageInput && inputBefore !== null && domChatMessageInput.value !== inputBefore) {
+                    domChatMessageInput.value = inputBefore;
+                    if (typeof autoResizeChatInput === 'function') autoResizeChatInput();
+                }
+            };
+
+            // Native file paste: Finder/Explorer "Copy file" puts file references on
+            // the OS clipboard that the WebView never exposes to JS, so ask the
+            // backend. A real file routes through the same path as a drag-drop
+            // (preview → send). Falls through to the image-bytes path below when the
+            // clipboard holds raw image data (e.g. a screenshot).
             try {
                 const filePaths = await invoke('read_clipboard_files');
                 if (Array.isArray(filePaths) && filePaths.length) {
-                    evt.preventDefault();
+                    restoreInput();
                     const droppedPath = filePaths[0]; // mirror drag-drop: first item
                     const strReplyRef = strCurrentReplyReference;
                     cancelReply();
@@ -10556,7 +10577,7 @@ window.addEventListener("DOMContentLoaded", async () => {
 
             // Fall back to raw image bytes (screenshot data with no file reference).
             if (imageBlob) {
-                evt.preventDefault();
+                restoreInput();
 
                 // Read the blob as bytes
                 const arrayBuffer = await imageBlob.arrayBuffer();
