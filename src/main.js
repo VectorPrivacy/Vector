@@ -9820,7 +9820,15 @@ window.addEventListener("DOMContentLoaded", async () => {
                 
                 // Update unread counter
                 await invoke('update_unread_counter');
-                
+
+                // Re-apply badge-gated perks (raised emoji-pack limits). Hot-reload skips the login
+                // flow where this normally runs, so without it the Vector badge benefits silently
+                // revert to the default limits across a dev refresh. The flag is cached, so no network.
+                invoke('get_my_badges').then(b => {
+                    _myBadges = b;
+                    applyBadgeLimits(!!b?.vector);
+                }).catch(() => {});
+
                 // Monitor relay connections and render relay list
                 invoke("monitor_relay_connections");
                 renderRelayList();
