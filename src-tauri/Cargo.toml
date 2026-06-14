@@ -112,6 +112,11 @@ whisper-rs = { version = "0.15.1", optional = true }
 # Whisper (with platform-specific GPU acceleration)
 [target.'cfg(target_os = "macos")'.dependencies]
 whisper-rs = { version = "0.15.1", features = ["metal"], optional = true }
+# Native file clipboard (read/write file references). Already in the lock via
+# the wry/tao stack — promoted to direct deps with the pasteboard features on.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray"] }
+objc2-app-kit = { version = "0.3", features = ["NSPasteboard"] }
 
 [target.'cfg(windows)'.dependencies]
 whisper-rs = { version = "0.15.1", features = ["vulkan"], optional = true }

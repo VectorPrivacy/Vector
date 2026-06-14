@@ -10523,22 +10523,47 @@ window.addEventListener("DOMContentLoaded", async () => {
     // Hook up an in-chat File Paste listener
     document.onpaste = async (evt) => {
         if (strOpenChat) {
-            // Check if the clipboard data contains an image
-            const arrItems = Array.from(evt.clipboardData.items);
+            // clipboardData is only valid during synchronous dispatch — capture the
+            // image item + its blob NOW, since the await below would invalidate it.
+            const arrItems = Array.from(evt.clipboardData?.items || []);
             const imageItem = arrItems.find(item => item.type.startsWith('image/'));
-            if (imageItem) {
+            const imageBlob = imageItem ? imageItem.getAsFile() : null;
+            const imageType = imageItem ? imageItem.type : '';
+
+            // Native file paste first: Finder/Explorer "Copy file" puts file
+            // references on the OS clipboard that the WebView never exposes to JS,
+            // so ask the backend. Any real file routes through the same path as a
+            // drag-drop (preview → send). Falls through to the image-bytes path
+            // below when the clipboard holds raw image data (e.g. a screenshot).
+            try {
+                const filePaths = await invoke('read_clipboard_files');
+                if (Array.isArray(filePaths) && filePaths.length) {
+                    evt.preventDefault();
+                    const droppedPath = filePaths[0]; // mirror drag-drop: first item
+                    const strReplyRef = strCurrentReplyReference;
+                    cancelReply();
+                    const isDir = await invoke('is_directory', { path: droppedPath }).catch(() => false);
+                    if (isDir) {
+                        await openFolderZipPreview(droppedPath, strOpenChat, strReplyRef);
+                    } else {
+                        await openFilePreview(droppedPath, strOpenChat, strReplyRef);
+                    }
+                    return;
+                }
+            } catch (e) {
+                console.warn('[paste] native file read failed, falling back to image bytes:', e);
+            }
+
+            // Fall back to raw image bytes (screenshot data with no file reference).
+            if (imageBlob) {
                 evt.preventDefault();
 
-                // Get the image as a blob
-                const blob = imageItem.getAsFile();
-                if (!blob) return;
-
                 // Read the blob as bytes
-                const arrayBuffer = await blob.arrayBuffer();
+                const arrayBuffer = await imageBlob.arrayBuffer();
                 const bytes = new Uint8Array(arrayBuffer);
 
                 // Determine file extension from MIME type
-                const mimeType = imageItem.type;
+                const mimeType = imageType;
                 let ext = 'png'; // Default
                 if (mimeType.includes('jpeg') || mimeType.includes('jpg')) {
                     ext = 'jpg';

@@ -730,6 +730,7 @@ pub fn run() {
             commands::wallpaper::publish_wallpaper,
             commands::wallpaper::cancel_wallpaper_preview,
             commands::wallpaper::remove_wallpaper,
+            commands::clipboard::read_clipboard_files,
             #[cfg(debug_assertions)]
             commands::account::debug_hot_reload_sync,
             commands::account::logout,
