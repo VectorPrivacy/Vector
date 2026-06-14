@@ -41,6 +41,7 @@ function initMessageToolbar() {
             <button class="dmsg-toolbar-btn btn" data-action="reply" aria-label="Reply" title="Reply"><span class="icon icon-reply"></span></button>
             <button class="dmsg-toolbar-btn btn" data-action="edit" aria-label="Edit" title="Edit" hidden><span class="icon icon-edit"></span></button>
             <button class="dmsg-toolbar-btn btn" data-action="reveal-file" aria-label="Reveal in folder" title="Reveal in folder" hidden><span class="icon icon-file-search"></span></button>
+            <button class="dmsg-toolbar-btn btn" data-action="copy-file" aria-label="Copy" title="Copy" hidden><span class="icon icon-copy"></span></button>
             <button class="dmsg-toolbar-btn btn" data-action="retry" aria-label="Retry send" title="Retry send" hidden><span class="icon icon-refresh"></span></button>
             <button class="dmsg-toolbar-btn btn dmsg-toolbar-btn-danger" data-action="delete" aria-label="Delete message" title="Delete message" hidden><span class="icon icon-trash"></span></button>
         `;
@@ -144,6 +145,7 @@ function showMessageToolbar(rowEl) {
     const replyBtn = _dmsgToolbarEl.querySelector('[data-action="reply"]');
     const editBtn = _dmsgToolbarEl.querySelector('[data-action="edit"]');
     const revealBtn = _dmsgToolbarEl.querySelector('[data-action="reveal-file"]');
+    const copyFileBtn = _dmsgToolbarEl.querySelector('[data-action="copy-file"]');
     const retryBtn = _dmsgToolbarEl.querySelector('[data-action="retry"]');
     const deleteBtn = _dmsgToolbarEl.querySelector('[data-action="delete"]');
 
@@ -154,6 +156,7 @@ function showMessageToolbar(rowEl) {
         replyBtn.hidden = true;
         editBtn.hidden = true;
         revealBtn.hidden = true;
+        copyFileBtn.hidden = true;
         retryBtn.hidden = false;
         deleteBtn.hidden = false;
         deleteBtn.dataset.mode = 'failed';
@@ -196,6 +199,16 @@ function showMessageToolbar(rowEl) {
         revealBtn.dataset.path = downloadedPath;
     } else {
         delete revealBtn.dataset.path;
+    }
+
+    // Copy-file: put the downloaded attachment on the OS clipboard as a real file
+    // (paste into Finder/Explorer or another chat). Same gating as reveal — the
+    // file must exist on disk. Desktop only for now (the backend errors elsewhere).
+    copyFileBtn.hidden = !downloadedPath;
+    if (downloadedPath) {
+        copyFileBtn.dataset.path = downloadedPath;
+    } else {
+        delete copyFileBtn.dataset.path;
     }
 
     // Delete / Hide button visibility:
@@ -331,6 +344,15 @@ function _dmsgHandleToolbarClick(e) {
         case 'reveal-file': {
             const path = btn.dataset.path;
             if (path) revealItemInDir(path);
+            break;
+        }
+        case 'copy-file': {
+            const path = btn.dataset.path;
+            if (path) {
+                invoke('write_clipboard_files', { paths: [path] })
+                    .then(() => showToast('Copied file to clipboard'))
+                    .catch((err) => showToast(String(err)));
+            }
             break;
         }
         case 'retry': {
@@ -742,6 +764,11 @@ async function _dmsgOpenMessageMenu(rowEl, x, y) {
                 items.push({ label: 'Share', icon: 'share', onClick: () => invoke('share_attachment', { path: downloadedPath }) });
             } else if (!platformFeatures?.is_mobile) {
                 items.push({ label: 'Reveal in folder', icon: 'file-search', onClick: () => revealItemInDir(downloadedPath) });
+                items.push({ label: 'Copy', icon: 'copy', onClick: () => {
+                    invoke('write_clipboard_files', { paths: [downloadedPath] })
+                        .then(() => showToast('Copied file to clipboard'))
+                        .catch((err) => showToast(String(err)));
+                } });
             }
         }
     }

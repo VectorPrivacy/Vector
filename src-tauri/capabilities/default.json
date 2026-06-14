@@ -146,6 +146,7 @@
     "allow-cancel-wallpaper-preview",
     "allow-remove-wallpaper",
     "allow-read-clipboard-files",
+    "allow-write-clipboard-files",
     "allow-setup-encryption",
     "allow-skip-encryption",
     "allow-notifs",
