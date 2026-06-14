@@ -48,7 +48,12 @@ fn read_clipboard_files_impl() -> Result<Vec<String>, String> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "android")]
+fn read_clipboard_files_impl() -> Result<Vec<String>, String> {
+    Ok(crate::android::storage::clipboard_read_files())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "android")))]
 fn read_clipboard_files_impl() -> Result<Vec<String>, String> {
     Ok(Vec::new())
 }
@@ -91,7 +96,16 @@ fn write_clipboard_files_impl(paths: Vec<String>) -> Result<(), String> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "android")]
+fn write_clipboard_files_impl(paths: Vec<String>) -> Result<(), String> {
+    match crate::android::storage::clipboard_copy_files(&paths) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("No files were copied to the clipboard".to_string()),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "android")))]
 fn write_clipboard_files_impl(_paths: Vec<String>) -> Result<(), String> {
     Err("Copying files to the clipboard isn't supported on this platform yet".to_string())
 }

@@ -612,6 +612,18 @@ pub async fn miniapp_load_info(
         return Err(Error::InvalidPackage("Empty file path".to_string()));
     }
 
+    // Android content:// URIs (share / clipboard paste) aren't real filesystem
+    // paths — the existence check below would fail. Read the bytes via the content
+    // resolver and parse in-memory; the manifest supplies the real name + icon.
+    #[cfg(target_os = "android")]
+    {
+        if file_path.starts_with("content://") {
+            let (bytes, _ext) = crate::android::filesystem::read_android_uri_bytes(file_path.clone())
+                .map_err(|e| Error::InvalidPackage(format!("Failed to read content URI: {}", e)))?;
+            return miniapp_load_info_from_bytes(bytes, "app.xdc".to_string()).await;
+        }
+    }
+
     // 10-second timeout so this command can NEVER hang forever
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         // Check file existence on blocking thread (avoid sync I/O on async runtime)

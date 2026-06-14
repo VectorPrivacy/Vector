@@ -511,15 +511,18 @@ pub fn cache_android_file(file_path: String) -> Result<AndroidFileCacheResult, S
     {
         // Read the file using the same method as avatar upload (read_android_uri)
         // This uses getType() instead of query() which may have different permission behavior
+        // read_android_uri now carries the real display name + name-derived extension
+        // (falling back to MIME); only synthesize a generic name if it had neither.
         let attachment = filesystem::read_android_uri(file_path.clone())?;
         let bytes = attachment.bytes;
-        let extension = attachment.extension.clone();
         let size = bytes.len() as u64;
-        
-        // For Android content URIs, we can't easily get the display name without query()
-        // which may fail due to permissions. Use a generic name with the extension.
-        let name = format!("file.{}", extension);
-        
+        let extension = attachment.extension.clone();
+        let name = if attachment.name.is_empty() {
+            format!("file.{}", extension)
+        } else {
+            attachment.name.clone()
+        };
+
         // Generate preview for supported image types
         let preview = if matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico") {
             generate_image_preview_from_bytes(&bytes).ok()

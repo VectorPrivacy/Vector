@@ -309,11 +309,24 @@ fn read_android_uri_bytes_internal(
 }
 
 pub fn read_android_uri(uri: String) -> Result<AttachmentFile, String> {
-    with_android_context(|env, activity| {
+    let mut attachment = with_android_context(|env, activity| {
         let content_resolver = get_content_resolver(env, activity)?;
         read_from_android_uri_internal(env, &content_resolver, &uri)
             .map_err(|e| format!("Failed to read URI: {:?}", e))
-    })
+    })?;
+
+    // The read above derives the extension from MIME, which is lossy for zip-based
+    // formats (.xdc → octet-stream → "bin") and yields no name. Enrich from the real
+    // display name when the metadata query succeeds; keep the MIME fallback otherwise.
+    if let Ok(info) = get_android_uri_info(uri) {
+        if !info.name.is_empty() && info.name != "unknown" {
+            attachment.name = info.name;
+            if !info.extension.is_empty() {
+                attachment.extension = info.extension;
+            }
+        }
+    }
+    Ok(attachment)
 }
 
 fn read_from_android_uri_internal(

@@ -762,6 +762,11 @@ async function _dmsgOpenMessageMenu(rowEl, x, y) {
             if (platformFeatures?.os === 'android') {
                 items.push({ label: 'Open', icon: 'file-search', onClick: () => invoke('open_attachment', { path: downloadedPath }) });
                 items.push({ label: 'Share', icon: 'share', onClick: () => invoke('share_attachment', { path: downloadedPath }) });
+                items.push({ label: 'Copy', icon: 'copy', onClick: () => {
+                    invoke('write_clipboard_files', { paths: [downloadedPath] })
+                        .then(() => showToast('Copied file to clipboard'))
+                        .catch((err) => showToast(String(err)));
+                } });
             } else if (!platformFeatures?.is_mobile) {
                 items.push({ label: 'Reveal in folder', icon: 'file-search', onClick: () => revealItemInDir(downloadedPath) });
                 items.push({ label: 'Copy', icon: 'copy', onClick: () => {

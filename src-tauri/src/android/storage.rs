@@ -4,7 +4,7 @@
 //! intent / FileProvider / MediaScanner work stays in type-checked code. The
 //! Context is passed as the first argument to each static method.
 
-use jni::objects::{JClass, JObject, JString, JValue};
+use jni::objects::{JClass, JObject, JObjectArray, JString, JValue};
 use jni::JNIEnv;
 
 use super::utils::with_android_context;
@@ -296,6 +296,80 @@ pub fn open_file(path: &str) -> Result<bool, String> {
 /// Share a file via Android's share sheet (ACTION_SEND). Returns true if launched.
 pub fn share_file(path: &str) -> Result<bool, String> {
     call_file_action("shareFile", path)
+}
+
+/// Put files on the system clipboard as content:// URIs (FileProvider). Returns
+/// true if a clip was set.
+pub fn clipboard_copy_files(paths: &[String]) -> Result<bool, String> {
+    if paths.is_empty() {
+        return Ok(false);
+    }
+    with_android_context(|env, activity| {
+        let cls = load_class(env, activity, "io/vectorapp/VectorFiles")?;
+        let string_cls = env
+            .find_class("java/lang/String")
+            .map_err(|e| format!("String class: {:?}", e))?;
+        let arr = env
+            .new_object_array(paths.len() as i32, &string_cls, JObject::null())
+            .map_err(|e| format!("new String[]: {:?}", e))?;
+        for (i, p) in paths.iter().enumerate() {
+            let js = env.new_string(p).map_err(|e| format!("path str: {:?}", e))?;
+            env.set_object_array_element(&arr, i as i32, &js)
+                .map_err(|e| format!("set arr[{}]: {:?}", i, e))?;
+        }
+        let res = env
+            .call_static_method(
+                &cls,
+                "copyFilesToClipboard",
+                "(Landroid/content/Context;[Ljava/lang/String;)Z",
+                &[JValue::Object(activity), JValue::Object(&arr)],
+            )
+            .map_err(|e| format!("copyFilesToClipboard: {:?}", e))?
+            .z()
+            .map_err(|e| format!("copyFilesToClipboard bool: {:?}", e))?;
+        Ok(res)
+    })
+}
+
+/// Copy clipboard file URIs into the app cache; returns their absolute paths
+/// (empty on a text-only clip or a denied read).
+pub fn clipboard_read_files() -> Vec<String> {
+    with_android_context(|env, activity| {
+        let cls = load_class(env, activity, "io/vectorapp/VectorFiles")?;
+        let res = env
+            .call_static_method(
+                &cls,
+                "readClipboardFiles",
+                "(Landroid/content/Context;)[Ljava/lang/String;",
+                &[JValue::Object(activity)],
+            )
+            .map_err(|e| format!("readClipboardFiles: {:?}", e))?
+            .l()
+            .map_err(|e| format!("readClipboardFiles obj: {:?}", e))?;
+        if res.is_null() {
+            return Ok(Vec::new());
+        }
+        let arr = JObjectArray::from(res);
+        let len = env
+            .get_array_length(&arr)
+            .map_err(|e| format!("array len: {:?}", e))?;
+        let mut out = Vec::with_capacity(len as usize);
+        for i in 0..len {
+            let el = env
+                .get_object_array_element(&arr, i)
+                .map_err(|e| format!("arr[{}]: {:?}", i, e))?;
+            if el.is_null() {
+                continue;
+            }
+            let s: String = env
+                .get_string(&JString::from(el))
+                .map_err(|e| format!("str: {:?}", e))?
+                .into();
+            out.push(s);
+        }
+        Ok(out)
+    })
+    .unwrap_or_default()
 }
 
 /// Invoke a `VectorFiles` static method of shape `(Context, String) -> bool`.

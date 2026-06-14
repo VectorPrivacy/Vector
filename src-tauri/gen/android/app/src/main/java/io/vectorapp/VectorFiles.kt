@@ -1,5 +1,7 @@
 package io.vectorapp
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.media.MediaScannerConnection
@@ -112,6 +114,60 @@ object VectorFiles {
             true
         } catch (_: Throwable) {
             false
+        }
+    }
+
+    /**
+     * Put files on the system clipboard as content:// URIs (via the FileProvider)
+     * so they paste into apps that accept files. Mirrors [shareFile] but targets
+     * the clipboard instead of a share sheet. Returns true if a clip was set.
+     */
+    @JvmStatic
+    fun copyFilesToClipboard(context: Context, paths: Array<String>): Boolean {
+        return try {
+            val authority = context.packageName + ".fileprovider"
+            val resolver = context.contentResolver
+            var clip: ClipData? = null
+            for (p in paths) {
+                val file = File(p)
+                if (!file.exists()) continue
+                val uri: Uri = FileProvider.getUriForFile(context, authority, file)
+                if (clip == null) {
+                    clip = ClipData.newUri(resolver, file.name, uri)
+                } else {
+                    clip.addItem(ClipData.Item(uri))
+                }
+            }
+            val built = clip ?: return false
+            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(built)
+            true
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * Return the content:// URIs of files on the clipboard. They're handed back
+     * verbatim (not copied to disk) so they flow through the same content-URI
+     * pipeline as a shared file — openFilePreview/cache_android_file read + cache
+     * the bytes immediately while the read grant is live. Text-only clips (no URI
+     * items) yield an empty array; clipboard reads require the app foregrounded
+     * (Android 10+), and a denial just yields an empty array.
+     */
+    @JvmStatic
+    fun readClipboardFiles(context: Context): Array<String> {
+        return try {
+            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            val clip = clipboard.primaryClip ?: return emptyArray()
+            val out = ArrayList<String>()
+            for (i in 0 until clip.itemCount) {
+                val uri = clip.getItemAt(i).uri ?: continue
+                if (uri.scheme == "content") out.add(uri.toString())
+            }
+            out.toTypedArray()
+        } catch (_: Throwable) {
+            emptyArray()
         }
     }
 }
