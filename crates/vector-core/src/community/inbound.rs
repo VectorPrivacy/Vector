@@ -104,7 +104,11 @@ pub fn ingest_message(
 /// `message_update`; Removed surfaces as a `message_removed`.
 pub enum IncomingEvent {
     NewMessage(Message),
-    Updated { target_id: String, message: Message },
+    /// An existing message changed (reaction or edit). `message` is the live-updated view for the
+    /// UI. `edit_event` is `Some` only for edits: the `MESSAGE_EDIT` StoredEvent the caller persists
+    /// (event-sourced, folded on reload like DM edits) instead of overwriting the row. Reactions
+    /// leave it `None` and the caller re-saves the message row (which carries the new reaction).
+    Updated { target_id: String, message: Message, edit_event: Option<Box<crate::stored_event::StoredEvent>> },
     Removed { target_id: String },
     /// A join/leave presence announcement (kind 3306). `npub` is the announcing member; the
     /// caller persists + surfaces it as a `MemberJoined`/`MemberLeft` system event. `event_id`
@@ -465,7 +469,7 @@ fn apply_reaction(state: &mut ChatState, opened: &OpenedMessage, my_pubkey: &Pub
         return None;
     }
     let (_chat, message) = state.find_message(&target_id)?;
-    Some(IncomingEvent::Updated { target_id, message })
+    Some(IncomingEvent::Updated { target_id, message, edit_event: None })
 }
 
 /// Apply an inbound edit (3302) to its target message. PARSED by the shared `process_rumor`
@@ -474,8 +478,8 @@ fn apply_reaction(state: &mut ChatState, opened: &OpenedMessage, my_pubkey: &Pub
 fn apply_edit(state: &mut ChatState, opened: &OpenedMessage, my_pubkey: &PublicKey) -> Option<IncomingEvent> {
     use crate::rumor::{process_rumor, RumorProcessingResult};
     let (rumor, ctx) = concord_rumor(opened, nostr_sdk::Kind::from(event_kind::MESSAGE_EDIT), my_pubkey);
-    let (target_id, new_content, edited_at, emoji_tags) = match process_rumor(rumor, ctx, &crate::db::get_download_dir()) {
-        Ok(RumorProcessingResult::Edit { message_id, new_content, edited_at, emoji_tags, .. }) => (message_id, new_content, edited_at, emoji_tags),
+    let (target_id, new_content, edited_at, emoji_tags, edit_event) = match process_rumor(rumor, ctx, &crate::db::get_download_dir()) {
+        Ok(RumorProcessingResult::Edit { message_id, new_content, edited_at, emoji_tags, event }) => (message_id, new_content, edited_at, emoji_tags, event),
         _ => return None,
     };
     // Author-scoped: you can't edit someone else's message (not a parser concern — needs the resident
@@ -491,7 +495,9 @@ fn apply_edit(state: &mut ChatState, opened: &OpenedMessage, my_pubkey: &PublicK
     let (_chat_id, message) = state.update_message(&target_id, |m| {
         m.apply_edit(new_content.clone(), edited_at, emoji_tags.clone());
     })?;
-    Some(IncomingEvent::Updated { target_id, message })
+    // Persist the edit as a folded MESSAGE_EDIT event (caller sets chat_id), mirroring DMs —
+    // no row overwrite, no JSON snapshot.
+    Some(IncomingEvent::Updated { target_id, message, edit_event: Some(Box::new(edit_event)) })
 }
 
 /// version-pinned authority for a directed authority action (moderation-hide 3305, kick 3309):
@@ -744,7 +750,7 @@ mod tests {
 
         let react = seal_typed(&bob, event_kind::COMMUNITY_REACTION, "🔥", 2, &target);
         match process_incoming(&mut state, &react, &test_channel(), &bob.public_key()) {
-            Some(IncomingEvent::Updated { target_id, message }) => {
+            Some(IncomingEvent::Updated { target_id, message, edit_event: None }) => {
                 assert_eq!(target_id, target);
                 assert!(message.reactions.iter().any(|r| r.emoji == "🔥"), "reaction applied to target");
             }
@@ -832,9 +838,14 @@ mod tests {
         // Author edits her own message → applied.
         let edit = seal_typed(&alice, event_kind::COMMUNITY_EDIT, "edited!", 2, &target);
         match process_incoming(&mut state, &edit, &test_channel(), &alice.public_key()) {
-            Some(IncomingEvent::Updated { message, .. }) => {
+            Some(IncomingEvent::Updated { message, edit_event, .. }) => {
                 assert_eq!(message.content, "edited!");
                 assert!(message.edited);
+                // Event-sourced: the edit rides a foldable MESSAGE_EDIT event, not a row overwrite.
+                let ev = edit_event.expect("edit surfaces a MESSAGE_EDIT event to persist");
+                assert_eq!(ev.kind, event_kind::MESSAGE_EDIT);
+                assert_eq!(ev.reference_id.as_deref(), Some(target.as_str()));
+                assert_eq!(ev.content, "edited!");
             }
             _ => panic!("expected an edit update"),
         }

@@ -288,9 +288,10 @@ async fn handle_community_event(
                 let _ = crate::commands::messaging::update_unread_counter(handle.clone()).await;
             }
         }
-        Some(vector_core::community::inbound::IncomingEvent::Updated { target_id, message }) => {
-            // Reaction or edit applied to an existing message → surgical UI update.
-            let _ = crate::db::save_message(&chat_id, &message).await;
+        Some(vector_core::community::inbound::IncomingEvent::Updated { target_id, message, edit_event }) => {
+            // Reaction or edit applied to an existing message → surgical UI update. Edits are
+            // event-sourced (foldable MESSAGE_EDIT row) so the revision history survives reload.
+            crate::commands::community::persist_community_update(&chat_id, &message, edit_event.as_deref()).await;
             vector_core::emit_event(
                 "message_update",
                 &serde_json::json!({ "old_id": &target_id, "message": &message, "chat_id": &chat_id }),

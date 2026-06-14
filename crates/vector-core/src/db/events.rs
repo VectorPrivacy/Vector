@@ -1277,4 +1277,32 @@ mod tests {
         save_message(chat, &mk("m9", 2004, false)).await.unwrap();
         assert_eq!(unread().await, 1, "one arrival after last_read");
     }
+
+    // Edits are event-sourced for BOTH transports: a MESSAGE_EDIT event folds into the target's
+    // history on reload (latest content + revisions + the edit's own emoji). Community used to
+    // overwrite the row and lose all of this — this locks in the unified fold.
+    #[tokio::test]
+    async fn edit_event_folds_into_history_on_reload() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "channel_edit_fold";
+        save_message(chat, &Message {
+            id: "orig1".into(), content: "original".into(), at: 5_000_000,
+            npub: Some("npub1author".into()), ..Default::default()
+        }).await.unwrap();
+
+        let cid = crate::db::id_cache::get_chat_id_by_identifier(chat).unwrap();
+        let emoji = vec![crate::types::EmojiTag { shortcode: "wave".into(), url: "u/wave".into() }];
+        save_edit_event("edit1", "orig1", "edited :wave:", &emoji, cid, None, "npub1author").await.unwrap();
+
+        let m = get_message_views(cid, 50, 0).await.unwrap()
+            .into_iter().find(|m| m.id == "orig1").expect("message reloaded");
+        assert!(m.edited, "folded edit sets the edited flag");
+        let h = m.edit_history.as_ref().expect("history reconstructed from the edit event");
+        assert_eq!(h.len(), 2, "original + one edit");
+        assert_eq!(h[0].content, "original");
+        assert_eq!(h[1].content, "edited :wave:");
+        assert_eq!(m.content, "edited :wave:", "latest revision is the displayed content");
+        assert_eq!(m.emoji_tags.len(), 1, "the edit's own emoji folds onto the message");
+        assert_eq!(m.emoji_tags[0].shortcode, "wave");
+    }
 }

@@ -1521,8 +1521,8 @@ async fn sync_community_channel_inner(
                 }
                 new_messages += 1;
             }
-            IncomingEvent::Updated { target_id, message } => {
-                let _ = crate::db::save_message(channel_id, message).await;
+            IncomingEvent::Updated { target_id, message, edit_event } => {
+                persist_community_update(channel_id, message, edit_event.as_deref()).await;
                 // Reactions/edits apply surgically by target id (position-independent), so
                 // emit on BOTH latest and older pages — an older page can carry a reaction to
                 // a still-visible message, which must update live.
@@ -2126,6 +2126,26 @@ pub(crate) async fn apply_community_presence(
 /// through `process_incoming` (which applies it to STATE + yields the updated target
 /// message); the relay echo dedups. `target` is the inner id of the message being
 /// reacted-to / edited.
+/// Persist a Community `Updated` outcome. Edits are event-sourced — saved as a foldable
+/// MESSAGE_EDIT event so reload reconstructs the revision history like DMs, rather than
+/// overwriting the row (which would strand the `(edited)` history). Reactions carry no edit
+/// event and re-save the message row (which holds the new reaction).
+pub(crate) async fn persist_community_update(
+    channel_id: &str,
+    message: &vector_core::types::Message,
+    edit_event: Option<&vector_core::stored_event::StoredEvent>,
+) {
+    if let Some(ev) = edit_event {
+        let mut ev = ev.clone();
+        if let Ok(cid) = crate::db::get_chat_id_by_identifier(channel_id) {
+            ev.chat_id = cid;
+        }
+        let _ = crate::db::save_event(&ev).await;
+    } else {
+        let _ = crate::db::save_message(channel_id, message).await;
+    }
+}
+
 async fn publish_community_control(
     channel_id: &str,
     kind: u16,
@@ -2174,8 +2194,8 @@ async fn publish_community_control(
         let mut state = vector_core::state::STATE.lock().await;
         vector_core::community::inbound::process_incoming(&mut state, &outer, &channel, &author_pk)
     };
-    if let Some(vector_core::community::inbound::IncomingEvent::Updated { target_id, message }) = outcome {
-        let _ = crate::db::save_message(channel_id, &message).await;
+    if let Some(vector_core::community::inbound::IncomingEvent::Updated { target_id, message, edit_event }) = outcome {
+        persist_community_update(channel_id, &message, edit_event.as_deref()).await;
         vector_core::emit_event(
             "message_update",
             &serde_json::json!({ "old_id": &target_id, "message": &message, "chat_id": channel_id }),
@@ -2319,8 +2339,8 @@ async fn promote_preloaded_page(community: &vector_core::community::Community, p
                 );
                 painted += 1;
             }
-            IncomingEvent::Updated { target_id, message } => {
-                let _ = crate::db::save_message(&channel_id, message).await;
+            IncomingEvent::Updated { target_id, message, edit_event } => {
+                persist_community_update(&channel_id, message, edit_event.as_deref()).await;
                 vector_core::emit_event(
                     "message_update",
                     &serde_json::json!({ "old_id": target_id, "message": message, "chat_id": &channel_id }),
