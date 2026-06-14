@@ -3428,6 +3428,15 @@ body.chat-bg-disabled .chat-messages::before {
   margin-top: 2px;
 }
 
+/* Scale custom/twemoji to the text run (mirrors `.dmsg .emoji`) — without this
+   the natural image size blows the row up. */
+.edit-history-text .emoji {
+  width: 1.15em;
+  height: 1.15em;
+  vertical-align: -0.2em;
+  display: inline-block;
+}
+
 
 #chat-box {
   width: 100%;

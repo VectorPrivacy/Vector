@@ -7165,6 +7165,42 @@ function cancelEdit() {
 }
 
 /**
+ * Build `[{shortcode, url}]` for every emoji in the equipped packs (the same set
+ * the picker/autocomplete resolve against). Lets optimistic, pre-relay renders
+ * (edit echo, edit history) swap `:shortcode:` for the image without waiting on
+ * the backend's authoritative tags. `dispCode` carries duplicate-name disambig.
+ */
+function equippedEmojiTags() {
+    const tags = [];
+    const seen = new Set();
+    for (const pack of (arrEmojiPacks || [])) {
+        for (const e of (pack.emojis || [])) {
+            const code = e.dispCode || e.shortcode;
+            if (code && e.url && !seen.has(code)) {
+                tags.push({ shortcode: code, url: e.url });
+                seen.add(code);
+            }
+        }
+    }
+    return tags;
+}
+
+/** Merge emoji tag lists, first-wins per shortcode (authoritative tags before fallbacks). */
+function mergeEmojiTags(...lists) {
+    const out = [];
+    const seen = new Set();
+    for (const list of lists) {
+        for (const t of (list || [])) {
+            if (t && t.shortcode && t.url && !seen.has(t.shortcode)) {
+                out.push({ shortcode: t.shortcode, url: t.url });
+                seen.add(t.shortcode);
+            }
+        }
+    }
+    return out;
+}
+
+/**
  * Show the edit history popup for a message
  * @param {string} messageId - The ID of the message to show history for
  * @param {HTMLElement} targetElement - The element that was clicked (for positioning)
@@ -7207,6 +7243,12 @@ function showEditHistory(messageId, targetElement) {
         });
     };
 
+    // Custom-emoji tags for the history. The live message only carries the
+    // CURRENT revision's tags, so older revisions (which may use a different
+    // `:shortcode:`) are filled from the equipped packs — same source the
+    // picker/autocomplete resolve against.
+    const historyEmojiTags = mergeEmojiTags(msg.emoji_tags, equippedEmojiTags());
+
     // Build edit history entries (oldest to newest)
     const totalEntries = msg.edit_history.length;
     const entryElements = [];
@@ -7240,6 +7282,8 @@ function showEditHistory(messageId, targetElement) {
         const textDiv = document.createElement('div');
         textDiv.classList.add('edit-history-text');
         textDiv.textContent = entry.content;
+        renderCustomEmojiShortcodes(textDiv, historyEmojiTags);
+        twemojify(textDiv);
 
         div.appendChild(timeDiv);
         div.appendChild(textDiv);
@@ -10592,6 +10636,10 @@ async function sendMessage(messageText) {
                     linkifyUrls(spanMessage);
                     processInlineImages(spanMessage);
                     renderMentions(spanMessage, false);
+                    // Resolve custom emoji optimistically (before twemoji, mirroring
+                    // the render path) so the edit doesn't flash `:shortcode:` while
+                    // the backend's authoritative message_update is in flight.
+                    renderCustomEmojiShortcodes(spanMessage, equippedEmojiTags());
                     twemojify(spanMessage);
                 }
                 // Add edited indicator if not already present
