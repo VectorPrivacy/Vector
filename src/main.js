@@ -4687,18 +4687,13 @@ async function login(skipAnimations = false) {
             // chat payload; only the encrypted logo needs a lazy cache step).
             resolveCommunityAvatars();
 
-            // Warm the active theme's emoji pack in the background so it's pinned
-            // instantly on the first picker open (it's runtime-injected, not in
-            // the subscription DB, so it would otherwise fetch on open). Also
-            // registers it with the send resolver, so `:shortcode:` posts as a
-            // real emoji even before the picker is ever opened. The fetch's own
-            // timeout absorbs relay-connect latency, so firing it here is safe.
-            const _themeNaddr = THEME_EMOJI_PACKS[_currentThemeName()];
-            if (_themeNaddr) {
-                _fetchThemePack(_themeNaddr)
-                    .then(() => _registerThemeEmoji(_cachedThemePack()))
-                    .catch(() => {});
-            }
+            // Warm the full emoji set in the background (subscribed packs + the
+            // active theme's pinned pack). Without this `arrEmojiPacks` stays empty
+            // until the picker is first opened, so `:shortcode:` autocomplete shows
+            // nothing and optimistic custom-emoji renders can't resolve. Also
+            // registers the theme with the send resolver and makes the first picker
+            // open cheap (data + DOM already composed). Read-only/local + guarded.
+            loadEmojiPacks();
 
             // Helper to show the main UI after login
             const showMainUI = async () => {
