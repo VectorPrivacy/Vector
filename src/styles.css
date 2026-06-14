@@ -3193,7 +3193,10 @@ body.chat-bg-disabled .chat-messages::before {
   -webkit-line-clamp: 4;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  margin-top: 3px;
+  /* Vertical padding gives inline mention pills clip-safe room — the clamp's
+     overflow:hidden would otherwise shear the chip's top/bottom flat. The 3px
+     top replaces the old margin so the gap above is unchanged. */
+  padding: 3px 2px;
 }
 
 /* Status pill sits in the banner empty space to the right of the avatar.

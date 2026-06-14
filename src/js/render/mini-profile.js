@@ -26,6 +26,21 @@ let miniProfileNpub = null;
  */
 function showMiniProfile(npub, anchorEl) {
     if (!npub) return;
+
+    // Tapping a mention chip INSIDE the open mini-profile replaces it in place:
+    // reuse the current popup's screen position rather than re-anchoring to the
+    // chip, which hideMiniProfile() is about to detach (its rect would collapse
+    // to 0,0 → top-left). Captured before the teardown below.
+    let reusePos = null;
+    if (miniProfileEl && anchorEl && miniProfileEl.contains(anchorEl)) {
+        if (miniProfileEl.classList.contains('mini-profile-centered')) {
+            reusePos = { centered: true };
+        } else {
+            const r = miniProfileEl.getBoundingClientRect();
+            reusePos = { left: r.left, top: r.top };
+        }
+    }
+
     hideMiniProfile();
     miniProfileNpub = npub;
 
@@ -51,7 +66,20 @@ function showMiniProfile(npub, anchorEl) {
     document.body.appendChild(popup);
     miniProfileEl = popup;
 
-    _positionMiniProfile(popup, anchorEl);
+    if (reusePos?.centered) {
+        popup.classList.add('mini-profile-centered');
+    } else if (reusePos) {
+        // Same spot as the popup we just replaced, clamped to the viewport in
+        // case the new bio is taller.
+        const popupRect = popup.getBoundingClientRect();
+        const margin = 8;
+        const left = Math.max(margin, Math.min(reusePos.left, window.innerWidth - popupRect.width - margin));
+        const top = Math.max(margin, Math.min(reusePos.top, window.innerHeight - popupRect.height - margin));
+        popup.style.left = `${left}px`;
+        popup.style.top = `${top}px`;
+    } else {
+        _positionMiniProfile(popup, anchorEl);
+    }
 
     // Kick off a fresh fetch in case data is stale or missing — same priority
     // queue renderMessage uses for missing author profiles.
@@ -195,6 +223,8 @@ function _populateMiniProfile(popup, npub, profile) {
         aboutEl.className = 'mini-profile-about';
         aboutEl.textContent = about;
         twemojify(aboutEl);
+        // Render `npub1…` / `@npub` mentions as tappable @tags, same as the Profile tab.
+        renderMentions(aboutEl, false, { allowBare: true, queueSync: true });
         body.appendChild(aboutEl);
     }
 
