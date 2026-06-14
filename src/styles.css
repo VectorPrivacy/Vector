@@ -4148,6 +4148,18 @@ img.emoji-img-loading {
   background-color: #0a0a0a;
   z-index: 2;
 }
+/* The scroll container (.emoji-main) has padding-top: 8px, so a sticky `top: 0` pins this header 8px
+   BELOW the visible top — emoji scrolling up bleed through that strip. Cap it with an opaque band
+   directly above the header (matches the panel bg, so it's invisible when the header is at rest). */
+.emoji-creator-head::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 100%;
+  height: 12px;
+  background-color: #0a0a0a;
+}
 .emoji-creator-logo {
   width: 26px;
   height: 26px;
