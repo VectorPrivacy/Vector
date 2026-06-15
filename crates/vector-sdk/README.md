@@ -105,6 +105,24 @@ for m in community.members().await { /* ... */ }
 community.leave().await?;                     // dissolve(), capabilities(), roles()
 ```
 
+**Public vs private bots (invite policy)** — for a bot to be usable in communities it must accept
+invites, but a private bot mustn't be spammable into random ones. Set the policy on the builder:
+
+```rust
+// Public bot — auto-accept Community invites from anyone:
+VectorBot::builder().nsec(key).public().build().await?;
+
+// Private bot — auto-accept ONLY invites from these npubs; ignore everyone else:
+VectorBot::builder().nsec(key).whitelist(["npub1owner…", "npub1admin…"]).build().await?;
+
+// Default is `InvitePolicy::Manual` — invites are parked for you to handle:
+for inv in bot.pending_invites()? { /* … */ }
+bot.accept_invite(&community_id).await?;
+```
+
+Auto-accept fires both for live invites *and* for ones received while the bot was offline (swept on
+the next connect), so a restarted bot still joins what it was invited to.
+
 **Receiving** — `bot.on_message(handler)` runs an async handler per inbound
 message — DMs **and** Community channel messages — each on its own task
 (`msg.is_group` tells them apart if you care). For full control,

@@ -70,12 +70,41 @@ use nostr_sdk::prelude::FromBech32 as _;
 // VectorBot
 // ============================================================================
 
+/// How a bot handles inbound Community invites (gift-wrapped invite bundles). Set on the builder
+/// with [`public`](VectorBotBuilder::public) / [`whitelist`](VectorBotBuilder::whitelist) /
+/// [`invite_policy`](VectorBotBuilder::invite_policy).
+#[derive(Clone, Debug)]
+pub enum InvitePolicy {
+    /// Don't auto-accept — invites are parked for manual handling via
+    /// [`VectorBot::pending_invites`] / [`VectorBot::accept_invite`]. (Default.)
+    Manual,
+    /// A **public** bot: auto-accept Community invites from anyone.
+    Public,
+    /// A **private** bot: auto-accept invites *only* when the inviter's npub is in this whitelist;
+    /// ignore all others. This is what keeps a bot from being spammed into random communities.
+    Whitelist(Vec<String>),
+}
+
+impl InvitePolicy {
+    /// Whether an invite from `inviter_npub` should be auto-accepted under this policy.
+    fn accepts(&self, inviter_npub: Option<&str>) -> bool {
+        match self {
+            InvitePolicy::Manual => false,
+            InvitePolicy::Public => true,
+            InvitePolicy::Whitelist(list) => {
+                inviter_npub.is_some_and(|npub| list.iter().any(|w| w == npub))
+            }
+        }
+    }
+}
+
 /// A logged-in Vector bot: an identity connected to relays, ready to send and
 /// receive. Cheap to [`Clone`] — clones share the same underlying session.
 #[derive(Clone)]
 pub struct VectorBot {
     core: VectorCore,
     npub: String,
+    invite_policy: Arc<InvitePolicy>,
 }
 
 impl VectorBot {
@@ -101,6 +130,70 @@ impl VectorBot {
     /// ergonomically here (communities, `sync_dms`, custom rumors, etc.).
     pub fn core(&self) -> VectorCore {
         self.core
+    }
+
+    /// This bot's invite policy (see [`InvitePolicy`]).
+    pub fn invite_policy(&self) -> &InvitePolicy {
+        &self.invite_policy
+    }
+
+    /// Parked Community invites awaiting a decision — each `{ community_id, name, inviter_npub }`.
+    /// (Auto-accepted invites are already gone; these are the ones held under
+    /// [`InvitePolicy::Manual`] or rejected by a whitelist.)
+    pub fn pending_invites(&self) -> Result<Vec<serde_json::Value>> {
+        self.core.list_pending_invites()
+    }
+
+    /// Accept a parked Community invite by id, then start receiving its channels.
+    pub async fn accept_invite(&self, community_id: &str) -> Result<serde_json::Value> {
+        let res = self.core.accept_pending_invite(community_id).await?;
+        // The realtime sub was built without this community; refresh so its channels flow in.
+        if let Some(client) = vector_core::state::nostr_client() {
+            vector_core::community::realtime::refresh_subscription(&client).await;
+        }
+        Ok(res)
+    }
+
+    /// Apply the invite policy to every currently-parked invite — auto-joining the ones it allows.
+    /// Called at `on_message` startup (so a restarted bot picks up invites received while it was
+    /// down); also safe to call manually. No-op under [`InvitePolicy::Manual`].
+    pub async fn process_pending_invites(&self) {
+        if matches!(*self.invite_policy, InvitePolicy::Manual) {
+            return;
+        }
+        let Ok(invites) = self.core.list_pending_invites() else { return };
+        for inv in invites {
+            let Some(cid) = inv.get("community_id").and_then(|c| c.as_str()) else { continue };
+            let inviter = inv.get("inviter_npub").and_then(|n| n.as_str());
+            if self.invite_policy.accepts(inviter) {
+                let _ = self.accept_invite(cid).await;
+            }
+        }
+    }
+
+    /// Apply [`invite_policy`](Self::invite_policy) to a just-arrived invite: auto-accept it when the
+    /// policy allows (and the inviter passes a whitelist), otherwise leave it parked. Invoked
+    /// automatically by the `on_message` listen loop; no-op under [`InvitePolicy::Manual`]. Exposed
+    /// so a custom [`listen_with`](Self::listen_with) handler can opt into the same policy.
+    pub async fn apply_invite_policy(&self, community_id: &str) {
+        if matches!(*self.invite_policy, InvitePolicy::Manual) {
+            return;
+        }
+        // Resolve the inviter from the parked record (needed for the whitelist check).
+        let inviter = self
+            .core
+            .list_pending_invites()
+            .ok()
+            .and_then(|invites| {
+                invites.into_iter().find_map(|i| {
+                    (i.get("community_id").and_then(|c| c.as_str()) == Some(community_id))
+                        .then(|| i.get("inviter_npub").and_then(|n| n.as_str()).map(String::from))
+                        .flatten()
+                })
+            });
+        if self.invite_policy.accepts(inviter.as_deref()) {
+            let _ = self.accept_invite(community_id).await;
+        }
     }
 
     /// A unified messaging handle for a conversation, **auto-detecting** whether `id` is a DM
@@ -167,6 +260,12 @@ impl VectorBot {
         F: Fn(VectorBot, IncomingMessage) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
+        // Catch up DMs FIRST so any invite delivered while the bot was offline is parked, THEN apply
+        // the invite policy to everything parked — so a restarted private bot still auto-joins
+        // communities it was invited to. New live invites are handled by on_community_invite.
+        let _ = self.core.sync_dms(None, &NoOpEventHandler).await;
+        self.process_pending_invites().await;
+
         let adapter = ClosureHandler {
             bot: self.clone(),
             handler: Arc::new(handler),
@@ -258,6 +357,7 @@ pub struct VectorBotBuilder {
     password: Option<String>,
     data_dir: Option<PathBuf>,
     event_emitter: Option<Box<dyn EventEmitter>>,
+    invite_policy: Option<InvitePolicy>,
 }
 
 impl VectorBotBuilder {
@@ -282,6 +382,27 @@ impl VectorBotBuilder {
     pub fn password(mut self, password: impl Into<String>) -> Self {
         self.password = Some(password.into());
         self
+    }
+
+    /// Set the Community invite policy explicitly (see [`InvitePolicy`]). Defaults to
+    /// [`InvitePolicy::Manual`].
+    pub fn invite_policy(mut self, policy: InvitePolicy) -> Self {
+        self.invite_policy = Some(policy);
+        self
+    }
+
+    /// Make this a **public** bot — auto-accept Community invites from anyone.
+    /// Shorthand for [`invite_policy(InvitePolicy::Public)`](Self::invite_policy).
+    pub fn public(self) -> Self {
+        self.invite_policy(InvitePolicy::Public)
+    }
+
+    /// Make this a **private** bot — auto-accept invites *only* from these npubs, ignoring all
+    /// others. Shorthand for [`invite_policy(InvitePolicy::Whitelist(..))`](Self::invite_policy).
+    pub fn whitelist(self, npubs: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.invite_policy(InvitePolicy::Whitelist(
+            npubs.into_iter().map(Into::into).collect(),
+        ))
     }
 
     /// Override the data directory (SQLite DB + per-account storage). Defaults
@@ -314,6 +435,7 @@ impl VectorBotBuilder {
         Ok(VectorBot {
             core,
             npub: result.npub,
+            invite_policy: Arc::new(self.invite_policy.unwrap_or(InvitePolicy::Manual)),
         })
     }
 }
@@ -688,6 +810,15 @@ where
         // Community has a single message hook, so derive is_file from the payload (DMs split it
         // across on_dm_received / on_file_received instead).
         self.dispatch(chat_id, msg, !msg.attachments.is_empty(), true);
+    }
+
+    fn on_community_invite(&self, community_id: &str) {
+        // Apply the bot's InvitePolicy — auto-accept (public / whitelisted inviter) or leave parked.
+        let bot = self.bot.clone();
+        let community_id = community_id.to_string();
+        tokio::spawn(async move {
+            bot.apply_invite_policy(&community_id).await;
+        });
     }
 }
 
