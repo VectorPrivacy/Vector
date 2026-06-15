@@ -1,5 +1,6 @@
-//! Sends a single file to a recipient, then exits. Demonstrates the encrypted
-//! file-attachment pipeline.
+//! Sends a single file to a recipient, then exits. Demonstrates the send side of
+//! the encrypted file-attachment pipeline; see `save_files_bot` for the receive
+//! side (download + decrypt).
 //!
 //! Run with:
 //! ```sh

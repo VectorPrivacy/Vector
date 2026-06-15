@@ -1,11 +1,14 @@
 //! # Vector SDK
 //!
-//! An ergonomic Rust SDK for building [Vector](https://vectorapp.io) bots and
-//! clients. Vector is a private messenger on the Nostr protocol; this SDK is a
-//! thin, friendly skin over [`vector_core`] — the headless library that holds
-//! **all** of Vector's protocol logic. You get NIP-17 gift-wrapped DMs, file
-//! attachments, reactions, typing indicators, edits, deletes, and profiles
-//! without ever touching a relay, a gift-wrap, or an encryption key directly.
+//! Build a private-messaging bot in about a dozen lines.
+//!
+//! Vector is an end-to-end-encrypted messenger on the [Nostr](https://nostr.com)
+//! protocol. This SDK is a thin, friendly skin over [`vector_core`] — the
+//! headless library that powers the Vector desktop and mobile apps and holds
+//! **all** of the protocol logic. You get NIP-17 gift-wrapped DMs, encrypted
+//! file attachments, reactions, typing indicators, edits, deletes, profiles, and
+//! full Discord-style **Communities** — without ever touching a relay, a
+//! gift-wrap, or an encryption key directly.
 //!
 //! ```no_run
 //! use vector_sdk::VectorBot;
@@ -13,22 +16,129 @@
 //! #[tokio::main]
 //! async fn main() -> vector_sdk::Result<()> {
 //!     let bot = VectorBot::builder()
-//!         .nsec("nsec1...")
+//!         .nsec("nsec1...")          // or .mnemonic("twelve words ...")
 //!         .build()
 //!         .await?;
 //!
-//!     // Send a message — `channel` auto-detects DM (npub) vs Community channel (hex id).
-//!     bot.channel("npub1...").send("Hello from a bot!").await?;
+//!     println!("Online as {}", bot.npub());
 //!
-//!     // Echo every inbound message back — same handler for DMs AND Community channels.
+//!     // Reply to everything. The SAME handler serves DMs *and* Community channels.
 //!     bot.on_message(|_bot, msg| async move {
-//!         if msg.is_mine() { return; }
-//!         let _ = msg.reply(&format!("Echo: {}", msg.text())).await;
+//!         if msg.is_mine() { return; }              // ignore our own messages
+//!         let _ = msg.reply(&format!("You said: {}", msg.text())).await;
 //!     }).await?;
 //!
 //!     Ok(())
 //! }
 //! ```
+//!
+//! That bot already speaks encrypted DMs *and* Community channels, reconnects
+//! through relay outages, and catches up on anything it missed while offline.
+//! You wrote none of that.
+//!
+//! ## One API for DMs and Communities
+//!
+//! Like discord.js, you never branch on "is this a DM or a Community channel?".
+//! A [`Channel`] is a [`Channel`]; you send and receive the same way.
+//! [`bot.channel(id)`](VectorBot::channel) **auto-detects** the transport from
+//! the id (an `npub` → DM, a 64-char hex id → Community channel), and
+//! [`msg.reply(...)`](IncomingMessage::reply) answers wherever the message came
+//! from. The gift-wrap-vs-Concord split lives entirely inside the SDK.
+//!
+//! ```no_run
+//! # use vector_sdk::VectorBot;
+//! # async fn run(bot: VectorBot, id: &str, msg_id: &str) -> vector_sdk::Result<()> {
+//! let chat = bot.channel(id);            // DM or Community channel — auto-detected
+//! chat.send("hi").await?;                //
+//! chat.react(msg_id, "👍").await?;       // identical surface either way
+//! chat.send_file("./photo.png").await?;  //
+//! chat.typing().await?;                  // "typing…" indicator
+//! # Ok(()) }
+//! ```
+//!
+//! ## What a bot can do
+//!
+//! | You want to… | …you call |
+//! | --- | --- |
+//! | Send / reply / edit / delete | [`Channel::send`] · [`reply`](Channel::reply) · [`edit`](Channel::edit) · [`delete`](Channel::delete) |
+//! | React (unicode or NIP-30 custom) | [`Channel::react`] · [`react_custom`](Channel::react_custom) |
+//! | Send & receive files | [`Channel::send_file`] · [`VectorBot::download_attachment`] / [`save_attachment`](VectorBot::save_attachment) |
+//! | Receive messages | [`VectorBot::on_message`] |
+//! | Receive *everything* (joins, reactions, invites…) | [`VectorBot::on_event`] → match on [`BotEvent`] |
+//! | Moderate a community | [`IncomingMessage::member`] → [`Member::kick`] · [`ban`](Member::ban) · [`grant_admin`](Member::grant_admin) |
+//! | Manage a community | [`IncomingMessage::community`] / [`VectorBot::community`] → [`Community`] |
+//! | Be invitable safely | [`builder().public()`](VectorBotBuilder::public) / [`whitelist(..)`](VectorBotBuilder::whitelist) |
+//! | Manage profiles | [`fetch_profile`](VectorBot::fetch_profile) · [`update_profile`](VectorBot::update_profile) · [`block`](VectorBot::block) … |
+//! | Anything else | [`bot.core()`](VectorBot::core) → the full [`VectorCore`] facade |
+//!
+//! ## Receiving: `on_message` vs `on_event`
+//!
+//! [`on_message`](VectorBot::on_message) is the fast path — one async handler per
+//! inbound message, DMs and Community channels alike, each on its own task.
+//!
+//! For everything beyond messages, [`on_event`](VectorBot::on_event) delivers the
+//! full stream as a [`BotEvent`] you `match` on — `Message`, `MessageUpdate` (a
+//! reaction/edit landed), `Delete`, `MemberJoin`, `MemberLeave`, `Typing`,
+//! `Invite`, and `Removed` (the bot was kicked/banned):
+//!
+//! ```no_run
+//! # use vector_sdk::{VectorBot, BotEvent};
+//! # async fn run(bot: VectorBot) -> vector_sdk::Result<()> {
+//! bot.on_event(|bot, event| async move {
+//!     match event {
+//!         BotEvent::Message(msg) if !msg.is_mine() => { let _ = msg.reply("hi").await; }
+//!         BotEvent::MemberJoin { channel_id, npub } => {
+//!             let _ = bot.channel(channel_id).send(&format!("welcome {}!", &npub[..12])).await;
+//!         }
+//!         _ => {}
+//!     }
+//! }).await?;
+//! # Ok(()) }
+//! ```
+//!
+//! ## Communities, the discord.js way
+//!
+//! A message in a Community channel hands you the *sender in context* — act on
+//! them directly:
+//!
+//! ```no_run
+//! # use vector_sdk::IncomingMessage;
+//! # async fn run(msg: IncomingMessage) -> vector_sdk::Result<()> {
+//! if let Some(member) = msg.member() {     // the sender, as a Member of this community
+//!     if !member.is_admin() {
+//!         member.ban().await?;             // or .kick() / .unban() / .grant_admin()
+//!     }
+//! }
+//! # Ok(()) }
+//! ```
+//!
+//! ## Public vs private bots
+//!
+//! A bot must accept invites to be useful in communities, but a *private* bot
+//! mustn't be spammable into random ones. Set the policy on the builder:
+//!
+//! ```no_run
+//! # use vector_sdk::VectorBot;
+//! # async fn run() -> vector_sdk::Result<()> {
+//! VectorBot::builder().nsec("nsec1...").public().build().await?;                 // accept from anyone
+//! VectorBot::builder().nsec("nsec1...").whitelist(["npub1owner…"]).build().await?; // only these inviters
+//! # Ok(()) }
+//! ```
+//!
+//! Auto-accept fires for live invites *and* for ones received while the bot was
+//! offline (swept on the next connect), so a restarted bot still joins what it
+//! was invited to. The default is [`InvitePolicy::Manual`] — see
+//! [`pending_invites`](VectorBot::pending_invites) / [`accept_invite`](VectorBot::accept_invite).
+//!
+//! ## Outage resilience, for free
+//!
+//! [`on_message`](VectorBot::on_message) / [`on_event`](VectorBot::on_event) catch
+//! up on connect, then a relay health monitor takes over: it force-reconnects
+//! dead relays and, on each reconnect, folds back anything missed while offline
+//! (re-foundings, rekeys, bans, metadata, recent messages) into local state. It's
+//! event-driven — no idle polling. Catch-up restores *state*; it does **not**
+//! replay missed *messages* to your handler, so query a gap with
+//! [`bot.core().get_messages(...)`](VectorCore).
 //!
 //! ## Single identity per process
 //!
@@ -39,9 +149,24 @@
 //!
 //! ## Reaching deeper
 //!
-//! Everything not surfaced ergonomically here — communities, history sync,
-//! custom rumors — is one hop away via [`VectorBot::core`], which hands you the
-//! full [`VectorCore`] facade.
+//! Everything not surfaced ergonomically here — creating communities, history
+//! sync, custom rumors — is one hop away via [`VectorBot::core`], which hands you
+//! the full [`VectorCore`] facade.
+//!
+//! ## Examples
+//!
+//! Runnable bots live in [`examples/`](https://github.com/VectorPrivacy/Vector/tree/master/crates/vector-sdk/examples):
+//!
+//! - **`echo_bot`** — the minimal hello-world; replies to every message.
+//! - **`slash_command_bot`** — a `/command` router (`/ping`, `/roll`, `/help`…).
+//! - **`ai_bot`** — an LLM chatbot with a typing indicator and threaded replies.
+//! - **`moderation_bot`** — welcomes joiners and auto-bans on a word filter.
+//! - **`whitelist_bot`** — a private bot that only joins communities it trusts.
+//! - **`file_bot`** / **`save_files_bot`** — send a file / receive and decrypt one.
+//!
+//! ```sh
+//! VECTOR_NSEC=nsec1... cargo run -p vector-sdk --example echo_bot
+//! ```
 
 use std::future::Future;
 use std::path::PathBuf;

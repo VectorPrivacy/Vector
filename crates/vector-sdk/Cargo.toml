@@ -27,3 +27,18 @@ name = "echo_bot"
 
 [[example]]
 name = "file_bot"
+
+[[example]]
+name = "slash_command_bot"
+
+[[example]]
+name = "ai_bot"
+
+[[example]]
+name = "moderation_bot"
+
+[[example]]
+name = "whitelist_bot"
+
+[[example]]
+name = "save_files_bot"

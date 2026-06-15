@@ -173,9 +173,25 @@ everything not surfaced here, including **Community management**
 
 ## Examples
 
+Runnable, self-contained bots live in [`examples/`](examples) — each shows off one
+capability. Every one needs `VECTOR_NSEC` (the bot's `nsec`); a few take extra env vars.
+
+| Example | What it shows |
+| --- | --- |
+| [`echo_bot`](examples/echo_bot.rs) | The minimal hello-world — replies to every message (DM or Community). |
+| [`slash_command_bot`](examples/slash_command_bot.rs) | A `/command` router: `/ping`, `/echo`, `/roll`, `/help`. |
+| [`ai_bot`](examples/ai_bot.rs) | An LLM chatbot: typing indicator, threaded replies, per-chat history. |
+| [`moderation_bot`](examples/moderation_bot.rs) | `on_event` — welcomes joiners, auto-bans on a word filter via `msg.member()`. |
+| [`whitelist_bot`](examples/whitelist_bot.rs) | A private bot that only joins communities it's invited to by trusted npubs. |
+| [`file_bot`](examples/file_bot.rs) | Sends one encrypted file, then exits. |
+| [`save_files_bot`](examples/save_files_bot.rs) | Receives files and decrypts them to disk (the other half of `file_bot`). |
+
 ```sh
-# Echo bot — replies to every DM
+# Echo bot — replies to every message, in DMs and Community channels
 VECTOR_NSEC=nsec1... cargo run -p vector-sdk --example echo_bot
+
+# AI bot — wire any OpenAI-compatible endpoint to your chats
+OPENAI_API_KEY=sk-... VECTOR_NSEC=nsec1... cargo run -p vector-sdk --example ai_bot
 
 # File bot — sends one file then exits
 VECTOR_NSEC=nsec1... VECTOR_TARGET=npub1... VECTOR_FILE=./image.png \
