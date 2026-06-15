@@ -3,6 +3,12 @@ name = "vector-core"
 version = "0.1.0"
 edition = "2021"
 description = "Core library for Vector — the single source of truth for all Vector clients, SDKs, and interfaces."
+license = "MIT"
+repository = "https://github.com/VectorPrivacy/Vector"
+homepage = "https://vectorapp.io"
+documentation = "https://docs.rs/vector-core"
+keywords = ["nostr", "messaging", "encryption", "vector"]
+categories = ["network-programming", "cryptography", "asynchronous"]
 
 [dependencies]
 # Nostr Protocol. Declared as crates.io versions so the crate is publishable; the
