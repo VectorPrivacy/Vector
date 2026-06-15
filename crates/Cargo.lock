@@ -5702,6 +5702,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "vector-sdk"
+version = "0.3.0"
+dependencies = [
+ "nostr-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+ "vector-core",
+]
+
+[[package]]
 name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
