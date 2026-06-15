@@ -81,12 +81,29 @@ bot.channel(id).delete(&msg_id).await?;
 | `channel.typing()` | Send a typing indicator |
 | `channel.edit(msg_id, new_text)` | Edit a message you sent |
 | `channel.delete(msg_id)` | Delete a message you sent |
-| `channel.send_file(path)` | Send an encrypted file attachment (DM only for now) |
+| `channel.send_file(path)` | Send an encrypted file attachment |
 | `msg.reply(text)` / `msg.react(emoji)` | Respond to an inbound message uniformly |
 
-> File attachments to Community channels aren't exposed through the SDK yet —
-> `send_file` on a community `Channel` returns an error. Everything else is fully
-> uniform.
+**Community management** — a message hands you the *actor in context* (discord.js-style),
+so you act on the sender directly:
+
+```rust
+// In a community channel handler:
+if let Some(member) = msg.member() {        // the sender, as a Member of this community
+    member.kick().await?;                    // or .ban() / .unban()
+    member.grant_admin().await?;             // or .revoke_admin()
+    let prof = member.profile().await;       // their profile
+    if member.is_admin() { /* ... */ }       // is_owner() too
+}
+
+// Or address a community by id:
+let community = bot.community(community_id);  // also: msg.community(), bot.communities()
+community.invite("npub1...").await?;
+let link = community.create_invite().await?;
+community.edit(Some("New name"), None).await?;
+for m in community.members().await { /* ... */ }
+community.leave().await?;                     // dissolve(), capabilities(), roles()
+```
 
 **Receiving** — `bot.on_message(handler)` runs an async handler per inbound
 message — DMs **and** Community channel messages — each on its own task

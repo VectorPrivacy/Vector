@@ -122,9 +122,26 @@ impl VectorBot {
         Channel { core: self.core, id: npub.into(), kind: ChannelKind::Dm }
     }
 
-    /// An explicit Community-channel handle for a channel id (skips auto-detection).
-    pub fn community(&self, channel_id: impl Into<String>) -> Channel {
-        Channel { core: self.core, id: channel_id.into(), kind: ChannelKind::Community }
+    /// A [`Community`] handle by its community id, for management (members, invites, roles,
+    /// metadata). To *message* a community channel, use [`channel`](Self::channel) with the
+    /// channel id instead.
+    pub fn community(&self, community_id: impl Into<String>) -> Community {
+        Community { core: self.core, id: community_id.into() }
+    }
+
+    /// Every Community this bot is a member of.
+    pub async fn communities(&self) -> Vec<Community> {
+        self.core
+            .list_communities()
+            .await
+            .into_iter()
+            .filter_map(|v| {
+                v.get("community_id")
+                    .or_else(|| v.get("id"))
+                    .and_then(|i| i.as_str())
+                    .map(|id| self.community(id.to_string()))
+            })
+            .collect()
     }
 
     // ---- receiving ----
@@ -390,22 +407,16 @@ impl Channel {
         }
     }
 
-    /// Send a file from disk as an encrypted attachment.
-    ///
-    /// Currently supported for DMs only; Community file attachments are not yet exposed through the
-    /// SDK and return an error.
+    /// Send a file from disk as an encrypted attachment — works for DMs and Community channels.
     pub async fn send_file(&self, path: impl AsRef<std::path::Path>) -> Result<String> {
+        let path = path.as_ref().to_string_lossy().into_owned();
         match self.kind {
-            ChannelKind::Dm => {
-                let path = path.as_ref().to_string_lossy().into_owned();
-                self.core
-                    .send_file(&self.id, &path)
-                    .await
-                    .map(|r| r.event_id.unwrap_or(r.pending_id))
-            }
-            ChannelKind::Community => Err(VectorError::Other(
-                "file send to Community channels is not yet supported via the SDK".into(),
-            )),
+            ChannelKind::Dm => self
+                .core
+                .send_file(&self.id, &path)
+                .await
+                .map(|r| r.event_id.unwrap_or(r.pending_id)),
+            ChannelKind::Community => self.core.send_community_file(&self.id, &path).await,
         }
     }
 }
@@ -452,6 +463,26 @@ impl IncomingMessage {
         self.channel().react(&self.message.id, emoji).await
     }
 
+    /// The [`Community`] this message belongs to — `None` for DMs. Use it for community-level
+    /// management (invites, roles, metadata).
+    pub fn community(&self) -> Option<Community> {
+        if !self.is_group {
+            return None;
+        }
+        let community_id = vector_core::db::community::community_id_for_channel(&self.chat_id)
+            .ok()
+            .flatten()?;
+        Some(Community { core: VectorCore, id: community_id })
+    }
+
+    /// The sender as a [`Member`] of this community — `None` for DMs or if the sender is unknown.
+    /// Act on them directly: `msg.member()?.kick().await`, `.ban()`, `.grant_admin()`, etc.
+    pub fn member(&self) -> Option<Member> {
+        let community = self.community()?;
+        let npub = self.message.npub.clone()?;
+        Some(Member { core: VectorCore, community_id: community.id, npub })
+    }
+
     /// The message text.
     pub fn text(&self) -> &str {
         &self.message.content
@@ -460,6 +491,149 @@ impl IncomingMessage {
     /// `true` if this is the bot's own message (e.g. its own echo).
     pub fn is_mine(&self) -> bool {
         self.message.mine
+    }
+}
+
+// ============================================================================
+// Community + Member — object model for community management
+// ============================================================================
+
+/// A handle to a Community for management — members, invites, roles, metadata. Obtained from
+/// [`VectorBot::community`], [`VectorBot::communities`], or [`IncomingMessage::community`]. To
+/// *message* a channel within it, use a [`Channel`] (`bot.channel(channel_id)`).
+#[derive(Clone)]
+pub struct Community {
+    core: VectorCore,
+    id: String,
+}
+
+impl Community {
+    /// The community id.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// A handle to a member of this community by npub — act on them directly.
+    pub fn member(&self, npub: impl Into<String>) -> Member {
+        Member { core: self.core, community_id: self.id.clone(), npub: npub.into() }
+    }
+
+    /// Observed members (best-effort, from recent activity).
+    pub async fn members(&self) -> Vec<Member> {
+        self.core
+            .get_community_members(&self.id)
+            .await
+            .into_iter()
+            .filter_map(|v| v.get("npub").and_then(|n| n.as_str()).map(|n| self.member(n.to_string())))
+            .collect()
+    }
+
+    /// Invite an npub via a gift-wrapped private invite (requires the create-invite permission).
+    pub async fn invite(&self, npub: &str) -> Result<()> {
+        self.core.invite_to_community(&self.id, npub).await.map(|_| ())
+    }
+
+    /// Mint a public invite link for this community.
+    pub async fn create_invite(&self) -> Result<String> {
+        self.core.create_public_invite(&self.id).await
+    }
+
+    /// Update the community's name and/or description.
+    pub async fn edit(&self, name: Option<&str>, description: Option<&str>) -> Result<()> {
+        self.core.edit_community_metadata(&self.id, name, description).await
+    }
+
+    /// Leave this community.
+    pub async fn leave(&self) -> Result<()> {
+        self.core.leave_community(&self.id).await
+    }
+
+    /// Dissolve this community (owner only, irreversible).
+    pub async fn dissolve(&self) -> Result<()> {
+        self.core.dissolve_community(&self.id).await
+    }
+
+    /// Your own role-based capabilities here (JSON flags: manage_*, create_invite, kick, ban, …).
+    pub fn capabilities(&self) -> Result<serde_json::Value> {
+        self.core.community_capabilities(&self.id)
+    }
+
+    /// The owner + admin npubs (`{ owner, admins: [...] }`).
+    pub fn roles(&self) -> Result<serde_json::Value> {
+        self.core.community_roles(&self.id)
+    }
+}
+
+/// A handle to a member of a community — act on them directly. Obtained from
+/// [`Community::member`] or [`IncomingMessage::member`].
+#[derive(Clone)]
+pub struct Member {
+    core: VectorCore,
+    community_id: String,
+    npub: String,
+}
+
+impl Member {
+    /// This member's npub.
+    pub fn npub(&self) -> &str {
+        &self.npub
+    }
+
+    /// The id of the community this handle is scoped to.
+    pub fn community_id(&self) -> &str {
+        &self.community_id
+    }
+
+    /// Cooperatively kick them (they can rejoin). Requires KICK + outranking them.
+    pub async fn kick(&self) -> Result<()> {
+        self.core.kick_member(&self.community_id, &self.npub).await
+    }
+
+    /// Ban them (terminal; in a private community this triggers a read-cut rekey). Requires BAN.
+    pub async fn ban(&self) -> Result<()> {
+        self.core.set_member_banned(&self.community_id, &self.npub, true).await
+    }
+
+    /// Lift a ban.
+    pub async fn unban(&self) -> Result<()> {
+        self.core.set_member_banned(&self.community_id, &self.npub, false).await
+    }
+
+    /// Grant them the @admin role (requires MANAGE_ROLES).
+    pub async fn grant_admin(&self) -> Result<()> {
+        self.core.grant_admin(&self.community_id, &self.npub).await
+    }
+
+    /// Revoke their @admin role.
+    pub async fn revoke_admin(&self) -> Result<()> {
+        self.core.revoke_admin(&self.community_id, &self.npub).await
+    }
+
+    /// Fetch this member's profile.
+    pub async fn profile(&self) -> Option<SlimProfile> {
+        self.core.load_profile(&self.npub).await;
+        self.core.get_profile(&self.npub).await
+    }
+
+    /// Whether this member is the community owner.
+    pub fn is_owner(&self) -> bool {
+        self.core
+            .community_roles(&self.community_id)
+            .ok()
+            .and_then(|r| r.get("owner").and_then(|o| o.as_str()).map(|o| o == self.npub))
+            .unwrap_or(false)
+    }
+
+    /// Whether this member is an admin (the owner counts as admin).
+    pub fn is_admin(&self) -> bool {
+        let Ok(roles) = self.core.community_roles(&self.community_id) else { return false };
+        let owner = roles.get("owner").and_then(|o| o.as_str()) == Some(self.npub.as_str());
+        let admin = roles
+            .get("admins")
+            .and_then(|a| a.as_array())
+            .map(|arr| arr.iter().any(|n| n.as_str() == Some(self.npub.as_str())))
+            .unwrap_or(false);
+        owner || admin
     }
 }
 
@@ -503,7 +677,9 @@ where
     }
 
     fn on_community_message(&self, chat_id: &str, msg: &Message, _is_new: bool) {
-        self.dispatch(chat_id, msg, false, true);
+        // Community has a single message hook, so derive is_file from the payload (DMs split it
+        // across on_dm_received / on_file_received instead).
+        self.dispatch(chat_id, msg, !msg.attachments.is_empty(), true);
     }
 }
 
