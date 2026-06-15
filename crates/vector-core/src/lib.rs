@@ -377,6 +377,11 @@ impl VectorCore {
         if attachment.url.is_empty() {
             return Err(VectorError::Other("attachment has no URL".into()));
         }
+        // SSRF guard: the URL is attacker-controlled (off an inbound message). build_http_client only
+        // validates redirect HOPS, not the initial request — so validate it here (matches the native
+        // download path). With Tor off this is the only egress guard.
+        crate::net::validate_url_not_private(&attachment.url)
+            .map_err(|e| VectorError::Other(e.to_string()))?;
         let client = crate::net::build_http_client(std::time::Duration::from_secs(120)).map_err(VectorError::Other)?;
         let resp = client.get(&attachment.url).send().await
             .map_err(|e| VectorError::Other(format!("download: {e}")))?;
@@ -1787,17 +1792,24 @@ impl VectorCore {
             let mut rx = monitor.subscribe();
             let session = state::SessionGuard::capture();
             tokio::spawn(async move {
+                // Debounce reconnect bursts: StatusChanged is per-relay, but one catch-up queries the
+                // whole pool — so coalesce Connected transitions within a short window into one resync.
+                let mut last_resync: Option<std::time::Instant> = None;
                 while let Ok(notification) = rx.recv().await {
                     if !session.is_valid() {
                         return;
                     }
                     let MonitorNotification::StatusChanged { status, .. } = notification;
                     if status == RelayStatus::Connected {
+                        if last_resync.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(3)) {
+                            continue;
+                        }
                         let _ = VectorCore.sync_communities().await;
                         let _ = VectorCore.sync_dms(None, &NoOpEventHandler).await;
                         if let Some(c) = state::nostr_client() {
                             community::realtime::refresh_subscription(&c).await;
                         }
+                        last_resync = Some(std::time::Instant::now());
                     }
                 }
             });
@@ -1939,5 +1951,32 @@ impl VectorCore {
         // next account's outbound messages with A's theme shortcodes (leaking A's pack Blossom URLs). The
         // frontend re-registers the new account's theme, but only if it HAS one — clear to be safe.
         crate::emoji_packs::set_theme_emoji_tags(Vec::new());
+    }
+}
+
+#[cfg(test)]
+mod facade_tests {
+    use super::*;
+
+    /// SSRF regression: `download_attachment` must reject a private/link-local URL via
+    /// `validate_url_not_private` BEFORE any network fetch (the URL is attacker-controlled).
+    #[tokio::test]
+    async fn download_attachment_rejects_private_url() {
+        let att = crate::types::Attachment {
+            url: "http://169.254.169.254/latest/meta-data/".to_string(),
+            ..Default::default()
+        };
+        match VectorCore.download_attachment(&att).await {
+            Err(VectorError::Other(msg)) => {
+                assert!(msg.contains("Private/internal"), "expected SSRF rejection, got: {msg}")
+            }
+            other => panic!("expected SSRF rejection, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn download_attachment_rejects_empty_url() {
+        let att = crate::types::Attachment::default();
+        assert!(VectorCore.download_attachment(&att).await.is_err());
     }
 }

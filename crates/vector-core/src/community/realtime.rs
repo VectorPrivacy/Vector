@@ -118,6 +118,9 @@ pub async fn rebuild_routes() -> (Vec<String>, HashSet<String>) {
 pub async fn refresh_subscription(client: &Client) {
     let (pseudonyms, relays) = rebuild_routes().await;
 
+    // Hold COMMUNITY_SUB_ID across the unsubscribe+subscribe ON PURPOSE: it serializes concurrent
+    // refreshers (Monitor, health-probe reconnect, refresh_control, accept_invite) so they can't
+    // race into a duplicate subscription. Narrowing this lock would reintroduce that double-sub race.
     let mut sub_guard = COMMUNITY_SUB_ID.lock().await;
     if let Some(old_id) = sub_guard.take() {
         client.unsubscribe(&old_id).await;
