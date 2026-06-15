@@ -187,6 +187,14 @@ impl VectorBot {
         self.core.sync_dms(since_days, &NoOpEventHandler).await
     }
 
+    /// Catch up every Community this bot is in — refold consensus (re-foundings / rekeys / banlist /
+    /// metadata) and fetch recent messages into local state. Runs automatically inside
+    /// [`on_message`](Self::on_message)/`listen` on connect and periodically for outage resilience;
+    /// exposed for manual use (e.g. right after a known reconnect).
+    pub async fn sync_communities(&self) -> Result<()> {
+        self.core.sync_communities().await
+    }
+
     // ---- profiles ----
 
     /// Fetch a profile from relays and return the merged result. Returns `None`
