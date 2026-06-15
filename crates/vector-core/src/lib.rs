@@ -641,9 +641,45 @@ impl VectorCore {
         ).await
     }
 
+    /// Like [`update_profile`](Self::update_profile) but marks the profile as a bot (`bot: true` in
+    /// the metadata). The SDK uses this for every bot; build human clients on `update_profile`.
+    pub async fn update_bot_profile(&self, name: &str, avatar: &str, banner: &str, about: &str) -> bool {
+        profile::sync::update_bot_profile(
+            name.to_string(), avatar.to_string(), banner.to_string(), about.to_string(),
+            &NoOpProfileSyncHandler,
+        ).await
+    }
+
     /// Update the current user's status and broadcast to relays.
     pub async fn update_status(&self, status: &str) -> bool {
         profile::sync::update_status(status.to_string()).await
+    }
+
+    /// Upload an image file to Blossom **unencrypted** and return its public URL — for avatars,
+    /// banners, and other images other clients must fetch directly. (The opposite of
+    /// [`send_file`](Self::send_file)'s encrypted attachments.) Pass the URL to [`update_profile`].
+    ///
+    /// [`update_profile`]: Self::update_profile
+    pub async fn upload_public_image(&self, file_path: &str) -> Result<String> {
+        let path = std::path::Path::new(file_path);
+        let bytes = std::fs::read(path).map_err(VectorError::Io)?;
+        if bytes.is_empty() {
+            return Err(VectorError::Other("Empty image file".into()));
+        }
+        let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("bin").to_lowercase();
+        let mime = crate::crypto::mime_from_extension(&extension);
+        let client = state::nostr_client().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
+        let signer = client
+            .signer()
+            .await
+            .map_err(|e| VectorError::Other(format!("Signer unavailable: {e}")))?;
+        let servers = crate::blossom_servers::compute_enabled_servers();
+        if servers.is_empty() {
+            return Err(VectorError::Other("No Blossom servers configured".into()));
+        }
+        crate::blossom::upload_blob_with_failover(signer, servers, std::sync::Arc::new(bytes), Some(mime))
+            .await
+            .map_err(VectorError::Other)
     }
 
     /// Block a user by npub.

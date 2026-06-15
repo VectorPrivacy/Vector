@@ -396,6 +396,23 @@ pub async fn update_profile(
     name: String, avatar: String, banner: String, about: String,
     handler: &dyn ProfileSyncHandler,
 ) -> bool {
+    update_profile_inner(name, avatar, banner, about, false, handler).await
+}
+
+/// Publish the current user's profile and mark it as a bot (`bot: true` in the metadata). The SDK
+/// uses this so every bot it builds is tagged; human clients use [`update_profile`].
+pub async fn update_bot_profile(
+    name: String, avatar: String, banner: String, about: String,
+    handler: &dyn ProfileSyncHandler,
+) -> bool {
+    update_profile_inner(name, avatar, banner, about, true, handler).await
+}
+
+async fn update_profile_inner(
+    name: String, avatar: String, banner: String, about: String,
+    is_bot: bool,
+    handler: &dyn ProfileSyncHandler,
+) -> bool {
     let client = match nostr_client() {
         Some(c) => c,
         None => return false,
@@ -413,10 +430,9 @@ pub async fn update_profile(
             Ok(n) => n,
             Err(_) => return false,
         };
-        let profile = match state.get_profile(&npub) {
-            Some(p) => p,
-            None => return false,
-        };
+        // Start from the existing profile if we have one, else a blank profile so a first-time
+        // update (e.g. a freshly-created bot that has never published a kind-0) still works.
+        let profile = state.get_profile(&npub).cloned().unwrap_or_default();
 
         // Merge: use new value if provided, else carry existing
         let mut meta = Metadata::new().name(if name.is_empty() {
@@ -480,6 +496,9 @@ pub async fn update_profile(
         meta
     }; // STATE lock dropped before network I/O
 
+    // SDK-built bots carry `bot: true` so clients can badge them; human clients never set it.
+    let meta = if is_bot { meta.custom_field("bot", true) } else { meta };
+
     // Build and sign Kind 0 metadata event
     let metadata_json = serde_json::to_string(&meta).unwrap();
     let metadata_event = EventBuilder::new(Kind::Metadata, metadata_json)
@@ -498,20 +517,16 @@ pub async fn update_profile(
             };
             let save_data = {
                 let mut state = STATE.lock().await;
-                let id = match state.interner.lookup(&npub) {
-                    Some(id) => id,
+                // Apply the published metadata to our own profile, creating the entry if this
+                // identity had none yet (a freshly-created account is interned here on first set).
+                let mut profile = state.get_profile(&npub).cloned().unwrap_or_default();
+                profile.from_metadata(meta);
+                let (avatar_url, banner_url) = (profile.avatar.to_string(), profile.banner.to_string());
+                state.insert_or_replace_profile(&npub, profile);
+                let slim = match state.interner.lookup(&npub).and_then(|id| state.serialize_profile(id)) {
+                    Some(s) => s,
                     None => return false,
                 };
-                let (avatar_url, banner_url) = {
-                    let profile = match state.get_profile_mut_by_id(id) {
-                        Some(p) => p,
-                        None => return false,
-                    };
-                    profile.from_metadata(meta);
-                    (profile.avatar.to_string(), profile.banner.to_string())
-                };
-
-                let slim = state.serialize_profile(id).unwrap();
                 (slim, avatar_url, banner_url)
             };
 
@@ -520,7 +535,10 @@ pub async fn update_profile(
             handler.on_profile_fetched(&slim, &avatar_url, &banner_url);
             true
         }
-        Err(_) => false,
+        Err(e) => {
+            crate::log_warn!("[update_profile] relay broadcast failed: {e}");
+            false
+        }
     }
 }
 
