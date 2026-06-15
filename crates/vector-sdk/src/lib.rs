@@ -260,17 +260,52 @@ impl VectorBot {
         F: Fn(VectorBot, IncomingMessage) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        // Catch up DMs FIRST so any invite delivered while the bot was offline is parked, THEN apply
-        // the invite policy to everything parked — so a restarted private bot still auto-joins
-        // communities it was invited to. New live invites are handled by on_community_invite.
-        let _ = self.core.sync_dms(None, &NoOpEventHandler).await;
-        self.process_pending_invites().await;
-
+        self.prepare_listen().await;
         let adapter = ClosureHandler {
             bot: self.clone(),
             handler: Arc::new(handler),
         };
         self.core.listen(Arc::new(adapter)).await
+    }
+
+    /// Register an async handler for **every** kind of inbound event — messages, reactions/edits,
+    /// deletes, member join/leave, typing, invites, and being removed — and block until disconnect.
+    /// Match on [`BotEvent`]; ignore the variants you don't care about. A superset of
+    /// [`on_message`](Self::on_message) (use that if you only want messages).
+    ///
+    /// ```no_run
+    /// # use vector_sdk::{VectorBot, BotEvent};
+    /// # async fn run(bot: VectorBot) -> vector_sdk::Result<()> {
+    /// bot.on_event(|bot, event| async move {
+    ///     match event {
+    ///         BotEvent::Message(msg) if !msg.is_mine() => { let _ = msg.reply("hi").await; }
+    ///         BotEvent::MemberJoin { channel_id, npub } => {
+    ///             let _ = bot.channel(channel_id).send(&format!("welcome {}!", &npub[..12])).await;
+    ///         }
+    ///         _ => {}
+    ///     }
+    /// }).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn on_event<F, Fut>(&self, handler: F) -> Result<()>
+    where
+        F: Fn(VectorBot, BotEvent) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.prepare_listen().await;
+        let adapter = EventClosureHandler {
+            bot: self.clone(),
+            handler: Arc::new(handler),
+        };
+        self.core.listen(Arc::new(adapter)).await
+    }
+
+    /// Shared listen startup: catch up DMs FIRST so any invite delivered while offline is parked,
+    /// THEN apply the invite policy to everything parked (so a restarted private bot still auto-joins
+    /// communities it was invited to). Live invites are handled by the event adapters.
+    async fn prepare_listen(&self) {
+        let _ = self.core.sync_dms(None, &NoOpEventHandler).await;
+        self.process_pending_invites().await;
     }
 
     /// Escape hatch: drive the receive loop with a custom
@@ -819,6 +854,124 @@ where
         tokio::spawn(async move {
             bot.apply_invite_policy(&community_id).await;
         });
+    }
+}
+
+// ============================================================================
+// BotEvent — the full inbound-event stream for `on_event`
+// ============================================================================
+
+/// Every kind of inbound event a bot can observe. Delivered to [`VectorBot::on_event`]. DMs and
+/// Community channels are unified: `chat_id` is the sender's npub for a DM, the channel id for a
+/// Community message.
+#[derive(Clone, Debug)]
+pub enum BotEvent {
+    /// A new message (DM or Community channel).
+    Message(IncomingMessage),
+    /// A reaction or edit landed on an existing message; `message` is the updated view (inspect
+    /// `.reactions` / `.content`, keyed by `message.id`).
+    MessageUpdate { chat_id: String, message: Message },
+    /// A message was deleted (cooperative delete / moderation tombstone).
+    Delete { chat_id: String, message_id: String },
+    /// A member joined a Community channel.
+    MemberJoin { channel_id: String, npub: String },
+    /// A member left (or was kicked from) a Community channel.
+    MemberLeave { channel_id: String, npub: String },
+    /// A member is typing in a Community channel; `until` is the unix-secs the indicator expires.
+    Typing { chat_id: String, npub: String, until: u64 },
+    /// A Community invite arrived. Already auto-handled per [`InvitePolicy`]; surfaced for visibility
+    /// (and for `Manual` policy, so you can decide via [`VectorBot::accept_invite`]).
+    Invite { community_id: String },
+    /// This bot was removed from a Community (kicked / banned / a leave authored on another device).
+    Removed { community_id: String },
+}
+
+/// Adapts a user `on_event` closure into an [`InboundEventHandler`], mapping every hook to a [`BotEvent`].
+struct EventClosureHandler<F> {
+    bot: VectorBot,
+    handler: Arc<F>,
+}
+
+impl<F, Fut> EventClosureHandler<F>
+where
+    F: Fn(VectorBot, BotEvent) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    fn emit(&self, event: BotEvent) {
+        let handler = self.handler.clone();
+        let bot = self.bot.clone();
+        tokio::spawn(async move {
+            handler(bot, event).await;
+        });
+    }
+
+    fn message(&self, chat_id: &str, msg: &Message, is_group: bool, is_file: bool) {
+        self.emit(BotEvent::Message(IncomingMessage {
+            chat_id: chat_id.to_string(),
+            is_group,
+            is_file,
+            message: msg.clone(),
+        }));
+    }
+}
+
+impl<F, Fut> InboundEventHandler for EventClosureHandler<F>
+where
+    F: Fn(VectorBot, BotEvent) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    fn on_dm_received(&self, chat_id: &str, msg: &Message, _is_new: bool) {
+        self.message(chat_id, msg, false, false);
+    }
+    fn on_file_received(&self, chat_id: &str, msg: &Message, _is_new: bool) {
+        self.message(chat_id, msg, false, true);
+    }
+    fn on_community_message(&self, chat_id: &str, msg: &Message, _is_new: bool) {
+        self.message(chat_id, msg, true, !msg.attachments.is_empty());
+    }
+    fn on_reaction_received(&self, chat_id: &str, msg: &Message) {
+        self.emit(BotEvent::MessageUpdate { chat_id: chat_id.to_string(), message: msg.clone() });
+    }
+    fn on_community_update(&self, chat_id: &str, _target_id: &str, msg: &Message) {
+        self.emit(BotEvent::MessageUpdate { chat_id: chat_id.to_string(), message: msg.clone() });
+    }
+    fn on_message_deleted(&self, chat_id: &str, message_id: &str) {
+        self.emit(BotEvent::Delete { chat_id: chat_id.to_string(), message_id: message_id.to_string() });
+    }
+    fn on_community_removed(&self, chat_id: &str, target_id: &str) {
+        self.emit(BotEvent::Delete { chat_id: chat_id.to_string(), message_id: target_id.to_string() });
+    }
+    fn on_community_presence(
+        &self,
+        chat_id: &str,
+        npub: &str,
+        joined: bool,
+        _event_id: &str,
+        _created_at: u64,
+        _invited_by: Option<&str>,
+        _invited_label: Option<&str>,
+    ) {
+        let (channel_id, npub) = (chat_id.to_string(), npub.to_string());
+        self.emit(if joined {
+            BotEvent::MemberJoin { channel_id, npub }
+        } else {
+            BotEvent::MemberLeave { channel_id, npub }
+        });
+    }
+    fn on_community_typing(&self, chat_id: &str, npub: &str, until: u64) {
+        self.emit(BotEvent::Typing { chat_id: chat_id.to_string(), npub: npub.to_string(), until });
+    }
+    fn on_community_self_removed(&self, community_id: &str) {
+        self.emit(BotEvent::Removed { community_id: community_id.to_string() });
+    }
+    fn on_community_invite(&self, community_id: &str) {
+        // Auto-handle per policy (same as on_message), AND surface the event for visibility.
+        let bot = self.bot.clone();
+        let cid = community_id.to_string();
+        tokio::spawn(async move {
+            bot.apply_invite_policy(&cid).await;
+        });
+        self.emit(BotEvent::Invite { community_id: community_id.to_string() });
     }
 }
 

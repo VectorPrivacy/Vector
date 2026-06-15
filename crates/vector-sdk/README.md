@@ -125,8 +125,26 @@ the next connect), so a restarted bot still joins what it was invited to.
 
 **Receiving** — `bot.on_message(handler)` runs an async handler per inbound
 message — DMs **and** Community channel messages — each on its own task
-(`msg.is_group` tells them apart if you care). For full control,
-`bot.listen_with(handler)` takes a raw `InboundEventHandler`.
+(`msg.is_group` tells them apart if you care).
+
+For everything beyond messages, `bot.on_event(|bot, event|)` delivers the full stream as a
+[`BotEvent`] enum — `Message`, `MessageUpdate` (a reaction/edit landed), `Delete`, `MemberJoin`,
+`MemberLeave`, `Typing`, `Invite`, and `Removed` (the bot was kicked/banned). Match what you need:
+
+```rust
+bot.on_event(|bot, event| async move {
+    match event {
+        BotEvent::Message(msg) if !msg.is_mine() => { msg.reply("hi").await.ok(); }
+        BotEvent::MemberJoin { channel_id, npub } => {
+            bot.channel(channel_id).send(&format!("welcome {}!", &npub[..12])).await.ok();
+        }
+        BotEvent::MessageUpdate { message, .. } => { /* a reaction or edit landed */ }
+        _ => {}
+    }
+}).await?;
+```
+
+For full low-level control, `bot.listen_with(handler)` takes a raw `InboundEventHandler`.
 
 **Outage resilience** — `on_message`/`listen` catch up on connect, then a **relay health monitor**
 takes over: it force-reconnects dead/zombie relays and, on each reconnect, folds back anything
