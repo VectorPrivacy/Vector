@@ -21,6 +21,7 @@ pub mod rekey;
 pub mod roster;
 pub mod version;
 pub mod public_invite;
+pub mod realtime;
 pub mod roles;
 pub mod send;
 pub mod service;

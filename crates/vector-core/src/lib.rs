@@ -1490,8 +1490,10 @@ impl VectorCore {
         let my_pk = state::my_public_key()
             .ok_or(VectorError::Other("Not logged in".into()))?;
 
-        // Subscribe to DMs (GiftWraps)
+        // Subscribe to DMs (GiftWraps) AND Community channel events — one loop dispatches both
+        // through the same handler, so `on_dm_received`/`on_community_message` share a sink.
         let dm_sub_id = self.subscribe_dms().await?;
+        community::realtime::refresh_subscription(&client).await;
 
         let client_for_closure = client.clone();
 
@@ -1505,6 +1507,10 @@ impl VectorCore {
                         // DMs, files, reactions
                         let prepared = event_handler::prepare_event(*event, &c, my_pk).await;
                         event_handler::commit_prepared_event(prepared, true, &*handler).await;
+                    } else if community::realtime::subscription_id().await.as_ref() == Some(&subscription_id) {
+                        // Community channel messages / reactions / edits / control editions
+                        let session = state::SessionGuard::capture();
+                        community::realtime::dispatch_event(&session, *event, handler.clone()).await;
                     }
                 }
                 Ok(false)
@@ -1577,6 +1583,9 @@ impl VectorCore {
         // account-scoped — drop it so the next account can't read A's cursors/warmed pages. The
         // generation stamp self-invalidates too, but clear explicitly for parity with the GUI swap.
         crate::community::cache::clear();
+        // Community realtime route/subscription state is account-scoped (channel keys + banned sets);
+        // drop it so a swapped-in account can't listen on the prior account's pseudonyms.
+        crate::community::realtime::clear().await;
         // Theme-pack emoji tags are account-scoped; leaving the prior account's set active would tag the
         // next account's outbound messages with A's theme shortcodes (leaking A's pack Blossom URLs). The
         // frontend re-registers the new account's theme, but only if it HAS one — clear to be safe.

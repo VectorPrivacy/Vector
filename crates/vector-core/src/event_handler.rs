@@ -34,6 +34,55 @@ pub trait InboundEventHandler: Send + Sync {
     /// joined (member-view Community persisted). Platform refreshes the Community
     /// subscription so messages start flowing, and surfaces the new Community in the UI.
     fn on_community_invite(&self, _community_id: &str) {}
+
+    // --- Community realtime (Concord channel events; `chat_id` is the channel id hex) ---
+
+    /// A new Community channel message was received, ingested into STATE, and persisted.
+    fn on_community_message(&self, _chat_id: &str, _msg: &Message, _is_new: bool) {}
+
+    /// A reaction or edit was applied to an existing Community message. `target_id` is the
+    /// affected message; `msg` is the live-updated view.
+    fn on_community_update(&self, _chat_id: &str, _target_id: &str, _msg: &Message) {}
+
+    /// A Community message was removed (cooperative delete / moderation tombstone).
+    fn on_community_removed(&self, _chat_id: &str, _target_id: &str) {}
+
+    /// A join/leave presence announcement. `created_at` is the authenticated inner timestamp;
+    /// `invited_by`/`invited_label` carry invite attribution when present.
+    #[allow(clippy::too_many_arguments)]
+    fn on_community_presence(
+        &self,
+        _chat_id: &str,
+        _npub: &str,
+        _joined: bool,
+        _event_id: &str,
+        _created_at: u64,
+        _invited_by: Option<&str>,
+        _invited_label: Option<&str>,
+    ) {}
+
+    /// A Community typing indicator (ephemeral). `until` is the unix-secs the typer stops being active.
+    fn on_community_typing(&self, _chat_id: &str, _npub: &str, _until: u64) {}
+
+    /// A WebXDC realtime peer signal. `node_addr` = `Some` advertises an Iroh node, `None` = peer-left.
+    #[allow(clippy::too_many_arguments)]
+    fn on_community_webxdc(
+        &self,
+        _chat_id: &str,
+        _npub: &str,
+        _topic_id: &str,
+        _node_addr: Option<&str>,
+        _event_id: &str,
+        _created_at: u64,
+    ) {}
+
+    /// The local user was removed from a Community (kick / ban / a leave authored on another device).
+    /// Local data is torn down (epoch keys retained); the platform surfaces it + refreshes subs.
+    fn on_community_self_removed(&self, _community_id: &str) {}
+
+    /// A Community's control plane was refreshed in realtime (banlist/roles/metadata/mode change,
+    /// or a re-founding followed). The platform re-reads display state.
+    fn on_community_refreshed(&self, _community_id: &str) {}
 }
 
 /// No-op handler for CLI/tests.
