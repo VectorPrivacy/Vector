@@ -1670,6 +1670,22 @@ impl VectorCore {
         Ok(output.val)
     }
 
+    /// Catch up every locally-held Community: fold control / re-foundings / rekeys / banlist and
+    /// fetch recent messages into local state for each channel. State-only (does not replay to an
+    /// [`InboundEventHandler`]). Called at `listen()` start and periodically for outage resilience;
+    /// also safe to call manually after a known disconnect.
+    pub async fn sync_communities(&self) -> Result<()> {
+        let ids = db::community::list_community_ids().map_err(VectorError::from)?;
+        for id in ids {
+            if let Ok(Some(community)) = db::community::load_community(&id) {
+                for ch in &community.channels {
+                    let _ = self.sync_community_channel(&ch.id.to_hex(), 50).await;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Start listening for incoming DMs.
     ///
     /// Blocks until the client disconnects. Processes GiftWraps
@@ -1709,10 +1725,39 @@ impl VectorCore {
         let my_pk = state::my_public_key()
             .ok_or(VectorError::Other("Not logged in".into()))?;
 
+        // Outage resilience — catch up on connect, then re-sync periodically.
+        //
+        // Catch up BEFORE going realtime so a bot that was offline folds any missed re-foundings /
+        // metadata / banlist changes (and recent messages) into local state, and subscribes at the
+        // CURRENT epoch pseudonyms. This is state-only: historical messages are not replayed to the
+        // handler (matches the gateway model) — query them via `get_messages`.
+        let _ = self.sync_communities().await;
+        let _ = self.sync_dms(None, &NoOpEventHandler).await;
+
         // Subscribe to DMs (GiftWraps) AND Community channel events — one loop dispatches both
         // through the same handler, so `on_dm_received`/`on_community_message` share a sink.
         let dm_sub_id = self.subscribe_dms().await?;
         community::realtime::refresh_subscription(&client).await;
+
+        // Periodic re-sync: the relay pool auto-reconnects the socket, but a `limit(0)` realtime
+        // sub never replays what was published while we were down. So every interval we refold
+        // consensus + reconcile DMs (NIP-77 negentropy → only the diff), then re-track the realtime
+        // sub at the current epochs. Stops when the account is swapped.
+        const RESYNC_INTERVAL_SECS: u64 = 120;
+        let session = state::SessionGuard::capture();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(RESYNC_INTERVAL_SECS)).await;
+                if !session.is_valid() {
+                    return;
+                }
+                let _ = VectorCore.sync_communities().await;
+                let _ = VectorCore.sync_dms(None, &NoOpEventHandler).await;
+                if let Some(c) = state::nostr_client() {
+                    community::realtime::refresh_subscription(&c).await;
+                }
+            }
+        });
 
         let client_for_closure = client.clone();
 
