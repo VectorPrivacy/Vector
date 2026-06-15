@@ -5,15 +5,14 @@ edition = "2021"
 description = "Core library for Vector — the single source of truth for all Vector clients, SDKs, and interfaces."
 
 [dependencies]
-# Nostr Protocol
-nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "zeroize-secretkey" }
+# Nostr Protocol. Declared as crates.io versions so the crate is publishable; the
+# workspace `[patch.crates-io]` redirects the shared `nostr` to the zeroize fork for
+# in-workspace builds (so the app keeps secret-key zeroization), while published
+# crates resolve to stock nostr.
+nostr = "0.44"
 nostr-sdk = { version = "0.44.1", features = ["nip06", "nip44", "nip59"] }
 nostr-blossom = "0.44.0"
-# NIP-46 (Nostr Connect / Remote Signing). Same fork as `nostr` so the
-# transitive nostr type identity lines up — pulling from crates.io would pin
-# upstream nostr through the patch table, but using the fork explicitly keeps
-# the resolver from juggling two branches of the same workspace.
-nostr-connect = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "zeroize-secretkey" }
+nostr-connect = "0.44"
 bip39 = { version = "2.2.2", features = ["rand"] }
 
 # Database
