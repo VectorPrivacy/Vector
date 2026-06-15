@@ -980,6 +980,135 @@ impl VectorCore {
         Ok(message_id)
     }
 
+    /// Send an ephemeral typing indicator to a Community channel.
+    pub async fn send_community_typing(&self, channel_id: &str) -> Result<()> {
+        use crate::community::{service, transport::LiveTransport};
+        let (community, channel) = self.resolve_channel(channel_id)?;
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(8));
+        service::publish_typing_signal(&transport, &community, &channel)
+            .await
+            .map_err(VectorError::Other)
+    }
+
+    /// React to a Community message. `emoji_url` carries the NIP-30 image URL for a custom
+    /// `:shortcode:` reaction (parity with DMs).
+    pub async fn send_community_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+        emoji_url: Option<&str>,
+    ) -> Result<()> {
+        let emoji_tags: Vec<crate::types::EmojiTag> = match emoji_url {
+            Some(url) if emoji.starts_with(':') && emoji.ends_with(':') && emoji.len() >= 3 && !url.is_empty() => {
+                vec![crate::types::EmojiTag { shortcode: emoji[1..emoji.len() - 1].to_string(), url: url.to_string() }]
+            }
+            _ => Vec::new(),
+        };
+        self.publish_community_control(
+            channel_id, stored_event::event_kind::COMMUNITY_REACTION, emoji, message_id, &emoji_tags,
+        ).await
+    }
+
+    /// Edit one of your own Community messages.
+    pub async fn edit_community_message(&self, channel_id: &str, message_id: &str, new_content: &str) -> Result<()> {
+        let emoji_tags = emoji_packs::resolve_outbound_emoji_tags(new_content);
+        self.publish_community_control(
+            channel_id, stored_event::event_kind::COMMUNITY_EDIT, new_content, message_id, &emoji_tags,
+        ).await
+    }
+
+    /// Delete one of your own Community messages: a NIP-09 relay nuke when the per-message key is
+    /// held, plus a cooperative tombstone so peers hide it, plus best-effort attachment cleanup.
+    pub async fn delete_community_message(&self, message_id: &str) -> Result<()> {
+        use crate::community::{service, transport::LiveTransport};
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+
+        let (channel_id, attachment_urls) = {
+            let st = state::STATE.lock().await;
+            match st.find_message(message_id) {
+                Some((chat, msg)) => (
+                    chat.id.clone(),
+                    msg.attachments.iter().filter(|a| !a.url.is_empty()).map(|a| a.url.clone()).collect::<Vec<_>>(),
+                ),
+                None => return Err(VectorError::Other("message not found (already deleted?)".into())),
+            }
+        };
+
+        // Layer 1 — relay nuke against the retained per-message key (best-effort).
+        if crate::db::community::get_message_key(message_id).map(|k| k.is_some()).unwrap_or(false) {
+            let _ = service::delete_message(&transport, message_id).await;
+        }
+        // Layer 2 — cooperative tombstone so peers hide it.
+        self.publish_community_control(
+            &channel_id, stored_event::event_kind::COMMUNITY_DELETE, "", message_id, &[],
+        ).await?;
+        // Layer 3 — best-effort attachment blob delete.
+        if !attachment_urls.is_empty() {
+            if let Some(client) = state::nostr_client() {
+                if let Ok(signer) = client.signer().await {
+                    crate::blossom::delete_blobs_best_effort(signer, attachment_urls);
+                }
+            }
+        }
+        // Local removal.
+        let removed_chat = {
+            let mut st = state::STATE.lock().await;
+            st.remove_message(message_id).map(|(cid, _)| cid)
+        };
+        let _ = crate::db::events::delete_event(message_id).await;
+        traits::emit_event_json("message_removed", serde_json::json!({
+            "id": message_id, "chat_id": removed_chat.as_deref().unwrap_or(&channel_id), "reason": "deleted",
+        }));
+        Ok(())
+    }
+
+    /// Shared community control-event publish (reaction / edit / delete tombstone): build the
+    /// inner-typed envelope, sign, send over the community transport, then locally echo + persist + emit.
+    async fn publish_community_control(
+        &self,
+        channel_id: &str,
+        kind: u16,
+        content: &str,
+        target: &str,
+        emoji_tags: &[crate::types::EmojiTag],
+    ) -> Result<()> {
+        use crate::community::{envelope, inbound, service, transport::LiveTransport};
+        let (community, channel) = self.resolve_channel(channel_id)?;
+        let author_pk = state::my_public_key().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let unsigned = envelope::build_inner_typed(
+            author_pk, &channel.id, channel.epoch, kind, content, ms, Some(target), emoji_tags,
+        );
+        let client = state::nostr_client().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
+        let signer = client.signer().await.map_err(|e| VectorError::Other(format!("Signer unavailable: {e}")))?;
+        let inner = unsigned.sign(&signer).await.map_err(|e| VectorError::Other(format!("sign: {e}")))?;
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        let outer = service::send_signed_message(&transport, &community, &channel, &inner)
+            .await.map_err(VectorError::Other)?;
+        // Local echo + persist + emit (relay echo dedups on inner id).
+        let outcome = {
+            let mut st = state::STATE.lock().await;
+            inbound::process_incoming(&mut st, &outer, &channel, &author_pk)
+        };
+        if let Some(inbound::IncomingEvent::Updated { target_id, message, edit_event }) = outcome {
+            if let Some(ev) = edit_event {
+                let mut ev = (*ev).clone();
+                if let Ok(cid) = crate::db::id_cache::get_chat_id_by_identifier(channel_id) { ev.chat_id = cid; }
+                let _ = crate::db::events::save_event(&ev).await;
+            } else {
+                let _ = crate::db::events::save_message(channel_id, &message).await;
+            }
+            traits::emit_event_json("message_update", serde_json::json!({
+                "old_id": target_id, "message": &message, "chat_id": channel_id,
+            }));
+        }
+        Ok(())
+    }
+
     /// Fetch the latest page of a Community channel from relays, ingesting messages,
     /// reactions, edits, and deletes. Returns the count of brand-new messages applied.
     /// Returns `(new_message_count, warnings)`. `warnings` are NON-FATAL errors hit during the sync
