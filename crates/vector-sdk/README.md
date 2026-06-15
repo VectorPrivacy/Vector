@@ -159,6 +159,10 @@ event-driven (no idle polling) — work happens only when a relay actually (re)c
 `bot.sync_communities()` and `bot.sync_dms(since_days)` (NIP-77 negentropy) are also exposed for
 manual catch-up.
 
+Catch-up folds missed *state* (re-foundings, rekeys, bans, metadata) into local storage but does
+**not** replay missed *messages* to your handler — `on_message`/`on_event` fire for messages
+received while connected. Query anything missed while offline with `bot.core().get_messages(...)`.
+
 **Profiles** — `bot.fetch_profile(npub)`, `bot.update_profile(...)`,
 `bot.set_status(...)`, `bot.block/unblock(...)`, `bot.set_nickname(...)`,
 `bot.blocked_users()`.

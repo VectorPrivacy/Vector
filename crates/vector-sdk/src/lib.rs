@@ -63,8 +63,9 @@ pub mod nostr {
     pub use nostr_sdk::prelude::{FromBech32, Keys, PublicKey, SecretKey, ToBech32};
 }
 
-// Brings `PublicKey::from_bech32` into scope for DM-vs-Community id auto-detection.
-use nostr_sdk::prelude::FromBech32 as _;
+// Brings `PublicKey::from_bech32` / `.to_bech32()` into scope for id auto-detection + whitelist
+// normalization.
+use nostr_sdk::prelude::{FromBech32 as _, ToBech32 as _};
 
 // ============================================================================
 // VectorBot
@@ -82,6 +83,8 @@ pub enum InvitePolicy {
     Public,
     /// A **private** bot: auto-accept invites *only* when the inviter's npub is in this whitelist;
     /// ignore all others. This is what keeps a bot from being spammed into random communities.
+    /// Entries must be bech32 `npub1…` (the form inviters are compared as). Prefer the
+    /// [`whitelist`](VectorBotBuilder::whitelist) builder, which normalizes hex → bech32 for you.
     Whitelist(Vec<String>),
 }
 
@@ -202,11 +205,7 @@ impl VectorBot {
     /// as an error when you actually send.
     pub fn channel(&self, id: impl Into<String>) -> Channel {
         let id = id.into();
-        let kind = if nostr_sdk::PublicKey::from_bech32(&id).is_ok() {
-            ChannelKind::Dm
-        } else {
-            ChannelKind::Community
-        };
+        let kind = channel_kind_for(&id);
         Channel { core: self.core, id, kind }
     }
 
@@ -449,12 +448,19 @@ impl VectorBotBuilder {
         self.invite_policy(InvitePolicy::Public)
     }
 
-    /// Make this a **private** bot — auto-accept invites *only* from these npubs, ignoring all
-    /// others. Shorthand for [`invite_policy(InvitePolicy::Whitelist(..))`](Self::invite_policy).
+    /// Make this a **private** bot — auto-accept invites *only* from these pubkeys, ignoring all
+    /// others. Accepts `npub1…` or hex; each is normalized to bech32 (un-parseable entries are
+    /// dropped) so the whitelist always matches the inviter form the SDK compares against.
+    /// Shorthand for [`invite_policy(InvitePolicy::Whitelist(..))`](Self::invite_policy).
     pub fn whitelist(self, npubs: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.invite_policy(InvitePolicy::Whitelist(
-            npubs.into_iter().map(Into::into).collect(),
-        ))
+        let normalized = npubs
+            .into_iter()
+            .filter_map(|n| {
+                let s = n.into();
+                nostr_sdk::PublicKey::parse(&s).ok().and_then(|pk| pk.to_bech32().ok())
+            })
+            .collect();
+        self.invite_policy(InvitePolicy::Whitelist(normalized))
     }
 
     /// Override the data directory (SQLite DB + per-account storage). Defaults
@@ -1013,6 +1019,16 @@ where
 // Helpers
 // ============================================================================
 
+/// Classify a conversation id: a valid bech32 `npub` is a DM, anything else (a 64-char hex channel
+/// id) is a Community channel.
+fn channel_kind_for(id: &str) -> ChannelKind {
+    if nostr_sdk::PublicKey::from_bech32(id).is_ok() {
+        ChannelKind::Dm
+    } else {
+        ChannelKind::Community
+    }
+}
+
 /// A per-OS default data directory for a bot's storage.
 fn default_data_dir() -> PathBuf {
     #[cfg(target_os = "macos")]
@@ -1037,4 +1053,40 @@ fn default_data_dir() -> PathBuf {
         }
     }
     PathBuf::from("vector-sdk-data")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nostr_sdk::Keys;
+
+    #[test]
+    fn invite_policy_matrix() {
+        let a = Keys::generate().public_key().to_bech32().unwrap();
+        let b = Keys::generate().public_key().to_bech32().unwrap();
+
+        // Manual never auto-accepts.
+        assert!(!InvitePolicy::Manual.accepts(Some(&a)));
+        assert!(!InvitePolicy::Manual.accepts(None));
+
+        // Public accepts anyone (even an unknown/absent inviter).
+        assert!(InvitePolicy::Public.accepts(Some(&a)));
+        assert!(InvitePolicy::Public.accepts(None));
+
+        // Whitelist accepts ONLY listed inviters, and never a missing one.
+        let wl = InvitePolicy::Whitelist(vec![a.clone()]);
+        assert!(wl.accepts(Some(&a)), "whitelisted inviter must be accepted");
+        assert!(!wl.accepts(Some(&b)), "non-whitelisted inviter must be rejected");
+        assert!(!wl.accepts(None), "missing inviter must be rejected under whitelist");
+    }
+
+    #[test]
+    fn channel_kind_auto_detection() {
+        // A valid bech32 npub → DM.
+        let npub = Keys::generate().public_key().to_bech32().unwrap();
+        assert_eq!(channel_kind_for(&npub), ChannelKind::Dm);
+        // A 64-char hex channel id (and a raw-hex pubkey) → Community (not bech32).
+        assert_eq!(channel_kind_for(&"a".repeat(64)), ChannelKind::Community);
+        assert_eq!(channel_kind_for(&Keys::generate().public_key().to_hex()), ChannelKind::Community);
+    }
 }
