@@ -373,6 +373,23 @@ impl VectorBot {
         self.core.get_blocked_users().await
     }
 
+    // ---- attachments ----
+
+    /// Download a received attachment and decrypt it to plaintext bytes (fetches the encrypted blob
+    /// from its Blossom URL, then AES-decrypts with the attachment's embedded key + nonce). Find
+    /// attachments on `msg.message.attachments`.
+    pub async fn download_attachment(&self, attachment: &Attachment) -> Result<Vec<u8>> {
+        self.core.download_attachment(attachment).await
+    }
+
+    /// Download a received attachment and write the decrypted bytes to `path`. Returns the path.
+    pub async fn save_attachment(&self, attachment: &Attachment, path: impl Into<PathBuf>) -> Result<PathBuf> {
+        let path = path.into();
+        let bytes = self.core.download_attachment(attachment).await?;
+        std::fs::write(&path, bytes).map_err(VectorError::Io)?;
+        Ok(path)
+    }
+
     // ---- lifecycle ----
 
     /// Disconnect from relays and close the local database.
@@ -532,6 +549,21 @@ impl Channel {
         }
     }
 
+    /// Send a text message as a **threaded reply** to `replied_to` (an existing message's id).
+    /// Works for DMs and Community channels. Returns the new message's event id.
+    pub async fn reply(&self, replied_to: &str, text: &str) -> Result<String> {
+        match self.kind {
+            ChannelKind::Dm => self
+                .core
+                .send_dm_reply(&self.id, replied_to, text)
+                .await
+                .map(|r| r.event_id.unwrap_or(r.pending_id)),
+            ChannelKind::Community => {
+                self.core.send_community_message(&self.id, text, Some(replied_to)).await
+            }
+        }
+    }
+
     /// React to a message with a unicode emoji (e.g. `"👍"`).
     pub async fn react(&self, message_id: &str, emoji: &str) -> Result<()> {
         match self.kind {
@@ -618,9 +650,11 @@ impl IncomingMessage {
         }
     }
 
-    /// Respond in the same conversation. Works identically for DMs and Community channels.
+    /// Respond as a **threaded reply** to this message — the response references it, so clients
+    /// render it as a reply. Works identically for DMs and Community channels. (For a plain,
+    /// non-threaded response in the same conversation, use `msg.channel().send(...)`.)
     pub async fn reply(&self, text: &str) -> Result<String> {
-        self.channel().send(text).await
+        self.channel().reply(&self.message.id, text).await
     }
 
     /// React to *this* message with an emoji, in its own conversation.

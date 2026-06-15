@@ -82,7 +82,13 @@ bot.channel(id).delete(&msg_id).await?;
 | `channel.edit(msg_id, new_text)` | Edit a message you sent |
 | `channel.delete(msg_id)` | Delete a message you sent |
 | `channel.send_file(path)` | Send an encrypted file attachment |
-| `msg.reply(text)` / `msg.react(emoji)` | Respond to an inbound message uniformly |
+| `channel.reply(msg_id, text)` | Send a **threaded** reply to a specific message |
+| `msg.reply(text)` / `msg.react(emoji)` | Threaded reply / react to an inbound message |
+| `bot.download_attachment(&att)` / `bot.save_attachment(&att, path)` | Fetch + decrypt a received file |
+
+`msg.reply(text)` threads (references the message it answers); for a plain, non-threaded response
+use `msg.channel().send(text)`. Received files live on `msg.message.attachments` —
+`bot.download_attachment(att)` returns the decrypted bytes, `bot.save_attachment(att, path)` writes them.
 
 **Community management** — a message hands you the *actor in context* (discord.js-style),
 so you act on the sender directly:
