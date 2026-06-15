@@ -7,11 +7,17 @@ license = "MIT"
 keywords = ["nostr", "sdk", "bot", "vector", "messaging"]
 categories = ["network-programming", "asynchronous", "api-bindings"]
 rust-version = "1.75"
+repository = "https://github.com/VectorPrivacy/Vector"
+homepage = "https://vectorapp.io"
+documentation = "https://docs.rs/vector-sdk"
+readme = "README.md"
 
 [dependencies]
 # The single source of truth — all protocol logic lives here. Tor stays opt-in
 # (vector-core's `tor` feature is off by default) so the SDK's dep tree is light.
-vector-core = { path = "../vector-core", default-features = false }
+# `version` is set so the crate is publishable once vector-core ships to crates.io;
+# until then the `path` wins for local builds.
+vector-core = { path = "../vector-core", version = "0.1.0", default-features = false }
 nostr-sdk = "0.44.1"
 tokio = { version = "1.49", features = ["rt", "rt-multi-thread", "macros", "time"] }
 serde = { version = "1", features = ["derive"] }
