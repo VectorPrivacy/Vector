@@ -383,6 +383,180 @@ impl VectorCore {
         ).await.map_err(|e| VectorError::Other(e))
     }
 
+    /// Send a NIP-25 reaction to a DM message. `emoji_url` carries the NIP-30
+    /// image URL when reacting with a custom-pack emoji (content stays
+    /// `:shortcode:`). Returns the reaction's rumor id. Local echo + persistence
+    /// are best-effort — the gift-wrap send is the source of truth.
+    pub async fn send_reaction(
+        &self,
+        to_npub: &str,
+        reference_id: &str,
+        emoji: &str,
+        emoji_url: Option<&str>,
+    ) -> Result<String> {
+        use nostr_sdk::prelude::*;
+
+        let client = state::nostr_client().ok_or(VectorError::Other("Not connected".into()))?;
+        let my_public_key = state::my_public_key().ok_or(VectorError::Other("Not logged in".into()))?;
+
+        let reference_event = EventId::from_hex(reference_id)
+            .map_err(|e| VectorError::Nostr(e.to_string()))?;
+        let receiver_pubkey = PublicKey::from_bech32(to_npub)
+            .map_err(|e| VectorError::Nostr(e.to_string()))?;
+
+        // NIP-30 custom-emoji tag — only when content is `:shortcode:` and a URL is present.
+        let custom_emoji_tag = emoji_url.and_then(|url| {
+            if !emoji.starts_with(':') || !emoji.ends_with(':') || emoji.len() < 3 || url.is_empty() {
+                return None;
+            }
+            let shortcode = &emoji[1..emoji.len() - 1];
+            if shortcode.is_empty() { return None; }
+            Some(Tag::custom(TagKind::custom("emoji"), [shortcode.to_string(), url.to_string()]))
+        });
+
+        let reaction_target = nostr_sdk::nips::nip25::ReactionTarget {
+            event_id: reference_event,
+            public_key: receiver_pubkey,
+            coordinate: None,
+            kind: Some(Kind::PrivateDirectMessage),
+            relay_hint: None,
+        };
+        let mut builder = EventBuilder::reaction(reaction_target, emoji);
+        if let Some(tag) = custom_emoji_tag {
+            builder = builder.tag(tag);
+        }
+        let rumor = builder.build(my_public_key);
+        let rumor_id = rumor.id.ok_or(VectorError::Other("Failed to get rumor ID".into()))?.to_hex();
+
+        inbox_relays::send_gift_wrap(&client, &receiver_pubkey, rumor.clone(), [])
+            .await.map_err(VectorError::Other)?;
+
+        // Self-wrap for recovery; bail on account swap before signing.
+        let self_wrap_client = client.clone();
+        let self_wrap_session = state::SessionGuard::capture();
+        tokio::spawn(async move {
+            if !self_wrap_session.is_valid() { return; }
+            let _ = self_wrap_client.gift_wrap(&my_public_key, rumor, []).await;
+        });
+
+        // Best-effort optimistic local echo + persistence.
+        let reaction = Reaction {
+            id: rumor_id.clone(),
+            reference_id: reference_id.to_string(),
+            author_id: my_public_key.to_bech32().unwrap_or_else(|_| my_public_key.to_hex()),
+            emoji: emoji.to_string(),
+            emoji_url: emoji_url.map(|s| s.to_string()),
+        };
+        let msg_for_save = {
+            let mut st = state::STATE.lock().await;
+            match st.add_reaction_to_message(reference_id, reaction) {
+                Some((cid, true)) => st.find_message(reference_id).map(|(_, m)| (cid, m)),
+                _ => None,
+            }
+        };
+        if let Some((cid, msg)) = msg_for_save {
+            let _ = db::events::save_message(&cid, &msg).await;
+            traits::emit_event_json("message_update", serde_json::json!({
+                "old_id": reference_id, "message": &msg, "chat_id": &cid
+            }));
+        }
+
+        Ok(rumor_id)
+    }
+
+    /// Send an ephemeral typing indicator to a DM recipient. Fire-and-forget
+    /// with a 30-second NIP-40 expiry so relays purge it quickly.
+    pub async fn send_typing(&self, to_npub: &str) -> Result<()> {
+        use nostr_sdk::prelude::*;
+
+        let client = state::nostr_client().ok_or(VectorError::Other("Not connected".into()))?;
+        let my_public_key = state::my_public_key().ok_or(VectorError::Other("Not logged in".into()))?;
+        let pubkey = PublicKey::from_bech32(to_npub).map_err(|e| VectorError::Nostr(e.to_string()))?;
+
+        let expiry = Timestamp::from_secs(Timestamp::now().as_secs() + 30);
+        let rumor = EventBuilder::new(Kind::ApplicationSpecificData, "typing")
+            .tag(Tag::public_key(pubkey))
+            .tag(Tag::custom(TagKind::d(), vec!["vector"]))
+            .tag(Tag::expiration(expiry))
+            .build(my_public_key);
+
+        client.gift_wrap_to(
+            state::active_trusted_relays().await,
+            &pubkey,
+            rumor,
+            [Tag::expiration(expiry)],
+        ).await.map_err(|e| VectorError::Nostr(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Edit a DM you previously sent (kind-16 edit) with an optimistic local
+    /// echo. Returns the edit event id. Persistence is best-effort and only
+    /// happens when the chat already exists locally.
+    pub async fn edit_dm(&self, to_npub: &str, message_id: &str, new_content: &str) -> Result<String> {
+        use nostr_sdk::prelude::*;
+
+        let client = state::nostr_client().ok_or(VectorError::Other("Not connected".into()))?;
+        let my_public_key = state::my_public_key().ok_or(VectorError::Other("Not logged in".into()))?;
+        let my_npub = my_public_key.to_bech32().map_err(|e| VectorError::Nostr(e.to_string()))?;
+        let receiver_pubkey = PublicKey::from_bech32(to_npub).map_err(|e| VectorError::Nostr(e.to_string()))?;
+        let reference_event = EventId::from_hex(message_id).map_err(|e| VectorError::Nostr(e.to_string()))?;
+
+        // NIP-30: resolve `:shortcode:` so the edit carries emoji image tags.
+        let emoji_tags = emoji_packs::resolve_outbound_emoji_tags(new_content);
+
+        let mut builder = EventBuilder::new(
+            Kind::from_u16(stored_event::event_kind::MESSAGE_EDIT),
+            new_content,
+        ).tag(Tag::event(reference_event));
+        for et in &emoji_tags {
+            builder = builder.tag(Tag::custom(
+                TagKind::custom("emoji"),
+                [et.shortcode.clone(), et.url.clone()],
+            ));
+        }
+        let rumor = builder.build(my_public_key);
+        let edit_id = rumor.id.ok_or(VectorError::Other("Failed to get edit rumor ID".into()))?.to_hex();
+        let edit_ts_ms = rumor.created_at.as_secs() * 1000;
+
+        // Optimistic local echo + best-effort persistence.
+        let msg_for_emit = {
+            let mut st = state::STATE.lock().await;
+            st.update_message_in_chat(to_npub, message_id, |msg| {
+                msg.apply_edit(new_content.to_string(), edit_ts_ms, emoji_tags.clone());
+                msg.preview_metadata = None;
+            })
+        };
+        if let Some(msg) = msg_for_emit {
+            traits::emit_event_json("message_update", serde_json::json!({
+                "old_id": message_id, "message": &msg, "chat_id": to_npub
+            }));
+            if let Ok(db_chat_id) = db::id_cache::get_chat_id_by_identifier(to_npub) {
+                let _ = db::events::save_edit_event(
+                    &edit_id, message_id, new_content, &emoji_tags, db_chat_id, None, &my_npub,
+                ).await;
+            }
+        }
+
+        inbox_relays::send_gift_wrap(&client, &receiver_pubkey, rumor.clone(), [])
+            .await.map_err(VectorError::Other)?;
+
+        let self_wrap_client = client.clone();
+        let self_wrap_session = state::SessionGuard::capture();
+        tokio::spawn(async move {
+            if !self_wrap_session.is_valid() { return; }
+            let _ = self_wrap_client.gift_wrap(&my_public_key, rumor, []).await;
+        });
+
+        Ok(edit_id)
+    }
+
+    /// Delete a DM you sent (NIP-09 over the retained gift-wrap keys).
+    pub async fn delete_dm(&self, message_id: &str) -> Result<deletion::DeleteOutcome> {
+        use nostr_sdk::prelude::*;
+        let rumor_id = EventId::from_hex(message_id).map_err(|e| VectorError::Nostr(e.to_string()))?;
+        deletion::delete_own_dm(&rumor_id).await.map_err(VectorError::Other)
+    }
+
     /// Get chats from the in-memory state.
     pub async fn get_chats(&self) -> Vec<SerializableChat> {
         let state = state::STATE.lock().await;

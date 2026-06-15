@@ -9,7 +9,6 @@ use crate::net;
 use crate::STATE;
 use crate::util;
 use crate::TAURI_APP;
-use crate::nostr_client;
 
 // Submodules
 pub(crate) mod types;
@@ -44,7 +43,7 @@ pub(crate) fn upload_cancel_flags()
 pub use sending::*;
 pub use files::*;
 pub use types::{
-    AttachmentFile, Reaction,
+    AttachmentFile,
 };
 
 /// Protocol-agnostic reaction function that works for both DMs and Group Chats.
@@ -60,102 +59,26 @@ pub async fn react_to_message(
 ) -> Result<bool, String> {
     use crate::chat::ChatType;
 
-    let client = nostr_client().ok_or("Nostr client not initialized")?;
-    let my_public_key = crate::my_public_key().ok_or("Public key not initialized")?;
-
-    // NIP-30 custom-emoji tag — only valid when the content is `:shortcode:`
-    // and we have a URL. Defensive: a bare emoji like "👍" stays untagged.
-    let custom_emoji_tag = emoji_url.as_ref().and_then(|url| {
-        if !emoji.starts_with(':') || !emoji.ends_with(':') || emoji.len() < 3 {
-            return None;
-        }
-        let shortcode = &emoji[1..emoji.len() - 1];
-        if shortcode.is_empty() || url.is_empty() { return None; }
-        Some(Tag::custom(
-            TagKind::custom("emoji"),
-            [shortcode.to_string(), url.clone()],
-        ))
-    });
-
-    // Determine chat type
-    let state = STATE.lock().await;
-    let chat = state.chats.iter().find(|c| c.id == chat_id)
-        .ok_or_else(|| "Chat not found".to_string())?;
-    let chat_type = chat.chat_type.clone();
-    drop(state);
+    // Community reactions ride their own command; only DMs reach this path.
+    let chat_type = {
+        let state = STATE.lock().await;
+        let chat = state.chats.iter().find(|c| c.id == chat_id)
+            .ok_or_else(|| "Chat not found".to_string())?;
+        chat.chat_type.clone()
+    };
 
     match chat_type {
         ChatType::DirectMessage => {
-            // For DMs, send gift-wrapped reaction
-            let reference_event = EventId::from_hex(&reference_id).map_err(|e| e.to_string())?;
-            let receiver_pubkey = PublicKey::from_bech32(&chat_id).map_err(|e| e.to_string())?;
-
-            // Build NIP-25 Reaction rumor
-            let reaction_target = nostr_sdk::nips::nip25::ReactionTarget {
-                event_id: reference_event,
-                public_key: receiver_pubkey,
-                coordinate: None,
-                kind: Some(Kind::PrivateDirectMessage),
-                relay_hint: None,
-            };
-            let mut builder = EventBuilder::reaction(reaction_target, &emoji);
-            if let Some(tag) = custom_emoji_tag.clone() {
-                builder = builder.tag(tag);
-            }
-            let rumor = builder.build(my_public_key);
-            let rumor_id = rumor.id.ok_or("Failed to get rumor ID")?.to_hex();
-            
-            // Send reaction to the receiver (routed to their inbox relays if available)
-            crate::inbox_relays::send_gift_wrap(&client, &receiver_pubkey, rumor.clone(), [])
+            // Single source of truth — vector-core owns the reaction pipeline
+            // (gift-wrap + self-wrap + optimistic state + persist + message_update emit).
+            vector_core::VectorCore
+                .send_reaction(&chat_id, &reference_id, &emoji, emoji_url.as_deref())
                 .await
-                .map_err(|e| e.to_string())?;
-            
-            // Self-wrap for recovery. Clone existing `client` (cheap Arc;
-            // no re-fetch that could observe a different account) and
-            // capture SessionGuard so a swap aborts before signing.
-            let self_wrap_client = client.clone();
-            let self_wrap_session = vector_core::state::SessionGuard::capture();
-            tokio::spawn(async move {
-                if !self_wrap_session.is_valid() { return; }
-                let _ = self_wrap_client.gift_wrap(&my_public_key, rumor, []).await;
-            });
-
-            // Add reaction to local state (bech32 npub to match DB format and frontend strPubkey)
-            let reaction = Reaction {
-                id: rumor_id,
-                reference_id: reference_id.clone(),
-                author_id: my_public_key.to_bech32().unwrap_or_else(|_| my_public_key.to_hex()),
-                emoji,
-                emoji_url: emoji_url.clone(),
-            };
-            
-            let msg_for_save = {
-                let mut state = STATE.lock().await;
-                // Use helper that handles interner access via split borrowing
-                if let Some((chat_id, was_added)) = state.add_reaction_to_message(&reference_id, reaction) {
-                    if was_added {
-                        state.find_message(&reference_id)
-                            .map(|(_, msg)| (chat_id, msg))
-                    } else { None }
-                } else { None }
-            };
-
-            if let Some((chat_id, msg)) = msg_for_save {
-                if let Some(handle) = TAURI_APP.get() {
-                    let _ = crate::db::save_message(&chat_id, &msg).await;
-                    let _ = handle.emit("message_update", serde_json::json!({
-                        "old_id": &reference_id,
-                        "message": &msg,
-                        "chat_id": &chat_id
-                    }));
-                    return Ok(true);
-                }
-            }
-
-            Ok(false)
+                .map(|_| true)
+                .map_err(|e| e.to_string())
         }
         ChatType::Community => {
-            return Err("Reactions in Community channels are not yet supported".to_string());
+            Err("Reactions in Community channels are not yet supported".to_string())
         }
     }
 }
@@ -277,23 +200,13 @@ pub async fn edit_message(
     new_content: String,
 ) -> Result<String, String> {
     use crate::chat::ChatType;
-    use crate::stored_event::event_kind;
 
-    let client = nostr_client().ok_or("Nostr client not initialized")?;
-    let my_public_key = crate::my_public_key().ok_or("Public key not initialized")?;
-    let my_npub = my_public_key.to_bech32().map_err(|e| e.to_string())?;
-
-    // Determine chat type and get db chat_id
-    let (chat_type, db_chat_id) = {
+    // Determine chat type to route Community edits to their own pipeline.
+    let chat_type = {
         let state = STATE.lock().await;
         let chat = state.chats.iter().find(|c| c.id == chat_id)
             .ok_or_else(|| "Chat not found".to_string())?;
-        let chat_type = chat.chat_type.clone();
-
-        // Get db chat ID
-        let db_chat_id = crate::db::get_chat_id_by_identifier(&chat_id)?;
-
-        (chat_type, db_chat_id)
+        chat.chat_type.clone()
     };
 
     // Community channel edits ride their own envelope path (kind-3302 over the
@@ -303,73 +216,10 @@ pub async fn edit_message(
         return Ok(String::new());
     }
 
-    // NIP-30: resolve `:shortcode:` in the edited content against subscribed
-    // packs so the edit carries `["emoji", ...]` tags — recipients render the
-    // image, not literal text. Mirrors the send pipeline.
-    let emoji_tags = vector_core::emoji_packs::resolve_outbound_emoji_tags(&new_content);
-
-    // Build the edit rumor (reply ref + emoji tags)
-    let reference_event = EventId::from_hex(&message_id).map_err(|e| e.to_string())?;
-    let mut builder = EventBuilder::new(Kind::from_u16(event_kind::MESSAGE_EDIT), &new_content)
-        .tag(Tag::event(reference_event));
-    for et in &emoji_tags {
-        builder = builder.tag(Tag::custom(
-            TagKind::custom("emoji"),
-            [et.shortcode.clone(), et.url.clone()],
-        ));
-    }
-    let rumor = builder.build(my_public_key);
-    let edit_id = rumor.id.ok_or("Failed to get edit rumor ID")?.to_hex();
-    let created_at = rumor.created_at.as_secs();
-    let edit_timestamp_ms = created_at * 1000;
-
-    // Optimistic local echo BEFORE the network send (matches send_dm's on_pending):
-    // the editor sees the rendered custom emoji instantly instead of waiting on the relay.
-    let msg_for_emit = {
-        let mut state = STATE.lock().await;
-        state.update_message_in_chat(&chat_id, &message_id, |msg| {
-            msg.apply_edit(new_content.clone(), edit_timestamp_ms, emoji_tags.clone());
-            msg.preview_metadata = None;
-        })
-    };
-    if let Some(msg) = msg_for_emit {
-        if let Some(handle) = TAURI_APP.get() {
-            handle.emit("message_update", serde_json::json!({
-                "old_id": &message_id,
-                "message": msg,
-                "chat_id": &chat_id
-            })).ok();
-        }
-    }
-
-    // Persist the edit (carrying its emoji tags so a reload still renders them)
-    if TAURI_APP.get().is_some() {
-        crate::db::save_edit_event(
-            &edit_id,
-            &message_id,
-            &new_content,
-            &emoji_tags,
-            db_chat_id,
-            None, // user_id derived from npub stored in event
-            &my_npub,
-        ).await?;
-    }
-
-    // DM gift-wrapped edit (Community already delegated above).
-    let receiver_pubkey = PublicKey::from_bech32(&chat_id).map_err(|e| e.to_string())?;
-
-    // Send edit to the receiver (routed to their inbox relays if available)
-    crate::inbox_relays::send_gift_wrap(&client, &receiver_pubkey, rumor.clone(), [])
+    // DM edits — vector-core owns the kind-16 edit pipeline (optimistic echo +
+    // persist + gift-wrap + self-wrap).
+    vector_core::VectorCore
+        .edit_dm(&chat_id, &message_id, &new_content)
         .await
-        .map_err(|e| e.to_string())?;
-
-    // Self-wrap for recovery (same pattern as react_to_message).
-    let self_wrap_client = client.clone();
-    let self_wrap_session = vector_core::state::SessionGuard::capture();
-    tokio::spawn(async move {
-        if !self_wrap_session.is_valid() { return; }
-        let _ = self_wrap_client.gift_wrap(&my_public_key, rumor, []).await;
-    });
-
-    Ok(edit_id)
+        .map_err(|e| e.to_string())
 }

@@ -17,48 +17,13 @@ use crate::{nostr_client, active_trusted_relays};
 pub async fn start_typing(receiver: String) -> bool {
     // Return false on no-session — typing fires continuously from
     // keystrokes, so a panic here would crash the runtime mid-swap.
-    let Some(client) = nostr_client() else { return false; };
-    let Some(my_public_key) = crate::my_public_key() else { return false; };
+    if crate::my_public_key().is_none() {
+        return false;
+    }
 
     match PublicKey::from_bech32(receiver.as_str()) {
-        Ok(pubkey) => {
-            // This is a DM - use NIP-17 gift wrapping
-
-            // Build and broadcast the Typing Indicator
-            let rumor = EventBuilder::new(Kind::ApplicationSpecificData, "typing")
-                .tag(Tag::public_key(pubkey))
-                .tag(Tag::custom(TagKind::d(), vec!["vector"]))
-                .tag(Tag::expiration(Timestamp::from_secs(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs()
-                        + 30,
-                )))
-                .build(my_public_key);
-
-            // Gift Wrap and send our Typing Indicator to receiver via our Trusted Relay
-            // Note: we set a 30-second expiry so that relays can purge typing indicators quickly
-            let expiry_time = Timestamp::from_secs(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs()
-                    + 30,
-            );
-            match client
-                .gift_wrap_to(
-                    active_trusted_relays().await.into_iter(),
-                    &pubkey,
-                    rumor,
-                    [Tag::expiration(expiry_time)],
-                )
-                .await
-            {
-                Ok(_) => true,
-                Err(_) => false,
-            }
-        }
+        // A DM — vector-core owns the NIP-17 typing pipeline (30s expiry).
+        Ok(_) => vector_core::VectorCore.send_typing(&receiver).await.is_ok(),
         // A hex target is a Community channel — publish an ephemeral typing signal over Concord.
         Err(_) => crate::commands::community::send_community_typing(receiver.as_str()).await,
     }
