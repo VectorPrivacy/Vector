@@ -362,6 +362,42 @@ impl VectorCore {
             .map_err(|e| VectorError::Other(e))
     }
 
+    /// Send a DM as a threaded reply to `replied_to` (an existing message's event id).
+    pub async fn send_dm_reply(&self, to_npub: &str, replied_to: &str, content: &str) -> Result<sending::SendResult> {
+        sending::send_dm(to_npub, content, Some(replied_to), &SendConfig::default(), Arc::new(NoOpSendCallback)).await
+            .map_err(|e| VectorError::Other(e))
+    }
+
+    /// Download a received attachment and decrypt it to plaintext bytes. Fetches the encrypted blob
+    /// from its Blossom URL (SSRF/Tor-aware client, size-capped) and AES-decrypts with the
+    /// attachment's embedded key + nonce.
+    pub async fn download_attachment(&self, attachment: &Attachment) -> Result<Vec<u8>> {
+        use futures_util::StreamExt;
+        const MAX_DOWNLOAD: usize = 256 * 1024 * 1024;
+        if attachment.url.is_empty() {
+            return Err(VectorError::Other("attachment has no URL".into()));
+        }
+        let client = crate::net::build_http_client(std::time::Duration::from_secs(120)).map_err(VectorError::Other)?;
+        let resp = client.get(&attachment.url).send().await
+            .map_err(|e| VectorError::Other(format!("download: {e}")))?;
+        if !resp.status().is_success() {
+            return Err(VectorError::Other(format!("download failed: HTTP {}", resp.status())));
+        }
+        // Stream with a cap so a hostile/oversized blob can't OOM the process.
+        let mut encrypted: Vec<u8> = Vec::with_capacity(
+            resp.content_length().map(|l| (l as usize).min(MAX_DOWNLOAD)).unwrap_or(64 * 1024),
+        );
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| VectorError::Other(format!("read body: {e}")))?;
+            if encrypted.len() + chunk.len() > MAX_DOWNLOAD {
+                return Err(VectorError::Other("attachment exceeds 256 MiB cap".into()));
+            }
+            encrypted.extend_from_slice(&chunk);
+        }
+        crate::crypto::decrypt_data(&encrypted, &attachment.key, &attachment.nonce).map_err(VectorError::Other)
+    }
+
     /// Send a NIP-17 gift-wrapped file attachment DM.
     pub async fn send_file(&self, to_npub: &str, file_path: &str) -> Result<sending::SendResult> {
         let path = std::path::Path::new(file_path);
