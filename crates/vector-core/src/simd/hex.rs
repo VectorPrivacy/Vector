@@ -931,6 +931,9 @@ fn hex_to_bytes_16_scalar_padded(h: &[u8]) -> [u8; 16] {
 /// Convert hex string to bytes (arbitrary length).
 ///
 /// Uses SIMD for the bulk of the conversion when input is large enough.
+// `set_len` before init is deliberate: every architecture branch writes all `out_len` bytes
+// through `out_ptr` before `result` is read, so pre-zeroing would only waste a memset on a hot path.
+#[allow(clippy::uninit_vec)]
 pub fn hex_string_to_bytes(s: &str) -> Vec<u8> {
     let h = s.as_bytes();
     let out_len = h.len() / 2;
