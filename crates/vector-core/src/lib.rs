@@ -980,6 +980,96 @@ impl VectorCore {
         Ok(message_id)
     }
 
+    /// Send a file to a Community channel as an encrypted attachment. Returns the message id.
+    /// Mirrors the DM file pipeline (encrypt → Blossom upload → NIP-92 `imeta`) but publishes
+    /// over the community transport.
+    pub async fn send_community_file(&self, channel_id: &str, file_path: &str) -> Result<String> {
+        use crate::community::{attachments, envelope, inbound, service, transport::LiveTransport};
+        let path = std::path::Path::new(file_path);
+        let bytes = std::fs::read(path).map_err(VectorError::Io)?;
+        if bytes.is_empty() {
+            return Err(VectorError::Other("Empty file".into()));
+        }
+        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
+        let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("bin").to_lowercase();
+
+        let (community, channel) = self.resolve_channel(channel_id)?;
+        let author_pk = state::my_public_key().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
+
+        let file_hash = crate::crypto::sha256_hex(&bytes);
+        let mime = crate::crypto::mime_from_extension(&extension);
+        let img_meta = crate::crypto::generate_image_metadata(&bytes);
+
+        // Save the plaintext locally (hash-keyed) so the sender previews it instantly.
+        let download_dir = crate::db::get_download_dir();
+        let _ = std::fs::create_dir_all(&download_dir);
+        let local_name = if filename.is_empty() { format!("{}.{}", &file_hash, extension) } else { filename.clone() };
+        let local_path = crate::crypto::resolve_unique_filename(&download_dir, &local_name);
+        let _ = std::fs::write(&local_path, &bytes);
+
+        // Encrypt → upload to Blossom (signer reused for the envelope below).
+        let params = crate::crypto::generate_encryption_params();
+        let encrypted = crate::crypto::encrypt_data(&bytes, &params)?;
+        let encrypted_size = encrypted.len() as u64;
+
+        let client = state::nostr_client().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
+        let signer = client.signer().await.map_err(|e| VectorError::Other(format!("Signer unavailable: {e}")))?;
+        let servers = crate::blossom_servers::compute_enabled_servers();
+        if servers.is_empty() {
+            return Err(VectorError::Other("No Blossom servers configured".into()));
+        }
+        let noop_progress: crate::blossom::ProgressCallback = std::sync::Arc::new(|_, _| Ok(()));
+        let url = crate::blossom::upload_blob_with_progress_and_failover(
+            signer.clone(),
+            servers,
+            std::sync::Arc::new(encrypted),
+            Some(mime),
+            /* is_encrypted */ true,
+            noop_progress,
+            Some(3),
+            Some(std::time::Duration::from_secs(2)),
+            None,
+        ).await.map_err(VectorError::Other)?;
+
+        let attachment = crate::types::Attachment {
+            id: file_hash.clone(),
+            key: params.key.clone(),
+            nonce: params.nonce.clone(),
+            extension: extension.clone(),
+            name: filename.clone(),
+            url,
+            path: local_path.to_string_lossy().to_string(),
+            size: encrypted_size,
+            img_meta,
+            downloading: false,
+            downloaded: true,
+            ..Default::default()
+        };
+        let imeta = vec![attachments::attachment_to_imeta(&attachment)];
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let unsigned = envelope::build_inner_full(
+            author_pk, &channel.id, channel.epoch,
+            stored_event::event_kind::COMMUNITY_MESSAGE, "", ms, None, &[], &imeta,
+        );
+        let message_id = unsigned.id.ok_or_else(|| VectorError::Other("inner event has no id".into()))?.to_hex();
+        let inner = unsigned.sign(&signer).await.map_err(|e| VectorError::Other(format!("sign: {e}")))?;
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(30));
+        let outer = service::send_signed_message(&transport, &community, &channel, &inner)
+            .await.map_err(VectorError::Other)?;
+        // Local echo so get_messages reflects the send.
+        let echoed = {
+            let mut st = state::STATE.lock().await;
+            inbound::process_incoming(&mut st, &outer, &channel, &author_pk)
+        };
+        if let Some(inbound::IncomingEvent::NewMessage(m)) = echoed {
+            let _ = crate::db::events::save_message(channel_id, &m).await;
+        }
+        Ok(message_id)
+    }
+
     /// Send an ephemeral typing indicator to a Community channel.
     pub async fn send_community_typing(&self, channel_id: &str) -> Result<()> {
         use crate::community::{service, transport::LiveTransport};
