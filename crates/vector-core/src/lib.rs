@@ -330,6 +330,8 @@ impl VectorCore {
         let client = ClientBuilder::new()
             .signer(keys)
             .opts(nostr_client_options())
+            // Relay health monitor — powers the reconnect-driven catch-up in `listen()`.
+            .monitor(Monitor::new(1024))
             .build();
 
         // Add trusted relays
@@ -1739,25 +1741,72 @@ impl VectorCore {
         let dm_sub_id = self.subscribe_dms().await?;
         community::realtime::refresh_subscription(&client).await;
 
-        // Periodic re-sync: the relay pool auto-reconnects the socket, but a `limit(0)` realtime
-        // sub never replays what was published while we were down. So every interval we refold
-        // consensus + reconcile DMs (NIP-77 negentropy → only the diff), then re-track the realtime
-        // sub at the current epochs. Stops when the account is swapped.
-        const RESYNC_INTERVAL_SECS: u64 = 120;
-        let session = state::SessionGuard::capture();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(RESYNC_INTERVAL_SECS)).await;
-                if !session.is_valid() {
-                    return;
+        // Outage resilience via the relay Monitor — event-driven, not polling.
+        //
+        // (1) Reconnect-driven catch-up: a `limit(0)` realtime sub never replays what was published
+        // while we were down, so a relay (re)connecting is exactly when we must catch up. On each
+        // Connected transition we refold consensus + reconcile DMs (NIP-77 negentropy → only the
+        // diff) and re-track the realtime sub at the current epochs. Idle when healthy. Stops on swap.
+        if let Some(monitor) = client.monitor() {
+            let mut rx = monitor.subscribe();
+            let session = state::SessionGuard::capture();
+            tokio::spawn(async move {
+                while let Ok(notification) = rx.recv().await {
+                    if !session.is_valid() {
+                        return;
+                    }
+                    let MonitorNotification::StatusChanged { status, .. } = notification;
+                    if status == RelayStatus::Connected {
+                        let _ = VectorCore.sync_communities().await;
+                        let _ = VectorCore.sync_dms(None, &NoOpEventHandler).await;
+                        if let Some(c) = state::nostr_client() {
+                            community::realtime::refresh_subscription(&c).await;
+                        }
+                    }
                 }
-                let _ = VectorCore.sync_communities().await;
-                let _ = VectorCore.sync_dms(None, &NoOpEventHandler).await;
-                if let Some(c) = state::nostr_client() {
-                    community::realtime::refresh_subscription(&c).await;
+            });
+        }
+
+        // (2) Health probe: a relay can report Connected while silently dead. Every 60s probe each
+        // with a tiny query + timeout; a zombie is force-reconnected (which fires the monitor above
+        // → catch-up), and Disconnected/Terminated relays are reconnected directly.
+        {
+            let client_health = client.clone();
+            let session = state::SessionGuard::capture();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await; // warm-up
+                loop {
+                    if !session.is_valid() {
+                        return;
+                    }
+                    for (url, relay) in client_health.relays().await {
+                        match relay.status() {
+                            RelayStatus::Connected => {
+                                let probe = tokio::time::timeout(
+                                    std::time::Duration::from_secs(10),
+                                    client_health.fetch_events_from(
+                                        vec![url.to_string()],
+                                        Filter::new().kind(Kind::Metadata).limit(1),
+                                        std::time::Duration::from_secs(8),
+                                    ),
+                                )
+                                .await;
+                                if !matches!(probe, Ok(Ok(_))) {
+                                    let _ = relay.disconnect();
+                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                    let _ = relay.try_connect(std::time::Duration::from_secs(10)).await;
+                                }
+                            }
+                            RelayStatus::Terminated | RelayStatus::Disconnected => {
+                                let _ = relay.try_connect(std::time::Duration::from_secs(10)).await;
+                            }
+                            _ => {}
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 }
-            }
-        });
+            });
+        }
 
         let client_for_closure = client.clone();
 

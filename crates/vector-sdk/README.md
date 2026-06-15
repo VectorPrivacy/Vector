@@ -110,10 +110,12 @@ message — DMs **and** Community channel messages — each on its own task
 (`msg.is_group` tells them apart if you care). For full control,
 `bot.listen_with(handler)` takes a raw `InboundEventHandler`.
 
-**Outage resilience** — `on_message`/`listen` catch up on connect and re-sync periodically, so a
-bot that drops its connection auto-reconnects and folds back anything it missed while offline
-(re-foundings, rekeys, bans, metadata, recent messages) into local state. `bot.sync_communities()`
-and `bot.sync_dms(since_days)` (NIP-77 negentropy) are also exposed for manual catch-up.
+**Outage resilience** — `on_message`/`listen` catch up on connect, then a **relay health monitor**
+takes over: it force-reconnects dead/zombie relays and, on each reconnect, folds back anything
+missed while offline (re-foundings, rekeys, bans, metadata, recent messages) into local state. It's
+event-driven (no idle polling) — work happens only when a relay actually (re)connects.
+`bot.sync_communities()` and `bot.sync_dms(since_days)` (NIP-77 negentropy) are also exposed for
+manual catch-up.
 
 **Profiles** — `bot.fetch_profile(npub)`, `bot.update_profile(...)`,
 `bot.set_status(...)`, `bot.block/unblock(...)`, `bot.set_nickname(...)`,
