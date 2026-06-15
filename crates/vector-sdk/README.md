@@ -209,10 +209,17 @@ one process.)
 
 ## Accounts & keys
 
-- `.nsec("nsec1...")` — an existing secret key.
+- **No key at all** — `build()` creates a persistent identity on first run (stored
+  as `identity.nsec` in the data dir) and reuses it every run after. Ideal for a
+  first bot; the npub is printed once on creation. Running several keyless bots?
+  Give each its own `.data_dir(...)` so they get distinct identities.
+- `.nsec("nsec1...")` — an existing secret key (always wins over the stored one).
 - `.mnemonic("...")` — a BIP-39 seed phrase (NIP-06 derivation).
 - `.password("pin")` — required only for accounts encrypted at rest.
-- `VectorBot::generate_nsec()` — mint a fresh identity.
+- `VectorBot::generate_nsec()` — mint a fresh identity yourself.
+
+The bot never mints a *fresh* key per run — a keyless bot's identity is stable
+across restarts, so it keeps its DMs and community memberships.
 
 Storage (the SQLite DB and per-account data) defaults to a per-OS application
 directory; override it with `.data_dir(path)`.

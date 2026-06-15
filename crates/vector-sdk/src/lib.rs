@@ -140,6 +140,25 @@
 //! replay missed *messages* to your handler, so query a gap with
 //! [`bot.core().get_messages(...)`](VectorCore).
 //!
+//! ## Identity: bring your own, or let the bot make one
+//!
+//! Supply a key with [`nsec`](VectorBotBuilder::nsec) / [`mnemonic`](VectorBotBuilder::mnemonic) —
+//! or supply nothing, and [`build`](VectorBotBuilder::build) **creates an identity on first run and
+//! persists it** (`identity.nsec`) in the bot's data directory, reusing the same one every run after.
+//! So a first bot needs zero setup:
+//!
+//! ```no_run
+//! # use vector_sdk::VectorBot;
+//! # async fn run() -> vector_sdk::Result<()> {
+//! let bot = VectorBot::builder().build().await?; // first run mints + stores an nsec; reused after
+//! println!("online as {}", bot.npub());
+//! # Ok(()) }
+//! ```
+//!
+//! It never mints a *fresh* key per run — the identity is stable, so the bot keeps its DMs and
+//! community memberships across restarts. Running several keyless bots? Give each its own
+//! [`data_dir`](VectorBotBuilder::data_dir) so they get distinct identities.
+//!
 //! ## Single identity per process
 //!
 //! `vector_core` is built on process-global state, so **one [`VectorBot`] owns
@@ -467,9 +486,11 @@ impl VectorBot {
         self.core.get_profile(npub).await
     }
 
-    /// Update this bot's own profile metadata (broadcasts a kind-0 event).
+    /// Update this bot's own profile metadata (broadcasts a kind-0 event). The profile is always
+    /// tagged `bot: true` so clients can badge it as a bot — that's the whole point of the SDK. If
+    /// you're building a human client, use [`vector_core`]'s `update_profile` directly instead.
     pub async fn update_profile(&self, name: &str, avatar: &str, banner: &str, about: &str) -> bool {
-        self.core.update_profile(name, avatar, banner, about).await
+        self.core.update_bot_profile(name, avatar, banner, about).await
     }
 
     /// Set this bot's status (kind-30315).
@@ -504,6 +525,14 @@ impl VectorBot {
     /// attachments on `msg.message.attachments`.
     pub async fn download_attachment(&self, attachment: &Attachment) -> Result<Vec<u8>> {
         self.core.download_attachment(attachment).await
+    }
+
+    /// Upload a local image (avatar, banner, …) to Blossom and return its public URL. Unlike
+    /// [`send_file`](Channel::send_file)'s encrypted attachments, this is uploaded in the clear so
+    /// other clients can fetch it directly — pass the URL to [`update_profile`](Self::update_profile).
+    pub async fn upload_image(&self, path: impl AsRef<std::path::Path>) -> Result<String> {
+        let path = path.as_ref().to_string_lossy().into_owned();
+        self.core.upload_public_image(&path).await
     }
 
     /// Download a received attachment and write the decrypted bytes to `path`. Returns the path.
@@ -602,19 +631,41 @@ impl VectorBotBuilder {
         self
     }
 
-    /// Initialize core, log in, and connect to relays.
+    /// Initialize core, resolve the identity, log in, and connect to relays.
+    ///
+    /// If no key was supplied via [`nsec`](Self::nsec) / [`mnemonic`](Self::mnemonic), the bot loads
+    /// — or, on first run, **creates and persists** — an identity (`identity.nsec`) in its data
+    /// directory, so it keeps the same npub across restarts. An explicit key always takes precedence.
     pub async fn build(self) -> Result<VectorBot> {
-        let key = self.key.ok_or_else(|| {
-            VectorError::Other("VectorBot requires a key — call .nsec(...) or .mnemonic(...)".into())
-        })?;
         let data_dir = self.data_dir.unwrap_or_else(default_data_dir);
         std::fs::create_dir_all(&data_dir).ok();
 
         let core = VectorCore::init(CoreConfig {
-            data_dir,
+            data_dir: data_dir.clone(),
             event_emitter: self.event_emitter,
         })?;
+
+        // An explicit key wins; otherwise load — or, on first run, create — a persistent identity.
+        let (key, fresh_identity) = match self.key {
+            Some(key) => (key, None),
+            None => {
+                let (nsec, path, created) = load_or_create_identity(core, &data_dir)?;
+                (nsec, created.then_some(path))
+            }
+        };
+
         let result = core.login(&key, self.password.as_deref()).await?;
+
+        // One-time provisioning notice — the only thing the SDK writes to stderr.
+        if let Some(path) = fresh_identity {
+            eprintln!(
+                "[vector-sdk] Created a new bot identity {} (stored at {}). \
+                 Back it up — that file is the bot.",
+                result.npub,
+                path.display()
+            );
+        }
+
         Ok(VectorBot {
             core,
             npub: result.npub,
@@ -1153,6 +1204,31 @@ fn channel_kind_for(id: &str) -> ChannelKind {
         ChannelKind::Community
     }
 }
+
+/// Load the bot's persistent identity from `<data_dir>/identity.nsec`, creating and storing a fresh
+/// one on first run. Returns `(nsec, path, created)` where `created` is true only on first run.
+fn load_or_create_identity(core: VectorCore, data_dir: &std::path::Path) -> Result<(String, PathBuf, bool)> {
+    let path = data_dir.join("identity.nsec");
+    if let Ok(contents) = std::fs::read_to_string(&path) {
+        let nsec = contents.trim();
+        if !nsec.is_empty() {
+            return Ok((nsec.to_string(), path, false));
+        }
+    }
+    let nsec = core.generate_nsec()?;
+    std::fs::write(&path, &nsec).map_err(VectorError::Io)?;
+    restrict_to_owner(&path);
+    Ok((nsec, path, true))
+}
+
+/// Best-effort tighten of the identity file to owner-only read/write (no-op off unix).
+#[cfg(unix)]
+fn restrict_to_owner(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+}
+#[cfg(not(unix))]
+fn restrict_to_owner(_path: &std::path::Path) {}
 
 /// A per-OS default data directory for a bot's storage.
 fn default_data_dir() -> PathBuf {
