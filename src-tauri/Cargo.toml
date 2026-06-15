@@ -71,7 +71,7 @@ hound = "3.5.1"
 symphonia = { version = "0.5.5", features = ["mp3", "wav", "flac", "pcm", "aac", "isomp4", "ogg", "vorbis"] }
 rustfft = "6.2"
 lofty = "0.24"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
 rayon = "1.11.0"
 
 # Transitive Dependencies (re-used from frameworks we already utilise, like Tauri)
