@@ -135,6 +135,112 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
             }));
         }
     }
+
+    // --- Community realtime (vector-core's `community::realtime::dispatch_event` already
+    // ingested + persisted message-path events; these hooks own UI + notifications + the
+    // richer presence/teardown side-effects the GUI needs). ---
+
+    fn on_community_message(&self, chat_id: &str, msg: &Message, _is_new: bool) {
+        vector_core::emit_event("message_new", &serde_json::json!({ "message": msg, "chat_id": chat_id }));
+        let chat_id = chat_id.to_string();
+        let msg = msg.clone();
+        tokio::spawn(async move {
+            crate::services::subscription_handler::show_community_notification(&chat_id, &msg).await;
+            if let Some(handle) = TAURI_APP.get() {
+                let _ = commands::messaging::update_unread_counter(handle.clone()).await;
+            }
+        });
+    }
+
+    fn on_community_update(&self, chat_id: &str, target_id: &str, msg: &Message) {
+        vector_core::emit_event("message_update", &serde_json::json!({
+            "old_id": target_id, "message": msg, "chat_id": chat_id,
+        }));
+    }
+
+    fn on_community_removed(&self, chat_id: &str, target_id: &str) {
+        vector_core::emit_event("message_removed", &serde_json::json!({
+            "id": target_id, "chat_id": chat_id, "reason": "deleted",
+        }));
+    }
+
+    fn on_community_presence(
+        &self,
+        chat_id: &str,
+        npub: &str,
+        joined: bool,
+        event_id: &str,
+        created_at: u64,
+        invited_by: Option<&str>,
+        invited_label: Option<&str>,
+    ) {
+        let session = vector_core::state::SessionGuard::capture();
+        let (chat_id, npub, event_id) = (chat_id.to_string(), npub.to_string(), event_id.to_string());
+        let invited_by = invited_by.map(str::to_string);
+        let invited_label = invited_label.map(str::to_string);
+        tokio::spawn(async move {
+            if !session.is_valid() { return; }
+            crate::commands::community::apply_community_presence(
+                &chat_id, &npub, joined, &event_id, created_at,
+                invited_by.as_deref(), invited_label.as_deref(),
+            ).await;
+        });
+    }
+
+    fn on_community_typing(&self, chat_id: &str, npub: &str, until: u64) {
+        let (chat_id, npub) = (chat_id.to_string(), npub.to_string());
+        tokio::spawn(async move {
+            let typers = {
+                let mut state = crate::STATE.lock().await;
+                state.update_typing_and_get_active(&chat_id, &npub, until)
+            };
+            vector_core::emit_event("typing-update", &serde_json::json!({
+                "conversation_id": chat_id, "typers": typers,
+            }));
+        });
+    }
+
+    fn on_community_webxdc(
+        &self,
+        chat_id: &str,
+        npub: &str,
+        topic_id: &str,
+        node_addr: Option<&str>,
+        event_id: &str,
+        created_at: u64,
+    ) {
+        let (chat_id, npub, topic_id, event_id) =
+            (chat_id.to_string(), npub.to_string(), topic_id.to_string(), event_id.to_string());
+        let node_addr = node_addr.map(str::to_string);
+        tokio::spawn(async move {
+            match node_addr {
+                Some(addr) => handle_webxdc_peer_advertisement(&event_id, &topic_id, &addr, &npub, created_at, &chat_id).await,
+                None => handle_webxdc_peer_left(&event_id, &topic_id, &npub, created_at, &chat_id).await,
+            }
+        });
+    }
+
+    fn on_community_self_removed(&self, community_id: &str) {
+        let session = vector_core::state::SessionGuard::capture();
+        let community_id = community_id.to_string();
+        tokio::spawn(async move {
+            if !session.is_valid() { return; }
+            crate::commands::community::self_remove_from_community(&community_id, false).await;
+        });
+    }
+
+    fn on_community_refreshed(&self, community_id: &str) {
+        let session = vector_core::state::SessionGuard::capture();
+        let community_id = community_id.to_string();
+        tokio::spawn(async move {
+            if !session.is_valid() { return; }
+            let id = vector_core::community::CommunityId(vector_core::simd::hex::hex_to_bytes_32(&community_id));
+            if let Ok(Some(c)) = vector_core::db::community::load_community(&id) {
+                crate::commands::community::sync_community_chats(&c).await;
+            }
+            vector_core::emit_event("community_refreshed", &serde_json::json!({ "community_id": community_id }));
+        });
+    }
 }
 
 /// Extract display info for a DM text notification.

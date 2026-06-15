@@ -649,14 +649,10 @@ pub async fn reset_session() {
     // account B's outbound messages. The frontend re-registers B's theme only if it has one.
     vector_core::emoji_packs::set_theme_emoji_tags(Vec::new());
 
-    // Community subscription pointer + routing table — the latter holds channel
-    // SECRET keys, so it MUST be cleared on swap or account A's keys leak into B's
-    // session. The new account rebuilds both via refresh_community_subscription().
-    { *crate::services::subscription_handler::COMMUNITY_SUB_ID.lock().await = None; }
-    { crate::services::subscription_handler::COMMUNITY_ROUTES.lock().await.clear(); }
-    // Control-plane routing table (#z pseudonym -> community id) is keyed off account-specific
-    // pseudonyms; carrying it across swap misroutes account A's control editions into B's session.
-    { crate::services::subscription_handler::CONTROL_ROUTES.lock().await.clear(); }
+    // Community subscription pointer + routing tables hold channel SECRET keys + account-specific
+    // pseudonyms, so they MUST be cleared on swap or account A's keys/routes leak into B's session.
+    // The state now lives in vector-core; the new account rebuilds it via refresh_community_subscription().
+    vector_core::community::realtime::clear().await;
     // Community per-channel sync state (account-scoped) — drop so account B doesn't inherit
     // A's history-start flags, paging cursors, or any stale in-flight claims. (Access-time
     // generation checks self-reset too; this is the explicit teardown.)

@@ -20,7 +20,7 @@ use vector_core::sending::{send_rumor_dm, NoOpSendCallback, SendCallback, SendCo
 /// (name/description/owner/icon-flag), so they load uniformly with DMs at startup (no
 /// separate hydrate). Called whenever the Community is created, joined, or its metadata
 /// changes.
-async fn sync_community_chats(community: &vector_core::community::Community) {
+pub(crate) async fn sync_community_chats(community: &vector_core::community::Community) {
     use nostr_sdk::ToBech32;
     let session = vector_core::state::SessionGuard::capture();
     let is_owner = vector_core::community::service::is_proven_owner(community);
@@ -502,133 +502,8 @@ pub(crate) async fn check_self_banned(community_id: &str) -> bool {
     }
 }
 
-/// Realtime channel-follow retry budget: a re-founding publishes the channel rekey under the NEW root
-/// right after the base rekey, so the base-3303-triggered follow can fetch the channel rekey before it has
-/// propagated to our relays. Retry a few times with a short backoff (each retry is sub-second on a hit) so
-/// the channel converges in ~realtime instead of stranding until the next sync.
-const CHANNEL_FOLLOW_MAX_ATTEMPTS: u32 = 5;
-const CHANNEL_FOLLOW_BACKOFF_MS: u64 = 700;
-
-/// Realtime control-plane refresh: a kind-3308 edition (banlist / roles / metadata / invite-links) just
-/// arrived for this community, so FOLLOW any re-founding it implies (base + channel rekeys) and re-fold the
-/// whole plane, self-removing if WE were just banned. Mirrors `sync_community_channel_inner` so an online
-/// member experiences a control change — including a privatize/private-ban re-founding — LIVE rather than
-/// only on the next sync; a `community_refreshed` event tells the UI to re-render. Best-effort, SessionGuard
-/// across the fetches. Runs SPAWNED off the notification loop, so it may rebuild the subscription when the
-/// follow advances an epoch (resubscribe at the new pseudonyms) without re-entering that loop.
-/// Per-community in-flight guard for `refresh_community_control` — one 3308 can be delivered by the
-/// realtime route, the straggler sink, AND a reconnect resync at once; without this they'd run
-/// duplicate concurrent full control catch-ups racing on the same community row.
-static REFRESH_CONTROL_INFLIGHT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
-
-pub(crate) async fn refresh_community_control(community_id: &str) {
-    // Claim the in-flight slot or bail (a concurrent refresh is already folding this community).
-    {
-        let mut inflight = REFRESH_CONTROL_INFLIGHT.lock().unwrap_or_else(|e| e.into_inner());
-        if !inflight.insert(community_id.to_string()) {
-            return;
-        }
-    }
-    // RAII release — panic-safe, so a fold panic can't permanently wedge this community's refreshes.
-    struct RefreshClaim(String);
-    impl Drop for RefreshClaim {
-        fn drop(&mut self) {
-            REFRESH_CONTROL_INFLIGHT
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&self.0);
-        }
-    }
-    let _claim = RefreshClaim(community_id.to_string());
-
-    let session = vector_core::state::SessionGuard::capture();
-    let Ok(id_bytes) = hex_to_id32(community_id) else { return; };
-    let Some(community) = vector_core::db::community::load_community(&CommunityId(id_bytes)).ok().flatten() else { return; };
-    // Longer than the 12s op-norm: this single REQ must fold the WHOLE control plane, and boot/refresh is
-    // REQ-heavy (relays contended + ratelimited), so a short cap returns it partial → grants/metadata drop
-    // and authority/convergence silently fail closed.
-    let bt = LiveTransport::with_timeout(Duration::from_secs(20));
-    // Epochs the live subscription is currently pinned to — if the follow below advances either, the sub
-    // must be rebuilt (resubscribe at the new pseudonyms) or realtime delivery stays dead at the old epoch.
-    let pre_server_epoch = community.server_root_epoch.0;
-    let pre_channel_epochs: Vec<(String, u64)> =
-        community.channels.iter().map(|c| (c.id.to_hex(), c.epoch.0)).collect();
-    // FOLLOW FIRST (mirrors sync_community_channel_inner): a privatize / private-ban re-founds the base
-    // under a NEW epoch + re-anchors the control plane there, so walk the rotation BEFORE folding control —
-    // else we'd read the stale-epoch coordinate and never advance. This is what makes a re-founding follow
-    // in REALTIME (on receipt of the triggering 3308), not only on the next sync. An AUTHORIZED rotation
-    // that excluded us is a removal → tear down locally (the catch-all for a cut member who can no longer
-    // decrypt the new control plane to see the banlist).
-    if let Ok(c) = vector_core::community::service::catch_up_server_root(&bt, &community).await {
-        // Re-check BEFORE the destructive teardown: catch_up straddled network I/O, and a mid-flight
-        // account swap must not let this tear down the new account's state.
-        if !session.is_valid() { return; }
-        if c.removed { self_remove_from_community(community_id, false).await; return; }
-    }
-    if !session.is_valid() { return; }
-    let community = vector_core::db::community::load_community(&CommunityId(id_bytes)).ok().flatten().unwrap_or(community);
-    // ONE REQ for the whole control plane (banlist + roles + invite-links + metadata), applied banlist-first.
-    let _ = vector_core::community::service::fetch_and_apply_control(&bt, &community).await;
-    if !session.is_valid() { return; }
-    if check_self_banned(community_id).await { return; } // we were banned → torn down, nothing more to do
-    if !session.is_valid() { return; }
-    // Walk each channel's rekey chain so we hold the current channel keys. INVARIANT: a re-founding rotates
-    // the base AND every channel ONCE per base rotation, so each channel must advance by the same delta the
-    // base just did. The channel rekey is published under the NEW root right after the base rekey, so a
-    // single fetch can RACE its propagation (and there's no channel-rekey-coordinate subscription to re-fire
-    // it). Retry with a short backoff until every channel reaches the expected epoch, or the budget is spent
-    // (the next sync is the backstop). No-op fast path when the base didn't advance (base_delta == 0).
-    let base_delta = vector_core::db::community::load_community(&CommunityId(id_bytes)).ok().flatten()
-        .map(|c| c.server_root_epoch.0).unwrap_or(pre_server_epoch).saturating_sub(pre_server_epoch);
-    for attempt in 0..CHANNEL_FOLLOW_MAX_ATTEMPTS {
-        if !session.is_valid() { return; }
-        let Some(cur) = vector_core::db::community::load_community(&CommunityId(id_bytes)).ok().flatten() else { break; };
-        for ch in &cur.channels {
-            let _ = vector_core::community::service::catch_up_channel_rekeys(&bt, &cur, &ch.id).await;
-        }
-        let caught = base_delta == 0 || vector_core::db::community::load_community(&CommunityId(id_bytes)).ok().flatten()
-            .map(|c| c.channels.iter().all(|ch| {
-                let pre = pre_channel_epochs.iter().find(|(id, _)| id == &ch.id.to_hex()).map(|(_, e)| *e).unwrap_or(ch.epoch.0);
-                ch.epoch.0 >= pre.saturating_add(base_delta)
-            }))
-            .unwrap_or(true);
-        if caught { break; }
-        if attempt + 1 < CHANNEL_FOLLOW_MAX_ATTEMPTS {
-            tokio::time::sleep(Duration::from_millis(CHANNEL_FOLLOW_BACKOFF_MS)).await;
-        }
-    }
-    if !session.is_valid() { return; }
-    // Resume any outstanding read-cut re-seal (a private ban whose rotation failed transiently). No-op if none.
-    let community = vector_core::db::community::load_community(&CommunityId(id_bytes)).ok().flatten().unwrap_or(community);
-    let _ = vector_core::community::service::retry_pending_read_cut(&bt, &community).await;
-    if !session.is_valid() { return; }
-    let community = vector_core::db::community::load_community(&CommunityId(id_bytes)).ok().flatten().unwrap_or(community);
-    // Push the freshened display metadata (name/desc/icon/owner) into STATE + the chat rows, then tell
-    // the frontend to re-read so the change shows live (member list, roster crown, name, mode).
-    sync_community_chats(&community).await;
-    // If the follow advanced the base or any channel epoch, rebuild the FULL subscription so realtime
-    // delivery resumes at the new pseudonyms (safe here — we're a spawned task, not in the notification
-    // loop). Otherwise just refresh the route maps so the inbound drop-filter sees the new banlist (a
-    // received ban starts dropping that author live, a received unban stops dropping them).
-    let advanced = community.server_root_epoch.0 != pre_server_epoch
-        || community.channels.iter().any(|c| {
-            pre_channel_epochs.iter().find(|(id, _)| id == &c.id.to_hex()).map(|(_, e)| *e != c.epoch.0).unwrap_or(true)
-        });
-    if advanced && session.is_valid() {
-        crate::services::subscription_handler::refresh_community_subscription().await;
-    } else {
-        crate::services::subscription_handler::rebuild_community_routes().await;
-    }
-    // Re-check after the subscription/route await before writing the cross-device list mirror — a
-    // mid-flight account swap must not persist this account's snapshot into the new account's settings.
-    if !session.is_valid() { return; }
-    // a base advance is a re-founding we followed in REALTIME — point the cross-device list's
-    // current snapshot (root + channel keys + name) so another device jumps straight to the latest epoch
-    // (debounced; no-op if unchanged). Mirrors `sync_community_channel_inner` (the explicit-sync follow path).
-    vector_core::community::list::refresh_membership_current(&community);
-    vector_core::emit_event("community_refreshed", &serde_json::json!({ "community_id": community_id }));
-}
+// Realtime control-plane follow (re-founding + control re-fold + self-removal) now lives in
+// `vector_core::community::realtime::refresh_control`, spawned by the core inbound dispatcher.
 
 // ============================================================================
 // Create + send (the core lifecycle)
