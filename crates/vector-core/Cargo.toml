@@ -7,6 +7,7 @@ license = "MIT"
 repository = "https://github.com/VectorPrivacy/Vector"
 homepage = "https://vectorapp.io"
 documentation = "https://docs.rs/vector-core"
+readme = "README.md"
 keywords = ["nostr", "messaging", "encryption", "vector"]
 categories = ["network-programming", "cryptography", "asynchronous"]
 
