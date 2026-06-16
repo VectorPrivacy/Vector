@@ -19,6 +19,12 @@
 let miniProfileEl = null;
 let miniProfileBackdrop = null;
 let miniProfileNpub = null;
+let miniProfileAnonTimer = null;
+
+// A found profile repaints instantly via the profile_update event, so this
+// only fires for identities relays have nothing for — long enough that a slow
+// (e.g. Tor) fetch of a real profile usually lands first.
+const MINI_PROFILE_ANON_FALLBACK_MS = 6000;
 
 /**
  * Open the mini profile for a given npub, anchored to the element the user
@@ -90,6 +96,18 @@ function showMiniProfile(npub, anchorEl) {
             forceRefresh: false,
         }).catch(() => { /* non-critical */ });
     }
+
+    // With no cached profile we show "Loading…"; the backend stays silent when
+    // relays have no metadata, so without this we'd hang forever. After a grace
+    // period, treat an unresolved identity as anonymous.
+    if (!profile) {
+        miniProfileAnonTimer = setTimeout(() => {
+            miniProfileAnonTimer = null;
+            if (miniProfileEl === popup && miniProfileNpub === npub && !getProfile(npub)) {
+                _populateMiniProfile(popup, npub, null, { fetchSettled: true });
+            }
+        }, MINI_PROFILE_ANON_FALLBACK_MS);
+    }
 }
 
 /**
@@ -105,6 +123,7 @@ function _miniProfileOpenFull(npub) {
 }
 
 function hideMiniProfile() {
+    if (miniProfileAnonTimer) { clearTimeout(miniProfileAnonTimer); miniProfileAnonTimer = null; }
     if (miniProfileEl) { miniProfileEl.remove(); miniProfileEl = null; }
     if (miniProfileBackdrop) { miniProfileBackdrop.remove(); miniProfileBackdrop = null; }
     miniProfileNpub = null;
@@ -118,6 +137,8 @@ function refreshMiniProfileIfMatches(npub) {
     if (!miniProfileEl || miniProfileNpub !== npub) return;
     const profile = (typeof getProfile === 'function') ? getProfile(npub) : null;
     if (!profile) return;
+    // Real data arrived — the "Anon" fallback is moot.
+    if (miniProfileAnonTimer) { clearTimeout(miniProfileAnonTimer); miniProfileAnonTimer = null; }
     _populateMiniProfile(miniProfileEl, npub, profile);
 }
 window.refreshMiniProfileIfMatches = refreshMiniProfileIfMatches;
@@ -127,7 +148,7 @@ window.refreshMiniProfileIfMatches = refreshMiniProfileIfMatches;
  * cleared first so this is safe to call multiple times against the same node
  * as data arrives.
  */
-function _populateMiniProfile(popup, npub, profile) {
+function _populateMiniProfile(popup, npub, profile, opts) {
     popup.innerHTML = '';
 
     // Banner strip
@@ -197,9 +218,10 @@ function _populateMiniProfile(popup, npub, profile) {
     if (displayName) {
         name.textContent = displayName;
         twemojify(name);
-    } else if (profile) {
-        // Profile is loaded but the user hasn't set a name. Nostr identities
-        // are valid without metadata, so call them what they are: anonymous.
+    } else if (profile || (opts && opts.fetchSettled)) {
+        // Either the profile loaded with no name set, or the fetch settled with
+        // nothing on relays. Nostr identities are valid without metadata, so
+        // call them what they are: anonymous.
         name.textContent = 'Anon';
     } else {
         // Profile not yet fetched — keep the placeholder so the user knows
@@ -313,6 +335,16 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && miniProfileEl) hideMiniProfile();
 });
 
+// Only a *user* scroll gesture should dismiss — a new message auto-scrolls the
+// chat programmatically, which must not yank the popup closed. wheel/touch set
+// a short intent window; a scroll within it is the user's, anything else (the
+// auto-scroll) is ignored.
+let _miniProfileScrollIntentUntil = 0;
+const _markMiniProfileScrollIntent = () => { _miniProfileScrollIntentUntil = Date.now() + 200; };
+document.addEventListener('wheel', _markMiniProfileScrollIntent, { capture: true, passive: true });
+document.addEventListener('touchmove', _markMiniProfileScrollIntent, { capture: true, passive: true });
+
 document.addEventListener('scroll', (e) => {
-    if (miniProfileEl && !miniProfileEl.contains(e.target)) hideMiniProfile();
+    if (!miniProfileEl || miniProfileEl.contains(e.target)) return;
+    if (Date.now() < _miniProfileScrollIntentUntil) hideMiniProfile();
 }, true);
