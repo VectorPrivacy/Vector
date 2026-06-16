@@ -45,18 +45,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ahash"
-version = "0.8.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
-dependencies = [
- "cfg-if",
- "once_cell",
- "version_check",
- "zerocopy",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -232,7 +220,8 @@ checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 [[package]]
 name = "arti-client"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e15d2051582670d5c003deda168da03f0d3475f6375bca57d6b9852a9d32eed"
 dependencies = [
  "async-trait",
  "cfg-if",
@@ -968,7 +957,8 @@ dependencies = [
 [[package]]
 name = "caret"
 version = "0.9.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "beae2cb9f60bc3f21effaaf9c64e51f6627edd54eedc9199ba07f519ef2a2101"
 
 [[package]]
 name = "cargo-platform"
@@ -2616,8 +2606,9 @@ dependencies = [
 
 [[package]]
 name = "fs-mistrust"
-version = "0.14.1"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9cfebc7c6bb65d327ded064db65cd260b6c418c27ae790318650cfa2a81bf33f"
 dependencies = [
  "derive_builder_fork_arti",
  "dirs",
@@ -2625,6 +2616,7 @@ dependencies = [
  "pwd-grp",
  "serde",
  "thiserror 2.0.18",
+ "void",
  "walkdir",
 ]
 
@@ -3256,9 +3248,6 @@ name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
-dependencies = [
- "ahash",
-]
 
 [[package]]
 name = "hashbrown"
@@ -3288,11 +3277,11 @@ checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
 
 [[package]]
 name = "hashlink"
-version = "0.9.1"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ba4ff7128dee98c7dc9794b6a411377e1404dba1c97deb8d1a55297bd25d8af"
+checksum = "7382cf6263419f2d8df38c55d7da83da5c18aef87fc7a7fc1fb1e344edfe14c1"
 dependencies = [
- "hashbrown 0.14.5",
+ "hashbrown 0.15.5",
 ]
 
 [[package]]
@@ -4502,9 +4491,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.30.1"
+version = "0.35.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e99fb7a497b1e3339bc746195567ed8d3e24945ecd636e3619d20b9de9e9149"
+checksum = "133c182a6a2c87864fe97778797e46c7e999672690dc9fa3ee8e241aa4a9c13f"
 dependencies = [
  "cc",
  "pkg-config",
@@ -5167,12 +5156,13 @@ dependencies = [
 
 [[package]]
 name = "nostr-connect"
-version = "0.44.0"
-source = "git+https://github.com/VectorPrivacy/nostr.git?branch=zeroize-secretkey#0f9f3a7ac42a0ac699b48458e87b4130c00cb54e"
+version = "0.44.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0055317f298380628e79c4663ea00bfab67d3cf4f00aefde5fc2b4f35f47d629"
 dependencies = [
  "async-utility",
  "nostr",
- "nostr-relay-pool 0.44.0 (git+https://github.com/VectorPrivacy/nostr.git?branch=zeroize-secretkey)",
+ "nostr-relay-pool",
  "tokio",
  "tracing",
 ]
@@ -5182,16 +5172,6 @@ name = "nostr-database"
 version = "0.44.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7462c9d8ae5ef6a28d66a192d399ad2530f1f2130b13186296dbb11bdef5b3d1"
-dependencies = [
- "lru",
- "nostr",
- "tokio",
-]
-
-[[package]]
-name = "nostr-database"
-version = "0.44.0"
-source = "git+https://github.com/VectorPrivacy/nostr.git?branch=zeroize-secretkey#0f9f3a7ac42a0ac699b48458e87b4130c00cb54e"
 dependencies = [
  "lru",
  "nostr",
@@ -5220,24 +5200,7 @@ dependencies = [
  "lru",
  "negentropy",
  "nostr",
- "nostr-database 0.44.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "nostr-relay-pool"
-version = "0.44.0"
-source = "git+https://github.com/VectorPrivacy/nostr.git?branch=zeroize-secretkey#0f9f3a7ac42a0ac699b48458e87b4130c00cb54e"
-dependencies = [
- "async-utility",
- "async-wsocket",
- "atomic-destructor",
- "hex",
- "lru",
- "negentropy",
- "nostr",
- "nostr-database 0.44.0 (git+https://github.com/VectorPrivacy/nostr.git?branch=zeroize-secretkey)",
+ "nostr-database",
  "tokio",
  "tracing",
 ]
@@ -5250,9 +5213,9 @@ checksum = "471732576710e779b64f04c55e3f8b5292f865fea228436daf19694f0bf70393"
 dependencies = [
  "async-utility",
  "nostr",
- "nostr-database 0.44.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nostr-database",
  "nostr-gossip",
- "nostr-relay-pool 0.44.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nostr-relay-pool",
  "tokio",
  "tracing",
 ]
@@ -5906,7 +5869,8 @@ dependencies = [
 [[package]]
 name = "oneshot-fused-workaround"
 version = "0.6.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e17b52d0e4a06a4c7eb8d2943c0015fa628cf4ccc409429cebc0f5bed6d33a82"
 dependencies = [
  "futures",
 ]
@@ -7239,7 +7203,8 @@ checksum = "1e061d1b48cb8d38042de4ae0a7a6401009d6143dc80d2e2d6f31f0bdd6470c7"
 [[package]]
 name = "retry-error"
 version = "0.12.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf6aa271ee564cc5d1df57c5cf7c6ac7a21a4f9f40d2bf1d32bf0a1bb3ddaeb0"
 dependencies = [
  "humantime",
  "web-time",
@@ -7325,9 +7290,9 @@ dependencies = [
 
 [[package]]
 name = "rusqlite"
-version = "0.32.1"
+version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7753b721174eb8ff87a9a0e799e2d7bc3749323e773db92e0984debb00019d6e"
+checksum = "165ca6e57b20e1351573e3729b958bc62f0e48025386970b6e4d29e7a7e71f3f"
 dependencies = [
  "bitflags 2.11.1",
  "fallible-iterator",
@@ -7501,8 +7466,9 @@ checksum = "28d3b2b1366ec20994f1fd18c3c594f05c5dd4bc44d8bb0c1c632c8d6829481f"
 
 [[package]]
 name = "safelog"
-version = "0.8.1"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97a907e0d82c61b1b06a2030c968eb313dcf432686b77801a26bc4b206f96573"
 dependencies = [
  "derive_more 2.1.1",
  "educe",
@@ -8066,7 +8032,8 @@ dependencies = [
 [[package]]
 name = "slotmap-careful"
 version = "0.7.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed92816c1fbb29891a525b92d5fa95757c9dee47044f76c8e06ceb1e052a8d64"
 dependencies = [
  "paste",
  "serde",
@@ -9588,7 +9555,8 @@ checksum = "756daf9b1013ebe47a8776667b466417e2d4c5679d441c26230efd9ef78692db"
 [[package]]
 name = "tor-async-utils"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4680d5ecdb052e950b31cd7c7852aa025968f648046e55251446d7d0e58138e"
 dependencies = [
  "derive-deftly",
  "educe",
@@ -9603,7 +9571,8 @@ dependencies = [
 [[package]]
 name = "tor-basic-utils"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a2351dee62e4edabb624a7e7ba85f6f2b73073ec4590e76c9b6f90fc30b91e9"
 dependencies = [
  "derive_more 2.1.1",
  "getrandom 0.3.2",
@@ -9624,7 +9593,8 @@ dependencies = [
 [[package]]
 name = "tor-bytes"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e86f91871fcd2e2fb16fcf55b7821b050b11d05d42b7e98104b662417bafda92"
 dependencies = [
  "bytes",
  "derive-deftly",
@@ -9641,7 +9611,8 @@ dependencies = [
 [[package]]
 name = "tor-cell"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ee932b1f0890a0ac689f6fdeec0fe4cc9e11bc1a18b2a09c2fb7adbd0761df4"
 dependencies = [
  "amplify",
  "bitflags 2.11.1",
@@ -9670,7 +9641,8 @@ dependencies = [
 [[package]]
 name = "tor-cert"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f774e4097af30e759ddcfcdd50e594183b62c2e70e3dd55f4b61e254d527505"
 dependencies = [
  "caret",
  "derive_builder_fork_arti",
@@ -9687,7 +9659,8 @@ dependencies = [
 [[package]]
 name = "tor-chanmgr"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31db74e069430a70f290820d7f60e2cd96364dcb4b8bbd92aee9bf94b9a2dfca"
 dependencies = [
  "async-trait",
  "base64ct",
@@ -9729,7 +9702,8 @@ dependencies = [
 [[package]]
 name = "tor-checkable"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d65310bcfd125f65e4ac8ee290b352d20a80909ef7226741f57e9a049391d3d7"
 dependencies = [
  "humantime",
  "signature 2.2.0",
@@ -9741,7 +9715,8 @@ dependencies = [
 [[package]]
 name = "tor-circmgr"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1310bb4288894f3bae03d0201ee397bed95fd08b24b18b5303a0bdbee012fba"
 dependencies = [
  "amplify",
  "async-trait",
@@ -9790,7 +9765,8 @@ dependencies = [
 [[package]]
 name = "tor-config"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24a1148697cfeeb8c35a3bd2ee3eb98a3510610635fca63e46bca33dfb3f450e"
 dependencies = [
  "amplify",
  "cfg-if",
@@ -9823,7 +9799,8 @@ dependencies = [
 [[package]]
 name = "tor-config-path"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a3cc17b20f63fa231e3811005c3c39dd55b4c3bc44c73565be2a632cc53a442"
 dependencies = [
  "directories",
  "serde",
@@ -9836,7 +9813,8 @@ dependencies = [
 [[package]]
 name = "tor-consdiff"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77b5da8bcea62b5f6695f9271f8367d6d00977a6bffd2da9a0795c29cb839790"
 dependencies = [
  "derive_more 2.1.1",
  "digest 0.10.7",
@@ -9852,7 +9830,8 @@ dependencies = [
 [[package]]
 name = "tor-dirclient"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "139aec98a8579613a08b1283ca9da4ceda110e0627798bff22b1b692a7a03bf0"
 dependencies = [
  "async-compression",
  "base64ct",
@@ -9879,7 +9858,8 @@ dependencies = [
 [[package]]
 name = "tor-dircommon"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c0e029a636b59ac25e4c2e261e306775dac5200c1632f99696cfc2c236b3b5d"
 dependencies = [
  "base64ct",
  "derive-deftly",
@@ -9899,7 +9879,8 @@ dependencies = [
 [[package]]
 name = "tor-dirmgr"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a659fc3d3aa9f1c11d940cd5fcc37a641a8db3595ec2b8df6dc4595e7d71ef08"
 dependencies = [
  "async-trait",
  "base64ct",
@@ -9955,7 +9936,8 @@ dependencies = [
 [[package]]
 name = "tor-error"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f8163b225e07e00be618cbebdbbc8ff003795121971cdf54297e820cc177569"
 dependencies = [
  "derive_more 2.1.1",
  "futures",
@@ -9972,7 +9954,8 @@ dependencies = [
 [[package]]
 name = "tor-general-addr"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b53d8066194461d13603437331c24c7a722d3d4e375ed1552c434b3240880f17"
 dependencies = [
  "derive_more 2.1.1",
  "thiserror 2.0.18",
@@ -9982,7 +9965,8 @@ dependencies = [
 [[package]]
 name = "tor-guardmgr"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "119df8b27549a1db143713b9afde6d0d5ef1736b9fd03264715bce9d83616d10"
 dependencies = [
  "amplify",
  "base64ct",
@@ -10026,7 +10010,8 @@ dependencies = [
 [[package]]
 name = "tor-hscrypto"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38f7f57feca263556c41c5d86129b6bd4b1f41dbfc566d070b112bd0bb1b6a21"
 dependencies = [
  "data-encoding",
  "derive-deftly",
@@ -10055,7 +10040,8 @@ dependencies = [
 [[package]]
 name = "tor-key-forge"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cea1159867a98160a0629529fdb3615479d3f963b5ab92914dbcc6f0b68bf5c"
 dependencies = [
  "derive-deftly",
  "derive_more 2.1.1",
@@ -10076,7 +10062,8 @@ dependencies = [
 [[package]]
 name = "tor-keymgr"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98e14dbf1a37b9efb1df0650cdf5cb0d6da83589f6d42cfc4d2f7762d72594a5"
 dependencies = [
  "amplify",
  "arrayvec",
@@ -10116,7 +10103,8 @@ dependencies = [
 [[package]]
 name = "tor-linkspec"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af62be67033640f5553797541720e34c12bf9ddb8569655d6241f32e7deed88f"
 dependencies = [
  "base64ct",
  "by_address",
@@ -10142,7 +10130,8 @@ dependencies = [
 [[package]]
 name = "tor-llcrypto"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc87d3def186b8edc21ec8f3645dd28cf3b13c6259f4e335e71b7ef52c6ea3f2"
 dependencies = [
  "aes",
  "base64ct",
@@ -10183,7 +10172,8 @@ dependencies = [
 [[package]]
 name = "tor-log-ratelim"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70066c9cf52f6c273243e97bc548c9be6e1d15e1bf5962da4f0be19686c85ade"
 dependencies = [
  "futures",
  "humantime",
@@ -10198,7 +10188,8 @@ dependencies = [
 [[package]]
 name = "tor-memquota"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aeeba11704612b6fb277d708d0ff9b471266084d86a6e557f858cdadaa61ca49"
 dependencies = [
  "cfg-if",
  "derive-deftly",
@@ -10228,7 +10219,8 @@ dependencies = [
 [[package]]
 name = "tor-memquota-cost"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0178ecdfe9a2856232aaa41805dfd75b8512a21e8e6d02a67427d00e221b192b"
 dependencies = [
  "derive-deftly",
  "itertools 0.14.0",
@@ -10239,7 +10231,8 @@ dependencies = [
 [[package]]
 name = "tor-netdir"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "570b4d45feb00f9a04b429ba1a612b956b263ca01bb7b56a38e01d1223d581b7"
 dependencies = [
  "async-trait",
  "bitflags 2.11.1",
@@ -10267,7 +10260,8 @@ dependencies = [
 [[package]]
 name = "tor-netdoc"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee1e809fc7d54cab30451fcb5f765ebb480ac8ad3e62454001ae875d36d1c27e"
 dependencies = [
  "amplify",
  "base64ct",
@@ -10310,7 +10304,8 @@ dependencies = [
 [[package]]
 name = "tor-persist"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b6d2a9f700c0cbea6dd9b6b3614c47d26fbeffcb0ffdc10caf713a465fb913b"
 dependencies = [
  "derive-deftly",
  "derive_more 2.1.1",
@@ -10337,7 +10332,8 @@ dependencies = [
 [[package]]
 name = "tor-proto"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db8556b34a5a24a8ce20cd439ad2081b6097645e165d95387ba8eb8fa17f3520"
 dependencies = [
  "amplify",
  "async-trait",
@@ -10402,7 +10398,8 @@ dependencies = [
 [[package]]
 name = "tor-protover"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3fb1b457a24d4e6f4ab1981f33a55c7c525c2edcad855cbc4bdc544430914fc1"
 dependencies = [
  "caret",
  "paste",
@@ -10415,7 +10412,8 @@ dependencies = [
 [[package]]
 name = "tor-ptmgr"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d1ee1b85d012edfc813c39da0a292c8b6e682b03e8ab8fbf4c07920c2efd67e"
 dependencies = [
  "async-trait",
  "cfg-if",
@@ -10444,7 +10442,8 @@ dependencies = [
 [[package]]
 name = "tor-relay-crypto"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7675f5d412acbdf62f8771553d3ca0cfad8afdd78f9b1f7c2befc370ce030bda"
 dependencies = [
  "derive-deftly",
  "derive_more 2.1.1",
@@ -10462,7 +10461,8 @@ dependencies = [
 [[package]]
 name = "tor-relay-selection"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3110742f2a9e071c7f6c9278cd37e0bae0995d7171516fe4efb2de675645667e"
 dependencies = [
  "rand 0.9.2",
  "serde",
@@ -10475,7 +10475,8 @@ dependencies = [
 [[package]]
 name = "tor-rtcompat"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1714889530e08014a32123bcf947d9564dda61508bc4e7ec5203dcd726985850"
 dependencies = [
  "async-trait",
  "async_executors",
@@ -10509,7 +10510,8 @@ dependencies = [
 [[package]]
 name = "tor-rtmock"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cc3bc02ab55161c3bb25b2ae64ea0e7a20b93cd3272f905dcbd8d5882d7a0be"
 dependencies = [
  "amplify",
  "assert_matches",
@@ -10538,7 +10540,8 @@ dependencies = [
 [[package]]
 name = "tor-socksproto"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36d84b4d4a8680dc865c7a7c44ea5701be049b88276b818f7cd6529af28c2115"
 dependencies = [
  "amplify",
  "caret",
@@ -10554,7 +10557,8 @@ dependencies = [
 [[package]]
 name = "tor-units"
 version = "0.41.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ae5c12f3bba5c4707f3a0a9c508320d6a4827e01e5e7ca0824ae55cbd2a737a"
 dependencies = [
  "derive-deftly",
  "derive_more 2.1.1",
@@ -10987,9 +10991,13 @@ dependencies = [
  "bip39",
  "bs58",
  "chacha20poly1305",
+ "clipboard-win",
  "cpal",
  "fast-thumbhash",
  "futures-util",
+ "gdk",
+ "glib",
+ "gtk",
  "hound",
  "http",
  "image",
@@ -11458,7 +11466,8 @@ dependencies = [
 [[package]]
 name = "web-time-compat"
 version = "0.1.0"
-source = "git+https://github.com/VectorPrivacy/arti.git?branch=vector%2Frusqlite-0.32#8ae48352bb37323c88746d370f750b1b94175972"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39819265f219f60a92312f2755262dba9fff180a4ec281556863d69fa36adc59"
 dependencies = [
  "web-time",
 ]

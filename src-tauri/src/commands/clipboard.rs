@@ -53,7 +53,42 @@ fn read_clipboard_files_impl() -> Result<Vec<String>, String> {
     Ok(crate::android::storage::clipboard_read_files())
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "android")))]
+#[cfg(target_os = "windows")]
+fn read_clipboard_files_impl() -> Result<Vec<String>, String> {
+    // CF_HDROP → Vec<String> of paths. Absent format (text/image/empty clipboard)
+    // or a transient open failure both yield an empty list so paste falls back,
+    // mirroring the other platforms (a missing file list is not an error here).
+    Ok(clipboard_win::get_clipboard(clipboard_win::formats::FileList).unwrap_or_default())
+}
+
+#[cfg(target_os = "linux")]
+fn read_clipboard_files_impl() -> Result<Vec<String>, String> {
+    // GTK clipboard ops must run on the GTK main thread; hop there and ferry the
+    // result back. wait_for_uris runs a nested main loop, which is safe on-thread.
+    let app = crate::TAURI_APP.get().ok_or("App handle unavailable")?.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        let paths = (|| -> Vec<String> {
+            let Some(display) = gdk::Display::default() else { return Vec::new(); };
+            // `default` is the CLIPBOARD selection (not PRIMARY); returns Option.
+            let Some(clipboard) = gtk::Clipboard::default(&display) else { return Vec::new(); };
+            clipboard
+                .wait_for_uris()
+                .iter()
+                // file:// URIs → local paths (glib handles percent-decoding + host).
+                .filter_map(|uri| glib::filename_from_uri(uri.as_str()).ok())
+                .map(|(path, _host)| path.to_string_lossy().into_owned())
+                .collect()
+        })();
+        let _ = tx.send(paths);
+    })
+    .map_err(|e| e.to_string())?;
+    // Bounded so an app teardown mid-read can't hang the worker; a timeout just
+    // means "no files" and paste falls back.
+    Ok(rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap_or_default())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "android", target_os = "windows", target_os = "linux")))]
 fn read_clipboard_files_impl() -> Result<Vec<String>, String> {
     Ok(Vec::new())
 }
@@ -105,7 +140,31 @@ fn write_clipboard_files_impl(paths: Vec<String>) -> Result<(), String> {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "android")))]
+#[cfg(target_os = "windows")]
+fn write_clipboard_files_impl(paths: Vec<String>) -> Result<(), String> {
+    // CF_HDROP: clipboard-win builds the DROPFILES structure from the path list.
+    // `FileList`'s Setter is impl'd over the unsized `[T]`, so the by-value
+    // `set_clipboard` helper can't reach it — call the trait method on a slice
+    // under our own clipboard guard instead.
+    use clipboard_win::{formats::FileList, Clipboard, Setter};
+    let _clip = Clipboard::new_attempts(10).map_err(|e| format!("Failed to open clipboard: {}", e))?;
+    FileList
+        .write_clipboard(&paths[..])
+        .map_err(|e| format!("Clipboard write failed: {}", e))
+}
+
+#[cfg(target_os = "linux")]
+fn write_clipboard_files_impl(_paths: Vec<String>) -> Result<(), String> {
+    // Deferred (not a missing API — gtk 0.18 does have Clipboard::set_with_data +
+    // SelectionData::set_uris). X11/Wayland clipboards are owner-served: setting
+    // text/uri-list + x-special/gnome-copied-files needs a persistent selection
+    // owner served from the GTK main thread for the app's lifetime, which warrants
+    // building + verifying on a real Linux box. Paste-in works today; until copy-out
+    // lands, surface the error so the UI can fall back to Share.
+    Err("Copying files to the clipboard isn't supported on Linux yet".to_string())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "android", target_os = "windows", target_os = "linux")))]
 fn write_clipboard_files_impl(_paths: Vec<String>) -> Result<(), String> {
     Err("Copying files to the clipboard isn't supported on this platform yet".to_string())
 }

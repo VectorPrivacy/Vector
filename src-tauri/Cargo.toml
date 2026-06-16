@@ -120,9 +120,17 @@ objc2-app-kit = { version = "0.3", features = ["NSPasteboard"] }
 
 [target.'cfg(windows)'.dependencies]
 whisper-rs = { version = "0.15.1", features = ["vulkan"], optional = true }
+# Native file clipboard (CF_HDROP read/write). Already in the lock via the
+# wry/tao stack — promoted to a direct dep.
+clipboard-win = "5"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 whisper-rs = { version = "0.15.1", features = ["vulkan"], optional = true }
+# GTK clipboard (file paste-in via text/uri-list). Pinned to the wry/tao GTK
+# generation (0.18) so no duplicate gtk crate is pulled.
+gtk = "0.18"
+gdk = "0.18"
+glib = "0.18"
 
 # For other platforms (not Android, macOS, Windows, or Linux)
 [target.'cfg(all(not(target_os = "android"), not(target_os = "macos"), not(windows), not(target_os = "linux")))'.dependencies]
