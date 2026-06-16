@@ -8871,9 +8871,13 @@ async function openCommunityInvitePanel(chat) {
     npubInput.oninput = () => {
         const np = extractNpub(npubInput.value || '');
         if (np && np !== myNpub && !bannedSet.has(np) && !memberSet.has(np)) {
-            if (!arrProfiles.some(p => p.id === np)) {
+            // Strangers = anyone who isn't an existing DM contact; the contacts loop only
+            // renders DM contacts, so a cached-but-never-DM'd profile must ride the stranger
+            // path or it shows nowhere. Fetch the profile only when we don't already have it.
+            const isDmContact = arrChats.some(c => c.chat_type === 'DirectMessage' && c.id === np);
+            if (!isDmContact) {
                 strangerInvitees.add(np);
-                if (!strangerProfileRequested.has(np)) {
+                if (!arrProfiles.some(p => p.id === np) && !strangerProfileRequested.has(np)) {
                     strangerProfileRequested.add(np);
                     invoke('load_profile', { npub: np }).then(() => renderContacts(npubInput.value || '')).catch(() => {});
                 }
