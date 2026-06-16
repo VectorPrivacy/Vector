@@ -29,13 +29,13 @@
 //! ```
 //!
 //! That bot already handles direct messages *and* communities, reconnects after a
-//! network drop, and catches up on what it missed. You wrote none of that.
+//! network drop, and catches up on what it missed.
 //!
 //! ## One API, everywhere
 //!
-//! Your bot talks to **conversations**. A conversation is either a direct message or a
-//! community channel, and your code is **identical for both** — you never branch on which
-//! it is. [`bot.channel(id)`](VectorBot::channel) opens either one by id, and
+//! Your bot sends and receives through a **`Channel`** — a direct-message chat or a
+//! community channel, handled **identically**. You never branch on which it is:
+//! [`bot.channel(id)`](VectorBot::channel) opens either by id, and
 //! [`msg.reply(...)`](IncomingMessage::reply) answers wherever the message came from.
 //!
 //! ```no_run
@@ -67,7 +67,7 @@
 //! ## Receiving: `on_message` vs `on_event`
 //!
 //! [`on_message`](VectorBot::on_message) is the fast path — one async handler per
-//! inbound message, DMs and Community channels alike, each on its own task.
+//! inbound message, DMs and Community channels alike; a slow handler won't hold up the others.
 //!
 //! For everything beyond messages, [`on_event`](VectorBot::on_event) delivers the
 //! full stream as a [`BotEvent`] you `match` on — `Message`, `MessageUpdate` (a
@@ -127,7 +127,7 @@
 //!
 //! If the bot loses its connection, [`on_message`](VectorBot::on_message) /
 //! [`on_event`](VectorBot::on_event) reconnect on their own and catch up on what was
-//! missed — you write none of it. Your handler fires for messages that arrive while the
+//! missed. Your handler fires for messages that arrive while the
 //! bot is running; to read older history, use
 //! [`bot.core().get_messages(...)`](VectorCore).
 //!
@@ -334,7 +334,7 @@ impl VectorBot {
         }
     }
 
-    /// A unified messaging handle for a conversation, **auto-detecting** whether `id` is a DM
+    /// A unified messaging handle for a chat or channel, **auto-detecting** whether `id` is a DM
     /// (an `npub`) or a Community channel (a 64-char hex channel id). Send and receive work the
     /// same way regardless — you never branch on the transport. Infallible; an invalid id surfaces
     /// as an error when you actually send.
@@ -376,8 +376,7 @@ impl VectorBot {
     /// Register an async message handler and block, processing inbound DMs and
     /// file attachments until the client disconnects. The handler is invoked
     /// once per message with a clone of the bot (so it can reply) and an
-    /// [`IncomingMessage`]. Each invocation runs on its own task, so a slow
-    /// handler won't stall the receive loop.
+    /// [`IncomingMessage`]. A slow handler won't hold up other messages.
     ///
     /// ```no_run
     /// # use vector_sdk::VectorBot;
@@ -554,6 +553,10 @@ pub struct VectorBotBuilder {
     data_dir: Option<PathBuf>,
     event_emitter: Option<Box<dyn EventEmitter>>,
     invite_policy: Option<InvitePolicy>,
+    #[cfg(feature = "tor")]
+    tor: bool,
+    #[cfg(feature = "tor")]
+    tor_bridges: Vec<String>,
 }
 
 impl VectorBotBuilder {
@@ -622,6 +625,26 @@ impl VectorBotBuilder {
         self
     }
 
+    /// Route **all** of this bot's traffic through embedded Tor. Requires the `tor` feature.
+    ///
+    /// Tor is started and bootstrapped during [`build`](Self::build) *before* the bot connects,
+    /// so the bot never touches the network in the clear. Bootstrapping can take several seconds.
+    #[cfg(feature = "tor")]
+    pub fn tor(mut self) -> Self {
+        self.tor = true;
+        self
+    }
+
+    /// Like [`tor`](Self::tor), but route through the given Tor **bridges** instead of public
+    /// entry relays — for networks where Tor itself is blocked. Each entry is a bridge line
+    /// (e.g. `"1.2.3.4:443 <fingerprint>"`). Implies [`tor`](Self::tor).
+    #[cfg(feature = "tor")]
+    pub fn tor_bridges(mut self, bridges: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.tor = true;
+        self.tor_bridges = bridges.into_iter().map(Into::into).collect();
+        self
+    }
+
     /// Initialize core, resolve the identity, log in, and connect to relays.
     ///
     /// If no key was supplied via [`nsec`](Self::nsec) / [`mnemonic`](Self::mnemonic), the bot loads
@@ -644,6 +667,42 @@ impl VectorBotBuilder {
                 (nsec, created.then_some(path))
             }
         };
+
+        // Bring Tor up BEFORE login connects: prime this account's DB with the Tor preference and
+        // start the service, so login's own relay connect already routes through Tor (no clear-net
+        // handshake). login re-reads the same DB setting, so the preference sticks.
+        #[cfg(feature = "tor")]
+        if self.tor {
+            use nostr_sdk::prelude::*;
+            let keys = if key.starts_with("nsec1") {
+                Keys::new(
+                    SecretKey::from_bech32(&key)
+                        .map_err(|e| VectorError::Other(format!("invalid nsec: {e}")))?,
+                )
+            } else {
+                Keys::from_mnemonic(&key, None)
+                    .map_err(|e| VectorError::Other(format!("invalid mnemonic: {e}")))?
+            };
+            let npub = keys.public_key().to_bech32().map_err(|e| VectorError::Other(e.to_string()))?;
+
+            vector_core::db::set_current_account(npub.clone()).map_err(VectorError::Other)?;
+            vector_core::db::init_database(&npub).map_err(VectorError::Other)?;
+            vector_core::db::settings::set_sql_setting("tor_enabled".to_string(), "1".to_string())
+                .map_err(VectorError::Other)?;
+            vector_core::tor::set_tor_enabled_pref(true);
+
+            let tor_dir = vector_core::db::account_dir(&npub).map_err(VectorError::Other)?.join("tor");
+            let (state_dir, cache_dir) = (tor_dir.join("state"), tor_dir.join("cache"));
+            std::fs::create_dir_all(&state_dir).ok();
+            std::fs::create_dir_all(&cache_dir).ok();
+
+            // Fail closed: blackhole the shared client until bootstrap finishes, then start + rebuild.
+            vector_core::net::rebuild_shared_http_client().map_err(VectorError::Other)?;
+            vector_core::tor::TorService::start(state_dir, cache_dir, &self.tor_bridges)
+                .await
+                .map_err(VectorError::Other)?;
+            vector_core::net::rebuild_shared_http_client().map_err(VectorError::Other)?;
+        }
 
         let result = core.login(&key, self.password.as_deref()).await?;
 
@@ -678,7 +737,7 @@ pub enum ChannelKind {
     Community,
 }
 
-/// A unified handle for a conversation — **a DM and a Community channel behave the same**. Every
+/// A unified handle for a chat or channel — **a DM and a Community channel behave the same**. Every
 /// method routes to the right transport under the hood, so a bot author never branches on DM-vs-
 /// channel. Obtained from [`VectorBot::channel`] / [`dm`](VectorBot::dm) /
 /// [`community`](VectorBot::community), or [`IncomingMessage::channel`].
@@ -690,7 +749,7 @@ pub struct Channel {
 }
 
 impl Channel {
-    /// The conversation id — an `npub` for a DM, a channel id for a Community channel.
+    /// The id of this chat or channel — an `npub` for a DM, a channel id for a Community channel.
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -800,7 +859,7 @@ impl Channel {
 /// to respond uniformly without caring which it is.
 #[derive(Clone, Debug)]
 pub struct IncomingMessage {
-    /// The conversation id. For a DM this is the sender's npub; for a Community message it's the
+    /// The chat or channel id. For a DM this is the sender's npub; for a Community message it's the
     /// channel id. Prefer [`reply`](Self::reply) / [`channel`](Self::channel) over using it directly.
     pub chat_id: String,
     /// `true` when this message arrived in a Community channel rather than a DM.
@@ -825,12 +884,12 @@ impl IncomingMessage {
 
     /// Respond as a **threaded reply** to this message — the response references it, so clients
     /// render it as a reply. Works identically for DMs and Community channels. (For a plain,
-    /// non-threaded response in the same conversation, use `msg.channel().send(...)`.)
+    /// non-threaded response in the same chat or channel, use `msg.channel().send(...)`.)
     pub async fn reply(&self, text: &str) -> Result<String> {
         self.channel().reply(&self.message.id, text).await
     }
 
-    /// React to *this* message with an emoji, in its own conversation.
+    /// React to *this* message with an emoji.
     pub async fn react(&self, emoji: &str) -> Result<()> {
         self.channel().react(&self.message.id, emoji).await
     }
@@ -1186,7 +1245,7 @@ where
 // Helpers
 // ============================================================================
 
-/// Classify a conversation id: a valid bech32 `npub` is a DM, anything else (a 64-char hex channel
+/// Classify an id: a valid bech32 `npub` is a DM, anything else (a 64-char hex channel
 /// id) is a Community channel.
 fn channel_kind_for(id: &str) -> ChannelKind {
     if nostr_sdk::PublicKey::from_bech32(id).is_ok() {

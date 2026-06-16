@@ -37,23 +37,23 @@ async fn main() -> vector_sdk::Result<()> {
 
 ## One API, everywhere
 
-Your bot talks to **conversations**. A conversation is either a direct message or a
-community channel — and your code is **identical for both**. You never branch on "is
-this a DM or a community?"; you just send and reply.
+Your bot sends and receives through a **`Channel`** — a direct-message chat or a
+community channel, handled **identically**. You never branch on "is this a DM or a
+community?"; you just send and reply.
 
 ```rust
 // `msg` could be from a DM or a community channel — same code either way:
-msg.reply("got it").await?;        // reply in the same conversation
+msg.reply("got it").await?;        // reply in the same chat or channel
 msg.react("👍").await?;            // react to it
 msg.channel().typing().await?;     // show a typing indicator
 
-// Or message a conversation directly by its id:
+// Or message a chat or channel directly by its id:
 bot.channel(id).send("hi").await?;
 ```
 
 ## What your bot can do
 
-**Messaging** — on any conversation (`bot.channel(id)`, `bot.dm(npub)`, or `msg.channel()`):
+**Messaging** — on any chat or channel (`bot.channel(id)`, `bot.dm(npub)`, or `msg.channel()`):
 
 | Method | What it does |
 | --- | --- |
@@ -99,7 +99,7 @@ By default, invites wait for you to handle them (`bot.pending_invites()` /
 was offline, so a restarted bot still joins.
 
 **Receiving** — `bot.on_message(handler)` runs your handler for every incoming message
-(DM or community), each on its own task.
+(DM or community); a slow handler won't hold up the others.
 
 For more than messages, `bot.on_event(|bot, event|)` gives you the full stream — match
 the parts you care about:
@@ -121,7 +121,7 @@ bot.on_event(|bot, event| async move {
 invites, and the bot being removed.
 
 **Staying connected** — if the bot loses its connection, it reconnects on its own and
-catches up on what it missed. You write none of that. Your handler fires for messages
+catches up on what it missed. Your handler fires for messages
 that arrive while the bot is running; to read older history, use `bot.core().get_messages(...)`.
 
 **Profiles** — `bot.fetch_profile(npub)`, `bot.update_profile(...)`, `bot.set_status(...)`,
@@ -162,7 +162,7 @@ OPENAI_API_KEY=sk-... VECTOR_NSEC=nsec1... cargo run --example ai_bot
 - `.password("...")` — only for keys that are encrypted at rest.
 - `VectorBot::generate_nsec()` — mint a fresh key yourself.
 
-A keyless bot's identity is stable across restarts, so it keeps its conversations and
+A keyless bot's identity is stable across restarts, so it keeps its chats and
 community memberships. Storage defaults to a per-OS application directory; override it
 with `.data_dir(path)`.
 
@@ -173,8 +173,20 @@ bots, run several processes.
 
 ## Optional: Tor
 
-Embedded Tor is available via the `tor` feature (off by default), so the dependency tree
-stays light unless you ask for it.
+To route the bot through Tor, enable the `tor` feature **and** call `.tor()` on the builder
+(the feature alone only compiles Tor in; `.tor()` turns it on):
+
+```toml
+vector-sdk = { version = "0.3", features = ["tor"] }
+```
+
+```rust
+let bot = VectorBot::builder().nsec(key).tor().build().await?;
+// .tor_bridges(["1.2.3.4:443 <fingerprint>"]) for networks where Tor is blocked
+```
+
+Tor is bootstrapped during `build()` *before* the bot connects, so it never touches the
+network in the clear. The feature is off by default, keeping the dependency tree light.
 
 ## License
 
