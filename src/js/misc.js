@@ -1021,6 +1021,32 @@ function cleanTrackingFromUrl(urlString) {
       amazonTrackingParams.forEach(param => url.searchParams.delete(param));
     }
     
+    // eBay-specific tracking — item pages carry a wall of _trkparms / itmprp /
+    // itmmeta / itmprp junk. Anchored host match (not loose .includes) because
+    // this branch rewrites the path, so a false positive would mangle the URL.
+    else if (/(^|\.)ebay\.[a-z.]+$/.test(hostname)) {
+      // Item pages reduce to /itm/ITEM_ID. The ID is a long digit run, either
+      // right after /itm/ or the trailing segment of a legacy title-slug URL.
+      const itmMatch = url.pathname.match(/\/itm\/(?:.+\/)?(\d{6,})/);
+      if (itmMatch) {
+        // `var` pre-selects a SKU on multi-variation listings — functional, not
+        // a tracker, so it survives the wipe.
+        const variation = url.searchParams.get('var');
+        url.search = '';
+        url.hash = '';
+        url.pathname = `/itm/${itmMatch[1]}`;
+        if (variation) url.searchParams.set('var', variation);
+      } else {
+        // Non-item eBay URLs (search, store, etc.): strip the known trackers.
+        const ebayTrackingParams = [
+          '_trkparms', '_trksid', 'itmprp', 'itmmeta', 'hash', 'amdata',
+          'epid', '_from', 'mkcid', 'mkrid', 'campid', 'toolid', 'customid',
+          'mkevt', 'nordt', 'rt', 'ssspo', 'sssrc', 'ssuid', 'widget_ver'
+        ];
+        ebayTrackingParams.forEach(param => url.searchParams.delete(param));
+      }
+    }
+
     // Twitter/X-specific
     else if (hostname.includes('twitter.com') || hostname.includes('x.com')) {
       const twitterTrackingParams = ['s', 't', 'ref_src', 'ref_url', 'src'];
