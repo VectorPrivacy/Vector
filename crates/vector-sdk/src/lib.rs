@@ -2,13 +2,9 @@
 //!
 //! Build a private-messaging bot in about a dozen lines.
 //!
-//! Vector is an end-to-end-encrypted messenger on the [Nostr](https://nostr.com)
-//! protocol. This SDK is a thin, friendly skin over [`vector_core`] — the
-//! headless library that powers the Vector desktop and mobile apps and holds
-//! **all** of the protocol logic. You get NIP-17 gift-wrapped DMs, encrypted
-//! file attachments, reactions, typing indicators, edits, deletes, profiles, and
-//! full Discord-style **Communities** — without ever touching a relay, a
-//! gift-wrap, or an encryption key directly.
+//! [Vector](https://vectorapp.io) is a private, encrypted messenger. This SDK lets your
+//! bot send and receive messages, files, and reactions, join communities, and ride out
+//! network drops — without ever touching the protocol or encryption underneath.
 //!
 //! ```no_run
 //! use vector_sdk::VectorBot;
@@ -32,18 +28,15 @@
 //! }
 //! ```
 //!
-//! That bot already speaks encrypted DMs *and* Community channels, reconnects
-//! through relay outages, and catches up on anything it missed while offline.
-//! You wrote none of that.
+//! That bot already handles direct messages *and* communities, reconnects after a
+//! network drop, and catches up on what it missed. You wrote none of that.
 //!
-//! ## One API for DMs and Communities
+//! ## One API, everywhere
 //!
-//! Like discord.js, you never branch on "is this a DM or a Community channel?".
-//! A [`Channel`] is a [`Channel`]; you send and receive the same way.
-//! [`bot.channel(id)`](VectorBot::channel) **auto-detects** the transport from
-//! the id (an `npub` → DM, a 64-char hex id → Community channel), and
-//! [`msg.reply(...)`](IncomingMessage::reply) answers wherever the message came
-//! from. The gift-wrap-vs-Concord split lives entirely inside the SDK.
+//! Your bot talks to **conversations**. A conversation is either a direct message or a
+//! community channel, and your code is **identical for both** — you never branch on which
+//! it is. [`bot.channel(id)`](VectorBot::channel) opens either one by id, and
+//! [`msg.reply(...)`](IncomingMessage::reply) answers wherever the message came from.
 //!
 //! ```no_run
 //! # use vector_sdk::VectorBot;
@@ -61,7 +54,7 @@
 //! | You want to… | …you call |
 //! | --- | --- |
 //! | Send / reply / edit / delete | [`Channel::send`] · [`reply`](Channel::reply) · [`edit`](Channel::edit) · [`delete`](Channel::delete) |
-//! | React (unicode or NIP-30 custom) | [`Channel::react`] · [`react_custom`](Channel::react_custom) |
+//! | React (emoji or custom image) | [`Channel::react`] · [`react_custom`](Channel::react_custom) |
 //! | Send & receive files | [`Channel::send_file`] · [`VectorBot::download_attachment`] / [`save_attachment`](VectorBot::save_attachment) |
 //! | Receive messages | [`VectorBot::on_message`] |
 //! | Receive *everything* (joins, reactions, invites…) | [`VectorBot::on_event`] → match on [`BotEvent`] |
@@ -96,10 +89,10 @@
 //! # Ok(()) }
 //! ```
 //!
-//! ## Communities, the discord.js way
+//! ## Communities
 //!
-//! A message in a Community channel hands you the *sender in context* — act on
-//! them directly:
+//! When a message comes from a community, you get the sender as a member you can act on
+//! directly:
 //!
 //! ```no_run
 //! # use vector_sdk::IncomingMessage;
@@ -121,7 +114,7 @@
 //! # use vector_sdk::VectorBot;
 //! # async fn run() -> vector_sdk::Result<()> {
 //! VectorBot::builder().nsec("nsec1...").public().build().await?;                 // accept from anyone
-//! VectorBot::builder().nsec("nsec1...").whitelist(["npub1owner…"]).build().await?; // only these inviters
+//! VectorBot::builder().nsec("nsec1...").whitelist(["npub1owner…"]).build().await?; // only these accounts
 //! # Ok(()) }
 //! ```
 //!
@@ -130,14 +123,12 @@
 //! was invited to. The default is [`InvitePolicy::Manual`] — see
 //! [`pending_invites`](VectorBot::pending_invites) / [`accept_invite`](VectorBot::accept_invite).
 //!
-//! ## Outage resilience, for free
+//! ## Staying connected
 //!
-//! [`on_message`](VectorBot::on_message) / [`on_event`](VectorBot::on_event) catch
-//! up on connect, then a relay health monitor takes over: it force-reconnects
-//! dead relays and, on each reconnect, folds back anything missed while offline
-//! (re-foundings, rekeys, bans, metadata, recent messages) into local state. It's
-//! event-driven — no idle polling. Catch-up restores *state*; it does **not**
-//! replay missed *messages* to your handler, so query a gap with
+//! If the bot loses its connection, [`on_message`](VectorBot::on_message) /
+//! [`on_event`](VectorBot::on_event) reconnect on their own and catch up on what was
+//! missed — you write none of it. Your handler fires for messages that arrive while the
+//! bot is running; to read older history, use
 //! [`bot.core().get_messages(...)`](VectorCore).
 //!
 //! ## Identity: bring your own, or let the bot make one
@@ -168,8 +159,8 @@
 //!
 //! ## Reaching deeper
 //!
-//! Everything not surfaced ergonomically here — creating communities, history
-//! sync, custom rumors — is one hop away via [`VectorBot::core`], which hands you
+//! Everything not surfaced here — creating communities, reading history, and
+//! lower-level controls — is one hop away via [`VectorBot::core`], which hands you
 //! the full [`VectorCore`] facade.
 //!
 //! ## Examples

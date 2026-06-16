@@ -1,24 +1,15 @@
 # Vector SDK
 
-An ergonomic Rust SDK for building [Vector](https://vectorapp.io) bots and clients.
-
-Vector is a private messenger built on the Nostr protocol. This SDK is a thin,
-friendly skin over [`vector-core`](../vector-core) — the headless library that
-holds **all** of Vector's protocol logic. You get NIP-17 gift-wrapped DMs, file
-attachments, reactions, typing indicators, edits, deletes, and profiles without
-ever touching a relay, a gift-wrap, or an encryption key directly.
-
-> **This is a ground-up rewrite of the old `vector_sdk` (0.2.x).** The previous
-> version hand-rolled gift-wrapping, AES-GCM file encryption, NIP-96 upload, and
-> reactions against `nostr-sdk` 0.42 directly. All of that now lives in
-> `vector-core`, so the SDK is a small ergonomic layer on top of the same engine
-> that powers the Vector desktop and mobile apps.
+Build a bot for [Vector](https://vectorapp.io) — a private, encrypted messenger — in
+about a dozen lines of Rust. Your bot sends and receives messages, files, and reactions,
+joins communities, and rides out network drops, without you ever touching the protocol
+or encryption underneath.
 
 ## Quick start
 
 ```toml
 [dependencies]
-vector-sdk = { path = "../crates/vector-sdk" } # or git, see "Using outside the workspace"
+vector-sdk = "0.3"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -28,218 +19,163 @@ use vector_sdk::VectorBot;
 #[tokio::main]
 async fn main() -> vector_sdk::Result<()> {
     let bot = VectorBot::builder()
-        .nsec("nsec1...")          // or .mnemonic("twelve words ...")
+        .nsec("nsec1...")          // the bot's key — or omit it and one is created for you
         .build()
         .await?;
 
-    println!("Logged in as {}", bot.npub());
+    println!("Online as {}", bot.npub());
 
-    // Send a message — `channel` auto-detects DM (npub) vs Community channel (hex id).
-    bot.channel("npub1...").send("Hello from a bot!").await?;
-
-    // Echo every inbound message back — the SAME handler serves DMs AND Community channels.
+    // Reply to every message the bot receives.
     bot.on_message(|_bot, msg| async move {
         if msg.is_mine() { return; }
-        let _ = msg.reply(&format!("Echo: {}", msg.text())).await;
+        let _ = msg.reply(&format!("You said: {}", msg.text())).await;
     }).await?;
 
     Ok(())
 }
 ```
 
-## One uniform API for DMs and Communities
+## One API, everywhere
 
-A bot author never branches on "is this a DM or a Community channel?" — like
-discord.js, a **`Channel`** is a `Channel` and you send/receive the same way.
-`bot.channel(id)` **auto-detects** the transport from the id (an `npub` → DM, a
-64-char hex → Community channel); `msg.reply(...)` responds wherever the
-message came from. The gift-wrap-vs-Concord split lives entirely inside the SDK.
+Your bot talks to **conversations**. A conversation is either a direct message or a
+community channel — and your code is **identical for both**. You never branch on "is
+this a DM or a community?"; you just send and reply.
 
 ```rust
-// All identical whether `msg` came from a DM or a Community channel:
-msg.reply("got it").await?;               // respond in the same conversation
-msg.react("👍").await?;                   // react to this message
-msg.channel().typing().await?;             // "thinking…" indicator
+// `msg` could be from a DM or a community channel — same code either way:
+msg.reply("got it").await?;        // reply in the same conversation
+msg.react("👍").await?;            // react to it
+msg.channel().typing().await?;     // show a typing indicator
 
-// Or address a conversation directly (auto-detected):
+// Or message a conversation directly by its id:
 bot.channel(id).send("hi").await?;
-bot.channel(id).edit(&msg_id, "fixed").await?;
-bot.channel(id).delete(&msg_id).await?;
-// Explicit constructors when you know the kind: bot.dm(npub) / bot.community(channel_id)
 ```
 
-## What you can do
+## What your bot can do
 
-**Messaging** — a unified `Channel` from `bot.channel(id)` / `bot.dm(npub)` /
-`bot.community(channel_id)`, or `msg.channel()`:
+**Messaging** — on any conversation (`bot.channel(id)`, `bot.dm(npub)`, or `msg.channel()`):
 
-| Method | Does (DM **and** Community) |
+| Method | What it does |
 | --- | --- |
-| `channel.send(text)` | Send a text message |
-| `channel.react(msg_id, "👍")` | React with a unicode emoji |
-| `channel.react_custom(msg_id, ":code:", url)` | React with a NIP-30 custom emoji |
-| `channel.typing()` | Send a typing indicator |
-| `channel.edit(msg_id, new_text)` | Edit a message you sent |
-| `channel.delete(msg_id)` | Delete a message you sent |
-| `channel.send_file(path)` | Send an encrypted file attachment |
-| `channel.reply(msg_id, text)` | Send a **threaded** reply to a specific message |
-| `msg.reply(text)` / `msg.react(emoji)` | Threaded reply / react to an inbound message |
-| `bot.download_attachment(&att)` / `bot.save_attachment(&att, path)` | Fetch + decrypt a received file |
+| `channel.send(text)` | Send a message |
+| `channel.reply(msg_id, text)` | Reply to a specific message (threaded) |
+| `channel.react(msg_id, "👍")` | React with an emoji |
+| `channel.react_custom(msg_id, ":code:", url)` | React with a custom image emoji |
+| `channel.typing()` | Show a typing indicator |
+| `channel.edit(msg_id, text)` / `channel.delete(msg_id)` | Edit / delete a message the bot sent |
+| `channel.send_file(path)` | Send a file |
+| `bot.download_attachment(&att)` / `bot.save_attachment(&att, path)` | Get a received file |
 
-`msg.reply(text)` threads (references the message it answers); for a plain, non-threaded response
-use `msg.channel().send(text)`. Received files live on `msg.message.attachments` —
-`bot.download_attachment(att)` returns the decrypted bytes, `bot.save_attachment(att, path)` writes them.
+On an incoming message: `msg.reply(text)` answers it, `msg.react(emoji)` reacts to it,
+and any received files are on `msg.message.attachments`.
 
-**Community management** — a message hands you the *actor in context* (discord.js-style),
-so you act on the sender directly:
+**Communities** — when a message comes from a community, you get the sender as a member
+you can act on directly:
 
 ```rust
-// In a community channel handler:
-if let Some(member) = msg.member() {        // the sender, as a Member of this community
-    member.kick().await?;                    // or .ban() / .unban()
-    member.grant_admin().await?;             // or .revoke_admin()
-    let prof = member.profile().await;       // their profile
-    if member.is_admin() { /* ... */ }       // is_owner() too
+if let Some(member) = msg.member() {
+    member.kick().await?;          // or .ban() / .unban()
+    member.grant_admin().await?;   // or .revoke_admin()
+    if member.is_admin() { /* ... */ }
 }
 
-// Or address a community by id:
+// Or manage a community directly:
 let community = bot.community(community_id);  // also: msg.community(), bot.communities()
 community.invite("npub1...").await?;
 let link = community.create_invite().await?;
-community.edit(Some("New name"), None).await?;
 for m in community.members().await { /* ... */ }
-community.leave().await?;                     // dissolve(), capabilities(), roles()
 ```
 
-**Public vs private bots (invite policy)** — for a bot to be usable in communities it must accept
-invites, but a private bot mustn't be spammable into random ones. Set the policy on the builder:
+**Joining communities** — to be useful in a community, a bot has to accept invites.
+Choose how:
 
 ```rust
-// Public bot — auto-accept Community invites from anyone:
-VectorBot::builder().nsec(key).public().build().await?;
-
-// Private bot — auto-accept ONLY invites from these npubs; ignore everyone else:
-VectorBot::builder().nsec(key).whitelist(["npub1owner…", "npub1admin…"]).build().await?;
-
-// Default is `InvitePolicy::Manual` — invites are parked for you to handle:
-for inv in bot.pending_invites()? { /* … */ }
-bot.accept_invite(&community_id).await?;
+VectorBot::builder().nsec(key).public().build().await?;                   // accept from anyone
+VectorBot::builder().nsec(key).whitelist(["npub1owner…"]).build().await?; // only these accounts
 ```
 
-Auto-accept fires both for live invites *and* for ones received while the bot was offline (swept on
-the next connect), so a restarted bot still joins what it was invited to.
+By default, invites wait for you to handle them (`bot.pending_invites()` /
+`bot.accept_invite(id)`). Auto-accept also picks up invites that arrived while the bot
+was offline, so a restarted bot still joins.
 
-**Receiving** — `bot.on_message(handler)` runs an async handler per inbound
-message — DMs **and** Community channel messages — each on its own task
-(`msg.is_group` tells them apart if you care).
+**Receiving** — `bot.on_message(handler)` runs your handler for every incoming message
+(DM or community), each on its own task.
 
-For everything beyond messages, `bot.on_event(|bot, event|)` delivers the full stream as a
-[`BotEvent`] enum — `Message`, `MessageUpdate` (a reaction/edit landed), `Delete`, `MemberJoin`,
-`MemberLeave`, `Typing`, `Invite`, and `Removed` (the bot was kicked/banned). Match what you need:
+For more than messages, `bot.on_event(|bot, event|)` gives you the full stream — match
+the parts you care about:
 
 ```rust
 bot.on_event(|bot, event| async move {
     match event {
         BotEvent::Message(msg) if !msg.is_mine() => { msg.reply("hi").await.ok(); }
         BotEvent::MemberJoin { channel_id, npub } => {
-            bot.channel(channel_id).send(&format!("welcome {}!", &npub[..12])).await.ok();
+            bot.channel(channel_id).send("welcome!").await.ok();
         }
-        BotEvent::MessageUpdate { message, .. } => { /* a reaction or edit landed */ }
+        BotEvent::MessageUpdate { .. } => { /* a reaction or edit landed */ }
         _ => {}
     }
 }).await?;
 ```
 
-For full low-level control, `bot.listen_with(handler)` takes a raw `InboundEventHandler`.
+`BotEvent` covers messages, reactions/edits, deletes, members joining or leaving, typing,
+invites, and the bot being removed.
 
-**Outage resilience** — `on_message`/`listen` catch up on connect, then a **relay health monitor**
-takes over: it force-reconnects dead/zombie relays and, on each reconnect, folds back anything
-missed while offline (re-foundings, rekeys, bans, metadata, recent messages) into local state. It's
-event-driven (no idle polling) — work happens only when a relay actually (re)connects.
-`bot.sync_communities()` and `bot.sync_dms(since_days)` (NIP-77 negentropy) are also exposed for
-manual catch-up.
+**Staying connected** — if the bot loses its connection, it reconnects on its own and
+catches up on what it missed. You write none of that. Your handler fires for messages
+that arrive while the bot is running; to read older history, use `bot.core().get_messages(...)`.
 
-Catch-up folds missed *state* (re-foundings, rekeys, bans, metadata) into local storage but does
-**not** replay missed *messages* to your handler — `on_message`/`on_event` fire for messages
-received while connected. Query anything missed while offline with `bot.core().get_messages(...)`.
+**Profiles** — `bot.fetch_profile(npub)`, `bot.update_profile(...)`, `bot.set_status(...)`,
+`bot.block(npub)` / `bot.unblock(npub)`, `bot.set_nickname(...)`.
 
-**Profiles** — `bot.fetch_profile(npub)`, `bot.update_profile(...)`,
-`bot.set_status(...)`, `bot.block/unblock(...)`, `bot.set_nickname(...)`,
-`bot.blocked_users()`.
-
-**Going deeper** — `bot.core()` returns the full [`VectorCore`] facade for
-everything not surfaced here, including **Community management**
-(create/join/invite/sync/roles/ban/kick), custom rumors, and lower-level controls.
+**Going deeper** — `bot.core()` exposes the full engine for anything not surfaced here
+(creating communities, reading history, and lower-level controls).
 
 ## Examples
 
-Runnable, self-contained bots live in [`examples/`](examples) — each shows off one
-capability. Every one needs `VECTOR_NSEC` (the bot's `nsec`); a few take extra env vars.
+Runnable, self-contained bots live in [`examples/`](examples) — each shows off one thing.
+Every one needs `VECTOR_NSEC` (the bot's key); a few take extra env vars.
 
 | Example | What it shows |
 | --- | --- |
-| [`echo_bot`](examples/echo_bot.rs) | The minimal hello-world — replies to every message (DM or Community). |
+| [`echo_bot`](examples/echo_bot.rs) | The minimal hello-world — replies to every message. |
 | [`slash_command_bot`](examples/slash_command_bot.rs) | A `/command` router: `/ping`, `/echo`, `/roll`, `/help`. |
 | [`ai_bot`](examples/ai_bot.rs) | An LLM chatbot: typing indicator, threaded replies, per-chat history. |
-| [`moderation_bot`](examples/moderation_bot.rs) | `on_event` — welcomes joiners, auto-bans on a word filter via `msg.member()`. |
-| [`whitelist_bot`](examples/whitelist_bot.rs) | A private bot that only joins communities it's invited to by trusted npubs. |
-| [`file_bot`](examples/file_bot.rs) | Sends one encrypted file, then exits. |
-| [`save_files_bot`](examples/save_files_bot.rs) | Receives files and decrypts them to disk (the other half of `file_bot`). |
+| [`moderation_bot`](examples/moderation_bot.rs) | Welcomes new members and auto-bans on a word filter. |
+| [`whitelist_bot`](examples/whitelist_bot.rs) | A private bot that only joins communities it trusts. |
+| [`file_bot`](examples/file_bot.rs) | Sends one file, then exits. |
+| [`save_files_bot`](examples/save_files_bot.rs) | Saves every received file to disk. |
 
 ```sh
-# Echo bot — replies to every message, in DMs and Community channels
-VECTOR_NSEC=nsec1... cargo run -p vector-sdk --example echo_bot
+# Echo bot — replies to every message
+VECTOR_NSEC=nsec1... cargo run --example echo_bot
 
 # AI bot — wire any OpenAI-compatible endpoint to your chats
-OPENAI_API_KEY=sk-... VECTOR_NSEC=nsec1... cargo run -p vector-sdk --example ai_bot
-
-# File bot — sends one file then exits
-VECTOR_NSEC=nsec1... VECTOR_TARGET=npub1... VECTOR_FILE=./image.png \
-  cargo run -p vector-sdk --example file_bot
+OPENAI_API_KEY=sk-... VECTOR_NSEC=nsec1... cargo run --example ai_bot
 ```
-
-## Important: one identity per process
-
-`vector-core` is built on process-global state, so **one `VectorBot` owns the
-process's identity at a time**. Build one bot per process. To run several
-identities, run several processes — or use `bot.core().swap_session()` to switch
-the active account in place. (This is a deliberate change from the old
-`VectorBot`, which carried its own keys and client and could host many bots in
-one process.)
 
 ## Accounts & keys
 
-- **No key at all** — `build()` creates a persistent identity on first run (stored
-  as `identity.nsec` in the data dir) and reuses it every run after. Ideal for a
-  first bot; the npub is printed once on creation. Running several keyless bots?
-  Give each its own `.data_dir(...)` so they get distinct identities.
-- `.nsec("nsec1...")` — an existing secret key (always wins over the stored one).
-- `.mnemonic("...")` — a BIP-39 seed phrase (NIP-06 derivation).
-- `.password("pin")` — required only for accounts encrypted at rest.
-- `VectorBot::generate_nsec()` — mint a fresh identity yourself.
+- **No key** — `build()` creates an identity on first run and reuses it every run after.
+  Perfect for a first bot. Running several keyless bots? Give each its own `.data_dir(...)`.
+- `.nsec("nsec1...")` — an existing key.
+- `.mnemonic("twelve words ...")` — a 12-word seed phrase.
+- `.password("...")` — only for keys that are encrypted at rest.
+- `VectorBot::generate_nsec()` — mint a fresh key yourself.
 
-The bot never mints a *fresh* key per run — a keyless bot's identity is stable
-across restarts, so it keeps its DMs and community memberships.
+A keyless bot's identity is stable across restarts, so it keeps its conversations and
+community memberships. Storage defaults to a per-OS application directory; override it
+with `.data_dir(path)`.
 
-Storage (the SQLite DB and per-account data) defaults to a per-OS application
-directory; override it with `.data_dir(path)`.
+## One bot per process
 
-## Using outside this workspace
+A bot owns the process while it runs, so run **one bot per process**. To run several
+bots, run several processes.
 
-`vector-core` depends on a small VectorPrivacy fork of `nostr` (it zeroizes
-secret keys on drop) applied via a workspace `[patch.crates-io]`. A consumer
-outside this monorepo must replicate that one line in its **root** `Cargo.toml`:
+## Optional: Tor
 
-```toml
-[patch.crates-io]
-nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "zeroize-secretkey" }
-```
-
-Embedded Tor (Arti) is **opt-in** via the `tor` feature, which is off by
-default — so the SDK's dependency tree stays light unless you ask for it.
+Embedded Tor is available via the `tor` feature (off by default), so the dependency tree
+stays light unless you ask for it.
 
 ## License
 
 MIT.
-
-[`VectorCore`]: https://docs.rs/vector-core
