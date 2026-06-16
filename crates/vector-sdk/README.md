@@ -9,7 +9,7 @@ or encryption underneath.
 
 ```toml
 [dependencies]
-vector-sdk = "0.3"
+vector_sdk = "0.3"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -177,7 +177,7 @@ To route the bot through Tor, enable the `tor` feature **and** call `.tor()` on 
 (the feature alone only compiles Tor in; `.tor()` turns it on):
 
 ```toml
-vector-sdk = { version = "0.3", features = ["tor"] }
+vector_sdk = { version = "0.3", features = ["tor"] }
 ```
 
 ```rust
