@@ -1570,10 +1570,20 @@ function _ensureEmojiTooltip() {
     return _emojiTooltipEl;
 }
 
+// Keep the tooltip this far from the viewport edge when clamping.
+const EMOJI_TOOLTIP_VIEWPORT_MARGIN = 6;
+
 function showEmojiTooltipAt(text, x, y) {
     const el = _ensureEmojiTooltip();
     el.textContent = text;
-    el.style.left = `${x}px`;
+    // The tooltip is centre-anchored (translateX(-50%)) and nowrap, so a long
+    // shortcode near a screen edge would overflow. Measure now — layout is live
+    // even at opacity:0 — and clamp the centre so both edges stay on-screen.
+    const half = el.offsetWidth / 2;
+    const min = EMOJI_TOOLTIP_VIEWPORT_MARGIN + half;
+    const max = window.innerWidth - EMOJI_TOOLTIP_VIEWPORT_MARGIN - half;
+    const cx = max < min ? window.innerWidth / 2 : Math.min(max, Math.max(min, x));
+    el.style.left = `${cx}px`;
     el.style.top = `${y}px`;
     el.classList.add('is-visible');
 }
@@ -1603,6 +1613,9 @@ document.addEventListener('mouseover', (e) => {
     if (!_supportsHoverTooltip()) return;
     const el = e.target.closest && e.target.closest('[data-emoji-tooltip]');
     if (!el || el === _emojiTooltipCurrentAnchor) return;
+    // Reaction chips own their own hover tip ("Right-click for details") — the
+    // per-emoji shortcode tooltip would double up, so suppress it inside them.
+    if (el.closest('.reaction')) return;
     _emojiTooltipCurrentAnchor = el;
     const text = el.dataset.emojiTooltip;
     if (!text) return;
@@ -1635,8 +1648,9 @@ function _isMobileTouchEnv() {
 document.addEventListener('click', (e) => {
     if (!_isMobileTouchEnv()) return;
     const el = e.target.closest && e.target.closest('[data-emoji-tooltip]');
-    if (!el) {
-        // Tap landed elsewhere — dismiss any active tooltip.
+    if (!el || el.closest('.reaction')) {
+        // Tap landed elsewhere (or on a reaction, which owns its own tip) —
+        // dismiss any active tooltip.
         if (_emojiTooltipCurrentAnchor) hideEmojiTooltip();
         return;
     }
