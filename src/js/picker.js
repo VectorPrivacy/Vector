@@ -880,16 +880,20 @@ function renderCustomEmojiShortcodes(rootEl, emojiTags) {
  */
 const _packPreviewCache = new Map(); // naddr -> { state: 'loading'|'ok'|'err', pack?, error? }
 
-// Matches an emoji-pack reference in three forms, all collapsing to the
-// same naddr capture group:
-//   1. Bare:        naddr1...
-//   2. NIP-21:      nostr:naddr1...
-//   3. Vector URL:  https://vectorapp.io/emojis/pack/naddr1...  (with
+// Matches an emoji-pack reference in three forms:
+//   1. Vector URL:  https://vectorapp.io/emojis/pack/naddr1...  (group 1; with
 //                   optional www. + optional trailing .html / slash)
-// Each form is replaced by the inline preview card so the user never
-// sees the underlying string — the preview's Copy button is the only
-// exposed share affordance.
-const NADDR_REGEX = /(?:https?:\/\/(?:www\.)?vectorapp\.io\/emojis\/pack\/|nostr:)?(naddr1[ac-hj-np-z02-9]{20,})(?:\.html)?\/?/gi;
+//   2. NIP-21:      nostr:naddr1...                              (group 1)
+//   3. Bare:        naddr1...                                    (group 3, with
+//                   a required text boundary in group 2 — start/space/bracket/
+//                   quote — so a naddr buried in a *foreign* URL path
+//                   (njump.me/naddr1…, ditto.pub/naddr1…) is NOT yanked into a
+//                   broken pack card. Lookbehind is avoided on purpose: WKWebView
+//                   only gained it in Safari 16.4, and a parse-time SyntaxError
+//                   would take the whole module down on older WebViews.
+// Each match is replaced by the inline preview card so the user never sees the
+// underlying string — the preview's Copy button is the only exposed share affordance.
+const NADDR_REGEX = /(?:https?:\/\/(?:www\.)?vectorapp\.io\/emojis\/pack\/|nostr:)(naddr1[ac-hj-np-z02-9]{20,})(?:\.html)?\/?|(^|[\s([{<"'])(naddr1[ac-hj-np-z02-9]{20,})/gi;
 
 /**
  * Strip every emoji-pack reference (bare naddr, `nostr:` URI, or
@@ -901,7 +905,9 @@ const NADDR_REGEX = /(?:https?:\/\/(?:www\.)?vectorapp\.io\/emojis\/pack\/|nostr
 function stripEmojiPackNaddrs(text) {
     if (!text) return text;
     return text
-        .replace(NADDR_REGEX, '')
+        // Keep the leading boundary char (group 2 — the space/bracket/quote that
+        // preceded a bare naddr); only the naddr itself is removed.
+        .replace(NADDR_REGEX, (_m, _urlNaddr, boundary) => boundary ?? '')
         .replace(/[ \t]{2,}/g, ' ')
         .replace(/\n{3,}/g, '\n\n')
         .trim();
@@ -922,7 +928,8 @@ function renderEmojiPackPreviews(target, text) {
     const seen = new Set();
     let match;
     while ((match = NADDR_REGEX.exec(text)) !== null) {
-        const naddr = match[1].toLowerCase();
+        // Group 1 = URL/nostr form, group 3 = bare form.
+        const naddr = (match[1] || match[3]).toLowerCase();
         if (seen.has(naddr)) continue;
         seen.add(naddr);
         const card = _buildPackPreviewCard(naddr);
