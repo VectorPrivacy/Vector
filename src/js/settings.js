@@ -1580,8 +1580,12 @@ function renderFileTypeDistribution(typeDistribution, totalBytes) {
         existingTooltip.remove();
     }
     
-    // Handle case when there are no files
-    if (totalBytes === 0) {
+    // Actual storage total = sum of the per-type byte sizes. (The `totalBytes`
+    // param is really file_count, which excludes cache / AI-model bytes that have
+    // no file count — so it falsely reads 0 on Android where attachments live
+    // outside the walked dir and only cache contributes.)
+    const total = Object.values(typeDistribution || {}).reduce((sum, val) => sum + val, 0);
+    if (total === 0) {
         storageBar.innerHTML = '<div style="width: 100%; height: 100%; background-color: #333; display: flex; align-items: center; justify-content: center; color: #888; font-size: 12px;">No Storage Used</div>';
         return;
     }

@@ -103,16 +103,10 @@ pub async fn run_maintenance() {
 pub async fn get_storage_info() -> Result<serde_json::Value, String> {
     let handle = TAURI_APP.get().ok_or("App handle not initialized")?;
 
-    // Determine the base directory (Downloads on most platforms, Documents on iOS)
-    let base_directory = if cfg!(target_os = "ios") {
-        tauri::path::BaseDirectory::Document
-    } else {
-        tauri::path::BaseDirectory::Download
-    };
-
-    // Resolve the vector directory path
-    let vector_dir = handle.path().resolve("vector", base_directory)
-        .map_err(|e| format!("Failed to resolve vector directory: {}", e))?;
+    // Canonical media dir: Downloads/vector on desktop, the external media dir on
+    // Android (where DOWNLOAD_DIR_OVERRIDE points). Resolving BaseDirectory::Download
+    // here instead missed Android's real media location, so attachments never counted.
+    let vector_dir = vector_core::db::get_download_dir();
 
     // Check if directory exists
     if !vector_dir.exists() {
