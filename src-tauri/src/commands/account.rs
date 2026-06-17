@@ -1228,49 +1228,24 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
         }
     }
 
-    // Already logged in (Android standalone bg-sync installed NOSTR_CLIENT
-    // before the Activity attached): clear stale state and let the
-    // foreground rebuild fresh. GuardedSigner + MY_SECRET_KEY remain valid.
-    if let Some(client) = nostr_client() {
-        // bg-sync's relays are minimal; the frontend's `connect()` will
-        // add the full set.
-        let stale_relays: Vec<String> = client.relays().await
-            .keys().map(|u| u.to_string()).collect();
-        for url in &stale_relays {
-            let _ = client.remove_relay(url.as_str()).await;
+    // A swiped-off Android service-only bg-sync can install NOSTR_CLIENT before
+    // the Activity attaches. That client carries bg-sync's minimal, now-
+    // disconnected relay set, and the session was never fully initialized
+    // (FULL_SESSION_INITIALIZED stays false) — reusing it strands the foreground
+    // on dead "Connecting…" relays and a half-booted UI (login screen). Salvaging
+    // it is fragile (the cold path's install guard would just keep the stale
+    // client), so tear the whole session down and reload, exactly like
+    // swap_session: the fresh boot runs boot_select_account (re-opens the DB)
+    // then a clean cold login that installs a fresh connected client and sets
+    // FULL_SESSION_INITIALIZED.
+    if nostr_client().is_some() {
+        let npub = crate::my_public_key()
+            .and_then(|pk| pk.to_bech32().ok())
+            .unwrap_or_default();
+        crate::account_manager::reset_session().await;
+        if let Some(handle) = TAURI_APP.get() {
+            let _ = handle.emit("session_reload", ());
         }
-
-        // bg-sync only preloads community channels + notification profiles —
-        // partial state that would trick `debug_hot_reload_sync` into
-        // skipping login and showing only group chats. Clear it so the
-        // frontend goes through the full boot flow.
-        {
-            let mut state = STATE.lock().await;
-            state.profiles.clear();
-            state.chats.clear();
-        }
-
-        if !stale_relays.is_empty() {
-            println!("[Login] Cleared {} stale relay(s) and partial state from background sync", stale_relays.len());
-        }
-
-        // bg-sync never had the password, so ENCRYPTION_KEY is empty.
-        // Derive it now so `maybe_decrypt` works. MY_SECRET_KEY is
-        // already valid from the bg-sync install.
-        if let Some(pwd) = password {
-            if vector_core::state::is_encryption_enabled_fast() && !crate::ENCRYPTION_KEY.has_key() {
-                let key = crypto::hash_pass(pwd).await;
-                crate::ENCRYPTION_KEY.set(key, &[&crate::MY_SECRET_KEY]);
-            }
-        }
-        // One-time wrap of pre-existing plaintext community rows on an already-encrypted account.
-        if let Err(e) = crate::commands::encryption::backfill_community_at_rest() {
-            eprintln!("[Login] community at-rest backfill deferred: {e}");
-        }
-
-        let npub = crate::my_public_key().ok_or("Public key not initialized")?
-            .to_bech32()
-            .map_err(|e| format!("Bech32 error: {}", e))?;
         return Ok(npub);
     }
 
