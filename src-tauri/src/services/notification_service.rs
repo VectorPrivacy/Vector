@@ -25,6 +25,33 @@ pub enum NotificationType {
     CommunityMessage,
 }
 
+/// How much of a message to reveal in the OS notification. Per-account setting
+/// (`notif_content_privacy`), read at notify time so it applies on every path
+/// including the Android background-sync service.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NotifContentPrivacy {
+    /// Sender + message (default).
+    Full,
+    /// Sender shown, message hidden.
+    HideContent,
+    /// Generic "you received a message" — no sender, avatar, or group.
+    HideAll,
+}
+
+/// Read the account's notification content-privacy preference. Defaults to
+/// `Full` when unset or unreadable (matches historical behavior).
+pub fn notif_content_privacy() -> NotifContentPrivacy {
+    match crate::db::get_sql_setting("notif_content_privacy".to_string())
+        .ok()
+        .flatten()
+        .as_deref()
+    {
+        Some("hide_content") => NotifContentPrivacy::HideContent,
+        Some("hide_all") => NotifContentPrivacy::HideAll,
+        _ => NotifContentPrivacy::Full,
+    }
+}
+
 /// Generic notification data structure
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -78,6 +105,31 @@ impl NotificationData {
             avatar_path,
             group_avatar_path: community_avatar_path,
             chat_id: Some(chat_id),
+        }
+    }
+
+    /// Rewrite the notification's visible fields per the content-privacy
+    /// preference. `chat_id` is left intact so tap-to-open still works (it is
+    /// not shown). Idempotent.
+    pub fn apply_content_privacy(&mut self, privacy: NotifContentPrivacy) {
+        match privacy {
+            NotifContentPrivacy::Full => {}
+            NotifContentPrivacy::HideContent => {
+                // Keep sender (title) + avatar; replace the body only.
+                self.body = if self.group_name.is_some() {
+                    "Sent a message".to_string()
+                } else {
+                    "Sent you a message".to_string()
+                };
+            }
+            NotifContentPrivacy::HideAll => {
+                self.title = "Vector".to_string();
+                self.body = "You received a message".to_string();
+                self.sender_name = None;
+                self.avatar_path = None;
+                self.group_name = None;
+                self.group_avatar_path = None;
+            }
         }
     }
 }
@@ -250,7 +302,12 @@ pub fn resolve_mention_display_names(content: &str, state: &crate::state::ChatSt
 }
 
 /// Show an OS notification with generic notification data
-pub fn show_notification_generic(data: NotificationData) {
+pub fn show_notification_generic(mut data: NotificationData) {
+    // Apply the user's content-privacy preference up front so every platform
+    // path inherits it. Android's background-sync service posts straight to
+    // post_notification_jni, which re-applies it (the transform is idempotent).
+    data.apply_content_privacy(notif_content_privacy());
+
     // On Android, always use our native JNI notification path.
     // Tauri's notification plugin is unreliable on Android (requires Activity).
     // post_notification_jni checks is_activity_in_foreground() to suppress

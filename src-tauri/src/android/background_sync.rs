@@ -813,6 +813,33 @@ pub fn post_notification_jni(
     if is_activity_in_foreground() {
         return;
     }
+
+    // Apply the user's content-privacy preference. This is the single chokepoint
+    // for every Android notification: the foreground path (show_notification_generic)
+    // and the background-sync service both land here. chat_id is untouched so
+    // tap-to-open still works (it isn't displayed).
+    let (title, body, avatar_path, sender_name, group_name, group_avatar_path):
+        (String, String, Option<String>, Option<String>, Option<String>, Option<String>) =
+        match crate::services::notif_content_privacy() {
+            crate::services::NotifContentPrivacy::Full => (
+                title.to_string(), body.to_string(),
+                avatar_path.map(str::to_string), sender_name.map(str::to_string),
+                group_name.map(str::to_string), group_avatar_path.map(str::to_string),
+            ),
+            crate::services::NotifContentPrivacy::HideContent => {
+                let b = if group_name.is_some() { "Sent a message" } else { "Sent you a message" };
+                (
+                    title.to_string(), b.to_string(),
+                    avatar_path.map(str::to_string), sender_name.map(str::to_string),
+                    group_name.map(str::to_string), group_avatar_path.map(str::to_string),
+                )
+            }
+            crate::services::NotifContentPrivacy::HideAll => (
+                "Vector".to_string(), "You received a message".to_string(),
+                None, None, None, None,
+            ),
+        };
+
     let vm = match BG_JAVA_VM.get() {
         Some(vm) => vm,
         None => {
@@ -866,19 +893,19 @@ pub fn post_notification_jni(
 
         let service_jclass = jni::objects::JClass::from(service_class);
 
-        let jtitle = env.new_string(title)
+        let jtitle = env.new_string(&title)
             .map_err(|e| format!("Failed to create title string: {:?}", e))?;
-        let jbody = env.new_string(body)
+        let jbody = env.new_string(&body)
             .map_err(|e| format!("Failed to create body string: {:?}", e))?;
-        let javatar = env.new_string(avatar_path.unwrap_or(""))
+        let javatar = env.new_string(avatar_path.as_deref().unwrap_or(""))
             .map_err(|e| format!("Failed to create avatar string: {:?}", e))?;
         let jchat_id = env.new_string(chat_id.unwrap_or(""))
             .map_err(|e| format!("Failed to create chat_id string: {:?}", e))?;
-        let jsender_name = env.new_string(sender_name.unwrap_or(""))
+        let jsender_name = env.new_string(sender_name.as_deref().unwrap_or(""))
             .map_err(|e| format!("Failed to create sender_name string: {:?}", e))?;
-        let jgroup_name = env.new_string(group_name.unwrap_or(""))
+        let jgroup_name = env.new_string(group_name.as_deref().unwrap_or(""))
             .map_err(|e| format!("Failed to create group_name string: {:?}", e))?;
-        let jgroup_avatar = env.new_string(group_avatar_path.unwrap_or(""))
+        let jgroup_avatar = env.new_string(group_avatar_path.as_deref().unwrap_or(""))
             .map_err(|e| format!("Failed to create group_avatar string: {:?}", e))?;
 
         env.call_static_method(

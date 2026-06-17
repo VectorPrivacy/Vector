@@ -1064,6 +1064,7 @@ const domSettingsDisplayImageTypesInfo = document.getElementById('display-image-
 const domSettingsChatBgInfo = document.getElementById('chat-bg-info');
 const domSettingsNotifMuteInfo = document.getElementById('notif-mute-info');
 const domSettingsNotifMuteEveryoneInfo = document.getElementById('notif-mute-everyone-info');
+const domSettingsNotifPrivacyInfo = document.getElementById('notif-privacy-info');
 const domSettingsExportAccountInfo = document.getElementById('export-account-info');
 const domSettingsChangePinInfo = document.getElementById('change-pin-info');
 const domSettingsChangePinLabel = document.getElementById('change-pin-label');
@@ -11150,6 +11151,11 @@ domChatMessageInput.oninput = async () => {
         e.preventDefault();
         e.stopPropagation();
         popupConfirm('Mute @everyone Pings', 'When enabled, <b>@everyone</b> mentions from group admins will <b>not bypass</b> your group mute setting.<br><br>By default, @everyone pings from admins will notify you even if the group is muted.', true);
+    };
+    if (domSettingsNotifPrivacyInfo) domSettingsNotifPrivacyInfo.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm('Notification Content Privacy', 'Controls how much of a message shows in OS notifications (lock screen, banners).<br><br><b>Show sender and message</b>: full preview.<br><b>Hide message</b>: shows who messaged you, not what.<br><b>Hide sender and message</b>: a generic "You received a message", revealing nothing.', true);
     };
 
     domSettingsExportAccountInfo.onclick = (e) => {

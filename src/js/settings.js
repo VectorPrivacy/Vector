@@ -1885,6 +1885,25 @@ async function initMuteEveryoneSetting(useDirect = false) {
 }
 
 /**
+ * Initialize the notification Content Privacy dropdown (all platforms). Reads
+ * and writes the per-account `notif_content_privacy` setting directly; the
+ * backend reads the same key at notify time. Values: full | hide_content | hide_all.
+ */
+async function initNotifContentPrivacy() {
+    const select = document.getElementById('notif-privacy-select');
+    if (!select) return;
+    try {
+        const val = await invoke('get_sql_setting', { key: 'notif_content_privacy' });
+        select.value = (val === 'hide_content' || val === 'hide_all') ? val : 'full';
+    } catch (_) {
+        select.value = 'full';
+    }
+    select.addEventListener('change', async (e) => {
+        await invoke('set_sql_setting', { key: 'notif_content_privacy', value: e.target.value });
+    });
+}
+
+/**
  * Initialize notification sound settings UI
  */
 async function initNotificationSettings() {
@@ -2278,6 +2297,9 @@ async function initSettings() {
         // Init @everyone toggle on mobile (direct DB read/write since notification commands are desktop-only)
         await initMuteEveryoneSetting(true);
     }
+
+    // Content Privacy dropdown is cross-platform (direct DB read/write).
+    await initNotifContentPrivacy();
 
     // Set up clear storage button
     const clearStorageBtn = document.getElementById('clear-storage-btn');

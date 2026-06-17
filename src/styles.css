@@ -7740,6 +7740,38 @@ select {
   pointer-events: none;
 }
 
+/* Notification Content Privacy row: label left, dropdown right (matches the
+   toggle rows). Stacks vertically on narrow screens so the label can't squash. */
+#notif-privacy-group {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 15px;
+}
+#notif-privacy-group .notif-privacy-label {
+  color: rgba(255, 255, 255, 0.8);
+  white-space: nowrap;
+}
+#notif-privacy-group .select-container {
+  margin: 0;
+  flex: 0 1 240px;
+}
+#notif-privacy-select {
+  width: 100%;
+  margin: 0;
+  padding: 8px 14px;
+}
+@media (max-width: 600px) {
+  #notif-privacy-group {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  #notif-privacy-group .select-container {
+    flex: 1 1 auto;
+  }
+}
+
 .neon-toggle {
   position: relative;
   display: inline-block;
