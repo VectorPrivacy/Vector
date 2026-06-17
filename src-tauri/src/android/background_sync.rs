@@ -272,10 +272,36 @@ pub extern "C" fn Java_io_vectorapp_VectorNotificationService_nativeStopBackgrou
     STOP_NOTIFY.notify_one();
 }
 
+/// The service-only process discards Rust stdout/stderr, so a panic in the sync
+/// thread otherwise vanishes without a trace (thread dies, no relay connection,
+/// no notifications). Route panics to logcat so they're diagnosable.
+static BG_PANIC_HOOK: std::sync::Once = std::sync::Once::new();
+fn install_bg_panic_logger() {
+    BG_PANIC_HOOK.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let loc = info
+                .location()
+                .map(|l| format!("{}:{}", l.file(), l.line()))
+                .unwrap_or_else(|| "?".to_string());
+            let msg = info
+                .payload()
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| info.payload().downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string panic>".to_string());
+            logcat(&format!("RUST PANIC at {}: {}", loc, msg));
+            prev(info);
+        }));
+    });
+}
+
 /// Main loop for standalone background sync.
 /// Bootstraps a Nostr client from stored keys, connects to relays,
 /// and subscribes to live GiftWrap events for instant notifications.
 fn run_standalone_sync_loop(data_dir: &str) {
+    install_bg_panic_logger();
+
     // Create a persistent tokio runtime for this thread
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()

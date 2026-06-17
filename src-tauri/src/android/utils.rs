@@ -5,20 +5,42 @@ use ndk_context::android_context;
 /// Standard buffer size for reading streams
 pub const STREAM_BUFFER_SIZE: i32 = 8192;
 
-/// Execute a function with an Android JNI context
+/// Execute a function with an Android JNI context.
+///
+/// Prefers the background service's stored VM + application context, which is
+/// registered whenever the foreground service starts (full-app AND service-only
+/// modes) and stays valid in the swiped-off, Activity-less process. `ndk_context`
+/// is only a fallback for the brief early-startup window before the service
+/// registers its context: `ndk_context::android_context()` PANICS when there is
+/// no Activity, so reaching it in service-only mode aborts the calling thread.
+///
+/// Every caller here is context-agnostic (MediaScanner, ContentResolver, system
+/// services, clipboard) or launches with FLAG_ACTIVITY_NEW_TASK, so the
+/// application context behaves identically to the Activity context.
 pub fn with_android_context<F, R>(f: F) -> Result<R, String>
 where
     F: for<'a> FnOnce(&mut JNIEnv<'a>, &JObject<'a>) -> Result<R, String>,
 {
+    if let (Some(vm), Some(ctx)) = (
+        crate::android::background_sync::BG_JAVA_VM.get(),
+        crate::android::background_sync::BG_APP_CONTEXT.get(),
+    ) {
+        let mut env = vm
+            .attach_current_thread()
+            .map_err(|e| format!("Failed to attach thread (bg context): {:?}", e))?;
+        return f(&mut env, ctx.as_obj());
+    }
+
+    // Fallback: Activity context (only safe when an Activity exists).
     let ctx = android_context();
     let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) }
         .map_err(|e| format!("Failed to get JavaVM: {:?}", e))?;
-    
+
     let mut env = vm.attach_current_thread()
         .map_err(|e| format!("Failed to attach thread: {:?}", e))?;
-    
+
     let activity = unsafe { JObject::from_raw(ctx.context().cast()) };
-    
+
     f(&mut env, &activity)
 }
 

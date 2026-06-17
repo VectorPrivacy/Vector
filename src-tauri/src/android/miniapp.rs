@@ -17,14 +17,11 @@ fn load_class_from_activity<'a>(
     activity: &JObject<'a>,
     class_name: &str,
 ) -> Result<JClass<'a>, String> {
-    // Get the activity's class
-    let activity_class = env
-        .get_object_class(activity)
-        .map_err(|e| format!("Failed to get activity class: {:?}", e))?;
-
-    // Get the classloader: activity.getClass().getClassLoader()
+    // Context.getClassLoader() on the instance returns the app's PathClassLoader.
+    // (Calling getClassLoader on the object's *class* returns the boot loader for
+    // framework context types like Application/Service, which can't see app classes.)
     let class_loader = env
-        .call_method(&activity_class, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+        .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
         .map_err(|e| format!("Failed to get classloader: {:?}", e))?
         .l()
         .map_err(|e| format!("Failed to convert classloader: {:?}", e))?;

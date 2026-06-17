@@ -9,18 +9,20 @@ use jni::JNIEnv;
 
 use super::utils::with_android_context;
 
-/// Load an app class via the activity's classloader (the system classloader
-/// used by `find_class` on native threads can't see app classes).
+/// Load an app class via the context's classloader (the system classloader used
+/// by `find_class` on native threads can't see app classes).
+///
+/// `getClassLoader` is invoked on the Context *instance* (`Context.getClassLoader()`
+/// always returns the app's PathClassLoader), NOT on the context's class —
+/// `Class.getClassLoader()` returns the boot loader for framework context types
+/// (Application / Service), which can't see app classes.
 fn load_class<'a>(
     env: &mut JNIEnv<'a>,
     activity: &JObject<'a>,
     name: &str,
 ) -> Result<JClass<'a>, String> {
-    let activity_class = env
-        .get_object_class(activity)
-        .map_err(|e| format!("activity class: {:?}", e))?;
     let class_loader = env
-        .call_method(&activity_class, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+        .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
         .map_err(|e| format!("classloader: {:?}", e))?
         .l()
         .map_err(|e| format!("classloader obj: {:?}", e))?;
