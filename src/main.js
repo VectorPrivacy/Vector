@@ -1065,6 +1065,7 @@ const domSettingsChatBgInfo = document.getElementById('chat-bg-info');
 const domSettingsNotifMuteInfo = document.getElementById('notif-mute-info');
 const domSettingsNotifMuteEveryoneInfo = document.getElementById('notif-mute-everyone-info');
 const domSettingsNotifPrivacyInfo = document.getElementById('notif-privacy-info');
+const domSettingsStorageGalleryInfo = document.getElementById('storage-gallery-info');
 const domSettingsExportAccountInfo = document.getElementById('export-account-info');
 const domSettingsChangePinInfo = document.getElementById('change-pin-info');
 const domSettingsChangePinLabel = document.getElementById('change-pin-label');
@@ -11156,6 +11157,11 @@ domChatMessageInput.oninput = async () => {
         e.preventDefault();
         e.stopPropagation();
         popupConfirm('Notification Content Privacy', 'Controls how much of a message shows in OS notifications (lock screen, banners).<br><br><b>Show sender and message</b>: full preview.<br><b>Hide message</b>: shows who messaged you, not what.<br><b>Hide sender and message</b>: a generic "You received a message", revealing nothing.', true);
+    };
+    if (domSettingsStorageGalleryInfo) domSettingsStorageGalleryInfo.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm('Hide Media from Gallery', 'By default, photos and videos you receive in Vector appear in your phone\'s Gallery app.<br><br>When enabled, Vector hides its media from the Gallery (and other apps). Existing media is removed from the Gallery too. Your files stay on the device and remain visible inside Vector.', true);
     };
 
     domSettingsExportAccountInfo.onclick = (e) => {

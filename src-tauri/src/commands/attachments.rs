@@ -200,6 +200,38 @@ pub async fn share_attachment(path: String) -> Result<bool, String> {
     }
 }
 
+/// Whether Vector's saved media is currently hidden from the device gallery
+/// (Android only). Always false on desktop. Drives the Storage settings toggle.
+#[tauri::command]
+pub async fn get_gallery_hidden() -> Result<bool, String> {
+    #[cfg(target_os = "android")]
+    {
+        Ok(crate::android::storage::gallery_hidden())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Ok(false)
+    }
+}
+
+/// Hide or reveal Vector's saved media in the device gallery (Android only).
+/// No-op on desktop. Runs off the async runtime since it touches the filesystem
+/// and the MediaScanner.
+#[tauri::command]
+pub async fn set_gallery_hidden(hidden: bool) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        tokio::task::spawn_blocking(move || crate::android::storage::set_gallery_hidden(hidden))
+            .await
+            .map_err(|e| format!("join error: {:?}", e))?
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = hidden;
+        Ok(())
+    }
+}
+
 /// Reject any path that doesn't resolve to a real file inside Vector's download
 /// dir. Hardening: the open/share intents hand a content:// URI to other apps
 /// via the FileProvider (which is scoped to all external storage), so a

@@ -120,6 +120,8 @@
     "allow-leave-community",
     "allow-open-attachment",
     "allow-share-attachment",
+    "allow-get-gallery-hidden",
+    "allow-set-gallery-hidden",
     "allow-login",
     "allow-login-from-stored-key",
     "allow-connect-bunker",

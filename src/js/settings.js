@@ -1544,6 +1544,27 @@ async function initStorageSection() {
             await saveMaxAutoDownloadBytes(bytes);
         });
     }
+
+    // Hide Media from Gallery (Android only — the backend command is a no-op on
+    // desktop, and the gallery concept doesn't apply there). onchange (not
+    // addEventListener) since initStorageSection re-runs after Clear Storage.
+    const galleryGroup = document.getElementById('storage-gallery-group');
+    const galleryToggle = document.getElementById('storage-gallery-toggle');
+    if (galleryGroup && galleryToggle && platformFeatures.is_mobile) {
+        galleryGroup.style.display = '';
+        try {
+            galleryToggle.checked = await invoke('get_gallery_hidden');
+        } catch (_) {
+            galleryToggle.checked = false;
+        }
+        galleryToggle.onchange = async (e) => {
+            try {
+                await invoke('set_gallery_hidden', { hidden: e.target.checked });
+            } catch (err) {
+                console.error('set_gallery_hidden failed:', err);
+            }
+        };
+    }
 }
 
 function renderFileTypeDistribution(typeDistribution, totalBytes) {

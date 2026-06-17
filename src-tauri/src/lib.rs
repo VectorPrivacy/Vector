@@ -763,6 +763,8 @@ pub fn run() {
             commands::attachments::download_attachment,
             commands::attachments::open_attachment,
             commands::attachments::share_attachment,
+            commands::attachments::get_gallery_hidden,
+            commands::attachments::set_gallery_hidden,
             // Community commands (commands/community.rs)
             commands::community::list_communities,
             commands::community::get_community,

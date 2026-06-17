@@ -67,8 +67,66 @@ pub fn external_media_dir() -> Option<String> {
     .ok()
 }
 
+/// Path of the `.nomedia` marker in the shared media dir. Its presence tells
+/// Android's MediaScanner to skip (and evict) everything in Vector's media dir.
+fn nomedia_marker() -> std::path::PathBuf {
+    vector_core::db::get_download_dir().join(".nomedia")
+}
+
+/// True when the user has hidden Vector's media from the gallery. Device-wide by
+/// nature: the marker governs the whole shared media dir, regardless of account.
+pub fn gallery_hidden() -> bool {
+    nomedia_marker().exists()
+}
+
+/// Hide or reveal all of Vector's saved media in the gallery. Writes/removes the
+/// `.nomedia` marker, then forces a MediaScanner pass over existing files so they
+/// are evicted (hidden) or re-indexed (visible) to match the new state.
+pub fn set_gallery_hidden(hidden: bool) -> Result<(), String> {
+    let dir = vector_core::db::get_download_dir();
+    let marker = dir.join(".nomedia");
+    if hidden {
+        std::fs::write(&marker, b"").map_err(|e| format!("create .nomedia: {:?}", e))?;
+    } else if let Err(e) = std::fs::remove_file(&marker) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!("remove .nomedia: {:?}", e));
+        }
+    }
+
+    // Re-run the scanner over existing files so it re-evaluates them against the
+    // marker (raw scan — bypasses the gallery_hidden gate, since when hiding we
+    // explicitly want the scan to evict). Batched to bound JNI churn.
+    const BATCH: usize = 128;
+    let mut batch: Vec<String> = Vec::with_capacity(BATCH);
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() || path.file_name().map(|n| n == ".nomedia").unwrap_or(false) {
+                continue;
+            }
+            batch.push(path.to_string_lossy().to_string());
+            if batch.len() >= BATCH {
+                scan_files_raw(&batch);
+                batch.clear();
+            }
+        }
+    }
+    if !batch.is_empty() {
+        scan_files_raw(&batch);
+    }
+    Ok(())
+}
+
 /// Best-effort: index a file into the gallery / file managers immediately.
+/// No-op when the user has hidden Vector's media from the gallery.
 pub fn scan_file(path: &str) {
+    if gallery_hidden() {
+        return;
+    }
+    scan_file_raw(path);
+}
+
+fn scan_file_raw(path: &str) {
     let path = path.to_string();
     let _ = with_android_context(|env, activity| {
         let cls = load_class(env, activity, "io/vectorapp/VectorFiles")?;
@@ -85,7 +143,17 @@ pub fn scan_file(path: &str) {
 }
 
 /// Batch index — one scanner request + one JNI round-trip for many files.
+/// No-op when the user has hidden Vector's media from the gallery.
 fn scan_files(paths: &[String]) {
+    if paths.is_empty() || gallery_hidden() {
+        return;
+    }
+    scan_files_raw(paths);
+}
+
+/// Raw batch index — ignores the gallery-hidden gate. Used by the toggle to force
+/// the scanner to re-evaluate files against a just-changed `.nomedia` marker.
+fn scan_files_raw(paths: &[String]) {
     if paths.is_empty() {
         return;
     }
