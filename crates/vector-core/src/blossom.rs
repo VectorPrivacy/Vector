@@ -355,6 +355,17 @@ where
     if status.is_success() {
         let descriptor: BlobDescriptor = response.json().await
             .map_err(|e| format!("Failed to parse response: {}", e))?;
+        // Integrity gate: a compliant server stores our bytes verbatim, so the
+        // returned descriptor hash MUST equal what we uploaded. A mismatch means
+        // the server transformed/re-encoded the blob, which is fatal for an
+        // encrypted upload (corrupts the ciphertext). `[INTEGRITY]` marks it so
+        // the failover loop routes around the server like a hard rejection.
+        if descriptor.sha256 != hash {
+            return Err(format!(
+                "[INTEGRITY] {} transformed the upload (returned {}, expected {})",
+                server_url, descriptor.sha256, hash,
+            ));
+        }
         Ok(descriptor.url.to_string())
     } else {
         // BUD-02: X-Reason is display-only; body feeds the classifier.
@@ -422,6 +433,14 @@ where
     if status.is_success() {
         let descriptor: BlobDescriptor = response.json().await
             .map_err(|e| format!("Failed to parse response: {}", e))?;
+        // Integrity gate (see upload_attempt): reject a server that returns a
+        // different hash than we uploaded — it re-encoded the blob.
+        if descriptor.sha256 != hash {
+            return Err(format!(
+                "[INTEGRITY] {} transformed the upload (returned {}, expected {})",
+                server_url, descriptor.sha256, hash,
+            ));
+        }
         Ok(descriptor.url.to_string())
     } else {
         let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
@@ -543,7 +562,9 @@ where
                 }
                 crate::log_warn!("[Blossom Error] Upload failed to {}: {}", server_url_str, e);
                 let status = parse_status_from_error(&e);
-                if crate::blossom_capabilities::is_mime_rejection(status, &e) {
+                // `[INTEGRITY]` = server stored a different hash (transformed the
+                // blob); route around it exactly like a hard MIME rejection.
+                if e.contains("[INTEGRITY]") || crate::blossom_capabilities::is_mime_rejection(status, &e) {
                     if let Err(err) = crate::blossom_capabilities::record_rejected_mime(
                         server_url_str, mime_for_routing, is_encrypted, upload_session,
                     ) {
@@ -633,7 +654,10 @@ where
         Ok(())
     } else {
         let body = response.text().await.unwrap_or_else(|_| "<no body>".into());
-        Err(format!("Blossom DELETE returned {}: {}", status, body))
+        // "with status N" phrasing so `parse_status_from_error` can read the
+        // code (the probe uses it to detect deletion-refusal). 404 already
+        // counts as success above (blob gone = effectively deleted).
+        Err(format!("Blossom DELETE failed with status {}: {}", status, body))
     }
 }
 
@@ -779,20 +803,47 @@ where
                     }
                     continue;
                 }
-                if let Err(e) = crate::blossom_capabilities::record_accepted(
-                    server_url_str, PROBE_MIME, true, payload_size, session,
-                ) {
-                    crate::log_warn!("[Blossom Probe] record_accepted failed: {}", e);
+                // Reaching here means the upload succeeded AND the returned hash
+                // matched (upload_attempt's integrity gate) — so the server
+                // accepts our encrypted type and stores it verbatim. Final gate:
+                // it must honor BUD-01 deletion, else removing a message can't
+                // remove its blob. The probe blob is deleted either way (cleanup);
+                // a 4s budget bounds the wait, and only a definitive refusal
+                // (403/405/501) sinks the server — transient failures stay optimistic.
+                let delete_result = match extract_hash_from_blossom_url(&url) {
+                    Some(hash) => tokio::time::timeout(
+                        std::time::Duration::from_secs(4),
+                        delete_blob(signer.clone(), &parsed, hash),
+                    ).await.ok(),
+                    None => None,
+                };
+                let refuses_deletion = matches!(
+                    &delete_result,
+                    Some(Err(e)) if matches!(parse_status_from_error(e), Some(403) | Some(405) | Some(501)),
+                );
+                if refuses_deletion {
+                    if let Err(err) = crate::blossom_capabilities::record_rejected_mime(
+                        server_url_str, PROBE_MIME, true, session,
+                    ) {
+                        crate::log_warn!("[Blossom Probe] record_rejected_mime failed: {}", err);
+                    }
+                    probed += 1;
+                    crate::log_info!("[Blossom Probe] {} refuses deletion; routing around", server_url_str);
+                } else {
+                    if let Err(e) = crate::blossom_capabilities::record_accepted(
+                        server_url_str, PROBE_MIME, true, payload_size, session,
+                    ) {
+                        crate::log_warn!("[Blossom Probe] record_accepted failed: {}", e);
+                    }
+                    probed += 1;
+                    crate::log_info!("[Blossom Probe] {} validated (accepts + verbatim + deletes)", server_url_str);
                 }
-                if let Some(hash) = extract_hash_from_blossom_url(&url) {
-                    let _ = delete_blob(signer.clone(), &parsed, hash).await;
-                }
-                probed += 1;
-                crate::log_info!("[Blossom Probe] {} accepts octet-stream", server_url_str);
             }
             Ok(Err(e)) => {
                 let status = parse_status_from_error(&e);
-                if crate::blossom_capabilities::is_mime_rejection(status, &e) {
+                // `[INTEGRITY]` = the server accepted but transformed our probe
+                // blob; treat it as unsuitable, same as a hard MIME rejection.
+                if e.contains("[INTEGRITY]") || crate::blossom_capabilities::is_mime_rejection(status, &e) {
                     if !crate::blossom_servers::is_enabled_server(server_url_str) {
                         continue;
                     }
@@ -802,7 +853,7 @@ where
                         crate::log_warn!("[Blossom Probe] record_rejected_mime failed: {}", err);
                     }
                     probed += 1;
-                    crate::log_info!("[Blossom Probe] {} rejects octet-stream: {}", server_url_str, e);
+                    crate::log_info!("[Blossom Probe] {} unsuitable; routing around: {}", server_url_str, e);
                 } else {
                     // Transient — leave reputation unchanged so we re-probe later.
                     crate::log_debug!("[Blossom Probe] {} transient error (not cached): {}", server_url_str, e);

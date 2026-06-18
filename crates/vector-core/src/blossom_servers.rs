@@ -17,9 +17,9 @@ use crate::state::nostr_client;
 /// Default servers in trust order (first = first try). All verified to
 /// accept Vector's encrypted octet-stream uploads at common sizes.
 pub const DEFAULT_BLOSSOM_SERVERS: &[&str] = &[
+    "https://blossom.ditto.pub",
     "https://blossom.primal.net",
     "https://nostr.download",
-    "https://blossom.ditto.pub",
     "https://blossom.data.haus",
 ];
 
@@ -99,7 +99,7 @@ pub fn save_disabled_default_blossom_servers(urls: &[String]) -> Result<(), Stri
 }
 
 // ============================================================================
-// Resolver — defaults (minus disabled) + enabled customs, preserving order
+// Resolver — enabled customs (first) + defaults (minus disabled)
 // ============================================================================
 
 pub fn is_default_server(url: &str) -> bool {
@@ -122,17 +122,22 @@ pub fn compute_enabled_servers() -> Vec<String> {
         .map(|s| s.trim().trim_end_matches('/').to_lowercase())
         .collect();
 
+    // Enabled custom servers are tried FIRST — a user who adds their own
+    // server wants it used (self-hosted / trusted). The capability ranker
+    // (`rank_servers`) then sinks any that fail validation (won't accept our
+    // encrypted type, transform the bytes, or refuse deletion) below the
+    // defaults, so a bad custom quietly falls through to ditto/etc.
     let mut out: Vec<String> = Vec::new();
-    for d in DEFAULT_BLOSSOM_SERVERS {
-        let key = d.trim_end_matches('/').to_lowercase();
-        if !disabled_lower.contains(&key) {
-            out.push((*d).to_string());
-        }
-    }
     let customs = load_custom_blossom_servers().unwrap_or_default();
     for c in customs {
         if c.enabled {
             out.push(c.url);
+        }
+    }
+    for d in DEFAULT_BLOSSOM_SERVERS {
+        let key = d.trim_end_matches('/').to_lowercase();
+        if !disabled_lower.contains(&key) {
+            out.push((*d).to_string());
         }
     }
     out
