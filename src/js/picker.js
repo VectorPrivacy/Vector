@@ -1216,26 +1216,7 @@ function _fillPackPreviewCard(card, result) {
     const pack = result.pack;
     card.dataset.packId = pack.id;
 
-    // Up to three rows × six columns of thumbnails. The fade gradient
-    // only kicks in once the third row is starting — smaller packs sit
-    // flush so we don't fake "more below" when there isn't any.
-    const thumbs = pack.emojis.slice(0, 18);
-    for (const e of thumbs) {
-        const img = document.createElement('img');
-        bindCachedEmojiImg(img, e.url, 'emoji');
-        img.alt = `:${e.shortcode}:`;
-        img.dataset.emojiTooltip = `:${e.shortcode}:`;
-        img.className = 'emoji-pack-preview-thumb';
-        left.appendChild(img);
-    }
-    if (thumbs.length === 0) {
-        const empty = document.createElement('div');
-        empty.className = 'emoji-pack-preview-empty';
-        empty.textContent = 'Empty pack';
-        left.appendChild(empty);
-    } else if (pack.emojis.length > 12) {
-        left.classList.add('is-overflowing');
-    }
+    _buildPackPreviewThumbs(left, pack);
 
     const titleRow = document.createElement('div');
     titleRow.className = 'emoji-pack-preview-title-row';
@@ -1287,6 +1268,47 @@ function _fillPackPreviewCard(card, result) {
     actions.appendChild(btn);
 
     right.appendChild(actions);
+}
+
+/**
+ * Fill the preview card's thumbnail column. One `<canvas>` draws every thumb
+ * (a single compositor layer instead of up to 18 animated `<img>`s — the
+ * mobile-lag fix), reusing the panel's URL-keyed frame cache.
+ */
+function _buildPackPreviewThumbs(left, pack) {
+    // Mirror the stock grid's responsive column count (matches the skeleton's
+    // CSS, which drops to 5 cols ≤480px — keeps skeleton→canvas seamless).
+    const cols = window.innerWidth <= 480 ? 5 : 6;
+    // Three rows, sized to the grid's `max-height: 96px` clip. The fade only
+    // kicks in once a third row exists so small packs don't fake "more below".
+    const thumbs = pack.emojis.slice(0, cols * 3);
+
+    if (thumbs.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'emoji-pack-preview-empty';
+        empty.textContent = 'Empty pack';
+        left.appendChild(empty);
+        return;
+    }
+    if (pack.emojis.length > cols * 2) left.classList.add('is-overflowing');
+
+    // 28px thumb in a 32px row matches the stock grid's
+    // `grid-auto-rows: 28px; gap: 4px` vertical rhythm.
+    left.classList.add('is-canvas');
+    const grid = new PackCanvasGrid(pack, {
+        emojis: thumbs,
+        cols,
+        cellPx: 32,
+        thumbPx: 28,
+        gapPx: 4,
+        boxPx: 0,            // decorative grid — no hover highlight box
+        hoverScale: false,
+        selectable: false,
+        isPreview: true,
+        ioRootMargin: '200px', // decode just before the card scrolls in
+    });
+    left.appendChild(grid.canvas);
+    grid.attachVisibilityObserver(null);   // viewport-rooted
 }
 
 function _onPackPreviewCopyClick(btn, card) {
@@ -1465,33 +1487,6 @@ function _attachEmojiPackReveal() {
     mo.observe(main, { childList: true });
 }
 
-/**
- * Attach `<img>` elements to pre-laid-out emoji cells in small batches,
- * one batch per animation frame. The grid keeps its final geometry from
- * the moment cells are appended (empty spans are still 36×36 inside the
- * grid template), so this only spreads decode + compositor work, never
- * triggers a layout shift. Used as the fallback path when ImageDecoder
- * isn't available (older WKWebView / WebView2).
- */
-function _hydrateEmojiCellsStaggered(cells) {
-    if (!cells.length) return;
-    let i = 0;
-    const BATCH = 8;
-    function step() {
-        const end = Math.min(i + BATCH, cells.length);
-        for (; i < end; i++) {
-            const { span, emoji } = cells[i];
-            if (!span.isConnected) continue;
-            const img = document.createElement('img');
-            img.alt = `:${emoji.dispCode || emoji.shortcode}:`;
-            bindCachedEmojiImg(img, emoji.url, 'emoji');
-            span.appendChild(img);
-        }
-        if (i < cells.length) requestAnimationFrame(step);
-    }
-    requestAnimationFrame(step);
-}
-
 // ============================================================================
 // Canvas-batched pack rendering
 // ============================================================================
@@ -1516,7 +1511,6 @@ function _hydrateEmojiCellsStaggered(cells) {
 // decoding runs in Rust via a Tauri command and ships a single
 // PNG spritesheet per emoji over IPC. Frontend just slices the loaded
 // `<img>` into the canvas via drawImage(src, sx, sy, sw, sh, ...).
-const PACK_CANVAS_AVAILABLE = typeof invoke === 'function';
 const PACK_CANVAS_THUMB_PX = 28;
 /** Row stride. Slightly taller than the thumb's 28+pad to give rows a
  *  bit of breathing room between them, matching the stock grid's 4px
@@ -1536,6 +1530,16 @@ const PACK_CANVAS_GAP_PX = 4;
 const PACK_CANVAS_HOVER_SCALE = 1.125;
 const PACK_CANVAS_HOVER_MS = 200;
 const PACK_CANVAS_TOOLTIP_DELAY_MS = 350;
+
+// Whole-canvas redraw cap. Staggered per-cell frame flips would otherwise
+// repaint the canvas on nearly every refresh tick (up to 120Hz on ProMotion),
+// so paint cost tracks display refresh. Capping decouples it; banked time still
+// advances frames at real speed, so we drop frames rather than slow animation.
+// Imperceptible at thumb size. The slack absorbs rAF dt jitter so a 60Hz desktop
+// isn't accidentally pushed down to 30fps by a frame landing just under budget.
+const PACK_CANVAS_FPS_DESKTOP = 60;
+const PACK_CANVAS_FPS_MOBILE = 30;
+const PACK_CANVAS_FRAME_SLACK_MS = 4;
 
 // ============================================================================
 // Shared Vector tooltip (used by canvas cells, preview thumbs, inline emoji)
@@ -1725,6 +1729,10 @@ function _packCanvasTick(now) {
     _packCanvasLastTick = now;
     let anyActive = false;
     for (const section of _activeCanvasSections) {
+        // A preview card can be ripped from the DOM (message re-render) while
+        // still in the active set, before its IO reports the removal — reap it
+        // here so we don't tick a detached canvas or leak its observers.
+        if (!section.canvas.isConnected) { section.destroy(); continue; }
         if (section._advance(dt)) anyActive = true;
     }
     // Pause when nothing needs animating (all visible packs static + idle).
@@ -1744,11 +1752,15 @@ function _startPackCanvasLoop() {
     _packCanvasRafHandle = requestAnimationFrame(_packCanvasTick);
 }
 
-/** Force-stop the loop and clear active sections — used when the picker
- *  closes so we don't keep ticking under opacity:0. */
+/** Drain the panel's sections from the loop — used when the picker closes so
+ *  we don't keep ticking it under opacity:0. In-chat preview grids are left
+ *  active (they animate independently of the panel); the loop only stops once
+ *  nothing at all remains. */
 function _stopPackCanvasLoop() {
-    _activeCanvasSections.clear();
-    if (_packCanvasRafHandle) {
+    for (const s of _activeCanvasSections) {
+        if (!s.isPreview) _activeCanvasSections.delete(s);
+    }
+    if (_activeCanvasSections.size === 0 && _packCanvasRafHandle) {
         cancelAnimationFrame(_packCanvasRafHandle);
         _packCanvasRafHandle = null;
     }
@@ -1793,16 +1805,39 @@ function _drawRoundedRect(ctx, x, y, w, h, r) {
 }
 
 class PackCanvasGrid {
-    constructor(pack) {
+    // `opts` lets the same engine back two surfaces: the full emoji panel
+    // (interactive, click-to-insert, hover-scale) and the in-chat pack
+    // preview (decorative, capped thumb count, tooltip-only). Defaults
+    // reproduce the panel's exact behaviour so existing call sites are
+    // unchanged.
+    constructor(pack, opts = {}) {
         this.pack = pack;
-        this.cols = 6;
-        this.rows = Math.ceil(pack.emojis.length / this.cols) || 1;
+        this.emojis = opts.emojis || pack.emojis;
+        this.cols = opts.cols || 6;
+        this.rows = Math.ceil(this.emojis.length / this.cols) || 1;
         this.dpr = Math.min(window.devicePixelRatio || 1, 2);
+        // Row stride + drawn-thumb size are configurable so the preview can
+        // run a tighter grid (28px thumb in a 32px row) than the panel
+        // (28px thumb in a 38px row).
+        this.cellStride = opts.cellPx || PACK_CANVAS_CELL_PX;
+        this.thumbPx = opts.thumbPx || PACK_CANVAS_THUMB_PX;
+        this.gapPx = opts.gapPx != null ? opts.gapPx : PACK_CANVAS_GAP_PX;
+        this.boxPx = opts.boxPx != null ? opts.boxPx : PACK_CANVAS_BOX_PX;
+        // Behaviour flags. Panel: all on. Preview: tooltip only.
+        this.hoverScale = opts.hoverScale !== false;
+        this.hoverTooltip = opts.hoverTooltip !== false;
+        this.selectable = opts.selectable !== false;
+        this.isPreview = !!opts.isPreview;
+        // IntersectionObserver config: panel roots on `.emoji-main`; preview
+        // roots on the viewport with a margin so frames decode just before
+        // a card scrolls into view.
+        this._ioRoot = opts.ioRoot != null ? opts.ioRoot : null;
+        this._ioMargin = opts.ioRootMargin || '0px';
         // Cell dimensions are computed from the parent's width at attach
-        // time so the canvas matches the native grid's `repeat(6, 1fr)`
-        // layout instead of bunching to a fixed 216px in the centre.
-        this.cellW = PACK_CANVAS_CELL_PX;
-        this.cellH = PACK_CANVAS_CELL_PX;
+        // time so the canvas matches the native grid's `repeat(N, 1fr)`
+        // layout instead of bunching to a fixed width in the centre.
+        this.cellW = this.cellStride;
+        this.cellH = this.cellStride;
 
         const canvas = document.createElement('canvas');
         canvas.className = 'emoji-pack-canvas';
@@ -1812,8 +1847,8 @@ class PackCanvasGrid {
         this.canvas = canvas;
         this.ctx = canvas.getContext('2d');
 
-        this.frames = new Array(pack.emojis.length);
-        this.cellState = pack.emojis.map(() => ({
+        this.frames = new Array(this.emojis.length);
+        this.cellState = this.emojis.map(() => ({
             frame: 0,
             elapsed: 0,
             // Hover scale state — per-cell so concurrent enter/leave
@@ -1837,13 +1872,16 @@ class PackCanvasGrid {
         this._nextDue = 0;
         this._accumDt = 0;
         this._hasTween = false;
+        // Min ms between whole-canvas redraws (60fps desktop, 30fps mobile).
+        const isMobile = typeof platformFeatures !== 'undefined' && platformFeatures.is_mobile;
+        this._frameBudget = 1000 / (isMobile ? PACK_CANVAS_FPS_MOBILE : PACK_CANVAS_FPS_DESKTOP);
 
         // Tooltip drives the shared singleton (defined at module scope so
         // canvas cells, preview thumbs and inline custom emoji all share
         // one node + one show/hide timer).
         this._tooltipPendingIdx = -1;
 
-        for (let i = 0; i < pack.emojis.length; i++) this.dirty.add(i);
+        for (let i = 0; i < this.emojis.length; i++) this.dirty.add(i);
 
         this._installEvents();
         // Frames are decoded lazily on first visibility (see
@@ -1856,13 +1894,17 @@ class PackCanvasGrid {
         if (!parent) return;
         const cssWidth = parent.clientWidth;
         if (cssWidth <= 0) return;
-        // Match stock grid's `gap: 4px` so column positions align.
-        const cellW = (cssWidth - PACK_CANVAS_GAP_PX * (this.cols - 1)) / this.cols;
-        // Row stride stays compact (matches stock grid's vertical rhythm)
-        // even when cells get wider — keeps the panel scannable.
-        const cellH = PACK_CANVAS_CELL_PX;
+        // Match the stock grid's column gap so canvas columns land at the
+        // same x-coordinates as the native `repeat(N, 1fr)` layout.
+        const cellW = (cssWidth - this.gapPx * (this.cols - 1)) / this.cols;
+        // Row stride stays compact (matches the stock grid's vertical
+        // rhythm) even when cells get wider — keeps the grid scannable.
+        const cellH = this.cellStride;
         const cssHeight = cellH * this.rows;
-        if (Math.abs(cellW - this.cellW) < 0.5 && cellH === this.cellH) return;
+        // `canvas.width > 0` guard: skip only genuine no-op resizes. Without it
+        // a first measurement that happens to match the initial cellW/cellH
+        // guess would return before the canvas is ever sized (stays 300×150).
+        if (this.canvas.width > 0 && Math.abs(cellW - this.cellW) < 0.5 && cellH === this.cellH) return;
         this.canvas.style.height = cssHeight + 'px';
         this.canvas.width = Math.round(cssWidth * this.dpr);
         this.canvas.height = Math.round(cssHeight * this.dpr);
@@ -1875,66 +1917,77 @@ class PackCanvasGrid {
         // 'low' is visually identical at a 28px thumb (≈1:1 at dpr 2) but far
         // cheaper than 'high' on the downscale path, which runs every drawn frame.
         this.ctx.imageSmoothingQuality = 'low';
-        for (let i = 0; i < this.pack.emojis.length; i++) this.dirty.add(i);
+        for (let i = 0; i < this.emojis.length; i++) this.dirty.add(i);
         this._render();
     }
 
     _installEvents() {
-        this.canvas.addEventListener('mousemove', (e) => {
-            const idx = this._cellAtEvent(e);
-            this._setHoverCell(idx);
-            this.canvas.style.cursor = idx >= 0 ? 'pointer' : '';
-        });
-        this.canvas.addEventListener('mouseleave', () => {
-            this._setHoverCell(-1);
-            this.canvas.style.cursor = '';
-        });
-        this.canvas.addEventListener('click', (e) => {
-            const idx = this._cellAtEvent(e);
-            if (idx < 0) return;
-            e.stopPropagation();
-            _handlePackEmojiSelect(this.pack, this.pack.emojis[idx]);
-        });
+        // Hover tracking is needed for either the scale tween or the
+        // tooltip; the preview wants only the latter, the panel both.
+        if (this.hoverScale || this.hoverTooltip) {
+            this.canvas.addEventListener('mousemove', (e) => {
+                const idx = this._cellAtEvent(e);
+                this._setHoverCell(idx);
+                this.canvas.style.cursor = idx >= 0 && this.selectable ? 'pointer' : '';
+            });
+            this.canvas.addEventListener('mouseleave', () => {
+                this._setHoverCell(-1);
+                this.canvas.style.cursor = '';
+            });
+        }
+        if (this.selectable) {
+            this.canvas.addEventListener('click', (e) => {
+                const idx = this._cellAtEvent(e);
+                if (idx < 0) return;
+                e.stopPropagation();
+                _handlePackEmojiSelect(this.pack, this.emojis[idx]);
+            });
+        }
     }
 
     _setHoverCell(idx) {
         if (idx === this.hoveredIndex) return;
         const now = performance.now();
-        if (this.hoveredIndex >= 0) {
-            const prev = this.cellState[this.hoveredIndex];
-            prev.scaleFrom = prev.scale;
-            prev.scaleTarget = 1;
-            prev.scaleStart = now;
-            this.dirty.add(this.hoveredIndex);
+        if (this.hoverScale) {
+            if (this.hoveredIndex >= 0) {
+                const prev = this.cellState[this.hoveredIndex];
+                prev.scaleFrom = prev.scale;
+                prev.scaleTarget = 1;
+                prev.scaleStart = now;
+                this.dirty.add(this.hoveredIndex);
+            }
+            if (idx >= 0) {
+                const cur = this.cellState[idx];
+                cur.scaleFrom = cur.scale;
+                cur.scaleTarget = PACK_CANVAS_HOVER_SCALE;
+                cur.scaleStart = now;
+                this.dirty.add(idx);
+            }
         }
         this.hoveredIndex = idx;
-        if (idx >= 0) {
-            const cur = this.cellState[idx];
-            cur.scaleFrom = cur.scale;
-            cur.scaleTarget = PACK_CANVAS_HOVER_SCALE;
-            cur.scaleStart = now;
-            this.dirty.add(idx);
-        }
         this._scheduleTooltip(idx);
-        // A hover tween needs per-frame ticks — flag it so _advance won't skip,
-        // ensure this section is active, and (re)start the loop if it went idle.
-        this._hasTween = true;
-        _activeCanvasSections.add(this);
-        _startPackCanvasLoop();
+        // Only the scale tween needs per-frame ticks; a tooltip-only grid
+        // (preview) must not wake the rAF loop just to track the cursor.
+        if (this.hoverScale) {
+            this._hasTween = true;
+            _activeCanvasSections.add(this);
+            _startPackCanvasLoop();
+        }
     }
 
     _scheduleTooltip(idx) {
+        if (!this.hoverTooltip) return;
         this._tooltipPendingIdx = idx;
         if (idx < 0) {
             hideEmojiTooltip();
             return;
         }
-        const emoji = this.pack.emojis[idx];
+        const emoji = this.emojis[idx];
         if (!emoji) return;
         const rect = this.canvas.getBoundingClientRect();
         const col = idx % this.cols;
         const row = (idx / this.cols) | 0;
-        const cx = rect.left + col * (this.cellW + PACK_CANVAS_GAP_PX) + this.cellW / 2;
+        const cx = rect.left + col * (this.cellW + this.gapPx) + this.cellW / 2;
         const cy = rect.top + row * this.cellH;
         scheduleEmojiTooltipAt(`:${emoji.dispCode || emoji.shortcode}:`, cx, cy);
     }
@@ -1943,14 +1996,14 @@ class PackCanvasGrid {
         const rect = this.canvas.getBoundingClientRect();
         const x = e.clientX - rect.left;
         const y = e.clientY - rect.top;
-        const stride = this.cellW + PACK_CANVAS_GAP_PX;
+        const stride = this.cellW + this.gapPx;
         const col = Math.floor(x / stride);
         const row = Math.floor(y / this.cellH);
         if (col < 0 || col >= this.cols || row < 0 || row >= this.rows) return -1;
         // Reject clicks that landed in the gap itself rather than on a cell.
         if ((x - col * stride) > this.cellW) return -1;
         const idx = row * this.cols + col;
-        return idx < this.pack.emojis.length ? idx : -1;
+        return idx < this.emojis.length ? idx : -1;
     }
 
     // Decode this section's frames once, the first time it becomes visible.
@@ -1961,8 +2014,8 @@ class PackCanvasGrid {
     }
 
     _loadFrames() {
-        for (let i = 0; i < this.pack.emojis.length; i++) {
-            const url = this.pack.emojis[i].url;
+        for (let i = 0; i < this.emojis.length; i++) {
+            const url = this.emojis[i].url;
             const idx = i;
             decodePackEmojiFrames(url).then((sheet) => {
                 this.frames[idx] = sheet || null;
@@ -1984,6 +2037,9 @@ class PackCanvasGrid {
             this._ro = new ResizeObserver(() => this._resize());
             this._ro.observe(this.canvas.parentElement);
         }
+        // Explicit arg wins (panel passes `.emoji-main`); otherwise fall back
+        // to the configured root (preview: viewport).
+        const ioRoot = root != null ? root : this._ioRoot;
         if (typeof IntersectionObserver === 'undefined') {
             this._requestFrames();   // no IO to gate on — decode now
             _activeCanvasSections.add(this);
@@ -1998,9 +2054,14 @@ class PackCanvasGrid {
                     _startPackCanvasLoop();
                 } else {
                     _activeCanvasSections.delete(this);
+                    // Preview cards live in the chat log and get torn out on
+                    // message re-render; removal fires a non-intersecting entry,
+                    // so reap the grid (disconnect observers) when its canvas
+                    // has left the DOM.
+                    if (this.isPreview && !entry.target.isConnected) this.destroy();
                 }
             }
-        }, { root: root || null, threshold: 0 });
+        }, { root: ioRoot || null, rootMargin: this._ioMargin, threshold: 0 });
         this._io.observe(this.canvas);
     }
 
@@ -2011,14 +2072,18 @@ class PackCanvasGrid {
         // Settled + nothing animated → no work until a hover / frame-load wakes us.
         if (!this._hasTween && this._nextDue === Infinity) return false;
         this._accumDt += Math.max(dt, 0);
-        // Nothing due yet and no tween → bank the time and wait (loop stays alive
-        // but this is O(1), not a full per-cell scan).
-        if (!this._hasTween && this._accumDt < this._nextDue) return true;
+        // Bank the time and wait until a redraw is actually warranted (loop stays
+        // alive but this is O(1), not a full per-cell scan). The wait is the
+        // greater of the next frame flip and the FPS budget, so the canvas never
+        // repaints faster than the cap; a live hover tween redraws every budget
+        // for smooth scaling. Slack absorbs rAF dt jitter at the budget boundary.
+        const minWait = this._hasTween ? this._frameBudget : Math.max(this._nextDue, this._frameBudget);
+        if (this._accumDt < minWait - PACK_CANVAS_FRAME_SLACK_MS) return true;
 
         const effDt = this._accumDt;   // banked elapsed time (per-tick dt already clamped upstream)
         this._accumDt = 0;
         const now = performance.now();
-        const n = this.pack.emojis.length;
+        const n = this.emojis.length;
         let nextDue = Infinity;
         let hasTween = false;
 
@@ -2029,15 +2094,23 @@ class PackCanvasGrid {
             if (sheet === undefined) {
                 // Still loading — re-scan promptly so we start it the moment it lands.
                 nextDue = 0;
-            } else if (sheet && sheet.frameCount >= 2 && effDt > 0) {
-                cell.elapsed += effDt;
-                let dur = sheet.durations[cell.frame] || 100;
-                while (cell.elapsed >= dur) {
-                    cell.elapsed -= dur;
-                    cell.frame = (cell.frame + 1) % sheet.frameCount;
-                    dur = sheet.durations[cell.frame] || 100;
-                    this.dirty.add(i);
+            } else if (sheet && sheet.frameCount >= 2) {
+                // Advance frames only when real time elapsed, but ALWAYS report
+                // this animated cell's next-due time. A zero-dt tick (the first
+                // tick after re-activation resets the clock) must not be read as
+                // "nothing animated" — that stops the loop and freezes the grid,
+                // which has no hover path to wake it back up.
+                if (effDt > 0) {
+                    cell.elapsed += effDt;
+                    let dur = sheet.durations[cell.frame] || 100;
+                    while (cell.elapsed >= dur) {
+                        cell.elapsed -= dur;
+                        cell.frame = (cell.frame + 1) % sheet.frameCount;
+                        dur = sheet.durations[cell.frame] || 100;
+                        this.dirty.add(i);
+                    }
                 }
+                const dur = sheet.durations[cell.frame] || 100;
                 const rem = dur - cell.elapsed;
                 if (rem < nextDue) nextDue = rem;
             }
@@ -2064,19 +2137,21 @@ class PackCanvasGrid {
     _render() {
         if (this.dirty.size === 0) return;
         const ctx = this.ctx;
-        const thumb = PACK_CANVAS_THUMB_PX;
+        // Clamp the drawn thumb to the cell so a narrow column (small card)
+        // can't overflow into its neighbour.
+        const thumb = Math.min(this.thumbPx, this.cellW, this.cellH);
         const insetX = (this.cellW - thumb) / 2;
         const insetY = (this.cellH - thumb) / 2;
         for (const i of this.dirty) {
             const col = i % this.cols;
             const row = (i / this.cols) | 0;
-            const x = col * (this.cellW + PACK_CANVAS_GAP_PX);
+            const x = col * (this.cellW + this.gapPx);
             const y = row * this.cellH;
             const cell = this.cellState[i];
             const cx = x + this.cellW / 2;
             const cy = y + this.cellH / 2;
 
-            ctx.clearRect(x, y, this.cellW + PACK_CANVAS_GAP_PX, this.cellH + PACK_CANVAS_GAP_PX);
+            ctx.clearRect(x, y, this.cellW + this.gapPx, this.cellH + this.gapPx);
 
             // Scale around the cell centre so the thumb grows in place
             // instead of drifting toward a corner.
@@ -2093,11 +2168,11 @@ class PackCanvasGrid {
             const bgProgress = Math.max(0, Math.min(1,
                 (cell.scale - 1) / (PACK_CANVAS_HOVER_SCALE - 1),
             ));
-            if (bgProgress > 0.01) {
-                const boxX = x + (this.cellW - PACK_CANVAS_BOX_PX) / 2;
-                const boxY = y + (this.cellH - PACK_CANVAS_BOX_PX) / 2;
+            if (bgProgress > 0.01 && this.boxPx > 0) {
+                const boxX = x + (this.cellW - this.boxPx) / 2;
+                const boxY = y + (this.cellH - this.boxPx) / 2;
                 ctx.fillStyle = `rgba(255, 255, 255, ${0.10 * bgProgress})`;
-                _drawRoundedRect(ctx, boxX, boxY, PACK_CANVAS_BOX_PX, PACK_CANVAS_BOX_PX, 6);
+                _drawRoundedRect(ctx, boxX, boxY, this.boxPx, this.boxPx, 6);
                 ctx.fill();
             }
 
@@ -3781,31 +3856,12 @@ function renderEmojiPackSections() {
         if (logoEl) attachLongPressContextMenu(logoEl, fireMenu);
         section.appendChild(header);
 
-        if (PACK_CANVAS_AVAILABLE) {
-            // Canvas-batched path: one compositor layer per section instead
-            // of one per emoji. Activation is gated by IntersectionObserver
-            // so off-screen pack sections don't tick.
-            const grid = new PackCanvasGrid(pack);
-            _packCanvasGrids.set(pack.id, grid);
-            section.appendChild(grid.canvas);
-        } else {
-            // Fallback: native <img> grid (older WKWebView / WebView2).
-            const grid = document.createElement('div');
-            grid.className = 'emoji-grid emoji-pack-grid';
-            const pendingCells = [];
-            for (const emoji of pack.emojis) {
-                const span = document.createElement('span');
-                span.className = 'emoji-pack-emoji';
-                span.dataset.packShortcode = emoji.dispCode || emoji.shortcode;
-                span.dataset.packUrl = emoji.url;
-                span.dataset.packId = pack.id;
-                span.dataset.emojiTooltip = `:${emoji.dispCode || emoji.shortcode}:`;
-                grid.appendChild(span);
-                pendingCells.push({ span, emoji });
-            }
-            _hydrateEmojiCellsStaggered(pendingCells);
-            section.appendChild(grid);
-        }
+        // One compositor layer per section instead of one per emoji.
+        // Activation is gated by IntersectionObserver so off-screen pack
+        // sections don't tick.
+        const grid = new PackCanvasGrid(pack);
+        _packCanvasGrids.set(pack.id, grid);
+        section.appendChild(grid.canvas);
 
         if (anchor) {
             main.insertBefore(section, anchor);
@@ -3816,14 +3872,12 @@ function renderEmojiPackSections() {
 
     // Attach visibility observers after the section is in the DOM so
     // IntersectionObserver can compute geometry against `.emoji-main`.
-    if (PACK_CANVAS_AVAILABLE) {
-        for (const grid of _packCanvasGrids.values()) {
-            grid.attachVisibilityObserver(main);
-        }
-        // Arm the on-screen packs deterministically rather than waiting on the
-        // IO's first callback (unreliable when this runs mid-open-transition).
-        _rearmVisiblePackCanvases();
+    for (const grid of _packCanvasGrids.values()) {
+        grid.attachVisibilityObserver(main);
     }
+    // Arm the on-screen packs deterministically rather than waiting on the
+    // IO's first callback (unreliable when this runs mid-open-transition).
+    _rearmVisiblePackCanvases();
 }
 
 /**

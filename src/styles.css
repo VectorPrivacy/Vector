@@ -3914,10 +3914,6 @@ body.chat-bg-disabled .chat-messages::before {
   border-radius: 0;
 }
 
-.emoji-pack-grid {
-  /* Pack emojis are raster images: don't enlarge them like text emoji on hover. */
-}
-
 .emoji-pack-section {
   /* Off-screen pack sections skip layout + paint until they intersect
      the viewport — Vector's chatlist FPS memo explicitly favours this
@@ -5208,6 +5204,17 @@ img.emoji-img-loading {
   border-radius: 6px;
 }
 
+/* Canvas-batched variant: a single <canvas> renders the whole grid, so the
+   container drops grid layout (the canvas handles internal cell positioning
+   itself) and just clips + rounds the canvas. The overflow fade still works. */
+.emoji-pack-preview-grid.is-canvas {
+  display: block;
+}
+
+.emoji-pack-preview-grid.is-canvas .emoji-pack-canvas {
+  width: 100%;
+}
+
 /* Bottom-row fade only triggers when the grid is bursting (>= 13 thumbs =
    third row is starting). Smaller packs sit flush so we don't fake "more
    below" when there isn't any. */
@@ -5220,16 +5227,6 @@ img.emoji-img-loading {
   height: 32px;
   pointer-events: none;
   background: linear-gradient(to bottom, rgba(10, 10, 10, 0) 0%, rgba(10, 10, 10, 0.85) 100%);
-}
-
-.emoji-pack-preview-thumb {
-  width: 100%;
-  height: 100%;
-  /* `contain` (not `fill`) — preview-grid cells are wider than tall
-     (6 × 1fr columns × 28px rows), so `fill` would horizontally squash
-     every square emoji. Letterboxing inside each cell preserves the
-     emoji's true aspect ratio at preview scale. */
-  object-fit: contain;
 }
 
 .emoji-pack-preview-empty {
