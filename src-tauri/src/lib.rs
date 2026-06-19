@@ -517,6 +517,7 @@ pub fn run() {
             message::delete_own_message,
             message::is_message_deletable,
             message::get_message_delete_options,
+            message::get_message_delete_meta_bulk,
             message::cancel_upload,
             message::paste_message,
             message::file_message,

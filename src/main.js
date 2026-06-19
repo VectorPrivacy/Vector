@@ -1639,6 +1639,11 @@ function finalizePendingMessage(chatId, pendingId, eventId) {
     msg.id = eventId;
     msg.pending = false;
 
+    // Own message just landed: we know its delete-meta without a fetch (retained
+    // keys on send, never admin-hideable). Seed the real id, drop the pending one.
+    dmsgInvalidateDeleteMeta(oldId);
+    dmsgSetOwnDeleteMeta(eventId, true);
+
     // Update event cache
     if (eventCache.has(chatId)) {
         const cachedEvents = eventCache.getEvents(chatId);
@@ -2781,6 +2786,9 @@ async function setupRustListeners() {
         if (!communityId) return;
         // A control change (ban/role/mode/metadata) can move the roster — refresh the count immediately.
         refreshCommunityMemberCount(communityId, true);
+        // Roster moves can flip moderation-hide authority, so the cached delete-meta
+        // verdicts may be stale — clear them to re-resolve on next render/hover.
+        dmsgClearDeleteMetaCache();
         try {
             const summary = await invoke('get_community', { communityId });
             for (const c of arrChats) {
@@ -3501,6 +3509,11 @@ async function setupRustListeners() {
                 // the finalized id renders as a duplicate (esp. for Community sends).
                 if (evt.payload.old_id !== evt.payload.message.id) {
                     eventCache.replaceId(evt.payload.chat_id, evt.payload.old_id, evt.payload.message.id);
+                    // Carry delete-meta to the finalized id (the Community-send path that
+                    // doesn't go through finalizePendingMessage): own sends retain keys +
+                    // are never admin-hideable; drop the orphaned optimistic-id entry.
+                    dmsgInvalidateDeleteMeta(evt.payload.old_id);
+                    if (evt.payload.message.mine) dmsgSetOwnDeleteMeta(evt.payload.message.id, true);
                 }
             }
         }
@@ -5946,6 +5959,24 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
         // instead of their actual chronological neighbors
         const sortedMessages = [...arrMessages].sort((a, b) => a.at - b.at);
 
+        // Pre-load delete/hide meta for this batch in one bulk call (own → retained
+        // keys; any community msg → admin-hide authority), so the hover toolbar
+        // reads a cache instead of an IPC per hover. Desktop-only (hover toolbar).
+        if (!platformFeatures?.is_mobile) {
+            const isCommunity = chat?.chat_type === 'Community';
+            // Skip pending/failed: a pending Community message is inserted with its
+            // final id BEFORE its retained key is stored (store_message_key runs
+            // post-publish), so prefetching now would cache a premature
+            // has_retained_keys:false that never refreshes (the id doesn't change) —
+            // exactly what made fresh sends show "limited". The toolbar suppresses the
+            // delete affordance for pending/failed anyway; once sent, the key exists
+            // and a hover (or re-render) resolves it correctly.
+            const metaIds = sortedMessages
+                .filter(m => (m.mine || isCommunity) && !m.pending && !m.failed)
+                .map(m => m.id);
+            if (metaIds.length) dmsgQueueDeleteMeta(metaIds);
+        }
+
         // Track last message time for timestamp insertion
         let nLastMsgTime = null;
 
@@ -8241,6 +8272,8 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                                 if (makeAdmin) { if (!adminNpubs.includes(m.npub)) adminNpubs.push(m.npub); }
                                 else { adminNpubs = adminNpubs.filter(n => n !== m.npub); }
                                 renderMembers(searchEl?.value || '');
+                                // A rank change can flip moderation-hide verdicts — drop the toolbar cache.
+                                dmsgClearDeleteMetaCache();
                             } catch (err) {
                                 crown.style.pointerEvents = '';
                                 crown.innerHTML = '<span class="icon icon-crown"></span>';
@@ -8286,6 +8319,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                             await invoke('kick_community_member', { communityId, npub: m.npub });
                             memberList = memberList.filter(x => x.npub !== m.npub);
                             renderMembers(searchEl?.value || '');
+                            dmsgClearDeleteMetaCache();
                             // Sync the "N members" subtext (the backend recorded the leave; this re-fetches).
                             refreshCommunityMemberCount(communityId, true);
                         } catch (err) {
@@ -8314,6 +8348,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                             await invoke('ban_community_member', { communityId, npub: m.npub });
                             memberList = memberList.filter(x => x.npub !== m.npub);
                             renderMembers(searchEl?.value || '');
+                            dmsgClearDeleteMetaCache();
                             // Sync the "N members" subtext (banned members are excluded by the fold).
                             refreshCommunityMemberCount(communityId, true);
                         } catch (err) {
@@ -8384,6 +8419,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                             await invoke('unban_community_member', { communityId, npub: bnpub });
                             bannedList = bannedList.filter(x => x !== bnpub);
                             renderMembers(searchEl?.value || '');
+                            dmsgClearDeleteMetaCache();
                         } catch (err) {
                             unbanBtn.disabled = false;
                             unbanBtn.innerHTML = '<span class="icon icon-add-user"></span>Unban';

@@ -19,6 +19,88 @@ let _dmsgToolbarTarget = null;
 let _dmsgToolbarHideTimer = null;
 let _dmsgToolbarListenersAttached = false;
 
+// ── Delete-meta cache ────────────────────────────────────────────────────────
+// The delete/hide affordance needs two backend-derived flags per message:
+// `has_retained_keys` (full vs limited delete) and `can_admin_hide` (moderation
+// authority over the author). Both are stable per (sent message, current roles),
+// so we cache them by message id and bulk-load a page at a time rather than
+// fetching on every hover. The volatile bits (mine, attachments, status) the
+// toolbar reads live off the message, so they need no cache. A coalescing queue
+// folds page renders + realtime arrivals into one bulk call.
+const _dmsgDeleteMeta = new Map();          // msgId → { has_retained_keys, can_admin_hide }
+const _dmsgDeleteMetaInflight = new Set();  // ids in a running bulk fetch (dedupe)
+const _dmsgDeleteMetaQueue = new Set();     // ids awaiting the next debounced flush
+let _dmsgDeleteMetaTimer = null;
+let _dmsgDeleteMetaGen = 0;                 // bumped on clear to drop stale in-flight results
+
+/** Queue message ids for a coalesced bulk meta fetch (page render, loadMore,
+ *  realtime arrival, or a hover cache-miss). Already-cached / in-flight ids skip. */
+function dmsgQueueDeleteMeta(ids) {
+    let added = false;
+    for (const id of ids) {
+        if (!id || _dmsgDeleteMeta.has(id) || _dmsgDeleteMetaInflight.has(id)) continue;
+        _dmsgDeleteMetaQueue.add(id);
+        added = true;
+    }
+    // Flush on the next tick (0ms): a render/loadMore queues the whole page in
+    // one synchronous call, so it still coalesces into a single bulk — but it
+    // lands in ~one IPC instead of a long wait, so the meta is cached before the
+    // mouse reaches a row (otherwise the late-arriving admin-hide button widens
+    // the right-anchored toolbar and shifts the others).
+    if (added && _dmsgDeleteMetaTimer === null) {
+        _dmsgDeleteMetaTimer = setTimeout(_dmsgFlushDeleteMeta, 0);
+    }
+}
+
+async function _dmsgFlushDeleteMeta() {
+    _dmsgDeleteMetaTimer = null;
+    const ids = [..._dmsgDeleteMetaQueue];
+    _dmsgDeleteMetaQueue.clear();
+    if (!ids.length) return;
+    const gen = _dmsgDeleteMetaGen;
+    ids.forEach(id => _dmsgDeleteMetaInflight.add(id));
+    try {
+        const map = await invoke('get_message_delete_meta_bulk', { messageIds: ids }) || {};
+        // A clear during the fetch (e.g. a roster change) makes these results stale —
+        // drop them rather than re-populate the cache with a pre-change verdict.
+        if (gen !== _dmsgDeleteMetaGen) return;
+        // Absent ids (message gone) cache a benign default so we don't refetch.
+        for (const id of ids) _dmsgDeleteMeta.set(id, map[id] || { has_retained_keys: false, can_admin_hide: false });
+    } catch (_) {
+        // Leave uncached; a later hover re-queues.
+    } finally {
+        ids.forEach(id => _dmsgDeleteMetaInflight.delete(id));
+    }
+    // Refresh the open toolbar if its (still-attached) target just got (re)cached.
+    if (_dmsgToolbarTarget && _dmsgToolbarTarget.isConnected && ids.includes(_dmsgToolbarTarget.id)) {
+        showMessageToolbar(_dmsgToolbarTarget);
+    }
+}
+
+/** Own just-sent message: both flags are known without asking (retained on send,
+ *  never admin-hideable since it's ours). Called on pending→sent finalize. */
+function dmsgSetOwnDeleteMeta(msgId, hasRetainedKeys = true) {
+    if (msgId) _dmsgDeleteMeta.set(msgId, { has_retained_keys: hasRetainedKeys, can_admin_hide: false });
+}
+
+/** Drop a cache entry — e.g. the pending id superseded by the real event id. */
+function dmsgInvalidateDeleteMeta(msgId) {
+    _dmsgDeleteMeta.delete(msgId);
+    _dmsgDeleteMetaInflight.delete(msgId);
+    _dmsgDeleteMetaQueue.delete(msgId);
+}
+
+/** A role/ban change can flip `can_admin_hide`; clear so verdicts re-resolve on
+ *  next render/hover. Coarse (clears all) since the trigger is rare. */
+function dmsgClearDeleteMetaCache() {
+    _dmsgDeleteMetaGen++; // invalidate any in-flight fetch's (now pre-change) results
+    _dmsgDeleteMeta.clear();
+    _dmsgDeleteMetaInflight.clear();
+    _dmsgDeleteMetaQueue.clear();
+    // Re-resolve the open toolbar's verdict — a roster change may have flipped it.
+    if (_dmsgToolbarTarget && _dmsgToolbarTarget.isConnected) showMessageToolbar(_dmsgToolbarTarget);
+}
+
 function initMessageToolbar() {
     if (typeof domChatMessages === 'undefined' || !domChatMessages) return;
 
@@ -228,47 +310,36 @@ function showMessageToolbar(rowEl) {
     delete deleteBtn.dataset.partial;
     delete deleteBtn.dataset.hasAttachments;
     deleteBtn.style.opacity = '';
+
+    // Volatile bits are read live off the msg; the two backend-derived flags
+    // (retained keys, admin-hide authority) come from the cache. A miss queues a
+    // coalesced bulk fetch (no per-hover IPC) and refreshes this toolbar when it
+    // lands; until then own rows render optimistically full-delete.
+    const hasDeletableAttachment = !!(msg && msg.attachments && msg.attachments.some(a => a.url));
+    const meta = _dmsgDeleteMeta.get(rowEl.id);
+    // Only the cases that can actually show a delete/hide button need the backend
+    // flags: own messages (retained keys) and any community message (admin-hide).
+    // A received DM never shows one, so don't fetch for it.
+    const inCommunity = arrChats.find(c => c.id === strOpenChat)?.chat_type === 'Community';
+    if (meta === undefined && (mine || inCommunity)) dmsgQueueDeleteMeta([rowEl.id]);
+
     if (mine) {
-        // Sync reveal — the icon is always present on own rows, so
-        // there's no async pop-in. Opacity is resolved by the
-        // backend round-trip below; until then we render at full
-        // opacity (the common case) and dial it down only if the
-        // backend reports no retained keys.
+        const fullyDeletable = meta ? meta.has_retained_keys : true;
         deleteBtn.dataset.mode = 'delete';
         deleteBtn.setAttribute('aria-label', 'Delete message');
-        deleteBtn.setAttribute('title', 'Delete message');
+        deleteBtn.setAttribute('title', fullyDeletable ? 'Delete message' : 'Delete message (limited)');
+        deleteBtn.style.opacity = fullyDeletable ? '' : '0.45';
+        deleteBtn.dataset.partial = fullyDeletable ? '' : '1';
+        deleteBtn.dataset.hasAttachments = hasDeletableAttachment ? '1' : '';
+        deleteBtn.hidden = false;
+    } else if (meta && meta.can_admin_hide) {
+        // Not ours but we hold moderation authority over the author (the early
+        // return above already suppressed the toolbar in a dissolved community).
+        deleteBtn.dataset.mode = 'hide';
+        deleteBtn.setAttribute('aria-label', 'Hide message');
+        deleteBtn.setAttribute('title', 'Hide message');
         deleteBtn.hidden = false;
     }
-    const targetId = rowEl.id;
-    invoke('get_message_delete_options', { messageId: targetId }).then(opts => {
-        // Bail if the toolbar moved on — async hop may resolve
-        // after hover ends.
-        if (_dmsgToolbarTarget !== rowEl) return;
-        let widthChanged = false;
-        if (opts.mine) {
-            // Reduced opacity when full network deletion isn't
-            // available (no retained keys). The icon stays clickable
-            // — the popup explains what will and won't happen.
-            const fullyDeletable = opts.has_retained_keys;
-            deleteBtn.style.opacity = fullyDeletable ? '' : '0.45';
-            deleteBtn.dataset.partial = fullyDeletable ? '' : '1';
-            deleteBtn.dataset.hasAttachments = opts.has_attachments ? '1' : '';
-            const tip = fullyDeletable
-                ? 'Delete message'
-                : 'Delete message (limited)';
-            deleteBtn.setAttribute('title', tip);
-        } else if (opts.can_admin_hide) {
-            deleteBtn.dataset.mode = 'hide';
-            deleteBtn.setAttribute('aria-label', 'Hide message');
-            deleteBtn.setAttribute('title', 'Hide message');
-            if (deleteBtn.hidden) widthChanged = true;
-            deleteBtn.hidden = false;
-        }
-        // Width changed only when admin-hide reveals an icon that
-        // wasn't there at sync time. Mine rows already had the icon
-        // at sync time, so no reposition needed there.
-        if (widthChanged) _dmsgPositionToolbar(rowEl);
-    }).catch(() => {/* opacity stays default for own messages */});
 
     _dmsgPositionToolbar(rowEl);
 }

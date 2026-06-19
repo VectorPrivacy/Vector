@@ -147,8 +147,9 @@ pub struct MessageDeleteOptions {
     /// Message has at least one Blossom-uploaded attachment we can
     /// delete from the storage server even without retained wrap keys.
     pub has_attachments: bool,
-    /// Not our message, but we have moderation authority over it (Community owner) — show a
-    /// "Hide" affordance that permanently cooperative-hides it for everyone.
+    /// Not our message, but we have moderation authority over it (Community owner or
+    /// an admin with MANAGE_MESSAGES who outranks the author) — show a "Hide"
+    /// affordance that permanently cooperative-hides it for everyone.
     pub can_admin_hide: bool,
 }
 
@@ -231,6 +232,117 @@ pub async fn get_message_delete_options(message_id: String) -> Result<MessageDel
 pub async fn is_message_deletable(message_id: String) -> Result<bool, String> {
     let opts = get_message_delete_options(message_id).await?;
     Ok(opts.mine)
+}
+
+/// The two backend-derived delete flags (the rest — `mine`, `has_attachments`,
+/// pending/failed/download state — the toolbar reads live off the message).
+#[derive(serde::Serialize)]
+pub struct DeleteMeta {
+    pub has_retained_keys: bool,
+    pub can_admin_hide: bool,
+}
+
+/// Bulk variant of the backend half of `get_message_delete_options`: resolves
+/// `has_retained_keys` + `can_admin_hide` for a page of messages in one call, so
+/// the toolbar reads them from a frontend cache instead of an IPC per hover.
+/// One STATE lock collects per-message context; the per-community load is
+/// memoised across the batch (a page is usually one community).
+#[tauri::command]
+pub async fn get_message_delete_meta_bulk(
+    message_ids: Vec<String>,
+) -> Result<std::collections::HashMap<String, DeleteMeta>, String> {
+    use nostr_sdk::EventId;
+    use std::collections::HashMap;
+    use vector_core::ChatType;
+
+    struct Ctx {
+        chat_type: ChatType,
+        chat_id: String,
+        mine: bool,
+        author: Option<String>,
+    }
+    // One lock: snapshot the context for every requested id, then release before
+    // the DB-bound authority/key lookups.
+    let ctxs: HashMap<String, Ctx> = {
+        let state = STATE.lock().await;
+        message_ids
+            .iter()
+            .filter_map(|id| {
+                state.find_message(id).map(|(chat, msg)| {
+                    (
+                        id.clone(),
+                        Ctx {
+                            chat_type: chat.chat_type.clone(),
+                            chat_id: chat.id.clone(),
+                            mine: msg.mine,
+                            author: msg.npub.clone(),
+                        },
+                    )
+                })
+            })
+            .collect()
+    };
+
+    let me_pk = vector_core::state::my_public_key();
+    // Memoise community loads across the batch (channel_id → loaded community).
+    let mut community_cache: HashMap<String, Option<vector_core::community::Community>> = HashMap::new();
+    let mut out = HashMap::with_capacity(ctxs.len());
+
+    for (id, ctx) in ctxs {
+        // Moderation-hide authority (same gate as the publish path) — owner-exempt,
+        // strict outrank, MANAGE_MESSAGES. Only ever true on someone else's
+        // Community message.
+        let can_admin_hide = !ctx.mine
+            && matches!(ctx.chat_type, ChatType::Community)
+            && match (ctx.author.as_deref(), &me_pk) {
+                (Some(author_hex), Some(me)) => {
+                    let community = community_cache
+                        .entry(ctx.chat_id.clone())
+                        .or_insert_with(|| {
+                            vector_core::db::community::community_id_for_channel(&ctx.chat_id)
+                                .ok()
+                                .flatten()
+                                .and_then(|cid| {
+                                    let bytes = vector_core::simd::hex::hex_to_bytes_32(&cid);
+                                    vector_core::db::community::load_community(
+                                        &vector_core::community::CommunityId(bytes),
+                                    )
+                                    .ok()
+                                    .flatten()
+                                })
+                        });
+                    community
+                        .as_ref()
+                        .map(|c| {
+                            vector_core::community::service::can_moderation_hide(
+                                c,
+                                &me.to_hex(),
+                                author_hex,
+                            )
+                        })
+                        .unwrap_or(false)
+                }
+                _ => false,
+            };
+
+        let has_retained_keys = if ctx.mine {
+            match ctx.chat_type {
+                ChatType::DirectMessage => EventId::from_hex(&id)
+                    .ok()
+                    .and_then(|rid| vector_core::db::nip17_keys::has_wrap_keys_for_rumor(&rid).ok())
+                    .unwrap_or(false),
+                ChatType::Community => vector_core::db::community::get_message_key(&id)
+                    .map(|k| k.is_some())
+                    .unwrap_or(false),
+            }
+        } else {
+            false
+        };
+
+        out.insert(id, DeleteMeta { has_retained_keys, can_admin_hide });
+    }
+
+    Ok(out)
 }
 
 /// Delete an outbound DM from the network *and* locally.
