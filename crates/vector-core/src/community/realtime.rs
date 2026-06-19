@@ -198,7 +198,15 @@ pub async fn dispatch_event(
     };
     let chat_id = channel.id.to_hex();
     match outcome {
-        Some(inbound::IncomingEvent::NewMessage(msg)) => {
+        Some(inbound::IncomingEvent::NewMessage(mut msg)) => {
+            // Resolve the reply preview (content/npub) from the DB before emitting,
+            // mirroring the DM realtime path. The replied-to message is often an
+            // older one that's persisted but outside the in-memory window; without
+            // this the recipient's live render finds no in-memory target and the
+            // reply shows as a plain message with no context.
+            if !msg.replied_to.is_empty() {
+                let _ = crate::db::events::populate_reply_context(&mut msg).await;
+            }
             let _ = crate::db::events::save_message(&chat_id, &msg).await;
             handler.on_community_message(&chat_id, &msg, true);
         }
