@@ -65,6 +65,7 @@ pub mod blossom_servers;
 pub mod blossom_capabilities;
 pub mod inbox_relays;
 pub mod emoji_packs;
+pub mod emoji_usage;
 pub mod badges;
 pub mod webxdc;
 #[cfg(feature = "tor")]

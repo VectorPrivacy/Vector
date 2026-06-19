@@ -37,6 +37,39 @@ pub async fn fetch_emoji_pack_by_naddr(naddr: String) -> Result<EmojiPack, Strin
     emoji_packs::fetch_pack_by_naddr(&naddr).await
 }
 
+/// Record one use of an emoji (stock unicode or custom pack emoji) into the
+/// active account's frecency store. Fire-and-forget from the frontend on every
+/// emoji selection. `kind` is "unicode" | "custom"; `url` is the pack image for
+/// customs. Fully synchronous (load+save), so it operates on whatever the
+/// current account is — no captured-npub staleness to guard.
+#[tauri::command]
+pub async fn bump_emoji_usage(kind: String, id: String, url: Option<String>) -> Result<(), String> {
+    if crate::account_manager::get_current_account().is_err() {
+        return Ok(()); // no account → silently skip (fire-and-forget)
+    }
+    vector_core::emoji_usage::bump(&kind, &id, url.as_deref())
+}
+
+/// Record every distinct emoji of one sent message in a single load+save.
+/// Called once per message (not per emoji) so a 10-emoji message is one IPC.
+#[tauri::command]
+pub async fn bump_emoji_usage_batch(entries: Vec<vector_core::emoji_usage::EmojiUse>) -> Result<(), String> {
+    if crate::account_manager::get_current_account().is_err() {
+        return Ok(());
+    }
+    vector_core::emoji_usage::bump_batch(&entries)
+}
+
+/// Ranked emoji usage (highest decayed-frecency first) for the active account,
+/// powering the picker's "recently used" row. `limit` caps the returned set.
+#[tauri::command]
+pub async fn get_emoji_usage(limit: Option<usize>) -> Result<Vec<vector_core::emoji_usage::EmojiUsageEntry>, String> {
+    if crate::account_manager::get_current_account().is_err() {
+        return Ok(Vec::new());
+    }
+    Ok(vector_core::emoji_usage::ranked(limit))
+}
+
 /// Resolve the active theme's pinned pack cache-first: returns the persisted
 /// copy instantly (refreshing in the background) or fetches + persists on a
 /// cache miss. Returns null if uncached and not found on relays.

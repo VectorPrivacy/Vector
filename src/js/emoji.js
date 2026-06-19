@@ -1935,7 +1935,6 @@ const arrEmojis = [
 ];
 
 let arrFavoriteEmojis = JSON.parse(localStorage.getItem('favoriteEmojis') || '[]');
-let arrRecentEmojis = JSON.parse(localStorage.getItem('recentEmojis') || '[]');
 
 // Apply some runtime changes to our EmojiDEX
 for (cEmoji of arrEmojis) {
@@ -2121,7 +2120,10 @@ const USAGE_SCORE_WEIGHT = 0.5;
 
 /** Return our most used emojis */
 function getMostUsedEmojis() {
-    return arrEmojis.sort((a, b) => b.used - a.used);
+    // Copy before sorting — `arrEmojis` is the master, category-ordered list the
+    // "All" grid renders from; sorting it in place would scramble that order now
+    // that `.used` carries real (hydrated) frecency scores instead of zeros.
+    return [...arrEmojis].sort((a, b) => b.used - a.used);
 }
 
 /**
@@ -2240,16 +2242,6 @@ function twemojify(domElement, opts) {
             cutoff.style.display = prev;
         }, { once: true });
     }
-}
-
-function addToRecentEmojis(emoji) {
-  // Remove if already exists
-  arrRecentEmojis = arrRecentEmojis.filter(e => e.emoji !== emoji.emoji);
-  // Add to beginning
-  arrRecentEmojis.unshift(emoji);
-  // Keep only last 20
-  arrRecentEmojis = arrRecentEmojis.slice(0, 20);
-  localStorage.setItem('recentEmojis', JSON.stringify(arrRecentEmojis));
 }
 
 function toggleFavoriteEmoji(emoji) {

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-bump-emoji-usage"
+description = "Enables the bump_emoji_usage command without any pre-configured scope."
+commands.allow = ["bump_emoji_usage"]
+
+[[permission]]
+identifier = "deny-bump-emoji-usage"
+description = "Denies the bump_emoji_usage command without any pre-configured scope."
+commands.deny = ["bump_emoji_usage"]

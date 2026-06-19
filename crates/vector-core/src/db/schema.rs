@@ -686,5 +686,29 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // Migration 44: Per-account emoji "frecency" (most-used) table.
+    // =========================================================================
+    // `score` is a time-weighted log-space value: each use adds
+    // 2^((t-EPOCH)/half_life), so ranking is a plain `ORDER BY score DESC` (the
+    // uniform decay factor cancels) — no per-row decay math at read time. `kind`:
+    // 0=unicode, 1=custom. WITHOUT ROWID + (kind,id) PK so a reuse is an in-place
+    // upsert (one row per emoji), not an append.
+    run_atomic_migration(conn, 44, "Create emoji_usage table", |tx| {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS emoji_usage (
+                kind      INTEGER NOT NULL,
+                id        TEXT    NOT NULL,
+                url       TEXT,
+                score     REAL    NOT NULL,
+                last_used INTEGER NOT NULL,
+                PRIMARY KEY (kind, id)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_emoji_usage_score
+                ON emoji_usage(score DESC);",
+        )
+        .map_err(|e| format!("Failed to create emoji_usage table: {}", e))?;
+        Ok(())
+    })?;
+
     Ok(())
 }

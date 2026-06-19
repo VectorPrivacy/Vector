@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-emoji-usage"
+description = "Enables the get_emoji_usage command without any pre-configured scope."
+commands.allow = ["get_emoji_usage"]
+
+[[permission]]
+identifier = "deny-get-emoji-usage"
+description = "Denies the get_emoji_usage command without any pre-configured scope."
+commands.deny = ["get_emoji_usage"]

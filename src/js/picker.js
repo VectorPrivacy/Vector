@@ -13,7 +13,7 @@
  *
  * Cross-file dependencies (resolved at call time via classic-script scope):
  *   - emoji.js   — arrEmojis, arrFavoriteEmojis, searchEmojis, getMostUsedEmojis,
- *                  addToRecentEmojis, toggleFavoriteEmoji
+ *                  toggleFavoriteEmoji
  *   - twemoji    — twemojify
  *   - main.js    — domChatMessageInput, domChatMessageInputEmoji,
  *                  domChatMessageInputSend, domChatMessageInputFile,
@@ -113,8 +113,14 @@ function openEmojiPanel(e) {
         // AFTER the panel's first visible paint. Double rAF: the outer fires in
         // the same frame the .visible style lands (transition starts), the inner
         // fires the frame after (content fills in, ~16ms into the 300ms slide). ---
-        requestAnimationFrame(() => requestAnimationFrame(() => {
+        requestAnimationFrame(() => requestAnimationFrame(async () => {
             // Bail if the panel was closed again before this fired.
+            if (!picker.classList.contains('visible')) return;
+
+            // Hydrate recents/search ranking from the per-account usage store
+            // (fast IPC; also picks up the active account after a swap). Re-check
+            // visibility after the await in case the panel closed meanwhile.
+            await loadEmojiUsage();
             if (!picker.classList.contains('visible')) return;
 
             resetEmojiPicker();
@@ -570,37 +576,115 @@ function _escapeAttr(s) {
     return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// ----- Custom emoji usage counters --------------------------------------------
-// Stock emojis track `used` directly on `arrEmojis` entries; custom emojis
-// don't live there, so we keep our own shortcode→count map in localStorage.
-// Used to promote frequently-used custom emojis ahead of stock unicode in
-// the search merge.
+// ----- Emoji usage (frecency) -------------------------------------------------
+// Persisted per-account in the backend (vector-core `emoji_usage`). Replaces the
+// old per-origin localStorage counters, which didn't survive production restarts
+// (WKWebView localStorage on the app scheme is ephemeral) and leaked across
+// accounts. Ranking is decayed frecency, computed backend-side; the picker just
+// hydrates the in-memory signals it reads synchronously — stock `arrEmojis[].used`
+// and a custom shortcode→score map — on each panel open, and bumps on selection.
 
-const CUSTOM_EMOJI_USAGE_KEY = 'vector_custom_emoji_usage';
-let _customEmojiUsageCache = null;
+/** Mirror of the backend SCORE_CAP so optimistic local bumps don't overshoot. */
+const EMOJI_USAGE_CAP = 25;
 
-function _customEmojiUsageMap() {
-    if (_customEmojiUsageCache) return _customEmojiUsageCache;
-    try {
-        const raw = localStorage.getItem(CUSTOM_EMOJI_USAGE_KEY);
-        _customEmojiUsageCache = raw ? JSON.parse(raw) : {};
-    } catch (_) {
-        _customEmojiUsageCache = {};
+/** Custom shortcode → frecency score, hydrated from the backend on open. */
+let _customUsageScores = {};
+
+/** Lazy emoji-char → `arrEmojis` entry map, so usage hydration/bumps are O(1)
+ *  instead of a linear scan of ~1.9k entries on every panel open. */
+let _emojiByChar = null;
+function _emojiEntryByChar(char) {
+    if (!_emojiByChar) {
+        _emojiByChar = new Map();
+        for (const e of arrEmojis) _emojiByChar.set(e.emoji, e);
     }
-    return _customEmojiUsageCache;
+    return _emojiByChar.get(char);
+}
+
+/** Pull the active account's ranked usage and hydrate the synchronous signals
+ *  the picker reads (stock `.used` + the custom score map). Cheap (≤256 rows),
+ *  run on each open so it reflects the current account + latest persisted use. */
+async function loadEmojiUsage() {
+    let entries = [];
+    try {
+        entries = await invoke('get_emoji_usage', { limit: 256 }) || [];
+    } catch (_) { entries = []; }
+    for (const e of arrEmojis) e.used = 0;
+    _customUsageScores = {};
+    for (const u of entries) {
+        if (u.kind === 'unicode') {
+            const e = _emojiEntryByChar(u.id);
+            if (e) e.used = u.score;
+        } else if (u.kind === 'custom') {
+            _customUsageScores[u.id] = u.score;
+        }
+    }
+}
+
+/** Record one emoji use: persist to the per-account backend store (fire-and-
+ *  forget) and optimistically bump the in-memory signal so the recents row and
+ *  search reflect it before the next reload. `kind` is 'unicode' | 'custom'. */
+function bumpEmojiUsage(kind, id, url) {
+    if (!id) return;
+    invoke('bump_emoji_usage', { kind, id, url: url || null }).catch(() => {});
+    if (kind === 'unicode') {
+        const e = _emojiEntryByChar(id);
+        if (e) e.used = Math.min(EMOJI_USAGE_CAP, (e.used || 0) + 1);
+    } else {
+        _customUsageScores[id] = Math.min(EMOJI_USAGE_CAP, (_customUsageScores[id] || 0) + 1);
+    }
 }
 
 function _customEmojiUsage(shortcode) {
-    return _customEmojiUsageMap()[shortcode] || 0;
+    return _customUsageScores[shortcode] || 0;
 }
 
-function bumpCustomEmojiUsage(shortcode) {
-    if (!shortcode) return;
-    const map = _customEmojiUsageMap();
-    map[shortcode] = (map[shortcode] || 0) + 1;
+/** Batched usage record for a sent message: persist all its distinct emojis in
+ *  ONE IPC (one backend load+save) and optimistically bump each locally. */
+function bumpEmojiUsageBatch(entries) {
+    if (!Array.isArray(entries) || entries.length === 0) return;
+    invoke('bump_emoji_usage_batch', { entries }).catch(() => {});
+    for (const e of entries) {
+        if (e.kind === 'unicode') {
+            const m = _emojiEntryByChar(e.id);
+            if (m) m.used = Math.min(EMOJI_USAGE_CAP, (m.used || 0) + 1);
+        } else if (e.kind === 'custom') {
+            _customUsageScores[e.id] = Math.min(EMOJI_USAGE_CAP, (_customUsageScores[e.id] || 0) + 1);
+        }
+    }
+}
+
+/** Extract the DISTINCT emojis from a sent message for frecency tracking: stock
+ *  unicode (grapheme-scanned against our dataset) + custom `:shortcode:` literals
+ *  resolving to a subscribed pack. Each unique emoji counts once per message —
+ *  repetition ACROSS messages over time is the meaningful signal, not within one. */
+function extractMessageEmojis(text) {
+    if (!text) return [];
+    const out = [];
+    const seen = new Set();
     try {
-        localStorage.setItem(CUSTOM_EMOJI_USAGE_KEY, JSON.stringify(map));
-    } catch (_) {}
+        const seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+        for (const part of seg.segment(text)) {
+            const ch = part.segment;
+            if (emojiDataSet.has(ch) && !seen.has('u:' + ch)) {
+                seen.add('u:' + ch);
+                out.push({ kind: 'unicode', id: ch, url: null });
+            }
+        }
+    } catch (_) { /* Intl.Segmenter unavailable → skip stock extraction */ }
+    const re = /:([a-zA-Z0-9_~+-]+):/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+        const code = m[1];
+        if (seen.has('c:' + code)) continue;
+        let url = null;
+        for (const pack of (arrEmojiPacks || [])) {
+            const hit = pack.emojis && pack.emojis.find(x => (x.dispCode || x.shortcode) === code);
+            if (hit) { url = hit.url; break; }
+        }
+        if (url) { seen.add('c:' + code); out.push({ kind: 'custom', id: code, url }); }
+    }
+    return out;
 }
 
 /** Custom-emoji equivalent of `getMostUsedEmojis()`. Hydrates each
@@ -610,7 +694,7 @@ function bumpCustomEmojiUsage(shortcode) {
  *  dropped silently (subscription was removed; the recents shouldn't
  *  point at packs that no longer exist). */
 function getMostUsedCustomEmojis(limit) {
-    const map = _customEmojiUsageMap();
+    const map = _customUsageScores;
     if (!arrEmojiPacks || !arrEmojiPacks.length) return [];
     const out = [];
     const seen = new Set();
@@ -3733,7 +3817,6 @@ function _handlePackEmojiSelect(pack, emoji) {
     // Insert the disambiguated code (`love~2`) so duplicate-name emojis resolve
     // to the exact image the user clicked.
     const code = emoji.dispCode || emoji.shortcode;
-    bumpCustomEmojiUsage(code);
     if (strCurrentReactionReference) {
         const literal = `:${code}:`;
         if (!_userAlreadyReacted(literal)) {
@@ -4233,7 +4316,6 @@ picker.addEventListener('click', (e) => {
     const shortcode = span.dataset.packShortcode;
     if (!shortcode) return;
 
-    bumpCustomEmojiUsage(shortcode);
     if (strCurrentReactionReference) {
         const url = span.dataset.packUrl;
         const literal = `:${shortcode}:`;
@@ -4257,9 +4339,6 @@ picker.addEventListener('click', (e) => {
         const cEmoji = arrEmojis.find(e => e.emoji === char);
 
         if (cEmoji) {
-            // Register usage
-            cEmoji.used++;
-            addToRecentEmojis(cEmoji);
 
             // Handle the emoji selection
             if (strCurrentReactionReference) {
@@ -4330,7 +4409,6 @@ emojiSearch.onkeydown = async (e) => {
         // it here first.
         const packShortcode = emojiElement.dataset.packShortcode;
         if (packShortcode) {
-            bumpCustomEmojiUsage(packShortcode);
             if (strCurrentReactionReference && _userAlreadyReacted(`:${packShortcode}:`)) {
                 // already reacted — just dismiss below
             } else if (strCurrentReactionReference) {
@@ -4352,8 +4430,6 @@ emojiSearch.onkeydown = async (e) => {
         const cEmoji = arrEmojis.find(a => a.emoji === emojiElement.dataset.emoji);
         if (!cEmoji) return;
 
-        cEmoji.used++;
-        addToRecentEmojis(cEmoji);
 
         // If this is a Reaction - use the original reaction handling
         if (strCurrentReactionReference && _userAlreadyReacted(cEmoji.emoji)) {
@@ -4456,7 +4532,6 @@ picker.addEventListener('click', (e) => {
         // Register the click in the emoji-dex
         const cEmoji = arrEmojis.find(a => a.emoji === e.target.alt);
         if (!cEmoji) return; // not a stock emoji IMG (pack image, logo, etc.)
-        cEmoji.used++;
 
         // If this is a Reaction - let's send it! (Skip if the user has
         // already reacted with this emoji; one reaction per emoji per author.)
