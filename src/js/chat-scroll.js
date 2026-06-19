@@ -80,6 +80,28 @@ function correctScrollForMediaLoad() {
 }
 
 /**
+ * Re-pin / position-correct the chat after an in-chat element grows or shrinks
+ * once its row is already laid out: media finishing load, an emoji-pack preview
+ * resolving its canvas height, the "New" unread divider being inserted, etc.
+ *
+ * Same three branches the media-load path uses, so every resizable element
+ * behaves identically:
+ *  - inside the open window  → snap to bottom (user just opened, expects bottom)
+ *  - back-paging older history → keep the visual anchor (don't snap away)
+ *  - steady-state            → soft scroll only if the user is still pinned
+ */
+function compensateChatScrollForResize() {
+    if (!domChatMessages) return;
+    if (chatOpenTimestamp && Date.now() - chatOpenTimestamp < 100) {
+        scrollToBottom(domChatMessages, false);
+    } else if (proceduralScrollState.isLoadingOlderMessages) {
+        correctScrollForMediaLoad();
+    } else {
+        softChatScroll();
+    }
+}
+
+/**
  * Handle procedural scroll loading of older messages
  */
 function handleProceduralScroll() {

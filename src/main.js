@@ -7650,7 +7650,12 @@ async function openChat(contact) {
             }
             if (firstUnread) {
                 const node = document.getElementById(firstUnread.id);
-                if (node) insertUnreadDivider(node);
+                if (node) {
+                    insertUnreadDivider(node);
+                    // The divider lands above a message after updateChat already
+                    // pinned to bottom, so its height bumps us off. Re-pin.
+                    compensateChatScrollForResize();
+                }
             }
         }
     }

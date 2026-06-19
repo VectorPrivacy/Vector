@@ -1294,6 +1294,7 @@ function _fillPackPreviewCard(card, result) {
     if (result.state === 'err') {
         card.classList.add('is-error');
         right.innerHTML = `<div class="emoji-pack-preview-title-row"><span class="emoji-pack-preview-title">Pack unavailable</span></div><div class="emoji-pack-preview-desc">${_escapeAttr(result.error || 'Failed to fetch')}</div>`;
+        if (domChatMessages?.contains(card)) compensateChatScrollForResize();
         return;
     }
 
@@ -1352,6 +1353,10 @@ function _fillPackPreviewCard(card, result) {
     actions.appendChild(btn);
 
     right.appendChild(actions);
+
+    // The grid resolves its canvas height now (up to 3 rows), well after the
+    // open-scroll. Re-pin so a tall pack doesn't bump the user off the bottom.
+    if (domChatMessages?.contains(card)) compensateChatScrollForResize();
 }
 
 /**

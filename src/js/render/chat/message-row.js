@@ -738,13 +738,7 @@ function _dmsgRenderImageAttachment(target, msg, sender, isGroupChat, cAttachmen
         // Bail if the row was detached during a chat-switch; firing scroll
         // adjustments against the new chat's viewport would be a regression.
         if (!imgPreview.isConnected) return;
-        if (chatOpenTimestamp && Date.now() - chatOpenTimestamp < 100) {
-            scrollToBottom(domChatMessages, false);
-        } else if (proceduralScrollState.isLoadingOlderMessages) {
-            correctScrollForMediaLoad();
-        } else {
-            softChatScroll();
-        }
+        compensateChatScrollForResize();
     }, { once: true });
     attachImagePreview(imgPreview);
     imgContainer.appendChild(imgPreview);
@@ -756,13 +750,7 @@ function _dmsgRenderVideoAttachment(target, cAttachment) {
     const handleMetadataLoaded = (video) => {
         if (!video.isConnected) return;
         video.currentTime = 0.1;
-        if (chatOpenTimestamp && Date.now() - chatOpenTimestamp < 100) {
-            scrollToBottom(domChatMessages, false);
-        } else if (proceduralScrollState.isLoadingOlderMessages) {
-            correctScrollForMediaLoad();
-        } else {
-            softChatScroll();
-        }
+        compensateChatScrollForResize();
     };
 
     const vidPreview = document.createElement('video');
