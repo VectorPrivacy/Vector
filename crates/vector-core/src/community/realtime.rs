@@ -227,6 +227,11 @@ pub async fn dispatch_event(
             let _ = crate::db::events::delete_event(&target_id).await;
             handler.on_community_removed(&chat_id, &target_id);
         }
+        Some(inbound::IncomingEvent::ReactionRemoved { message_id, reaction_id, message }) => {
+            // Drop the reaction's kind-7 row (save is additive) and refresh the parent's chips.
+            let _ = crate::db::events::delete_event(&reaction_id).await;
+            handler.on_community_update(&chat_id, &message_id, &message);
+        }
         Some(inbound::IncomingEvent::Presence { npub, joined, event_id, created_at, invited_by, invited_label }) => {
             handler.on_community_presence(
                 &chat_id, &npub, joined, &event_id, created_at,

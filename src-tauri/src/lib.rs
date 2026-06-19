@@ -788,6 +788,7 @@ pub fn run() {
             commands::community::sync_community_channel,
             commands::community::sync_communities_boot,
             commands::community::delete_community_message,
+            commands::community::revoke_reaction,
             commands::community::react_to_community_message,
             commands::community::edit_community_message,
             commands::community::invite_to_community,

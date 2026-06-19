@@ -835,6 +835,38 @@ impl ChatState {
         Some((chat_id, added))
     }
 
+    /// Locate a reaction by its event id across all chats.
+    /// Returns `(chat_id, parent_message_id, author_npub, is_community)`.
+    pub fn find_reaction(&self, reaction_id: &str) -> Option<(String, String, String, bool)> {
+        if reaction_id.is_empty() { return None; }
+        let target = crate::simd::hex::hex_to_bytes_32(reaction_id);
+        for chat in &self.chats {
+            for msg in chat.iter_compact() {
+                if let Some(r) = msg.reactions.iter().find(|r| r.id == target) {
+                    let author = self.interner.resolve(r.author_idx).unwrap_or("").to_string();
+                    return Some((chat.id.clone(), msg.id_hex(), author, chat.is_community()));
+                }
+            }
+        }
+        None
+    }
+
+    /// Remove a reaction from its parent message. Returns `(chat_id, updated Message)`
+    /// for the UI refresh, or `None` if the reaction wasn't present.
+    pub fn remove_reaction_from_message(&mut self, message_id: &str, reaction_id: &str) -> Option<(String, Message)> {
+        if message_id.is_empty() { return None; }
+        let chat_idx = self.chats.iter().position(|chat| chat.has_message(message_id))?;
+        let removed = self.chats[chat_idx]
+            .get_compact_message_mut(message_id)
+            .map(|m| m.remove_reaction(reaction_id))
+            .unwrap_or(false);
+        if !removed { return None; }
+        let chat_id = self.chats[chat_idx].id.clone();
+        self.chats[chat_idx]
+            .get_compact_message(message_id)
+            .map(|m| (chat_id, m.to_message(&self.interner)))
+    }
+
     pub fn remove_message(&mut self, message_id: &str) -> Option<(String, Message)> {
         if message_id.is_empty() { return None; }
         for chat in &mut self.chats {

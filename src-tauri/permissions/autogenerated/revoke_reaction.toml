@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-revoke-reaction"
+description = "Enables the revoke_reaction command without any pre-configured scope."
+commands.allow = ["revoke_reaction"]
+
+[[permission]]
+identifier = "deny-revoke-reaction"
+description = "Denies the revoke_reaction command without any pre-configured scope."
+commands.deny = ["revoke_reaction"]

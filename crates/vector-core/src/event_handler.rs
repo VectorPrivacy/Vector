@@ -372,7 +372,14 @@ pub async fn commit_prepared_event(
                     true
                 }
                 RumorProcessingResult::DeletionRequest { target_event_id } => {
-                    commit_deletion(&target_event_id, &contact, &sender, handler).await
+                    // A deletion targets a message OR a reaction (both event ids,
+                    // never colliding). Try the message path; if it's not a known
+                    // message, treat it as a reaction revocation.
+                    if commit_deletion(&target_event_id, &contact, &sender, handler).await {
+                        true
+                    } else {
+                        commit_reaction_deletion(&target_event_id, &sender).await
+                    }
                 }
                 RumorProcessingResult::Ignored => false,
             }
@@ -717,6 +724,58 @@ async fn commit_deletion(
 
     handler.on_message_deleted(&chat_id, target_event_id);
     let _ = contact;
+    true
+}
+
+/// Apply a cooperative reaction revocation (NIP-09 k=7) from the reaction's
+/// author. Removes the reaction from its parent message and drops the kind-7
+/// row, then live-refreshes the parent's chips. Returns false if we don't hold
+/// the reaction or the sender isn't its author.
+async fn commit_reaction_deletion(target_reaction_id: &str, sender: &PublicKey) -> bool {
+    let found = {
+        let state = crate::state::STATE.lock().await;
+        state.find_reaction(target_reaction_id)
+    };
+    let (chat_id, message_id, author_npub, _is_community) = match found {
+        Some(v) => v,
+        None => return false,
+    };
+
+    // Authorization: only the reaction's own author may revoke it.
+    let authorized = nostr_sdk::PublicKey::parse(&author_npub)
+        .map(|pk| pk == *sender)
+        .unwrap_or(false);
+    if !authorized {
+        eprintln!(
+            "[reaction-delete] unauthorized: sender {} is not the author of reaction {}",
+            sender.to_hex(), target_reaction_id
+        );
+        return false;
+    }
+
+    let updated = {
+        let mut state = crate::state::STATE.lock().await;
+        state.remove_reaction_from_message(&message_id, target_reaction_id)
+    };
+    let message = match updated {
+        Some((_cid, msg)) => msg,
+        None => return false,
+    };
+
+    // save_message is additive for reactions, so the kind-7 row must be
+    // dropped explicitly or it resurrects on reload.
+    if let Err(e) = crate::db::events::delete_event(target_reaction_id).await {
+        eprintln!("[reaction-delete] DB delete failed for {}: {}", target_reaction_id, e);
+    }
+
+    crate::traits::emit_event(
+        "message_update",
+        &serde_json::json!({
+            "old_id": &message_id,
+            "message": &message,
+            "chat_id": &chat_id,
+        }),
+    );
     true
 }
 

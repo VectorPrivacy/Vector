@@ -11437,28 +11437,33 @@ document.addEventListener('click', (e) => {
             .catch(() => downloadingAttachmentIds.delete(attId));
     }
 
-    // Click an existing reaction badge to add your own matching reaction (one per emoji per user)
+    // Click a reaction badge: add your matching reaction, or revoke it if you already reacted
+    // (one per emoji per user). Revoke only acts on your OWN reaction.
     const clickedReaction = e.target.closest('.reaction');
     if (clickedReaction && isReactionLongPressed()) return;
-    if (clickedReaction && !clickedReaction.hasAttribute('data-reacted')) {
+    if (clickedReaction) {
         const emoji = clickedReaction.getAttribute('data-emoji');
         const msgId = clickedReaction.getAttribute('data-msg-id');
         if (emoji && msgId) {
             for (const cChat of arrChats) {
                 const cMsg = cChat.messages.find(a => a.id === msgId);
                 if (!cMsg) continue;
-                // Check if we already reacted with this emoji
-                const alreadyReacted = cMsg.reactions.some(r => r.emoji === emoji && r.author_id === strPubkey);
-                if (alreadyReacted) break;
-                // Mark as reacted to prevent double-clicks before backend re-render
-                clickedReaction.setAttribute('data-reacted', 'true');
-                // Optimistic UI: increment the displayed count
-                const countNode = [...clickedReaction.childNodes].find(n => n.nodeType === Node.TEXT_NODE);
-                if (countNode) {
-                    const count = parseInt(countNode.textContent.trim()) || 1;
-                    countNode.textContent = ` ${count + 1}`;
+                const mine = cMsg.reactions.find(r => r.emoji === emoji && r.author_id === strPubkey);
+                if (mine) {
+                    // Already reacted → revoke. The backend optimistically removes the reaction
+                    // and emits message_update, so the chip refreshes without local bookkeeping.
+                    invoke('revoke_reaction', { reactionId: mine.id })
+                        .catch(err => console.error('revoke_reaction failed:', err));
+                } else {
+                    // Not yet reacted → add. Mark + optimistic count bump to debounce double-clicks.
+                    clickedReaction.setAttribute('data-reacted', 'true');
+                    const countNode = [...clickedReaction.childNodes].find(n => n.nodeType === Node.TEXT_NODE);
+                    if (countNode) {
+                        const count = parseInt(countNode.textContent.trim()) || 1;
+                        countNode.textContent = ` ${count + 1}`;
+                    }
+                    reactToMessageRouted(msgId, cChat.id, emoji);
                 }
-                reactToMessageRouted(msgId, cChat.id, emoji);
                 break;
             }
         }

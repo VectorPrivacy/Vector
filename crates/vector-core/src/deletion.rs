@@ -172,7 +172,7 @@ pub async fn delete_own_dm(rumor_id: &EventId) -> Result<DeleteOutcome, String> 
 
     let mut cooperative_hide_sent = false;
     if let Some(recipient) = cooperative_recipient {
-        match publish_cooperative_hide(&client, rumor_id, &recipient).await {
+        match publish_cooperative_hide(&client, rumor_id, &recipient, 14).await {
             Ok(()) => cooperative_hide_sent = true,
             Err(e) => crate::log_warn!("[NIP-17 delete] cooperative-hide notice failed: {}", e),
         }
@@ -198,6 +198,73 @@ pub async fn delete_own_dm(rumor_id: &EventId) -> Result<DeleteOutcome, String> 
         wraps_dispatched,
         cooperative_hide_sent,
         blobs_dispatched,
+        any_network_action,
+    })
+}
+
+/// Revoke one of OUR OWN DM reactions. Mirrors `delete_own_dm` but the
+/// target is a kind-7 reaction rumor: Layer 1 nukes each retained gift-wrap
+/// from its relays via the stored ephemeral key; Layer 2 sends a cooperative
+/// hide (k=7) to the counterpart + self so live clients drop the chip. No
+/// Blossom layer — reactions carry no attachments. `recipient` is the DM
+/// counterpart, used for the cooperative hide when no recipient-role wrap key
+/// is retained (e.g. only the self-wrap survived).
+pub async fn delete_own_reaction(
+    reaction_id: &EventId,
+    recipient: PublicKey,
+) -> Result<DeleteOutcome, String> {
+    let client = nostr_client().ok_or("Not logged in")?;
+    let session = crate::state::SessionGuard::capture();
+    let keys = crate::db::nip17_keys::get_wrap_keys_for_rumor(reaction_id)
+        .unwrap_or_default();
+
+    let wraps_total = keys.len();
+    let mut wraps_dispatched = 0usize;
+
+    // Layer 1 — relay-level nuke per retained wrap key.
+    for stored in keys.iter() {
+        let client = client.clone();
+        let task_session = session;
+        let wrap_event_id = stored.wrap_event_id;
+        let secret = stored.secret.clone();
+        let relay_urls = stored.relay_urls.clone();
+        tokio::spawn(async move {
+            if !task_session.is_valid() { return; }
+            delete_wrap_per_relay(&client, wrap_event_id, secret, relay_urls).await;
+            if !task_session.is_valid() { return; }
+            if let Err(e) = crate::db::nip17_keys::purge_wrap_keys(&[wrap_event_id]) {
+                crate::log_warn!("[reaction delete] failed to purge wrap key: {}", e);
+            }
+        });
+        wraps_dispatched += 1;
+    }
+
+    // Layer 2 — cooperative hide (k=7). Prefer a recipient pulled from a
+    // retained recipient/retry wrap key; fall back to the passed-in
+    // counterpart. The notice is signed by our main key, so it works even
+    // when no wrap keys survive (pre-retention reactions stay undeletable at
+    // the relay layer, but a live counterpart still drops the chip).
+    let cooperative_recipient = keys
+        .iter()
+        .find(|k| {
+            k.role == crate::db::nip17_keys::WrapRole::Recipient
+                || k.role == crate::db::nip17_keys::WrapRole::Retry
+        })
+        .map(|k| k.recipient_pubkey)
+        .unwrap_or(recipient);
+
+    let mut cooperative_hide_sent = false;
+    match publish_cooperative_hide(&client, reaction_id, &cooperative_recipient, 7).await {
+        Ok(()) => cooperative_hide_sent = true,
+        Err(e) => crate::log_warn!("[reaction delete] cooperative-hide failed: {}", e),
+    }
+
+    let any_network_action = wraps_dispatched > 0 || cooperative_hide_sent;
+    Ok(DeleteOutcome {
+        wraps_total,
+        wraps_dispatched,
+        cooperative_hide_sent,
+        blobs_dispatched: 0,
         any_network_action,
     })
 }
@@ -558,6 +625,7 @@ async fn publish_cooperative_hide(
     client: &Client,
     target_rumor_id: &EventId,
     recipient: &PublicKey,
+    original_kind: u16,
 ) -> Result<(), String> {
     let my_pk = my_public_key().ok_or("Public key not set")?;
     let now = std::time::SystemTime::now()
@@ -568,10 +636,11 @@ async fn publish_cooperative_hide(
 
     // Build the kind-5 rumor (signed by our main key via the gift-wrap
     // path's seal step). Reference the inner rumor id with `e`, hint at
-    // the original kind via `k`, expire after 30 days.
+    // the original kind via `k` (14 = DM message, 7 = reaction), expire
+    // after 30 days. The `k` lets the receiver remove the right thing.
     let rumor = EventBuilder::new(Kind::EventDeletion, "")
         .tag(Tag::event(*target_rumor_id))
-        .tag(Tag::custom(TagKind::custom("k"), ["14"]))
+        .tag(Tag::custom(TagKind::custom("k"), [original_kind.to_string()]))
         .tag(Tag::expiration(Timestamp::from(expiration_ts)))
         .build(my_pk);
 

@@ -1215,7 +1215,10 @@ function _dmsgBuildReactions(msg) {
         span.classList.add('reaction');  // Kept for the global '.reaction' click delegate (toggle-reaction handler in main.js).
         span.setAttribute('data-emoji', emoji);
         span.setAttribute('data-msg-id', msg.id);
-        if (mine) span.setAttribute('data-reacted', 'true');
+        if (mine) {
+            span.setAttribute('data-reacted', 'true');
+            span.title = 'Click to remove your reaction';
+        }
 
         // NIP-30 custom-emoji rendering — prefer the URL persisted on the
         // reaction itself (survives reload + unsubscribe), fall back to a

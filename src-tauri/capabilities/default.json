@@ -107,6 +107,7 @@
     "allow-sync-community-channel",
     "allow-sync-communities-boot",
     "allow-delete-community-message",
+    "allow-revoke-reaction",
     "allow-react-to-community-message",
     "allow-edit-community-message",
     "allow-list-communities",

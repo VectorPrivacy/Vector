@@ -470,17 +470,46 @@ impl VectorCore {
             builder = builder.tag(tag);
         }
         let rumor = builder.build(my_public_key);
-        let rumor_id = rumor.id.ok_or(VectorError::Other("Failed to get rumor ID".into()))?.to_hex();
+        let inner_rumor_id = rumor.id;
+        let rumor_id = inner_rumor_id.ok_or(VectorError::Other("Failed to get rumor ID".into()))?.to_hex();
 
-        inbox_relays::send_gift_wrap(&client, &receiver_pubkey, rumor.clone(), [])
+        // Retain the recipient wrap's ephemeral key + targeted relays so the
+        // reaction can later be revoked with a NIP-09 relay nuke (mirrors the
+        // DM message send path). Without retention the reaction is undeletable.
+        let outcome = inbox_relays::send_gift_wrap_retained(&client, &receiver_pubkey, rumor.clone(), [])
             .await.map_err(VectorError::Other)?;
+        if !outcome.output.success.is_empty() {
+            if let Some(rid) = inner_rumor_id {
+                if let Err(e) = db::nip17_keys::store_wrap_key(
+                    &outcome.wrap_event_id, &rid, &receiver_pubkey,
+                    db::nip17_keys::WrapRole::Recipient,
+                    &outcome.wrap_secret, &outcome.targeted_relays,
+                ) {
+                    crate::log_warn!("[Reaction] failed to persist wrap key: {}", e);
+                }
+            }
+        }
 
-        // Self-wrap for recovery; bail on account swap before signing.
+        // Self-wrap for multi-device recovery + retain its key too, so another
+        // device (or this one) can later revoke. Bail on account swap.
         let self_wrap_client = client.clone();
         let self_wrap_session = state::SessionGuard::capture();
         tokio::spawn(async move {
             if !self_wrap_session.is_valid() { return; }
-            let _ = self_wrap_client.gift_wrap(&my_public_key, rumor, []).await;
+            if let Ok(self_outcome) = inbox_relays::send_gift_wrap_retained(
+                &self_wrap_client, &my_public_key, rumor, [],
+            ).await {
+                if !self_wrap_session.is_valid() { return; }
+                if !self_outcome.output.success.is_empty() {
+                    if let Some(rid) = inner_rumor_id {
+                        let _ = db::nip17_keys::store_wrap_key(
+                            &self_outcome.wrap_event_id, &rid, &my_public_key,
+                            db::nip17_keys::WrapRole::SelfSend,
+                            &self_outcome.wrap_secret, &self_outcome.targeted_relays,
+                        );
+                    }
+                }
+            }
         });
 
         // Best-effort optimistic local echo + persistence.
@@ -1356,6 +1385,11 @@ impl VectorCore {
                 }
                 inbound::IncomingEvent::Removed { target_id } => {
                     let _ = crate::db::events::delete_event(target_id).await;
+                }
+                inbound::IncomingEvent::ReactionRemoved { reaction_id, .. } => {
+                    // save_message is additive, so a revoked reaction's kind-7 row must be
+                    // dropped explicitly or it resurrects on reload.
+                    let _ = crate::db::events::delete_event(reaction_id).await;
                 }
                 inbound::IncomingEvent::Presence { npub, joined, event_id, created_at, invited_by, invited_label } => {
                     let et = if *joined {

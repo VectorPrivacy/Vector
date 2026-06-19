@@ -110,6 +110,11 @@ pub enum IncomingEvent {
     /// leave it `None` and the caller re-saves the message row (which carries the new reaction).
     Updated { target_id: String, message: Message, edit_event: Option<Box<crate::stored_event::StoredEvent>> },
     Removed { target_id: String },
+    /// A reaction was revoked by its author (a 3305 tombstone whose target is a reaction id).
+    /// The caller drops the reaction's kind-7 row and re-emits `message` so chips refresh live.
+    /// Distinct from `Removed` (whole message) and `Updated` (re-saves the row, which is additive
+    /// and so can't express a removal). `message_id` is the parent for the UI update.
+    ReactionRemoved { message_id: String, reaction_id: String, message: Message },
     /// A join/leave presence announcement (kind 3306). `npub` is the announcing member; the
     /// caller persists + surfaces it as a `MemberJoined`/`MemberLeft` system event. `event_id`
     /// is the inner id (dedup key). `created_at` is the inner's authenticated timestamp (secs) so a
@@ -552,6 +557,25 @@ fn apply_delete(state: &mut ChatState, opened: &OpenedMessage, channel: &Channel
     };
     let deleter = opened.author;
     let deleter_hex = deleter.to_hex();
+
+    // A 3305 may target a REACTION rather than a message (both are event ids). Reactions are
+    // author-revocable only in v1 (no moderation-strip): the deleter must be the reactor. Handled
+    // before the message path so a reaction id never falls through to message-removal logic.
+    if let Some((_chat_id, message_id, author_npub, _is_comm)) = state.find_reaction(&target_id) {
+        let reactor_ok = PublicKey::parse(&author_npub).map(|pk| pk == deleter).unwrap_or(false);
+        if !reactor_ok {
+            crate::log_debug!("[community] dropped reaction-revoke: {deleter_hex} is not the reactor of {target_id}");
+            return None;
+        }
+        return state
+            .remove_reaction_from_message(&message_id, &target_id)
+            .map(|(_cid, message)| IncomingEvent::ReactionRemoved {
+                message_id,
+                reaction_id: target_id,
+                message,
+            });
+    }
+
     let owner_hex = channel.protected.first().map(|pk| pk.to_hex());
     // pinned authority for a moderation-hide: the deleter's cited grant must be one we've synced
     // (fail closed otherwise). Orthogonal to the outrank below; self-deletes don't consult it.

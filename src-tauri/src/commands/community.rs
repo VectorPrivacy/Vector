@@ -1406,6 +1406,15 @@ async fn sync_community_channel_inner(
                     &serde_json::json!({ "old_id": target_id, "message": message, "chat_id": channel_id }),
                 );
             }
+            IncomingEvent::ReactionRemoved { message_id, reaction_id, message } => {
+                // Reaction revoked by its author — drop the kind-7 row (save is additive) and
+                // re-emit the parent so chips refresh live.
+                let _ = crate::db::delete_event(reaction_id).await;
+                vector_core::emit_event(
+                    "message_update",
+                    &serde_json::json!({ "old_id": message_id, "message": message, "chat_id": channel_id }),
+                );
+            }
             IncomingEvent::Removed { target_id } => {
                 // Cooperative tombstone applies surgically by target id (position-independent),
                 // so honor it on both latest and older pages — drop locally + fade the row.
@@ -1885,6 +1894,75 @@ pub async fn delete_community_message(message_id: String) -> Result<(), String> 
     Ok(())
 }
 
+/// Revoke ONE of your own reactions (DM or Community). Author-gated: only the reactor can revoke,
+/// re-verified on the peer side. Mirrors message deletion: a relay nuke via the retained per-reaction
+/// ephemeral key, then a cooperative tombstone so live peers drop the chip. Pre-retention reactions
+/// hold no key (can't be relay-nuked), but the cooperative notice still reaches live peers.
+#[tauri::command]
+pub async fn revoke_reaction(reaction_id: String) -> Result<(), String> {
+    let session = vector_core::state::SessionGuard::capture();
+    if !session.is_valid() {
+        return Err("account changed during revoke".to_string());
+    }
+
+    // Locate the reaction, confirm it's ours, grab the parent message + chat type.
+    let (chat_id, message_id, author_npub, is_community) = {
+        let state = vector_core::state::STATE.lock().await;
+        state
+            .find_reaction(&reaction_id)
+            .ok_or_else(|| format!("Reaction not found (id: {reaction_id})"))?
+    };
+    let my_npub = vector_core::db::get_current_account()?;
+    if author_npub != my_npub {
+        return Err("Cannot revoke a reaction that isn't yours".to_string());
+    }
+
+    // Optimistic local removal + live chip refresh. Drop the kind-7 row (save is additive) and
+    // emit before the network round-trip — snappy, and it makes the cooperative self-echo a no-op.
+    let updated = {
+        let mut state = vector_core::state::STATE.lock().await;
+        state.remove_reaction_from_message(&message_id, &reaction_id)
+    };
+    let _ = crate::db::delete_event(&reaction_id).await;
+    if let Some((_cid, message)) = updated {
+        vector_core::emit_event(
+            "message_update",
+            &serde_json::json!({ "old_id": &message_id, "message": message, "chat_id": &chat_id }),
+        );
+    }
+
+    // Network propagation.
+    if is_community {
+        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+        // Layer 1 — relay nuke via the retained per-reaction ephemeral key (own send, post-retention).
+        let has_key = vector_core::db::community::get_message_key(&reaction_id)
+            .map(|k| k.is_some())
+            .unwrap_or(false);
+        if has_key {
+            if let Err(e) = vector_core::community::service::delete_message(&transport, &reaction_id).await {
+                log_error!("Community reaction relay delete failed, tombstone only: {e}");
+            }
+        }
+        // Layer 2 — cooperative 3305 tombstone targeting the reaction id (author-gated peer-side).
+        publish_community_control(
+            &chat_id,
+            vector_core::stored_event::event_kind::COMMUNITY_DELETE,
+            "",
+            &reaction_id,
+            &[],
+        )
+        .await?;
+    } else {
+        use nostr_sdk::{EventId, PublicKey};
+        let rid = EventId::from_hex(&reaction_id).map_err(|e| format!("Invalid reaction id: {e}"))?;
+        let recipient = PublicKey::parse(&chat_id)
+            .map_err(|e| format!("Invalid DM counterpart: {e}"))?;
+        vector_core::deletion::delete_own_reaction(&rid, recipient).await?;
+    }
+
+    Ok(())
+}
+
 /// Owner moderation-hide: permanently hide ANY member's message (cooperative — honest clients
 /// drop it because the 3305 carries the owner's real-npub signature, re-verified against the roster).
 /// No undo. Owner-only (enforced by `publish_owner_hide` via the roster MANAGE_MESSAGES check).
@@ -2223,6 +2301,13 @@ async fn promote_preloaded_page(community: &vector_core::community::Community, p
             }
             IncomingEvent::Removed { target_id } => {
                 let _ = crate::db::delete_event(target_id).await;
+            }
+            IncomingEvent::ReactionRemoved { message_id, reaction_id, message } => {
+                let _ = crate::db::delete_event(reaction_id).await;
+                vector_core::emit_event(
+                    "message_update",
+                    &serde_json::json!({ "old_id": message_id, "message": message, "chat_id": &channel_id }),
+                );
             }
             // Presence / membership outcomes are left to the background true-up sync (it re-fetches
             // the same page and applies them, deduped) — promotion only paints the message content.

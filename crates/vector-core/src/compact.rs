@@ -1076,6 +1076,18 @@ impl CompactMessage {
         true
     }
 
+    /// Remove a reaction by its hex event id. Returns true if one was removed.
+    pub fn remove_reaction(&mut self, reaction_id: &str) -> bool {
+        let target = hex_to_bytes_32(reaction_id);
+        if !self.reactions.iter().any(|r| r.id == target) {
+            return false;
+        }
+        let mut reactions = self.reactions.to_vec();
+        reactions.retain(|r| r.id != target);
+        self.reactions = TinyVec::from_vec(reactions);
+        true
+    }
+
     // Flag accessors for compatibility
     #[inline]
     pub fn is_mine(&self) -> bool { self.flags.is_mine() }
