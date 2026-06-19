@@ -3537,10 +3537,13 @@ async function setupRustListeners() {
                 domMsg?.replaceWith(renderMessage(evt.payload.message, profile, evt.payload.old_id));
             }
 
-            // If the old ID was a pending ID (our message), make sure to update and scroll accordingly
+            // The row may have grown after its initial layout (a reaction chip added in
+            // realtime, an edit, an attachment finishing). Keep a bottom-pinned user pinned.
+            compensateChatScrollForResize();
+
+            // If the old ID was a pending ID (our message), make sure to update accordingly
             if (evt.payload.old_id.startsWith('pending')) {
                 strLastMsgID = evt.payload.message.id;
-                softChatScroll();
             }
 
             // Update any reply contexts that quote this edited message
