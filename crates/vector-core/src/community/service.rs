@@ -35,6 +35,25 @@ async fn active_signer() -> Result<std::sync::Arc<dyn nostr_sdk::prelude::NostrS
     Ok(std::sync::Arc::new(keys))
 }
 
+/// Max communities a device may hold locally. The synced Community List is a single NIP-44 event
+/// (65 KB plaintext); past the cap even the slimmed list can't encrypt, so a NEW join/create is
+/// rejected above it (the user leaves one to make room).
+pub const MAX_COMMUNITIES: usize = 50;
+
+/// Reject a NEW join/create when already at [`MAX_COMMUNITIES`] local memberships. Counts the synced
+/// Community List (the thing that overflows). Re-accepting a community already held is exempt — the
+/// caller checks membership before calling this.
+fn enforce_community_cap() -> Result<(), String> {
+    let held = super::list::load_local_list().entries.len();
+    if held >= MAX_COMMUNITIES {
+        return Err(format!(
+            "You've reached the limit of {} communities. Leave one to join another.",
+            MAX_COMMUNITIES
+        ));
+    }
+    Ok(())
+}
+
 /// Create a brand-new Community end-to-end: mint keys + the default channel, persist
 /// it locally, and publish its GroupRoot + ChannelMetadata to the Community's relays.
 /// Returns the created Community. (The caller then runs the subscription refresh so it
@@ -46,6 +65,7 @@ pub async fn create_community<T: Transport + ?Sized>(
     relays: Vec<String>,
 ) -> Result<Community, String> {
     let session = SessionGuard::capture();
+    enforce_community_cap()?;
     let mut community = Community::create(name, default_channel_name, relays);
     // Owner attestation — MANDATORY: a community cannot exist without the root that anchors its
     // authority graph. It binds the community id to the creator's identity, signed by the owner's identity
@@ -1269,19 +1289,24 @@ pub fn accept_invite(invite: &CommunityInvite) -> Result<Community, String> {
     let session = SessionGuard::capture();
     let community = super::invite::accept_invite(invite)?; // validates caps + decodes keys
 
-    if let Some(existing) = crate::db::community::load_community(&community.id)? {
-        if is_proven_owner(&existing) {
-            return Err("you already own this Community".to_string());
+    match crate::db::community::load_community(&community.id)? {
+        // Already a member: a re-accept doesn't grow the list, so it's exempt from the cap.
+        Some(existing) => {
+            if is_proven_owner(&existing) {
+                return Err("you already own this Community".to_string());
+            }
+            // A known community id arriving with a DIFFERENT base key is a different community wearing
+            // the same id (collision / hijack) — reject rather than overwrite. The server-root key is
+            // the community's core secret, so it's the keyless authority anchor.
+            if existing.server_root_key.as_bytes() != community.server_root_key.as_bytes() {
+                return Err(
+                    "invite reuses a known Community id under a different authority — rejected"
+                        .to_string(),
+                );
+            }
         }
-        // A known community id arriving with a DIFFERENT base key is a different community wearing the
-        // same id (collision / hijack) — reject rather than overwrite. The server-root key is the
-        // community's core secret, so it's the keyless authority anchor.
-        if existing.server_root_key.as_bytes() != community.server_root_key.as_bytes() {
-            return Err(
-                "invite reuses a known Community id under a different authority — rejected"
-                    .to_string(),
-            );
-        }
+        // New membership — reject if we're already at the local community cap.
+        None => enforce_community_cap()?,
     }
 
     if !session.is_valid() {
@@ -3419,6 +3444,39 @@ mod tests {
         crate::state::MY_SECRET_KEY.store_from_keys(&owner, &[]);
         crate::state::set_my_public_key(owner.public_key());
         (tmp, guard)
+    }
+
+    #[test]
+    fn community_cap_rejects_a_new_membership_at_the_limit() {
+        let (_tmp, _guard) = init_test_db();
+        let mk = |i: usize| {
+            let id = format!("{:064x}", i);
+            crate::community::list::CommunityListEntry {
+                community_id: id.clone(),
+                seed: crate::community::invite::CommunityInvite {
+                    community_id: id,
+                    name: String::new(),
+                    server_root_key: String::new(),
+                    server_root_epoch: 0,
+                    relays: vec![],
+                    channels: vec![],
+                    owner_attestation: None,
+                    icon: None,
+                },
+                current: None,
+                added_at: 0,
+            }
+        };
+        let mut list = crate::community::list::CommunityList::default();
+        for i in 0..(MAX_COMMUNITIES - 1) {
+            list.entries.push(mk(i));
+        }
+        crate::db::settings::set_sql_setting("community_list_json".to_string(), list.to_json()).unwrap();
+        assert!(enforce_community_cap().is_ok(), "under the cap a new join is allowed");
+
+        list.entries.push(mk(MAX_COMMUNITIES - 1)); // now exactly MAX_COMMUNITIES
+        crate::db::settings::set_sql_setting("community_list_json".to_string(), list.to_json()).unwrap();
+        assert!(enforce_community_cap().is_err(), "at the cap a new join is rejected");
     }
 
     // --- apply_channel_rekey (#3c) ---

@@ -15,11 +15,18 @@ use super::{Channel, ChannelId, ChannelKey, Community, CommunityId, Epoch, Serve
 use crate::stored_event::event_kind;
 use nostr_sdk::prelude::{EventBuilder, Kind, PublicKey, UnsignedEvent};
 
+/// `skip_serializing_if` helper: omit a `u64` field from the JSON when it's the default 0 (e.g. an
+/// un-rotated epoch). `serde(default)` restores it on read. Trims the Community List on the wire.
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
+}
+
 /// A granted channel inside an invite bundle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InviteChannel {
     pub id: String,
     pub key: String,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub epoch: u64,
     pub name: String,
 }
@@ -32,18 +39,19 @@ pub struct CommunityInvite {
     pub server_root_key: String,
     /// The server-root's current epoch, so a joiner adopts the right base read clock. `default`
     /// keeps older bundles parseable (they predate rotation, so epoch 0 is correct for them).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub server_root_epoch: u64,
     pub relays: Vec<String>,
     pub channels: Vec<InviteChannel>,
     /// Owner attestation (signed event JSON) so the joiner learns + verifies who the owner
     /// is. `serde(default)` keeps older bundles (pre-feature) parseable.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_attestation: Option<String>,
     /// Community icon (encrypted blob ref) so a PARKED private invite can show the logo before the
-    /// recipient joins — the card fetches + decrypts it like a public-invite preview (a Blossom blob
-    /// fetch, no relay connect). `default` keeps older/icon-less bundles parseable.
-    #[serde(default)]
+    /// recipient joins (the card fetches + decrypts it like a public-invite preview). STRIPPED from
+    /// Community List blobs (see list.rs) since a rehydrating device folds the icon from the community
+    /// metadata; it's only carried in the actual invite bundle. `default` keeps icon-less bundles parseable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<super::CommunityImage>,
 }
 

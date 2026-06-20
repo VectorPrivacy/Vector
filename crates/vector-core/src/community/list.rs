@@ -52,7 +52,7 @@ pub struct CommunityListEntry {
     /// page, no walk. `None` only on a legacy entry (pre-`current`) → falls back to `seed` (one walk until
     /// the next refresh). Channel pseudonyms derive from the channel key, so this is the ONLY source of the
     /// current channel keys a fresh device needs to fetch the channel at the latest epoch.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current: Option<super::invite::CommunityInvite>,
     /// When this membership was (re-)added, in ms. Tiebreaks against a removal tombstone.
     pub added_at: u64,
@@ -87,9 +87,9 @@ pub struct CommunityRemoval {
 /// The whole synced list: present memberships + removal tombstones.
 #[derive(Clone, Serialize, Deserialize, Default, Debug, PartialEq, Eq)]
 pub struct CommunityList {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entries: Vec<CommunityListEntry>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tombstones: Vec<CommunityRemoval>,
 }
 
@@ -97,6 +97,14 @@ pub struct CommunityList {
 /// order is fixed, so this is reproducible on every device).
 fn canonical(inv: &super::invite::CommunityInvite) -> String {
     serde_json::to_string(inv).unwrap_or_default()
+}
+
+/// Strip the icon from a Community List blob (Option B). The list never carries icons: a rehydrating
+/// device folds the icon from the community metadata, so keeping it in every seed/current blob is pure
+/// NIP-44 weight. Applied at every entry-entry point AND on load, so `canonical()` stays icon-invariant
+/// across devices (an icon would otherwise perturb the epoch-tie tiebreak).
+fn strip_icon(inv: &mut super::invite::CommunityInvite) {
+    inv.icon = None;
 }
 
 /// Does `a` supersede `b` as the CURRENT (freshest) snapshot? Higher epoch wins; on an epoch TIE the
@@ -128,11 +136,43 @@ impl CommunityList {
     /// Parse from the decrypted JSON content of the list event. A malformed/empty payload is an empty list
     /// (never an error that aborts a refresh — same posture as the emoji list).
     pub fn from_json(s: &str) -> Self {
-        serde_json::from_str(s).unwrap_or_default()
+        let mut list: Self = serde_json::from_str(s).unwrap_or_default();
+        for e in &mut list.entries {
+            // Option B: strip any icon an older build wrote, so the in-memory list (and the canonical()
+            // tiebreaks computed from it) stay icon-invariant across devices.
+            // Option A: re-expand the omitted `current` back to `seed` so the in-memory form is uniform
+            // (`current` always Some, as merge/upsert expect); to_json re-slims it on the way out. Also
+            // covers legacy entries (pre-`current`), which `current()` already treated as seed.
+            strip_icon(&mut e.seed);
+            match e.current.as_mut() {
+                Some(c) => strip_icon(c),
+                None => e.current = Some(e.seed.clone()),
+            }
+        }
+        list
     }
 
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
+        serde_json::to_string(&self.slimmed()).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    /// Serialization-only slim copy (Option A): drop `current` when it equals `seed` (the common
+    /// no-rekey case), so the entry stores ONE blob, not two. The in-memory list keeps `current`
+    /// populated (the merge re-derives it via `current()`); this only shrinks the published/stored bytes.
+    /// `current`'s `skip_serializing_if` then omits the field entirely once it's `None`.
+    fn slimmed(&self) -> CommunityList {
+        let entries = self
+            .entries
+            .iter()
+            .map(|e| {
+                let mut e = e.clone();
+                if e.current.as_ref() == Some(&e.seed) {
+                    e.current = None;
+                }
+                e
+            })
+            .collect();
+        CommunityList { entries, tombstones: self.tombstones.clone() }
     }
 
     /// True iff `community_id` is a present membership (an entry whose add is newer than any tombstone).
@@ -153,7 +193,12 @@ impl CommunityList {
 
     /// ADD/refresh a membership locally (call before republishing). If a newer entry already exists it
     /// keeps the earliest seed (stable) and freshest current_root; a re-add after a tombstone resurrects.
-    pub fn upsert(&mut self, entry: CommunityListEntry) {
+    pub fn upsert(&mut self, mut entry: CommunityListEntry) {
+        // Option B: strip the icon before it enters the list (kept only in the actual invite bundle).
+        strip_icon(&mut entry.seed);
+        if let Some(c) = entry.current.as_mut() {
+            strip_icon(c);
+        }
         // A fresh add dominates any prior tombstone for this community (re-join) as long as its added_at is
         // newer — drop stale tombstones for it; the merge below re-derives the rest.
         self.tombstones.retain(|t| !(t.community_id == entry.community_id && t.removed_at <= entry.added_at));
@@ -189,7 +234,8 @@ impl CommunityList {
     /// Refresh the `current` snapshot (latest root + channel keys + name) of an existing entry — the rekey /
     /// rename follow. Accepts a newer epoch OR a same-epoch change (e.g. a rename); never regresses to
     /// an older epoch. No-op if the community isn't present. Returns true if it changed anything.
-    pub fn refresh_current(&mut self, community_id: &str, current: super::invite::CommunityInvite) -> bool {
+    pub fn refresh_current(&mut self, community_id: &str, mut current: super::invite::CommunityInvite) -> bool {
+        strip_icon(&mut current); // Option B: list blobs never carry the icon.
         if let Some(e) = self.entries.iter_mut().find(|e| e.community_id == community_id) {
             // Use the SAME total order as `merge`, so a local refresh only installs a snapshot that would
             // also WIN the merge — otherwise two devices ping-pong competing republishes (a refresh that
@@ -272,7 +318,8 @@ impl CommunityListEntry {
     /// as `refresh_current` follows re-foundings + renames forward.
     pub fn from_community(community: &super::Community, added_at_ms: u64) -> Self {
         // The invite bundle IS the join material — server root + channel keys + owner attestation + name.
-        let bundle = super::invite::build_invite(community);
+        let mut bundle = super::invite::build_invite(community);
+        strip_icon(&mut bundle); // Option B: the list blob carries no icon (a rehydrating device folds it).
         CommunityListEntry {
             community_id: community.id.to_hex(),
             current: Some(bundle.clone()),
