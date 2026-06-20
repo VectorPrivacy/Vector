@@ -147,16 +147,12 @@ function renderChat(chat, primaryColor) {
     divPreviewContainer.appendChild(divHeader);
 
     // Display either their Last Message or Typing Indicator
-    const cLastMsg = chat.messages[chat.messages.length - 1];
     const pChatPreview = document.createElement('p');
     pChatPreview.classList.add('cutoff');
 
-    if (chat._joining) {
-        // Optimistic join: spinner + "Joining…" while the community syncs (row is locked via
-        // .chatlist-joining). Replaces the otherwise-empty preview during the wait.
-        // .icon is position:absolute, so it needs a relative+sized wrapper to sit inline-left of the text.
-        pChatPreview.innerHTML = '<span class="chatlist-joining-spinner"><span class="icon icon-loading spin"></span></span>Joining…';
-    } else {
+    // generateChatPreviewText owns every state, including the optimistic-join "Joining…" spinner
+    // (`chat._joining`) — so the full render and the partial updateChatlistPreview path stay in lockstep.
+    {
         const preview = generateChatPreviewText(chat);
         pChatPreview.classList.toggle('typing-indicator-text', preview.isTyping);
         if (preview.isHtml) {
@@ -200,11 +196,20 @@ function renderCommunityInviteItem(invite) {
     divInvite.classList.add('chatlist-contact', 'chatlist-invite');
     divInvite.id = `community-invite-${invite.community_id}`;
 
-    // The private bundle carries no icon → group placeholder (real logo appears on join).
+    // Show the bundled community icon (fetched + decrypted like a public-invite preview) when present;
+    // fall back to the group placeholder for icon-less / pre-icon-bundle invites.
     const divAvatarContainer = document.createElement('div');
     divAvatarContainer.style.position = 'relative';
-    divAvatarContainer.appendChild(createPlaceholderAvatar(true, 50));
+    const placeholder = createPlaceholderAvatar(true, 50);
+    divAvatarContainer.appendChild(placeholder);
     divInvite.appendChild(divAvatarContainer);
+    if (invite.icon) {
+        invoke('cache_invite_logo', { image: invite.icon }).then(path => {
+            if (path && placeholder.isConnected) {
+                placeholder.replaceWith(createAvatarImg(convertFileSrc(path), 50, true));
+            }
+        }).catch(() => {});
+    }
 
     const divPreviewContainer = document.createElement('div');
     divPreviewContainer.classList.add('chatlist-contact-preview');

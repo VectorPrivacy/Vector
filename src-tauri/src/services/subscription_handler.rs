@@ -24,7 +24,9 @@ pub(crate) static SELFSYNC_SUB_IDS: LazyLock<Mutex<Vec<SubscriptionId>>> =
 /// Last self-sync event id processed per kind. A replaceable event stored on N relays is delivered N times
 /// with the SAME id; without this every copy would kick a full ingest/rehydrate sweep (N× the work). A
 /// genuine update has a new id and passes through.
-static SELFSYNC_LAST_EVENT: LazyLock<Mutex<HashMap<u16, EventId>>> =
+// Keyed by a per-list string (the `d`-tag for kind-30078 lists, else the kind) so the Community List and
+// Invite List — both kind 30078 — don't share a dedup slot and clobber each other's last-id.
+static SELFSYNC_LAST_EVENT: LazyLock<Mutex<HashMap<String, EventId>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 // `rebuild_community_routes` + `refresh_community_subscription` route state now lives in
@@ -52,14 +54,18 @@ pub(crate) async fn subscribe_self_sync() {
     // unsubscribe whatever it displaced — so two concurrent calls (start racing a swap re-entry) can't leak
     // an orphaned subscription or leave the routing set momentarily empty.
     let mut new_ids = Vec::new();
-    // Community List (parameterized-replaceable, d-tag scoped so it never aliases a wallpaper/badge 30078).
-    let community_filter = Filter::new()
+    // Community List + Invite List — both parameterized-replaceable kind-30078, d-tag scoped so they never
+    // alias a wallpaper/badge 30078. One filter (both d-tags) keeps the live sub as wire-efficient as boot.
+    let self_lists_filter = Filter::new()
         .author(my_pk)
         .kind(Kind::Custom(vector_core::stored_event::event_kind::APPLICATION_SPECIFIC))
-        .identifier(vector_core::community::list::COMMUNITY_LIST_D_TAG);
-    match client.subscribe(community_filter, None).await {
+        .identifiers([
+            vector_core::community::list::COMMUNITY_LIST_D_TAG.to_string(),
+            vector_core::community::invite_list::INVITE_LIST_D_TAG.to_string(),
+        ]);
+    match client.subscribe(self_lists_filter, None).await {
         Ok(out) => new_ids.push(out.val),
-        Err(e) => eprintln!("[self-sync] community-list subscribe failed: {:?}", e),
+        Err(e) => eprintln!("[self-sync] self-lists subscribe failed: {:?}", e),
     }
     // Emoji-pack List (replaceable kind 10030).
     let emoji_filter = Filter::new().author(my_pk).kind(Kind::Custom(10030));
@@ -84,18 +90,31 @@ async fn handle_self_sync_event(session: &vector_core::state::SessionGuard, even
     if !session.is_valid() {
         return;
     }
-    // Coalesce multi-relay re-delivery of the SAME replaceable event (same id) so one update = one sweep.
+    // Per-list dedup key: the `d`-tag for kind-30078 lists (Community vs Invite share the kind), else the
+    // kind. Coalesces multi-relay re-delivery of the SAME replaceable event so one update = one sweep.
+    let dedup_key = if event.kind.as_u16() == vector_core::stored_event::event_kind::APPLICATION_SPECIFIC {
+        event.tags.identifier().unwrap_or_default().to_string()
+    } else {
+        event.kind.as_u16().to_string()
+    };
     {
         let mut last = SELFSYNC_LAST_EVENT.lock().await;
-        if last.get(&event.kind.as_u16()) == Some(&event.id) {
+        if last.get(&dedup_key) == Some(&event.id) {
             return;
         }
-        last.insert(event.kind.as_u16(), event.id);
+        last.insert(dedup_key, event.id);
     }
     match event.kind.as_u16() {
         k if k == vector_core::stored_event::event_kind::APPLICATION_SPECIFIC => {
+            // Both lists are kind 30078 — route by `d`-tag.
+            let is_invite = event.tags.identifier()
+                == Some(vector_core::community::invite_list::INVITE_LIST_D_TAG);
             tokio::spawn(async move {
-                crate::commands::community::ingest_community_list_update(event).await;
+                if is_invite {
+                    crate::commands::community::ingest_invite_list_update(event).await;
+                } else {
+                    crate::commands::community::ingest_community_list_update(event).await;
+                }
             });
         }
         10030 => {
@@ -290,15 +309,24 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
             // If the session has been swapped out from under us, exit the
             // notification loop. Returning Ok(true) tells nostr-sdk to break.
             if !session.is_valid() { return Ok(true); }
-            if let RelayPoolNotification::Event { event, subscription_id, .. } = notification {
-                if subscription_id == gift_sub_id {
-                    // DMs/files/reactions/edits (via tauri_commit_prepared_event)
-                    super::handle_event(*event, true).await;
-                } else if vector_core::community::realtime::subscription_id().await.as_ref() == Some(&subscription_id) {
-                    handle_community_event(&session, *event).await;
-                } else if SELFSYNC_SUB_IDS.lock().await.contains(&subscription_id) {
-                    handle_self_sync_event(&session, *event).await;
+            match notification {
+                RelayPoolNotification::Event { event, subscription_id, .. } => {
+                    let k = event.kind.as_u16();
+                    if subscription_id == gift_sub_id {
+                        // DMs/files/reactions/edits (via tauri_commit_prepared_event)
+                        super::handle_event(*event, true).await;
+                    } else if (3300..=3311).contains(&k) {
+                        // Route Community events by KIND, not by subscription id: an event can arrive on the
+                        // live community sub OR on a fetch/sync/reconcile sub, so matching only the live sub
+                        // id would drop the rest. dispatch_event resolves the channel by the event's
+                        // z-pseudonym, and process_incoming dedups by outer-event id, so handling every
+                        // community event the pool surfaces is correct and idempotent.
+                        handle_community_event(&session, *event).await;
+                    } else if SELFSYNC_SUB_IDS.lock().await.contains(&subscription_id) {
+                        handle_self_sync_event(&session, *event).await;
+                    }
                 }
+                _ => {}
             }
             Ok(false)
         })

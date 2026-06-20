@@ -2836,6 +2836,14 @@ body.chat-bg-disabled .chat-messages::before {
   mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #fff calc(100% - 2px));
   animation: inline-image-spin 2s linear infinite;
 }
+/* Community avatar upload ring: same accent color as the attachment upload/download ring
+   (var(--icon-color-primary)), keeping the thin small-ring proportions above. */
+.community-upload-ring {
+  background: conic-gradient(
+    var(--icon-color-primary) 0% var(--progress),
+    rgba(255, 255, 255, 0.2) var(--progress) 100%
+  );
+}
 
 
 

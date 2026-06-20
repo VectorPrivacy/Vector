@@ -300,6 +300,16 @@ pub fn save_local_list(list: &CommunityList) -> Result<(), String> {
     crate::db::settings::set_sql_setting(LOCAL_LIST_KEY.to_string(), list.to_json())
 }
 
+/// UNIX-seconds of our most recent Community-List mutation — exposed so the combined self-list fetch can
+/// apply the same predates-our-publish guard the standalone fetch uses.
+pub fn our_last_community_publish() -> u64 {
+    crate::db::settings::get_sql_setting(LIST_PUBLISHED_AT_KEY.to_string())
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+}
+
 /// Stamp the local-mutation clock NOW (synchronously, before any debounced publish fires) so a refresh
 /// racing the not-yet-published change still treats the local copy as newer than a stale relay's.
 fn stamp_published_now() {
@@ -742,6 +752,7 @@ mod tests {
             relays: vec!["r1".into()],
             channels: vec![],
             owner_attestation: None,
+            icon: None,
         }
     }
 

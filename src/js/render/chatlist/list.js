@@ -93,6 +93,10 @@ function renderChatlist() {
         // For DMs, we only show them if they have messages
         if (!chatIsGroup(chat) && chat.messages.length === 0) continue;
 
+        // Message-less community: lazy-load its latest membership event so the preview can show
+        // "X has joined" instead of "No messages yet" (cached onto chat.lastSystemEvent).
+        if (chatIsGroup(chat)) ensureCommunityPreviewActivity(chat);
+
         // Do not render our own profile: it is accessible via the Bookmarks/Notes section
         if (chat.id === strPubkey) continue;
 

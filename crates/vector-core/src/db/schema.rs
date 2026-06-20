@@ -710,5 +710,24 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // Migration 62: Repair — guarantee `label` exists on community_public_invites. Id 43 (which adds it)
+    // was burned on DBs created from an older baseline: recorded as applied without the ALTER ever landing,
+    // so `label` is silently absent and list_all_public_invites errors. Use a fresh id past every recorded
+    // one (DBs already hold up to 61) and add the column only if missing, so it's a no-op where 43 worked.
+    run_atomic_migration(conn, 62, "Repair: ensure label column on community_public_invites", |tx| {
+        let has_label: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('community_public_invites') WHERE name = 'label'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("Failed to inspect community_public_invites columns: {}", e))?;
+        if has_label == 0 {
+            tx.execute_batch("ALTER TABLE community_public_invites ADD COLUMN label TEXT;")
+                .map_err(|e| format!("Failed to add label column: {}", e))?;
+        }
+        Ok(())
+    })?;
+
     Ok(())
 }

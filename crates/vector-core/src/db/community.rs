@@ -845,6 +845,75 @@ pub fn delete_public_invite(token: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// All minted public-invite links across ALL communities (backfill source for the synced Invite List).
+pub fn list_all_public_invites() -> Result<Vec<PublicInviteRecord>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT token, community_id, url, expires_at, created_at, label
+               FROM community_public_invites ORDER BY created_at DESC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(PublicInviteRecord {
+                token: dec_txt(&r.get::<_, String>(0)?),
+                community_id: r.get(1)?,
+                url: dec_txt(&r.get::<_, String>(2)?),
+                expires_at: r.get(3)?,
+                created_at: r.get(4)?,
+                label: r.get::<_, Option<String>>(5)?.map(|s| dec_txt(&s)),
+                join_count: 0,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+/// Insert a public-invite row only if its (decrypted) token isn't already present — idempotent hydration
+/// from the synced Invite List, PRESERVING the original `created_at` (unlike `save_public_invite`, which
+/// stamps now). Returns true if a row was inserted. Tokens are stored encrypted with a random nonce, so SQL
+/// equality can't dedup; scan + decrypt (few rows per community, owner-only).
+pub fn upsert_public_invite(
+    token: &str,
+    community_id: &str,
+    url: &str,
+    expires_at: Option<i64>,
+    created_at: i64,
+    label: Option<&str>,
+) -> Result<bool, String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let already = {
+        let mut stmt = conn
+            .prepare("SELECT token FROM community_public_invites WHERE community_id = ?1")
+            .map_err(|e| e.to_string())?;
+        let stored: Vec<String> = stmt
+            .query_map(params![community_id], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        stored.iter().any(|s| dec_txt(s) == token)
+    };
+    if already {
+        return Ok(false);
+    }
+    let enc_token = enc_txt(token)?;
+    let enc_url = enc_txt(url)?;
+    let enc_label = label.map(enc_txt).transpose()?;
+    conn.execute(
+        "INSERT INTO community_public_invites
+            (token, community_id, url, expires_at, created_at, label)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![enc_token, community_id, enc_url, expires_at, created_at, enc_label],
+    )
+    .map_err(|e| format!("upsert public invite: {e}"))?;
+    Ok(true)
+}
+
 /// Remove a Community and all its local state (channels, retained message keys, parked
 /// invites, minted public-invite tokens). Used when the user leaves a Community — there
 /// is no protocol "leave" (membership is key possession), so leaving is purely local:

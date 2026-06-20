@@ -260,7 +260,12 @@ class EventCache {
 
             if (entry.totalInDb === 0) {
                 entry.isFullyLoaded = true;
-                return [];
+                // Return the cache's OWN array, not a fresh []. A community with no real messages
+                // can still have system events (member joins) that get revealed/added into this array
+                // afterward; callers alias `chat.messages` to it, and the live system-event handler
+                // mutates it in place — a throwaway [] would orphan all of that (joins never render,
+                // empty-state placeholder sticks).
+                return entry.events;
             }
 
             // If we already have enough events cached, return them

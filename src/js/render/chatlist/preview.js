@@ -53,12 +53,39 @@ function generateTypingText(chat) {
 }
 
 /**
+ * Latest membership/system event for a message-less community's preview line. Prefers one already
+ * loaded into `chat.messages` (an opened community), else the `lastSystemEvent` cached live or lazily
+ * for the chat list. Returns `{ event_type, member_npub }` or null.
+ */
+function latestPreviewSystemEvent(chat) {
+    const msgs = chat.messages || [];
+    for (let i = msgs.length - 1; i >= 0; i--) {
+        const se = msgs[i].system_event;
+        if (se) return { event_type: se.event_type, member_npub: se.member_npub };
+    }
+    return chat.lastSystemEvent || null;
+}
+
+/**
  * Generate chat preview text for the chatlist
  * @param {Chat} chat - The chat object
  * @returns {{ text: string, isTyping: boolean, needsTwemoji: boolean }}
  */
 function generateChatPreviewText(chat) {
     const isGroup = chatIsGroup(chat);
+
+    // Optimistic join in flight: "Joining…" is authoritative over everything (typing, messages, member
+    // events) until the lock clears. The full row render (row.js) gates on this too, but the partial-update
+    // path (updateChatlistPreview) goes straight through here — so a join landing mid-join (e.g. the
+    // joiner's own "has joined") must not overwrite the spinner.
+    if (chat._joining) {
+        return {
+            text: '<span class="chatlist-joining-spinner"><span class="icon icon-loading spin"></span></span>Joining…',
+            isTyping: false,
+            needsTwemoji: false,
+            isHtml: true,
+        };
+    }
 
     // Walk back to find the latest actual conversation message. System
     // events (wallpaper changes, member joined/left) and — in group chats —
@@ -86,6 +113,13 @@ function generateChatPreviewText(chat) {
     // No messages
     if (!cLastMsg) {
         if (isGroup) {
+            // Surface the latest membership event ("X has joined") so a message-less community reads as
+            // alive instead of "No messages yet". systemEventContent falls back to an npub truncation
+            // until the profile loads; profile_update re-renders the list, upgrading it to the name.
+            const sysEv = latestPreviewSystemEvent(chat);
+            if (sysEv) {
+                return { text: systemEventContent(sysEv.event_type, sysEv.member_npub), isTyping: false, needsTwemoji: true };
+            }
             const memberCount = chat.metadata?.custom_fields?.member_count ? parseInt(chat.metadata.custom_fields.member_count) : null;
             return {
                 text: (memberCount != null) ? `${memberCount} ${memberCount === 1 ? 'Member' : 'Members'}` : 'No messages yet',

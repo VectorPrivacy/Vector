@@ -29,6 +29,20 @@ const CHANNEL_FOLLOW_BACKOFF_MS: u64 = 700;
 /// every channel we hold; refreshed on join/leave/rekey.
 static COMMUNITY_SUB_ID: LazyLock<Mutex<Option<SubscriptionId>>> = LazyLock::new(|| Mutex::new(None));
 
+/// Sorted pseudonym set of the CURRENTLY live Community subscription. Lets `refresh_subscription` skip
+/// a redundant unsubscribe+resubscribe when nothing changed (e.g. a metadata/avatar edit, which fires
+/// a control re-fold but doesn't alter the pseudonym set). The relay pool auto-re-applies the existing
+/// subscription on every reconnect, so leaving it in place is strictly more reliable than rebuilding it
+/// (a rebuild that lands mid-reconnect silently fails to register and kills realtime delivery).
+static COMMUNITY_SUB_SET: LazyLock<Mutex<Vec<String>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+
+/// Pool-wide `subscribe` of the community filter, opened alongside the targeted `subscribe_to`. On
+/// Android the targeted sub registers but never streams; the pool-wide one does (it rides the same
+/// auto-managed path the DM sub uses). On desktop the targeted sub streams. We keep BOTH so every
+/// platform gets live delivery; `process_incoming` dedups by outer-event id, so an event seen on both
+/// folds exactly once.
+static COMMUNITY_POOLWIDE_SUB_ID: LazyLock<Mutex<Option<SubscriptionId>>> = LazyLock::new(|| Mutex::new(None));
+
 /// `z` pseudonym (hex) → the Channel it belongs to. Lets the notification loop open an arriving
 /// event against the right channel key (and read its `banned` set for the inbound drop-filter).
 static COMMUNITY_ROUTES: LazyLock<Mutex<HashMap<String, Channel>>> =
@@ -53,6 +67,8 @@ pub async fn subscription_id() -> Option<SubscriptionId> {
 /// can't read the prior account's channel keys / banned sets.
 pub async fn clear() {
     *COMMUNITY_SUB_ID.lock().await = None;
+    *COMMUNITY_POOLWIDE_SUB_ID.lock().await = None;
+    COMMUNITY_SUB_SET.lock().await.clear();
     COMMUNITY_ROUTES.lock().await.clear();
     CONTROL_ROUTES.lock().await.clear();
     REFRESH_CONTROL_INFLIGHT.lock().unwrap_or_else(|e| e.into_inner()).clear();
@@ -113,20 +129,37 @@ pub async fn rebuild_routes() -> (Vec<String>, HashSet<String>) {
     (pseudonyms, relays)
 }
 
-/// (Re)build the Community subscription: rebuild the route maps, then open a single subscription
-/// scoped to every held channel/control pseudonym, targeted at the communities' relays.
+/// (Re)build the Community subscription: rebuild the route maps, then open TWO subscriptions over the
+/// same filter — a targeted `subscribe_to` (streams on desktop) and a pool-wide `subscribe` (streams on
+/// Android). `process_incoming` dedups by outer-event id, so overlap folds exactly once.
 pub async fn refresh_subscription(client: &Client) {
     let (pseudonyms, relays) = rebuild_routes().await;
 
     // Hold COMMUNITY_SUB_ID across the unsubscribe+subscribe ON PURPOSE: it serializes concurrent
     // refreshers (Monitor, health-probe reconnect, refresh_control, accept_invite) so they can't
     // race into a duplicate subscription. Narrowing this lock would reintroduce that double-sub race.
+    let mut new_set = pseudonyms.clone();
+    new_set.sort();
+
     let mut sub_guard = COMMUNITY_SUB_ID.lock().await;
+    let mut set_guard = COMMUNITY_SUB_SET.lock().await;
+
+    // Idempotent: unchanged pseudonym set + a live sub → keep it (the pool auto-re-applies it across
+    // reconnects, verified). Rebuilding would be pure churn and a rebuild landing mid-reconnect silently
+    // fails to register. rebuild_routes() above already refreshed routes/banlist — all a no-change needs.
+    if sub_guard.is_some() && *set_guard == new_set {
+        return;
+    }
+
     if let Some(old_id) = sub_guard.take() {
         client.unsubscribe(&old_id).await;
     }
+    *set_guard = new_set;
 
     if pseudonyms.is_empty() {
+        if let Some(old_pw) = COMMUNITY_POOLWIDE_SUB_ID.lock().await.take() {
+            client.unsubscribe(&old_pw).await;
+        }
         return;
     }
 
@@ -136,6 +169,26 @@ pub async fn refresh_subscription(client: &Client) {
         let _ = client.pool().add_relay(r.as_str(), crate::community_relay_options()).await;
     }
     client.connect().await;
+
+    // Wait (briefly) for at least one community relay to actually CONNECT before subscribing. A
+    // subscribe_to/subscribe issued against a still-connecting relay silently fails to register the
+    // live sub (seen right after the Android bg-sync churn / on create-with-avatar, which fires extra
+    // control re-folds → re-subscribes mid-reconnect). Polling until a socket is live makes the sub
+    // land reliably regardless of churn timing. Dead/slow relays (e.g. a timing-out one) are ignored —
+    // one connected relay is enough to stream.
+    {
+        let wanted: Vec<RelayUrl> = relays.iter().filter_map(|r| RelayUrl::parse(r).ok()).collect();
+        for _ in 0..24 {
+            let pool = client.pool().all_relays().await;
+            let any_live = wanted.iter().any(|u| {
+                pool.get(u).map(|r| r.status() == RelayStatus::Connected).unwrap_or(false)
+            });
+            if any_live {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
 
     let filter = Filter::new()
         .kinds([
@@ -152,9 +205,19 @@ pub async fn refresh_subscription(client: &Client) {
         .custom_tags(SingleLetterTag::lowercase(Alphabet::Z), pseudonyms)
         .limit(0);
 
-    match client.subscribe_to(relays.iter().cloned(), filter, None).await {
-        Ok(output) => *sub_guard = Some(output.val),
-        Err(e) => crate::log_warn!("[community] subscribe failed: {:?}", e),
+    // Pool-wide subscribe — the path that streams on Android (replaces any prior one).
+    {
+        let mut pw = COMMUNITY_POOLWIDE_SUB_ID.lock().await;
+        if let Some(old) = pw.take() {
+            client.unsubscribe(&old).await;
+        }
+        if let Ok(out) = client.subscribe(filter.clone(), None).await {
+            *pw = Some(out.val);
+        }
+    }
+    // Targeted subscribe — the path that streams on desktop.
+    if let Ok(output) = client.subscribe_to(relays.iter().cloned(), filter, None).await {
+        *sub_guard = Some(output.val);
     }
 }
 
@@ -187,7 +250,9 @@ pub async fn dispatch_event(
         return;
     }
 
-    let Some(channel) = COMMUNITY_ROUTES.lock().await.get(&pseudonym).cloned() else { return; };
+    let Some(channel) = COMMUNITY_ROUTES.lock().await.get(&pseudonym).cloned() else {
+        return;
+    };
     if !session.is_valid() {
         return;
     }

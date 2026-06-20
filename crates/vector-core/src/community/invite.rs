@@ -40,6 +40,11 @@ pub struct CommunityInvite {
     /// is. `serde(default)` keeps older bundles (pre-feature) parseable.
     #[serde(default)]
     pub owner_attestation: Option<String>,
+    /// Community icon (encrypted blob ref) so a PARKED private invite can show the logo before the
+    /// recipient joins — the card fetches + decrypts it like a public-invite preview (a Blossom blob
+    /// fetch, no relay connect). `default` keeps older/icon-less bundles parseable.
+    #[serde(default)]
+    pub icon: Option<super::CommunityImage>,
 }
 
 /// Hard caps on a received bundle. A bundle arrives over an unauthenticated gift wrap
@@ -100,6 +105,7 @@ pub fn build_invite(community: &Community) -> CommunityInvite {
             })
             .collect(),
         owner_attestation: community.owner_attestation.clone(),
+        icon: community.icon.clone(),
     }
 }
 
@@ -139,11 +145,10 @@ pub fn accept_invite(invite: &CommunityInvite) -> Result<Community, String> {
         server_root_key,
         server_root_epoch: Epoch(invite.server_root_epoch),
         name: invite.name.clone(),
-        // The private bundle conveys join material only; display metadata
-        // (description/icon/banner) arrives when the member syncs the GroupRoot, or via
-        // a public-invite preview. Left None here.
+        // Description/banner still arrive with the GroupRoot fold; the icon now rides the bundle so it
+        // shows on the parked invite AND instantly on join (the fold refreshes it authoritatively).
         description: None,
-        icon: None,
+        icon: invite.icon.clone(),
         banner: None,
         relays: super::cap_relays(invite.relays.clone()),
         channels,

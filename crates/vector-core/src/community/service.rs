@@ -1004,9 +1004,18 @@ fn proven_owner_hex(community: &Community) -> Option<String> {
 /// (`publish_owner_hide`) and the UI affordance (`get_message_delete_options`) call it, so the
 /// button shown can never disagree with what the publish will actually allow.
 pub fn can_moderation_hide(community: &Community, actor_hex: &str, author_hex: &str) -> bool {
+    // Normalize both identities to hex first. Callers pass a message's stored npub, which Concord
+    // persists as BECH32 (`opened.author.to_bech32()`), whereas the owner (`proven_owner_hex`) and the
+    // roster grants are keyed by lowercase HEX. A raw bech32 author matched NEITHER — it skipped
+    // owner-protection (`owner_hex == target_hex` is hex≠bech32) AND missed the roster position lookup
+    // (defaulting to u32::MAX, the lowest rank), so an admin wrongly "outranked" and could hide the
+    // owner. The enforcing `apply_delete` path avoids this by normalizing the same way (PublicKey::parse).
+    let to_hex = |s: &str| nostr_sdk::PublicKey::parse(s).map(|pk| pk.to_hex()).unwrap_or_else(|_| s.to_string());
+    let actor = to_hex(actor_hex);
+    let author = to_hex(author_hex);
     let owner = proven_owner_hex(community);
     let roster = crate::db::community::get_community_roles(&community.id.to_hex()).unwrap_or_default();
-    roster.can_act_on_member(actor_hex, owner.as_deref(), author_hex, super::roles::Permissions::MANAGE_MESSAGES)
+    roster.can_act_on_member(&actor, owner.as_deref(), &author, super::roles::Permissions::MANAGE_MESSAGES)
 }
 
 /// Rekey-plane authority with §6 banlist precedence: a positive authority
@@ -1501,6 +1510,19 @@ pub async fn create_public_invite<T: Transport + ?Sized>(
         expires_at.map(|e| e as i64),
         label.as_deref(),
     )?;
+    // Record the token in the self-encrypted Invite List so our other devices can see + copy + revoke this
+    // link (the local token store is device-only). Sibling to the Community List, debounced republish.
+    super::invite_list::add_invite(super::invite_list::InviteEntry {
+        token: token_hex.clone(),
+        community_id: community.id.to_hex(),
+        url: url.clone(),
+        label: label.clone(),
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        expires_at,
+    });
     // Publish MY updated invite-link set so every member's computed mode flips to Public — the link
     // now exists in the signed, foldable per-creator source of truth, not just my local token store.
     republish_my_invite_links(transport, community).await?;
@@ -1664,6 +1686,9 @@ pub async fn revoke_public_invite<T: Transport + ?Sized>(
         return Err("account changed during invite revoke".to_string());
     }
     crate::db::community::delete_public_invite(&token_hex)?;
+    // Tombstone it in the self-encrypted Invite List so our other devices drop the link too (and a stale
+    // device can't resurrect it). Terminal: a token is never re-minted.
+    super::invite_list::revoke_invite(&token_hex, &cid);
     // Republish MY (reduced) link set so the mode reflects the removal, then set the recomputed aggregate.
     republish_my_invite_links(transport, community).await?;
     if session.is_valid() {

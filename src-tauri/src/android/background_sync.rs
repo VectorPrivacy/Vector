@@ -70,6 +70,13 @@ pub static BG_APP_CONTEXT: OnceLock<GlobalRef> = OnceLock::new();
 /// Stored data directory path (captured from nativeStartBackgroundSync for later use in nativeOnPause)
 static BG_DATA_DIR: OnceLock<String> = OnceLock::new();
 
+/// In FULL APP MODE the foreground owns the global client AND the long-lived notification loop. The
+/// standalone sync (onPause) replaces the global with its own connected client so backgrounded ops keep
+/// working — this stashes the foreground client so `nativeOnResume` can restore it. Without the restore,
+/// the loop stays bound to the foreground client while every later subscription (`nostr_client()`) lands
+/// on the orphaned standalone client: a community created mid-session never delivers live until restart.
+static PRESWAP_FOREGROUND_CLIENT: Mutex<Option<Client>> = Mutex::new(None);
+
 /// Called from MainActivity.onResume via JNI
 #[no_mangle]
 pub extern "C" fn Java_io_vectorapp_MainActivity_nativeOnResume(
@@ -85,6 +92,18 @@ pub extern "C" fn Java_io_vectorapp_MainActivity_nativeOnResume(
         logcat("Stopping standalone sync (activity resumed)");
         STOP_STANDALONE_SYNC.store(true, Ordering::SeqCst);
         STOP_NOTIFY.notify_one();
+    }
+
+    // Restore the foreground client as the global. The standalone sync replaced it with its own client
+    // (torn down on the stop above); leaving that in place orphans the foreground notification loop from
+    // every subscription added afterward (mid-session community delivery dies until restart). Reconnect
+    // it too — its sockets dropped while backgrounded, and the pool re-applies the live subs on connect.
+    if let Some(fg) = PRESWAP_FOREGROUND_CLIENT.lock().unwrap().take() {
+        logcat("Restoring foreground client as global (post-resume)");
+        set_nostr_client(fg.clone());
+        tauri::async_runtime::spawn(async move {
+            fg.connect().await;
+        });
     }
 }
 
@@ -367,6 +386,14 @@ fn run_standalone_sync_loop(data_dir: &str) {
         // client that would poison the OnceCell and prevent the full app from
         // creating a proper client with signer after PIN unlock.
         if can_decrypt {
+            // Full app mode: stash the foreground client BEFORE we overwrite the global with this
+            // standalone one, so nativeOnResume can restore it (and keep the notification loop and all
+            // future subscriptions on a single live client).
+            if ACTIVITY_EVER_CREATED.load(Ordering::Acquire) {
+                if let Some(fg) = NOSTR_CLIENT.read().unwrap().as_ref().cloned() {
+                    *PRESWAP_FOREGROUND_CLIENT.lock().unwrap() = Some(fg);
+                }
+            }
             set_nostr_client(client.clone());
             set_my_public_key(my_public_key);
             if let Some(keys) = keys {

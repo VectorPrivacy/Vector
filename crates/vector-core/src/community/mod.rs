@@ -13,6 +13,7 @@ pub mod derive;
 pub mod envelope;
 pub mod inbound;
 pub mod invite;
+pub mod invite_list;
 pub mod list;
 pub mod metadata;
 pub mod edition;

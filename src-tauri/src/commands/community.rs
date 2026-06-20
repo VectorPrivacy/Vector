@@ -1528,6 +1528,14 @@ pub fn trigger_community_reconnect_resync() {
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(1500)).await;
         if session.is_valid() {
+            // RE-ARM the live Community subscription FIRST. On reconnect the pool re-applies the
+            // pool-wide DM subscription but NOT our targeted `subscribe_to` Community sub, so realtime
+            // community delivery silently dies after any reconnect (notably Android's bg-sync, which
+            // disconnects the shared pool on every foreground transition). The 1500ms debounce lets the
+            // reconnect burst settle so this re-subscribes against live connections, not mid-connect ones.
+            crate::services::subscription_handler::refresh_community_subscription().await;
+            // Then sweep the fetch to catch anything published during the disconnect gap (the live sub
+            // is limit(0) and only streams events published after it re-arms).
             let _ = sync_communities_boot().await;
         }
         IN_FLIGHT.store(false, Ordering::Release);
@@ -1554,12 +1562,27 @@ pub(crate) async fn reconcile_community_list_boot() {
         Some(pk) => pk,
         None => return,
     };
-    let relay = vector_core::community::list::fetch_community_list(&client, my_pk, session.clone())
-        .await
-        .unwrap_or_default();
+    // One REQ for BOTH self-lists (Community + Invite) — same kind-30078, different `d`-tags.
+    let (relay, relay_invites) =
+        vector_core::community::invite_list::fetch_self_lists(&client, my_pk, session.clone()).await;
     if !session.is_valid() {
         return;
     }
+
+    // Invite List half: merge the relay copy, seed any pre-feature local tokens, hydrate the read model
+    // (so a link minted on another device shows up here), and publish only if genuinely ahead.
+    {
+        let merged_invites =
+            vector_core::community::invite_list::load_local_invite_list().merge(&relay_invites);
+        let _ = vector_core::community::invite_list::save_local_invite_list(&merged_invites);
+        vector_core::community::invite_list::backfill_from_db();
+        let invites = vector_core::community::invite_list::load_local_invite_list();
+        vector_core::community::invite_list::hydrate_read_model(&invites);
+        if invites.is_ahead_of(&relay_invites) {
+            vector_core::community::invite_list::republish_invite_list_debounced();
+        }
+    }
+
     let merged = vector_core::community::list::load_local_list().merge(&relay);
     let _ = vector_core::community::list::save_local_list(&merged);
     // A tombstone we folded from another device (a leave/kick/ban there) may name a community whose DB row
@@ -1652,6 +1675,39 @@ pub(crate) async fn ingest_community_list_update(event: nostr_sdk::Event) {
     rehydrate_listed_communities(&merged, &session, true).await;
     if session.is_valid() {
         purge_stale_pending_invites(&merged.tombstones);
+    }
+}
+
+/// Route a live Invite List update from another device: decrypt, merge into the local mirror, and hydrate
+/// the read model so a link minted (or revoked) elsewhere appears (or disappears) here without a restart.
+pub(crate) async fn ingest_invite_list_update(event: nostr_sdk::Event) {
+    let session = vector_core::state::SessionGuard::capture();
+    let client = match vector_core::state::nostr_client() {
+        Some(c) => c,
+        None => return,
+    };
+    let Some(my_pk) = vector_core::my_public_key() else { return };
+    match vector_core::community::invite_list::ingest_remote_invite_list_event(&client, &my_pk, &event, session).await {
+        Ok(merged) => {
+            // Refresh any open invite panel (+ metadata) for each community whose links changed, so a link
+            // minted OR revoked on another device shows up live (tombstones carry their community too, so a
+            // last-link revoke still refreshes). Reuses the existing community_refreshed listener.
+            let mut seen = std::collections::HashSet::new();
+            let affected = merged
+                .entries
+                .iter()
+                .map(|e| &e.community_id)
+                .chain(merged.tombstones.iter().map(|t| &t.community_id));
+            for cid in affected {
+                if !cid.is_empty() && seen.insert(cid.clone()) {
+                    vector_core::emit_event(
+                        "community_refreshed",
+                        &serde_json::json!({ "community_id": cid }),
+                    );
+                }
+            }
+        }
+        Err(e) => vector_core::log_warn!("[InviteList] ingest remote update failed: {}", e),
     }
 }
 
@@ -2585,12 +2641,28 @@ pub async fn set_community_image(
     let mut community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
         .ok_or("Community not found")?;
 
-    let bytes = std::fs::read(&filepath).map_err(|e| format!("read image: {e}"))?;
-    let ext = std::path::Path::new(&filepath)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("png")
-        .to_lowercase();
+    // Read the picked file. On Android the file dialog returns a content:// URI that std::fs can't
+    // open, so route it through the JNI content-resolver (the same path upload_avatar uses); desktop
+    // reads the real path directly. Without this, picking an image on Android failed instantly at the
+    // read ("read image: ...") and surfaced as the generic "Failed to update the image" toast — for
+    // the owner too, not just admins.
+    let (bytes, ext): (Vec<u8>, String) = {
+        #[cfg(not(target_os = "android"))]
+        {
+            let bytes = std::fs::read(&filepath).map_err(|e| format!("read image: {e}"))?;
+            let ext = std::path::Path::new(&filepath)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("png")
+                .to_lowercase();
+            (bytes, ext)
+        }
+        #[cfg(target_os = "android")]
+        {
+            let af = crate::android::filesystem::read_android_uri(filepath.clone())?;
+            ((*af.bytes).clone(), af.extension)
+        }
+    };
     let plaintext_hash = vector_core::crypto::sha256_hex(&bytes);
 
     // Encrypt with a fresh random key+nonce (same as file attachments); the key rides in
@@ -2604,11 +2676,27 @@ pub async fn set_community_image(
     if servers.is_empty() {
         return Err("No Blossom servers configured.".to_string());
     }
-    let url = vector_core::blossom::upload_blob_with_failover(
+    // Emit upload progress so the avatar shows a ring (parity with profile avatars) instead of freezing
+    // until the new icon appears. `is_encrypted = true` routes the encrypted blob to servers that accept
+    // encrypted types (the same ranking file attachments use).
+    let cid_for_progress = community_id.clone();
+    let progress_cb: vector_core::blossom::ProgressCallback = std::sync::Arc::new(move |pct, _bytes| {
+        vector_core::emit_event(
+            "community_image_upload_progress",
+            &serde_json::json!({ "community_id": cid_for_progress, "progress": pct.unwrap_or(0), "is_banner": is_banner }),
+        );
+        Ok(())
+    });
+    let url = vector_core::blossom::upload_blob_with_progress_and_failover(
         signer,
         servers,
         std::sync::Arc::new(encrypted),
         Some("application/octet-stream"),
+        true,
+        progress_cb,
+        None,
+        None,
+        None,
     )
     .await?;
 

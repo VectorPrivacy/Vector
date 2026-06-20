@@ -1704,6 +1704,47 @@ function getChatSortTimestamp(chat) {
     return lastActivity || 0;
 }
 
+/**
+ * Lazy-load a message-less community's latest membership event into `chat.lastSystemEvent` so the
+ * chat-list preview shows "X has joined" instead of "No messages yet". One-shot per chat (guarded);
+ * a community with a real message needs nothing. On resolve, requests the actor's profile so the
+ * npub-stub upgrades to a name (via profile_update), then patches just this row.
+ */
+function ensureCommunityPreviewActivity(chat) {
+    if (!chat || chat._sysEvRequested) return;
+    if ((chat.messages || []).some(m => !m.system_event)) return; // a real message already drives the preview
+    chat._sysEvRequested = true;
+    invoke('get_system_events', { conversationId: chat.id }).then(events => {
+        if (!events || !events.length) return;
+        const latest = events.reduce((a, b) => (b.at > a.at ? b : a));
+        chat.lastSystemEvent = { event_type: latest.event_type, member_npub: latest.member_npub, at: latest.at };
+        const np = latest.member_npub;
+        if (np && !arrProfiles.some(p => p.id === np) && !strangerProfileRequested.has(np)) {
+            strangerProfileRequested.add(np);
+            invoke('load_profile', { npub: np }).catch(() => {});
+        }
+        updateChatlistPreview(chat.id);
+    }).catch(() => {});
+}
+
+
+/**
+ * Resolve a just-picked image path to a webview-displayable <img> src. On Android the file picker
+ * returns a content:// URI that convertFileSrc can't render (broken preview), so cache_android_file
+ * reads it and hands back a base64 preview; desktop uses the asset path directly. Returns null when
+ * no preview is available, so the caller can keep its placeholder instead of showing a broken image.
+ */
+async function pickedImagePreviewSrc(path) {
+    if (!path) return null;
+    if (platformFeatures.os !== 'android') return convertFileSrc(path);
+    try {
+        const info = await invoke('cache_android_file', { filePath: path });
+        if (info?.preview) return info.preview;
+    } catch (e) {
+        console.error('[preview] cache_android_file failed:', e);
+    }
+    return null;
+}
 
 /** Extract a valid npub from a bare npub string or a vectorapp.io profile URL */
 function extractNpub(input) {
@@ -1894,14 +1935,17 @@ async function loadCommunityInvites() {
         arrCommunityInvites = (invites || []).map(inv => {
             let name = 'Community';
             let channels = [];
+            let icon = null;
             // The bundle carries name + the channel id(s) + keys; we pull the ids so Accept can
             // render the real community row optimistically (same channel id → no swap on reconcile).
+            // It also carries the community icon (encrypted ref) so the invite card shows the real logo.
             try {
                 const b = JSON.parse(inv.bundle_json);
                 name = b.name || name;
                 channels = (b.channels || []).map(c => ({ id: c.id, name: c.name }));
+                icon = b.icon || null;
             } catch (_) {}
-            return { community_id: inv.community_id, name, inviter_npub: inv.inviter_npub, channels };
+            return { community_id: inv.community_id, name, inviter_npub: inv.inviter_npub, channels, icon };
         });
         updateChatBackNotification();
     } catch (e) {
@@ -2801,6 +2845,17 @@ async function setupRustListeners() {
                 if (summary.owner_npub) f.owner_npub = summary.owner_npub;
             }
         } catch (_) {}
+        // The metadata edit may have swapped the icon — re-cache it (URL-keyed fast-path no-ops when
+        // unchanged) and repoint avatar_cached, so a received icon change shows live for every member,
+        // not only after a hard reload.
+        try {
+            const cachedPath = await invoke('cache_community_image', { communityId, isBanner: false });
+            if (cachedPath) {
+                for (const c of arrChats) {
+                    if (c.metadata?.custom_fields?.community_id === communityId) c.metadata.avatar_cached = cachedPath;
+                }
+            }
+        } catch (_) {}
         // A control change may have promoted/demoted admins — refresh the cached roster so in-chat
         // admin tags + @everyone reflect it (the open overview re-fetches separately below).
         loadCommunityRoles(communityId);
@@ -2875,6 +2930,14 @@ async function setupRustListeners() {
             // Add to chat messages via cache (handles deduplication)
             // Note: chat.messages and cache share the same array reference, so only use cache
             eventCache.addEvent(conversation_id, systemMsg);
+
+            // Cache the latest membership event for the chatlist preview of a message-less community.
+            // (chat.messages isn't aliased to the cache when the community isn't open, so the preview
+            // can't see this event there.) Patch the row directly — the state hash doesn't track it.
+            if (chat && (!chat.lastSystemEvent || atMs >= chat.lastSystemEvent.at)) {
+                chat.lastSystemEvent = { event_type, member_npub: member_pubkey, at: atMs };
+                if (!chat.messages?.some(m => !m.system_event)) updateChatlistPreview(conversation_id);
+            }
 
             // Paint into the OPEN view only if this is genuinely the newest event. A historical replay (paging
             // / rehydration) is already in the cache at its real time and renders in order on the next chat
@@ -3293,6 +3356,14 @@ async function setupRustListeners() {
         }
         if (activeInviteModalRerender) {
             activeInviteModalRerender();
+        }
+
+        // Upgrade any message-less community whose preview shows THIS npub's join from the npub stub
+        // to the resolved name. The group row's state hash doesn't track the join actor, so renderChatlist
+        // alone wouldn't repaint it — patch the row directly.
+        for (const chat of arrChats) {
+            const se = latestPreviewSystemEvent(chat);
+            if (se && se.member_npub === evt.payload.id) updateChatlistPreview(chat.id);
         }
 
         // Render the Chat List
@@ -4719,6 +4790,9 @@ async function login(skipAnimations = false) {
             // registers the theme with the send resolver and makes the first picker
             // open cheap (data + DOM already composed). Read-only/local + guarded.
             loadEmojiPacks();
+            // Warm frecency too, so `:` autocomplete + the picker reflect ranked/recent use from the
+            // first interaction, not only after the panel's first open (which is where it loaded before).
+            loadEmojiUsage();
 
             // Helper to show the main UI after login
             const showMainUI = async () => {
@@ -8054,30 +8128,60 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
     }
     const prevOverlay = avatarParent.querySelector('.group-avatar-edit-overlay');
     if (prevOverlay) prevOverlay.remove();
+    // Reset the edit affordance every render — permission can change live (role grant/revoke) and the
+    // success path re-renders through here, which also clears the in-flight dim below.
+    avatarParent.onclick = null;
+    avatarParent.style.cursor = '';
+    avatarParent.style.opacity = '';
     if (caps.manage_metadata) {
-        const overlay = document.createElement('div');
-        overlay.className = 'group-avatar-edit-overlay';
-        overlay.innerHTML = '<span class="icon icon-edit" style="width:16px;height:16px;background-color:#fff;"></span>';
-        overlay.onclick = async (e) => {
-            e.stopPropagation();
+        const pickAndSetGroupAvatar = async () => {
+            const { open } = window.__TAURI__.dialog;
+            const selected = await open({ multiple: false, filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }] });
+            const filePath = typeof selected === 'string' ? selected : selected?.path;
+            if (!filePath) return;
+            // Mirror the profile-avatar uploader: the corner pencil itself becomes a small progress ring,
+            // kept visible through the upload (touch has no hover). On success the overlay re-renders fresh.
+            const overlayEl = avatarParent.querySelector('.group-avatar-edit-overlay');
+            const prevOverlayHtml = overlayEl ? overlayEl.innerHTML : null;
+            if (overlayEl) {
+                overlayEl.style.opacity = '1';
+                overlayEl.innerHTML = '<div class="profile-upload-spinner community-upload-ring" style="--progress:5%;"></div>';
+            }
+            let unlisten = null;
             try {
-                const { open } = window.__TAURI__.dialog;
-                const selected = await open({ multiple: false, filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }] });
-                const filePath = typeof selected === 'string' ? selected : selected?.path;
-                if (!filePath) return;
-                overlay.style.opacity = '0.5';
+                unlisten = await window.__TAURI__.event.listen('community_image_upload_progress', (e) => {
+                    if (e.payload?.community_id === communityId && !e.payload?.is_banner) {
+                        const ring = overlayEl?.querySelector('.profile-upload-spinner');
+                        if (ring) ring.style.setProperty('--progress', `${Math.max(5, e.payload.progress || 0)}%`);
+                    }
+                });
                 await invoke('set_community_image', { communityId, filepath: filePath, isBanner: false });
                 cf.icon = '1';
                 const cachedPath = await invoke('cache_community_image', { communityId, isBanner: false });
                 if (cachedPath) chat.metadata.avatar_cached = cachedPath;
-                await renderCommunityOverview(chat);
-                renderChatlist();
             } catch (err) {
                 console.error('Failed to set community image:', err);
-                overlay.style.opacity = '';
                 showToast('Failed to update the image');
+                // Restore the pencil + hover behavior (the success path re-renders the overlay fresh below).
+                if (overlayEl) {
+                    overlayEl.style.opacity = '';
+                    if (prevOverlayHtml != null) overlayEl.innerHTML = prevOverlayHtml;
+                }
+                return;
+            } finally {
+                if (unlisten) unlisten();
             }
+            await renderCommunityOverview(chat);
+            renderChatlist();
         };
+        // Whole icon is the tap target (friendlier on touch than the small pencil); the pencil overlay
+        // stays as the visual cue and its tap just bubbles up to this same handler.
+        avatarParent.style.cursor = 'pointer';
+        avatarParent.onclick = pickAndSetGroupAvatar;
+
+        const overlay = document.createElement('div');
+        overlay.className = 'group-avatar-edit-overlay';
+        overlay.innerHTML = '<span class="icon icon-edit" style="width:16px;height:16px;background-color:#fff;"></span>';
         avatarParent.appendChild(overlay);
     }
 
@@ -9190,7 +9294,7 @@ function enterProfileEditMode() {
             domProfileBanner.replaceWith(newBanner);
             domProfileBanner = newBanner;
         }
-        domProfileBanner.src = convertFileSrc(file);
+        domProfileBanner.src = await pickedImagePreviewSrc(file) || '';
     };
     document.getElementById('profile-edit-btn').style.display = 'none';
     document.getElementById('profile-share-btn').style.display = 'none';
@@ -9253,7 +9357,7 @@ function enterProfileEditMode() {
             domProfileAvatar.replaceWith(img);
             domProfileAvatar = img;
         }
-        domProfileAvatar.src = convertFileSrc(file);
+        domProfileAvatar.src = await pickedImagePreviewSrc(file) || '';
     };
 
     // Reset label to clean state on entry
@@ -9883,6 +9987,13 @@ window.addEventListener("DOMContentLoaded", async () => {
 
                 // Resolve Community logos (metadata already rides the chat payload).
                 resolveCommunityAvatars();
+
+                // Warm the emoji set + frecency. The login flow does this in its `init_finished`
+                // handler, which hot-reload skips — so without it `arrEmojiPacks`/frecency stay empty
+                // after a dev refresh until the picker is first opened (defaults-only `:` autocomplete
+                // and a stale first panel open).
+                loadEmojiPacks();
+                loadEmojiUsage();
 
                 // Hide login UI and show main UI
                 domLogin.style.display = 'none';
@@ -11938,13 +12049,15 @@ async function closeCreateGroup() {
             });
             if (!file) return;
             strCreateGroupAvatarPath = file;
-            // Show local preview, hide placeholder
-            if (domCreateGroupAvatarPreview) {
-                domCreateGroupAvatarPreview.src = convertFileSrc(file);
+            // Show local preview, hide placeholder (only if we resolved a displayable src — on Android
+            // a content:// URI needs cache_android_file's base64 preview, not convertFileSrc).
+            const previewSrc = await pickedImagePreviewSrc(file);
+            if (domCreateGroupAvatarPreview && previewSrc) {
+                domCreateGroupAvatarPreview.src = previewSrc;
                 domCreateGroupAvatarPreview.style.display = '';
+                if (domCreateGroupAvatarPlaceholder) domCreateGroupAvatarPlaceholder.style.display = 'none';
+                domCreateGroupAvatarPicker.classList.add('has-image');
             }
-            if (domCreateGroupAvatarPlaceholder) domCreateGroupAvatarPlaceholder.style.display = 'none';
-            domCreateGroupAvatarPicker.classList.add('has-image');
         };
     }
 
@@ -11996,10 +12109,12 @@ async function closeCreateGroup() {
             // path); reloads re-source this from the persisted DB created_at.
             chat.metadata.custom_fields.created_at = String(Date.now());
             if (strCreateGroupAvatarPath) {
-                // Show the locally-picked avatar instantly (convertFileSrc, no remote fetch);
-                // the backend re-caches authoritatively once the upload lands below.
                 chat.metadata.custom_fields.icon = '1';
-                chat.metadata.avatar_cached = convertFileSrc(strCreateGroupAvatarPath);
+                // avatar_cached is a RAW path (every render site convertFileSrc's it). Desktop: the picked
+                // path is a real file → instant preview. Android: a content:// URI isn't a renderable path,
+                // so leave it for the post-upload cache below — the header refreshes there (no manual re-enter,
+                // no broken/default-then-flip). (The old convertFileSrc here double-converted → broken.)
+                if (platformFeatures.os !== 'android') chat.metadata.avatar_cached = strCreateGroupAvatarPath;
             }
             renderChatlist();
 
@@ -12014,7 +12129,23 @@ async function closeCreateGroup() {
                     try { await invoke('update_community_metadata', { communityId, name: null, description }); }
                     catch (err) { console.error('Set community description failed:', err); showToast('Community created, but the description failed to save'); }
                 }
-                // Post-creation: loop a private invite out to each picked contact.
+                // Upload the avatar BEFORE sending invites: the private invite bundle snapshots
+                // community.icon, so the icon must already be in the metadata for invitees to see the
+                // logo on their parked invite (not only after they join).
+                if (strCreateGroupAvatarPath) {
+                    try {
+                        await invoke('set_community_image', { communityId, filepath: strCreateGroupAvatarPath, isBanner: false });
+                        const path = await invoke('cache_community_image', { communityId, isBanner: false });
+                        if (path) {
+                            chat.metadata.avatar_cached = path;
+                            renderChatlist();
+                            // Refresh the open channel header so the icon shows without a manual back-out/
+                            // re-enter (renderChatlist only updates the list row, not the open top bar).
+                            if (strOpenChat === channelId) setChatHeader(chat, null, true, false);
+                        }
+                    } catch (err) { console.error('Set community avatar failed:', err); showToast('Community created, but the avatar upload failed'); }
+                }
+                // Then loop a private invite out to each picked contact (the bundle now carries the icon).
                 if (inviteeNpubs.length) {
                     let ok = 0;
                     for (const np of inviteeNpubs) {
@@ -12024,13 +12155,6 @@ async function closeCreateGroup() {
                     // Success is silent (the invitees just appear); only failures surface.
                     const failed = inviteeNpubs.length - ok;
                     if (failed) showToast(`${failed} invite${failed === 1 ? '' : 's'} failed to send`);
-                }
-                if (strCreateGroupAvatarPath) {
-                    try {
-                        await invoke('set_community_image', { communityId, filepath: strCreateGroupAvatarPath, isBanner: false });
-                        const path = await invoke('cache_community_image', { communityId, isBanner: false });
-                        if (path) { chat.metadata.avatar_cached = path; renderChatlist(); }
-                    } catch (err) { console.error('Set community avatar failed:', err); showToast('Community created, but the avatar upload failed'); }
                 }
             })();
         } catch (e) {
