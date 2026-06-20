@@ -174,6 +174,9 @@ function openImageViewer(imageSrc) {
     // Show overlay
     viewerOverlay.style.display = 'flex';
     setTimeout(() => viewerOverlay.classList.add('active'), 10);
+
+    // Android back closes the viewer instead of navigating the conversation away.
+    pushBack('image-viewer', closeViewer);
     
     // Update zoom info
     updateZoomInfo();
@@ -192,7 +195,8 @@ function openImageViewer(imageSrc) {
  */
 function closeViewer() {
     if (!viewerOverlay) return;
-    
+    popBack('image-viewer');
+
     viewerOverlay.classList.remove('active');
     setTimeout(() => {
         viewerOverlay.style.display = 'none';

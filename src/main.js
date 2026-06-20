@@ -214,6 +214,8 @@ const profileSwitcher = {
             document.getElementById('profile-switcher-panel').classList.add('open');
             document.getElementById('my-profile-switcher').classList.add('open');
             this.isOpen = true;
+            // Android back closes the account list instead of navigating the profile screen away.
+            pushBack('profile-switcher', () => profileSwitcher.close());
             const trashToggle = document.getElementById('profile-switcher-trash-toggle');
             if (trashToggle) trashToggle.style.display = '';
         } catch (e) {
@@ -224,6 +226,7 @@ const profileSwitcher = {
     },
 
     close() {
+        popBack('profile-switcher');
         document.getElementById('profile-switcher-backdrop').classList.remove('visible');
         document.getElementById('profile-switcher-panel').classList.remove('open');
         document.getElementById('my-profile-switcher').classList.remove('open');
