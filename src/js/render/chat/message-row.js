@@ -795,6 +795,9 @@ function _dmsgRenderFileAttachment(target, msg, cAttachment) {
                 }
             } catch (err) {
                 console.error('Failed to open Mini App:', err);
+                // Surface WHY (e.g. "Invalid Mini App package: Missing index.html") instead of a silent
+                // no-op — the open threw before any optimistic status, so the card stays "Click to Play".
+                showToast(String(err));
             }
         } else {
             revealItemInDir(path);

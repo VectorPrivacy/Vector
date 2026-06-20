@@ -1159,6 +1159,22 @@ pub async fn miniapp_open(
                                 }
                             });
                         }
+                    } else if let Some(instance) = closing_instance.as_ref() {
+                        // SOLO app (no realtime channel was ever joined): still clear the optimistic
+                        // "Playing"/"online" the in-chat card set on open, so it resets live instead of
+                        // lingering until a chat re-render. Multiplayer is handled by the branch above.
+                        if let Some(topic) = instance.realtime_topic.as_ref() {
+                            let topic_encoded = super::realtime::encode_topic_id(topic);
+                            if let Some(main_window) = app_handle.get_webview_window("main") {
+                                let _ = main_window.emit("miniapp_realtime_status", serde_json::json!({
+                                    "topic": topic_encoded,
+                                    "peer_count": 0,
+                                    "peers": Vec::<String>::new(),
+                                    "is_active": false,
+                                    "has_pending_peers": false,
+                                }));
+                            }
+                        }
                     }
 
                     // Remove the instance — ONLY if it's still the one this destroy was for.
@@ -1232,7 +1248,10 @@ pub async fn miniapp_close(
 ) -> Result<(), Error> {
     let state = app.state::<MiniAppsState>();
 
-    if let Some((label, _)) = state.get_instance_by_message(&chat_id, &message_id).await {
+    if let Some((label, instance)) = state.get_instance_by_message(&chat_id, &message_id).await {
+        // `instance` is used only on Android below (desktop clears via WindowEvent::Destroyed).
+        #[cfg(not(target_os = "android"))]
+        let _ = &instance;
         #[cfg(target_os = "android")]
         {
             // Close Android overlay
@@ -1250,6 +1269,9 @@ pub async fn miniapp_close(
 
         // Full teardown: remove channel state, shut down Iroh entirely on Android
         let channel_state = state.remove_realtime_channel(&label).await;
+        // Topic to clear the in-chat status for (the channel's, else this solo app's own topic).
+        #[cfg(target_os = "android")]
+        let status_topic = channel_state.as_ref().map(|c| c.topic).or(instance.realtime_topic);
         if let Some(channel) = channel_state {
             let topic_encoded = super::realtime::encode_topic_id(&channel.topic);
 
@@ -1273,6 +1295,21 @@ pub async fn miniapp_close(
         // On desktop: WindowEvent::Destroyed handles leave_channel.
         #[cfg(target_os = "android")]
         {
+            // Android has no WindowEvent::Destroyed, so clear the in-chat "Playing"/"online" badge here
+            // (covers solo apps too — they never had a channel, so the desktop gating would skip them).
+            if let Some(topic) = status_topic {
+                let topic_encoded = super::realtime::encode_topic_id(&topic);
+                let session_peers = state.get_session_peers(&topic).await;
+                if let Some(main_window) = app.get_webview_window("main") {
+                    let _ = main_window.emit("miniapp_realtime_status", serde_json::json!({
+                        "topic": topic_encoded,
+                        "peer_count": session_peers.len(),
+                        "peers": session_peers,
+                        "is_active": false,
+                        "has_pending_peers": false,
+                    }));
+                }
+            }
             state.realtime.shutdown_iroh().await;
         }
 

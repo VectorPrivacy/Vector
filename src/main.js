@@ -6897,8 +6897,10 @@ function createFileBox(cAttachment, state = 'downloaded') {
 
         // Helper function to update the peer badge with avatar stack
         const updatePeerBadge = (peerCount, isPlaying, peerNpubs) => {
-            // session_peers is the single source of truth — use its length as the count
-            const totalPlayers = (peerNpubs && peerNpubs.length > 0) ? peerNpubs.length : (isPlaying ? peerCount + 1 : peerCount);
+            // session_peers is the single source of truth — its length is the count (it already includes
+            // self once we've joined a realtime channel). A solo app (no channel) has no session peers, so
+            // it shows no "online" badge — do NOT fabricate self+1 from `isPlaying`, which is just "window open".
+            const totalPlayers = (peerNpubs && peerNpubs.length > 0) ? peerNpubs.length : peerCount;
             if (totalPlayers > 0) {
                 peerBadge.innerHTML = '';
 
