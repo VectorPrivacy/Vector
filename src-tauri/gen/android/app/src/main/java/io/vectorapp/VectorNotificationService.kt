@@ -24,11 +24,8 @@ class VectorNotificationService : Service() {
         const val MESSAGES_CHANNEL_ID = "vector_messages_v2"
         const val SERVICE_NOTIFICATION_ID = 1
 
-        /** Incrementing counter for unique notification IDs (DMs and non-chat notifications). */
+        /** Incrementing counter for request codes + non-chat notification IDs. */
         private val notificationCounter = AtomicInteger(100)
-
-        /** Stable notification ID per chat — lets MessagingStyle accumulate messages in one notification. */
-        private val chatNotificationIds = java.util.concurrent.ConcurrentHashMap<String, Int>()
 
         /** Message history per chat — MessagingStyle requires replaying all messages on each update. */
         private data class ChatMessage(val senderName: String, val senderAvatarPath: String, val body: String, val timestamp: Long)
@@ -70,9 +67,11 @@ class VectorNotificationService : Service() {
             val isGroup = groupName.isNotEmpty()
             val historyKey = chatId.ifEmpty { title }
 
-            // Stable notification ID per chat so messages stack in one entry
+            // Deterministic per-chat notification ID so messages stack AND any later cancel (in-app
+            // read or resume) can recompute it without depending on mutable map state that a racing
+            // post/cancel could have already cleared.
             val notificationId = if (chatId.isNotEmpty()) {
-                chatNotificationIds.getOrPut(chatId) { notificationCounter.getAndIncrement() }
+                chatId.hashCode()
             } else {
                 notificationCounter.getAndIncrement()
             }
@@ -188,9 +187,9 @@ class VectorNotificationService : Service() {
 
         /**
          * Clear accumulated message history on Activity resume so a later notification doesn't replay
-         * messages the user has already seen. KEEPS chatNotificationIds so a per-chat cancelNotification
-         * (fired when a chat is read) can still find and dismiss a notification that's still showing
-         * after resume — the user opening the app does not, by itself, read every chat.
+         * messages the user has already seen. Notification IDs are deterministic (chatId.hashCode()),
+         * so a per-chat cancelNotification still resolves and dismisses a notification after resume
+         * without any retained map state.
          */
         @JvmStatic
         fun clearAllMessageHistory() {
@@ -201,22 +200,20 @@ class VectorNotificationService : Service() {
         @JvmStatic
         fun clearMessageHistory(historyKey: String) {
             chatMessageHistory.remove(historyKey)
-            chatNotificationIds.remove(historyKey)
         }
 
         /**
          * Revoke a single chat's notification. Called from Rust when the chat is read in-app or
-         * answered on another device. No-op if nothing is showing for that chat (the id map only
-         * holds chats with a live notification). historyKey == chatId for any non-empty chatId.
+         * answered on another device. Uses the deterministic per-chat ID, so it works even after a
+         * post/cancel race or a resume. Idempotent: cancelling an absent notification is a no-op.
          */
         @JvmStatic
         fun cancelNotification(context: Context, chatId: String) {
             if (chatId.isEmpty()) return
-            val id = chatNotificationIds.remove(chatId) ?: return
             chatMessageHistory.remove(chatId)
             val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            manager.cancel(id)
-            android.util.Log.d("VectorNotificationService", "Cancelled notification #$id for chat ${chatId.take(20)}")
+            manager.cancel(chatId.hashCode())
+            android.util.Log.d("VectorNotificationService", "Cancelled notification for chat ${chatId.take(20)}")
         }
 
         private fun loadBitmap(path: String): Bitmap? {

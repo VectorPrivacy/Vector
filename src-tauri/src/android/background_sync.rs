@@ -105,6 +105,14 @@ pub extern "C" fn Java_io_vectorapp_MainActivity_nativeOnResume(
             fg.connect().await;
         });
     }
+
+    // A message for the chat the user already has open, arriving while softly backgrounded, is
+    // auto-marked read but still posts a notification (the activity wasn't foreground). The chat
+    // never re-opens, so the in-app read path can't clear it — cancel the active chat's notification
+    // here on resume. Only the active chat; notifications for other chats stay until those are read.
+    if let Some(chat_id) = vector_core::state::get_active_chat() {
+        cancel_notification_jni(&chat_id);
+    }
 }
 
 /// Called from MainActivity.onPause via JNI
