@@ -44,6 +44,23 @@ pub struct MiniAppPackage {
     pub file_hash: String,
 }
 
+/// Resolve an archive entry name case-insensitively (lenience for authors who mis-case files, e.g. an
+/// `Index.html` entry for an `index.html` request — the WebXDC spec wants lowercase, but we'd rather a
+/// mis-cased app just work than fail). Exact match wins; otherwise an ASCII case-insensitive scan.
+/// Returns the ACTUAL stored name to pass to `by_name`.
+fn resolve_entry_ci<R: std::io::Read + std::io::Seek>(
+    archive: &zip::ZipArchive<R>,
+    target: &str,
+) -> Option<String> {
+    if archive.file_names().any(|n| n == target) {
+        return Some(target.to_string());
+    }
+    archive
+        .file_names()
+        .find(|n| n.eq_ignore_ascii_case(target))
+        .map(|s| s.to_string())
+}
+
 impl MiniAppPackage {
     /// Load a Mini App package from a .xdc file
     pub fn load(id: String, path: PathBuf) -> Result<Self, Error> {
@@ -73,16 +90,18 @@ impl MiniAppPackage {
         let cursor = Cursor::new(&file_data);
         let mut archive = zip::ZipArchive::new(cursor)?;
 
-        // Try to read manifest.toml
-        let manifest = match archive.by_name("manifest.toml") {
-            Ok(mut file) => {
+        // Try to read manifest.toml (case-insensitive lookup — lenient for a mis-cased entry).
+        let manifest = match resolve_entry_ci(&archive, "manifest.toml")
+            .and_then(|n| archive.by_name(&n).ok())
+        {
+            Some(mut file) => {
                 let bytes = Self::read_entry_capped(&mut file, 1024 * 1024)?;
                 let contents = String::from_utf8(bytes)
                     .map_err(|e| Error::ManifestParseError(e.to_string()))?;
                 toml::from_str(&contents)
                     .map_err(|e| Error::ManifestParseError(e.to_string()))?
             }
-            Err(_) => {
+            None => {
                 let name = path.file_stem()
                     .and_then(|s| s.to_str())
                     .unwrap_or("Mini App")
@@ -94,7 +113,8 @@ impl MiniAppPackage {
             }
         };
 
-        if archive.by_name("index.html").is_err() {
+        // Entry point required, but accept a mis-cased "Index.html" (served via the same CI lookup).
+        if resolve_entry_ci(&archive, "index.html").is_none() {
             return Err(Error::InvalidPackage("Missing index.html".to_string()));
         }
 
@@ -123,16 +143,18 @@ impl MiniAppPackage {
         let cursor = Cursor::new(bytes);
         let mut archive = zip::ZipArchive::new(cursor)?;
         
-        // Try to read manifest.toml
-        let manifest = match archive.by_name("manifest.toml") {
-            Ok(mut file) => {
+        // Try to read manifest.toml (case-insensitive lookup — lenient for a mis-cased entry).
+        let manifest = match resolve_entry_ci(&archive, "manifest.toml")
+            .and_then(|n| archive.by_name(&n).ok())
+        {
+            Some(mut file) => {
                 let bytes = Self::read_entry_capped(&mut file, 1024 * 1024)?;
                 let contents = String::from_utf8(bytes)
                     .map_err(|e| Error::ManifestParseError(e.to_string()))?;
                 toml::from_str(&contents)
                     .map_err(|e| Error::ManifestParseError(e.to_string()))?
             }
-            Err(_) => {
+            None => {
                 // No manifest, use fallback name
                 MiniAppManifest {
                     name: fallback_name.to_string(),
@@ -144,19 +166,20 @@ impl MiniAppPackage {
         const ICON_CAP: u64 = 8 * 1024 * 1024;
         // Try to get icon
         let icon = if !manifest.icon.is_empty() {
-            // Use icon from manifest
-            match archive.by_name(&manifest.icon) {
-                Ok(mut file) => Self::read_entry_capped(&mut file, ICON_CAP).ok(),
-                Err(_) => None,
-            }
+            // Use icon from manifest (case-insensitive lookup).
+            resolve_entry_ci(&archive, &manifest.icon)
+                .and_then(|n| archive.by_name(&n).ok())
+                .and_then(|mut file| Self::read_entry_capped(&mut file, ICON_CAP).ok())
         } else {
-            // Try common icon names
+            // Try common icon names (case-insensitive).
             let mut icon_data = None;
             for icon_name in &["icon.png", "icon.jpg", "icon.svg"] {
-                if let Ok(mut file) = archive.by_name(icon_name) {
-                    if let Ok(data) = Self::read_entry_capped(&mut file, ICON_CAP) {
-                        icon_data = Some(data);
-                        break;
+                if let Some(name) = resolve_entry_ci(&archive, icon_name) {
+                    if let Ok(mut file) = archive.by_name(&name) {
+                        if let Ok(data) = Self::read_entry_capped(&mut file, ICON_CAP) {
+                            icon_data = Some(data);
+                            break;
+                        }
                     }
                 }
             }
@@ -179,7 +202,10 @@ impl MiniAppPackage {
             return Err(Error::FileNotFound(format!("Invalid path: {}", path)));
         }
         
-        let mut zip_file = archive.by_name(normalized_path)
+        // Case-insensitive resolve so a mis-cased entry (e.g. "Index.html") still serves.
+        let actual_name = resolve_entry_ci(&archive, normalized_path)
+            .ok_or_else(|| Error::FileNotFound(path.to_string()))?;
+        let mut zip_file = archive.by_name(&actual_name)
             .map_err(|_| Error::FileNotFound(path.to_string()))?;
 
         // Generous: real .xdc games ship single packed assets (e.g. a Godot
