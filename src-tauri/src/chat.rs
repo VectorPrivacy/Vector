@@ -23,6 +23,9 @@ pub async fn mark_as_read_headless(chat_id: &str) -> bool {
     };
     let _ = crate::db::chats::save_slim_chat(slim).await;
 
+    // Read clears any lingering OS notification for this chat (in-app open / another device).
+    crate::services::notification_service::cancel_chat_notification(chat_id);
+
     // Notify the frontend if TAURI_APP is available (backgrounded app mode)
     if let Some(handle) = crate::TAURI_APP.get() {
         use tauri::Emitter;
@@ -76,6 +79,9 @@ pub async fn mark_as_read(chat_id: String, message_id: Option<String>) -> bool {
                 let _ = crate::db::chats::save_slim_chat(slim).await;
             }
         }
+
+        // Read clears any lingering OS notification for this chat (in-app open / another device).
+        crate::services::notification_service::cancel_chat_notification(&chat_id);
 
         crate::commands::messaging::update_unread_counter(handle.clone()).await;
     }

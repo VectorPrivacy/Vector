@@ -301,6 +301,17 @@ pub fn resolve_mention_display_names(content: &str, state: &crate::state::ChatSt
     result
 }
 
+/// Revoke the OS notification for a chat once it's been read (opened in-app) or answered on
+/// another device. Android: cancels the per-chat notification via JNI (no-op if none is showing).
+/// Desktop: no-op (desktop notifications aren't persistent or handle-tracked).
+pub fn cancel_chat_notification(chat_id: &str) {
+    #[cfg(target_os = "android")]
+    crate::android::background_sync::cancel_notification_jni(chat_id);
+
+    #[cfg(not(target_os = "android"))]
+    let _ = chat_id;
+}
+
 /// Show an OS notification with generic notification data
 pub fn show_notification_generic(mut data: NotificationData) {
     // Apply the user's content-privacy preference up front so every platform

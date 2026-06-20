@@ -62,7 +62,20 @@ pub(crate) struct TauriEventHandler;
 
 impl vector_core::InboundEventHandler for TauriEventHandler {
     fn on_dm_received(&self, chat_id: &str, msg: &Message, is_new: bool) {
-        if msg.mine || !is_new { return; }
+        if !is_new { return; }
+        if msg.mine {
+            // Answered from another device: mark this chat read here too so the unread clears and any
+            // pending OS notification is revoked, even when backgrounded. This hook runs in both the
+            // foreground handler and the background-sync commit path.
+            let chat_id = chat_id.to_string();
+            tokio::spawn(async move {
+                crate::chat::mark_as_read_headless(&chat_id).await;
+                if let Some(handle) = TAURI_APP.get() {
+                    let _ = commands::messaging::update_unread_counter(handle.clone()).await;
+                }
+            });
+            return;
+        }
         let chat_id = chat_id.to_string();
         let content = msg.content.clone();
         let msg_id = msg.id.clone();
@@ -95,7 +108,18 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
     }
 
     fn on_file_received(&self, chat_id: &str, msg: &Message, is_new: bool) {
-        if msg.mine || !is_new { return; }
+        if !is_new { return; }
+        if msg.mine {
+            // Answered from another device: mark read + revoke any notification (see on_dm_received).
+            let chat_id = chat_id.to_string();
+            tokio::spawn(async move {
+                crate::chat::mark_as_read_headless(&chat_id).await;
+                if let Some(handle) = TAURI_APP.get() {
+                    let _ = commands::messaging::update_unread_counter(handle.clone()).await;
+                }
+            });
+            return;
+        }
         let chat_id = chat_id.to_string();
         let extension = msg.attachments.first()
             .map(|att| att.extension.clone())

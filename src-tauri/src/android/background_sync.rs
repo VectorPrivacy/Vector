@@ -978,6 +978,52 @@ pub fn post_notification_jni(
     }
 }
 
+/// Revoke a chat's OS notification (chat read in-app, or answered on another device).
+/// No-op Kotlin-side if nothing is showing for that chat. Mirrors post_notification_jni's
+/// class-loader dance so it works from any JNI-attached thread.
+pub fn cancel_notification_jni(chat_id: &str) {
+    if chat_id.is_empty() { return; }
+
+    let vm = match BG_JAVA_VM.get() {
+        Some(vm) => vm,
+        None => { logcat("cancel_notification_jni: JavaVM not stored"); return; }
+    };
+    let context_ref = match BG_APP_CONTEXT.get() {
+        Some(ctx) => ctx,
+        None => { logcat("cancel_notification_jni: App context not stored"); return; }
+    };
+    let mut env = match vm.attach_current_thread() {
+        Ok(env) => env,
+        Err(e) => { logcat(&format!("cancel_notification_jni: attach failed: {:?}", e)); return; }
+    };
+    let context = context_ref.as_obj();
+
+    let result: Result<(), String> = (|| {
+        let class_loader = env.call_method(context, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+            .map_err(|e| format!("getClassLoader: {:?}", e))?
+            .l().map_err(|e| format!("ClassLoader cast: {:?}", e))?;
+        let class_name = env.new_string("io.vectorapp.VectorNotificationService")
+            .map_err(|e| format!("class name: {:?}", e))?;
+        let service_class = env.call_method(&class_loader, "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[jni::objects::JValue::Object(&class_name)])
+            .map_err(|e| format!("loadClass: {:?}", e))?
+            .l().map_err(|e| format!("class cast: {:?}", e))?;
+        let service_jclass = jni::objects::JClass::from(service_class);
+
+        let jchat_id = env.new_string(chat_id).map_err(|e| format!("chat_id: {:?}", e))?;
+        env.call_static_method(&service_jclass, "cancelNotification",
+            "(Landroid/content/Context;Ljava/lang/String;)V",
+            &[context.into(), (&jchat_id).into()])
+            .map_err(|e| format!("cancelNotification: {:?}", e))?;
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        logcat(&format!("Failed to cancel notification: {}", e));
+    }
+}
+
 /// Called from NotificationActionReceiver when the user taps "Mark as Read".
 /// Marks the chat as read in STATE + DB (headless, no TAURI_APP needed).
 #[no_mangle]

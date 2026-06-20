@@ -186,11 +186,15 @@ class VectorNotificationService : Service() {
             android.util.Log.d("VectorNotificationService", "Posted notification #$notificationId: $title (group: $isGroup, chat: ${chatId.take(20)})")
         }
 
-        /** Clear all message history (called when Activity resumes — notifications are no longer relevant). */
+        /**
+         * Clear accumulated message history on Activity resume so a later notification doesn't replay
+         * messages the user has already seen. KEEPS chatNotificationIds so a per-chat cancelNotification
+         * (fired when a chat is read) can still find and dismiss a notification that's still showing
+         * after resume — the user opening the app does not, by itself, read every chat.
+         */
         @JvmStatic
         fun clearAllMessageHistory() {
             chatMessageHistory.clear()
-            chatNotificationIds.clear()
         }
 
         /** Clear message history for a specific chat (called when a notification is dismissed). */
@@ -198,6 +202,21 @@ class VectorNotificationService : Service() {
         fun clearMessageHistory(historyKey: String) {
             chatMessageHistory.remove(historyKey)
             chatNotificationIds.remove(historyKey)
+        }
+
+        /**
+         * Revoke a single chat's notification. Called from Rust when the chat is read in-app or
+         * answered on another device. No-op if nothing is showing for that chat (the id map only
+         * holds chats with a live notification). historyKey == chatId for any non-empty chatId.
+         */
+        @JvmStatic
+        fun cancelNotification(context: Context, chatId: String) {
+            if (chatId.isEmpty()) return
+            val id = chatNotificationIds.remove(chatId) ?: return
+            chatMessageHistory.remove(chatId)
+            val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.cancel(id)
+            android.util.Log.d("VectorNotificationService", "Cancelled notification #$id for chat ${chatId.take(20)}")
         }
 
         private fun loadBitmap(path: String): Bitmap? {
