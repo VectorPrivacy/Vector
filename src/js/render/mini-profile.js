@@ -71,6 +71,9 @@ function showMiniProfile(npub, anchorEl) {
 
     document.body.appendChild(popup);
     miniProfileEl = popup;
+    // Register with the nav stack so the Android hardware back button closes the mini profile
+    // instead of falling through to the page/tab beneath it.
+    pushBack('mini-profile', hideMiniProfile);
 
     if (reusePos?.centered) {
         popup.classList.add('mini-profile-centered');
@@ -127,6 +130,7 @@ function hideMiniProfile() {
     if (miniProfileEl) { miniProfileEl.remove(); miniProfileEl = null; }
     if (miniProfileBackdrop) { miniProfileBackdrop.remove(); miniProfileBackdrop = null; }
     miniProfileNpub = null;
+    popBack('mini-profile');   // no-op if a hardware-back already popped us
 }
 
 /**
