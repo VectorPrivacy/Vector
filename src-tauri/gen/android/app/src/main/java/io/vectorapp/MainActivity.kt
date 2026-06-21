@@ -4,6 +4,11 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.webkit.JavascriptInterface
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.os.Bundle
@@ -32,6 +37,92 @@ class MainActivity : TauriActivity() {
     }
 
     private var managedWebView: WebView? = null
+
+    // ===== Device-tilt for the badge card =====
+    // Started/stopped from JS (window.__vectorGyroBridge) only while the card is open, so the sensor
+    // costs no battery otherwise. Uses the GRAVITY vector (preferred) or the raw ACCELEROMETER (present
+    // on every phone) — the device's angle relative to gravity — captured flat at the first reading,
+    // then pushed as window.__vectorGyro(rx, ry) deltas. (Not the gyroscope: that's motion-only and
+    // absent on many devices.)
+    private var sensorManager: SensorManager? = null
+    private var rotationSensor: Sensor? = null      // gravity (preferred) or raw accelerometer
+    private var gyroActive = false                  // listener currently registered
+    private var gyroWanted = false                  // JS wants tilt (card open) — drives re-arm on resume
+    private var gyroHasBaseline = false
+    private var gravX = 0.0                          // low-pass-filtered gravity vector
+    private var gravY = 0.0
+    private var gravZ = 0.0
+    private var baseNx = 0.0                         // normalised gravity at the first reading = "flat"
+    private var baseNz = 0.0
+    private var gyroLastPushMs = 0L
+
+    private val gyroListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            if (!gyroHasBaseline) {
+                gravX = event.values[0].toDouble(); gravY = event.values[1].toDouble(); gravZ = event.values[2].toDouble()
+                val m0 = Math.sqrt(gravX * gravX + gravY * gravY + gravZ * gravZ)
+                if (m0 < 1e-3) return                 // wait for a valid first reading
+                baseNx = gravX / m0; baseNz = gravZ / m0
+                gyroHasBaseline = true
+                return
+            }
+            // Low-pass to isolate gravity from hand-motion (raw accel) and damp jitter (gravity sensor).
+            val a = 0.15
+            gravX += (event.values[0].toDouble() - gravX) * a
+            gravY += (event.values[1].toDouble() - gravY) * a
+            gravZ += (event.values[2].toDouble() - gravZ) * a
+            val mag = Math.sqrt(gravX * gravX + gravY * gravY + gravZ * gravZ)
+            if (mag < 1e-3) return
+            val now = System.currentTimeMillis()
+            if (now - gyroLastPushMs < 30) return     // ~33 Hz cap on the JS bridge
+            gyroLastPushMs = now
+            // Normalised gravity vs the baseline → tilt: nx = left/right lean, nz = forward/back lean.
+            // Gain maps ~25 deg of phone tilt to the card's full range; the deadzone keeps it flat at rest.
+            val nx = gravX / mag
+            val nz = gravZ / mag
+            var ry = (nx - baseNx) * 28.0
+            var rx = -(nz - baseNz) * 28.0
+            if (Math.abs(rx) < 0.5) rx = 0.0
+            if (Math.abs(ry) < 0.5) ry = 0.0
+            val wv = managedWebView ?: return
+            wv.post { wv.evaluateJavascript("window.__vectorGyro && window.__vectorGyro($rx, $ry)", null) }
+        }
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+    }
+
+    inner class GyroBridge {
+        // Returns whether a usable tilt sensor exists; JS falls back to touch tilt when false. Stays
+        // read-only on this binder thread (no field writes); startGyro() (UI thread) caches + registers.
+        @JavascriptInterface fun start(): Boolean {
+            val sm = sensorManager ?: getSystemService(SensorManager::class.java) ?: return false
+            val present = sm.getDefaultSensor(Sensor.TYPE_GRAVITY) != null
+                || sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) != null
+            if (present) runOnUiThread { gyroWanted = true; startGyro() }
+            return present
+        }
+        @JavascriptInterface fun stop() { runOnUiThread { gyroWanted = false; stopGyro() } }
+    }
+
+    private fun startGyro() {
+        if (gyroActive) return
+        val sm = sensorManager
+            ?: getSystemService(SensorManager::class.java)?.also { sensorManager = it }
+            ?: return
+        val sensor = rotationSensor
+            ?: sm.getDefaultSensor(Sensor.TYPE_GRAVITY)
+            ?: sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+            ?: return
+        rotationSensor = sensor
+        gyroHasBaseline = false
+        sm.registerListener(gyroListener, sensor, SensorManager.SENSOR_DELAY_GAME)
+        gyroActive = true
+    }
+
+    private fun stopGyro() {
+        if (!gyroActive) return
+        sensorManager?.unregisterListener(gyroListener)
+        gyroActive = false
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -68,6 +159,7 @@ class MainActivity : TauriActivity() {
 
     override fun onResume() {
         super.onResume()
+        if (gyroWanted) startGyro()   // re-arm the tilt sensor if the badge card is still open
         try { nativeOnResume() } catch (_: Exception) {}
         // Clear notification message history — user is in the app, stale history is irrelevant
         VectorNotificationService.clearAllMessageHistory()
@@ -75,6 +167,7 @@ class MainActivity : TauriActivity() {
 
     override fun onPause() {
         super.onPause()
+        stopGyro()   // never leave the rotation sensor running while backgrounded
         try { nativeOnPause() } catch (_: Exception) {}
     }
 
@@ -176,6 +269,9 @@ class MainActivity : TauriActivity() {
     override fun onWebViewCreate(webView: WebView) {
         super.onWebViewCreate(webView)
         managedWebView = webView
+
+        // Expose the gyro bridge to the badge card: JS calls window.__vectorGyroBridge.start()/stop().
+        webView.addJavascriptInterface(GyroBridge(), "__vectorGyroBridge")
 
         // Initialize MiniAppManager for Mini Apps overlay support
         MiniAppManager.initialize(this)

@@ -2981,7 +2981,7 @@ async function setupRustListeners() {
         if (_myBadges.vector && ownProfileOpen) {
             domProfileBadgeFawkes.style.display = '';
             domProfileBadgeFawkes.onclick = () => {
-                popupConfirm('V for Vector Badge', `Acquired by logging in on Guy Fawkes Day&nbsp;(November 5, 2025).<br><br><i style="opacity: 0.5; font-size: 13px;">Remember, remember the 5th of November...</i>`, true, '', 'fawkes_mask.svg');
+                showBadgeCard({ title: 'V for Vector Badge', html: `Acquired by logging in on Guy Fawkes Day&nbsp;(November 5, 2025).<br><br><i style="opacity: 0.5; font-size: 13px;">Remember, remember the 5th of November...</i>`, svg: 'fawkes_mask.svg', perks: [{ text: 'Equip up to 100 emoji packs', sub: 'up from 3' }, { text: 'Up to 100 emoji per pack', sub: 'up from 30' }] });
             };
         }
     });
@@ -5143,7 +5143,7 @@ function renderProfileTab(cProfile) {
         if (count > 0) {
             domProfileBadgeInvite.style.display = '';
             domProfileBadgeInvite.onclick = () => {
-                popupConfirm('Vector Beta Inviter', `Acquired by inviting <b>${count} ${count === 1 ? 'user' : 'users'}</b> to the Vector Beta!`, true, '', 'vector_badge_placeholder.svg');
+                showBadgeCard({ title: 'Vector Beta Inviter', html: `Acquired by inviting <b>${count} ${count === 1 ? 'user' : 'users'}</b> to the Vector Beta!`, svg: 'vector_badge_placeholder.svg' });
             }
         }
     }).catch(e => {});
@@ -5157,7 +5157,7 @@ function renderProfileTab(cProfile) {
         if (hasBadge && domProfileId.textContent === fawkesNpub) {
             domProfileBadgeFawkes.style.display = '';
             domProfileBadgeFawkes.onclick = () => {
-                popupConfirm('V for Vector Badge', `Acquired by logging in on Guy Fawkes Day&nbsp;(November 5, 2025).<br><br><i style="opacity: 0.5; font-size: 13px;">Remember, remember the 5th of November...</i>`, true, '', 'fawkes_mask.svg');
+                showBadgeCard({ title: 'V for Vector Badge', html: `Acquired by logging in on Guy Fawkes Day&nbsp;(November 5, 2025).<br><br><i style="opacity: 0.5; font-size: 13px;">Remember, remember the 5th of November...</i>`, svg: 'fawkes_mask.svg', perks: [{ text: 'Equip up to 100 emoji packs', sub: 'up from 3' }, { text: 'Up to 100 emoji per pack', sub: 'up from 30' }] });
             };
         }
     }).catch(e => {});
