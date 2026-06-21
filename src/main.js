@@ -3469,10 +3469,15 @@ async function setupRustListeners() {
             cacheInsertedIntoChatMessages = chat.messages === eventCache.getEventsRef(chat.id);
         }
 
-        // Clear typing indicator for the sender when they send a message
-        if (!newMessage.mine && chat.active_typers) {
-            // Remove the sender from active typers
-            chat.active_typers = chat.active_typers.filter(npub => npub !== chat.id);
+        // A message from the sender ends their typing indicator immediately (don't wait for the
+        // expiry tick). DM typers are keyed by the chat id (the contact npub); Community typers by
+        // the sender's own npub, so resolve the sender rather than assuming it's the chat id, then
+        // refresh the header/preview right away so it short-circuits.
+        if (!newMessage.mine && chat.active_typers && chat.active_typers.length) {
+            const senderNpub = newMessage.npub || chat.id;
+            chat.active_typers = chat.active_typers.filter(npub => npub !== senderNpub);
+            if (strOpenChat === chat.id) updateChatHeaderSubtext(chat);
+            updateChatlistPreview(chat.id);
         }
 
         if (!cacheInsertedIntoChatMessages) {

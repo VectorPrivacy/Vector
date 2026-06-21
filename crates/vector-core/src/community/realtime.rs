@@ -198,6 +198,7 @@ pub async fn refresh_subscription(client: &Client) {
             Kind::Custom(event_kind::COMMUNITY_DELETE),
             Kind::Custom(event_kind::COMMUNITY_PRESENCE),
             Kind::Custom(event_kind::COMMUNITY_KICK),
+            Kind::Custom(event_kind::COMMUNITY_TYPING),
             Kind::Custom(event_kind::COMMUNITY_WEBXDC),
             Kind::Custom(event_kind::COMMUNITY_CONTROL),
             Kind::Custom(event_kind::COMMUNITY_REKEY),
