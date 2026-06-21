@@ -530,6 +530,15 @@ function hydrateRemoteIcons(rootEl) {
     for (const img of rootEl.querySelectorAll('img[data-cache-icon-url]')) {
         const url = img.dataset.cacheIconUrl;
         delete img.dataset.cacheIconUrl;
+        // The template's inline onerror= is CSP-blocked, so bind the placeholder swap in JS. A remote
+        // icon that can't be cached (404, Tor, oversized) becomes the slot's .icon-play placeholder.
+        img.onerror = () => {
+            img.onerror = null;
+            const ph = img.classList.contains('app-details-icon') ? 'app-details-icon-placeholder'
+                : img.classList.contains('marketplace-app-icon') ? 'marketplace-app-icon-placeholder'
+                : '';
+            img.outerHTML = `<span class="icon icon-play ${ph}"></span>`;
+        };
         bindBackendCachedImg(img, url);
     }
 }

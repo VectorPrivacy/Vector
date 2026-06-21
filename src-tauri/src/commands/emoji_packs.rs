@@ -546,8 +546,12 @@ pub async fn decode_animated_emoji<R: tauri::Runtime>(
     let (bytes, content_type) = if let Some(t) = local_bytes_with_type {
         t
     } else {
+        // SSRF + size guard: the emoji URL is attacker-controlled. Reject private/internal IP literals
+        // + known-local hostnames, and cap at 1 MB (oversized emoji are hidden, never decoded).
+        vector_core::net::validate_url_not_private(&url).map_err(|e| e.to_string())?;
+        const MAX_EMOJI_DECODE_BYTES: usize = 1024 * 1024;
         let client = vector_core::net::build_http_client(std::time::Duration::from_secs(10))?;
-        let resp = client.get(&url).send().await
+        let mut resp = client.get(&url).send().await
             .map_err(|e| format!("fetch: {}", e))?;
         if !resp.status().is_success() {
             return Err(format!("HTTP {}", resp.status()));
@@ -557,9 +561,21 @@ pub async fn decode_animated_emoji<R: tauri::Runtime>(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_lowercase();
-        let body = resp.bytes().await
-            .map_err(|e| format!("read body: {}", e))?
-            .to_vec();
+        if matches!(resp.content_length(), Some(len) if len as usize > MAX_EMOJI_DECODE_BYTES) {
+            return Err("emoji too large".to_string());
+        }
+        let mut body = Vec::new();
+        loop {
+            match resp.chunk().await.map_err(|e| format!("read body: {}", e))? {
+                Some(chunk) => {
+                    if body.len() + chunk.len() > MAX_EMOJI_DECODE_BYTES {
+                        return Err("emoji too large".to_string());
+                    }
+                    body.extend_from_slice(&chunk);
+                }
+                None => break,
+            }
+        }
         (body, ct)
     };
 

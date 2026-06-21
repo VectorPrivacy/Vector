@@ -327,7 +327,7 @@ pub async fn cache_image<R: Runtime>(
     // Download the image
     log_debug!("[ImageCache] Downloading {} for {:?}", url, image_type);
 
-    let response = match http_client().get(url).send().await {
+    let mut response = match http_client().get(url).send().await {
         Ok(resp) => resp,
         Err(e) => {
             log_warn!("[ImageCache] Failed to download {}: {}", url, e);
@@ -339,19 +339,33 @@ pub async fn cache_image<R: Runtime>(
         return CacheResult::Failed(format!("HTTP {}", response.status()));
     }
 
-    // Check content length to avoid downloading huge files
-    if let Some(len) = response.content_length() {
-        // Max 10MB for images
-        if len > 10 * 1024 * 1024 {
-            return CacheResult::Failed("Image too large (>10MB)".to_string());
-        }
+    // Per-type byte ceiling: emoji are display-tiny (oversized ones are hidden, never rendered),
+    // avatars/banners can be larger.
+    let max_bytes: u64 = match image_type {
+        ImageType::Emoji | ImageType::EmojiPackIcon => 1024 * 1024, // 1 MB
+        _ => 10 * 1024 * 1024,                                      // 10 MB
+    };
+    // Cheap reject when the server declares an oversized length...
+    if matches!(response.content_length(), Some(len) if len > max_bytes) {
+        return CacheResult::Failed(format!("Image too large (>{} MB)", max_bytes / (1024 * 1024)));
     }
-
-    let bytes = match response.bytes().await {
-        Ok(b) => b,
-        Err(e) => {
-            return CacheResult::Failed(format!("Failed to read response: {}", e));
+    // ...but a chunked / no-Content-Length / lying response must STILL be bounded: accumulate with
+    // a hard ceiling so a hostile server can't stream forever and OOM us.
+    let bytes = {
+        let mut buf: Vec<u8> = Vec::new();
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    if buf.len() + chunk.len() > max_bytes as usize {
+                        return CacheResult::Failed(format!("Image too large (>{} MB)", max_bytes / (1024 * 1024)));
+                    }
+                    buf.extend_from_slice(&chunk);
+                }
+                Ok(None) => break,
+                Err(e) => return CacheResult::Failed(format!("Failed to read response: {}", e)),
+            }
         }
+        buf
     };
 
     // Validate the image
@@ -496,7 +510,9 @@ pub async fn get_or_cache_image<R: Runtime>(
         CacheResult::Cached(path) | CacheResult::AlreadyCached(path) => Ok(Some(path)),
         CacheResult::Failed(e) => {
             log_warn!("[ImageCache] Failed to cache {}: {}", url, e);
-            Ok(None)
+            // Propagate the reason (404 / too-large / etc.) so the frontend can explain WHY, rather
+            // than silently swallowing it as Ok(None) and showing a generic message.
+            Err(e)
         }
     }
 }

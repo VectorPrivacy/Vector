@@ -510,6 +510,9 @@ pub async fn fetch_site_metadata(url: &str) -> Result<SiteMetadata, String> {
         .await
         .map_err(|e| e.to_string())?;
 
+    // Hard ceiling: the `Range` header above is only a REQUEST — a hostile server can ignore it and
+    // stream forever. OG/meta tags live near the top of <head>, so stop well before any real head ends.
+    const MAX_HEAD_SCAN_BYTES: usize = 512 * 1024;
     // Read the response in chunks — SIMD scan for </head> on raw bytes (no clone, no UTF-8 re-check)
     loop {
         let chunk = response.chunk().await.map_err(|e| e.to_string())?;
@@ -524,12 +527,18 @@ pub async fn fetch_site_metadata(url: &str) -> Result<SiteMetadata, String> {
                     html_chunk.truncate(end);
                     break;
                 }
+                if html_chunk.len() >= MAX_HEAD_SCAN_BYTES {
+                    html_chunk.truncate(MAX_HEAD_SCAN_BYTES);
+                    break;
+                }
             }
             None => break,
         }
     }
 
-    let html_string = String::from_utf8(html_chunk).map_err(|e| e.to_string())?;
+    // Lossy: the 512 KB cap (or a server cutting off) can truncate mid-UTF-8; a link preview should
+    // degrade gracefully on a partial byte sequence, not fail the whole fetch.
+    let html_string = String::from_utf8_lossy(&html_chunk).into_owned();
     let parsed = html_meta::extract_html_meta(&html_string);
 
     let mut metadata = SiteMetadata {

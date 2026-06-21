@@ -274,6 +274,38 @@ pub static MARKETPLACE_STATE: std::sync::LazyLock<Arc<RwLock<MarketplaceState>>>
 static FETCH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Parse a Nostr event into a MarketplaceApp
+/// A marketplace `d`-tag id is attacker-controlled and becomes a filesystem path (`<id>.xdc`).
+/// Allow only a bounded, separator-free, traversal-free token so an id can never escape the
+/// miniapps dir. Permits reverse-DNS / slug / hash ids; bans `/`, `\`, `..`, absolute/UNC paths.
+fn is_safe_app_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && !id.contains("..")
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+#[cfg(test)]
+mod app_id_tests {
+    use super::is_safe_app_id;
+
+    #[test]
+    fn accepts_normal_ids() {
+        for id in ["com.example.app", "my-cool-app", "abc123", "app.v2", "a"] {
+            assert!(is_safe_app_id(id), "should accept {:?}", id);
+        }
+        assert!(is_safe_app_id(&"x".repeat(128)), "128 chars should be accepted");
+    }
+
+    #[test]
+    fn rejects_traversal_and_unsafe() {
+        for id in ["", "..", "....", "a..b", "../../etc/passwd", "..\\win",
+                   "foo/bar", "foo\\bar", "/abs", "C:\\x", "app id", "café"] {
+            assert!(!is_safe_app_id(id), "should reject {:?}", id);
+        }
+        assert!(!is_safe_app_id(&"x".repeat(129)), "129 chars should be rejected");
+    }
+}
+
 pub fn parse_marketplace_event(event: &Event) -> Option<MarketplaceApp> {
     // Verify it's the correct kind
     if event.kind.as_u16() != MINIAPP_MARKETPLACE_KIND {
@@ -335,6 +367,10 @@ pub fn parse_marketplace_event(event: &Event) -> Option<MarketplaceApp> {
 
     // Validate required fields
     let id = id?;
+    if !is_safe_app_id(&id) {
+        log_warn!("[Marketplace] Rejected app with unsafe d-tag id: {:?}", id);
+        return None;
+    }
     let name = name?;
     let blossom_hash = blossom_hash?;
     let download_url = download_url?;
@@ -511,7 +547,8 @@ pub async fn fetch_marketplace_apps(trusted_only: bool) -> Result<Vec<Marketplac
                     app.installed = existing.installed;
                     app.local_path = existing.local_path.clone();
                     if app.icon_cached.is_none() {
-                        app.icon_cached = existing.icon_cached.clone();
+                        // Carry over the cached icon only if the file still exists (users can wipe the cache).
+                        app.icon_cached = icon_cached_if_present(existing.icon_cached.clone());
                     }
                 }
 
@@ -551,6 +588,12 @@ pub async fn fetch_marketplace_apps(trusted_only: bool) -> Result<Vec<Marketplac
     }
 
     Ok(apps)
+}
+
+/// icon_cached is only valid while the file exists — a manual cache wipe must not leave a dead path
+/// that blocks re-caching (the background re-cache gate is `icon_cached.is_none()`).
+fn icon_cached_if_present(p: Option<String>) -> Option<String> {
+    p.filter(|path| std::path::Path::new(path).exists())
 }
 
 /// Cache a Mini App icon in the background and update the marketplace state
@@ -597,6 +640,10 @@ pub async fn install_marketplace_app<R: tauri::Runtime>(
     handle: &tauri::AppHandle<R>,
     app_id: &str,
 ) -> Result<String, String> {
+    // Defense-in-depth: the id becomes a filesystem path below; never trust it raw.
+    if !is_safe_app_id(app_id) {
+        return Err("Invalid app id".to_string());
+    }
     // Get app info from cache
     let app = {
         let state = MARKETPLACE_STATE.read().await;
@@ -706,6 +753,11 @@ pub async fn check_app_installed<R: tauri::Runtime>(
     handle: &tauri::AppHandle<R>,
     app_id: &str,
 ) -> Option<String> {
+    // Defense-in-depth: app_id is joined into a path whose result can be opened; never trust it raw
+    // (a traversal id could resolve to a planted .xdc outside the marketplace dir).
+    if !is_safe_app_id(app_id) {
+        return None;
+    }
     let app_data_dir = handle.path().app_data_dir().ok()?;
     let file_path = app_data_dir
         .join("miniapps")
@@ -725,6 +777,10 @@ pub async fn uninstall_marketplace_app<R: tauri::Runtime>(
     app_id: &str,
     app_name: &str,
 ) -> Result<(), String> {
+    // Defense-in-depth: app_id is joined straight into the delete path; never trust it raw.
+    if !is_safe_app_id(app_id) {
+        return Err("Invalid app id".to_string());
+    }
     // Get the file path
     let app_data_dir = handle.path().app_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {}", e))?;
@@ -765,6 +821,10 @@ pub async fn update_marketplace_app<R: tauri::Runtime>(
     handle: &tauri::AppHandle<R>,
     app_id: &str,
 ) -> Result<String, String> {
+    // Defense-in-depth: the id becomes a filesystem path below; never trust it raw.
+    if !is_safe_app_id(app_id) {
+        return Err("Invalid app id".to_string());
+    }
     // Get app info from cache
     let app = {
         let state = MARKETPLACE_STATE.read().await;
@@ -1097,7 +1157,10 @@ pub async fn preload_marketplace_cache() {
         Ok(apps) if !apps.is_empty() => {
             let count = apps.len();
             let mut state = MARKETPLACE_STATE.write().await;
-            for app in apps {
+            for mut app in apps {
+                // A manual cache wipe can leave icon_cached pointing at a deleted file; drop it so the
+                // icon re-fetches (frontend falls back to icon_url; the network refresh re-caches it).
+                app.icon_cached = icon_cached_if_present(app.icon_cached);
                 state.upsert_app(app);
             }
             println!("[Marketplace] Preloaded {} apps from SQLite cache ({:?})", count, t.elapsed());

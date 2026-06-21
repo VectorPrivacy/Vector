@@ -13248,6 +13248,8 @@ hr {
   justify-content: center;
   flex-shrink: 0;
   overflow: hidden;
+  /* Contain the absolutely-positioned .icon-play placeholder when an icon is missing/fails. */
+  position: relative;
 }
 
 .marketplace-app-icon {
@@ -14060,6 +14062,8 @@ hr {
   background-color: rgba(255, 255, 255, 0.1);
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
   margin-bottom: 20px;
+  /* Contain the absolutely-positioned .icon-play placeholder when an icon is missing/fails. */
+  position: relative;
 }
 
 .app-details-icon {
@@ -15080,6 +15084,12 @@ hr {
 /* .dmsg-text is inline, so a divider-only message gives the <hr> a zero-width containing block
    and it disappears. Pin a visible block width (expands with surrounding text when present). */
 .dmsg-text hr            { display: block; width: 100%; min-width: 12rem; }
+/* Unavailable custom emoji shown inline as a tappable :shortcode: chip (tap explains why). */
+.emoji-unavailable       { cursor: pointer; opacity: 0.6; text-decoration: underline dotted; text-underline-offset: 2px; }
+/* Editor only: a failed emoji (oversized / unavailable) stays visible (⚠) so its creator can remove it. */
+.emoji-creator-cell-broken { position: relative; }
+.emoji-creator-cell-broken img { visibility: hidden; }
+.emoji-creator-cell-broken::after { content: '\26A0'; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 1.2em; color: #f0a500; pointer-events: none; }
 
 /* Markdown headers in chat: browser defaults (0.67em–2.33em) leave huge
  * gaps between consecutive headers. Tighten to chat-appropriate spacing

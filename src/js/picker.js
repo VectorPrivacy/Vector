@@ -426,6 +426,31 @@ function applyBadgeLimits(hasVectorBadge) {
 // `:lol:` shortcodes only fires one IPC).
 const _emojiCacheMemo = new Map();    // url → cached local fs path
 const _emojiCacheInflight = new Map(); // url → Promise<path|null>
+const _emojiFailReason = new Map();   // url → why the cache last failed (drives the inline tap-to-explain)
+
+/** Map the internal cache error to a friendly, accurate reason an emoji wouldn't load. */
+function emojiUnavailableMessage(reason) {
+    const r = (reason || '').toLowerCase();
+    if (r.includes('too large')) return "This emoji is over the 1 MB size limit.<br><br>Ask the emoji creator to compress their emoji!";
+    if (r.includes('404') || r.includes('not found')) return "This emoji is no longer available (it may have been deleted).";
+    if (r.includes('invalid') || r.includes('corrupt')) return "This emoji file is invalid or corrupted.";
+    if (r.includes('blocked')) return "This emoji was blocked for security (its host resolves to a private address).";
+    return reason
+        ? `This emoji couldn't be loaded (${escapeHtml(reason)}).`
+        : "This emoji couldn't be loaded (the host may be offline, or the file was removed).";
+}
+
+/** A failed inline custom emoji becomes a tappable `:shortcode:` chip that explains why it's missing. */
+function makeUnavailableEmojiChip(shortcode, reason) {
+    const span = document.createElement('span');
+    span.className = 'emoji-unavailable';
+    span.textContent = `:${shortcode}:`;
+    span.title = 'Emoji unavailable (tap for details)';
+    span.addEventListener('click', () => {
+        popupConfirm('Emoji unavailable', emojiUnavailableMessage(reason), true, '', 'vector_warning.svg');
+    });
+    return span;
+}
 
 function _isCacheableEmojiUrl(url) {
     return typeof url === 'string' && url.startsWith('https://');
@@ -455,6 +480,7 @@ async function cacheEmojiSrc(url, kind = 'emoji') {
                 return path;
             } catch (e) {
                 console.warn('[emoji-cache] failed:', url, e);
+                _emojiFailReason.set(url, String(e && e.message ? e.message : e));
                 return null;
             } finally {
                 _emojiCacheInflight.delete(url);
@@ -481,8 +507,11 @@ function bindCachedEmojiImg(img, url, kind = 'emoji', onUnavailable = null) {
     const unavailable = () => {
         img.classList.remove('emoji-img-loading');
         if (typeof onUnavailable === 'function') {
-            onUnavailable(img);
+            onUnavailable(img, _emojiFailReason.get(url) || '');
         } else {
+            // Conservative default: blank the img only. Containers (pack tabs, logos, the editor's
+            // logo button) must survive a failed icon. Emoji grids that should HIDE a failed cell pass
+            // an explicit onUnavailable (browse grid → cell.remove; canvas panel → _compact).
             img.removeAttribute('src');
         }
     };
@@ -938,10 +967,10 @@ function renderCustomEmojiShortcodes(rootEl, emojiTags) {
             img.alt = `:${shortcode}:`;
             img.dataset.emojiTooltip = `:${shortcode}:`;
             frag.appendChild(img);
-            // Deleted/404 emoji → fall back to the literal `:shortcode:`
-            // text so the message still reads coherently.
-            bindCachedEmojiImg(img, url, 'emoji', (el) => {
-                el.replaceWith(document.createTextNode(`:${shortcode}:`));
+            // Unavailable emoji (404 / removed / over the 1 MB cap) → a tappable `:shortcode:` chip
+            // that explains why, so the message still reads coherently and the reason is discoverable.
+            bindCachedEmojiImg(img, url, 'emoji', (el, reason) => {
+                el.replaceWith(makeUnavailableEmojiChip(shortcode, reason));
             });
             lastIndex = m.index + m[0].length;
         }
@@ -1210,7 +1239,8 @@ function _renderPackDetails(naddr, pack) {
             const img = document.createElement('img');
             img.alt = `:${e.shortcode}:`;
             img.dataset.emojiTooltip = `:${e.shortcode}:`;
-            bindCachedEmojiImg(img, e.url, 'emoji');
+            // Oversized / unavailable (cap-rejected) emoji are hidden entirely, as if not in the pack.
+            bindCachedEmojiImg(img, e.url, 'emoji', () => cell.remove());
             cell.appendChild(img);
             grid.appendChild(cell);
         }
@@ -1802,6 +1832,7 @@ async function decodePackEmojiFrames(url) {
             };
         } catch (e) {
             console.warn('[emoji-packs] frame decode failed:', url, e);
+            _emojiFailReason.set(url, String(e && e.message ? e.message : e));
             return null;
         }
     })();
@@ -1901,7 +1932,9 @@ class PackCanvasGrid {
     // unchanged.
     constructor(pack, opts = {}) {
         this.pack = pack;
-        this.emojis = opts.emojis || pack.emojis;
+        // Exclude emoji already known to be unavailable (oversized / 404 / etc.) so they never take a
+        // blank slot. First-time failures are dropped post-decode by _compact().
+        this.emojis = (opts.emojis || pack.emojis).filter(e => !_emojiFailReason.has(e.url));
         this.cols = opts.cols || 6;
         this.rows = Math.ceil(this.emojis.length / this.cols) || 1;
         this.dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -2103,19 +2136,43 @@ class PackCanvasGrid {
     }
 
     _loadFrames() {
+        let pending = this.emojis.length;
         for (let i = 0; i < this.emojis.length; i++) {
             const url = this.emojis[i].url;
             const idx = i;
             decodePackEmojiFrames(url).then((sheet) => {
                 this.frames[idx] = sheet || null;
-                this.dirty.add(idx);
-                this._render();
-                // A newly-loaded animated emoji needs the scheduler to re-evaluate
-                // and the loop to resume if it had gone idle while static.
-                this._nextDue = 0;
-                if (_activeCanvasSections.has(this)) _startPackCanvasLoop();
+                if (sheet) {
+                    this.dirty.add(idx);
+                    this._render();
+                    // A newly-loaded animated emoji needs the scheduler to re-evaluate
+                    // and the loop to resume if it had gone idle while static.
+                    this._nextDue = 0;
+                    if (_activeCanvasSections.has(this)) _startPackCanvasLoop();
+                }
+                // Once every frame has resolved, drop any that failed (oversized / 404 / etc.) so
+                // they leave no blank slot — the grid reflows around them.
+                if (--pending <= 0) this._compact();
             });
         }
+    }
+
+    /** Remove emoji whose frame failed to decode and compact the grid (no blank slots). */
+    _compact() {
+        const e = [], f = [], s = [];
+        let failed = false;
+        for (let i = 0; i < this.emojis.length; i++) {
+            if (this.frames[i] === null) { failed = true; continue; }
+            e.push(this.emojis[i]); f.push(this.frames[i]); s.push(this.cellState[i]);
+        }
+        if (!failed) return;
+        this.emojis = e; this.frames = f; this.cellState = s;
+        this.rows = Math.ceil(this.emojis.length / this.cols) || 1;
+        this.hoveredIndex = -1;
+        this.dirty.clear();
+        for (let i = 0; i < this.emojis.length; i++) this.dirty.add(i);
+        this.cellW = 0; // force _resize to recompute the canvas height for the new row count
+        this._resize();
     }
 
     attachVisibilityObserver(root) {
@@ -2488,7 +2545,12 @@ function _pcRenderGrid() {
         if (e.blobUrl) {
             img.src = e.blobUrl;
         } else {
-            bindCachedEmojiImg(img, e.url, 'emoji');
+            // The editor must NEVER hide a failed emoji — the creator has to see it's broken and
+            // remove/replace it. Mark the cell broken (reason on hover); keep it and its controls.
+            bindCachedEmojiImg(img, e.url, 'emoji', (el, reason) => {
+                cell.classList.add('emoji-creator-cell-broken');
+                cell.title = emojiUnavailableMessage(reason).replace(/<br\s*\/?>/gi, ' ');
+            });
         }
         img.alt = `:${e.shortcode}:`;
         img.draggable = false;
@@ -2530,6 +2592,11 @@ function _pcRenderGrid() {
             if (ev.target.closest('.emoji-creator-cell-remove')) return;
             if (cell.dataset.suppressClick === '1') {
                 delete cell.dataset.suppressClick;
+                return;
+            }
+            // A broken emoji can't be renamed — explain why and how to fix it instead of opening Rename.
+            if (cell.classList.contains('emoji-creator-cell-broken')) {
+                _pcBrokenEmojiError(_emojiFailReason.get(e.url) || '');
                 return;
             }
             _pcRenameEmoji(idx);
@@ -3047,6 +3114,22 @@ function _pcShowSlotFullError() {
         `Vector supports up to ${MAX_EQUIPPED_PACKS} equipped packs. Remove one to add another.`,
         { title: 'Remove a Pack First.', buttonText: 'GOT IT' },
     );
+}
+/** Editor: a broken emoji can't be renamed. Explain the cause (deleted vs oversized) and the fix. */
+function _pcBrokenEmojiError(reason) {
+    if ((reason || '').toLowerCase().includes('too large')) {
+        _pcShowError(
+            'Oops! Emoji Too Large!',
+            'This emoji is over the 1 MB size limit, so it cannot be used. Compress it under 1 MB, then delete this one and upload the smaller version.',
+            { title: 'Compress & Re-upload.', buttonText: 'GOT IT' },
+        );
+    } else {
+        _pcShowError(
+            'Oops! Emoji Unavailable!',
+            'This emoji has been deleted by its host. Re-uploading will fix it: delete this emoji, then upload it again.',
+            { title: 'Delete It & Re-upload.', buttonText: 'GOT IT' },
+        );
+    }
 }
 function _pcHideSizeError() {
     const overlay = document.getElementById('emoji-pack-creator-error');
