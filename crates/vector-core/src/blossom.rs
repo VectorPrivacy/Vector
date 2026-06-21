@@ -157,6 +157,16 @@ where
                 if permanent {
                     return Err(e);
                 }
+                // Gateway timeouts (Cloudflare 524/522/520, 504): the origin couldn't ingest the upload
+                // within the edge window (a too-slow/too-large upload). Retrying the same server just
+                // repeats the multi-minute timeout, so route around to the next server immediately.
+                if matches!(status, Some(504 | 520 | 522 | 524)) {
+                    crate::log_warn!(
+                        "[Blossom] {} gateway-timed-out (status {}) on {} bytes; routing to the next server",
+                        server_url, status.unwrap_or(0), file_data.len(),
+                    );
+                    return Err(e);
+                }
                 // On large uploads, mid-stream drops are almost always a
                 // size policy; don't burn retries. Below 8MB, treat as a
                 // genuine transient blip and retry.
@@ -896,6 +906,9 @@ mod parse_status_tests {
         assert_eq!(parse_status_from_error("Upload failed with status 500 Internal Server Error: x"), Some(500));
         assert_eq!(parse_status_from_error("Upload failed with status 413 Payload Too Large"), Some(413));
         assert_eq!(parse_status_from_error("Upload failed with status 415"), Some(415));
+        // Cloudflare gateway timeouts render as "<unknown status code>" — the failover branch relies
+        // on this still parsing to the numeric code.
+        assert_eq!(parse_status_from_error("Upload failed with status 524 <unknown status code>: gateway"), Some(524));
     }
 
     #[test]
