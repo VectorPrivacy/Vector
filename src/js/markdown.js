@@ -53,6 +53,11 @@ function initializeMarked() {
         // Disable autolinks - return false to prevent bare URLs from being auto-linked
         url(src) {
             return false;
+        },
+        // Disable setext headings ("text" then "---"/"===" on the next line) so a `---` divider never
+        // turns the line above it into a heading. Vector uses ATX `#` headings; `---` is the divider.
+        lheading() {
+            return undefined;
         }
     };
 

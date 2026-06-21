@@ -15077,6 +15077,9 @@ hr {
 .dmsg-text p:first-child { margin-top: 0; }
 .dmsg-text p:last-child  { margin-bottom: 0; }
 .dmsg-text a             { color: var(--icon-color-primary, #59fcb3); }
+/* .dmsg-text is inline, so a divider-only message gives the <hr> a zero-width containing block
+   and it disappears. Pin a visible block width (expands with surrounding text when present). */
+.dmsg-text hr            { display: block; width: 100%; min-width: 12rem; }
 
 /* Markdown headers in chat: browser defaults (0.67em–2.33em) leave huge
  * gaps between consecutive headers. Tighten to chat-appropriate spacing

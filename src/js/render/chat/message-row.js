@@ -221,7 +221,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         && remainderIsEmojiOnly;
 
     const textSpan = _dmsgBuildText(msg, displayContent, fEmojiOnly, isGroupChat, currentChat, isRevealedBlockedMsg);
-    if (textSpan && (textSpan.textContent || textSpan.querySelector('img,video'))) {
+    if (textSpan && (textSpan.textContent || textSpan.querySelector('img,video,hr'))) {
         twemojify(textSpan);
         content.appendChild(textSpan);
     }
