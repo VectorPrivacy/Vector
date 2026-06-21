@@ -1710,7 +1710,8 @@ html, body {
   background: #1e1e1e;
   border: 1px solid #393B3C;
   border-radius: 10px;
-  padding: 4px 0;
+  /* Edge-to-edge items (rounded corners clip the first/last hover); consistent with .profile-more-dropdown. */
+  padding: 0;
   min-width: 160px;
   overflow: hidden;
   z-index: 3000;
