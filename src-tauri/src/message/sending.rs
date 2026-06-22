@@ -65,7 +65,7 @@ impl SendCallback for TauriSendCallback {
         &self,
         pending_id: &str,
         percentage: u8,
-        _bytes_sent: u64,
+        bytes_sent: u64,
     ) -> Result<(), String> {
         // Check cancel flag
         {
@@ -80,7 +80,8 @@ impl SendCallback for TauriSendCallback {
         if let Some(handle) = TAURI_APP.get() {
             handle.emit("attachment_upload_progress", serde_json::json!({
                 "id": pending_id,
-                "progress": percentage
+                "progress": percentage,
+                "bytesSent": bytes_sent
             })).ok();
         }
         Ok(())

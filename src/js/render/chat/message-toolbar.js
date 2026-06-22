@@ -125,6 +125,7 @@ function initMessageToolbar() {
             <button class="dmsg-toolbar-btn btn" data-action="reveal-file" aria-label="Reveal in folder" title="Reveal in folder" hidden><span class="icon icon-file-search"></span></button>
             <button class="dmsg-toolbar-btn btn" data-action="copy-file" aria-label="Copy" title="Copy" hidden><span class="icon icon-copy"></span></button>
             <button class="dmsg-toolbar-btn btn" data-action="retry" aria-label="Retry send" title="Retry send" hidden><span class="icon icon-refresh"></span></button>
+            <button class="dmsg-toolbar-btn btn dmsg-toolbar-btn-danger" data-action="cancel-upload" aria-label="Cancel upload" title="Cancel upload" hidden><span class="icon icon-x"></span></button>
             <button class="dmsg-toolbar-btn btn dmsg-toolbar-btn-danger" data-action="delete" aria-label="Delete message" title="Delete message" hidden><span class="icon icon-trash"></span></button>
         `;
         // Append INSIDE the scrolling container so the toolbar moves with the message
@@ -202,11 +203,20 @@ function showMessageToolbar(rowEl) {
     _dmsgToolbarTarget = rowEl;
     _dmsgCancelToolbarHide();
 
-    // Pending messages aren't on the wire yet — cancel-send lives on the
-    // upload spinner itself, so suppress the hover toolbar entirely.
+    // Pending messages aren't on the wire yet. Attachment uploads get a single cancel action;
+    // plain text sends have no cancel path, so their toolbar stays suppressed.
     const status = rowEl.dataset.status;
     if (status === 'pending') {
-        _dmsgToolbarEl.hidden = true;
+        const pmsg = _dmsgLookupMessage(rowEl);
+        const cancelBtn = _dmsgToolbarEl.querySelector('[data-action="cancel-upload"]');
+        if (pmsg && pmsg.attachments && pmsg.attachments.length && cancelBtn) {
+            _dmsgToolbarEl.hidden = false;
+            _dmsgToolbarEl.dataset.target = rowEl.id;
+            for (const b of _dmsgToolbarEl.querySelectorAll('.dmsg-toolbar-btn')) b.hidden = (b !== cancelBtn);
+            _dmsgPositionToolbar(rowEl);
+        } else {
+            _dmsgToolbarEl.hidden = true;
+        }
         return;
     }
 
@@ -230,6 +240,8 @@ function showMessageToolbar(rowEl) {
     const copyFileBtn = _dmsgToolbarEl.querySelector('[data-action="copy-file"]');
     const retryBtn = _dmsgToolbarEl.querySelector('[data-action="retry"]');
     const deleteBtn = _dmsgToolbarEl.querySelector('[data-action="delete"]');
+    // Cancel-upload only applies to pending uploads (handled in the early return); never here.
+    _dmsgToolbarEl.querySelector('[data-action="cancel-upload"]').hidden = true;
 
     // Failed sends: only retry + delete make sense (the message isn't on
     // the wire, so react/reply/edit/reveal don't apply).
@@ -432,6 +444,9 @@ function _dmsgHandleToolbarClick(e) {
             if (msg && typeof retryFailedMessage === 'function') retryFailedMessage(msg);
             break;
         }
+        case 'cancel-upload':
+            invoke('cancel_upload', { pendingId: targetId });
+            break;
         case 'delete': {
             // Failed-message delete is local cleanup only (no NIP-09).
             if (btn.dataset.mode === 'failed') {
@@ -800,8 +815,15 @@ async function _dmsgOpenMessageMenu(rowEl, x, y) {
         showContextMenu({ x, y, items });
         return;
     }
-    // Pending: nothing actionable (cancel-send lives on the upload spinner).
-    if (status === 'pending') return;
+    // Pending: only attachment uploads are cancellable (a plain text send has no cancel path). The
+    // cancel flag is registered for messages with attachments (see sending.rs on_pending).
+    if (status === 'pending') {
+        if (msg && msg.attachments && msg.attachments.length) {
+            items.push({ label: 'Cancel upload', icon: 'x', danger: true, onClick: () => invoke('cancel_upload', { pendingId: targetId }) });
+            showContextMenu({ x, y, items });
+        }
+        return;
+    }
 
     const hasContent = !!(msg && msg.content);
     const hasAttachments = !!(msg && msg.attachments && msg.attachments.length);

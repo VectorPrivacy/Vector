@@ -3031,6 +3031,32 @@ async function setupRustListeners() {
         if (divUpload) {
             divUpload.style.setProperty('--progress', `${evt.payload.progress}%`);
         }
+        // Upload speed: derive bytes/sec from the cumulative bytesSent deltas, with the same adaptive
+        // lerp as the download speed so the displayed rate animates smoothly between chunks.
+        const bytes = evt.payload.bytesSent;
+        if (bytes != null) {
+            const now = performance.now();
+            let st = uploadSpeedState.get(evt.payload.id);
+            if (!st) {
+                st = { display: 0, target: 0, factor: 0.05, lastBytes: bytes, lastTime: now, raf: null };
+                uploadSpeedState.set(evt.payload.id, st);
+            } else {
+                const dtSec = (now - st.lastTime) / 1000;
+                if (dtSec > 0.05) {
+                    const bps = (bytes - st.lastBytes) / dtSec;
+                    if (bps >= 0) st.target = bps;
+                    st.factor = Math.min(0.15, Math.max(0.008, 3.0 / (dtSec * 60)));
+                    st.lastBytes = bytes;
+                    st.lastTime = now;
+                }
+            }
+            if (!st.raf) st.raf = requestAnimationFrame(() => updateUploadSpeedDisplay(evt.payload.id));
+        }
+        if (evt.payload.progress >= 100) {
+            const st = uploadSpeedState.get(evt.payload.id);
+            if (st && st.raf) cancelAnimationFrame(st.raf);
+            uploadSpeedState.delete(evt.payload.id);
+        }
     });
 
     // Smoothly interpolated download speed display: id → { display, target, factor, lastUpdate, raf }
@@ -3063,6 +3089,25 @@ async function setupRustListeners() {
         } else {
             lerp.raf = null;
         }
+    }
+
+    // Smoothly interpolated UPLOAD speed display (mirror of the download speed): id → { display,
+    // target, factor, lastBytes, lastTime, raf }. Computed from the cumulative bytesSent deltas.
+    const uploadSpeedState = new Map();
+    function updateUploadSpeedDisplay(pendingId) {
+        const st = uploadSpeedState.get(pendingId);
+        if (!st) return;
+        const spinner = document.getElementById(pendingId + '_file');
+        const sizeEl = spinner && spinner.closest('.custom-audio-player')?.querySelector('.file-attach-size');
+        // No rate target (image/video/audio upload has no file-box size text, or the spinner hasn't
+        // rendered yet): pause the loop so it doesn't spin doing nothing. The next progress event re-arms.
+        if (!sizeEl) { st.raf = null; return; }
+        st.display += (st.target - st.display) * st.factor;
+        if (Math.abs(st.target - st.display) < 500) st.display = st.target;
+        const dec = st.display >= 1048576 ? 2 : 0;
+        sizeEl.innerText = st.display > 0 ? `Uploading · ${formatBytes(st.display, dec, true)}/s` : 'Uploading';
+        if (st.display !== st.target) st.raf = requestAnimationFrame(() => updateUploadSpeedDisplay(pendingId));
+        else st.raf = null;
     }
 
     // Listen for backend error toasts
@@ -3562,8 +3607,11 @@ async function setupRustListeners() {
 
     // Listen for existing message updates (works for both DMs and MLS groups)
     _on('message_update', (evt) => {
-        // Drop any buffered upload progress for this pending id (spinner is gone after re-render)
+        // Drop any buffered upload progress + speed tracker for this pending id (the upload finished
+        // or failed; the spinner is gone after re-render, and a 100% frame isn't always emitted).
         pendingUploadProgress.delete(evt.payload.old_id);
+        const stUpd = uploadSpeedState.get(evt.payload.old_id);
+        if (stUpd) { if (stUpd.raf) cancelAnimationFrame(stUpd.raf); uploadSpeedState.delete(evt.payload.old_id); }
 
         // Find the message we're updating
         const cChat = getChat(evt.payload.chat_id);
@@ -3662,8 +3710,10 @@ async function setupRustListeners() {
     // Listen for message removal (e.g., cancelled upload, deleted failed message)
     _on('message_removed', (evt) => {
         const { id, chat_id, reason } = evt.payload;
-        // Drop any buffered upload progress (e.g. on cancel)
+        // Drop any buffered upload progress + speed tracker (e.g. on cancel)
         pendingUploadProgress.delete(id);
+        const stUp = uploadSpeedState.get(id);
+        if (stUp) { if (stUp.raf) cancelAnimationFrame(stUp.raf); uploadSpeedState.delete(id); }
         const cChat = getChat(chat_id);
         if (!cChat) return;
 
@@ -7024,6 +7074,7 @@ function createFileBox(cAttachment, state = 'downloaded') {
         if (cAttachment.name) {
             // Name already includes extension, just show size
             const sizeSpan = document.createElement('span');
+            sizeSpan.className = 'file-attach-size';
             sizeSpan.innerText = formatBytes(cAttachment.size);
             smallElement.appendChild(sizeSpan);
         } else {
@@ -7033,6 +7084,7 @@ function createFileBox(cAttachment, state = 'downloaded') {
             extSpan.innerText = `.${ext}`;
 
             const sizeSpan = document.createElement('span');
+            sizeSpan.className = 'file-attach-size';
             sizeSpan.innerText = ` — ${formatBytes(cAttachment.size)}`;
 
             smallElement.appendChild(extSpan);
