@@ -2086,7 +2086,7 @@ async function loadBlockedUsersList() {
             avatar.style.flexShrink = '0';
             const name = document.createElement('span');
             name.style.cssText = 'color: #ddd; font-size: 14px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left;';
-            const displayName = profile.nickname || profile.name;
+            const displayName = profile.nickname || profile.name || profile.display_name;
             if (displayName) {
                 name.textContent = displayName + ' ';
                 const npubHint = document.createElement('span');
@@ -2104,7 +2104,7 @@ async function loadBlockedUsersList() {
             unblockBtn.textContent = 'Unblock';
             unblockBtn.classList.add('unblock-btn');
             unblockBtn.onclick = async () => {
-                const confirmed = await popupConfirm('Unblock User', `Are you sure you want to unblock ${escapeHtml(profile.nickname || profile.name || profile.id.substring(0, 16))}?`);
+                const confirmed = await popupConfirm('Unblock User', `Are you sure you want to unblock ${escapeHtml(getName(profile))}?`);
                 if (!confirmed) return;
                 await invoke('unblock_user', { npub: profile.id });
                 showToast('User unblocked');

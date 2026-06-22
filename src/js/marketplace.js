@@ -1374,16 +1374,7 @@ function loadPublisherProfile(npub) {
         const profile = typeof getProfile === 'function' ? getProfile(npub) : null;
         
         if (profile) {
-            // Update name (prefer nickname, then name, then display_name)
-            if (profile.nickname) {
-                nameEl.textContent = profile.nickname;
-            } else if (profile.name) {
-                nameEl.textContent = profile.name;
-            } else if (profile.display_name) {
-                nameEl.textContent = profile.display_name;
-            } else {
-                nameEl.textContent = npub.substring(0, 12) + '...';
-            }
+            nameEl.textContent = getName(profile);
 
             // Update avatar if available
             const marketplaceAvatarSrc = getProfileAvatarSrc(profile);

@@ -44,7 +44,7 @@ function generateChatlistStateHash() {
             activeTypers.length,
             cLastMsg?.id,
             cLastMsg?.pending,
-            profile?.nickname || profile?.name,
+            profile?.nickname || profile?.name || profile?.display_name,
             profile?.avatar,
             profile?.avatar_cached,
             chat.muted,

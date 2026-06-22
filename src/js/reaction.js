@@ -52,11 +52,7 @@ function showReactionHoverTip(reactionEl) {
     const matchingReactions = msg.reactions.filter(r => r.emoji === emoji);
     if (matchingReactions.length === 0) return;
 
-    const names = matchingReactions.map(r => {
-        const profile = getProfile(r.author_id);
-        return profile?.nickname || profile?.name || profile?.display_name
-            || r.author_id.slice(0, 8) + '…';
-    });
+    const names = matchingReactions.map(r => getName(r.author_id));
 
     const tip = document.createElement('div');
     tip.className = 'reaction-hover-tip';

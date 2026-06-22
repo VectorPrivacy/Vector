@@ -30,22 +30,16 @@ function generateTypingText(chat) {
 
     // Groups show names
     if (activeTypers.length === 1) {
-        const typer = getProfile(activeTypers[0]);
-        const name = typer?.nickname || typer?.name || 'Someone';
+        const name = getName(getProfile(activeTypers[0]));
         return `${name} is typing...`;
     } else if (activeTypers.length === 2) {
-        const typer1 = getProfile(activeTypers[0]);
-        const typer2 = getProfile(activeTypers[1]);
-        const name1 = typer1?.nickname || typer1?.name || 'Someone';
-        const name2 = typer2?.nickname || typer2?.name || 'Someone';
+        const name1 = getName(getProfile(activeTypers[0]));
+        const name2 = getName(getProfile(activeTypers[1]));
         return `${name1} and ${name2} are typing...`;
     } else if (activeTypers.length === 3) {
-        const typer1 = getProfile(activeTypers[0]);
-        const typer2 = getProfile(activeTypers[1]);
-        const typer3 = getProfile(activeTypers[2]);
-        const name1 = typer1?.nickname || typer1?.name || 'Someone';
-        const name2 = typer2?.nickname || typer2?.name || 'Someone';
-        const name3 = typer3?.nickname || typer3?.name || 'Someone';
+        const name1 = getName(getProfile(activeTypers[0]));
+        const name2 = getName(getProfile(activeTypers[1]));
+        const name3 = getName(getProfile(activeTypers[2]));
         return `${name1}, ${name2}, and ${name3} are typing...`;
     } else {
         return 'Several people are typing...';
@@ -141,8 +135,7 @@ function generateChatPreviewText(chat) {
     if (cLastMsg.mine) {
         senderPrefix = 'You: ';
     } else if (isGroup && cLastMsg.npub) {
-        const senderProfile = getProfile(cLastMsg.npub);
-        const senderName = senderProfile?.nickname || senderProfile?.name || cLastMsg.npub.substring(0, 16);
+        const senderName = getName(cLastMsg.npub);
         senderPrefix = `${senderName}: `;
     }
 

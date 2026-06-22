@@ -218,7 +218,7 @@ function _populateMiniProfile(popup, npub, profile, opts) {
 
     const name = document.createElement('div');
     name.className = 'mini-profile-name';
-    const displayName = profile?.nickname || profile?.name;
+    const displayName = profile?.nickname || profile?.name || profile?.display_name;
     if (displayName) {
         name.textContent = displayName;
         twemojify(name);

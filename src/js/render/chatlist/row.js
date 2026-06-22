@@ -111,7 +111,7 @@ function renderChat(chat, primaryColor) {
     if (isGroup) {
         h4ContactName.textContent = chat.metadata?.custom_fields?.name || `Group ${chat.id.substring(0, 8)}...`;
     } else {
-        h4ContactName.textContent = profile?.nickname || profile?.name || chat.id;
+        h4ContactName.textContent = getName(profile || chat.id);
         if (profile?.nickname || profile?.name) twemojify(h4ContactName);
     }
     h4ContactName.classList.add('cutoff');

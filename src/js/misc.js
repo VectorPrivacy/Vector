@@ -156,7 +156,7 @@ function renderNostrProfilePreview(npubInfo, profile = null, isOnlyNpub = false)
     // Display name
     const spanName = document.createElement('span');
     spanName.classList.add('msg-profile-name');
-    spanName.textContent = profile?.nickname || profile?.name || npubInfo.npub.substring(0, 12) + '…';
+    spanName.textContent = getName(profile || npubInfo.npub);
     if (profile?.nickname || profile?.name) {
         // Will be twemojified by caller if needed
         spanName.setAttribute('data-twemoji', 'true');
@@ -217,8 +217,8 @@ function updateNostrProfilePreview(previewElement, profile) {
     
     // Update name
     const nameSpan = previewElement.querySelector('.msg-profile-name');
-    if (nameSpan && (profile.nickname || profile.name)) {
-        nameSpan.textContent = profile.nickname || profile.name;
+    if (nameSpan && (profile.nickname || profile.name || profile.display_name)) {
+        nameSpan.textContent = profile.nickname || profile.name || profile.display_name;
         nameSpan.setAttribute('data-twemoji', 'true');
         // Twemojify if the function is available
         twemojify(nameSpan);
@@ -1514,7 +1514,7 @@ function renderMentions(element, senderIsAdmin = false, opts = {}) {
             }
             const npub = match[1];
             const profile = getProfile(npub);
-            const displayName = profile?.nickname || profile?.name || npub.substring(0, 12) + '...';
+            const displayName = getName(npub);
             if (queueSync && !profile) {
                 // Uncached tagged profile → fetch it; the profile_update handler refreshes this chip's name.
                 invoke('queue_profile_sync', { npub, priority: 'high', forceRefresh: false }).catch(() => {});

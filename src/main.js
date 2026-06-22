@@ -14,10 +14,17 @@ const SystemEventType = {
     WallpaperRemoved: 4,
 };
 
+/** The one true display-name resolver. Accepts a profile object or an npub/id string.
+ *  Order: local nickname → Nostr name → Nostr display_name → shortened npub. */
+function getName(profileOrId) {
+    const p = typeof profileOrId === 'string' ? getProfile(profileOrId) : profileOrId;
+    const id = typeof profileOrId === 'string' ? profileOrId : p?.id;
+    return p?.nickname || p?.name || p?.display_name || (id ? id.substring(0, 12) + '…' : 'Someone');
+}
+
 /** Resolve a system-event actor's display name from cached profiles; npub-prefix fallback. */
 function systemEventName(npub) {
-    const p = arrProfiles.find(x => x.id === npub);
-    return p?.nickname || p?.name || (npub ? npub.substring(0, 12) + '…' : 'Someone');
+    return getName(npub);
 }
 
 /** The non-name part of a system-event line (" has joined", etc.). Split from the name so the
@@ -2551,7 +2558,7 @@ function resolveMentionText(text) {
     return text.replace(/@(npub1[a-z0-9]{58})/g, (full, npub) => {
         const profile = getProfile(npub);
         if (profile) {
-            return '@' + (profile.nickname || profile.name || npub);
+            return '@' + getName(npub);
         }
         return full;
     });
@@ -3329,7 +3336,7 @@ async function setupRustListeners() {
         // and member-list retro-resolve).
         {
             const id = evt.payload.id;
-            const newName = evt.payload.nickname || evt.payload.name || (id.substring(0, 12) + '…');
+            const newName = evt.payload.nickname || evt.payload.name || evt.payload.display_name || (id.substring(0, 12) + '…');
             document.querySelectorAll(`.dmsg-author[data-npub="${id}"]`).forEach(a => {
                 // .dmsg-author holds ONLY the name — bot/admin/owner badges are siblings in the parent
                 // .dmsg-header — so reset + re-twemojify the whole element. (Patching the first text node
@@ -5075,7 +5082,7 @@ function renderCurrentProfile(cProfile) {
     domAccountAvatarContainer.appendChild(domAvatar);
 
     // Render our Display Name
-    domAccountName.textContent = cProfile?.nickname || cProfile?.name || strPubkey.substring(0, 10) + '…';
+    domAccountName.textContent = getName(cProfile);
     domAccountName.onclick = () => openProfile();
     if (cProfile?.nickname || cProfile?.name) twemojify(domAccountName);
 
@@ -5109,7 +5116,7 @@ function renderProfileTab(cProfile) {
         if (domSwitcher) domSwitcher.style.display = 'none';
         domProfileName.style.display = '';
         // textContent: name is attacker-controlled kind-0 data, never HTML.
-        domProfileName.textContent = cProfile?.nickname || cProfile?.name || (cProfile?.id ? cProfile.id.substring(0, 10) + '…' : 'Unknown');
+        domProfileName.textContent = getName(cProfile);
         if (cProfile?.nickname || cProfile?.name) twemojify(domProfileName);
     }
 
@@ -5181,7 +5188,7 @@ function renderProfileTab(cProfile) {
 
     // Secondary Display Name — "Anonymous" for our own un-named profile; npub prefix for others.
     const strNamePlaceholder = cProfile.mine ? 'Anonymous' : (cProfile?.id ? cProfile.id.substring(0, 10) + '…' : '');
-    domProfileNameSecondary.textContent = cProfile?.nickname || cProfile?.name || strNamePlaceholder;
+    domProfileNameSecondary.textContent = cProfile?.nickname || cProfile?.name || cProfile?.display_name || strNamePlaceholder;
     if (cProfile?.nickname || cProfile?.name) twemojify(domProfileNameSecondary);
 
     // Secondary Status (innerHTML copy is safe: source was built from a text
@@ -6027,7 +6034,7 @@ function setChatHeader(chat, profile, isGroup, fNotes) {
         };
         domChatContact.classList.add('btn');
     } else {
-        domChatContact.textContent = profile?.nickname || profile?.name || strOpenChat.substring(0, 10) + '…';
+        domChatContact.textContent = getName(profile);
         if (profile?.nickname || profile?.name) twemojify(domChatContact);
         domChatContact.onclick = () => {
             previousChatBeforeProfile = strOpenChat;
@@ -6346,7 +6353,7 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             // Ensure the member count/status renders even before the first message
             updateChatHeaderSubtext(chat);
         } else {
-            domChatContact.textContent = profile?.nickname || profile?.name || strOpenChat.substring(0, 10) + '…';
+            domChatContact.textContent = getName(profile);
             domChatContact.onclick = null;
             domChatContact.classList.remove('btn');
             domChatContactStatus.textContent = '';
@@ -6979,7 +6986,7 @@ function createFileBox(cAttachment, state = 'downloaded') {
                         const img = document.createElement('img');
                         const profile = getProfile(npub);
                         const src = getProfileAvatarSrc(profile);
-                        const displayName = profile?.nickname || profile?.name;
+                        const displayName = profile?.nickname || profile?.name || profile?.display_name;
                         if (displayName) {
                             wrapper.addEventListener('mouseenter', () => showGlobalTooltip(displayName, wrapper));
                             wrapper.addEventListener('mouseleave', hideGlobalTooltip);
@@ -8398,7 +8405,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
             const tierOf = (npub) => npub === ownerNpub ? 0 : (adminNpubs.includes(npub) ? 1 : 2);
             const displayOf = (m) => {
                 const profile = arrProfiles.find(p => p.id === m.npub) || null;
-                const name = profile ? (profile.nickname || profile.name || '') : '';
+                const name = profile ? (profile.nickname || profile.name || profile.display_name || '') : '';
                 return name || (m.npub.substring(0, 10) + '...' + m.npub.substring(m.npub.length - 6));
             };
             const ordered = [...memberList].sort((a, b) =>
@@ -8407,7 +8414,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
             for (const m of ordered) {
                 const isCommunityOwner = m.npub === ownerNpub;
                 const profile = arrProfiles.find(p => p.id === m.npub) || null;
-                const name = profile ? (profile.nickname || profile.name || '') : '';
+                const name = profile ? (profile.nickname || profile.name || profile.display_name || '') : '';
                 const display = name || (m.npub.substring(0, 10) + '...' + m.npub.substring(m.npub.length - 6));
                 if (f && !(display + ' ' + m.npub).toLowerCase().includes(f)) continue;
                 // Reuse the existing member-row design (display-only: no selection indicator).
@@ -8585,7 +8592,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                 membersEl.appendChild(hdr);
                 for (const bnpub of bannedList) {
                     const p = arrProfiles.find(x => x.id === bnpub) || null;
-                    const nm = p ? (p.nickname || p.name || '') : '';
+                    const nm = p ? (p.nickname || p.name || p.display_name || '') : '';
                     const disp = nm || (bnpub.substring(0, 10) + '...' + bnpub.substring(bnpub.length - 6));
                     const row = document.createElement('div');
                     row.className = 'member-pick-row';
@@ -9045,7 +9052,7 @@ async function openCommunityInvitePanel(chat) {
         row.appendChild(avatar);
         const nameSpan = document.createElement('div');
         nameSpan.className = 'compact-member-name';
-        const nm = profile ? (profile.nickname || profile.name || '') : '';
+        const nm = profile ? (profile.nickname || profile.name || profile.display_name || '') : '';
         nameSpan.textContent = nm || (npub.substring(0, 10) + '...' + npub.substring(npub.length - 6));
         if (nm) twemojify(nameSpan);
         row.appendChild(nameSpan);
@@ -9087,7 +9094,7 @@ async function openCommunityInvitePanel(chat) {
                 return (bt || 0) - (at || 0);
             });
         for (const p of contacts) {
-            const name = p.nickname || p.name || '';
+            const name = p.nickname || p.name || p.display_name || '';
             if (f && !(name + ' ' + p.id).toLowerCase().includes(filterNpub || f)) continue;
             frag.appendChild(buildContactRow(p.id, p));
         }
@@ -11073,7 +11080,7 @@ const mentionCtrl = typeof initMentionSelector === 'function' ? initMentionSelec
                 const p = getProfile(npub);
                 return {
                     npub,
-                    name: p?.nickname || p?.name || npub.substring(0, 12) + '...',
+                    name: getName(npub),
                     avatarSrc: p ? getProfileAvatarSrc(p) : null,
                     lastActive: lastActive[npub] || 0
                 };
@@ -11919,14 +11926,14 @@ function renderCreateGroupList(filterText = '') {
         if (!aChatTimestamp && bChatTimestamp) return 1;
 
         // Fallback: sort alphabetically
-        const aName = (a?.nickname || a?.name || '').toLowerCase();
-        const bName = (b?.nickname || b?.name || '').toLowerCase();
+        const aName = (a?.nickname || a?.name || a?.display_name || '').toLowerCase();
+        const bName = (b?.nickname || b?.name || b?.display_name || '').toLowerCase();
         return aName.localeCompare(bName);
     });
 
     // Helper to build a member-pick row
     const buildRow = (npub, profile) => {
-        const name = profile ? (profile.nickname || profile.name || '') : '';
+        const name = profile ? (profile.nickname || profile.name || profile.display_name || '') : '';
         const isSelected = arrSelectedGroupMembers.includes(npub);
 
         const row = document.createElement('div');
@@ -11996,7 +12003,7 @@ function renderCreateGroupList(filterText = '') {
         if (p.is_blocked) continue;
 
         // Filter by nickname/name/npub (use extracted npub if input is a profile URL)
-        const name = p.nickname || p.name || '';
+        const name = p.nickname || p.name || p.display_name || '';
         const hay = (name + ' ' + p.id).toLowerCase();
         if (f && !hay.includes(filterNpub || f)) continue;
 

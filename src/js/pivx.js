@@ -1029,12 +1029,7 @@ async function checkPivxPaymentClaimedState(bubble, address, hintEl, isMine, ret
  */
 function getChatDisplayName(chatId) {
     // DM - get profile name
-    const profile = getProfile(chatId);
-    if (profile?.nickname) return profile.nickname;
-    if (profile?.name) return profile.name;
-
-    // Fallback to truncated pubkey
-    return chatId.substring(0, 8) + '...';
+    return getName(chatId);
 }
 
 // ========== End PIVX Wallet Functions ==========

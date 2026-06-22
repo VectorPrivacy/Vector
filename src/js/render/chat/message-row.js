@@ -381,9 +381,7 @@ function _dmsgBuildHeader(authorFullId, authorProfile, msg, isGroupChat, current
     author.classList.add('dmsg-author', 'btn');
     if (authorFullId) author.dataset.npub = authorFullId;
 
-    const displayName = authorProfile?.nickname
-        || authorProfile?.name
-        || (authorFullId ? authorFullId.substring(0, 12) + '…' : 'Unknown');
+    const displayName = getName(authorProfile || authorFullId);
     author.textContent = displayName;
     twemojify(author);
 
@@ -459,8 +457,8 @@ function _dmsgBuildReplyContext(msg, sender) {
         cSenderProfile = sender;
     }
 
-    if (cSenderProfile?.nickname || cSenderProfile?.name) {
-        spanName.textContent = cSenderProfile.nickname || cSenderProfile.name;
+    if (cSenderProfile?.nickname || cSenderProfile?.name || cSenderProfile?.display_name) {
+        spanName.textContent = cSenderProfile.nickname || cSenderProfile.name || cSenderProfile.display_name;
         twemojify(spanName);
     } else {
         const fallbackId = (hasBackendContext ? msg.replied_to_npub : cMsg?.npub) || cSenderProfile?.id || '';
