@@ -3783,6 +3783,9 @@ async function setupRustListeners() {
         // back to a fully-read state, which an in-place preview update can't
         // express. Deletions are rare enough that a full render is fine.
         renderChatlist();
+        // The in-app chat-list badge is DB-sourced (chat.unread); re-derive it so deleting an unread
+        // message drops the badge too. renderChatlist alone repaints the stale pre-deletion count.
+        scheduleUnreadRefresh();
 
         // Recompute the OS taskbar badge — if the deleted message was unread,
         // the badge would otherwise stay stuck on its pre-deletion count.
@@ -4897,6 +4900,9 @@ async function login(skipAnimations = false) {
 
                 // Finished boot!
                 fInit = false;
+                // Catch a share that landed between the cold-start poll and now (the live listener
+                // skips events while fInit was still true).
+                consumePendingShare();
 
                 // Render the chatlist
                 console.time('[Boot] showMainUI:renderChatlist');
@@ -5038,12 +5044,7 @@ async function login(skipAnimations = false) {
 
             // Handle a share (file/text from another app) that arrived on a cold
             // start before the live listener was attached.
-            try {
-                const pendingShare = await invoke('get_pending_share');
-                if (pendingShare) await handleIncomingShare(pendingShare);
-            } catch (e) {
-                console.error('Failed to check for pending share:', e);
-            }
+            await consumePendingShare();
         });
 
         // Wait for connect + all listener registrations to complete
@@ -7855,6 +7856,12 @@ async function openChat(contact) {
             openFilePreview(share.uris[0], contact, '').catch(e => console.error('[Share] preview failed:', e));
         } else if (share.text) {
             domChatMessageInput.value = share.text;
+            // A programmatic value set doesn't fire 'input', so reveal Send manually (mirrors the
+            // edit path); otherwise the mic stays until the user types a character.
+            domChatMessageInputSend.classList.add('active');
+            domChatMessageInputSend.style.display = '';
+            domChatMessageInputVoice.style.display = 'none';
+            autoResizeChatInput();
             domChatMessageInput.focus();
         }
     }
@@ -7862,6 +7869,18 @@ async function openChat(contact) {
 
 /** Inbound share awaiting a chat selection (set when another app shares into Vector). */
 let pendingShareToSend = null;
+
+/** Consume a pending inbound share and route it to the chat picker. The backend's get_pending_share
+ *  atomically take()s, so the cold-start poll, the live event, and the resume hook can all call this
+ *  and the share is handled exactly once, whichever fires first. */
+async function consumePendingShare() {
+    try {
+        const share = await invoke('get_pending_share');
+        if (share) await handleIncomingShare(share);
+    } catch (e) {
+        console.error('[Share] consume failed:', e);
+    }
+}
 
 /**
  * Handle a file/text share received from another app. Drops the user into the
@@ -9782,10 +9801,11 @@ window.addEventListener("DOMContentLoaded", async () => {
     });
 
     // Inbound share from another app (Android share sheet). If not logged in yet,
-    // Rust has stored it pending and the post-login poll will pick it up.
-    await listen('share_received', async (evt) => {
+    // Rust has stored it pending and the post-login poll will pick it up. Route through the
+    // atomic consume so a live event + a resume poll can't double-handle the same share.
+    await listen('share_received', async () => {
         if (fInit) return;
-        await handleIncomingShare(evt.payload);
+        await consumePendingShare();
     });
 
     // Listen for critical loading errors from the backend (database, migrations, etc.)
@@ -10070,7 +10090,10 @@ window.addEventListener("DOMContentLoaded", async () => {
                 
                 // Mark init as complete so renderChatlist works
                 fInit = false;
-                
+                // Catch a share that landed between the cold-start poll and now (the live listener
+                // skips events while fInit was still true).
+                consumePendingShare();
+
                 // Render the chatlist
                 renderChatlist();
                 
@@ -11232,14 +11255,16 @@ domChatMessageInput.oninput = async () => {
         await getCurrentWindow().onFocusChanged((event) => {
             const wasActive = isWindowActive();
             windowFocused = !!event.payload;
-            if (!wasActive && isWindowActive()) onWindowResumed();
+            if (!wasActive && isWindowActive()) { onWindowResumed(); if (!fInit) consumePendingShare(); }
             syncBackendActiveChat();
         });
 
         document.addEventListener('visibilitychange', () => {
             const wasActive = isWindowActive();
             documentVisible = !document.hidden;
-            if (!wasActive && isWindowActive()) onWindowResumed();
+            // A share that foregrounded the app (onNewIntent stored it) may have been emitted before
+            // the WebView resumed; poll for it on every resume so it isn't stranded until a later tap.
+            if (!wasActive && isWindowActive()) { onWindowResumed(); if (!fInit) consumePendingShare(); }
             syncBackendActiveChat();
         });
     }
