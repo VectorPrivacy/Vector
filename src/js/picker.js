@@ -3,7 +3,7 @@
  *
  * Two modes share one container: emoji (default) and GIF (Gifverse API). The
  * mode toggle, search box, and dispatch logic all live here. Emoji data and
- * persistence (recent / favorites / shortcodes) live in emoji.js.
+ * persistence (recent / shortcodes) live in emoji.js.
  *
  * The panel is also used as a reaction picker — when a `.dmsg-react-trigger`
  * element is the click source (set by the floating message toolbar), the next
@@ -12,8 +12,7 @@
  * target message id during that mode.
  *
  * Cross-file dependencies (resolved at call time via classic-script scope):
- *   - emoji.js   — arrEmojis, arrFavoriteEmojis, searchEmojis, getMostUsedEmojis,
- *                  toggleFavoriteEmoji
+ *   - emoji.js   — arrEmojis, searchEmojis, getMostUsedEmojis
  *   - twemoji    — twemojify
  *   - main.js    — domChatMessageInput, domChatMessageInputEmoji,
  *                  domChatMessageInputSend, domChatMessageInputFile,
@@ -108,7 +107,7 @@ function openEmojiPanel(e) {
         }
         strCurrentReactionReference = strReaction || '';
 
-        // --- Deferred: the expensive content build (twemoji recents/favorites,
+        // --- Deferred: the expensive content build (twemoji recents,
         // the ~1.8k-span All grid, pack sidebar/sections + canvas loop) runs
         // AFTER the panel's first visible paint. Double rAF: the outer fires in
         // the same frame the .visible style lands (transition starts), the inner
@@ -3982,7 +3981,7 @@ function renderEmojiPackSections() {
     main.querySelectorAll('.emoji-pack-section').forEach(el => el.remove());
     _destroyAllPackCanvasGrids();
 
-    // Pack sections slot between Favorites and All so custom emojis read
+    // Pack sections slot between Recents and All so custom emojis read
     // as a promoted tier, even though their sidebar tabs sit at the bottom.
     const anchor = document.getElementById('emoji-all');
 
@@ -4114,9 +4113,6 @@ function renderEmojiPanel() {
         // No recent emojis, render all grid immediately
         renderAllEmojisGrid(allGrid);
     }
-
-    // Load favorites section
-    loadFavoritesSection();
 }
 
 /**
@@ -4183,26 +4179,6 @@ function renderAllEmojisGrid(allGrid) {
     });
 }
 
-/**
- * Loads the favorites section separately.
- */
-function loadFavoritesSection() {
-    const favoritesGrid = document.getElementById('emoji-favorites-grid');
-    favoritesGrid.innerHTML = '';
-
-    const favoritesFragment = document.createDocumentFragment();
-    arrFavoriteEmojis.slice(0, 24).forEach(emoji => {
-        const span = document.createElement('span');
-        span.textContent = emoji.emoji;
-        span.dataset.emoji = emoji.emoji;
-        span.dataset.emojiTooltip = stockEmojiTitle(emoji);
-        favoritesFragment.appendChild(span);
-    });
-
-    favoritesGrid.appendChild(favoritesFragment);
-    twemojify(favoritesGrid);
-}
-
 function loadEmojiSections() {
     // Legacy function - now calls renderEmojiPanel
     renderEmojiPanel();
@@ -4233,10 +4209,8 @@ function resetEmojiPicker() {
     // Clear search input
     emojiSearch.value = '';
 
-    // Show all sections — but don't override `hidden` attributes;
-    // inline display beats the UA `[hidden]` rule, so sections we
-    // deliberately hide (e.g. favorites while unimplemented) would
-    // reappear after a search clear.
+    // Show all sections — but don't override `hidden` attributes; inline display beats the
+    // UA `[hidden]` rule, so any section we deliberately hide would reappear after a search clear.
     document.querySelectorAll('.emoji-section').forEach(section => {
         if (section.hidden) return;
         section.style.display = 'block';
@@ -4591,28 +4565,6 @@ emojiSearch.onkeydown = async (e) => {
         }
     }
 };
-
-// Add contextmenu event for right-click to favorite
-picker.addEventListener('contextmenu', (e) => {
-    if (e.target.tagName === 'SPAN' && e.target.parentElement.classList.contains('emoji-grid')) {
-        e.preventDefault();
-        const emoji = e.target.textContent;
-        const emojiData = arrEmojis.find(e => e.emoji === emoji);
-
-        if (emojiData) {
-            const added = toggleFavoriteEmoji(emojiData);
-            if (added) {
-                // Visual feedback for adding to favorites
-                e.target.style.transform = 'scale(1.3)';
-                e.target.style.backgroundColor = 'rgba(255, 215, 0, 0.3)';
-                setTimeout(() => {
-                    e.target.style.transform = '';
-                    e.target.style.backgroundColor = '';
-                }, 500);
-            }
-        }
-    }
-});
 
 // Emoji selection
 picker.addEventListener('click', (e) => {

@@ -3761,11 +3761,6 @@ body.chat-bg-disabled .chat-messages::before {
   margin: 0 8px 0 0;
 }
 
-/* Star icon in favorites header uses theme color */
-#emoji-favorites .emoji-section-header .section-icon {
-  background-color: var(--icon-color-primary);
-}
-
 /* `.emoji-picker` prefix outranks the legacy `.emoji-picker span
    { width:30px height:30px padding:6px border-radius:100% }` rule —
    without these resets the title <span> is forced into a 30×30 circle

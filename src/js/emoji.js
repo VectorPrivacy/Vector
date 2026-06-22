@@ -1934,8 +1934,6 @@ const arrEmojis = [
     { emoji: '🏴󠁧󠁢󠁷󠁬󠁳󠁿', name: 'flag wales flag: welsh gb uk britain british cymru dragon', display: 'flag: Wales', shortcode: 'flag-wales', freq: 13 }
 ];
 
-let arrFavoriteEmojis = JSON.parse(localStorage.getItem('favoriteEmojis') || '[]');
-
 // Apply some runtime changes to our EmojiDEX
 for (cEmoji of arrEmojis) {
     // Force everything in to lowercase
@@ -2248,15 +2246,4 @@ function twemojify(domElement, opts) {
             cutoff.style.display = prev;
         }, { once: true });
     }
-}
-
-function toggleFavoriteEmoji(emoji) {
-  const index = arrFavoriteEmojis.findIndex(e => e.emoji === emoji.emoji);
-  if (index >= 0) {
-    arrFavoriteEmojis.splice(index, 1);
-  } else {
-    arrFavoriteEmojis.push(emoji);
-  }
-  localStorage.setItem('favoriteEmojis', JSON.stringify(arrFavoriteEmojis));
-  return index < 0; // Returns true if added, false if removed
 }
