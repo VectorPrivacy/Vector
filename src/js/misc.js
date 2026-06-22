@@ -1476,12 +1476,14 @@ function getTextContentWithoutImages(element) {
  * @param {HTMLElement} element - The message span to process
  */
 function renderMentions(element, senderIsAdmin = false, opts = {}) {
-    // allowBare: also linkify a raw `npub1…` (optionally `@`/`nostr:`-prefixed) that isn't preceded
-    // by a word char or `/` — so npubs pasted plainly in a profile bio become tags, while npubs inside
-    // URLs are left alone. queueSync: fetch an uncached tagged profile so its name can fill in.
+    // allowBare: also linkify a raw `npub1…` (optionally `@`/`nostr:`-prefixed) not preceded by a word
+    // char or `/` — so npubs pasted plainly in a bio become tags. It also folds our OWN
+    // vectorapp.io/profile/<npub> links into tags (that domain only; npubs in any other URL stay put).
+    // The vectorapp.io branch is first so the bare branch's `/`-lookbehind can't swallow the npub
+    // mid-URL. queueSync: fetch an uncached tagged profile so its name can fill in.
     const { allowBare = false, queueSync = false } = opts;
     const mentionPattern = allowBare
-        ? /(?<![\w/])(?:@|nostr:)?(npub1[a-z0-9]{58})\b/g
+        ? /https?:\/\/vectorapp\.io\/profile\/(npub1[a-z0-9]{58})\b|(?<![\w/])(?:@|nostr:)?(npub1[a-z0-9]{58})\b/g
         : /@(npub1[a-z0-9]{58})/g;
     const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, {
         acceptNode(node) {
@@ -1512,7 +1514,7 @@ function renderMentions(element, senderIsAdmin = false, opts = {}) {
             if (match.index > lastIdx) {
                 frag.appendChild(document.createTextNode(node.textContent.slice(lastIdx, match.index)));
             }
-            const npub = match[1];
+            const npub = match[1] || match[2];   // group 1 = vectorapp.io link, group 2 = bare npub
             const profile = getProfile(npub);
             const displayName = getName(npub);
             if (queueSync && !profile) {
