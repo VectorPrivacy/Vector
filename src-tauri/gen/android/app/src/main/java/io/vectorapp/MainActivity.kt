@@ -53,7 +53,7 @@ class MainActivity : TauriActivity() {
     private var gravY = 0.0
     private var gravZ = 0.0
     private var baseNx = 0.0                         // normalised gravity at the first reading = "flat"
-    private var baseNz = 0.0
+    private var baseNy = 0.0
     private var gyroLastPushMs = 0L
 
     private val gyroListener = object : SensorEventListener {
@@ -62,7 +62,7 @@ class MainActivity : TauriActivity() {
                 gravX = event.values[0].toDouble(); gravY = event.values[1].toDouble(); gravZ = event.values[2].toDouble()
                 val m0 = Math.sqrt(gravX * gravX + gravY * gravY + gravZ * gravZ)
                 if (m0 < 1e-3) return                 // wait for a valid first reading
-                baseNx = gravX / m0; baseNz = gravZ / m0
+                baseNx = gravX / m0; baseNy = gravY / m0
                 gyroHasBaseline = true
                 return
             }
@@ -76,12 +76,13 @@ class MainActivity : TauriActivity() {
             val now = System.currentTimeMillis()
             if (now - gyroLastPushMs < 30) return     // ~33 Hz cap on the JS bridge
             gyroLastPushMs = now
-            // Normalised gravity vs the baseline → tilt: nx = left/right lean, nz = forward/back lean.
-            // Gain maps ~25 deg of phone tilt to the card's full range; the deadzone keeps it flat at rest.
+            // Normalised gravity vs the baseline → tilt. On this device the screen-plane axes map
+            // swapped: Y drives forward/back, X drives side-to-side; Z (screen rotation) is ignored.
+            // Gain maps ~25 deg of phone tilt to the card's full range.
             val nx = gravX / mag
-            val nz = gravZ / mag
-            var ry = (nx - baseNx) * 28.0
-            var rx = -(nz - baseNz) * 28.0
+            val ny = gravY / mag
+            var rx = -(ny - baseNy) * 28.0   // forward/back <- Y
+            var ry = (nx - baseNx) * 28.0    // side-to-side <- X
             if (Math.abs(rx) < 0.5) rx = 0.0
             if (Math.abs(ry) < 0.5) ry = 0.0
             val wv = managedWebView ?: return
