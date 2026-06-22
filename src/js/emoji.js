@@ -1941,6 +1941,12 @@ for (cEmoji of arrEmojis) {
     // Force everything in to lowercase
     cEmoji.name = cEmoji.name.toLowerCase();
 
+    // Newer Unicode emojis ship without a curated shortcode; derive one from the display name so
+    // every stock emoji normalises to a :shortcode: (e.g. "distorted face" -> distorted_face).
+    if (!cEmoji.shortcode && cEmoji.display) {
+        cEmoji.shortcode = cEmoji.display.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    }
+
     // Add our 'used' integer to track usage for personalised emoji lists
     cEmoji.used = 0;
 }
