@@ -15109,7 +15109,7 @@ hr {
   width: min(78vw, 300px);
   padding: 36px 28px 28px;
   border-radius: 22px;
-  background: linear-gradient(160deg, #232527, #16181a);
+  background: linear-gradient(160deg, #171717, #16181a);
   border: 1px solid #393B3C;
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6);
   transform-style: preserve-3d;
