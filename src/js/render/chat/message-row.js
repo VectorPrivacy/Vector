@@ -483,6 +483,7 @@ function _dmsgBuildReplyContext(msg, sender) {
     } else if (hasAttachment) {
         spanRef = document.createElement('div');
         spanRef.style.display = 'flex';
+        spanRef.style.alignItems = 'center';   // vertically center the type icon with its label
         const attachmentExt = cMsg?.attachments?.[0]?.extension;
         const cFileType = attachmentExt ? getFileTypeInfo(attachmentExt) : { icon: 'attachment', description: 'Attachment' };
 
