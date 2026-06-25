@@ -2660,7 +2660,12 @@ async function refreshUnreadCounts() {
         const n = counts[chat.id] || 0;
         if (chat.unread !== n) { chat.unread = n; changed = true; }
     }
-    if (changed && !strOpenChat) renderChatlist();
+    if (changed) {
+        // A chat is open → the chatlist is hidden, so refresh the in-chat back-chevron unread dot
+        // (it reads the chat.unread we just updated); otherwise refresh the visible rows.
+        if (strOpenChat) updateChatBackNotification();
+        else renderChatlist();
+    }
 }
 
 let _unreadRefreshTimer = null;
