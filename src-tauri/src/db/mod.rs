@@ -48,6 +48,11 @@ pub async fn get_chat_message_count(chat_id: &str) -> Result<usize, String> {
     let chat_int_id = vector_core::db::id_cache::get_chat_id_by_identifier(chat_id)?;
     vector_core::db::events::get_chat_message_count(chat_int_id)
 }
+/// Anchored message window around an event id (string-identifier wrapper).
+pub async fn get_messages_around(chat_id: &str, anchor_id: &str, before: usize, after: usize) -> Result<Vec<vector_core::Message>, String> {
+    let chat_int_id = vector_core::db::id_cache::get_chat_id_by_identifier(chat_id)?;
+    vector_core::db::events::get_messages_around(chat_int_id, anchor_id, before, after).await
+}
 // Wrapper tracking — sync functions re-exported directly
 pub use vector_core::db::wrappers::{
     save_processed_wrapper, load_processed_wrappers, load_negentropy_items,

@@ -28,9 +28,13 @@ use crate::{
 async fn auto_mark_if_active(chat_id: &str, msg_id: &str) {
     let active = vector_core::state::get_active_chat();
     if active.as_deref() != Some(chat_id) { return; }
+    // A swap can land while awaiting the STATE lock; re-check inside so we never write account A's
+    // last_read into account B's freshly-swapped chat list/DB.
+    let session = vector_core::state::SessionGuard::capture();
 
     let slim = {
         let mut state = STATE.lock().await;
+        if !session.is_valid() { return; }
         if let Some(chat) = state.chats.iter_mut().find(|c| c.id == chat_id) {
             chat.last_read = vector_core::compact::encode_message_id(msg_id);
             state.get_chat(chat_id).map(|c| {
@@ -68,7 +72,9 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
             // pending OS notification is revoked, even when backgrounded. This hook runs in both the
             // foreground handler and the background-sync commit path.
             let chat_id = chat_id.to_string();
+            let session = vector_core::state::SessionGuard::capture();
             tokio::spawn(async move {
+                if !session.is_valid() { return; }
                 crate::chat::mark_as_read_headless(&chat_id).await;
                 if let Some(handle) = TAURI_APP.get() {
                     let _ = commands::messaging::update_unread_counter(handle.clone()).await;
@@ -79,7 +85,9 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
         let chat_id = chat_id.to_string();
         let content = msg.content.clone();
         let msg_id = msg.id.clone();
+        let session = vector_core::state::SessionGuard::capture();
         tokio::spawn(async move {
+            if !session.is_valid() { return; }
             // If the user is actively watching this chat, advance last_read
             // before the badge recount so the message never counts as unread.
             // The FE's own markAsRead still runs on the message_new event for
@@ -112,7 +120,9 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
         if msg.mine {
             // Answered from another device: mark read + revoke any notification (see on_dm_received).
             let chat_id = chat_id.to_string();
+            let session = vector_core::state::SessionGuard::capture();
             tokio::spawn(async move {
+                if !session.is_valid() { return; }
                 crate::chat::mark_as_read_headless(&chat_id).await;
                 if let Some(handle) = TAURI_APP.get() {
                     let _ = commands::messaging::update_unread_counter(handle.clone()).await;
@@ -125,7 +135,9 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
             .map(|att| att.extension.clone())
             .unwrap_or_else(|| String::from("file"));
         let msg_id = msg.id.clone();
+        let session = vector_core::state::SessionGuard::capture();
         tokio::spawn(async move {
+            if !session.is_valid() { return; }
             auto_mark_if_active(&chat_id, &msg_id).await;
             // Check muted
             let is_muted = {
@@ -165,11 +177,32 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
     // richer presence/teardown side-effects the GUI needs). ---
 
     fn on_community_message(&self, chat_id: &str, msg: &Message, _is_new: bool) {
+        // Realtime community messages are genuinely live: the back-paging fetch is a SEPARATE one-shot
+        // batch (process_channel_batch), not this stream, so a suppression flag here only ever hides
+        // live messages (saved-but-never-surfaced → permanently stuck unread). Always surface.
         vector_core::emit_event("message_new", &serde_json::json!({ "message": msg, "chat_id": chat_id }));
         let chat_id = chat_id.to_string();
         let msg = msg.clone();
+        // Snapshot the session BEFORE the spawn (multi-account rule 1): a swap can land before the
+        // body runs, and auto_mark below writes last_read — guard it from landing in account B's DB.
+        let session = vector_core::state::SessionGuard::capture();
         tokio::spawn(async move {
-            crate::services::subscription_handler::show_community_notification(&chat_id, &msg).await;
+            if !session.is_valid() { return; }
+            // Advance last_read first if this is the chat the user is actively watching, so a message
+            // in the open community never counts as unread on the badge recount below (mirrors the DM
+            // path; without it the badge bumps to 1 and races the FE's markAsRead, leaving it stuck).
+            auto_mark_if_active(&chat_id, &msg.id).await;
+            // Ping only for genuinely-live messages. A bulk back-sync (jump-to-unread) or a relay
+            // re-delivering already-saved history pushes OLD events through this handler; by inner
+            // timestamp they're stale, so skip the notification. They still surface + count via the
+            // message_new emit above — only the SFX/OS-ping is muted, so nothing goes sticky.
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            if msg.at.saturating_add(300_000) >= now_ms {
+                crate::services::subscription_handler::show_community_notification(&chat_id, &msg).await;
+            }
             if let Some(handle) = TAURI_APP.get() {
                 let _ = commands::messaging::update_unread_counter(handle.clone()).await;
             }

@@ -113,13 +113,16 @@ pub async fn get_messages_around_id<R: Runtime>(
     target_message_id: String,
     context_before: usize,
 ) -> Result<Vec<Message>, String> {
+    // Snapshot the session before the DB await so a mid-load account swap can't write the prior
+    // account's messages (and an auto-created chat) into the new account's STATE.
+    let session = vector_core::state::SessionGuard::capture();
     let messages = db::get_messages_around_id(&chat_id, &target_message_id, context_before).await?;
 
     // Sync to backend state so fetch_msg_metadata and other functions can find these messages
     // Clone for return, move originals to batch (zero-copy in batch insert)
     let messages_for_return = messages.clone();
 
-    if !messages.is_empty() {
+    if !messages.is_empty() && session.is_valid() {
         #[cfg(debug_assertions)]
         let start = std::time::Instant::now();
         let mut state = STATE.lock().await;
@@ -136,6 +139,38 @@ pub async fn get_messages_around_id<R: Runtime>(
             println!("[CacheStats] messages_around load: added {} msgs in {:?}", added, start.elapsed());
             state.cache_stats.log();
         }
+    }
+
+    Ok(messages_for_return)
+}
+
+/// Anchored (random-access) message window: `before` messages up to and
+/// including `anchor_id`, plus `after` messages newer than it. O(window) load
+/// regardless of how deep the anchor sits — used by jump-to-unread.
+/// Errs if the anchor id isn't in the DB so the caller can fall back.
+#[tauri::command]
+pub async fn get_messages_around<R: Runtime>(
+    _handle: AppHandle<R>,
+    chat_id: String,
+    anchor_id: String,
+    before: usize,
+    after: usize,
+) -> Result<Vec<Message>, String> {
+    // Snapshot the session before the DB await: a swap during the load must not write account A's
+    // messages into account B's STATE (add_messages_to_chat_batch even creates the chat if missing).
+    let session = vector_core::state::SessionGuard::capture();
+    // Clamp the window. Trusted callers pass <=51; the cap bounds a hostile-frontend DoS (each row is
+    // decrypted + composed + cloned into STATE) without affecting any real use.
+    let before = before.min(512);
+    let after = after.min(512);
+    let messages = db::get_messages_around(&chat_id, &anchor_id, before, after).await?;
+
+    // Sync to backend state so fetch_msg_metadata and friends can find these messages.
+    let messages_for_return = messages.clone();
+
+    if !messages.is_empty() && session.is_valid() {
+        let mut state = STATE.lock().await;
+        state.add_messages_to_chat_batch(&chat_id, messages);
     }
 
     Ok(messages_for_return)

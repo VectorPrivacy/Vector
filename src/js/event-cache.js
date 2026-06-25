@@ -37,8 +37,15 @@ const EVENT_CACHE_CONFIG = {
     // Maximum number of conversations to keep full event history for
     maxCachedConversations: 5,
 
-    // Maximum events to keep per conversation in cache
-    maxEventsPerConversation: 100,
+    // Maximum events to keep per conversation in cache. The buffer may hold a
+    // (older) seek segment + the (newest) tail segment with a gap between them;
+    // this caps their combined size before the seek segment is evicted.
+    maxEventsPerConversation: 1000,
+
+    // The newest N events are PINNED — never evicted, never dropped by a seek.
+    // entry.events[last] is therefore always the true latest message, which the
+    // chat-list preview/sort/status read by walking from the array's end.
+    tailBudget: 500,
 
     // Number of events to load per batch (for pagination)
     eventsPerBatch: 20,
@@ -59,6 +66,11 @@ class ConversationCacheEntry {
         this.totalInDb = 0;  // Total displayable event count in database
         this.loadedOffset = 0;  // How many events from the end we've loaded
         this.isFullyLoaded = false;  // Whether all events are loaded
+        // Non-congruent history: `events` may be [seek-region … GAP … tail-region].
+        // gapAfterId = the id of the seek-region's NEWEST row, after which a gap
+        // precedes the pinned tail. null = the buffer is one contiguous run (the
+        // common case: fresh open, tail-only, or a gap that closed on scroll).
+        this.gapAfterId = null;
     }
 
     /**
@@ -96,21 +108,56 @@ class ConversationCacheEntry {
     }
 
     /**
-     * Trim events to the configured maximum (called during LRU eviction)
-     * Keeps the most recent events
+     * Index of the first event in the PINNED tail segment. The tail is the newest
+     * `tailBudget` events that are part of the contiguous run reaching the live tail.
+     * When there's a gap, the tail starts AFTER the gap (everything below gapAfterId
+     * in the array is the seek segment, which is droppable). When there's no gap, the
+     * tail is simply the newest `tailBudget` of the whole array. Returns 0 when the
+     * buffer is at or under the budget (the entire array is the tail).
+     */
+    _tailStartIndex() {
+        const budget = EVENT_CACHE_CONFIG.tailBudget;
+        if (this.gapAfterId != null) {
+            const gapIdx = this.events.findIndex(e => e.id === this.gapAfterId);
+            // Everything strictly after the gap boundary is the tail run. Keep all
+            // of it (it is, by construction, the rows from the newest page onward).
+            if (gapIdx !== -1) return gapIdx + 1;
+            // gapAfterId no longer present (its row was the seek edge and got dropped)
+            // — treat the buffer as contiguous and fall through to the budget rule.
+        }
+        return Math.max(0, this.events.length - budget);
+    }
+
+    /**
+     * Trim events down toward the configured maximum WITHOUT ever dropping the tail.
+     * The tail (newest `tailBudget`, or everything past the gap) is pinned; only the
+     * seek segment (oldest rows below the gap, or the oldest of a contiguous over-cap
+     * run) is shed. Called during LRU eviction / chat close.
      */
     trimToMax() {
-        if (this.events.length > EVENT_CACHE_CONFIG.maxEventsPerConversation) {
-            // Keep the most recent events (at the end)
-            const excess = this.events.length - EVENT_CACHE_CONFIG.maxEventsPerConversation;
-            this.events = this.events.slice(excess);
-            // Adjust loadedOffset since we removed older events
-            this.loadedOffset = Math.max(0, this.loadedOffset - excess);
-            this.isFullyLoaded = false; // We no longer have all events
+        const max = EVENT_CACHE_CONFIG.maxEventsPerConversation;
+        if (this.events.length <= max) return;
 
-            // Rebuild the Set to match trimmed events
-            this.eventIds = new Set(this.events.map(e => e.id));
+        // Never trim into the tail: the most we may drop is everything below the
+        // tail-start index, capped so the kept array lands at the budget.
+        const tailStart = this._tailStartIndex();
+        const overBy = this.events.length - max;
+        const drop = Math.min(overBy, tailStart);
+        if (drop <= 0) return;
+
+        this.events.splice(0, drop);
+        // Dropping the seek segment removes the gap's older side; if the whole seek
+        // segment is gone, the buffer is contiguous again.
+        if (this.gapAfterId != null && !this.events.some(e => e.id === this.gapAfterId)) {
+            this.gapAfterId = null;
         }
+        // loadedOffset counts from the newest page; dropping OLDER rows below the tail
+        // doesn't change how much of the tail we hold, but keep it a safe lower bound.
+        this.loadedOffset = Math.max(0, this.loadedOffset - drop);
+        this.isFullyLoaded = false; // we no longer hold the oldest rows
+
+        // Rebuild the Set to match the trimmed events
+        this.eventIds = new Set(this.events.map(e => e.id));
     }
 
     /**
@@ -125,50 +172,81 @@ class ConversationCacheEntry {
             return false;
         }
 
-        // Fast path: newest event (most common real-time case) - O(1) append
-        if (this.events.length === 0 || event.at >= this.events[this.events.length - 1].at) {
+        // Segment-confined insert: when there's a gap the buffer is non-monotonic
+        // ([seek … GAP … tail]), so a single binary search over the whole array could
+        // land a mid-history arrival inside the WRONG segment and weld it across the
+        // gap. Resolve which segment the event belongs to by its timestamp first.
+        if (this.events.length === 0) {
             this.events.push(event);
+        } else if (this.gapAfterId == null) {
+            // Contiguous: ordinary ASC insert (fast-path append for the newest).
+            this._insertSortedInRange(event, 0, this.events.length);
         } else {
-            // Out-of-order: binary search for position + splice
-            const insertIndex = this._binarySearchInsertIndex(event.at);
-            this.events.splice(insertIndex, 0, event);
+            const gapIdx = this.events.findIndex(e => e.id === this.gapAfterId);
+            if (gapIdx === -1) {
+                // Boundary row gone (shouldn't happen) — treat as contiguous.
+                this.gapAfterId = null;
+                this._insertSortedInRange(event, 0, this.events.length);
+            } else {
+                const tailStart = gapIdx + 1;
+                const tailOldestAt = this.events[tailStart]?.at ?? Infinity;
+                const seekNewestAt = this.events[gapIdx].at;
+                if (event.at >= tailOldestAt) {
+                    // Belongs in the tail (incl. the common genuine-newest tail arrival).
+                    this._insertSortedInRange(event, tailStart, this.events.length);
+                } else if (event.at <= seekNewestAt) {
+                    // Belongs in the seek region.
+                    this._insertSortedInRange(event, 0, tailStart);
+                } else {
+                    // Falls strictly inside the unfetched gap interior. Inserting it into
+                    // either segment would corrupt a boundary or falsely bridge the gap;
+                    // it lives in the DB and the gap-fill scroll will pick it up. Drop it
+                    // from the in-memory buffer (don't add to the Set) but still count it.
+                    this.totalInDb++;
+                    this.touch();
+                    return false;
+                }
+            }
         }
 
         this.eventIds.add(event.id);
         this.totalInDb++;
         this.touch();
 
-        // Trim if needed (remove oldest, update Set)
+        // Trim if needed: drop the OLDEST row (the seek segment's oldest, or the
+        // oldest of a contiguous over-cap run) — NEVER the tail. The cap (~1000)
+        // sits well above the tail budget (~500), so a single overflow shift only
+        // ever sheds a seek-region row.
         if (this.events.length > EVENT_CACHE_CONFIG.maxEventsPerConversation) {
             const removed = this.events.shift();
             this.eventIds.delete(removed.id);
             this.loadedOffset = Math.max(0, this.loadedOffset - 1);
+            // If the shed row was the gap boundary, the whole seek region is gone now
+            // (shift drops from the front) → the buffer is contiguous.
+            if (this.gapAfterId === removed.id) this.gapAfterId = null;
         }
 
         return true;
     }
 
     /**
-     * Binary search to find insertion index for a timestamp
-     * Returns the index where an event with this timestamp should be inserted
-     * @param {number} timestamp - The timestamp to find position for
-     * @returns {number} - The insertion index
+     * Insert `event` into the sorted sub-range [lo, hi) of this.events by .at,
+     * keeping that sub-range ASC. Fast-paths an append at the range's tail.
      * @private
      */
-    _binarySearchInsertIndex(timestamp) {
-        let low = 0;
-        let high = this.events.length;
-
-        while (low < high) {
-            const mid = (low + high) >>> 1;  // Unsigned right shift for floor division
-            if (this.events[mid].at < timestamp) {
-                low = mid + 1;
-            } else {
-                high = mid;
-            }
+    _insertSortedInRange(event, lo, hi) {
+        // Append fast-path: at-or-after the range's current last element.
+        if (hi <= lo || event.at >= this.events[hi - 1].at) {
+            this.events.splice(hi, 0, event);
+            return;
         }
-
-        return low;
+        let low = lo, high = hi;
+        while (low < high) {
+            const mid = (low + high) >>> 1;
+            if (this.events[mid].at < event.at) low = mid + 1;
+            else high = mid;
+        }
+        this.events.splice(low, 0, event);
     }
 
     /**
@@ -268,33 +346,31 @@ class EventCache {
                 return entry.events;
             }
 
-            // If we already have enough events cached, return them
-            if (entry.events.length >= count) {
-                return entry.events;
-            }
-
-            // We need to load events from DB
-            // If we have some cached (e.g., from real-time updates), we need to merge carefully
+            // ALWAYS re-anchor to the DB's NEWEST page — a chat opens at the live tail. A prior
+            // scroll-up or seek (jump/reply) may have left entry.events as a stale mid-history slice;
+            // reusing it would reopen the chat mid-history with no newer rows to scroll down to.
+            // Rebuild from the newest page, keeping only not-yet-persisted pending/failed sends (and
+            // any realtime arrival within the page's time range), so the window opens CONTIGUOUS at
+            // now. Older history re-loads anchored on scroll-up — O(window), no stale accretion.
             const cachedEvents = entry.events;
-
-            // Load materialized event views (events with computed reactions, edits applied, etc.)
             const events = await invoke('get_message_views', {
                 chatId: conversationId,
                 limit: count,
                 offset: 0
             });
-
-            // Merge: DB events are authoritative, but add any cached events not in DB result
-            // (This handles the case where real-time events arrived but aren't in DB yet)
             const dbEventIds = new Set(events.map(e => e.id));
-            const newCachedEvents = cachedEvents.filter(e => !dbEventIds.has(e.id));
-
-            // Combine: DB events + any truly new cached events, sorted by timestamp
-            entry.events = [...events, ...newCachedEvents].sort((a, b) => a.at - b.at);
-            entry.loadedOffset = events.length; // Track how many we loaded from DB
+            const pageOldestAt = events.length ? events.reduce((m, e) => Math.min(m, e.at), Infinity) : 0;
+            const keepCached = cachedEvents.filter(e =>
+                !dbEventIds.has(e.id) && (e.pending || e.failed || e.at >= pageOldestAt)
+            );
+            entry.events = [...events, ...keepCached].sort((a, b) => a.at - b.at);
+            entry.loadedOffset = events.length;
             entry.isFullyLoaded = events.length >= entry.totalInDb;
+            // Re-anchored to a clean newest page → the buffer is contiguous; any prior
+            // seek region (older than this page) was dropped, so there's no gap.
+            entry.gapAfterId = null;
 
-            // Rebuild Set to match merged events (for O(1) duplicate checks)
+            // Rebuild Set to match the re-anchored events (for O(1) duplicate checks)
             entry.eventIds = new Set(entry.events.map(e => e.id));
 
             return entry.events;
@@ -346,6 +422,79 @@ class EventCache {
     }
 
     /**
+     * Merge an anchored seek slice (jump-to-unread / reply-jump) into a conversation
+     * WITHOUT dropping the pinned tail. Mutates the entry's events array IN PLACE so
+     * aliases (chat.messages / getEventsRef) stay valid.
+     *
+     * The result is `[seek-region … (maybe GAP) … tail-region]`:
+     *  - The tail (the contiguous run reaching events[last], i.e. the true latest) is
+     *    ALWAYS preserved → chat-list preview/sort/status read the real newest message.
+     *  - A PRIOR seek segment is discarded first (at most one seek + the tail).
+     *  - The new slice merges in, deduped, sorted ASC by .at.
+     *  - gapAfterId is set to the seek-region's newest id when the slice does NOT reach
+     *    the tail (a real gap), or null when slice and tail overlap/touch (contiguous).
+     *
+     * @param {string} conversationId
+     * @param {Array} slice - ASC-by-.at messages for the seek window
+     * @returns {Array} - the entry's events array (now tail-pinned + seek-merged)
+     */
+    seedWindow(conversationId, slice) {
+        const entry = this.getOrCreateEntry(conversationId);
+
+        // Identify the tail run to preserve: everything past an existing gap, else the
+        // newest tailBudget of the current (contiguous) buffer. This run reaches the
+        // live tail and must survive the seed untouched.
+        const budget = EVENT_CACHE_CONFIG.tailBudget;
+        let tailStart;
+        if (entry.gapAfterId != null) {
+            const gi = entry.events.findIndex(e => e.id === entry.gapAfterId);
+            tailStart = gi !== -1 ? gi + 1 : Math.max(0, entry.events.length - budget);
+        } else {
+            tailStart = Math.max(0, entry.events.length - budget);
+        }
+        const tail = entry.events.slice(tailStart);
+
+        // Dedup the incoming slice against the tail (an overlap row is common when the
+        // seek lands near the tail). Slice rows that aren't in the tail are the seek
+        // region. Keep ASC order.
+        const tailIds = new Set(tail.map(e => e.id));
+        const sliceSorted = slice.slice().sort((a, b) => a.at - b.at);
+        const seekRegion = sliceSorted.filter(e => !tailIds.has(e.id));
+
+        // Contiguity test: the seek region touches/overlaps the tail when its newest
+        // event is at-or-after the tail's oldest event. (When the slice fully overlapped
+        // the tail, seekRegion is empty and it's trivially contiguous.)
+        let gapAfterId = null;
+        if (seekRegion.length && tail.length) {
+            const seekNewestAt = seekRegion[seekRegion.length - 1].at;
+            const tailOldestAt = tail[0].at;
+            if (seekNewestAt < tailOldestAt) {
+                gapAfterId = seekRegion[seekRegion.length - 1].id;
+            }
+        }
+
+        // Rebuild events in place: seek region (older) then tail (newer). When there's
+        // no gap, this is one contiguous ASC run; when there is, the boundary is gapAfterId.
+        // Re-sort defensively so a touching (non-gap) merge stays globally ASC.
+        const merged = gapAfterId != null
+            ? [...seekRegion, ...tail]
+            : [...seekRegion, ...tail].sort((a, b) => a.at - b.at);
+        entry.events.length = 0;
+        for (const e of merged) entry.events.push(e);
+        entry.eventIds = new Set(entry.events.map(e => e.id));
+        entry.gapAfterId = gapAfterId;
+
+        // Seek slice is not the whole chat → allow further loading. loadedOffset is
+        // meaningless as a from-newest count once non-congruent, so park it and keep
+        // totalInDb a safe lower bound.
+        entry.loadedOffset = entry.events.length;
+        entry.totalInDb = Math.max(entry.totalInDb, entry.events.length);
+        entry.isFullyLoaded = false;
+        entry.touch();
+        return entry.events;
+    }
+
+    /**
      * Add a new real-time event to the cache
      * All event types (messages, payments, etc.) use this same method
      * @param {string} conversationId - The conversation identifier
@@ -355,6 +504,67 @@ class EventCache {
     addEvent(conversationId, event) {
         const entry = this.getOrCreateEntry(conversationId);
         return entry.addEvent(event);
+    }
+
+    /**
+     * Merge a batch of events into a conversation, deduping by id and keeping the
+     * array IN PLACE (chat.messages aliases survive). Used by the anchored window
+     * extends: the anchored DB read overlaps the window edge by one row (the
+     * `<= anchor` include / `> anchor` exclude boundary), so the overlap row is
+     * dropped here rather than rendered twice. Resulting array stays ASC by .at.
+     *
+     * Gap-aware: when there's a tracked gap (seek region below the tail) an
+     * append (prepend=false) inserts the newer rows AT THE GAP BOUNDARY — between
+     * the seek region and the tail — NOT at the array end (which would weld them
+     * onto the tail and skip the still-unfetched gap interior). The gap boundary
+     * advances to the newest inserted row; when those rows reach the tail's oldest
+     * (timestamps touch/overlap) the gap CLOSES (gapAfterId = null, one contiguous
+     * run). A prepend grows the seek region's older side and leaves the gap intact.
+     *
+     * @param {string} conversationId
+     * @param {Array} newEvents - ASC-by-.at batch (older for prepend, newer for append)
+     * @param {boolean} prepend - true = older rows above, false = newer rows below
+     * @returns {number} count of genuinely-new rows merged
+     */
+    addEvents(conversationId, newEvents, prepend = true) {
+        if (!newEvents || !newEvents.length) return 0;
+        const entry = this.getOrCreateEntry(conversationId);
+        const fresh = newEvents.filter(e => !entry.eventIds.has(e.id));
+        if (!fresh.length) return 0;
+        for (const e of fresh) entry.eventIds.add(e.id);
+        fresh.sort((a, b) => a.at - b.at);
+
+        if (prepend) {
+            // Older rows go to the front (grow the seek region / the head). The gap
+            // (if any) sits further down and is unaffected.
+            entry.events.unshift(...fresh);
+        } else if (entry.gapAfterId != null) {
+            // Newer rows fill the gap between the seek region and the tail. Insert
+            // them right after the gap boundary, then advance/close the gap.
+            const gapIdx = entry.events.findIndex(e => e.id === entry.gapAfterId);
+            const insertAt = gapIdx === -1 ? entry.events.length : gapIdx + 1;
+            entry.events.splice(insertAt, 0, ...fresh);
+
+            // Gap closes when the fetched rows definitively overlap the tail: the newest
+            // fetched row is STRICTLY past the next (tail) row, leaving no interior. The
+            // strict `>` avoids a same-second false-close that could weld an unfetched
+            // equal-timestamp interior row. Otherwise the boundary advances to the newest
+            // fetched row; the caller force-closes (closeGap) when its batch came back
+            // short (DB interior exhausted → next rows are the tail).
+            const newGapId = fresh[fresh.length - 1].id;
+            const newGapIdx = insertAt + fresh.length - 1;
+            const tailNext = entry.events[newGapIdx + 1];
+            const reachedTail = tailNext && fresh[fresh.length - 1].at > tailNext.at;
+            entry.gapAfterId = (reachedTail || newGapIdx + 1 >= entry.events.length)
+                ? null
+                : newGapId;
+        } else {
+            // Contiguous buffer: newer rows extend the tail at the end.
+            entry.events.push(...fresh);
+        }
+        entry.totalInDb = Math.max(entry.totalInDb, entry.events.length);
+        entry.touch();
+        return fresh.length;
     }
 
     /**
@@ -450,8 +660,49 @@ class EventCache {
             loadedOffset: entry.loadedOffset,
             isFullyLoaded: entry.isFullyLoaded,
             hasMoreEvents: entry.hasMoreEvents,
-            lastAccess: entry.lastAccess
+            lastAccess: entry.lastAccess,
+            gapAfterId: entry.gapAfterId
         };
+    }
+
+    /**
+     * The id after which a gap precedes the pinned tail (non-congruent history),
+     * or null when the buffer is one contiguous run. Read by the gap-aware window
+     * extends to decide in-memory vs anchored fetch at the seek/tail boundary.
+     * @param {string} conversationId
+     * @returns {string|null}
+     */
+    getGapAfterId(conversationId) {
+        return this.cache.get(conversationId)?.gapAfterId ?? null;
+    }
+
+    /**
+     * Force the buffer contiguous (clear the tracked gap) WITHOUT moving rows. Used
+     * when the DB has nothing between the seek region and the tail (the rows below
+     * the gap are unpersisted tail sends), so in-segment scrolling can reach them.
+     * @param {string} conversationId
+     */
+    closeGap(conversationId) {
+        const entry = this.cache.get(conversationId);
+        if (entry) entry.gapAfterId = null;
+    }
+
+    /**
+     * Drop the seek segment (everything up to and including the gap boundary),
+     * keeping ONLY the tail, and clear the gap — in place (alias-safe). Used when
+     * the window has moved into the tail and the older seek region is stale: a
+     * scroll-up from the tail re-anchors cleanly rather than crossing the gap.
+     * @param {string} conversationId
+     */
+    dropSeekSegment(conversationId) {
+        const entry = this.cache.get(conversationId);
+        if (!entry || entry.gapAfterId == null) return;
+        const gapIdx = entry.events.findIndex(e => e.id === entry.gapAfterId);
+        if (gapIdx !== -1) {
+            const removed = entry.events.splice(0, gapIdx + 1);
+            for (const e of removed) entry.eventIds.delete(e.id);
+        }
+        entry.gapAfterId = null;
     }
 
     /**
@@ -464,11 +715,14 @@ class EventCache {
             const oldestKey = this.cache.keys().next().value;
             const oldestEntry = this.cache.get(oldestKey);
 
-            // Keep only the last event for preview
+            // Keep only the last event(s) for preview. slice(-N) keeps the NEWEST
+            // rows = the tail, so the chat-list preview stays correct, and the
+            // dropped seek region (if any) means the buffer is contiguous again.
             if (oldestEntry.events.length > EVENT_CACHE_CONFIG.minEventsForPreview) {
                 oldestEntry.events = oldestEntry.events.slice(-EVENT_CACHE_CONFIG.minEventsForPreview);
                 oldestEntry.loadedOffset = EVENT_CACHE_CONFIG.minEventsForPreview;
                 oldestEntry.isFullyLoaded = false;
+                oldestEntry.gapAfterId = null;
                 // Rebuild Set to match trimmed events
                 oldestEntry.eventIds = new Set(oldestEntry.events.map(e => e.id));
             }

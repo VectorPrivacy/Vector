@@ -554,6 +554,7 @@ pub fn run() {
             commands::messaging::get_chat_messages_paginated,
             commands::messaging::get_message_views,
             commands::messaging::get_messages_around_id,
+            commands::messaging::get_messages_around,
             commands::messaging::get_system_events,
             commands::messaging::get_chat_message_count,
             commands::messaging::evict_chat_messages,

@@ -9,8 +9,12 @@ pub use vector_core::{ChatType, SerializableChat};
 /// `chat_mark_read` event so the frontend can update its unread state.
 #[allow(dead_code)]
 pub async fn mark_as_read_headless(chat_id: &str) -> bool {
+    // A swap can land while awaiting the STATE lock; re-check inside so an answered-elsewhere read
+    // never writes account A's last_read into account B's freshly-swapped DB.
+    let session = vector_core::state::SessionGuard::capture();
     let (slim, last_read_hex) = {
         let mut state = crate::STATE.lock().await;
+        if !session.is_valid() { return false; }
         let idx = match state.chats.iter().position(|c| c.id == chat_id) {
             Some(i) => i,
             None => return false,

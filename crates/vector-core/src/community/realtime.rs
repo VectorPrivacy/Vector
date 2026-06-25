@@ -274,6 +274,8 @@ pub async fn dispatch_event(
                 let _ = crate::db::events::populate_reply_context(&mut msg).await;
             }
             let _ = crate::db::events::save_message(&chat_id, &msg).await;
+            // This is the LIVE stream (limit-0 subscription) — back-paged history arrives via a
+            // separate one-shot batch, never here. So these are always genuinely new; surface them.
             handler.on_community_message(&chat_id, &msg, true);
         }
         Some(inbound::IncomingEvent::Updated { target_id, message, edit_event }) => {

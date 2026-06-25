@@ -413,6 +413,10 @@ function timeAgo(timestamp) {
  * @param {boolean} [fSmooth=true] - Whether to use smooth scrolling (true) or instant scrolling (false)
  */
 function scrollToBottom(domElement, fSmooth = true) {
+    // Mark this as an app-initiated scroll so the chat's intent-aware pin doesn't
+    // misread it as the user moving. No-op for non-chat scrollables (the guard
+    // only matters for #chat-messages); harmless elsewhere.
+    if (typeof beginProgrammaticScroll === 'function') beginProgrammaticScroll();
     domElement.scrollTo({
         top: domElement.scrollHeight,
         behavior: fSmooth ? 'smooth' : 'auto'
@@ -429,6 +433,14 @@ function scrollToBottom(domElement, fSmooth = true) {
  * @param {boolean} [options.smoothScroll=true] - Whether to use smooth scrolling
  * @returns {Function} Cleanup function to remove event listeners
  */
+// Set by createScrollHandler to its current un-throttled visibility evaluator,
+// so window slides / renders can re-evaluate the scroll-return button without a
+// scroll event. No-op until a handler is wired.
+let _scrollReturnReeval = null;
+/** Re-evaluate the scroll-return button's visibility now (called after window
+ *  slides, renders, and drops where no scroll event fires). */
+function refreshScrollReturnButton() { if (_scrollReturnReeval) _scrollReturnReeval(); }
+
 function createScrollHandler(scrollableDiv, bottomButton, options = {}) {
     const SCROLL_THRESHOLD = options.threshold ?? 250;
     const THROTTLE_TIME = options.throttleTime ?? 150;
@@ -441,6 +453,18 @@ function createScrollHandler(scrollableDiv, bottomButton, options = {}) {
     // Optional onClick — called instead of (well, alongside) the default
     // scroll-to-bottom so callers can clear unread badges, etc.
     const onClick = typeof options.onClick === 'function' ? options.onClick : null;
+    // Optional force-visible predicate: when it returns true the button stays
+    // shown regardless of the DOM scroll-distance check. With DOM windowing the
+    // rendered bottom isn't the data bottom (newer rows live below the window),
+    // so distance-from-bottom alone can't tell the button to stay visible.
+    const shouldForceVisible = typeof options.shouldForceVisible === 'function' ? options.shouldForceVisible : null;
+    // Mirror of shouldForceVisible: when windowed AND the live tail is on screen, the button must
+    // HIDE regardless of pin/scroll-position (a media-reflow scroll could otherwise strand it visible).
+    const shouldForceHidden = typeof options.shouldForceHidden === 'function' ? options.shouldForceHidden : null;
+    // Optional jump-to-bottom override: returns true if it handled landing at
+    // the data bottom (e.g. re-rendering the newest window), suppressing the
+    // default scrollTo(scrollHeight) which can't reach the live tail when windowed.
+    const onJumpToBottom = typeof options.onJumpToBottom === 'function' ? options.onJumpToBottom : null;
 
     /**
      * Throttles a function call
@@ -463,7 +487,18 @@ function createScrollHandler(scrollableDiv, bottomButton, options = {}) {
      * Handles the scroll event and updates button visibility
      * @private
      */
-    const handleScroll = throttle(() => {
+    // Core visibility decision, shared by the scroll listener and by callers
+    // that slide the window (which fire no scroll event). Force-visible wins;
+    // pinned hides; otherwise distance-from-bottom decides.
+    const evaluateVisibility = () => {
+        if (shouldForceVisible && shouldForceVisible()) {
+            bottomButton.classList.add('visible');
+            return;
+        }
+        if (shouldForceHidden && shouldForceHidden()) {
+            bottomButton.classList.remove('visible');
+            return;
+        }
         if (isPinned && isPinned()) {
             bottomButton.classList.remove('visible');
             return;
@@ -477,13 +512,25 @@ function createScrollHandler(scrollableDiv, bottomButton, options = {}) {
         } else {
             bottomButton.classList.remove('visible');
         }
-    }, THROTTLE_TIME);
+    };
+    const handleScroll = throttle(evaluateVisibility, THROTTLE_TIME);
+    // Expose an un-throttled re-evaluation hook so window slides / renders can
+    // refresh the button the instant the rendered range changes.
+    _scrollReturnReeval = evaluateVisibility;
 
     /**
      * Scrolls to bottom and hides the button
      * @private
      */
     const handleButtonClick = () => {
+        // When windowed and scrolled/windowed away from the live tail, the DOM
+        // bottom isn't the data bottom — a plain scrollTo would land on stale
+        // rows. Let the caller re-render the newest window + pin instead.
+        if (onJumpToBottom && onJumpToBottom()) {
+            bottomButton.classList.remove('visible');
+            if (onClick) onClick();
+            return;
+        }
         scrollToBottom(scrollableDiv, SMOOTH_SCROLL);
         bottomButton.classList.remove('visible');
         if (onClick) onClick();
@@ -514,6 +561,9 @@ function centerInView(targetMessage) {
     // Calculate the scroll position needed to center the message
     const scrollPosition = targetMessage.offsetTop - (containerHeight / 2) + (targetMessage.offsetHeight / 2);
 
+    // App-initiated jump (reply-jump / unread-jump centering) — don't let the
+    // chat's intent-aware pin read this as the user scrolling.
+    if (typeof beginProgrammaticScroll === 'function') beginProgrammaticScroll();
     // Smooth scroll to the calculated position
     container.scrollTo({
         top: scrollPosition,

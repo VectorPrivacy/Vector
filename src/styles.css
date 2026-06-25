@@ -2652,6 +2652,11 @@ html, body {
   font-family: 'Rubik';
 
   overscroll-behavior-y: contain;
+
+  /* DOM windowing owns scroll-position math (manual scrollTop corrections on
+     window slide). Chromium auto-anchors scroll on DOM mutation, WebKit does
+     not — disabling it gives engine parity and avoids double-correction. */
+  overflow-anchor: none;
 }
 
 .chat-messages > *:last-child {
@@ -8989,7 +8994,9 @@ select:disabled:hover {
   border-radius: 100%;
   height: 45px;
   width: 45px;
-  z-index: 1;
+  /* Above #dmsg-toolbar (z-index 50) so a message hover-toolbar can't render over
+     the floating button and swallow the click. */
+  z-index: 60;
 }
 
 .scroll-return-badge {
@@ -15459,6 +15466,48 @@ hr {
    accidentally clobber the `position:` of) the header, composer, and
    the floating scroll-return button. */
 #chat { position: relative; isolation: isolate; }
+
+/* Floating "jump to unread" pill — top-center of the chat view, below the header. */
+.unread-jump-pill {
+  position: absolute;
+  top: 75px;
+  left: 50%;
+  transform: translateX(-50%) translateY(-8px);
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 7px 15px;
+  border: none;
+  border-radius: 100px;
+  background: var(--accent-color, #59fcb3);
+  color: #0c0c0c;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5), 0 2px 5px rgba(0, 0, 0, 0.4);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.unread-jump-pill.visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+  pointer-events: auto;
+}
+.unread-jump-pill.loading { cursor: default; pointer-events: none; }
+.unread-jump-pill.loading::before {
+  content: '';
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  margin-right: 7px;
+  border: 2px solid rgba(12, 12, 12, 0.3);
+  border-top-color: #0c0c0c;
+  border-radius: 50%;
+  animation: unread-pill-spin 0.7s linear infinite;
+}
+@keyframes unread-pill-spin { to { transform: rotate(360deg); } }
 
 .chat-wallpaper-layer {
   position: absolute;

@@ -26,14 +26,22 @@ pub async fn save_event(event: &StoredEvent) -> Result<(), String> {
         event.content.clone()
     };
 
+    // UPSERT (not INSERT OR REPLACE) so a re-save (reaction/edit) UPDATES in place and PRESERVES the
+    // rowid. get_messages_around's (created_at, received_at, rowid) cursor needs a stable final
+    // tiebreak to page through same-timestamp bursts; INSERT OR REPLACE churns the rowid and drops rows.
     conn.execute(
         r#"
-        INSERT OR REPLACE INTO events (
+        INSERT INTO events (
             id, kind, chat_id, user_id, content, tags, reference_id,
             created_at, received_at, mine, pending, failed, wrapper_event_id, npub, preview_metadata
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-            COALESCE(?13, (SELECT wrapper_event_id FROM events WHERE id = ?1)),
-            ?14, ?15)
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+        ON CONFLICT(id) DO UPDATE SET
+            kind = excluded.kind, chat_id = excluded.chat_id, user_id = excluded.user_id,
+            content = excluded.content, tags = excluded.tags, reference_id = excluded.reference_id,
+            created_at = excluded.created_at, received_at = excluded.received_at,
+            mine = excluded.mine, pending = excluded.pending, failed = excluded.failed,
+            wrapper_event_id = COALESCE(excluded.wrapper_event_id, events.wrapper_event_id),
+            npub = excluded.npub, preview_metadata = excluded.preview_metadata
         "#,
         rusqlite::params![
             event.id,
@@ -406,8 +414,15 @@ pub fn update_wrapper_event_id(event_id: &str, wrapper_event_id: &str) -> Result
 /// Get message count for a chat.
 pub fn get_chat_message_count(chat_id: i64) -> Result<usize, String> {
     let conn = super::get_db_connection_guard_static()?;
+    // Must count the SAME kinds get_message_views returns (community chat 9, DM 14, file 15). A
+    // narrower set under-counts vs. the rows actually loaded, which latches the frontend cache's
+    // `isFullyLoaded` flag true and wedges the local back-pager — community channels then never
+    // page DB history past the first screen.
     let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM events WHERE chat_id = ?1 AND kind IN (14, 15)",
+        &format!(
+            "SELECT COUNT(*) FROM events WHERE chat_id = ?1 AND kind IN ({}, {}, {})",
+            event_kind::CHAT_MESSAGE, event_kind::PRIVATE_DIRECT_MESSAGE, event_kind::FILE_ATTACHMENT
+        ),
         rusqlite::params![chat_id],
         |row| row.get(0),
     ).map_err(|e| format!("Failed to count messages: {}", e))?;
@@ -820,11 +835,19 @@ pub async fn get_message_views(
     limit: usize,
     offset: usize,
 ) -> Result<Vec<Message>, String> {
-    use std::collections::HashMap;
-
     // Step 1: Get message events (kind 9, 14, 15)
     let message_kinds = [event_kind::CHAT_MESSAGE, event_kind::PRIVATE_DIRECT_MESSAGE, event_kind::FILE_ATTACHMENT];
     let message_events = get_events(chat_id, Some(&message_kinds), limit, offset).await?;
+
+    compose_message_views(message_events).await
+}
+
+/// Compose Message views from already-fetched message events (kind 9/14/15):
+/// fetch related reactions/edits, parse attachments, apply edits, resolve reply
+/// context. Shared by `get_message_views` (offset pager) and `get_messages_around`
+/// (anchored window). Input order is preserved in the output.
+async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<Message>, String> {
+    use std::collections::HashMap;
 
     if message_events.is_empty() {
         return Ok(Vec::new());
@@ -972,6 +995,100 @@ pub async fn get_message_views(
     }
 
     Ok(messages)
+}
+
+/// Anchored (random-access) message window: load `before` messages up to and
+/// including the anchor, plus `after` messages strictly newer than it. O(window)
+/// regardless of how deep the anchor sits in the chat — unlike the offset pager,
+/// which is O(depth) to reach a far-back message.
+///
+/// Returns ASC by `created_at` (oldest first), composed with reactions/edits/
+/// attachments. Errs if the anchor id isn't in the DB so the caller can fall back.
+pub async fn get_messages_around(
+    chat_id: i64,
+    anchor_id: &str,
+    before: usize,
+    after: usize,
+) -> Result<Vec<Message>, String> {
+    let message_kinds = [event_kind::CHAT_MESSAGE, event_kind::PRIVATE_DIRECT_MESSAGE, event_kind::FILE_ATTACHMENT];
+
+    let message_events: Vec<StoredEvent> = {
+        let conn = super::get_db_connection_guard_static()?;
+
+        // Resolve the anchor's FULL sort key (created_at, received_at, rowid). Paging by created_at
+        // alone wedges on a wall of equal timestamps (a message burst): the query keeps returning the
+        // same newest-N of the cluster, so back-paging stalls before reaching older history. The
+        // (received_at, rowid) tiebreak — rowid being the unique final key — gives a strict total
+        // order, so every page steps strictly past the previous, through any same-timestamp cluster.
+        let (anchor_at, anchor_rt, anchor_rowid): (i64, i64, i64) = conn.query_row(
+            "SELECT created_at, received_at, rowid FROM events WHERE id = ?1",
+            rusqlite::params![anchor_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).map_err(|e| format!("Anchor message not found: {}", e))?;
+
+        // Kinds occupy ?2..?4; then ?5 created_at, ?6 received_at, ?7 rowid, ?8 limit.
+        let kind_placeholders: String = (0..message_kinds.len())
+            .map(|i| format!("?{}", i + 2))
+            .collect::<Vec<_>>()
+            .join(",");
+        let cols = "id, kind, chat_id, user_id, content, tags, reference_id, \
+                    created_at, received_at, mine, pending, failed, wrapper_event_id, npub, preview_metadata";
+
+        // Older incl. anchor: strict key <= anchor key; newest-first then reverse to ASC.
+        let older_sql = format!(
+            "SELECT {} FROM events WHERE chat_id = ?1 AND kind IN ({}) \
+             AND (created_at < ?5 OR (created_at = ?5 AND (received_at < ?6 \
+                  OR (received_at = ?6 AND rowid <= ?7)))) \
+             ORDER BY created_at DESC, received_at DESC, rowid DESC LIMIT ?8",
+            cols, kind_placeholders
+        );
+        let mut older_stmt = conn.prepare(&older_sql)
+            .map_err(|e| format!("Failed to prepare older window query: {}", e))?;
+        let older_rows = older_stmt.query_map(
+            rusqlite::params![
+                chat_id,
+                message_kinds[0] as i32, message_kinds[1] as i32, message_kinds[2] as i32,
+                anchor_at, anchor_rt, anchor_rowid, before as i64
+            ],
+            parse_event_row,
+        ).map_err(|e| format!("Failed to query older window: {}", e))?;
+        let mut older: Vec<StoredEvent> = older_rows.filter_map(|r| r.ok()).collect();
+        older.reverse(); // DESC -> ASC
+
+        // Newer: strictly after the anchor key.
+        let newer_sql = format!(
+            "SELECT {} FROM events WHERE chat_id = ?1 AND kind IN ({}) \
+             AND (created_at > ?5 OR (created_at = ?5 AND (received_at > ?6 \
+                  OR (received_at = ?6 AND rowid > ?7)))) \
+             ORDER BY created_at ASC, received_at ASC, rowid ASC LIMIT ?8",
+            cols, kind_placeholders
+        );
+        let mut newer_stmt = conn.prepare(&newer_sql)
+            .map_err(|e| format!("Failed to prepare newer window query: {}", e))?;
+        let newer_rows = newer_stmt.query_map(
+            rusqlite::params![
+                chat_id,
+                message_kinds[0] as i32, message_kinds[1] as i32, message_kinds[2] as i32,
+                anchor_at, anchor_rt, anchor_rowid, after as i64
+            ],
+            parse_event_row,
+        ).map_err(|e| format!("Failed to query newer window: {}", e))?;
+        let newer: Vec<StoredEvent> = newer_rows.filter_map(|r| r.ok()).collect();
+
+        older.into_iter().chain(newer).collect()
+    };
+
+    // Decrypt message content (mirror get_events).
+    let mut decrypted = Vec::with_capacity(message_events.len());
+    for mut event in message_events {
+        if event.kind == event_kind::CHAT_MESSAGE || event.kind == event_kind::PRIVATE_DIRECT_MESSAGE {
+            event.content = crate::crypto::maybe_decrypt(event.content).await
+                .unwrap_or_else(|_| "[Decryption failed]".to_string());
+        }
+        decrypted.push(event);
+    }
+
+    compose_message_views(decrypted).await
 }
 
 /// Get the last message for ALL chats in a single batch query.

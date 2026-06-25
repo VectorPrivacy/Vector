@@ -2060,7 +2060,15 @@ async function acceptCommunityInvite(communityId) {
         const channelId = await surfaceCommunitySummary(summary);
         clearCommunityJoining(communityId);
         adjustSize();
-        if (channelId) openChat(channelId);
+        if (channelId && arrChats.some(c => c.id === channelId)) {
+            openChat(channelId);
+        } else {
+            // The community was torn down during the join (kicked/banned before it landed, so the
+            // chat row is gone or never materialized). Surface a short notice rather than silently
+            // bailing the open and leaving the user wondering why the join did nothing.
+            showToast('You were removed from this community by an admin');
+            renderChatlist();
+        }
     } catch (e) {
         console.error('Failed to accept community invite:', e);
         // Roll back the optimistic row + restore the invite.
@@ -2580,22 +2588,14 @@ function updateChatBackNotification() {
     const hasOtherUnreads = arrChats.some(chat => {
         // Skip the currently open chat
         if (chat.id === strOpenChat) return false;
-        
         // Skip chats with no messages (same as chatlist rendering)
         if (!chat.messages || chat.messages.length === 0) return false;
-        
         // Skip our own profile (bookmarks/notes)
         if (chat.id === strPubkey) return false;
-        
-        // Get profile for DM chats
-        const isGroup = chatIsGroup(chat);
-        const profile = !isGroup && chat.participants.length === 1 ? getProfile(chat.id) : null;
-        
-        // Skip muted chats
-        if (chat.muted) return false;
-        
-        // Check if this chat has unread messages
-        return countUnreadMessages(chat) > 0;
+        // Use the SAME badge count as the chatlist rows (computeRowBadgeCount: DB-authoritative
+        // chat.unread, muted-aware) so the back dot can't light for a chat whose row shows nothing.
+        // The raw countUnreadMessages walk can diverge from chat.unread on a windowed cache.
+        return computeRowBadgeCount(chat) > 0;
     });
     
     // Show or hide the notification dot (show if there are unread messages OR unanswered invites)
@@ -2902,12 +2902,10 @@ async function setupRustListeners() {
     _on('system_event', async (evt) => {
         try {
             const { conversation_id, event_id, event_type, member_pubkey, member_name } = evt.payload || {};
-            console.log('[System Event] Received:', event_id, event_type);
 
             // Deduplication by event_id
             const chat = arrChats.find(c => c.id === conversation_id);
             if (chat && chat.messages.some(msg => msg.id === event_id)) {
-                console.log('[System Event] Skipping duplicate:', event_id);
                 return;
             }
 
@@ -2949,18 +2947,33 @@ async function setupRustListeners() {
                 if (!chat.messages?.some(m => !m.system_event)) updateChatlistPreview(conversation_id);
             }
 
-            // Paint into the OPEN view only if this is genuinely the newest event. A historical replay (paging
-            // / rehydration) is already in the cache at its real time and renders in order on the next chat
-            // open/render — appending it to the bottom here would misplace it.
+            // Paint into the OPEN view only if this is genuinely the newest event AND the live tail is on
+            // screen (DOM windowing). A historical replay (paging / rehydration) is already in the cache at
+            // its real time and renders in order on the next chat open/render — appending it to the bottom
+            // here would misplace it. When windowed-and-scrolled-up the data is in the cache; the next
+            // scroll-down windows it in.
             if (strOpenChat === conversation_id && domChatMessages) {
-                const newestAt = (chat?.messages || []).reduce((mx, m) => (m.id !== event_id && m.at > mx ? m.at : mx), 0);
-                if (atMs >= newestAt) {
+                // Same windowing render gate as message_new: a jumpToUnread resolve
+                // freezes the window (data-only), and we paint ONLY on a genuine
+                // tail-append (this event lands immediately after the DOM's bottom row).
+                // A historical replay sorts into the middle — it must not append here.
+                const frozen = CHAT_WINDOW_ENABLED && _unreadJumpResolving;
+                const bottomIdx = CHAT_WINDOW_ENABLED ? _windowBottomRenderedIndex() : -1;
+                const newIdx = CHAT_WINDOW_ENABLED ? _windowIndexOfId(event_id) : -1;
+                // Windowed: only paint at the live tail. Seeked away (windowAtTail false),
+                // a newest system event still appends to the bounded slice and would pass
+                // the index check, so require isAtDataBottom() too.
+                const tailAppend = CHAT_WINDOW_ENABLED
+                    ? (isAtDataBottom() && (bottomIdx === -1 || newIdx === bottomIdx + 1))
+                    : (atMs >= (chat?.messages || []).reduce((mx, m) => (m.id !== event_id && m.at > mx ? m.at : mx), 0) && isAtDataBottom());
+                if (!frozen && tailAppend) {
                     const systemElement = insertSystemEvent(content, null, member_pubkey, event_type);
                     // Tag with the event id so the profile_update retro-resolver can
                     // find + repaint this line in place when a stranger's name lands.
                     systemElement.id = event_id;
                     domChatMessages.appendChild(systemElement);
                     softChatScroll();
+                    if (CHAT_WINDOW_ENABLED) { _windowReseatAnchorsFromDom(); windowTrimTopIfOver(); }
                 }
                 refreshChatEmptyState(); // a "X joined" landed in the open chat → drop the start marker
             }
@@ -3575,15 +3588,65 @@ async function setupRustListeners() {
 
         // If this user has the open chat, then update the chat too
         if (strOpenChat === chat.id) {
-            updateChat(chat, [newMessage]);
-            refreshChatEmptyState(); // first message in a fresh community → drop the start marker
-            // Increment rendered count since we're adding a new message
-            proceduralScrollState.renderedMessageCount++;
-            proceduralScrollState.totalMessageCount++;
+            // DOM windowing render gate. A jumpToUnread resolve freezes the window
+            // entirely — its relay-walk/DB-pull echoes are data-only (already in
+            // chat.messages above), so skip ALL rendering AND badge updates; the
+            // window renders once, at the jump.
+            const frozen = CHAT_WINDOW_ENABLED && _unreadJumpResolving;
+            // Gate on a GENUINE tail-append, not "at bottom": a row renders only if
+            // it lands immediately AFTER the DOM's bottom-rendered message (or the
+            // window is empty). An OLDER insert (a back-paged history echo) sorts into
+            // the MIDDLE of chat.messages — it must NOT prepend into the DOM.
+            const bottomIdx = CHAT_WINDOW_ENABLED ? _windowBottomRenderedIndex() : -1;
+            const newIdx = CHAT_WINDOW_ENABLED ? _windowIndexOfId(newMessage.id) : -1;
+            // When seeked away (windowAtTail false) chat.messages is a bounded slice
+            // whose end is NOT the live tail — a newest arrival still appends to that
+            // slice and would satisfy the index check, so it must ALSO be at the tail.
+            const atTail = !CHAT_WINDOW_ENABLED || isAtDataBottom();
+            const tailAppend = atTail && (bottomIdx === -1 || newIdx === bottomIdx + 1);
+            let rendered = false;
+            if (frozen) {
+                // Data-only: chat.messages/cache already holds it. No DOM, no badge.
+                proceduralScrollState.totalMessageCount++;
+            } else if (!CHAT_WINDOW_ENABLED) {
+                updateChat(chat, [newMessage]);
+                rendered = true;
+                refreshChatEmptyState();
+                proceduralScrollState.renderedMessageCount++;
+                proceduralScrollState.totalMessageCount++;
+            } else if (newMessage.mine && !tailAppend) {
+                // Own send while scrolled up / seeked away: re-seat the window at the
+                // live tail so the sent row is visible, then pin (windowJumpToBottom snaps).
+                windowJumpToBottom();
+                rendered = true;
+                refreshChatEmptyState();
+                proceduralScrollState.renderedMessageCount++;
+                proceduralScrollState.totalMessageCount++;
+            } else if (tailAppend) {
+                // The next message after the rendered bottom (and we're at the tail) →
+                // append + trim. The append keeps the window glued to the live tail.
+                updateChat(chat, [newMessage]);
+                windowBottomId = newMessage.id;   // the append made it the bottom row
+                windowAtTail = true;              // still glued to the tail
+                windowTrimTopIfOver();
+                rendered = true;
+                refreshChatEmptyState(); // first message in a fresh community → drop the start marker
+                proceduralScrollState.renderedMessageCount++;
+                proceduralScrollState.totalMessageCount++;
+            } else {
+                // Not a tail-append (seeked away, or an OLDER history-echo insert). No DOM
+                // row. A genuine newest arrival below a seeked window bumps the scroll-down
+                // badge; an older insert is pure data.
+                proceduralScrollState.totalMessageCount++;
+                const winMsgs = _windowMessages();
+                const newestIdx = (winMsgs?.length || chat.messages.length) - 1;
+                if (!newMessage.mine && newIdx === newestIdx) incrementUnreadBelow();
+            }
             // Open chat + pinned + window actually visible = user saw it
             // land. Tabbed-out arrivals stay unread until refocus, even when
-            // the chat is open and pinned.
-            if (!newMessage.mine && chatPinnedToBottom && isWindowActive()) {
+            // the chat is open and pinned. Only when the row actually rendered at
+            // the tail (the user saw it) — never on a data-only/frozen path.
+            if (!newMessage.mine && rendered && tailAppend && chatPinnedToBottom && isWindowActive()) {
                 markAsRead(chat, newMessage);
                 clearUnreadDivider();
             }
@@ -6296,9 +6359,12 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
         // healed in one pass.
         _dedupeAdjacentDaySeparators();
 
-        // Auto-scroll on new messages (if the user hasn't scrolled up, or on manual chat open)
+        // Auto-scroll on new messages (if the user hasn't scrolled up, or on manual chat open).
+        // Gated on the intent-aware pin, NOT raw distance: a user resting just below the
+        // pin threshold during a sync must not be yanked to the tail. Suppressed during a
+        // window slide (extend-newer/drop), which owns scrollTop itself.
         const pxFromBottom = domChatMessages.scrollHeight - domChatMessages.scrollTop - domChatMessages.clientHeight;
-        if (pxFromBottom < 500 || fClicked) {
+        if (!_windowSuppressAutoScroll && ((chatPinnedToBottom && pxFromBottom < 500) || fClicked)) {
             const cLastMsg = chat.messages[chat.messages.length - 1];
             if (strLastMsgID !== cLastMsg.id || fClicked) {
                 strLastMsgID = cLastMsg.id;
@@ -6991,8 +7057,8 @@ function createFileBox(cAttachment, state = 'downloaded') {
                             wrapper.addEventListener('mouseenter', () => showGlobalTooltip(displayName, wrapper));
                             wrapper.addEventListener('mouseleave', hideGlobalTooltip);
                         }
-                        img.onerror = function() { this.src = 'icons/contact-placeholder.svg'; };
-                        img.src = src || 'icons/contact-placeholder.svg';
+                        img.onerror = function() { this.onerror = null; this.src = 'icons/user-placeholder.svg'; };
+                        img.src = src || 'icons/user-placeholder.svg';
                         img.style.width = '14px';
                         img.style.height = '14px';
                         img.style.borderRadius = '50%';
@@ -7552,7 +7618,7 @@ function revealSystemEventsInWindow(chatId) {
     const stats = eventCache.getStats(chatId);
     let bound = -Infinity;
     if (!stats?.isFullyLoaded) {
-        const loaded = eventCache.getEvents(chatId) || [];
+        const loaded = eventCache.getEventsRef(chatId) || [];
         let oldestReal = Infinity;
         for (const m of loaded) {
             if (!m.system_event && m.at < oldestReal) oldestReal = m.at;
@@ -7597,6 +7663,9 @@ function refreshChatEmptyState() {
 }
 
 async function openChat(contact) {
+    // Safety net: a navigate-away mid-resolve clears this in jumpToUnread's finally,
+    // but unfreeze the window on any chat open in case a path slipped through.
+    _unreadJumpResolving = false;
     pushBack('chat', closeChat);
     // Abandon a wallpaper preview staged in a different chat so its edit
     // overlay doesn't leak onto this header.
@@ -7653,6 +7722,7 @@ async function openChat(contact) {
     // the stale value to find the boundary, but we still want to advance
     // chat.last_read so the OS badge clears immediately on entering the chat.
     const lastReadOnOpen = chat?.last_read || '';
+    const unreadOnOpen = chat?.unread || 0;   // snapshot before the open-time markAsRead zeroes it
     if (chat?.messages?.length) {
         const latestNonMine = findLatestContactMessage(chat.messages);
         if (latestNonMine) markAsRead(chat, latestNonMine);
@@ -7701,6 +7771,7 @@ async function openChat(contact) {
     // was scrolled up. Also wipes the unread badge + divider from the
     // prior chat — re-entering a chat counts as "I've read up to here".
     chatPinnedToBottom = true;
+    _userScrolledAway = false;   // fresh open lands at the live tail; release any prior latch
     clearUnreadBelow();
     clearUnreadDivider();
     syncBackendActiveChat();
@@ -7778,8 +7849,22 @@ async function openChat(contact) {
 
     // Initialize procedural scroll state with actual counts
     initProceduralScrollWithCache(contact, initialMessages.length, totalMessages);
-    
-    await updateChat(chat, initialMessages, profile, true);
+
+    // DOM windowing: render only the newest MAX rows so a large cached array
+    // (prior scroll-up loads still in the cache from a previous open) doesn't
+    // flood the DOM on reopen. renderWindow clears + renders the slice and sets
+    // the window anchors. Falls through to the legacy full render when disabled.
+    if (CHAT_WINDOW_ENABLED && initialMessages.length > MAX_WINDOW_ROWS) {
+        await renderWindow(initialMessages.length - MAX_WINDOW_ROWS, initialMessages.length);
+        scrollToBottom(domChatMessages, false);
+    } else {
+        await updateChat(chat, initialMessages, profile, true);
+        // Anchor the window to the freshly-rendered tail so isAtDataBottom() and
+        // the scroll-extend paths have valid anchors.
+        if (CHAT_WINDOW_ENABLED) _windowReseatAnchorsFromDom();
+    }
+    // Initial open lands on the newest message — the window bottom IS the live tail.
+    if (CHAT_WINDOW_ENABLED) windowAtTail = true;
     refreshChatEmptyState(); // empty community → show the "start of channel" marker
 
     // Drop a "New" divider above the first non-mine message after
@@ -7806,6 +7891,21 @@ async function openChat(contact) {
             }
         }
     }
+
+    // Offer the jump pill ONLY when the read boundary is genuinely OFF-SCREEN — last_read is older
+    // than the opened page (not in initialMessages). If last_read is within the loaded window, the
+    // unread is already on screen (handled by the divider, or trivially visible) and a jump button
+    // would point at nothing. This also stops a stray pill for an own trailing message.
+    const lastReadIdx = lastReadOnOpen ? initialMessages.findIndex(m => m.id === lastReadOnOpen) : -1;
+    if (unreadOnOpen > 0 && lastReadOnOpen && lastReadIdx < 0 && initialMessages.length > 0) {
+        showUnreadJumpPill(unreadOnOpen, lastReadOnOpen);
+    } else {
+        hideUnreadJumpPill();
+    }
+
+    // Short messages can leave the fixed-count initial load not overflowing the viewport — no
+    // scrollbar, so the user can't page older or reach the unread frontier. Fill to overflow.
+    ensureChatScrollable();
 
     // If the user is blocked (DM only), disable the chat input and show a system message
     const isBlockedChat = !isGroup && profile?.is_blocked;
@@ -9164,6 +9264,10 @@ async function openChatlist() {
     domSettings.style.display = 'none';
     domInvites.style.display = 'none';
     domGroupOverview.style.display = 'none';
+    // Hide the chat view too. openChat shows domChat BEFORE it resolves the chat, so a bail-to-list
+    // (e.g. a community torn down mid-open by a ban/removal → no chat found) would otherwise strand
+    // the blank chat header over the list. The list is the root view: nothing else should overlay it.
+    domChat.style.display = 'none';
     previousChatBeforeProfile = ""; // Clear when navigating away
 
     if (domChats.style.display !== '') {
@@ -10593,26 +10697,6 @@ window.addEventListener("DOMContentLoaded", async () => {
             handleProceduralScroll();
         }, 100);
     });
-    // Mark user-initiated scroll intent. handleChatScrollIntent only updates
-    // chatPinnedToBottom when a scroll event lands within USER_SCROLL_WINDOW_MS
-    // of one of these inputs, so reflow-driven and programmatic scrolls
-    // (softChatScroll → scrollToBottom) can't unpin a user who's at bottom
-    // and shouldn't pin a user who is reading above.
-    domChatMessages.addEventListener('wheel', markUserScrollIntent, { passive: true });
-    domChatMessages.addEventListener('touchstart', markUserScrollIntent, { passive: true });
-    domChatMessages.addEventListener('touchmove', markUserScrollIntent, { passive: true });
-    domChatMessages.addEventListener('keydown', (e) => {
-        if (['PageUp', 'PageDown', 'ArrowUp', 'ArrowDown', 'Home', 'End', ' ', 'Spacebar'].includes(e.key)) {
-            markUserScrollIntent();
-        }
-    });
-    // Scroll-to-bottom button is an explicit "I want to be at bottom" signal.
-    if (domChatMessagesScrollReturnBtn) {
-        domChatMessagesScrollReturnBtn.addEventListener('click', () => {
-            chatPinnedToBottom = true;
-            syncBackendActiveChat();
-        });
-    }
     domChatNewStartBtn.onclick = () => {
         let inputValue = domChatNewInput.value.trim();
         // A pasted Community invite link → preview + join flow (not a DM).
@@ -10659,6 +10743,24 @@ window.addEventListener("DOMContentLoaded", async () => {
         threshold: 500,
         isPinned: () => chatPinnedToBottom,
         onClick: clearUnreadBelow,
+        // With windowing, newer messages can live below the rendered window even
+        // when the DOM is "at its bottom" — keep the button up whenever we're not
+        // viewing the live tail so the user can always get back to "now".
+        shouldForceVisible: () => CHAT_WINDOW_ENABLED && !isAtDataBottom(),
+        // Inverse: at the live tail, force-hide so a media-reflow scroll can't strand the button on.
+        shouldForceHidden: () => CHAT_WINDOW_ENABLED && isAtDataBottom(),
+        // Click must reach the true data bottom. When windowed away, re-render the
+        // newest window + pin; otherwise fall through to the default scrollTo.
+        onJumpToBottom: () => {
+            chatPinnedToBottom = true;
+            _userScrolledAway = false;   // explicit return to "now" releases the latch
+            if (CHAT_WINDOW_ENABLED && !isAtDataBottom()) {
+                windowJumpToBottom();   // re-renders newest MAX window, pins, clears badge
+                return true;
+            }
+            syncBackendActiveChat();
+            return false;
+        },
     });
 
     // Hook up an in-chat File Upload listener
@@ -11775,30 +11877,58 @@ function syncBackendActiveChat() {
 }
 
 const PIN_THRESHOLD_PX = 80;
-// 500ms covers iOS/Android momentum-scroll: scroll events keep firing
-// after touchend until momentum decays. A shorter window would miss
-// late-firing pxFromBottom updates and leave pinned stale.
-const USER_SCROLL_WINDOW_MS = 500;
 
-let lastUserScrollIntentAt = 0;
-function markUserScrollIntent() { lastUserScrollIntentAt = Date.now(); }
+// Intent-aware pin. PIN_THRESHOLD_PX alone makes the pin purely positional, so a
+// user resting just under the threshold gets re-snapped to the bottom by every
+// auto-scroll. The latch records that the USER scrolled up and KEEPS the pin
+// released until they return to the true bottom — a slight scroll-up sticks.
+const BOTTOM_EPSILON_PX = 6;        // "true bottom" tolerance for clearing the latch
+const PROGRAMMATIC_SCROLL_MS = 120; // suppress user-scroll-up detection just after an app scroll
+let lastScrollTop = 0;
+let _userScrolledAway = false;
+let _programmaticScrollUntil = 0;
+/** Mark a short window during which scroll events are the app's own (not the
+ *  user). Call immediately before any programmatic scrollTop change so a drop-top
+ *  compensation (scrollTop -= droppedHeight) isn't misread as a user scroll-up. */
+function beginProgrammaticScroll() {
+    _programmaticScrollUntil = Date.now() + PROGRAMMATIC_SCROLL_MS;
+    // Re-baseline so the very next scroll event's delta is measured from the
+    // post-jump position, not the pre-jump one.
+    if (domChatMessages) lastScrollTop = domChatMessages.scrollTop;
+}
 
 let unreadBelowCount = 0;
 let unreadDividerEl = null;
 const domChatScrollReturnBadge = document.getElementById('chat-scroll-return-badge');
 
 /**
- * Insert (or reuse) the "New" divider above the given message element.
+ * Insert (or reuse) the "New" divider relative to the given message element.
  * Persists for the chat session — only the first unread message gets a
  * divider; later messages just stack under it. Cleared by openChat()
  * (close + re-enter) and by sending a message.
+ *
+ * `anchorAfter=false` (default) inserts the divider BEFORE the row (it sits
+ * above that row). `anchorAfter=true` inserts it AFTER the row (the divider
+ * sits below the anchor, i.e. above the NEXT row). The manual scroll-up path
+ * anchors AFTER the last-read row: the boundary row is older than the first
+ * unread, so it survives the scroll-up bottom-trim longer, and "after last_read"
+ * = "above the first new message" regardless of who sent it.
  */
-function insertUnreadDivider(beforeEl) {
-    if (unreadDividerEl || !beforeEl?.parentNode) return;
+function insertUnreadDivider(anchorEl, anchorAfter = false) {
+    if (unreadDividerEl || !anchorEl?.parentNode) return;
     const p = document.createElement('p');
     p.classList.add('msg-inline-timestamp', 'unread-divider');
     p.textContent = 'New';
-    beforeEl.parentNode.insertBefore(p, beforeEl);
+    // Remember the anchor row + mode so a window re-render (renderWindow) can
+    // re-insert it consistently when its target lands in the slice.
+    p._targetId = anchorEl.id || null;
+    p._anchorAfter = anchorAfter;
+    if (anchorAfter) {
+        // Insert below the anchor (before its next sibling, or append if last).
+        anchorEl.parentNode.insertBefore(p, anchorEl.nextElementSibling);
+    } else {
+        anchorEl.parentNode.insertBefore(p, anchorEl);
+    }
     unreadDividerEl = p;
 }
 function clearUnreadDivider() {
@@ -11822,17 +11952,35 @@ function incrementUnreadBelow() { setUnreadBelow(unreadBelowCount + 1); }
 function clearUnreadBelow() { setUnreadBelow(0); }
 
 /**
- * Recompute chatPinnedToBottom — but only honour scroll events that
- * trail a recent user input. Programmatic scrollTo() and overflow-anchor
- * adjustments still fire scroll events, but we don't want those to flip
- * the user's intent.
+ * Recompute chatPinnedToBottom. Intent-aware: a USER scroll-up (scrollTop
+ * decreased on a non-programmatic event) releases the pin and latches it
+ * released until the user returns to the true bottom. The app's own scrolls
+ * (guarded by beginProgrammaticScroll) never trip the latch.
  */
 function handleChatScrollIntent() {
     if (!strOpenChat || !domChatMessages) return;
-    if (Date.now() - lastUserScrollIntentAt > USER_SCROLL_WINDOW_MS) return;
-    const pxFromBottom = domChatMessages.scrollHeight - domChatMessages.scrollTop - domChatMessages.clientHeight;
+    const scrollTop = domChatMessages.scrollTop;
+    const pxFromBottom = domChatMessages.scrollHeight - scrollTop - domChatMessages.clientHeight;
+    const isProgrammatic = Date.now() < _programmaticScrollUntil;
+
+    // User scrolled UP (and it wasn't us) → release and latch until they're
+    // back at the true bottom. Drop-top compensations move scrollTop up too,
+    // but they're wrapped in beginProgrammaticScroll, so isProgrammatic gates them out.
+    if (!isProgrammatic && scrollTop < lastScrollTop - 1) {
+        _userScrolledAway = true;
+    }
+    // Returned to the true bottom → allow re-pin (genuine "glue to the live tail").
+    if (pxFromBottom < BOTTOM_EPSILON_PX) {
+        _userScrolledAway = false;
+    }
+    lastScrollTop = scrollTop;
+
+    // Manually scrolled up toward the unread boundary (instead of clicking the pill): reveal the
+    // "New" divider as the boundary loads, and retire the pill + mark caught up once it's in view.
+    revealUnreadFrontierIfReached();
+
     const wasPinned = chatPinnedToBottom;
-    chatPinnedToBottom = pxFromBottom < PIN_THRESHOLD_PX;
+    chatPinnedToBottom = pxFromBottom < PIN_THRESHOLD_PX && !_userScrolledAway;
     // User scrolled themselves back into pin range — clear the badge and
     // advance last_read so the OS unread indicator reflects reality. The
     // divider stays put until the chat is closed.
@@ -11850,6 +11998,10 @@ function handleChatScrollIntent() {
 function softChatScroll() {
     if (!strOpenChat) return;
     if (!chatPinnedToBottom) return;
+    // Windowing: the pin only drives scrolling in the NEWEST window. Windowed away from the live
+    // tail, scrolling to the DOM bottom would trip windowExtendNewer → re-render → re-scroll, an
+    // infinite down-window cascade. Stay put; the ↓ button is the way back to "now".
+    if (CHAT_WINDOW_ENABLED && !isAtDataBottom()) return;
     scrollToBottom(domChatMessages, false);
 }
 

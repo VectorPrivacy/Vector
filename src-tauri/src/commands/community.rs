@@ -1169,6 +1169,10 @@ const COMMUNITY_PAGE_FETCH_LIMIT: usize = 50;
 pub struct CommunitySyncResult {
     pub new_messages: u32,
     pub reached_start: bool,
+    /// Oldest event timestamp (ms) this page fetched — the relay-walk cursor for the next
+    /// older page. `None` when the page was empty. Lets a caller page contiguously backward
+    /// (e.g. the jump-to-unread gap fill) without trusting the local DB's offset contiguity.
+    pub oldest_ms: Option<u64>,
 }
 
 /// Sync one PAGE of a Community channel from the network (Discord-style).
@@ -1183,17 +1187,11 @@ pub struct CommunitySyncResult {
 /// Anti-stampede (one in-flight fetch per channel+page) + history-start short-circuit keep it
 /// orderly and waste-free. Ingest dedups on inner id; re-persist is idempotent (INSERT OR REPLACE).
 #[tauri::command]
-pub async fn sync_community_channel(channel_id: String, before_ms: Option<u64>) -> Result<CommunitySyncResult, String> {
+pub async fn sync_community_channel(channel_id: String, before_ms: Option<u64>, reset_cursor: Option<bool>) -> Result<CommunitySyncResult, String> {
     let is_older = before_ms.is_some();
 
-    // History-start: stop paging into the void once we've found a channel's beginning.
-    if is_older && vector_core::community::cache::is_at_history_start(&channel_id) {
-        return Ok(CommunitySyncResult { new_messages: 0, reached_start: true });
-    }
-
-    // Anti-stampede: one in-flight fetch per channel per direction. The older cursor is
-    // backend-tracked (not the varying `before_ms`), so all concurrent older requests target
-    // the same page → one key dedups them; latest is its own key.
+    // Anti-stampede: one in-flight fetch per channel per direction. Claimed FIRST so the cursor reset
+    // below runs UNDER the claim — it can't clear the floor out from under a racing scroll-up fetch.
     let key = format!("{channel_id}:{}", if is_older { "older" } else { "latest" });
     if !vector_core::community::cache::try_begin_page_fetch(&key) {
         return Ok(CommunitySyncResult::default());
@@ -1207,6 +1205,21 @@ pub async fn sync_community_channel(channel_id: String, before_ms: Option<u64>) 
         }
     }
     let _claim = PageClaim(key);
+
+    // Jump-to-unread filling a MIDDLE gap (a hole NEWER than our back-paging floor): reset the floors
+    // so this walk re-pages from the frontend's `before_ms` (the recent window) DOWN through the gap.
+    // Without it an older page fetches strictly older than the bottom cursor, which can never reach a
+    // hole in the middle (the cause of the surviving gap on public communities — no epochs involved).
+    if reset_cursor == Some(true) {
+        vector_core::community::cache::clear_channel_floors(&channel_id);
+    }
+
+    // History-start: stop paging into the void once we've found a channel's beginning. Checked AFTER
+    // the reset so a deliberate gap-fill re-enables paging past a previously-recorded start.
+    if is_older && vector_core::community::cache::is_at_history_start(&channel_id) {
+        return Ok(CommunitySyncResult { new_messages: 0, reached_start: true, oldest_ms: None });
+    }
+
     sync_community_channel_inner(&channel_id, before_ms, is_older).await
 }
 
@@ -1254,7 +1267,7 @@ async fn sync_community_channel_inner(
                     return Err("account changed during sync".to_string());
                 }
                 self_remove_from_community(&community_id, false).await;
-                return Ok(CommunitySyncResult { new_messages: 0, reached_start: true });
+                return Ok(CommunitySyncResult { new_messages: 0, reached_start: true, oldest_ms: None });
             }
         }
         if !session.is_valid() {
@@ -1271,7 +1284,7 @@ async fn sync_community_channel_inner(
             return Err("account changed during sync".to_string());
         }
         if check_self_banned(&community_id).await {
-            return Ok(CommunitySyncResult { new_messages: 0, reached_start: true });
+            return Ok(CommunitySyncResult { new_messages: 0, reached_start: true, oldest_ms: None });
         }
         // Walk THIS channel's rekey chain (all held roots + gap-fill) so we hold the current channel
         // key before paging — unconditional, the self-healing convergence for a lagging/prior-root
@@ -1449,7 +1462,7 @@ async fn sync_community_channel_inner(
                 // batch — the community is being torn down, so later same-batch writes (message saves,
                 // presence) would orphan rows under a now-deleted chat. Teardown retains the held epoch keys.
                 self_remove_from_community(community_id, false).await;
-                return Ok(CommunitySyncResult { new_messages, reached_start: false });
+                return Ok(CommunitySyncResult { new_messages, reached_start: false, oldest_ms: None });
             }
             IncomingEvent::Typing { .. } => {
                 // Realtime-only ephemeral signal; never fetched in a sync/straggler batch. No-op.
@@ -1493,7 +1506,10 @@ async fn sync_community_channel_inner(
     // either: ≥limit events sharing the boundary second (a burst "wall") just means the next
     // page must step past them, not that history ended.
     let reached_start = if is_older && !verified_times.is_empty() && events.len() < COMMUNITY_PAGE_FETCH_LIMIT {
-        let older_than_cursor = until_secs.map_or(0, |u| {
+        // A NULL cursor (e.g. right after a floor reset) cannot conclude history-start — only an
+        // explicit "nothing strictly older than the cursor" can. Default to a non-zero count so a
+        // missing cursor never fail-marks the start (which would wedge future scroll-back DB-only).
+        let older_than_cursor = until_secs.map_or(usize::MAX, |u| {
             verified_times.iter().filter(|t| **t < u).count()
         });
         if older_than_cursor == 0 {
@@ -1506,7 +1522,13 @@ async fn sync_community_channel_inner(
         false
     };
 
-    Ok(CommunitySyncResult { new_messages, reached_start })
+    // Relay-walk cursor: oldest OUTER wire `created_at` this page returned (NIP-01 seconds, ×1000 only
+    // to fit the ms `before_ms` param). MUST stay on the OUTER clock, never the inner authored `at`:
+    // the relay filters `until` on outer, AND the inner `at` is hostile-controllable (a member could
+    // backdate to slip under the cursor and evade back-paging). The seconds resolution is the relay's,
+    // not a precision bug — the inner `at` (ms) is for local sort + the reachedBoundary termination.
+    let oldest_ms = verified_times.iter().copied().min().map(|s| s.saturating_mul(1000));
+    Ok(CommunitySyncResult { new_messages, reached_start, oldest_ms })
 }
 
 /// Coalesce a burst of relay reconnections into a single Community re-sync. `sync_communities_boot`
@@ -1742,7 +1764,7 @@ async fn rehydrate_listed_communities(
                 }
                 if page_messages {
                     for ch in &community.channels {
-                        let _ = sync_community_channel(ch.id.to_hex(), None).await;
+                        let _ = sync_community_channel(ch.id.to_hex(), None, None).await;
                     }
                 }
                 // Quietly archive PRIOR epochs' keys in the background so older history loads on scroll-back —
@@ -1769,7 +1791,7 @@ async fn rehydrate_listed_communities(
                                 if !session_for_backfill.is_valid() {
                                     break;
                                 }
-                                let _ = sync_community_channel(cid.clone(), None).await;
+                                let _ = sync_community_channel(cid.clone(), None, None).await;
                             }
                             vector_core::emit_event(
                                 "community_refreshed",
@@ -1856,7 +1878,7 @@ pub async fn sync_communities_boot() -> Result<(), String> {
     futures_util::stream::iter(channels)
         .map(|cid| async move {
             if session.is_valid() {
-                let _ = sync_community_channel(cid, None).await;
+                let _ = sync_community_channel(cid, None, None).await;
             }
         })
         .buffer_unordered(BOOT_SYNC_WINDOW)

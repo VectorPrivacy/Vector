@@ -73,6 +73,7 @@
     "allow-get-chat-messages-paginated",
     "allow-get-message-views",
     "allow-get-messages-around-id",
+    "allow-get-messages-around",
     "allow-get-system-events",
     "allow-get-chat-message-count",
     "allow-evict-chat-messages",

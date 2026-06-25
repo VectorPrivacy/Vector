@@ -9,6 +9,11 @@
  * orchestration in list.js handles iteration, ordering, and DOM swap.
  */
 
+// Mirrors the initial message page size (proceduralScrollState.messagesPerBatch /
+// the windowing batch). Past this, a Community's unread count is a lower bound
+// (last_read may be off the first synced page), so render "N+" not a false exact.
+const COMMUNITY_UNREAD_PLUS_THRESHOLD = 20;
+
 /**
  * Render a Chat Preview for the Chat List
  * @param {Chat} chat - The profile we're rendering
@@ -178,7 +183,12 @@ function renderChat(chat, primaryColor) {
     if (nUnread) {
         const spanCount = document.createElement('span');
         spanCount.classList.add('chatlist-contact-count');
-        spanCount.textContent = nUnread > 99 ? '99+' : String(nUnread);
+        // Communities page their history, so a count past one opened screen (last_read off-page) may
+        // be a lower bound — unsynced messages aren't counted. Show "N+" rather than a false-exact
+        // figure. DMs fully Negentropy-sync, so their count is always exact.
+        spanCount.textContent = nUnread > 99
+            ? '99+'
+            : (chat.chat_type === 'Community' && nUnread >= COMMUNITY_UNREAD_PLUS_THRESHOLD ? `${nUnread}+` : String(nUnread));
         divContact.appendChild(spanCount);
     }
 

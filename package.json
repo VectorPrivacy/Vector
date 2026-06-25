@@ -14,7 +14,8 @@
     "dev:bare": "npm run tauri:dev:bare",
     "build:bare": "npm run tauri:build:bare",
     "android:dev": "./scripts/android-dev.sh",
-    "android:build": "tauri android build"
+    "android:build": "tauri android build",
+    "test:cache": "node --test \"tests/event-cache/*.test.mjs\""
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.9.6",
