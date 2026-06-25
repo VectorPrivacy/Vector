@@ -304,6 +304,7 @@ fn process_text_message(
         replied_to_content: None, // Populated by get_message_views
         replied_to_npub: None,
         replied_to_has_attachment: None,
+        replied_to_attachment_extension: None,
         preview_metadata: None,
         at: ms_timestamp,
         attachments: Vec::new(),
@@ -515,6 +516,7 @@ fn process_file_attachment(
         replied_to_content: None, // Populated by get_message_views
         replied_to_npub: None,
         replied_to_has_attachment: None,
+        replied_to_attachment_extension: None,
         preview_metadata: None,
         at: ms_timestamp,
         attachments: vec![attachment],

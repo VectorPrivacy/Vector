@@ -1570,6 +1570,9 @@ impl CompactMessage {
             replied_to_content: self.replied_to_content.as_ref().map(|s| s.to_string()),
             replied_to_npub: interner.resolve(self.replied_to_npub_idx).map(|s| s.to_string()),
             replied_to_has_attachment: self.flags.replied_to_has_attachment(),
+            // Re-resolved per get_message_views / populate_reply_context; the compact
+            // form keeps only the bool, so this stays None on the RAM path.
+            replied_to_attachment_extension: None,
             wrapper_event_id: self.wrapper_id_hex(),
             content: self.content.to_string(),
             // Convert compact attachments back to regular Attachment
@@ -1752,6 +1755,7 @@ mod tests {
                         None
                     },
                     replied_to_has_attachment: None,
+                    replied_to_attachment_extension: None,
                     wrapper_event_id: Some(format!("{:0>64x}", i + 1000000)),
                     content: format!("This is message number {} with some typical content length.", i),
                     attachments: vec![],
@@ -2980,6 +2984,7 @@ mod tests {
             replied_to_content: Some("Original message".into()),
             replied_to_npub: Some("npub1replier".into()),
             replied_to_has_attachment: Some(true),
+            replied_to_attachment_extension: None,
             preview_metadata: Some(SiteMetadata {
                 domain: "example.com".into(),
                 og_title: Some("Test Page".into()),

@@ -663,6 +663,9 @@ pub struct ReplyContext {
     pub content: String,
     pub npub: Option<String>,
     pub has_attachment: bool,
+    /// Extension of the attachment, when the replied-to message is a file, so
+    /// the reply quote can label the type even when the target is off-screen.
+    pub extension: Option<String>,
 }
 
 /// Fetch reply context for a list of message IDs.
@@ -675,7 +678,7 @@ pub async fn get_reply_contexts(
         return Ok(HashMap::new());
     }
 
-    let (events, edits): (Vec<(String, i32, String, Option<String>)>, Vec<(String, String)>) = {
+    let (events, edits): (Vec<(String, i32, String, Option<String>, Option<String>)>, Vec<(String, String)>) = {
         let conn = super::get_db_connection_guard_static()?;
 
         let placeholders: String = (0..message_ids.len())
@@ -683,9 +686,9 @@ pub async fn get_reply_contexts(
             .collect::<Vec<_>>()
             .join(",");
 
-        // Query original messages
+        // Query original messages (tags carry the file-type/name for attachment quotes)
         let sql = format!(
-            "SELECT id, kind, content, npub FROM events WHERE id IN ({})",
+            "SELECT id, kind, content, npub, tags FROM events WHERE id IN ({})",
             placeholders
         );
         let mut stmt = conn.prepare(&sql)
@@ -696,7 +699,8 @@ pub async fn get_reply_contexts(
 
         let rows = stmt.query_map(params_dyn.as_slice(), |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?,
-                row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?))
+                row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?))
         }).map_err(|e| format!("Failed to query reply contexts: {}", e))?;
         let events_result: Vec<_> = rows.filter_map(|r| r.ok()).collect();
         drop(stmt);
@@ -726,7 +730,7 @@ pub async fn get_reply_contexts(
 
     // Decrypt and build contexts
     let mut contexts = HashMap::new();
-    for (id, kind, original_content, npub) in events {
+    for (id, kind, original_content, npub, tags) in events {
         let has_attachment = kind == event_kind::FILE_ATTACHMENT as i32;
         let content_to_decrypt = latest_edits.get(&id).cloned().unwrap_or(original_content);
 
@@ -739,7 +743,24 @@ pub async fn get_reply_contexts(
             String::new()
         };
 
-        contexts.insert(id, ReplyContext { content: decrypted_content, npub, has_attachment });
+        // Stored kind-15 tags carry the attachments as a JSON array under the "attachments" tag, each
+        // entry with its own `extension` (the rumor's file-type/name tags are not re-stored). Pull the
+        // first attachment's extension so the quote can show the file type.
+        let extension = if has_attachment {
+            tags.as_deref()
+                .and_then(|t| serde_json::from_str::<Vec<Vec<String>>>(t).ok())
+                .and_then(|parsed| parsed.into_iter()
+                    .find(|t| t.first().map(|k| k == "attachments").unwrap_or(false))
+                    .and_then(|t| t.into_iter().nth(1)))
+                .and_then(|json| serde_json::from_str::<Vec<serde_json::Value>>(&json).ok())
+                .and_then(|atts| atts.into_iter().next())
+                .and_then(|a| a.get("extension").and_then(|e| e.as_str()).map(str::to_lowercase))
+                .filter(|e| !e.is_empty())
+        } else {
+            None
+        };
+
+        contexts.insert(id, ReplyContext { content: decrypted_content, npub, has_attachment, extension });
     }
 
     Ok(contexts)
@@ -758,6 +779,7 @@ pub async fn populate_reply_context(message: &mut Message) -> Result<(), String>
         message.replied_to_content = Some(ctx.content.clone());
         message.replied_to_npub = ctx.npub.clone();
         message.replied_to_has_attachment = Some(ctx.has_attachment);
+        message.replied_to_attachment_extension = ctx.extension.clone();
     }
 
     Ok(())
@@ -969,6 +991,7 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
         messages.push(Message {
             id: event.id, content, replied_to,
             replied_to_content: None, replied_to_npub: None, replied_to_has_attachment: None,
+            replied_to_attachment_extension: None,
             preview_metadata, attachments, reactions, at,
             pending: event.pending, failed: event.failed, mine: event.mine,
             npub: event.npub, wrapper_event_id: event.wrapper_event_id,
@@ -990,6 +1013,7 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
                 msg.replied_to_content = Some(ctx.content.clone());
                 msg.replied_to_npub = ctx.npub.clone();
                 msg.replied_to_has_attachment = Some(ctx.has_attachment);
+                msg.replied_to_attachment_extension = ctx.extension.clone();
             }
         }
     }
@@ -1228,6 +1252,7 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
         result.entry(chat_identifier).or_default().push(Message {
             id: event.id, content, replied_to,
             replied_to_content: None, replied_to_npub: None, replied_to_has_attachment: None,
+            replied_to_attachment_extension: None,
             preview_metadata, attachments, reactions, at: event.created_at * 1000,
             pending: event.pending, failed: event.failed, mine: event.mine,
             npub: event.npub, wrapper_event_id: event.wrapper_event_id,

@@ -20,6 +20,11 @@ pub struct Message {
     pub replied_to_npub: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replied_to_has_attachment: Option<bool>,
+    /// File extension of the replied-to attachment, when known. Lets the reply
+    /// quote show the file type (Photo/Video/...) for off-screen targets the
+    /// in-memory message can't supply.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replied_to_attachment_extension: Option<String>,
     pub preview_metadata: Option<SiteMetadata>,
     pub attachments: Vec<Attachment>,
     pub reactions: Vec<Reaction>,
@@ -57,6 +62,7 @@ impl Default for Message {
             replied_to_content: None,
             replied_to_npub: None,
             replied_to_has_attachment: None,
+            replied_to_attachment_extension: None,
             preview_metadata: None,
             attachments: Vec::new(),
             reactions: Vec::new(),
@@ -592,6 +598,7 @@ mod tests {
             replied_to_content: Some("previous msg".to_string()),
             replied_to_npub: Some("npub1xyz".to_string()),
             replied_to_has_attachment: Some(true),
+            replied_to_attachment_extension: Some("png".to_string()),
             preview_metadata: None,
             attachments: vec![Attachment::default()],
             reactions: vec![Reaction {
@@ -626,6 +633,7 @@ mod tests {
         assert_eq!(deserialized.reactions.len(), 1, "reactions should survive serde roundtrip");
         assert_eq!(deserialized.attachments.len(), 1, "attachments should survive serde roundtrip");
         assert_eq!(deserialized.replied_to_content, msg.replied_to_content, "replied_to_content should survive roundtrip");
+        assert_eq!(deserialized.replied_to_attachment_extension, msg.replied_to_attachment_extension, "replied_to_attachment_extension should survive roundtrip");
         assert_eq!(deserialized.npub, msg.npub, "npub should survive serde roundtrip");
     }
 
@@ -636,6 +644,7 @@ mod tests {
             replied_to_content: None,
             replied_to_npub: None,
             replied_to_has_attachment: None,
+            replied_to_attachment_extension: None,
             npub: None,
             edit_history: None,
             ..Default::default()
@@ -644,6 +653,7 @@ mod tests {
         assert!(!json.contains("replied_to_content"), "None replied_to_content should be omitted from JSON");
         assert!(!json.contains("replied_to_npub"), "None replied_to_npub should be omitted from JSON");
         assert!(!json.contains("replied_to_has_attachment"), "None replied_to_has_attachment should be omitted");
+        assert!(!json.contains("replied_to_attachment_extension"), "None replied_to_attachment_extension should be omitted");
         assert!(!json.contains("\"npub\""), "None npub should be omitted from JSON");
         assert!(!json.contains("edit_history"), "None edit_history should be omitted from JSON");
     }
