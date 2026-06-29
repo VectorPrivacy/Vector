@@ -53,7 +53,16 @@ function systemEventContent(eventType, npub) {
  * Profile dropdown and the pre-login picker both consume. Keeping it in one
  * place so the two callers can't drift on validation or error handling.
  */
-const MAX_ACCOUNTS = 5;
+// Free accounts cap, raised by effective tier (3/6/9/unlimited). SOFT gate on the
+// Add Account button only — already-added accounts are never hidden or restricted,
+// even when the user holds more than the current cap.
+const ACCOUNTS_BY_TIER = [3, 6, 9, Infinity];
+// Device-wide: the highest tier across ALL accounts (adding a profile spans accounts), from
+// get_max_account_tier. Unlike per-account perks, this must NOT drop on an un-badged account.
+let _maxAccountTier = 0;
+function maxAccountsForTier() {
+    return ACCOUNTS_BY_TIER[Math.min(Math.max(_maxAccountTier | 0, 0), 3)];
+}
 
 const multiAccount = {
     /**
@@ -245,6 +254,13 @@ const profileSwitcher = {
     },
 
     render(accounts) {
+        // The account cap is device-wide (highest tier across all accounts); refresh it and
+        // re-render if it changed, so the gate is right even on an un-badged active account.
+        invoke('get_max_account_tier').then(t => {
+            t = t | 0;
+            if (t !== _maxAccountTier && this.isOpen) { _maxAccountTier = t; this.render(accounts); }
+            else _maxAccountTier = t;
+        }).catch(() => {});
         const list = document.getElementById('profile-switcher-list');
         list.innerHTML = '';
         const myProfile = arrProfiles.find(p => p.mine);
@@ -257,11 +273,11 @@ const profileSwitcher = {
             });
             list.appendChild(row);
         }
-        // Cap at MAX_ACCOUNTS — replace the Add button label and disable
-        // the click affordance once the user has hit the ceiling.
+        // Soft cap: disable the Add button at the tier's account ceiling. Existing
+        // accounts (even above the cap) stay listed + usable; only adding more is gated.
         const addBtn = document.getElementById('profile-switcher-add');
         if (addBtn) {
-            const atCap = accounts.length >= MAX_ACCOUNTS;
+            const atCap = accounts.length >= maxAccountsForTier();
             addBtn.classList.toggle('disabled', atCap);
             const label = addBtn.querySelector('.profile-switcher-add-label');
             if (label) label.textContent = atCap ? 'Maximum Accounts' : 'Add Profile';
@@ -913,6 +929,7 @@ const domProfileNameSecondary = document.getElementById('profile-secondary-name'
 const domProfileStatusSecondary = document.getElementById('profile-secondary-status');
 const domProfileBadgeInvite = document.getElementById('profile-badge-invites');
 const domProfileBadgeFawkes = document.getElementById('profile-badge-fawkes');
+const domProfileBadgeBugHunter = document.getElementById('profile-badge-bughunter');
 const domProfileDescription = document.getElementById('profile-description');
 const domProfileDescriptionEditor = document.getElementById('profile-description-editor');
 const domProfileOptions = document.getElementById('profile-option-list');
@@ -957,7 +974,7 @@ async function resolveFawkesBadge(npub, isMine) {
         _ownBadgeLiveChecked = true;
         try {
             const has = await invoke('check_fawkes_badge', { npub });
-            if (has) _myBadges = { vector: true };
+            if (has) _myBadges = { vector: true, tier: 3 };
             return has;
         } catch { return !!_myBadges?.vector; }
     }
@@ -967,6 +984,45 @@ async function resolveFawkesBadge(npub, isMine) {
         _fawkesBadgeCache.set(npub, has);
         return has;
     } catch { return false; }
+}
+
+/** V for Vector (Guy Fawkes) badge card. Grants Full Premium (effective tier 3). */
+function showFawkesCard() {
+    showBadgeCard({
+        title: 'V for Vector Badge',
+        html: `Acquired by logging in on Guy Fawkes Day&nbsp;(November 5, 2025).<br><br><i style="opacity: 0.5; font-size: 13px;">Remember, remember the 5th of November...</i>`,
+        svg: 'fawkes_mask.svg',
+        perks: [{ text: 'Unlimited emoji packs', sub: 'up from 3' }, { text: 'Up to 90 emoji per pack', sub: 'up from 30' }, { text: 'Unlimited accounts', sub: 'up from 3' }],
+    });
+}
+
+/** Resolve a user's Bug Hunter tier (0-3). Own → the cached value (filled by the
+ *  post-sync refresh); others → a live fetch, session-cached. 0 = no badge. */
+const _bugHunterTierCache = new Map();
+async function resolveBugHunterTier(npub, isMine) {
+    if (isMine) {
+        if (_myBadges === null) { try { _myBadges = await invoke('get_my_badges'); } catch {} }
+        return _myBadges?.bug_hunter | 0;
+    }
+    if (_bugHunterTierCache.has(npub)) return _bugHunterTierCache.get(npub);
+    try {
+        const tier = await invoke('get_bug_hunter_tier', { npub });
+        _bugHunterTierCache.set(npub, tier);
+        return tier;
+    } catch { return 0; }
+}
+
+/** Open the Bug Hunter card for a held tier (1-3): highest-tier art, the tier
+ *  rail, and the Partial/Full Premium access label. */
+function showBugHunterCard(tier) {
+    showBadgeCard({
+        title: 'Bug Hunter',
+        subtitle: 'Tier ' + tier,
+        html: 'Bug Hunter badges are one of the most prestigious awards to true contributors of Vector who have identified and reported bugs or issues.',
+        svg: 'bughunter_' + tier + '.svg',
+        tierProgress: { current: tier, total: 3, icons: ['bughunter_1.svg', 'bughunter_2.svg', 'bughunter_3.svg'] },
+        access: tier >= 3 ? 'Full Premium Access' : 'Partial Premium Access',
+    });
 }
 
 // Close profile "More" dropdown when clicking outside
@@ -2998,16 +3054,19 @@ async function setupRustListeners() {
     // Badge cache resolved post-sync — lift emoji-pack limits if we hold the
     // Vector badge. Pure UI gating; the backend enforces authoritatively.
     _on('badges_updated', (evt) => {
-        _myBadges = { vector: !!evt.payload?.vector };
-        if (typeof applyBadgeLimits === 'function') applyBadgeLimits(_myBadges.vector);
-        // If our own profile is open, reveal the badge live (no reopen needed).
+        _myBadges = { vector: !!evt.payload?.vector, tier: evt.payload?.tier | 0, bug_hunter: evt.payload?.bug_hunter | 0 };
+        applyTierLimits(_myBadges.tier);
+        // If our own profile is open, reveal the badges live (no reopen needed).
         const ownProfileOpen = domProfile.style.display !== 'none'
             && domProfileId.textContent === strPubkey;
-        if (_myBadges.vector && ownProfileOpen) {
+        if (ownProfileOpen && _myBadges.vector) {
             domProfileBadgeFawkes.style.display = '';
-            domProfileBadgeFawkes.onclick = () => {
-                showBadgeCard({ title: 'V for Vector Badge', html: `Acquired by logging in on Guy Fawkes Day&nbsp;(November 5, 2025).<br><br><i style="opacity: 0.5; font-size: 13px;">Remember, remember the 5th of November...</i>`, svg: 'fawkes_mask.svg', perks: [{ text: 'Equip up to 100 emoji packs', sub: 'up from 3' }, { text: 'Up to 100 emoji per pack', sub: 'up from 30' }] });
-            };
+            domProfileBadgeFawkes.onclick = () => showFawkesCard();
+        }
+        if (ownProfileOpen && _myBadges.bug_hunter > 0) {
+            domProfileBadgeBugHunter.src = './icons/bughunter_' + _myBadges.bug_hunter + '.svg';
+            domProfileBadgeBugHunter.style.display = '';
+            domProfileBadgeBugHunter.onclick = () => showBugHunterCard(_myBadges.bug_hunter);
         }
     });
 
@@ -5087,8 +5146,9 @@ async function login(skipAnimations = false) {
             // result), so perks are live before this session's post-sync refresh.
             invoke("get_my_badges").then(b => {
                 _myBadges = b;
-                if (typeof applyBadgeLimits === 'function') applyBadgeLimits(!!b?.vector);
+                applyTierLimits(b?.tier | 0);
             }).catch(() => {});
+            invoke('get_max_account_tier').then(t => { _maxAccountTier = t | 0; }).catch(() => {});
 
             // Setup our Unread Counters
             await invoke("update_unread_counter");
@@ -5282,9 +5342,18 @@ function renderProfileTab(cProfile) {
         // the (first-time, uncached) lookup was in flight.
         if (hasBadge && domProfileId.textContent === fawkesNpub) {
             domProfileBadgeFawkes.style.display = '';
-            domProfileBadgeFawkes.onclick = () => {
-                showBadgeCard({ title: 'V for Vector Badge', html: `Acquired by logging in on Guy Fawkes Day&nbsp;(November 5, 2025).<br><br><i style="opacity: 0.5; font-size: 13px;">Remember, remember the 5th of November...</i>`, svg: 'fawkes_mask.svg', perks: [{ text: 'Equip up to 100 emoji packs', sub: 'up from 3' }, { text: 'Up to 100 emoji per pack', sub: 'up from 30' }] });
-            };
+            domProfileBadgeFawkes.onclick = () => showFawkesCard();
+        }
+    }).catch(e => {});
+
+    // Bug Hunter Badge (NIP-58, team-awarded; shows the highest tier held)
+    domProfileBadgeBugHunter.style.display = 'none';
+    const bhNpub = cProfile.id;
+    resolveBugHunterTier(bhNpub, !!cProfile.mine).then(tier => {
+        if (tier > 0 && domProfileId.textContent === bhNpub) {
+            domProfileBadgeBugHunter.src = './icons/bughunter_' + tier + '.svg';
+            domProfileBadgeBugHunter.style.display = '';
+            domProfileBadgeBugHunter.onclick = () => showBugHunterCard(tier);
         }
     }).catch(e => {});
 
@@ -10234,7 +10303,7 @@ window.addEventListener("DOMContentLoaded", async () => {
                 // revert to the default limits across a dev refresh. The flag is cached, so no network.
                 invoke('get_my_badges').then(b => {
                     _myBadges = b;
-                    applyBadgeLimits(!!b?.vector);
+                    applyTierLimits(b?.tier | 0);
                 }).catch(() => {});
 
                 // Monitor relay connections and render relay list

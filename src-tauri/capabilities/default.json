@@ -199,6 +199,8 @@
     "allow-get-invited-users",
     "allow-check-fawkes-badge",
     "allow-get-my-badges",
+    "allow-get-bug-hunter-tier",
+    "allow-get-max-account-tier",
     "allow-get-storage-info",
     "allow-clear-storage",
     "allow-export-keys",

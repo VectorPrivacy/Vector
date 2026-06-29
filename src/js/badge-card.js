@@ -32,7 +32,14 @@ function _buildBadgeCardDom() {
             '<div class="badge-card-glare"></div>' +
             '<img class="badge-card-badge" alt="" draggable="false">' +
             '<div class="badge-card-title"></div>' +
+            '<div class="badge-card-subtitle"></div>' +
             '<div class="badge-card-desc"></div>' +
+            '<div class="badge-card-tiers"></div>' +
+            '<div class="badge-card-access">' +
+              // Award-ribbon glyph; inherits the accent green via currentColor.
+              '<svg class="badge-card-access-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="6"></circle><path d="M15.477 12.89 17 22l-5-3-5 3 1.523-9.11"></path></svg>' +
+              '<span class="badge-card-access-text"></span>' +
+            '</div>' +
             '<div class="badge-card-perks"></div>' +
           '</div>' +
         '</div>';
@@ -62,7 +69,11 @@ function _buildBadgeCardDom() {
         overlay, scene, card,
         badge: overlay.querySelector('.badge-card-badge'),
         title: overlay.querySelector('.badge-card-title'),
+        subtitle: overlay.querySelector('.badge-card-subtitle'),
         desc: overlay.querySelector('.badge-card-desc'),
+        tiers: overlay.querySelector('.badge-card-tiers'),
+        access: overlay.querySelector('.badge-card-access'),
+        accessText: overlay.querySelector('.badge-card-access-text'),
         perks: overlay.querySelector('.badge-card-perks'),
     };
     return _badgeEls;
@@ -135,12 +146,42 @@ function _renderBadgePerks(els, perks) {
     }
 }
 
-/** @param {{title:string, html:string, svg:string, perks?:{text:string,sub?:string}[]}} badge — `html` is trusted (hardcoded copy). */
-function showBadgeCard({ title, html, svg, perks }) {
+/** Render the tiered-badge progress rail: `total` circular nodes (icons[i-1]), filled through `current`,
+ *  joined by connectors that go accent-green only between two already-held tiers. Hidden when absent. */
+function _renderBadgeTiers(els, tierProgress) {
+    els.tiers.innerHTML = '';
+    if (!tierProgress || !tierProgress.total) { els.tiers.style.display = 'none'; return; }
+    els.tiers.style.display = '';
+    const { current, total, icons } = tierProgress;
+    for (let i = 1; i <= total; i++) {
+        const node = document.createElement('div');
+        node.className = 'badge-card-tier-node' + (i <= current ? ' is-filled' : '');
+        const img = document.createElement('img');
+        img.alt = ''; img.draggable = false;
+        const ic = icons && icons[i - 1];
+        if (ic) img.src = /:\/\/|^data:|^blob:/.test(ic) ? ic : './icons/' + ic;
+        node.appendChild(img);
+        els.tiers.appendChild(node);
+        // Connector to the next node is green only when both ends (i and i+1) are held.
+        if (i < total) {
+            const conn = document.createElement('div');
+            conn.className = 'badge-card-tier-conn' + (current >= i + 1 ? ' is-filled' : '');
+            els.tiers.appendChild(conn);
+        }
+    }
+}
+
+/** @param {{title:string, html:string, svg:string, perks?:{text:string,sub?:string}[], subtitle?:string, tierProgress?:{current:number,total:number,icons:string[]}, access?:string}} badge — `html` is trusted (hardcoded copy). */
+function showBadgeCard({ title, html, svg, perks, subtitle, tierProgress, access }) {
     const els = _badgeEls || _buildBadgeCardDom();
     els.badge.src = /:\/\/|^data:|^blob:/.test(svg) ? svg : './icons/' + svg;
     els.title.textContent = title || '';
+    if (subtitle) { els.subtitle.textContent = subtitle; els.subtitle.style.display = ''; }
+    else { els.subtitle.style.display = 'none'; }
     els.desc.innerHTML = html || '';
+    _renderBadgeTiers(els, tierProgress);
+    if (access) { els.accessText.textContent = access; els.access.style.display = ''; }
+    else { els.access.style.display = 'none'; }
     _renderBadgePerks(els, perks);
     _resetBadgeTilt();
     _badgeOpen = true;

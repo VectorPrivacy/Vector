@@ -371,8 +371,8 @@ function refreshEmojiPacksForTheme() {
 /** Max packs a user can have equipped at once. Mirrors vector-core's
  *  `MAX_EQUIPPED_PACKS`. Frontend pre-gates the create + subscribe
  *  buttons so the backend never sees a request it's just going to reject.
- *  Raised by the Vector badge (see `applyBadgeLimits`); these are `let` so
- *  the badge can lift them at runtime. Pure in-app gates — never used to
+ *  Scaled by the effective tier (see `applyTierLimits`); these are `let` so
+ *  the tier can lift them at runtime. Pure in-app gates — never used to
  *  slice the loaded/displayed pack list. */
 let MAX_EQUIPPED_PACKS = 3;
 /** Display-side per-pack emoji cap. Mirrors vector-core's
@@ -381,20 +381,26 @@ let MAX_EQUIPPED_PACKS = 3;
  *  search index, and recent-used surfaces all see the same set. Old
  *  reactions referencing emojis past the cap still render via the
  *  per-message `emoji` tags — those don't depend on `arrEmojiPacks`.
- *  Raised by the Vector badge (see `applyBadgeLimits`). */
+ *  Scaled by the effective tier (see `applyTierLimits`). */
 let MAX_DISPLAY_EMOJIS_PER_PACK = 30;
 
-/** Lift (or restore) the emoji-pack limits based on whether we hold the
- *  Vector badge. Called at boot (get_my_badges) and on the `badges_updated`
- *  event. PC_MAX_EMOJIS is declared later in the file but hoisted, so it's
- *  safe to assign here. These are in-app gates + the per-pack display cap
- *  only — the pack-count load/render path is never gated on them. */
-function applyBadgeLimits(hasVectorBadge) {
-    const newDisplayCap = hasVectorBadge ? 100 : 30;
+/** Per-effective-tier (0-3) caps, mirroring vector-core's emoji_packs tables.
+ *  Tier 3 (full premium) is unlimited equipped packs. */
+const EQUIPPED_PACKS_BY_TIER = [3, 6, 9, Infinity];
+const EMOJIS_PER_PACK_BY_TIER = [30, 30, 60, 90];
+
+/** Lift (or restore) the emoji-pack limits for the account's effective tier
+ *  (0-3). Called at boot (get_my_badges) and on the `badges_updated` event.
+ *  PC_MAX_EMOJIS is declared later in the file but hoisted, so it's safe to
+ *  assign here. In-app gates + the per-pack display cap only — the pack-count
+ *  load/render path is never gated on them. */
+function applyTierLimits(tier) {
+    tier = Math.min(Math.max(tier | 0, 0), 3);
+    const newDisplayCap = EMOJIS_PER_PACK_BY_TIER[tier];
     const displayCapChanged = MAX_DISPLAY_EMOJIS_PER_PACK !== newDisplayCap;
-    MAX_EQUIPPED_PACKS = hasVectorBadge ? 100 : 3;
+    MAX_EQUIPPED_PACKS = EQUIPPED_PACKS_BY_TIER[tier];
     MAX_DISPLAY_EMOJIS_PER_PACK = newDisplayCap;
-    PC_MAX_EMOJIS = hasVectorBadge ? 100 : 30;
+    PC_MAX_EMOJIS = newDisplayCap;
     // If the display cap changes after packs were already loaded, they were
     // truncated in place to the old cap and the signature cache would block a
     // plain reload. Reset the signature and reload so packs re-truncate to the
@@ -2373,7 +2379,7 @@ function _destroyAllPackCanvasGrids() {
 // pencil, or closes the picker) so an abandoned edit costs zero network.
 
 // Pack-creator per-pack emoji cap. `let` so the Vector badge can raise it
-// at runtime (see `applyBadgeLimits`).
+// at runtime (see `applyTierLimits`).
 let PC_MAX_EMOJIS = 30;
 const PC_MAX_FILE_BYTES = 256 * 1024;
 

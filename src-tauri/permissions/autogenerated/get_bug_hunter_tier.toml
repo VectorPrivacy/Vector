@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-bug-hunter-tier"
+description = "Enables the get_bug_hunter_tier command without any pre-configured scope."
+commands.allow = ["get_bug_hunter_tier"]
+
+[[permission]]
+identifier = "deny-get-bug-hunter-tier"
+description = "Denies the get_bug_hunter_tier command without any pre-configured scope."
+commands.deny = ["get_bug_hunter_tier"]

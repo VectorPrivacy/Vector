@@ -582,6 +582,8 @@ pub fn run() {
             commands::invites::get_invited_users,
             commands::invites::check_fawkes_badge,
             commands::invites::get_my_badges,
+            commands::invites::get_bug_hunter_tier,
+            commands::invites::get_max_account_tier,
             commands::system::get_storage_info,
             commands::system::clear_storage,
             commands::system::check_battery_optimized,

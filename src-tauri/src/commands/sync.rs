@@ -920,8 +920,12 @@ pub async fn fetch_messages<R: Runtime>(
                     if !badge_session.is_valid() { return; }
                     vector_core::badges::refresh_own_badges().await;
                     if !badge_session.is_valid() { return; }
+                    vector_core::badges::refresh_own_bug_hunter().await;
+                    if !badge_session.is_valid() { return; }
                     let _ = badge_handle.emit("badges_updated", serde_json::json!({
                         "vector": vector_core::badges::has_vector_badge(),
+                        "tier": vector_core::badges::effective_tier(),
+                        "bug_hunter": vector_core::badges::bug_hunter_tier(),
                     }));
                 });
             }

@@ -15167,6 +15167,18 @@ hr {
 .badge-card-perk:last-child { margin-bottom: 0; }
 .badge-card-perk::before { content: '\2713'; color: var(--accent-color, #59fcb3); font-weight: 700; flex-shrink: 0; }
 .badge-card-perk-sub { color: #777; font-size: 12px; margin-left: auto; padding-left: 8px; white-space: nowrap; }
+/* Tiered "Bug Hunter" extras: muted subtitle, the progress rail, and the access label. */
+.badge-card-subtitle { transform: translateZ(22px); font-size: 13px; letter-spacing: 0.06em; color: #8a8a8a; margin: -4px 0 12px; }
+.badge-card-tiers { transform: translateZ(12px); display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 18px; }
+/* Default node = not-yet-held: dimmed + desaturated. .is-filled restores full colour + accent ring. */
+.badge-card-tier-node { position: relative; width: 40px; height: 40px; flex-shrink: 0; opacity: 0.35; filter: grayscale(1); transition: opacity 0.2s ease, filter 0.2s ease; }
+.badge-card-tier-node img { width: 100%; height: 100%; object-fit: contain; display: block; pointer-events: none; user-select: none; }
+.badge-card-tier-node.is-filled { opacity: 1; filter: none; }
+.badge-card-tier-conn { width: 20px; height: 3px; border-radius: 2px; flex-shrink: 0; background: rgba(255, 255, 255, 0.15); }
+.badge-card-tier-conn.is-filled { background: var(--accent-color, #59fcb3); }
+.badge-card-access { transform: translateZ(14px); display: flex; align-items: center; justify-content: center; gap: 7px; margin-top: 20px; color: var(--accent-color, #59fcb3); font-size: 15px; font-weight: 500; }
+.badge-card-access-icon { width: 16px; height: 16px; flex-shrink: 0; }
+.badge-card-access-text { line-height: 1; }
 @media (prefers-reduced-motion: reduce) {
   .badge-card-scene, .badge-card { transform: none; }
   .badge-card-scene { transition: opacity 0.3s ease; }

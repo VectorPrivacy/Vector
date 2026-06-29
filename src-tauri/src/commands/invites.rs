@@ -246,7 +246,26 @@ pub async fn check_fawkes_badge(npub: String) -> Result<bool, String> {
 pub fn get_my_badges() -> serde_json::Value {
     serde_json::json!({
         "vector": vector_core::badges::has_vector_badge(),
+        "tier": vector_core::badges::effective_tier(),
+        "bug_hunter": vector_core::badges::bug_hunter_tier(),
     })
+}
+
+/// Resolve a user's Bug Hunter tier (0-3) live from the issuer's awards minus
+/// revocations. The badge card uses this for other profiles; our own reads the
+/// cached value from get_my_badges (filled by the post-sync refresh).
+#[tauri::command]
+pub async fn get_bug_hunter_tier(npub: String) -> Result<u8, String> {
+    let pk = PublicKey::from_bech32(&npub).map_err(|e| e.to_string())?;
+    let (tier, _revoked) = vector_core::badges::fetch_bug_hunter_tier(&pk).await?;
+    Ok(tier)
+}
+
+/// The highest tier across ALL accounts on this install. The multi-account cap is
+/// device-level (adding a profile spans accounts), unlike the per-account perks.
+#[tauri::command]
+pub fn get_max_account_tier() -> u8 {
+    vector_core::badges::max_account_tier()
 }
 
 // Handler list for this module (for reference):

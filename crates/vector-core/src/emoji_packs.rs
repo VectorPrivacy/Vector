@@ -58,43 +58,31 @@ fn build_pack_addr(pubkey: &str, identifier: &str) -> String {
 /// without making a genuinely-missing pack feel sluggish.
 const FETCH_TIMEOUT_SECS: u64 = 20;
 
-/// Base in-app cap on packs a user can equip (subscribe + own). This gates
-/// only the in-app add action; packs subscribed via other clients always load
-/// in full and are never sliced. The Vector badge raises it (see
-/// `effective_max_equipped_packs`).
-pub const MAX_EQUIPPED_PACKS: usize = 3;
+/// Per-effective-tier caps (index = `badges::effective_tier()`, 0-3). These gate
+/// only the in-app add action; packs subscribed via other clients always load in
+/// full and are never sliced. Tier 3 (full premium) is effectively unlimited for
+/// the count cap.
+const EQUIPPED_PACKS_BY_TIER: [usize; 4] = [3, 6, 9, usize::MAX];
+/// Per-pack emoji cap by tier (authoring + display). Full premium tops out at 90.
+const EMOJIS_PER_PACK_BY_TIER: [usize; 4] = [30, 30, 60, 90];
 
-/// Badge-holder cap on equipped packs. Effectively unlimited for normal use.
-pub const MAX_EQUIPPED_PACKS_BADGE: usize = 100;
+/// Base (free, tier-0) equipped-pack cap. Named const for the frontend mirror.
+pub const MAX_EQUIPPED_PACKS: usize = EQUIPPED_PACKS_BY_TIER[0];
 
-/// Maximum emojis per own pack on publish. Shared packs received from
-/// the network may exceed this — the frontend truncates them at display
-/// time. This cap only enforces what *we* author. The Vector badge raises it
-/// (see `effective_max_emojis_per_pack`).
-pub const MAX_EMOJIS_PER_PACK: usize = 30;
+/// Base (free, tier-0) emojis-per-own-pack cap. Shared packs received from the
+/// network may exceed this — only what *we* author is capped, and the frontend
+/// truncates oversized received packs at display time.
+pub const MAX_EMOJIS_PER_PACK: usize = EMOJIS_PER_PACK_BY_TIER[0];
 
-/// Badge-holder cap on emojis per own pack.
-pub const MAX_EMOJIS_PER_PACK_BADGE: usize = 100;
-
-/// In-app equipped-pack cap for the current account, raised when the Vector
-/// badge is held. Gate the in-app subscribe/create action on this — never the
-/// load/display path.
+/// In-app equipped-pack cap for the current account, scaled by effective tier.
+/// Gate the in-app subscribe/create action on this — never the load/display path.
 pub fn effective_max_equipped_packs() -> usize {
-    if crate::badges::has_vector_badge() {
-        MAX_EQUIPPED_PACKS_BADGE
-    } else {
-        MAX_EQUIPPED_PACKS
-    }
+    EQUIPPED_PACKS_BY_TIER[crate::badges::effective_tier() as usize]
 }
 
-/// Per-pack emoji authoring cap for the current account, raised when the
-/// Vector badge is held.
+/// Per-pack emoji authoring cap for the current account, scaled by effective tier.
 pub fn effective_max_emojis_per_pack() -> usize {
-    if crate::badges::has_vector_badge() {
-        MAX_EMOJIS_PER_PACK_BADGE
-    } else {
-        MAX_EMOJIS_PER_PACK
-    }
+    EMOJIS_PER_PACK_BY_TIER[crate::badges::effective_tier() as usize]
 }
 
 // ============================================================================
@@ -180,7 +168,7 @@ pub fn set_theme_emoji_tags(tags: Vec<(String, String)>) {
 /// what the picker displayed — otherwise a large pack's hidden tail (the picker
 /// only shows the first N) would enter the candidate set and shift the indices.
 pub fn effective_display_cap() -> usize {
-    if crate::badges::has_vector_badge() { 100 } else { 30 }
+    EMOJIS_PER_PACK_BY_TIER[crate::badges::effective_tier() as usize]
 }
 
 /// Resolve a (possibly `~N`-suffixed) shortcode token against the candidate map.
