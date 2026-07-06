@@ -3213,6 +3213,17 @@ body.chat-bg-disabled .chat-messages::before {
   padding: 3px 2px;
 }
 
+/* An inline chip's background paints the font's content area (plus padding),
+   which outgrows the bio's 1.4 line-height and overlaps consecutive mention
+   lines. inline-block + a sub-line line-height bounds the pill's paint box
+   deterministically, immune to font metrics. */
+.mini-profile-about .mention {
+  padding-top: 0;
+  padding-bottom: 0;
+  display: inline-block;
+  line-height: 1.2;
+}
+
 /* Status pill sits in the banner empty space to the right of the avatar.
    Absolute positioning + a translucent dark pill so it stays readable over
    any banner image. */
