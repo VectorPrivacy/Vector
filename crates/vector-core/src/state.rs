@@ -872,8 +872,20 @@ impl ChatState {
         for chat in &mut self.chats {
             if let Some(compact) = chat.messages.find_by_hex_id(message_id) {
                 let msg = compact.to_message(&self.interner);
+                let removed_id = compact.id;
+                let removed_at = compact.at;
                 let chat_id = chat.id.clone();
+                let was_marker = chat.last_read == removed_id;
                 chat.messages.remove_by_hex_id(message_id);
+                // A deleted read marker leaves `last_read` dangling and collapses the unread anchor
+                // (badge stuck at 99+); retreat it to the newest surviving contact message before the
+                // deleted one, or clear it. Mirrors the DB retreat in `db::events::delete_event`.
+                if was_marker {
+                    chat.last_read = chat.messages.iter().rev()
+                        .find(|m| m.at <= removed_at && !m.flags.is_mine())
+                        .map(|m| m.id)
+                        .unwrap_or([0u8; 32]);
+                }
                 return Some((chat_id, msg));
             }
         }
@@ -1504,6 +1516,31 @@ mod tests {
             state.find_message(&msg_id).is_none(),
             "removed message should no longer be findable"
         );
+    }
+
+    #[test]
+    fn remove_message_retreats_last_read_marker() {
+        let mut state = ChatState::new();
+        state.create_dm_chat("npub1peer");
+        let m1 = make_message(1, "one", 1_700_000_000_000, false);
+        let m2 = make_message(2, "two", 1_700_000_001_000, false);
+        let (m1_id, m2_id) = (m1.id.clone(), m2.id.clone());
+        state.add_message_to_chat("npub1peer", m1);
+        state.add_message_to_chat("npub1peer", m2);
+
+        // Read up to the newest — m2 is the marker.
+        state.chats.iter_mut().find(|c| c.id == "npub1peer").unwrap().last_read =
+            crate::compact::encode_message_id(&m2_id);
+
+        // Deleting the marker retreats it to the prior survivor, never leaves it dangling.
+        state.remove_message(&m2_id);
+        assert_eq!(state.get_chat("npub1peer").unwrap().last_read,
+            crate::compact::encode_message_id(&m1_id), "marker retreats to m1");
+
+        // Deleting the last survivor clears the marker (no predecessor).
+        state.remove_message(&m1_id);
+        assert_eq!(state.get_chat("npub1peer").unwrap().last_read, [0u8; 32],
+            "no predecessor → marker clears");
     }
 
     #[test]

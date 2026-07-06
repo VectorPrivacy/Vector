@@ -2698,6 +2698,15 @@ function markAsRead(chat, message) {
     }
 }
 
+/** Mark a chat fully caught-up: advance last_read to the newest CONTACT message, never the raw
+ *  window tail. The tail can be a system event (kind 30078), and pinning last_read there gives the
+ *  unread query a row it can't anchor on, wedging the badge at a permanent 99+. No-op when the
+ *  window holds no contact message (nothing non-mine can be unread). Used by the jump/reveal paths. */
+function markChatCaughtUp(chat) {
+    const caughtUp = findLatestContactMessage(chat?.messages);
+    if (caughtUp) markAsRead(chat, caughtUp);
+}
+
 /**
  * Per-chat unread badges are sourced from the DB (`chat.unread`), not by walking in-memory
  * messages — so they're correct even after a restart, when only the last message per chat is in

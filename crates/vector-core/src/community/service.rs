@@ -3429,6 +3429,9 @@ mod tests {
     fn init_test_db() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
         let guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         crate::db::close_database();
+        // Per-account row-id caches survive close_database; clear them so a stale entry from a prior
+        // test's DB can't point into this fresh account's DB and FK-fail an insert.
+        crate::db::clear_id_caches();
         let tmp = tempfile::tempdir().unwrap();
         let n = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let account = make_test_npub(n);

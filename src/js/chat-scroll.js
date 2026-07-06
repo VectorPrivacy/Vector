@@ -1257,7 +1257,7 @@ function revealUnreadFrontierIfReached() {
         const cr = domChatMessages.getBoundingClientRect();
         if (dr.bottom > cr.top && dr.top < cr.bottom) {   // divider overlaps the viewport
             hideUnreadJumpPill();
-            if (chat.messages?.length) markAsRead(chat, chat.messages[chat.messages.length - 1]);
+            markChatCaughtUp(chat);   // newest contact message, never the raw tail (may be a system event)
         }
     }
 }
@@ -1486,10 +1486,10 @@ async function jumpToUnread(lastReadId) {
         const lr = document.getElementById(lastReadId);
         if (lr) centerInView(lr);
     }
-    // Jumping to unread IS catching up — mark the whole chat read (last_read = the true newest, the
-    // pinned tail's last row), so the badge + pill clear in one shot even though the viewport rests
-    // at the divider. Without this last_read stays at the old boundary and the pill survives reopen.
-    if (chat.messages?.length) markAsRead(chat, chat.messages[chat.messages.length - 1]);
+    // Jumping to unread IS catching up — mark the whole chat read so the badge + pill clear in one
+    // shot even though the viewport rests at the divider. Without this last_read stays at the old
+    // boundary and the pill survives reopen.
+    markChatCaughtUp(chat);
     hideUnreadJumpPill();
     } finally { _unreadJumpResolving = false; }
 }

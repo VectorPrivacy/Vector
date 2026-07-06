@@ -347,6 +347,22 @@ pub async fn save_edit_event(
 /// Delete an event from the events table by ID.
 pub async fn delete_event(event_id: &str) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
+    // If this row is a chat's read marker, retreat it to the newest surviving event before it FIRST.
+    // A deleted marker would leave `last_read` dangling and collapse the unread anchor (badge stuck
+    // at 99+). The UPDATE fires only when this chat's marker is exactly the row being deleted.
+    if let Ok(Some((chat_row, at))) = conn.query_row(
+        "SELECT chat_id, created_at FROM events WHERE id = ?1",
+        rusqlite::params![event_id],
+        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+    ).optional() {
+        conn.execute(
+            "UPDATE chats SET last_read = COALESCE(( \
+                 SELECT id FROM events WHERE chat_id = ?1 AND id != ?2 AND created_at <= ?3 \
+                 ORDER BY created_at DESC, id DESC LIMIT 1), '') \
+             WHERE id = ?1 AND last_read = ?2",
+            rusqlite::params![chat_row, event_id, at],
+        ).map_err(|e| format!("read-marker retreat: {e}"))?;
+    }
     conn.execute(
         "DELETE FROM events WHERE id = ?1",
         rusqlite::params![event_id],
@@ -1272,6 +1288,9 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
 /// Muted/blocked filtering is left to the caller (it lives in RAM state, cheaply).
 pub async fn unread_counts() -> Result<std::collections::HashMap<String, u32>, String> {
     let conn = super::get_db_connection_guard_static()?;
+    // The `last_read` anchor is kind-agnostic on purpose: a "read to here" marker can land on a
+    // system event (kind 30078), and it must still cut the count by its timestamp, or the badge
+    // wedges at a permanent 99+. Only the own-message anchor is kind-filtered.
     let mut stmt = conn
         .prepare(
             "SELECT c.chat_identifier, COUNT(*) AS unread \
@@ -1279,8 +1298,8 @@ pub async fn unread_counts() -> Result<std::collections::HashMap<String, u32>, S
              WHERE e.kind IN (?1, ?2, ?3) AND e.mine = 0 \
                AND e.created_at > COALESCE(( \
                      SELECT MAX(e2.created_at) FROM events e2 \
-                     WHERE e2.chat_id = c.id AND e2.kind IN (?1, ?2, ?3) \
-                       AND (e2.mine = 1 OR e2.id = c.last_read)), 0) \
+                     WHERE e2.chat_id = c.id \
+                       AND ((e2.mine = 1 AND e2.kind IN (?1, ?2, ?3)) OR e2.id = c.last_read)), 0) \
              GROUP BY c.chat_identifier",
         )
         .map_err(|e| format!("prepare unread_counts: {e}"))?;
@@ -1337,6 +1356,9 @@ mod tests {
     fn init_test_db() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
         let guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         crate::db::close_database();
+        // Each test rebinds to a fresh per-account DB; the row-id caches are per-account, so a stale
+        // entry (e.g. a shared author npub) would point into the prior test's DB and FK-fail the insert.
+        crate::db::clear_id_caches();
         let tmp = tempfile::tempdir().unwrap();
         let n = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let account = make_test_npub(n);
@@ -1418,6 +1440,84 @@ mod tests {
         assert_eq!(unread().await, 0, "last_read=m8 clears all");
         save_message(chat, &mk("m9", 2004, false)).await.unwrap();
         assert_eq!(unread().await, 1, "one arrival after last_read");
+    }
+
+    // Regression: a "read to here" marker that lands on a system event (kind 30078, not a counted
+    // kind, e.g. the windowed jump-reveal path marking off the raw tail) must still clear unread.
+    // The anchor keys off the marker row's time whatever its kind, so it can't wedge at 99+.
+    #[tokio::test]
+    async fn unread_clears_when_last_read_is_a_system_event() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "npub1sysevtdm";
+        let mk = |id: &str, secs: u64| Message {
+            id: id.into(), content: "x".into(), at: secs * 1000, mine: false,
+            npub: Some("npub1sender".to_string()), ..Default::default()
+        };
+        let unread = || async { unread_counts().await.unwrap().get(chat).copied().unwrap_or(0) };
+
+        // 5 contact messages, never read → all unread. No own message, so the ONLY viable anchor
+        // is last_read (this is the case that used to stick at a permanent count).
+        for i in 0..5u64 {
+            save_message(chat, &mk(&format!("m{i}"), 1000 + i)).await.unwrap();
+        }
+        assert_eq!(unread().await, 5, "never-read backlog");
+
+        // A system event is the newest row (a join notification, after every contact message).
+        save_system_event_at("sysev", chat, SystemEventType::MemberJoined, "npubX", None, 2000, None, None).await.unwrap();
+
+        // last_read pinned to that system event (kind 30078) — the reported bad state.
+        {
+            let conn = crate::db::get_write_connection_guard_static().unwrap();
+            conn.execute(
+                "UPDATE chats SET last_read = ?1 WHERE chat_identifier = ?2",
+                rusqlite::params!["sysev", chat],
+            ).unwrap();
+        }
+        assert_eq!(unread().await, 0, "read marker on a system event still clears the badge");
+    }
+
+    // Deleting a message adjusts unread correctly: removing an UNREAD message drops the count by
+    // one, removing the read MARKER retreats it to the prior message (never collapses to 99+), and
+    // removing the last read message clears the marker without over-counting.
+    #[tokio::test]
+    async fn deleting_a_message_adjusts_unread_without_wedging() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "npub1delunread";
+        let mk = |id: &str, secs: u64| Message {
+            id: id.into(), content: "x".into(), at: secs * 1000, mine: false,
+            npub: Some("npub1sender".to_string()), ..Default::default()
+        };
+        let unread = || async { unread_counts().await.unwrap().get(chat).copied().unwrap_or(0) };
+        let set_marker = |id: &str| {
+            let conn = crate::db::get_write_connection_guard_static().unwrap();
+            conn.execute("UPDATE chats SET last_read = ?1 WHERE chat_identifier = ?2",
+                rusqlite::params![id, chat]).unwrap();
+        };
+        let marker = || -> String {
+            let conn = crate::db::get_db_connection_guard_static().unwrap();
+            conn.query_row("SELECT last_read FROM chats WHERE chat_identifier = ?1",
+                rusqlite::params![chat], |r| r.get::<_, String>(0)).unwrap()
+        };
+
+        // m0..m5, read up to m1 → m2,m3,m4,m5 unread.
+        for i in 0..6u64 { save_message(chat, &mk(&format!("m{i}"), 1000 + i)).await.unwrap(); }
+        set_marker("m1");
+        assert_eq!(unread().await, 4, "m2..m5 unread");
+
+        // Delete an UNREAD mid-block message → badge drops by one, marker untouched.
+        delete_event("m3").await.unwrap();
+        assert_eq!(unread().await, 3, "one unread deleted → badge minus one");
+        assert_eq!(marker(), "m1", "deleting an unread message leaves the marker alone");
+
+        // Delete the read MARKER → retreats to the prior surviving message (m0), unread unchanged.
+        delete_event("m1").await.unwrap();
+        assert_eq!(marker(), "m0", "marker retreats to the newest survivor before it");
+        assert_eq!(unread().await, 3, "retreat keeps the count, no collapse to 99+");
+
+        // Delete the last surviving read message → marker clears, still exactly the unread block.
+        delete_event("m0").await.unwrap();
+        assert_eq!(marker(), "", "no earlier survivor → marker clears");
+        assert_eq!(unread().await, 3, "cleared marker counts only the true unread survivors");
     }
 
     // Edits are event-sourced for BOTH transports: a MESSAGE_EDIT event folds into the target's
