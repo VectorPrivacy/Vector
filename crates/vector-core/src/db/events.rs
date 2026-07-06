@@ -387,6 +387,31 @@ pub fn event_author(event_id: &str) -> Result<Option<String>, String> {
     .map_err(|e| format!("Failed to read event author: {}", e))
 }
 
+/// The owning chat identifier, `mine` flag, and stored author (npub) of an event, or
+/// `None` if the row (or DB) is absent. Lets delete-affordance resolution give paged-out
+/// rows the same verdict as resident ones — residency is a cache detail, not a verdict.
+pub fn event_delete_context(event_id: &str) -> Result<Option<(String, bool, Option<String>)>, String> {
+    let conn = match super::get_db_connection_guard_static() {
+        Ok(c) => c,
+        Err(_) => return Ok(None),
+    };
+    conn.query_row(
+        "SELECT c.chat_identifier, e.mine, e.npub \
+         FROM events e JOIN chats c ON c.id = e.chat_id \
+         WHERE e.id = ?1",
+        rusqlite::params![event_id],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i32>(1)? != 0,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        },
+    )
+    .optional()
+    .map_err(|e| format!("Failed to read event delete context: {}", e))
+}
+
 /// Check if a message/event exists in the database. Returns false if DB unavailable.
 pub fn message_exists_in_db(message_id: &str) -> Result<bool, String> {
     let conn = match super::get_db_connection_guard_static() {
@@ -1394,6 +1419,34 @@ mod tests {
         let fut_ev = evs.iter().find(|e| e.id == "ev_future").expect("future event saved");
         assert!(fut_ev.created_at >= before && fut_ev.created_at <= after,
             "future-dated event clamped to local now ({} not in {}..={})", fut_ev.created_at, before, after);
+    }
+
+    // Delete-affordance resolution must work on paged-out rows: the events table is the
+    // fallback source for (chat, mine, author) when a message isn't STATE-resident.
+    #[tokio::test]
+    async fn event_delete_context_resolves_from_db() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "npub1contactdc";
+
+        let mine_msg = Message { id: "dc_mine".into(), content: "x".into(), at: 1_000, mine: true, ..Default::default() };
+        let theirs = Message {
+            id: "dc_theirs".into(), content: "y".into(), at: 2_000, mine: false,
+            npub: Some("npub1sender".to_string()),
+            ..Default::default()
+        };
+        save_message(chat, &mine_msg).await.unwrap();
+        save_message(chat, &theirs).await.unwrap();
+
+        let (chat_id, mine, _author) = event_delete_context("dc_mine").unwrap().expect("own row resolves");
+        assert_eq!(chat_id, chat);
+        assert!(mine);
+
+        let (chat_id, mine, author) = event_delete_context("dc_theirs").unwrap().expect("contact row resolves");
+        assert_eq!(chat_id, chat);
+        assert!(!mine);
+        assert_eq!(author.as_deref(), Some("npub1sender"));
+
+        assert!(event_delete_context("dc_absent").unwrap().is_none(), "unknown id is None, not an error");
     }
 
     // The reported bug: unread must accumulate across a restart (when only the last message per

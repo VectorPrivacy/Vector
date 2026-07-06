@@ -154,76 +154,168 @@ pub struct MessageDeleteOptions {
     pub can_admin_hide: bool,
 }
 
+/// Load the owning Community of a channel. `Ok(None)` is a confident "not a
+/// community channel" (or none stored locally); `Err(())` means a store read
+/// failed, so no confident verdict exists.
+fn load_community_for_channel(chat_id: &str) -> Result<Option<vector_core::community::Community>, ()> {
+    let Some(cid) = vector_core::db::community::community_id_for_channel(chat_id).map_err(|_| ())? else {
+        return Ok(None);
+    };
+    let bytes = vector_core::simd::hex::hex_to_bytes_32(&cid);
+    vector_core::db::community::load_community(&vector_core::community::CommunityId(bytes)).map_err(|_| ())
+}
+
+/// Shared resolver behind `get_message_delete_options` and
+/// `get_message_delete_meta_bulk` — one verdict path, so the hover toolbar and
+/// the context menu can never disagree. STATE first, DB fallback for paged-out
+/// rows (residency is a cache detail, not a verdict). Ids that can't be
+/// confidently resolved — unknown everywhere, or any store lookup failed —
+/// are OMITTED so callers retry later instead of caching a false verdict.
+async fn resolve_delete_options(
+    message_ids: &[String],
+) -> HashMap<String, MessageDeleteOptions> {
+    use nostr_sdk::EventId;
+    use vector_core::ChatType;
+
+    struct Ctx {
+        /// `None` = paged-out row (chat type unknown) — check both key stores.
+        chat_type: Option<ChatType>,
+        chat_id: String,
+        mine: bool,
+        author: Option<String>,
+        has_attachments: bool,
+    }
+    // One lock: snapshot the context for every resident id, then release before
+    // the DB-bound authority/key lookups.
+    let mut ctxs: HashMap<String, Ctx> = {
+        let state = STATE.lock().await;
+        message_ids
+            .iter()
+            .filter_map(|id| {
+                state.find_message(id).map(|(chat, msg)| {
+                    (
+                        id.clone(),
+                        Ctx {
+                            chat_type: Some(chat.chat_type.clone()),
+                            chat_id: chat.id.clone(),
+                            mine: msg.mine,
+                            author: msg.npub.clone(),
+                            has_attachments: msg.attachments.iter().any(|a| !a.url.is_empty()),
+                        },
+                    )
+                })
+            })
+            .collect()
+    };
+    // Paged-out rows: same context from the events table. `has_attachments` is
+    // advisory popup copy only, so the fallback doesn't recompose attachments.
+    for id in message_ids {
+        if ctxs.contains_key(id) {
+            continue;
+        }
+        if let Ok(Some((chat_id, mine, author))) = vector_core::db::events::event_delete_context(id) {
+            ctxs.insert(
+                id.clone(),
+                Ctx { chat_type: None, chat_id, mine, author, has_attachments: false },
+            );
+        }
+    }
+
+    let me_pk = vector_core::state::my_public_key();
+    // Memoise community loads across the batch (channel_id → load outcome). The memo keeps
+    // Err distinct from Ok(None): a failed read must omit the verdict (below), not cache a
+    // confident "no community" for every row of the channel.
+    let mut community_cache: HashMap<String, Result<Option<vector_core::community::Community>, ()>> =
+        HashMap::new();
+    let mut out = HashMap::with_capacity(ctxs.len());
+
+    for (id, ctx) in ctxs {
+        // Moderation-hide: on someone ELSE's Community message, offer "Hide" iff we hold the
+        // authority to actually publish it — MANAGE_MESSAGES + outrank the author (owner OR
+        // admin). Mirrors the publish gate via the same shared `can_moderation_hide`, so the
+        // button can't disagree with what the publish allows. A paged-out row (chat type
+        // unknown) resolves through the same community lookup; non-community chats yield None.
+        let maybe_community = matches!(ctx.chat_type, Some(ChatType::Community)) || ctx.chat_type.is_none();
+        let can_admin_hide = if !ctx.mine && maybe_community {
+            match (ctx.author.as_deref(), &me_pk) {
+                (Some(author_hex), Some(me)) => {
+                    let community = community_cache
+                        .entry(ctx.chat_id.clone())
+                        .or_insert_with(|| load_community_for_channel(&ctx.chat_id));
+                    match community {
+                        // Transient store failure: omit rather than cache a false "no Hide".
+                        Err(()) => continue,
+                        Ok(None) => false,
+                        Ok(Some(c)) => vector_core::community::service::can_moderation_hide(
+                            c,
+                            &me.to_hex(),
+                            author_hex,
+                        ),
+                    }
+                }
+                _ => false,
+            }
+        } else {
+            false
+        };
+
+        let has_retained_keys = if ctx.mine {
+            // A malformed hex id can't be a retained DM rumor: confident false, not an error.
+            let dm_keys = || -> Result<bool, String> {
+                match EventId::from_hex(&id) {
+                    Ok(rid) => vector_core::db::nip17_keys::has_wrap_keys_for_rumor(&rid),
+                    Err(_) => Ok(false),
+                }
+            };
+            // Community channels retain a per-message ephemeral key on send; its presence
+            // is exactly "can we do a real NIP-09 network delete" (full vs limited).
+            let community_keys =
+                || vector_core::db::community::get_message_key(&id).map(|k| k.is_some());
+            let checked = match ctx.chat_type {
+                Some(ChatType::DirectMessage) => dm_keys(),
+                Some(ChatType::Community) => community_keys(),
+                // Chat type unknown: an inner id exists in at most one store.
+                None => match (community_keys(), dm_keys()) {
+                    (Ok(true), _) | (_, Ok(true)) => Ok(true),
+                    (Ok(false), Ok(false)) => Ok(false),
+                    (Err(e), _) | (_, Err(e)) => Err(e),
+                },
+            };
+            match checked {
+                Ok(b) => b,
+                // Transient store failure: omit rather than degrade to "limited".
+                Err(_) => continue,
+            }
+        } else {
+            false
+        };
+
+        out.insert(
+            id,
+            MessageDeleteOptions {
+                mine: ctx.mine,
+                has_retained_keys,
+                has_attachments: ctx.has_attachments,
+                can_admin_hide,
+            },
+        );
+    }
+
+    out
+}
+
 /// Surface what the toolbar should know about this message's
 /// deletability. The toolbar uses these flags to gate the trash icon,
 /// pick visual affordance (full / reduced opacity), and choose the
 /// right confirm copy and backend command.
 ///
-/// Always returns successfully — an absent message returns the all-
-/// false default (no toolbar). The flags are advisory; the backend
-/// commands themselves do whatever is actually possible at click time.
+/// Always returns successfully — an unresolvable message returns the all-
+/// false default (no delete UI; a reopen re-probes). The flags are advisory;
+/// the backend commands themselves do whatever is actually possible at click time.
 #[tauri::command]
 pub async fn get_message_delete_options(message_id: String) -> Result<MessageDeleteOptions, String> {
-    use nostr_sdk::EventId;
-    use vector_core::ChatType;
-
-    let (chat_type, chat_id, mine, has_attachments, author) = {
-        let state = STATE.lock().await;
-        match state.find_message(&message_id) {
-            Some((chat, msg)) => (
-                chat.chat_type.clone(),
-                chat.id.clone(),
-                msg.mine,
-                msg.attachments.iter().any(|a| !a.url.is_empty()),
-                msg.npub.clone(),
-            ),
-            None => return Ok(MessageDeleteOptions::default()),
-        }
-    };
-
-    // Moderation-hide: on someone ELSE's Community message, offer "Hide" iff we hold the authority
-    // to actually publish it — MANAGE_MESSAGES + outrank the author (owner OR admin). Mirrors the
-    // publish gate via the same shared `can_moderation_hide`, so the button can't disagree with what
-    // the publish allows. (Was owner-only, hiding the option from authorized admins.)
-    let can_admin_hide = !mine
-        && matches!(chat_type, ChatType::Community)
-        && match (author.as_deref(), vector_core::state::my_public_key()) {
-            (Some(author_hex), Some(me_pk)) => vector_core::db::community::community_id_for_channel(&chat_id)
-                .ok()
-                .flatten()
-                .and_then(|cid| {
-                    let bytes = vector_core::simd::hex::hex_to_bytes_32(&cid);
-                    vector_core::db::community::load_community(&vector_core::community::CommunityId(bytes)).ok().flatten()
-                })
-                .map(|c| vector_core::community::service::can_moderation_hide(&c, &me_pk.to_hex(), author_hex))
-                .unwrap_or(false),
-            _ => false,
-        };
-
-    let has_retained_keys = if mine {
-        match chat_type {
-            ChatType::DirectMessage => {
-                EventId::from_hex(&message_id)
-                    .ok()
-                    .and_then(|rid| vector_core::db::nip17_keys::has_wrap_keys_for_rumor(&rid).ok())
-                    .unwrap_or(false)
-            }
-            // Community channels retain a per-message ephemeral key on send; its presence
-            // is exactly "can we do a real NIP-09 network delete" (full vs limited).
-            ChatType::Community => vector_core::db::community::get_message_key(&message_id)
-                .map(|k| k.is_some())
-                .unwrap_or(false),
-        }
-    } else {
-        false
-    };
-
-    Ok(MessageDeleteOptions {
-        mine,
-        has_retained_keys,
-        has_attachments,
-        can_admin_hide,
-    })
+    let mut map = resolve_delete_options(std::slice::from_ref(&message_id)).await;
+    Ok(map.remove(&message_id).unwrap_or_default())
 }
 
 /// Backwards-compat shim: kept so older frontends/tests that call
@@ -243,107 +335,22 @@ pub struct DeleteMeta {
     pub can_admin_hide: bool,
 }
 
-/// Bulk variant of the backend half of `get_message_delete_options`: resolves
-/// `has_retained_keys` + `can_admin_hide` for a page of messages in one call, so
-/// the toolbar reads them from a frontend cache instead of an IPC per hover.
-/// One STATE lock collects per-message context; the per-community load is
-/// memoised across the batch (a page is usually one community).
+/// Bulk variant of `get_message_delete_options`: resolves `has_retained_keys` +
+/// `can_admin_hide` for a page of messages in one call, so the toolbar reads
+/// them from a frontend cache instead of an IPC per hover. Same shared resolver
+/// as the single-id command; unresolvable ids are omitted from the map (the
+/// frontend leaves them uncached and re-queues later).
 #[tauri::command]
 pub async fn get_message_delete_meta_bulk(
     message_ids: Vec<String>,
 ) -> Result<std::collections::HashMap<String, DeleteMeta>, String> {
-    use nostr_sdk::EventId;
-    use std::collections::HashMap;
-    use vector_core::ChatType;
-
-    struct Ctx {
-        chat_type: ChatType,
-        chat_id: String,
-        mine: bool,
-        author: Option<String>,
-    }
-    // One lock: snapshot the context for every requested id, then release before
-    // the DB-bound authority/key lookups.
-    let ctxs: HashMap<String, Ctx> = {
-        let state = STATE.lock().await;
-        message_ids
-            .iter()
-            .filter_map(|id| {
-                state.find_message(id).map(|(chat, msg)| {
-                    (
-                        id.clone(),
-                        Ctx {
-                            chat_type: chat.chat_type.clone(),
-                            chat_id: chat.id.clone(),
-                            mine: msg.mine,
-                            author: msg.npub.clone(),
-                        },
-                    )
-                })
-            })
-            .collect()
-    };
-
-    let me_pk = vector_core::state::my_public_key();
-    // Memoise community loads across the batch (channel_id → loaded community).
-    let mut community_cache: HashMap<String, Option<vector_core::community::Community>> = HashMap::new();
-    let mut out = HashMap::with_capacity(ctxs.len());
-
-    for (id, ctx) in ctxs {
-        // Moderation-hide authority (same gate as the publish path) — owner-exempt,
-        // strict outrank, MANAGE_MESSAGES. Only ever true on someone else's
-        // Community message.
-        let can_admin_hide = !ctx.mine
-            && matches!(ctx.chat_type, ChatType::Community)
-            && match (ctx.author.as_deref(), &me_pk) {
-                (Some(author_hex), Some(me)) => {
-                    let community = community_cache
-                        .entry(ctx.chat_id.clone())
-                        .or_insert_with(|| {
-                            vector_core::db::community::community_id_for_channel(&ctx.chat_id)
-                                .ok()
-                                .flatten()
-                                .and_then(|cid| {
-                                    let bytes = vector_core::simd::hex::hex_to_bytes_32(&cid);
-                                    vector_core::db::community::load_community(
-                                        &vector_core::community::CommunityId(bytes),
-                                    )
-                                    .ok()
-                                    .flatten()
-                                })
-                        });
-                    community
-                        .as_ref()
-                        .map(|c| {
-                            vector_core::community::service::can_moderation_hide(
-                                c,
-                                &me.to_hex(),
-                                author_hex,
-                            )
-                        })
-                        .unwrap_or(false)
-                }
-                _ => false,
-            };
-
-        let has_retained_keys = if ctx.mine {
-            match ctx.chat_type {
-                ChatType::DirectMessage => EventId::from_hex(&id)
-                    .ok()
-                    .and_then(|rid| vector_core::db::nip17_keys::has_wrap_keys_for_rumor(&rid).ok())
-                    .unwrap_or(false),
-                ChatType::Community => vector_core::db::community::get_message_key(&id)
-                    .map(|k| k.is_some())
-                    .unwrap_or(false),
-            }
-        } else {
-            false
-        };
-
-        out.insert(id, DeleteMeta { has_retained_keys, can_admin_hide });
-    }
-
-    Ok(out)
+    let resolved = resolve_delete_options(&message_ids).await;
+    Ok(resolved
+        .into_iter()
+        .map(|(id, o)| {
+            (id, DeleteMeta { has_retained_keys: o.has_retained_keys, can_admin_hide: o.can_admin_hide })
+        })
+        .collect())
 }
 
 /// Delete an outbound DM from the network *and* locally.

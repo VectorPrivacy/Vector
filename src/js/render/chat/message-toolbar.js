@@ -64,15 +64,23 @@ async function _dmsgFlushDeleteMeta() {
         // A clear during the fetch (e.g. a roster change) makes these results stale —
         // drop them rather than re-populate the cache with a pre-change verdict.
         if (gen !== _dmsgDeleteMetaGen) return;
-        // Absent ids (message gone) cache a benign default so we don't refetch.
-        for (const id of ids) _dmsgDeleteMeta.set(id, map[id] || { has_retained_keys: false, can_admin_hide: false });
+        // Ids the backend can't confidently resolve (gone everywhere, or a transient
+        // store failure) are omitted — leave them uncached so a later render/hover
+        // re-queues, instead of wedging a false "limited" verdict in the cache.
+        for (const id of ids) {
+            const meta = map[id];
+            if (meta) _dmsgDeleteMeta.set(id, meta);
+        }
     } catch (_) {
         // Leave uncached; a later hover re-queues.
     } finally {
         ids.forEach(id => _dmsgDeleteMetaInflight.delete(id));
     }
     // Refresh the open toolbar if its (still-attached) target just got (re)cached.
-    if (_dmsgToolbarTarget && _dmsgToolbarTarget.isConnected && ids.includes(_dmsgToolbarTarget.id)) {
+    // Gated on a cache HIT: refreshing on an unresolved id would re-queue it and
+    // spin a fetch/refresh loop.
+    if (_dmsgToolbarTarget && _dmsgToolbarTarget.isConnected
+        && ids.includes(_dmsgToolbarTarget.id) && _dmsgDeleteMeta.has(_dmsgToolbarTarget.id)) {
         showMessageToolbar(_dmsgToolbarTarget);
     }
 }
