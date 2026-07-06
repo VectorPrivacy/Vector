@@ -6,6 +6,7 @@ use nostr_sdk::prelude::{EventId, Timestamp};
 /// (cheaper than a per-row string, and the ledger can grow large). Never renumber an existing value.
 pub const TRANSPORT_NIP17: i64 = 0;
 pub const TRANSPORT_CONCORD: i64 = 1;
+pub const TRANSPORT_CONCORD2: i64 = 2;
 
 /// Persist an outer-event id for cross-session dedup (INSERT OR IGNORE), tagged by `transport`
 /// so the ledger is shared across transports while negentropy stays NIP-17-scoped.

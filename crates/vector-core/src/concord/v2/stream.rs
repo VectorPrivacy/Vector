@@ -166,6 +166,30 @@ pub fn build_plane_rumor(
     rumor
 }
 
+/// Build the unsigned seal around a rumor — for callers signing through a
+/// `NostrSigner` (local keys or a NIP-46 bunker) before [`wrap_signed_seal`].
+pub fn build_seal(
+    group: &GroupKey,
+    author: PublicKey,
+    rumor: &UnsignedEvent,
+    form: SealForm,
+) -> Result<UnsignedEvent, StreamError> {
+    let mut rumor = rumor.clone();
+    rumor.ensure_id();
+    let rumor_json = rumor.as_json();
+    let seal_content = match form {
+        // Byte-verbatim: the seal's content IS the rumor's serialized JSON.
+        SealForm::Plaintext => cap(&rumor_json)?.to_string(),
+        SealForm::Encrypted => encrypt_to_bytes(group.conversation_key(), cap(&rumor_json)?.as_bytes())
+            .map(|ct| base64_encode(&ct))
+            .map_err(|e| StreamError::Crypto(e.to_string()))?,
+    };
+    cap(&seal_content)?;
+    Ok(EventBuilder::new(Kind::Custom(form.kind()), seal_content)
+        .custom_created_at(rumor.created_at)
+        .build(author))
+}
+
 /// Seal a rumor with the author's local keys and wrap it at the plane's
 /// address. `ephemeral_p` is the wrap's throwaway `p` key — the caller may
 /// retain its secret to NIP-09-delete the wrap later (CORD-01 §Deletions).
@@ -176,24 +200,9 @@ pub fn wrap_rumor(
     form: SealForm,
     ephemeral_p: PublicKey,
 ) -> Result<Event, StreamError> {
-    let mut rumor = rumor.clone();
-    rumor.ensure_id();
-    let rumor_json = rumor.as_json();
-
-    let seal_content = match form {
-        // Byte-verbatim: the seal's content IS the rumor's serialized JSON.
-        SealForm::Plaintext => cap(&rumor_json)?.to_string(),
-        SealForm::Encrypted => encrypt_to_bytes(group.conversation_key(), cap(&rumor_json)?.as_bytes())
-            .map(|ct| base64_encode(&ct))
-            .map_err(|e| StreamError::Crypto(e.to_string()))?,
-    };
-
-    let seal = EventBuilder::new(Kind::Custom(form.kind()), cap(&seal_content)?)
-        .custom_created_at(rumor.created_at)
-        .build(author_keys.public_key())
+    let seal = build_seal(group, author_keys.public_key(), rumor, form)?
         .sign_with_keys(author_keys)
         .map_err(|e| StreamError::Sign(e.to_string()))?;
-
     wrap_signed_seal(group, &seal, kind::WRAP, ephemeral_p)
 }
 

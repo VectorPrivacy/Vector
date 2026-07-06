@@ -120,6 +120,7 @@ fn summarize(community: &vector_core::community::Community) -> CommunitySummary 
 }
 
 /// List every Community the local user holds (owned or joined), for the chat list.
+/// Combines both protocol generations: v1 (legacy) and v2 (CORD).
 #[tauri::command]
 pub async fn list_communities() -> Result<Vec<CommunitySummary>, String> {
     let ids = vector_core::db::community::list_community_ids()?;
@@ -129,7 +130,54 @@ pub async fn list_communities() -> Result<Vec<CommunitySummary>, String> {
             out.push(summarize(&c));
         }
     }
+    for c in vector_core::concord::v2::db::list_communities()? {
+        out.push(summarize_v2(&c));
+    }
     Ok(out)
+}
+
+/// The `CommunitySummary` for a Concord v2 community — same frontend shape,
+/// with v2's self-certifying owner in place of v1's attestation.
+fn summarize_v2(community: &vector_core::concord::v2::community::Community) -> CommunitySummary {
+    let is_owner = vector_core::my_public_key()
+        .map(|pk| pk == community.owner)
+        .unwrap_or(false);
+    CommunitySummary {
+        community_id: community.id.to_hex(),
+        name: community.name.clone(),
+        description: community.description.clone(),
+        is_owner,
+        has_icon: false,
+        channels: community
+            .channels
+            .iter()
+            .filter(|c| !c.deleted)
+            .map(|c| ChannelSummary { channel_id: c.id.to_hex(), name: c.name.clone() })
+            .collect(),
+        owner_npub: community.owner.to_bech32().ok(),
+        dissolved: vector_core::concord::v2::db::is_dissolved(&community.id),
+        preloaded: false,
+    }
+}
+
+/// Whether a community id belongs to the v2 (CORD) universe.
+fn is_v2_community(community_id: &str) -> bool {
+    vector_core::concord::v2::CommunityId::from_hex(community_id)
+        .map(|id| {
+            vector_core::concord::v2::db::load_community(&id)
+                .ok()
+                .flatten()
+                .is_some()
+        })
+        .unwrap_or(false)
+}
+
+/// Whether a channel id belongs to a v2 community.
+fn is_v2_channel(channel_id: &str) -> bool {
+    matches!(
+        vector_core::concord::v2::db::community_id_for_channel(channel_id),
+        Ok(Some(_))
+    )
 }
 
 /// A best-effort member entry: an observed participant (someone who has posted) + their
@@ -171,6 +219,19 @@ pub async fn unban_community_member(community_id: String, npub: String) -> Resul
 /// button on ownership + a type-to-confirm; this re-verifies authority cryptographically.
 #[tauri::command]
 pub async fn delete_community(community_id: String) -> Result<(), String> {
+    if is_v2_community(&community_id) {
+        let client = vector_core::state::nostr_client().ok_or("Not logged in")?;
+        let community = vector_core::concord::v2::CommunityId::from_hex(&community_id)
+            .and_then(|id| vector_core::concord::v2::db::load_community(&id).ok().flatten())
+            .ok_or("Community not found")?;
+        // An already-sealed husk skips the publish; this is just local cleanup.
+        if !vector_core::concord::v2::db::is_dissolved(&community.id) {
+            vector_core::concord::v2::service::dissolve_community(&client, &community_id).await?;
+        }
+        vector_core::concord::v2::service::teardown_local(&community).await;
+        vector_core::concord::v2::service::refresh_subscription(&client).await;
+        return Ok(());
+    }
     let session = vector_core::state::SessionGuard::capture();
     let id_bytes = hex_to_id32(&community_id)?;
     let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
@@ -381,6 +442,11 @@ async fn set_member_banned(community_id: &str, npub: &str, banned: bool) -> Resu
 /// Fetch one Community's summary (for the overview/settings panel).
 #[tauri::command]
 pub async fn get_community(community_id: String) -> Result<CommunitySummary, String> {
+    if let Some(id) = vector_core::concord::v2::CommunityId::from_hex(&community_id) {
+        if let Some(c) = vector_core::concord::v2::db::load_community(&id)? {
+            return Ok(summarize_v2(&c));
+        }
+    }
     let id_bytes = hex_to_id32(&community_id)?;
     let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
         .ok_or("Community not found")?;
@@ -392,6 +458,10 @@ pub async fn get_community(community_id: String) -> Result<CommunitySummary, Str
 /// purely local. Also clears the channels' chat rows from STATE.
 #[tauri::command]
 pub async fn leave_community(community_id: String) -> Result<(), String> {
+    if is_v2_community(&community_id) {
+        let client = vector_core::state::nostr_client().ok_or("Not logged in")?;
+        return vector_core::concord::v2::service::leave_community(&client, &community_id).await;
+    }
     let session = vector_core::state::SessionGuard::capture();
     let id_bytes = hex_to_id32(&community_id)?;
     // Capture the full community first (channel ids for chat-row teardown + a leave announce).
@@ -509,16 +579,18 @@ pub(crate) async fn check_self_banned(community_id: &str) -> bool {
 // Create + send (the core lifecycle)
 // ============================================================================
 
-/// Create a new single-channel Community owned by the local user. Defaults the channel
-/// to "general" and the relay set to the active trusted relays. Persists + publishes
-/// metadata, surfaces the channel locally, and starts the subscription. Returns the
-/// `(community_id, channel_id)` hex pair.
+/// Create a new Community owned by the local user. Creation is **Concord v2
+/// only** — v1 communities remain readable/usable, but new ones are founded
+/// on the CORD protocol. Genesis is the spec's fixed shape (metadata + one
+/// public `#general`), so `channel_name` is accepted for API compatibility
+/// but the founding channel is always `#general` (CORD-02 §1).
 #[tauri::command]
 pub async fn create_community(
     name: String,
     channel_name: Option<String>,
     relays: Option<Vec<String>>,
 ) -> Result<CreatedCommunity, String> {
+    let _ = channel_name;
     let relays = match relays {
         Some(r) if !r.is_empty() => r,
         _ => vector_core::state::active_trusted_relays()
@@ -530,30 +602,16 @@ pub async fn create_community(
     if relays.is_empty() {
         return Err("No relays available to host the Community".to_string());
     }
-    let channel_name = channel_name.unwrap_or_else(|| "general".to_string());
 
-    let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+    let client = vector_core::state::nostr_client().ok_or("Not logged in")?;
     let community =
-        service::create_community(&transport, &name, &channel_name, relays).await?;
+        vector_core::concord::v2::service::create_community(&client, &name, relays).await?;
 
-    let channel_id = community.channels[0].id.to_hex();
-    // Persist the channel chat(s) with display metadata so they load like any DM.
-    sync_community_chats(&community).await;
-    // record the join in the cross-device list so our other devices auto-join silently.
-    vector_core::community::list::add_membership(&community);
-    // Start receiving on the new channel.
-    crate::services::subscription_handler::refresh_community_subscription().await;
-
-    // Proven owner npub (verified attestation) so the frontend can stamp the crown
-    // immediately, rather than waiting for the next reload to re-derive it.
-    let community_id = community.id.to_hex();
-    let owner_npub = community
-        .owner_attestation
-        .as_ref()
-        .and_then(|att| vector_core::community::owner::verify_owner_attestation(att, &community_id))
-        .and_then(|pk| pk.to_bech32().ok());
-
-    Ok(CreatedCommunity { community_id, channel_id, owner_npub })
+    Ok(CreatedCommunity {
+        community_id: community.id.to_hex(),
+        channel_id: community.channels[0].id.to_hex(),
+        owner_npub: community.owner.to_bech32().ok(),
+    })
 }
 
 #[derive(serde::Serialize)]
@@ -567,6 +625,12 @@ pub struct CreatedCommunity {
 /// dropped keystroke ping is harmless. `channel_id` is the channel hex id (the open-chat id the
 /// frontend already hands `start_typing`). Returns false if it isn't a known Community channel.
 pub(crate) async fn send_community_typing(channel_id: &str) -> bool {
+    if is_v2_channel(channel_id) {
+        let Some(client) = vector_core::state::nostr_client() else { return false };
+        return vector_core::concord::v2::service::send_typing(&client, channel_id)
+            .await
+            .is_ok();
+    }
     let session = vector_core::state::SessionGuard::capture();
     let Ok(Some(community_id)) = vector_core::db::community::community_id_for_channel(channel_id) else {
         return false;
@@ -593,6 +657,9 @@ pub async fn send_community_message(
     content: String,
     replied_to: Option<String>,
 ) -> Result<(), String> {
+    if is_v2_channel(&channel_id) {
+        return send_community_message_v2(channel_id, content, replied_to).await;
+    }
     use vector_core::sending::SendCallback;
     use vector_core::Message;
     let reply = replied_to.filter(|r| !r.is_empty());
@@ -695,6 +762,126 @@ pub async fn send_community_message(
         }
         Err(e) => {
             // 3b. Failed — mark the optimistic message failed (offers retry in the UI).
+            let failed = {
+                let mut state = vector_core::state::STATE.lock().await;
+                state.update_message(&message_id, |m| {
+                    m.set_failed(true);
+                    m.set_pending(false);
+                })
+            };
+            if let Some((_cid, ref msg)) = failed {
+                callback.on_failed(&channel_id, &message_id, msg);
+            }
+            Err(e)
+        }
+    }
+}
+
+/// The Concord v2 send path: same pending → sent/failed lifecycle, built on
+/// the CORD stream envelope (kind 9 rumor, encrypted seal, authors-addressed
+/// wrap). The rumor id is known before the optimistic insert, so the relay
+/// echo dedups by inner id exactly like v1 and DMs.
+async fn send_community_message_v2(
+    channel_id: String,
+    content: String,
+    replied_to: Option<String>,
+) -> Result<(), String> {
+    use vector_core::concord::v2;
+    use vector_core::sending::SendCallback;
+    use vector_core::Message;
+
+    let session = vector_core::state::SessionGuard::capture();
+    let client = vector_core::state::nostr_client().ok_or("Not logged in")?;
+    let author_pk = vector_core::my_public_key().ok_or("Public key not set")?;
+    let my_npub = author_pk.to_bech32().ok();
+    let reply = replied_to.filter(|r| !r.is_empty());
+
+    let community_hex = v2::db::community_id_for_channel(&channel_id)?
+        .ok_or("Unknown Community channel")?;
+    let community_id = v2::CommunityId::from_hex(&community_hex).ok_or("bad community id")?;
+    let community = v2::db::load_community(&community_id)?.ok_or("Community not found")?;
+    if v2::db::is_dissolved(&community_id) {
+        return Err("This community has been dissolved".to_string());
+    }
+    let channel = v2::ChannelId::from_hex(&channel_id).ok_or("bad channel id")?;
+    let epoch = community.channel_epoch(&channel).ok_or("Channel not found")?;
+
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    // NIP-30 custom emoji + the CORD reply `q` tag ride inside the signed rumor.
+    let emoji_tags = vector_core::emoji_packs::resolve_outbound_emoji_tags(&content);
+    let mut extra_tags: Vec<nostr_sdk::Tag> = emoji_tags
+        .iter()
+        .map(|et| {
+            nostr_sdk::Tag::custom(
+                nostr_sdk::TagKind::Custom("emoji".into()),
+                [et.shortcode.clone(), et.url.clone()],
+            )
+        })
+        .collect();
+    if let Some(parent) = reply.as_deref() {
+        extra_tags.push(nostr_sdk::Tag::custom(
+            nostr_sdk::TagKind::q(),
+            [parent.to_string()],
+        ));
+    }
+    let rumor = v2::stream::build_rumor(
+        author_pk,
+        v2::kind::MESSAGE,
+        &content,
+        &channel,
+        epoch,
+        ms,
+        extra_tags,
+    );
+    let message_id = rumor.id.ok_or("rumor has no id")?.to_hex();
+
+    // 1. Optimistic message — renders instantly, keyed by its real id.
+    let callback = crate::message::sending::TauriSendCallback;
+    let pending_msg = Message {
+        id: message_id.clone(),
+        content: content.clone(),
+        at: ms,
+        pending: true,
+        mine: true,
+        npub: my_npub,
+        replied_to: reply.clone().unwrap_or_default(),
+        emoji_tags: emoji_tags.clone(),
+        ..Default::default()
+    };
+    {
+        let mut state = vector_core::state::STATE.lock().await;
+        state.add_message_to_chat(&channel_id, pending_msg.clone());
+    }
+    callback.on_pending(&channel_id, &pending_msg);
+
+    // 2. Seal (signer-agnostic: local or bunker) + wrap + publish.
+    let publish_result = if session.is_valid() {
+        v2::service::publish_chat_rumor(&client, &community, &channel, &rumor, false).await
+    } else {
+        Err("account changed during send".to_string())
+    };
+
+    match publish_result {
+        Ok(_wrap_id) => {
+            // Mark on own-send only while the session that sent it is live.
+            if !session.is_valid() {
+                return Ok(());
+            }
+            let sent = {
+                let mut state = vector_core::state::STATE.lock().await;
+                state.update_message(&message_id, |m| m.set_pending(false))
+            };
+            if let Some((_cid, ref msg)) = sent {
+                callback.on_sent(&channel_id, &message_id, msg);
+                callback.on_persist(&channel_id, msg);
+            }
+            Ok(())
+        }
+        Err(e) => {
             let failed = {
                 let mut state = vector_core::state::STATE.lock().await;
                 state.update_message(&message_id, |m| {
@@ -1188,6 +1375,14 @@ pub struct CommunitySyncResult {
 /// orderly and waste-free. Ingest dedups on inner id; re-persist is idempotent (INSERT OR REPLACE).
 #[tauri::command]
 pub async fn sync_community_channel(channel_id: String, before_ms: Option<u64>, reset_cursor: Option<bool>) -> Result<CommunitySyncResult, String> {
+    if is_v2_channel(&channel_id) {
+        let _ = reset_cursor;
+        let client = vector_core::state::nostr_client().ok_or("Not logged in")?;
+        let (new_messages, reached_start, oldest_ms) =
+            vector_core::concord::v2::service::sync_channel_page(&client, &channel_id, before_ms)
+                .await?;
+        return Ok(CommunitySyncResult { new_messages, reached_start, oldest_ms });
+    }
     let is_older = before_ms.is_some();
 
     // Anti-stampede: one in-flight fetch per channel per direction. Claimed FIRST so the cursor reset
@@ -1884,6 +2079,16 @@ pub async fn sync_communities_boot() -> Result<(), String> {
         .buffer_unordered(BOOT_SYNC_WINDOW)
         .collect::<Vec<()>>()
         .await;
+
+    // Concord v2 boot sweep: control fold + latest page per channel, then the
+    // authors-routed realtime subscription.
+    if session.is_valid() {
+        if let Some(client) = vector_core::state::nostr_client() {
+            if let Err(e) = vector_core::concord::v2::service::boot_sync(&client).await {
+                vector_core::log_warn!("[concord2] boot sync failed: {}", e);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2512,6 +2717,16 @@ pub async fn update_community_metadata(
     name: Option<String>,
     description: Option<String>,
 ) -> Result<(), String> {
+    if is_v2_community(&community_id) {
+        let client = vector_core::state::nostr_client().ok_or("Not logged in")?;
+        return vector_core::concord::v2::service::update_metadata(
+            &client,
+            &community_id,
+            name.as_deref(),
+            description.as_deref(),
+        )
+        .await;
+    }
     let session = vector_core::state::SessionGuard::capture();
     let id_bytes = hex_to_id32(&community_id)?;
     let mut community = vector_core::db::community::load_community(&CommunityId(id_bytes))?

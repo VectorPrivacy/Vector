@@ -653,6 +653,8 @@ pub async fn reset_session() {
     // pseudonyms, so they MUST be cleared on swap or account A's keys/routes leak into B's session.
     // The state now lives in vector-core; the new account rebuilds it via refresh_community_subscription().
     vector_core::community::realtime::clear().await;
+    // Concord v2 routes embed derived plane KEYS — same swap hygiene.
+    vector_core::concord::v2::service::clear().await;
     // Community per-channel sync state (account-scoped) — drop so account B doesn't inherit
     // A's history-start flags, paging cursors, or any stale in-flight claims. (Access-time
     // generation checks self-reset too; this is the explicit teardown.)

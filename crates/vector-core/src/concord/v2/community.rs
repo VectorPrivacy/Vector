@@ -42,6 +42,8 @@ pub struct Community {
     pub root: CommunityRoot,
     pub root_epoch: Epoch,
     pub name: String,
+    /// Presentation only — follows the metadata fold, like `name`.
+    pub description: Option<String>,
     pub relays: Vec<String>,
     pub channels: Vec<Channel>,
 }
@@ -88,6 +90,7 @@ impl Community {
             root,
             root_epoch: Epoch(0),
             name: name.to_string(),
+            description: None,
             relays,
             channels: vec![Channel {
                 id: general,
@@ -159,6 +162,7 @@ impl Community {
             root,
             root_epoch: Epoch(bundle.root_epoch),
             name: bundle.name.clone(),
+            description: None,
             relays: bundle.relays.clone(),
             channels,
         })
@@ -280,6 +284,7 @@ impl Community {
     pub fn apply_control(&mut self, fold: &ControlFold) {
         if let Some(meta) = fold.metadata() {
             self.name = meta.name.clone();
+            self.description = meta.description.clone();
             if !meta.relays.is_empty() {
                 self.relays = meta.effective_relays().to_vec();
             }

@@ -729,5 +729,48 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // Migration 63: Concord v2 (CORD protocol) local state. Scoped under `concord2_*`
+    // so the two protocol generations never share rows. Per-account like everything
+    // else here; ids are hex; secrets (root, private-channel keys) are at-rest
+    // encrypted via the `enc_*` helpers in `concord/v2/db.rs`. Editions store the
+    // signed plaintext-seal JSON verbatim: enough to rebuild the Control fold at boot
+    // AND to re-wrap heads signature-intact in a future compaction (CORD-06).
+    run_atomic_migration(conn, 63, "Create Concord v2 tables", |tx| {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS concord2_communities (
+                community_id TEXT PRIMARY KEY,
+                owner        TEXT NOT NULL,
+                owner_salt   TEXT NOT NULL,
+                root         BLOB NOT NULL,
+                root_epoch   INTEGER NOT NULL DEFAULT 0,
+                name         TEXT NOT NULL,
+                description  TEXT,
+                relays       TEXT NOT NULL,
+                created_at   INTEGER NOT NULL,
+                dissolved    INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS concord2_channels (
+                channel_id   TEXT PRIMARY KEY,
+                community_id TEXT NOT NULL,
+                name         TEXT NOT NULL,
+                private      INTEGER NOT NULL DEFAULT 0,
+                deleted      INTEGER NOT NULL DEFAULT 0,
+                channel_key  BLOB,
+                epoch        INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_concord2_channels_community
+                ON concord2_channels(community_id);
+            CREATE TABLE IF NOT EXISTS concord2_editions (
+                community_id TEXT NOT NULL,
+                eid          TEXT NOT NULL,
+                version      INTEGER NOT NULL,
+                seal_json    TEXT NOT NULL,
+                PRIMARY KEY (community_id, eid, version)
+            );",
+        )
+        .map_err(|e| format!("Failed to create concord2 tables: {}", e))?;
+        Ok(())
+    })?;
+
     Ok(())
 }

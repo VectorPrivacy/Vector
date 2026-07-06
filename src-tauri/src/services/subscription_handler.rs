@@ -143,6 +143,52 @@ async fn handle_community_event(
     vector_core::community::realtime::dispatch_event(session, event, handler).await;
 }
 
+/// Route a Concord v2 wrap (kind 1059/21059 authored by a known plane address)
+/// and surface the outcome to the UI. Returns false when the author is not a
+/// v2 plane — the caller falls through to the DM gift-wrap pipeline.
+pub(crate) async fn handle_concord2_event(
+    session: &vector_core::state::SessionGuard,
+    event: &Event,
+) -> bool {
+    use vector_core::concord::v2::service::{dispatch_event, Inbound};
+    let Some(client) = vector_core::state::nostr_client() else { return false };
+    let Some(outcome) = dispatch_event(session, &client, event).await else {
+        return false;
+    };
+    match outcome {
+        Inbound::NewMessage { chat_id, message } => {
+            vector_core::emit_event(
+                "message_new",
+                &serde_json::json!({ "message": &message, "chat_id": &chat_id }),
+            );
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            // Ping only for genuinely-live messages (parity with v1): a
+            // back-synced page pushes old events through here too.
+            if message.at.saturating_add(300_000) >= now_ms && !message.mine {
+                show_community_notification(&chat_id, &message).await;
+            }
+            if let Some(handle) = crate::TAURI_APP.get() {
+                let _ = crate::commands::messaging::update_unread_counter(handle.clone()).await;
+            }
+        }
+        Inbound::Typing { chat_id, npub, until } => {
+            let typers = {
+                let mut state = crate::STATE.lock().await;
+                state.update_typing_and_get_active(&chat_id, &npub, until)
+            };
+            vector_core::emit_event(
+                "typing-update",
+                &serde_json::json!({ "conversation_id": chat_id, "typers": typers }),
+            );
+        }
+        Inbound::Handled => {}
+    }
+    true
+}
+
 /// Routes "straggler" community events — ones a slower relay returned after a racing
 /// `LiveTransport::fetch` already handed the caller the fast relay's batch — back through the SAME
 /// realtime ingest path. So a historical message, control edition, or rekey that only a slow relay
@@ -298,6 +344,9 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
     // Community (kind-3300) subscription — scoped to our channels' epoch pseudonyms.
     refresh_community_subscription().await;
 
+    // Concord v2 subscription — kind 1059/21059 by derived plane authors.
+    vector_core::concord::v2::service::refresh_subscription(&client).await;
+
     // Self-sync subscription — our own replaceable settings lists (Community List + emoji list). Covers
     // boot, reconnect, AND instant cross-device in one open subscription.
     subscribe_self_sync().await;
@@ -312,7 +361,15 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
             match notification {
                 RelayPoolNotification::Event { event, subscription_id, .. } => {
                     let k = event.kind.as_u16();
-                    if subscription_id == gift_sub_id {
+                    // Concord v2 wraps share kind 1059 with DM gift wraps; the seam is the
+                    // author — a v2 plane address is a route-map hit, a DM wrap's ephemeral
+                    // author never is. Checked first so v2 events stream regardless of which
+                    // subscription surfaced them.
+                    if (k == 1059 || k == 21059)
+                        && handle_concord2_event(&session, &event).await
+                    {
+                        // handled by the v2 pipeline
+                    } else if subscription_id == gift_sub_id {
                         // DMs/files/reactions/edits (via tauri_commit_prepared_event)
                         super::handle_event(*event, true).await;
                     } else if (3300..=3311).contains(&k) {

@@ -13,12 +13,14 @@
 pub mod community;
 pub mod community_list;
 pub mod control;
+pub mod db;
 pub mod derive;
 pub mod edition;
 pub mod guestbook;
 pub mod invite;
 pub mod rekey;
 pub mod roster;
+pub mod service;
 pub mod stream;
 
 use serde::{Deserialize, Serialize};
