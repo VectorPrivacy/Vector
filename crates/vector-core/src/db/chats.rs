@@ -133,11 +133,17 @@ pub fn save_slim_chat(slim_chat: &SlimChatDB) -> Result<(), String> {
         .unwrap_or_else(|_| "{}".to_string());
 
     conn.execute(
+        // `last_read` never regresses to empty through a chat save: a STATE chat can
+        // predate marker hydration (realtime-created, partial boot), and persisting its
+        // empty marker would wipe the stored read position — resurrecting every message
+        // since as phantom unread. Marker clears go through the dedicated
+        // `UPDATE chats SET last_read` paths, not this upsert.
         "INSERT INTO chats (chat_identifier, chat_type, participants, last_read, created_at, metadata, muted, wallpaper_path, wallpaper_ts, wallpaper_blur, wallpaper_dim, wallpaper_url, wallpaper_uploader) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
          ON CONFLICT(chat_identifier) DO UPDATE SET \
             chat_type = excluded.chat_type, participants = excluded.participants, \
-            last_read = excluded.last_read, metadata = excluded.metadata, muted = excluded.muted, \
+            last_read = CASE WHEN excluded.last_read = '' THEN chats.last_read ELSE excluded.last_read END, \
+            metadata = excluded.metadata, muted = excluded.muted, \
             wallpaper_path = excluded.wallpaper_path, wallpaper_ts = excluded.wallpaper_ts, \
             wallpaper_blur = excluded.wallpaper_blur, wallpaper_dim = excluded.wallpaper_dim, \
             wallpaper_url = excluded.wallpaper_url, wallpaper_uploader = excluded.wallpaper_uploader",
@@ -209,6 +215,47 @@ mod tests {
         crate::db::set_current_account(account.clone()).unwrap();
         crate::db::init_database(&account).unwrap();
         (tmp, guard)
+    }
+
+    // A chat save carrying an EMPTY marker (a STATE chat that predates marker
+    // hydration) must not wipe the persisted read position — message persists
+    // re-save the chat row constantly, and a wipe resurrects every message
+    // since as phantom unread. A real marker still advances normally.
+    #[test]
+    fn chat_upsert_preserves_last_read_against_empty_marker() {
+        let (_tmp, _guard) = init_test_db();
+        let chat_id = "npub1markerkeeper";
+
+        let mut slim = super::SlimChatDB {
+            id: chat_id.to_string(),
+            chat_type: crate::ChatType::DirectMessage,
+            participants: vec![],
+            last_read: "aa".repeat(32),
+            created_at: 1000,
+            metadata: crate::chat::ChatMetadata::default(),
+            muted: false,
+            wallpaper_path: String::new(),
+            wallpaper_ts: 0,
+            wallpaper_blur: 0,
+            wallpaper_dim: 50,
+            wallpaper_url: String::new(),
+            wallpaper_uploader: String::new(),
+        };
+        super::save_slim_chat(&slim).unwrap();
+
+        // Un-hydrated STATE copy re-saves the row: marker survives.
+        slim.last_read = String::new();
+        super::save_slim_chat(&slim).unwrap();
+        let chats = super::get_all_chats().unwrap();
+        let chat = chats.iter().find(|c| c.id == chat_id).expect("chat saved");
+        assert_eq!(chat.last_read, "aa".repeat(32), "empty marker must not wipe the stored one");
+
+        // A real marker still advances.
+        slim.last_read = "bb".repeat(32);
+        super::save_slim_chat(&slim).unwrap();
+        let chats = super::get_all_chats().unwrap();
+        let chat = chats.iter().find(|c| c.id == chat_id).expect("chat saved");
+        assert_eq!(chat.last_read, "bb".repeat(32), "non-empty marker advances normally");
     }
 
     // Regression: a non-npub id stub-created via get_or_create_chat_id must use the
