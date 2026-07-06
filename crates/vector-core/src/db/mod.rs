@@ -23,7 +23,8 @@ pub mod events;
 pub mod chats;
 pub mod wrappers;
 pub mod nip17_keys;
-pub mod community;
+// Concord v1 persistence lives with its protocol; aliased for the historical `db::community` path.
+pub use crate::concord::v1::db as community;
 
 pub use settings::{
     get_sql_setting, set_sql_setting, get_pkey, set_pkey, get_seed, set_seed, remove_setting,

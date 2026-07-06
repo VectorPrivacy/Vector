@@ -9,6 +9,7 @@
 pub mod attachments;
 pub mod cache;
 pub mod cipher;
+pub mod db;
 pub mod derive;
 pub mod envelope;
 pub mod inbound;

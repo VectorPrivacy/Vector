@@ -347,13 +347,17 @@ pub async fn fetch_messages<R: Runtime>(
                 // teardown from older builds) renders as an un-deletable ghost — every community
                 // command starts at load_community and errors "not found". Drop STATE + DB rows.
                 {
-                    let held: std::collections::HashSet<String> =
+                    let mut held: std::collections::HashSet<String> =
                         vector_core::db::community::list_community_ids()
                             .unwrap_or_default()
                             .into_iter()
                             .filter_map(|id| vector_core::db::community::load_community(&id).ok().flatten())
                             .flat_map(|c| c.channels.iter().map(|ch| ch.id.to_hex()).collect::<Vec<_>>())
                             .collect();
+                    // Concord v2 channels are Community chat rows too — never sweep them.
+                    for c in vector_core::concord::v2::db::list_communities().unwrap_or_default() {
+                        held.extend(c.channels.iter().map(|ch| ch.id.to_hex()));
+                    }
                     let orphans: Vec<String> = state
                         .chats
                         .iter()

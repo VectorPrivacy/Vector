@@ -51,7 +51,7 @@ pub(crate) fn hex_id_to_32(hex: &str) -> Result<[u8; 32], String> {
 /// Persist a Community and all its channels (upsert). Secrets are stored as raw
 /// blobs in the account-scoped DB.
 pub fn save_community(community: &Community) -> Result<(), String> {
-    let conn = super::get_write_connection_guard_static()?;
+    let conn = crate::db::get_write_connection_guard_static()?;
     let relays_json = serde_json::to_string(&community.relays).map_err(|e| e.to_string())?;
     let community_id = community.id.to_hex();
 
@@ -153,7 +153,7 @@ pub fn save_community(community: &Community) -> Result<(), String> {
 /// key for a contested epoch over a previously-stored loser (the only legitimate same-coordinate
 /// overwrite; an epoch key is otherwise immutable).
 pub fn store_epoch_key(community_id: &str, scope_id: &str, epoch: u64, key: &[u8; 32]) -> Result<(), String> {
-    let conn = super::get_write_connection_guard_static()?;
+    let conn = crate::db::get_write_connection_guard_static()?;
     store_epoch_key_tx(&conn, community_id, scope_id, epoch, key)
 }
 
@@ -191,7 +191,7 @@ pub fn advance_channel_epoch(
     new_epoch: u64,
     new_key: &[u8; 32],
 ) -> Result<bool, String> {
-    let conn = super::get_write_connection_guard_static()?;
+    let conn = crate::db::get_write_connection_guard_static()?;
     let tx = conn.unchecked_transaction().map_err(|e| format!("advance channel epoch tx: {e}"))?;
     // Archive always (PK includes epoch → never clobbers another epoch's key).
     store_epoch_key_tx(&tx, community_id, channel_id, new_epoch, new_key)?;
@@ -225,7 +225,7 @@ pub fn advance_channel_epoch(
 /// caught-up OLDER base epoch is archived (its control/base history stays decryptable) but never
 /// regresses the head. Returns whether the head advanced.
 pub fn advance_server_root_epoch(community_id: &str, new_epoch: u64, new_root: &[u8; 32]) -> Result<bool, String> {
-    let conn = super::get_write_connection_guard_static()?;
+    let conn = crate::db::get_write_connection_guard_static()?;
     let tx = conn.unchecked_transaction().map_err(|e| format!("advance server root tx: {e}"))?;
     // Archive always, under the all-zero server-root scope sentinel (PK includes epoch → never clobbers
     // another epoch's root).
@@ -258,7 +258,7 @@ pub fn advance_server_root_epoch(community_id: &str, new_epoch: u64, new_root: &
 /// + swaps the head, but ONLY while we're still AT `epoch` (a later real rotation must win over a stale
 /// converge). Returns whether it switched.
 pub fn converge_server_root_epoch(community_id: &str, epoch: u64, new_root: &[u8; 32]) -> Result<bool, String> {
-    let conn = super::get_write_connection_guard_static()?;
+    let conn = crate::db::get_write_connection_guard_static()?;
     let tx = conn.unchecked_transaction().map_err(|e| format!("converge server root tx: {e}"))?;
     store_epoch_key_tx(&tx, community_id, crate::community::SERVER_ROOT_SCOPE_HEX, epoch, new_root)?;
     let enc = enc_key(new_root)?;
@@ -278,7 +278,7 @@ pub fn converge_server_root_epoch(community_id: &str, epoch: u64, new_root: &[u8
 /// addressed under the converged server root), replacing the one we minted in our own losing fork. Switches
 /// only while the channel is still AT `epoch`. Returns whether it switched.
 pub fn converge_channel_epoch(community_id: &str, channel_id: &str, epoch: u64, new_key: &[u8; 32]) -> Result<bool, String> {
-    let conn = super::get_write_connection_guard_static()?;
+    let conn = crate::db::get_write_connection_guard_static()?;
     let tx = conn.unchecked_transaction().map_err(|e| format!("converge channel tx: {e}"))?;
     store_epoch_key_tx(&tx, community_id, channel_id, epoch, new_key)?;
     let enc = enc_key(new_key)?;
@@ -297,7 +297,7 @@ pub fn converge_channel_epoch(community_id: &str, channel_id: &str, epoch: u64, 
 /// returned epoch (`#z` OR-set) so cross-epoch history isn't stranded. Sorted in Rust (not SQL):
 /// epoch is a u64 stored as i64, so a SQL `ORDER BY` would mis-order epochs >= 2^63.
 pub fn held_epoch_keys(community_id: &str, scope_id: &str) -> Result<Vec<(Epoch, [u8; 32])>, String> {
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     let mut stmt = conn
         .prepare("SELECT epoch, key FROM community_epoch_keys WHERE community_id = ?1 AND scope_id = ?2")
         .map_err(|e| e.to_string())?;
@@ -318,7 +318,7 @@ pub fn held_epoch_keys(community_id: &str, scope_id: &str) -> Result<Vec<(Epoch,
 /// The held key for one specific `(scope, epoch)`, or `None` if not held. The open path uses this to
 /// select the decryption key by the inbound event's `epoch` tag.
 pub fn held_epoch_key(community_id: &str, scope_id: &str, epoch: u64) -> Result<Option<[u8; 32]>, String> {
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     let blob: Option<Vec<u8>> = conn
         .query_row(
             "SELECT key FROM community_epoch_keys WHERE community_id = ?1 AND scope_id = ?2 AND epoch = ?3",
@@ -334,7 +334,7 @@ pub fn held_epoch_key(community_id: &str, scope_id: &str, epoch: u64) -> Result<
 /// `created_at` is set on the first save and preserved across metadata re-saves, so it tracks
 /// the join moment. Used to sort a not-yet-active community by join time. `None` if unknown.
 pub fn community_created_at_ms(id: &CommunityId) -> Option<u64> {
-    let conn = super::get_db_connection_guard_static().ok()?;
+    let conn = crate::db::get_db_connection_guard_static().ok()?;
     conn.query_row(
         "SELECT created_at FROM communities WHERE community_id = ?1",
         params![id.to_hex()],
@@ -348,7 +348,7 @@ pub fn community_created_at_ms(id: &CommunityId) -> Option<u64> {
 
 /// Load a Community and its channels by id. Returns `None` if not stored locally.
 pub fn load_community(id: &CommunityId) -> Result<Option<Community>, String> {
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     let id_hex = id.to_hex();
 
     let row = conn
@@ -513,7 +513,7 @@ pub fn store_message_key(
     ephemeral: &Keys,
     relays: &[String],
 ) -> Result<(), String> {
-    let conn = super::get_write_connection_guard_static()?;
+    let conn = crate::db::get_write_connection_guard_static()?;
     let relays_json = serde_json::to_string(relays).map_err(|e| e.to_string())?;
     let sk_bytes = to_32(ephemeral.secret_key().as_secret_bytes())?;
     let enc_secret = enc_key(&sk_bytes)?;
@@ -540,7 +540,7 @@ pub fn store_message_key(
 /// or already deleted). Peek-only so the key survives a failed deletion publish; the
 /// caller removes it with [`delete_message_key`] only after the publish succeeds.
 pub fn get_message_key(message_id: &str) -> Result<Option<(Keys, String, Vec<String>)>, String> {
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     let row = conn
         .query_row(
             "SELECT ephemeral_secret, outer_event_id, relays
@@ -561,7 +561,7 @@ pub fn get_message_key(message_id: &str) -> Result<Option<(Keys, String, Vec<Str
 
 /// Remove a retained message key (after a successful deletion publish).
 pub fn delete_message_key(message_id: &str) -> Result<(), String> {
-    let conn = super::get_write_connection_guard_static()?;
+    let conn = crate::db::get_write_connection_guard_static()?;
     conn.execute(
         "DELETE FROM community_message_keys WHERE message_id = ?1",
         params![message_id],
@@ -583,7 +583,7 @@ pub fn take_message_key(message_id: &str) -> Result<Option<(Keys, String, Vec<St
 /// The hex id of the Community that owns `channel_id`, if any is stored locally. Used to
 /// resolve a channel-addressed chat back to its Community for sending.
 pub fn community_id_for_channel(channel_id: &str) -> Result<Option<String>, String> {
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     conn.query_row(
         "SELECT community_id FROM community_channels WHERE channel_id = ?1",
         params![channel_id],
@@ -596,7 +596,7 @@ pub fn community_id_for_channel(channel_id: &str) -> Result<Option<String>, Stri
 /// Whether a Community with this id is already stored locally (joined). Cheaper than
 /// `load_community` when only existence matters (e.g. inbound-invite dedup).
 pub fn community_exists(id: &CommunityId) -> Result<bool, String> {
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     let found: Option<i64> = conn
         .query_row(
             "SELECT 1 FROM communities WHERE community_id = ?1",
@@ -631,7 +631,7 @@ pub fn save_pending_invite(
     /// (#298). Newest-wins: a stale months-old park is the safe thing to shed.
     const MAX_PENDING_INVITES: usize = 100;
 
-    let conn = super::get_write_connection_guard_static()?;
+    let conn = crate::db::get_write_connection_guard_static()?;
     let enc_bundle = enc_txt(bundle_json)?;
     let enc_inviter = enc_txt(inviter_npub)?;
     let changed = conn
@@ -664,7 +664,7 @@ pub fn save_pending_invite(
 /// those communities (so the ingest-time `community_exists` guard saw nothing yet). Returns the
 /// count purged.
 pub fn purge_pending_invites_for_held_communities() -> Result<usize, String> {
-    let conn = super::get_write_connection_guard_static()?;
+    let conn = crate::db::get_write_connection_guard_static()?;
     let n = conn
         .execute(
             "DELETE FROM pending_community_invites
@@ -677,7 +677,7 @@ pub fn purge_pending_invites_for_held_communities() -> Result<usize, String> {
 
 /// All parked invites, newest first.
 pub fn list_pending_invites() -> Result<Vec<PendingCommunityInvite>, String> {
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     let mut stmt = conn
         .prepare(
             "SELECT community_id, bundle_json, inviter_npub, received_at
@@ -705,7 +705,7 @@ pub fn list_pending_invites() -> Result<Vec<PendingCommunityInvite>, String> {
 /// owner/authority collision), so the row must survive a rejected accept — peek here,
 /// then [`delete_pending_invite`] only after the join succeeds.
 pub fn get_pending_invite(community_id: &str) -> Result<Option<String>, String> {
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     let raw: Option<String> = conn
         .query_row(
             "SELECT bundle_json FROM pending_community_invites WHERE community_id = ?1",
@@ -719,7 +719,7 @@ pub fn get_pending_invite(community_id: &str) -> Result<Option<String>, String> 
 
 /// Drop a parked invite without joining (the user declined).
 pub fn delete_pending_invite(community_id: &str) -> Result<(), String> {
-    let conn = super::get_write_connection_guard_static()?;
+    let conn = crate::db::get_write_connection_guard_static()?;
     conn.execute(
         "DELETE FROM pending_community_invites WHERE community_id = ?1",
         params![community_id],
@@ -730,7 +730,7 @@ pub fn delete_pending_invite(community_id: &str) -> Result<(), String> {
 
 /// Whether an invite for this id is already parked (inbound dedup).
 pub fn pending_invite_exists(community_id: &str) -> Result<bool, String> {
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     let found: Option<i64> = conn
         .query_row(
             "SELECT 1 FROM pending_community_invites WHERE community_id = ?1",
@@ -766,7 +766,7 @@ pub fn save_public_invite(
     expires_at: Option<i64>,
     label: Option<&str>,
 ) -> Result<(), String> {
-    let conn = super::get_write_connection_guard_static()?;
+    let conn = crate::db::get_write_connection_guard_static()?;
     // token + url are the link's secret; encrypted, the token PK becomes per-write-unique (random
     // nonce) so this is effectively an INSERT — fine, mints generate a fresh token each time.
     let enc_token = enc_txt(token)?;
@@ -785,7 +785,7 @@ pub fn save_public_invite(
 
 /// All minted public-invite links for a Community, newest first.
 pub fn list_public_invites(community_id: &str) -> Result<Vec<PublicInviteRecord>, String> {
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     let mut stmt = conn
         .prepare(
             "SELECT token, community_id, url, expires_at, created_at, label
@@ -824,7 +824,7 @@ pub fn list_public_invites(community_id: &str) -> Result<Vec<PublicInviteRecord>
 
 /// Forget a minted public-invite token (after revoking it on relays).
 pub fn delete_public_invite(token: &str) -> Result<(), String> {
-    let conn = super::get_write_connection_guard_static()?;
+    let conn = crate::db::get_write_connection_guard_static()?;
     // Stored tokens are encrypted (random nonce), so an equality DELETE can't match — scan,
     // decrypt, and delete the row whose plaintext token matches (by rowid). Few rows, owner-only.
     let rows: Vec<(i64, String)> = {
@@ -847,7 +847,7 @@ pub fn delete_public_invite(token: &str) -> Result<(), String> {
 
 /// All minted public-invite links across ALL communities (backfill source for the synced Invite List).
 pub fn list_all_public_invites() -> Result<Vec<PublicInviteRecord>, String> {
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     let mut stmt = conn
         .prepare(
             "SELECT token, community_id, url, expires_at, created_at, label
@@ -886,7 +886,7 @@ pub fn upsert_public_invite(
     created_at: i64,
     label: Option<&str>,
 ) -> Result<bool, String> {
-    let conn = super::get_write_connection_guard_static()?;
+    let conn = crate::db::get_write_connection_guard_static()?;
     let already = {
         let mut stmt = conn
             .prepare("SELECT token FROM community_public_invites WHERE community_id = ?1")
@@ -932,7 +932,7 @@ pub fn delete_community_retain_keys(community_id: &str) -> Result<(), String> {
 }
 
 fn delete_community_inner(community_id: &str, retain_keys: bool) -> Result<(), String> {
-    let conn = super::get_write_connection_guard_static()?;
+    let conn = crate::db::get_write_connection_guard_static()?;
     // Atomic: a crash/error mid-delete must not orphan channel/invite rows under a
     // now-missing parent (community_id_for_channel would still resolve them).
     let tx = conn.unchecked_transaction().map_err(|e| format!("delete community tx: {e}"))?;
@@ -993,7 +993,7 @@ pub fn community_member_activity(community_id: &str) -> Result<Vec<(String, u64)
     // Map each channel's hex id → its integer chat row id (skip channels with no events yet).
     let mut chat_ints: Vec<i64> = Vec::new();
     for ch in &community.channels {
-        if let Ok(cid) = super::id_cache::get_chat_id_by_identifier(&ch.id.to_hex()) {
+        if let Ok(cid) = crate::db::id_cache::get_chat_id_by_identifier(&ch.id.to_hex()) {
             chat_ints.push(cid);
         }
     }
@@ -1011,7 +1011,7 @@ pub fn community_member_activity(community_id: &str) -> Result<Vec<(String, u64)
     // No channel has any events yet (e.g. fresh community) → skip the activity queries; the owner + roster
     // are still surfaced by the post-filter re-assert below.
     if !chat_ints.is_empty() {
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     let placeholders = chat_ints.iter().map(|_| "?").collect::<Vec<_>>().join(",");
 
     {
@@ -1130,7 +1130,7 @@ pub fn community_invite_join_counts(
     };
     let mut chat_ints: Vec<i64> = Vec::new();
     for ch in &community.channels {
-        if let Ok(cid) = super::id_cache::get_chat_id_by_identifier(&ch.id.to_hex()) {
+        if let Ok(cid) = crate::db::id_cache::get_chat_id_by_identifier(&ch.id.to_hex()) {
             chat_ints.push(cid);
         }
     }
@@ -1138,7 +1138,7 @@ pub fn community_invite_join_counts(
         return Ok(HashMap::new());
     }
     let sys = crate::stored_event::event_kind::APPLICATION_SPECIFIC;
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     let placeholders = chat_ints.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let sql = format!(
         "SELECT npub, tags FROM events \
@@ -1183,7 +1183,7 @@ pub fn community_invite_join_counts(
 /// so the stored banlist can never roll backwards.
 pub fn set_community_banlist(community_id: &str, banned_hex: &[String], at: i64) -> Result<(), String> {
     let json = enc_txt(&serde_json::to_string(banned_hex).map_err(|e| e.to_string())?)?;
-    let conn = super::get_write_connection_guard_static()?;
+    let conn = crate::db::get_write_connection_guard_static()?;
     conn.execute(
         "UPDATE communities SET banlist = ?1, banlist_at = ?2 WHERE community_id = ?3",
         params![json, at, community_id],
@@ -1195,7 +1195,7 @@ pub fn set_community_banlist(community_id: &str, banned_hex: &[String], at: i64)
 /// The `created_at` (secs) of the banlist edition currently stored, or 0 if none. The version
 /// floor the rollback guard compares against.
 pub fn get_community_banlist_at(community_id: &str) -> Result<i64, String> {
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     let at: Option<i64> = conn
         .query_row(
             "SELECT banlist_at FROM communities WHERE community_id = ?1",
@@ -1217,7 +1217,7 @@ pub fn set_community_roles(
     at: i64,
 ) -> Result<(), String> {
     let json = enc_txt(&serde_json::to_string(roles).map_err(|e| e.to_string())?)?;
-    let conn = super::get_write_connection_guard_static()?;
+    let conn = crate::db::get_write_connection_guard_static()?;
     conn.execute(
         "UPDATE communities SET roles = ?1, roles_at = ?2 WHERE community_id = ?3",
         params![json, at, community_id],
@@ -1230,7 +1230,7 @@ pub fn set_community_roles(
 pub fn get_community_roles(
     community_id: &str,
 ) -> Result<crate::community::roles::CommunityRoles, String> {
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     let json: Option<String> = conn
         .query_row(
             "SELECT roles FROM communities WHERE community_id = ?1",
@@ -1244,7 +1244,7 @@ pub fn get_community_roles(
 
 /// The `created_at` (secs) of the role-graph edition currently stored, or 0 if none.
 pub fn get_community_roles_at(community_id: &str) -> Result<i64, String> {
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     let at: Option<i64> = conn
         .query_row(
             "SELECT roles_at FROM communities WHERE community_id = ?1",
@@ -1271,7 +1271,7 @@ pub fn set_edition_head_with_id(community_id: &str, entity_id: &str, version: u6
 }
 
 fn set_edition_head_inner(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: Option<&[u8; 32]>) -> Result<(), String> {
-    let conn = super::get_write_connection_guard_static()?;
+    let conn = crate::db::get_write_connection_guard_static()?;
     // MONOTONIC, EPOCH-PRIMARY: the head IS the refuse-downgrade floor. The recorded `epoch` is
     // the community's current server-root epoch (re-founding bumps it + resets versions to 1). A higher
     // epoch ALWAYS supersedes (so a re-founding's v1 lands over a held v21); within an epoch, version
@@ -1302,7 +1302,7 @@ fn set_edition_head_inner(community_id: &str, entity_id: &str, version: u64, sel
 /// so it heals to a ranked id). The version-advance path is unchanged and still handled by
 /// [`set_edition_head_with_id`]; callers run BOTH (advance covers v+1, converge covers a same-v fork).
 pub fn converge_edition_head(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32]) -> Result<(), String> {
-    let conn = super::get_write_connection_guard_static()?;
+    let conn = crate::db::get_write_connection_guard_static()?;
     // Scoped to the CURRENT epoch's head: a fork is resolved within an epoch, never across one (an epoch
     // bump is a re-founding, handled by the advance path). `epoch` matches the community's current epoch.
     conn.execute(
@@ -1323,7 +1323,7 @@ pub fn converge_edition_head(community_id: &str, entity_id: &str, version: u64, 
 /// NULL/None held id is "always replaceable") — so it never applies a display edit the head write would
 /// then refuse.
 pub fn get_edition_head_inner_id(community_id: &str, entity_id: &str) -> Result<Option<[u8; 32]>, String> {
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     let row: Option<Option<Vec<u8>>> = conn
         .query_row(
             "SELECT inner_id FROM community_edition_heads WHERE community_id = ?1 AND entity_id = ?2",
@@ -1345,7 +1345,7 @@ pub fn get_edition_head_inner_id(community_id: &str, entity_id: &str) -> Result<
 /// The current head `(version, self_hash)` of a control entity's edition chain, or `None` if no
 /// edition is held yet (so the next edition is the genesis, version 1, no prev_hash).
 pub fn get_edition_head(community_id: &str, entity_id: &str) -> Result<Option<(u64, [u8; 32])>, String> {
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     let row: Option<(i64, Vec<u8>)> = conn
         .query_row(
             "SELECT version, self_hash FROM community_edition_heads WHERE community_id = ?1 AND entity_id = ?2",
@@ -1369,7 +1369,7 @@ pub fn get_edition_head(community_id: &str, entity_id: &str) -> Result<Option<(u
 /// that withholds one entity's editions while over-serving another's can't slip a thinned control
 /// plane past the rotator.
 pub fn edition_head_entity_ids(community_id: &str) -> Result<std::collections::HashSet<String>, String> {
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     let mut stmt = conn
         .prepare("SELECT entity_id FROM community_edition_heads WHERE community_id = ?1")
         .map_err(|e| e.to_string())?;
@@ -1390,7 +1390,7 @@ pub fn edition_head_entity_ids(community_id: &str) -> Result<std::collections::H
 /// (e.g. resurrecting a since-revoked admin's old grant). An empty map = a bootstrapping joiner (folds
 /// from genesis, floor 0).
 pub fn get_all_edition_heads(community_id: &str) -> Result<std::collections::HashMap<String, (u64, [u8; 32])>, String> {
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     let mut stmt = conn
         .prepare("SELECT entity_id, version, self_hash FROM community_edition_heads WHERE community_id = ?1")
         .map_err(|e| e.to_string())?;
@@ -1416,7 +1416,7 @@ pub fn get_all_edition_heads(community_id: &str) -> Result<std::collections::Has
 /// at a PRIOR epoch belongs to a superseded founding, so its entity folds fresh from the new epoch's v1
 /// genesis). This is what lets a re-founding's compacted v1 plane land without a version-only downgrade.
 pub fn get_all_edition_heads_epoched(community_id: &str) -> Result<std::collections::HashMap<String, (u64, u64, [u8; 32])>, String> {
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     let mut stmt = conn
         .prepare("SELECT entity_id, epoch, version, self_hash FROM community_edition_heads WHERE community_id = ?1")
         .map_err(|e| e.to_string())?;
@@ -1439,7 +1439,7 @@ pub fn get_all_edition_heads_epoched(community_id: &str) -> Result<std::collecti
 
 /// A Community's current banlist (hex pubkeys). Empty for an unknown community or empty list.
 pub fn get_community_banlist(community_id: &str) -> Result<Vec<String>, String> {
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     let json: Option<String> = conn
         .query_row(
             "SELECT banlist FROM communities WHERE community_id = ?1",
@@ -1456,7 +1456,7 @@ pub fn get_community_banlist(community_id: &str) -> Result<Vec<String>, String> 
 /// (the registry's own entity), so this is just the content cache (mirrors `set_community_banlist`).
 pub fn set_community_invite_registry(community_id: &str, link_locators: &[String]) -> Result<(), String> {
     let json = enc_txt(&serde_json::to_string(link_locators).map_err(|e| e.to_string())?)?;
-    let conn = super::get_write_connection_guard_static()?;
+    let conn = crate::db::get_write_connection_guard_static()?;
     conn.execute(
         "UPDATE communities SET invite_registry = ?1 WHERE community_id = ?2",
         params![json, community_id],
@@ -1468,7 +1468,7 @@ pub fn set_community_invite_registry(community_id: &str, link_locators: &[String
 /// A Community's current invite-link registry (active link locators, hex). Empty for an unknown
 /// community or a Private one. `is_public` = this is non-empty (computed mode).
 pub fn get_community_invite_registry(community_id: &str) -> Result<Vec<String>, String> {
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     let json: Option<String> = conn
         .query_row(
             "SELECT invite_registry FROM communities WHERE community_id = ?1",
@@ -1491,7 +1491,7 @@ pub struct InviteLinkSetRow {
 /// Replacing wholesale (not upserting) drops a creator who has revoked every link, so the per-creator
 /// view stays in lockstep with the flat registry computed in the same fold.
 pub fn replace_invite_link_sets(community_id: &str, sets: &[InviteLinkSetRow]) -> Result<(), String> {
-    let mut conn = super::get_write_connection_guard_static()?;
+    let mut conn = crate::db::get_write_connection_guard_static()?;
     let tx = conn.transaction().map_err(|e| format!("invite-link-sets tx: {e}"))?;
     tx.execute("DELETE FROM community_invite_link_sets WHERE community_id = ?1", params![community_id])
         .map_err(|e| format!("clear invite-link-sets: {e}"))?;
@@ -1516,7 +1516,7 @@ pub fn replace_invite_link_sets(community_id: &str, sets: &[InviteLinkSetRow]) -
 /// Upsert ONE creator's invite-link set (optimistic local update after the local user mints/revokes their
 /// own links, mirroring the flat-registry merge). An empty set removes the row.
 pub fn upsert_invite_link_set(community_id: &str, creator_hex: &str, locators: &[String]) -> Result<(), String> {
-    let conn = super::get_write_connection_guard_static()?;
+    let conn = crate::db::get_write_connection_guard_static()?;
     // `creator` is encrypted (random nonce), so locate any existing row by decrypting + matching.
     let existing_rowid: Option<i64> = {
         let mut stmt = conn
@@ -1566,7 +1566,7 @@ pub fn upsert_invite_link_set(community_id: &str, creator_hex: &str, locators: &
 /// Every creator's active invite-link set for a Community (creator hex + locators). Empty for a Private
 /// community (or one not yet re-folded since this table was added).
 pub fn get_invite_link_sets(community_id: &str) -> Result<Vec<InviteLinkSetRow>, String> {
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     let mut stmt = conn
         .prepare("SELECT creator, locators FROM community_invite_link_sets WHERE community_id = ?1")
         .map_err(|e| format!("prepare invite-link-sets: {e}"))?;
@@ -1590,7 +1590,7 @@ pub fn get_invite_link_sets(community_id: &str) -> Result<Vec<InviteLinkSetRow>,
 /// the re-seal is attempted and cleared only when it succeeds, so a transient failure is retried later
 /// instead of silently leaving a banned member with read access.
 pub fn set_read_cut_pending(community_id: &str, pending: bool) -> Result<(), String> {
-    let conn = super::get_write_connection_guard_static()?;
+    let conn = crate::db::get_write_connection_guard_static()?;
     conn.execute(
         "UPDATE communities SET read_cut_pending = ?1 WHERE community_id = ?2",
         params![pending as i64, community_id],
@@ -1603,7 +1603,7 @@ pub fn set_read_cut_pending(community_id: &str, pending: bool) -> Result<(), Str
 /// is no un-dissolve). Idempotent: re-setting an already-dissolved community is a harmless no-op. Once
 /// set, the control fold stops advancing and the inbound path drops every subsequent event.
 pub fn set_community_dissolved(community_id: &str) -> Result<(), String> {
-    let conn = super::get_write_connection_guard_static()?;
+    let conn = crate::db::get_write_connection_guard_static()?;
     conn.execute(
         "UPDATE communities SET dissolved = 1 WHERE community_id = ?1",
         params![community_id],
@@ -1615,7 +1615,7 @@ pub fn set_community_dissolved(community_id: &str) -> Result<(), String> {
 /// Whether a community has been sealed by a folded + owner-verified GroupDissolved tombstone.
 /// `false` for an unknown community.
 pub fn get_community_dissolved(community_id: &str) -> Result<bool, String> {
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     let v: Option<i64> = conn
         .query_row(
             "SELECT dissolved FROM communities WHERE community_id = ?1",
@@ -1630,7 +1630,7 @@ pub fn get_community_dissolved(community_id: &str) -> Result<bool, String> {
 /// Whether a PRIVATE-community read-cut re-seal is still outstanding (a prior attempt failed). The ban
 /// flow retries the re-seal whenever this is set. `false` for an unknown community.
 pub fn get_read_cut_pending(community_id: &str) -> Result<bool, String> {
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     let v: Option<i64> = conn
         .query_row(
             "SELECT read_cut_pending FROM communities WHERE community_id = ?1",
@@ -1647,7 +1647,7 @@ pub fn get_read_cut_pending(community_id: &str) -> Result<bool, String> {
 /// to `server_root_epoch + 1` on a fresh exclusion delta (ban add / privatize); left untouched on a pure
 /// resume so the in-flight target is preserved.
 pub fn set_read_cut_target_epoch(community_id: &str, target: u64) -> Result<(), String> {
-    let conn = super::get_write_connection_guard_static()?;
+    let conn = crate::db::get_write_connection_guard_static()?;
     conn.execute(
         "UPDATE communities SET read_cut_target_epoch = ?1 WHERE community_id = ?2",
         params![target as i64, community_id],
@@ -1659,7 +1659,7 @@ pub fn set_read_cut_target_epoch(community_id: &str, target: u64) -> Result<(), 
 /// The base epoch a pending read-cut must reach (see [`set_read_cut_target_epoch`]). `0` for an unknown
 /// community. Reinterpreted i64->u64 (lossless) for epochs >= 2^63.
 pub fn get_read_cut_target_epoch(community_id: &str) -> Result<u64, String> {
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     let v: Option<i64> = conn
         .query_row(
             "SELECT read_cut_target_epoch FROM communities WHERE community_id = ?1",
@@ -1674,7 +1674,7 @@ pub fn get_read_cut_target_epoch(community_id: &str) -> Result<u64, String> {
 /// The base (server-root) epoch a channel was last rekeyed FOR during a read-cut — the per-channel
 /// progress marker that lets a resumed re-founding skip channels already cut. `0` if unknown.
 pub fn channel_rekeyed_at_server_epoch(community_id: &str, channel_id: &str) -> Result<u64, String> {
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     let v: Option<i64> = conn
         .query_row(
             "SELECT rekeyed_at_server_epoch FROM community_channels WHERE community_id = ?1 AND channel_id = ?2",
@@ -1690,7 +1690,7 @@ pub fn channel_rekeyed_at_server_epoch(community_id: &str, channel_id: &str) -> 
 /// Best-effort progress marker: written after the channel rekey lands, so a crash before it just re-rotates
 /// the channel on resume (safe, the rekey is monotonic) rather than skipping a channel that needed cutting.
 pub fn mark_channel_rekeyed_at_server_epoch(community_id: &str, channel_id: &str, server_epoch: u64) -> Result<(), String> {
-    let conn = super::get_write_connection_guard_static()?;
+    let conn = crate::db::get_write_connection_guard_static()?;
     conn.execute(
         "UPDATE community_channels SET rekeyed_at_server_epoch = ?1 WHERE community_id = ?2 AND channel_id = ?3",
         params![server_epoch as i64, community_id, channel_id],
@@ -1701,7 +1701,7 @@ pub fn mark_channel_rekeyed_at_server_epoch(community_id: &str, channel_id: &str
 
 /// Ids of every locally-stored Community.
 pub fn list_community_ids() -> Result<Vec<CommunityId>, String> {
-    let conn = super::get_db_connection_guard_static()?;
+    let conn = crate::db::get_db_connection_guard_static()?;
     let mut stmt = conn
         .prepare("SELECT community_id FROM communities ORDER BY created_at")
         .map_err(|e| e.to_string())?;

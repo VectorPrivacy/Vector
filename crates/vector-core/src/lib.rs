@@ -166,8 +166,10 @@ pub mod deletion;
 // === SIMD Operations ===
 pub mod simd;
 
-// === Community protocol (GROUP_PROTOCOL.md) ===
-pub mod community;
+// === Concord (communities) protocol, versioned ===
+pub mod concord;
+// Back-compat alias: Concord v1 grew up as `community`; every consumer uses this path.
+pub use concord::v1 as community;
 
 // === Event Handler ===
 pub mod event_handler;
