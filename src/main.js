@@ -11586,6 +11586,14 @@ domChatMessageInput.oninput = async () => {
             popupConfirm('Emoticon Suggestions', 'When enabled, text emoticons suggest the matching emoji as you type:<br><br><b>:)</b> → 🙂&nbsp;&nbsp; <b>:D</b> → 😄&nbsp;&nbsp; <b>:P</b> → 😛&nbsp;&nbsp; <b>:3</b> → 😺<br><br>Turn it off to type emoticons as plain text (e.g. <b>:3</b>) without the emoji selector getting in the way.', true);
         };
     }
+    const domSettingsAutocorrectInfo = document.getElementById('autocorrect-info');
+    if (domSettingsAutocorrectInfo) {
+        domSettingsAutocorrectInfo.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            popupConfirm('Autocorrect', 'When enabled, your device corrects typos as you type in the chat box, using your system\'s autocorrect.<br><br>Turn it off if your system keeps "fixing" words you meant to type.', true);
+        };
+    }
     const domSettingsBatteryBgServiceInfo = document.getElementById('battery-bg-service-info');
     if (domSettingsBatteryBgServiceInfo) {
         domSettingsBatteryBgServiceInfo.onclick = (e) => {

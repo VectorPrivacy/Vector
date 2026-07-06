@@ -1454,6 +1454,17 @@ let fDisplayImageTypes = false;
 // Emoticon suggestions (`:)` → 🙂, …). Read by the `:` shortcode selector; default on. Loaded
 // from the DB in initSettings (runs at boot) so the value is live before Settings is ever opened.
 let emoticonSuggestionsEnabled = true;
+// OS autocorrect in the chat box. Default on; macOS users who find the system's
+// substitutions too eager can switch it off (which is also what mobile keyboards
+// key their correction behavior off).
+let fAutocorrectEnabled = true;
+
+/** Reflect the Autocorrect setting onto the chat box (the edit flow reuses the
+ *  same textarea). Spellcheck underlines are left alone: the setting governs
+ *  the OS *rewriting* text, not marking it. */
+function applyAutocorrectSetting() {
+    domChatMessageInput.setAttribute('autocorrect', fAutocorrectEnabled ? 'on' : 'off');
+}
 
 // Security Settings - Encryption state
 let fEncryptionEnabled = true;
@@ -2305,6 +2316,19 @@ async function initSettings() {
         emoticonToggle.addEventListener('change', async (e) => {
             emoticonSuggestionsEnabled = e.target.checked;
             await saveEmoticonSuggestions(e.target.checked);
+        });
+    }
+
+    // Autocorrect toggle: applied to the chat box immediately, both at boot and on change.
+    const autocorrectToggle = document.getElementById('autocorrect-toggle');
+    if (autocorrectToggle) {
+        fAutocorrectEnabled = await loadAutocorrect();
+        applyAutocorrectSetting();
+        autocorrectToggle.checked = fAutocorrectEnabled;
+        autocorrectToggle.addEventListener('change', async (e) => {
+            fAutocorrectEnabled = e.target.checked;
+            applyAutocorrectSetting();
+            await saveAutocorrect(e.target.checked);
         });
     }
 

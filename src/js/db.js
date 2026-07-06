@@ -122,6 +122,24 @@ async function saveStripTracking(bool) {
 }
 
 /**
+ * Load the user's Autocorrect setting
+ * @returns {Promise<boolean>}
+ */
+async function loadAutocorrect() {
+    const value = await invoke('get_sql_setting', { key: 'autocorrect' });
+    if (value === null || value === undefined) return true; // Default to enabled
+    return value === 'true' || value === '1';
+}
+
+/**
+ * Set the user's Autocorrect setting
+ * @param {boolean} bool - `true` to enable, `false` to disable
+ */
+async function saveAutocorrect(bool) {
+    return await invoke('set_sql_setting', { key: 'autocorrect', value: bool ? 'true' : 'false' });
+}
+
+/**
  * Load the user's Send Typing Indicators setting
  * @returns {Promise<boolean>}
  */
