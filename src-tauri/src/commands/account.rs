@@ -74,6 +74,13 @@ pub async fn debug_hot_reload_sync() -> Result<serde_json::Value, String> {
     if !FULL_SESSION_INITIALIZED.load(std::sync::atomic::Ordering::Acquire) {
         return Err("State is from background sync, not a full session - perform normal login".to_string());
     }
+    // The unlock/swap path initializes the session (client + own profile) BEFORE the
+    // login flow hydrates chats from the DB. Serving that mid-window snapshot would
+    // hydrate the frontend with zero chats AND skip the login flow that loads them —
+    // an empty app for the whole run. db_loaded flips only after the full DB load.
+    if !state.db_loaded {
+        return Err("DB not yet hydrated into state - perform normal login".to_string());
+    }
 
     // Return the full state for the frontend to hydrate
     println!("[Debug Hot-Reload] Sending cached state to frontend ({} profiles, {} chats)",
