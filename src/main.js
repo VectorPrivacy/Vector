@@ -1273,15 +1273,21 @@ function showGlobalTooltip(text, targetElement) {
     if (!tooltip) return;
     
     tooltip.textContent = text;
-    
+
     // Get the target element's position
     const rect = targetElement.getBoundingClientRect();
-    
-    // Position tooltip above the element, centered horizontally
-    tooltip.style.left = `${rect.left + rect.width / 2}px`;
+
+    // Position tooltip above the element, centered horizontally, but clamped
+    // inside the viewport: a wide tooltip (e.g. a long URL) centered over an
+    // edge-hugging target otherwise bleeds off-screen.
+    const pad = 8;
+    const half = tooltip.offsetWidth / 2;
+    const centerX = rect.left + rect.width / 2;
+    const clampedX = Math.max(pad + half, Math.min(window.innerWidth - pad - half, centerX));
+    tooltip.style.left = `${clampedX}px`;
     tooltip.style.top = `${rect.top - 8}px`;
     tooltip.style.transform = 'translate(-50%, -100%)';
-    
+
     // Show the tooltip
     tooltip.classList.add('visible');
 }
@@ -11696,15 +11702,80 @@ domChatMessageInput.oninput = async () => {
 
 });
 
+/**
+ * Confirm-then-open for web links: a Discord-style speed bump showing the true
+ * destination before leaving the app, since markdown link text can say
+ * anything. Mobile only: desktop's safety affordance is the hover tooltip,
+ * while touch has no hover to reveal a labeled link's destination.
+ */
+async function confirmAndOpenUrl(url) {
+    let parsed = null;
+    try { parsed = new URL(url); } catch (_) {}
+    // Non-web schemes (mailto) keep the direct-open path.
+    if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) {
+        return openUrl(url);
+    }
+    const full = parsed.toString();
+    if (!platformFeatures?.is_mobile) {
+        return openUrl(full);
+    }
+    // Tail-truncate only, so the security-relevant scheme + host stay visible.
+    const shown = full.length > 220 ? `${full.slice(0, 220)}…` : full;
+    const confirmed = await popupConfirm(
+        'Opening Link',
+        `This hyperlink redirects to:<br><code class="link-confirm-url">${escapeHtml(shown)}</code>Are you sure you want to continue?`,
+        false,
+        '',
+        'vector_warning.svg'
+    );
+    if (confirmed) openUrl(full);
+}
+
+/**
+ * A WYSIWYG link shows its own destination as its visible text (linkified bare
+ * URLs, <url> autolinks). Those can't deceive, so neither the hover tooltip
+ * nor the open-confirm adds anything. Compared via the href ATTRIBUTE: the
+ * .href property normalizes (adds trailing slashes) and would mismatch the
+ * verbatim text.
+ */
+function anchorShowsItsDestination(anchor) {
+    const label = (anchor.textContent || '').trim().replace(/\/$/, '');
+    const rawHref = (anchor.getAttribute('href') || '').trim().replace(/\/$/, '');
+    return !!label && label === rawHref;
+}
+
+// Hover tooltip: the honest counterpart to the open-confirm. Surfaces a
+// labeled web link's true destination centered above it, since the visible
+// text may say anything. Desktop only: touch has no hover, and the synthetic
+// mouseover a tap fires would flash the tooltip beneath the confirm popup.
+document.addEventListener('mouseover', (e) => {
+    if (platformFeatures?.is_mobile) return;
+    const anchor = e.target.closest?.('a[href]');
+    if (!anchor || !/^https?:/i.test(anchor.href)) return;
+    if (anchorShowsItsDestination(anchor)) return;
+    // Tail-truncate only, so the security-relevant scheme + host stay visible;
+    // the tooltip wraps up to a few lines.
+    const url = anchor.href;
+    showGlobalTooltip(url.length > 140 ? `${url.slice(0, 140)}…` : url, anchor);
+});
+document.addEventListener('mouseout', (e) => {
+    if (e.target.closest?.('a[href]')) hideGlobalTooltip();
+});
+
 // Listen for app-wide click interations
 document.addEventListener('click', (e) => {
     // If we're clicking the emoji search, don't close it!
     if (e.target === emojiSearch) return;
 
-    // If we're clicking an <a> link, handle it with our openUrl function
-    if (e.target.tagName === 'A' && e.target.href) {
+    // Any <a> click (including on styled children inside one) routes through
+    // the confirm-then-open speed bump — except WYSIWYG links, whose visible
+    // text already IS the destination. UI anchors with their own handlers
+    // stopPropagation before reaching here.
+    const anchor = e.target.closest?.('a');
+    if (anchor && anchor.href) {
         e.preventDefault();
-        return openUrl(e.target.href);
+        if (anchorShowsItsDestination(anchor)) return openUrl(anchor.href);
+        return confirmAndOpenUrl(anchor.href);
     }
 
     // If we're clicking a <summary> to toggle <details>, handle scroll adjustment

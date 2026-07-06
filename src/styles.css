@@ -6043,22 +6043,43 @@ img.emoji-img-loading {
 /* Global tooltip - positioned absolutely in the viewport */
 .global-tooltip {
   position: fixed;
-  background-color: rgba(0, 0, 0, 0.9);
+  /* Translucent over a backdrop blur (frosted glass), with a layered shadow
+     lifting it off busy chat content. WKWebView needs the -webkit- prefix. */
+  background-color: rgba(10, 12, 11, 0.72);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
   color: white;
   padding: 6px 10px;
   border-radius: 8px;
   border: 1px solid var(--icon-color-primary);
   font-size: 12px;
-  white-space: nowrap;
+  /* Wrap-capable: link-destination tooltips carry long unbroken URLs that
+     would otherwise render as one off-screen line. Short labels ("Bot")
+     still fit one line and render exactly as before. */
+  white-space: normal;
+  word-break: break-all;
+  max-width: min(90vw, 520px);
+  width: max-content;
+  text-align: center;
   pointer-events: none;
   opacity: 0;
   transition: opacity 0.15s ease;
   z-index: 100000;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.45);
 }
 
 .global-tooltip.visible {
   opacity: 1;
+}
+
+/* Destination line in the link-open confirm: the full URL must wrap inside the
+   popup, never overflow it. Accent color marks it as the load-bearing fact. */
+.link-confirm-url {
+  display: block;
+  margin: 8px 0;
+  word-break: break-all;
+  color: var(--icon-color-primary, #59fcb3);
+  font-size: 12px;
 }
 
 /* Empty state for attachment panel views */
