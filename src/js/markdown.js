@@ -88,6 +88,13 @@ function initializeMarked() {
             return encodeAttr(text);
         }
 
+        // Anti-spoof: URL-shaped link text must go where it claims. A mismatch like
+        // [https://trusted.com](https://evil.io) renders as the raw source instead,
+        // so the true destination stays visible and nothing deceptive is clickable.
+        if (mdLinkTextSpoofsHref(text, href)) {
+            return encodeAttr(token.raw || `[${text}](${href})`);
+        }
+
         // Detect [text](<url>) combo syntax: angle brackets in the raw source suppress previews
         const noPreview = /\]\(<[^>]+>\)$/.test(token.raw || '');
         const attrs = noPreview ? ' data-no-preview="true"' : '';
@@ -147,8 +154,10 @@ function initializeMarked() {
     // Escape unknown HTML tags as literal text — prevents DOMPurify from stripping
     // user content like "<insert text here>" which gets parsed as an unknown HTML element.
     // Safe tags (b, em, strong, etc.) pass through for user HTML support.
+    // No 'a': a raw <a href> would bypass the markdown-link spoof guard entirely
+    // (renderer.link never sees it). Links must go through markdown syntax.
     const safeHtmlTags = new Set([
-        'a', 'abbr', 'b', 'blockquote', 'br', 'code', 'del', 'details', 'div', 'em',
+        'abbr', 'b', 'blockquote', 'br', 'code', 'del', 'details', 'div', 'em',
         'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr', 'i', 'li', 'ol', 'p', 'pre', 's',
         'span', 'strong', 'sub', 'summary', 'sup', 'table', 'tbody', 'td', 'th', 'thead',
         'tr', 'u', 'ul'
@@ -261,6 +270,107 @@ function sanitizeUrl(url) {
     }
 
     return '';
+}
+
+/**
+ * TLDs accepted when deciding whether BARE link text (no scheme, no www.)
+ * is URL-shaped. Deliberately curated: an any-TLD match would flag benign
+ * filename text like [README.md](repo-url) as a spoof.
+ * @private
+ */
+const MD_LINK_BARE_TLDS = new Set([
+    'com', 'net', 'org', 'io', 'app', 'dev', 'co', 'me', 'ai', 'gg', 'xyz', 'info', 'to',
+    'tv', 'is', 'fi', 'de', 'uk', 'us', 'ca', 'au', 'fr', 'it', 'nl', 'es', 'jp',
+    'cn', 'in', 'br', 'ch', 'at', 'se', 'no', 'dk', 'pl', 'eu', 'online', 'site', 'store',
+    'cash', 'social', 'chat', 'link', 'click', 'download', 'live', 'news', 'space',
+    'world', 'pro', 'cloud', 'tech', 'money', 'vip', 'win', 'top', 'club', 'zone',
+    'fund', 'gold', 'trade', 'page', 'land', 'life', 'network', 'digital', 'finance',
+    'exchange', 'foundation',
+]);
+
+/**
+ * URL-shaped fragments inside link text: scheme'd, www.-prefixed, or a bare
+ * domain (TLD captured in group 1 for the allowlist check). Brackets and
+ * backslashes end a fragment: they're forbidden host code points, and letting
+ * them in would make a fragment like `https://trusted.com]` unparseable —
+ * which combined with a lenient parse failure is exactly how a spoof dodges.
+ * @private
+ */
+const MD_LINK_TEXT_URL_RX = /\bhttps?:\/\/[^\s<>"'()\[\]\\]+|\bwww\.[a-z0-9-]+(?:\.[a-z0-9-]+)+(?::\d+)?(?:\/[^\s<>"'()\[\]\\]*)?|\b[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.([a-z]{2,24})(?::\d+)?(?:\/[^\s<>"'()\[\]\\]*)?/gi;
+
+/**
+ * Normalized hostname of a URL, or null if unparseable.
+ * Unicode hosts come back punycoded, so a mixed-script lookalike can't pass
+ * as the ASCII host it imitates. Fully non-ASCII homoglyph domains never
+ * match the fragment regex at all and stay out of scope.
+ * @private
+ */
+function mdLinkHostOf(url) {
+    try {
+        return new URL(url).hostname.toLowerCase().replace(/^www\./, '').replace(/\.$/, '');
+    } catch (_e) {
+        return null;
+    }
+}
+
+/**
+ * Same site, or one is a dot-subdomain of the other. Subdomain tolerance is
+ * safe in both directions: the shorter host is the registrable parent of the
+ * longer, so the destination stays within the domain the text names (or a
+ * parent of it) — never a sibling like paypal.com.evil.io.
+ * @private
+ */
+function mdLinkHostsRelated(a, b) {
+    return a === b || a.endsWith('.' + b) || b.endsWith('.' + a);
+}
+
+/**
+ * Does this markdown link's visible text claim a destination its href doesn't
+ * honor? Every URL-shaped fragment in the text must resolve to the href's own
+ * host — otherwise [https://trusted.com](https://evil.io) renders as a
+ * trusted-looking link that navigates somewhere else entirely.
+ * @private
+ */
+function mdLinkTextSpoofsHref(text, href) {
+    // Where the link actually goes. Relative hrefs stay null: in-app paths
+    // never legitimately carry URL-shaped display text.
+    const trimmedHref = (href || '').trim();
+    let actualHost = null;
+    if (/^https?:\/\//i.test(trimmedHref)) {
+        actualHost = mdLinkHostOf(trimmedHref);
+    } else if (/^mailto:/i.test(trimmedHref)) {
+        // A mailto's "host" is the address domain, so [a@real.com](mailto:a@evil.io)
+        // is held to the same rule.
+        const addr = trimmedHref.slice(7).split(/[?#]/)[0];
+        const at = addr.lastIndexOf('@');
+        if (at >= 0) actualHost = addr.slice(at + 1).toLowerCase().replace(/^www\./, '').replace(/\.$/, '');
+    }
+
+    // Normalize lookalike forms before matching: NFKC folds fullwidth ASCII,
+    // ideographic full stops become dots, and the zero-width characters that
+    // let "paypal.[ZWSP]com" dodge the scan while rendering identically are
+    // stripped. Capped: a claim buried past 2KB of link text isn't a
+    // convincing spoof, and the bare-domain alternative backtracks
+    // quadratically on adversarial dot-runs.
+    const visibleText = (text || '')
+        .normalize('NFKC')
+        .replace(/[\u200B-\u200D\u2060\u00AD\uFEFF]/g, '')
+        .replace(/\u3002/g, '.')
+        .slice(0, 2048);
+
+    for (const m of visibleText.matchAll(MD_LINK_TEXT_URL_RX)) {
+        const fragment = m[0];
+        const bareTld = m[1];
+        // Bare domains count as URL-shaped only on a known TLD; scheme'd and
+        // www. fragments always count.
+        if (bareTld !== undefined && !MD_LINK_BARE_TLDS.has(bareTld.toLowerCase())) continue;
+        const claimedHost = mdLinkHostOf(/^https?:\/\//i.test(fragment) ? fragment : `https://${fragment}`);
+        // URL-shaped but unparseable is exactly what a dodge looks like \u2014 fail
+        // closed (degrades to the honest raw render, never a deceptive anchor).
+        if (!claimedHost) return true;
+        if (!actualHost || !mdLinkHostsRelated(claimedHost, actualHost)) return true;
+    }
+    return false;
 }
 
 /**

@@ -162,9 +162,163 @@ pub fn rebuild_shared_http_client() -> Result<(), String> {
     Ok(())
 }
 
+/// Find the byte index where a bracket/paren group opened at `start` closes,
+/// tracking nesting depth and honoring backslash escapes — markdown balances
+/// both, so a naive first-closer scan desyncs on `[[claim]](evil)` or
+/// `[claim\]](evil)` and lets the claim reach the URL scan. All compared
+/// bytes are ASCII, so the returned index is char-boundary-safe.
+fn md_group_close(bytes: &[u8], start: usize, open: u8, close: u8) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut escaped = false;
+    let mut j = start;
+    loop {
+        match bytes.get(j).copied() {
+            None => return None,
+            Some(b'\\') if !escaped => escaped = true,
+            Some(b) if b == open && !escaped => depth += 1,
+            Some(b) if b == close && !escaped => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(j);
+                }
+            }
+            _ => escaped = false,
+        }
+        j += 1;
+    }
+}
+
+/// Rewrite markdown links so a preview-URL scan sees only real DESTINATIONS:
+/// `[text](href)` keeps the href and drops the display text — a URL claimed in
+/// the text must never win the OG preview over where the link actually goes —
+/// `[text](<href>)` drops entirely (angle brackets are the no-preview syntax),
+/// and `[text][ref]` drops the label (its destination is a definition scanned
+/// on its own elsewhere in the text). Images (`![alt](url)`) render as literal
+/// text in chat, so they pass through untouched.
+pub fn strip_md_link_claims(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'[' || (i > 0 && bytes[i - 1] == b'!') {
+            i += 1;
+            continue;
+        }
+        let Some(close) = md_group_close(bytes, i + 1, b'[', b']') else { break };
+        match bytes.get(close + 1).copied() {
+            // Inline link: drop the label, contribute the destination.
+            Some(b'(') => {
+                let Some(paren) = md_group_close(bytes, close + 2, b'(', b')') else {
+                    i = close + 1;
+                    continue;
+                };
+                out.push_str(&text[last..i]);
+                let href = text[close + 2..paren].trim();
+                if !(href.starts_with('<') && href.ends_with('>')) {
+                    out.push(' ');
+                    out.push_str(href);
+                    out.push(' ');
+                }
+                i = paren + 1;
+                last = i;
+            }
+            // Reference link: drop the label; the `[ref]: url` definition line
+            // carries the real destination and gets scanned as plain text.
+            Some(b'[') => {
+                let Some(ref_close) = md_group_close(bytes, close + 2, b'[', b']') else {
+                    i = close + 1;
+                    continue;
+                };
+                out.push_str(&text[last..i]);
+                i = ref_close + 1;
+                last = i;
+            }
+            _ => {
+                i = close + 1;
+            }
+        }
+    }
+    out.push_str(&text[last..]);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ========================================================================
+    // strip_md_link_claims — preview scan must see destinations, not claims
+    // ========================================================================
+
+    #[test]
+    fn md_link_claim_text_dropped_href_kept() {
+        // The spoof shape: claimed URL first in raw text, real destination second.
+        let out = strip_md_link_claims("[https://your-bank.com](https://evil.io)");
+        assert!(!out.contains("your-bank.com"), "claimed text must not reach the scan: {out}");
+        assert!(out.contains("https://evil.io"), "real destination must reach the scan: {out}");
+    }
+
+    #[test]
+    fn md_no_preview_link_dropped_entirely() {
+        let out = strip_md_link_claims("see [docs](<https://vector.app/docs>) ok");
+        assert!(!out.contains("vector.app"), "no-preview href must not reach the scan: {out}");
+        assert!(out.contains("see ") && out.contains(" ok"));
+    }
+
+    #[test]
+    fn md_image_passes_through() {
+        let text = "![shot](https://host.io/img.png)";
+        assert_eq!(strip_md_link_claims(text), text);
+    }
+
+    #[test]
+    fn plain_text_and_bare_urls_untouched() {
+        let text = "check https://vector.app and [also] (spaced) brackets";
+        assert_eq!(strip_md_link_claims(text), text);
+    }
+
+    #[test]
+    fn multiple_links_keep_document_order() {
+        let out = strip_md_link_claims("[a](https://one.io) mid [b](https://two.io)");
+        let one = out.find("https://one.io").expect("first href kept");
+        let two = out.find("https://two.io").expect("second href kept");
+        assert!(one < two);
+    }
+
+    #[test]
+    fn nested_bracket_label_still_drops_claim() {
+        let out = strip_md_link_claims("[[https://trusted.com]](https://evil.io)");
+        assert!(!out.contains("trusted.com"), "nested-bracket claim must not reach the scan: {out}");
+        assert!(out.contains("https://evil.io"));
+    }
+
+    #[test]
+    fn escaped_bracket_label_still_drops_claim() {
+        let out = strip_md_link_claims(r"[https://trusted.com\]](https://evil.io)");
+        assert!(!out.contains("trusted.com"), "escaped-bracket claim must not reach the scan: {out}");
+        assert!(out.contains("https://evil.io"));
+    }
+
+    #[test]
+    fn paren_path_href_survives_whole() {
+        let out = strip_md_link_claims("[wiki](https://en.wikipedia.org/wiki/Foo_(bar))");
+        assert!(out.contains("https://en.wikipedia.org/wiki/Foo_(bar)"), "balanced-paren href kept intact: {out}");
+    }
+
+    #[test]
+    fn reference_link_label_dropped_definition_scanned() {
+        let out = strip_md_link_claims("[https://trusted.com][1]\n[1]: https://evil.io");
+        assert!(!out.contains("trusted.com"), "reflink claim must not reach the scan: {out}");
+        assert!(out.contains("https://evil.io"), "definition URL stays scannable: {out}");
+    }
+
+    #[test]
+    fn multibyte_label_no_panic() {
+        let out = strip_md_link_claims("[🔒 sécurisé — café](https://evil.io) 日本語");
+        assert!(out.contains("https://evil.io"));
+        assert!(out.contains("日本語"));
+    }
 
     // ========================================================================
     // Valid public URLs — should pass

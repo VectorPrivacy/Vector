@@ -1217,7 +1217,19 @@ function linkifyUrls(element) {
         // Trim trailing punctuation that's likely not part of the URL
         // (common in prose: "Check out https://example.com.")
         let url = originalUrl.replace(/[.,;:!?]+$/, '');
-        
+        // A trailing ')' is prose punctuation unless the URL itself opened a
+        // paren (e.g. /wiki/Foo_(bar)) — parenthesized URLs and raw markdown
+        // hrefs sit inside (...) constantly. Parens counted once up front
+        // (punctuation trims can't remove any), and the strip capped: real
+        // prose closes a couple of parens, while each strip reallocates the
+        // string, so a crafted paren-flood must not become quadratic work.
+        let parenOpens = (url.match(/\(/g) || []).length;
+        let parenCloses = (url.match(/\)/g) || []).length;
+        for (let strips = 0; strips < 8 && url.endsWith(')') && parenCloses > parenOpens; strips++) {
+          url = url.slice(0, -1).replace(/[.,;:!?]+$/, '');
+          parenCloses--;
+        }
+
         // This will throw if URL is malformed
         const urlObj = new URL(url);
         
@@ -1253,8 +1265,9 @@ function linkifyUrls(element) {
           fragment.appendChild(document.createTextNode(url));
         }
         
-        // Use original URL length for tracking position (before cleaning/trimming)
-        lastIndex = matchIndex + originalUrl.length;
+        // Consume only what the link kept; trimmed prose punctuation flows
+        // back into the following text segment instead of vanishing.
+        lastIndex = matchIndex + url.length;
       } catch (e) {
         // Invalid URL, skip it and continue
         continue;

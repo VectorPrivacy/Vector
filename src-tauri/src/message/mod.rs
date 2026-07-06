@@ -101,9 +101,11 @@ pub async fn fetch_msg_metadata(chat_id: String, msg_id: String) -> bool {
         None => return false,
     };
 
-    // Extract URLs from the message
+    // Extract URLs from the message. Markdown links contribute their DESTINATION
+    // only: [https://trusted.com](https://evil.io) must never preview the claimed
+    // site while the click goes elsewhere.
     const MAX_URLS_TO_TRY: usize = 3;
-    let urls = util::extract_https_urls(&text);
+    let urls = util::extract_https_urls(&vector_core::net::strip_md_link_claims(&text));
     if urls.is_empty() {
         return false;
     }
