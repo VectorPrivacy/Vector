@@ -15,8 +15,10 @@
 //! [`derive`], and the kind registry below (CORD-02 Appendix B). A retired
 //! number is burned forever, never reused.
 
+pub mod chat;
 pub mod control;
 pub mod derive;
+pub mod guestbook;
 pub mod stream;
 
 /// Inner rumor kinds (CORD-02 Appendix B). The *outer* event is always a wrap
