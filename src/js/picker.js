@@ -176,7 +176,8 @@ const EMOJI_CHUNK_SIZE = 36; // 6 columns x 6 rows
  * Populated by `loadEmojiPacks()` on first picker open; subsequent
  * opens reuse the cached array while a background refresh updates it.
  * `id` is the canonical naddr (no relay hints); there is NO `addr` field.
- * @type {Array<{id:string,title:string,image_url:string,description:string,emojis:Array<{shortcode:string,url:string}>,is_own:boolean,is_theme?:boolean,updated_at:number}>}
+ * `status`: 0 active, 1 revoked (creator tombstone), 2 missing (durably absent).
+ * @type {Array<{id:string,title:string,image_url:string,description:string,emojis:Array<{shortcode:string,url:string}>,is_own:boolean,is_theme?:boolean,updated_at:number,status:number}>}
  */
 let arrEmojiPacks = [];
 let emojiPacksLoaded = false;
@@ -268,9 +269,42 @@ async function _fetchThemePack(naddr, force = false) {
  * bare `code`. Runs over the already-display-capped `packs`, matching the
  * backend's per-pack cap, so the indices agree exactly.
  */
+/** A pack the health engine has declared dead: revoked (deterministic
+ *  tombstone from its creator) or missing (durably absent from its relays).
+ *  Dead packs still render as a greyed section with an explanation, but
+ *  their emojis leave recents, search, autocomplete, and disambiguation. */
+function packIsDead(pack) {
+    return pack && (pack.status === 1 || pack.status === 2);
+}
+
+/** Explanation line for a dead pack's section. Plain language (no protocol
+ *  jargon), picked deterministically per pack (not per render) so the copy
+ *  doesn't shuffle every panel open. */
+function deadPackMessage(pack) {
+    const revoked = pack.status === 1;
+    const msgs = revoked
+        ? [
+            'The creator has taken this pack down.',
+            'This pack was removed by its creator.',
+            'The creator of this pack has retired it.',
+        ]
+        : [
+            'This pack is no longer available.',
+            'This pack seems to have disappeared.',
+            'This pack couldn\'t be found anymore.',
+        ];
+    let h = 0;
+    const id = pack.id || '';
+    for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+    return msgs[h % msgs.length];
+}
+
 function _assignEmojiDisambig(packs) {
     const urlsByCode = new Map(); // base code -> Set of distinct URLs
     for (const pack of packs) {
+        // Dead packs don't claim `~N` slots; a live pack sharing the
+        // shortcode gets its clean code back.
+        if (packIsDead(pack)) continue;
         if (!Array.isArray(pack.emojis)) continue;
         for (const e of pack.emojis) {
             if (!e || !e.shortcode || !e.url) continue;
@@ -556,8 +590,10 @@ function _packsSignature(packs) {
     // The trailing `T` marks a theme-pinned entry vs. the user's own subscribed
     // copy of the same pack (identical id/updated_at/length), so toggling a
     // subscription to the active theme's pack actually repaints instead of being
-    // skipped as "unchanged".
-    return packs.map(p => `${p.id}@${p.updated_at}#${p.emojis ? p.emojis.length : 0}${p.is_theme ? 'T' : ''}`).join('|');
+    // skipped as "unchanged". `~status` is load-bearing: a health transition
+    // (active/revoked/missing) changes NOTHING else — no new event exists,
+    // that's what dead means — so without it the grey-out never repaints.
+    return packs.map(p => `${p.id}@${p.updated_at}#${p.emojis ? p.emojis.length : 0}${p.is_theme ? 'T' : ''}~${p.status | 0}`).join('|');
 }
 
 async function loadEmojiPacks({ refresh = false } = {}) {
@@ -739,6 +775,7 @@ function getMostUsedCustomEmojis(limit) {
         // Usage is keyed by the disambiguated code, so match on `dispCode`
         // (falling back to the bare shortcode for non-colliding emojis).
         for (const pack of arrEmojiPacks) {
+            if (packIsDead(pack)) continue;
             if (!pack.emojis) continue;
             const match = pack.emojis.find(e => (e.dispCode || e.shortcode) === shortcode);
             if (match) {
@@ -778,6 +815,7 @@ function searchCustomEmojis(query) {
     // one clobbering the other. Matching is still against the bare shortcode.
     const seen = new Set();
     for (const pack of arrEmojiPacks) {
+        if (packIsDead(pack)) continue;
         if (!pack.emojis) continue;
         for (const e of pack.emojis) {
             const sc = e.shortcode.toLowerCase();
@@ -831,7 +869,9 @@ async function _unsubscribePackFromMenu(pack) {
         // — it just flips from a subscribed pin to a theme pin, you keep the pack.
         const themeNaddr = THEME_EMOJI_PACKS[_currentThemeName()];
         if (themeNaddr && pack.id === themeNaddr && !_themePackCache[themeNaddr]) {
-            _themePackCache[themeNaddr] = { ...pack, is_theme: true };
+            // Theme pins are never health-judged; carrying a dead verdict over
+            // would grey a pin the health engine no longer tracks.
+            _themePackCache[themeNaddr] = { ...pack, is_theme: true, status: 0 };
         }
         await invoke('unsubscribe_emoji_pack', { id: pack.id });
         await loadEmojiPacks();
@@ -875,6 +915,7 @@ function renderEmojiPackSidebar() {
     for (const pack of arrEmojiPacks) {
         const btn = document.createElement('button');
         btn.className = 'emoji-category-btn emoji-pack-tab';
+        if (packIsDead(pack)) btn.classList.add('emoji-pack-tab-dead');
         btn.dataset.packId = pack.id;
         btn.title = pack.title || pack.identifier;
         if (pack.image_url) {
@@ -4037,7 +4078,47 @@ function renderEmojiPackSections() {
         // sections don't tick.
         const grid = new PackCanvasGrid(pack);
         _packCanvasGrids.set(pack.id, grid);
+
+        // The canvas must stay a DIRECT child of the section: PackCanvasGrid
+        // sizes itself from canvas.parentElement and the section is already
+        // the positioning anchor (it hosts the cell tooltip).
         section.appendChild(grid.canvas);
+
+        if (packIsDead(pack)) {
+            // Graceful drop: the emojis stay visible but blurred behind an
+            // explanation + a user-driven remove. Nothing is ripped away
+            // silently, and old messages keep rendering their own emoji URLs.
+            section.classList.add('emoji-pack-dead');
+            // WebKitGTK doesn't reliably render CSS blur (software fallback
+            // with the DMABUF renderer disabled), which would leave the dead
+            // emojis crisp under the notice — hide the canvas outright there
+            // so the section reads as the notice alone.
+            if (platformFeatures?.os === 'linux') section.classList.add('emoji-pack-dead-noblur');
+            const notice = document.createElement('div');
+            notice.className = 'emoji-pack-dead-notice';
+            const msg = document.createElement('span');
+            msg.className = 'emoji-pack-dead-text';
+            msg.textContent = deadPackMessage(pack);
+            const sub = document.createElement('span');
+            sub.className = 'emoji-pack-dead-subtext';
+            sub.textContent = 'Old messages will still show its emojis.';
+            notice.appendChild(msg);
+            notice.appendChild(sub);
+            // Theme-pinned entries aren't subscriptions (nothing to remove) —
+            // same gate as the pack context menu.
+            if (!pack.is_theme) {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'btn emoji-pack-dead-remove';
+                btn.textContent = 'Remove Pack';
+                btn.addEventListener('click', (ev) => {
+                    ev.stopPropagation();
+                    _unsubscribePackFromMenu(pack);
+                });
+                notice.appendChild(btn);
+            }
+            section.appendChild(notice);
+        }
 
         if (anchor) {
             main.insertBefore(section, anchor);

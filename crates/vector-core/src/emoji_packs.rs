@@ -121,7 +121,45 @@ pub struct EmojiPack {
     /// Event `created_at` — fed back into the relay filter so re-fetches
     /// don't process older events on top of a newer cached pack.
     pub updated_at: u64,
+    /// Health verdict: [`PACK_STATUS_ACTIVE`] / [`PACK_STATUS_REVOKED`] /
+    /// [`PACK_STATUS_MISSING`]. Dead packs stay in the picker payload so the
+    /// UI can render the section greyed with an explanation + remove button,
+    /// but their emojis are excluded from sending and suggestions.
+    pub status: u8,
 }
+
+/// Pack is live on its relays (or hasn't been judged otherwise).
+pub const PACK_STATUS_ACTIVE: u8 = 0;
+/// A deterministic tombstone was seen: the author replaced the pack with an
+/// EMPTY kind 30030 (Vector's own delete flow) or published a kind-5
+/// deletion naming it.
+pub const PACK_STATUS_REVOKED: u8 = 1;
+/// No tombstone, but the pack has been absent across enough clean sweeps of
+/// live relays (see the gauntlet in [`apply_pack_health`]) that it's
+/// considered gone.
+pub const PACK_STATUS_MISSING: u8 = 2;
+
+/// What one refresh sweep learned about a subscribed pack.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PackFetchOutcome {
+    /// A live (non-empty) pack event resolved.
+    Found,
+    /// Deterministic deletion evidence — no gauntlet needed.
+    Tombstoned,
+    /// Enough live relays answered EOSE and none had the pack.
+    CleanMiss,
+    /// Not enough connectivity to judge; counters must not move.
+    Unreachable,
+}
+
+/// Absence promotes to `missing` only after this many rate-limited clean
+/// misses AND [`PACK_MISS_PROMOTE_SECS`] since the first — strict enough
+/// that a weekend relay outage never flags a healthy pack.
+const PACK_MISS_PROMOTE_COUNT: i64 = 3;
+const PACK_MISS_PROMOTE_SECS: i64 = 48 * 3600;
+/// A clean miss moves the counter at most once per this window, so rapid
+/// app restarts can't fabricate the miss count.
+const PACK_MISS_RATELIMIT_SECS: i64 = 12 * 3600;
 
 impl EmojiPack {
     /// Raw NIP-51 coordinate (`kind:pubkey:identifier`). Used for kind
@@ -203,13 +241,16 @@ pub fn resolve_outbound_emoji_tags(content: &str) -> Vec<crate::types::EmojiTag>
 
     // Subscribed packs. INNER JOIN matches `load_all_packs` — soft-removed own
     // packs shouldn't leak their Blossom URLs through outbound tags when the
-    // user types a shortcode they thought was hidden.
+    // user types a shortcode they thought was hidden. Dead packs (revoked /
+    // missing) are excluded too: their emojis are retired from sending, not
+    // just from the picker.
     if let Ok(conn) = crate::db::get_db_connection_guard_static() {
         if let Ok(mut stmt) = conn.prepare(
             "SELECT p.addr, i.shortcode, i.url
              FROM emoji_pack_items i
              INNER JOIN emoji_packs p ON p.addr = i.pack_addr
              INNER JOIN emoji_pack_subscriptions s ON s.addr = p.addr
+             WHERE p.status = 0
              ORDER BY p.is_own DESC, p.updated_at DESC, i.position ASC"
         ) {
             if let Ok(rows) = stmt.query_map([], |row| {
@@ -360,6 +401,7 @@ pub fn parse_pack_from_event(event: &Event, my_pubkey_hex: Option<&str>) -> Opti
         emojis,
         is_own,
         updated_at: event.created_at.as_secs(),
+        status: PACK_STATUS_ACTIVE,
     })
 }
 
@@ -545,6 +587,104 @@ pub fn save_pack(pack: &EmojiPack) -> Result<(), String> {
     Ok(())
 }
 
+/// Apply one refresh sweep's verdict to a pack's persisted health. Returns
+/// `true` when the pack's STATUS changed (caller emits a UI refresh).
+///
+/// Rules:
+/// - `Found` resets everything to active — self-healing from any state, even
+///   revoked (the author republished, or a relay restored from backup).
+/// - `Tombstoned` is deterministic: revoked immediately, no gauntlet.
+/// - `CleanMiss` runs the gauntlet: the counter moves at most once per
+///   [`PACK_MISS_RATELIMIT_SECS`], and promotion to missing requires BOTH
+///   [`PACK_MISS_PROMOTE_COUNT`] misses and [`PACK_MISS_PROMOTE_SECS`] since
+///   the first — so neither rapid restarts nor one long offline stretch can
+///   false-positive. A revoked pack ignores misses (stronger evidence holds).
+/// - `Unreachable` never moves anything in either direction.
+///
+/// On a transition INTO revoked/missing, the pack's emojis are purged from
+/// the frequently-used engine so dead emojis stop being suggested.
+pub fn apply_pack_health(addr: &str, outcome: &PackFetchOutcome, now: i64) -> Result<bool, String> {
+    use rusqlite::OptionalExtension;
+    if matches!(outcome, PackFetchOutcome::Unreachable) {
+        return Ok(false);
+    }
+    // IMMEDIATE transaction: concurrent sweeps (boot trigger + panel refresh)
+    // each get their own pooled connection, so an unserialized read-modify-write
+    // could let a stale CleanMiss overwrite a just-written tombstone.
+    let mut conn = crate::db::get_write_connection_guard_static()?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("begin pack health tx: {}", e))?;
+
+    let row = tx
+        .query_row(
+            "SELECT status, miss_count, first_missed_at, last_miss_counted_at
+             FROM emoji_packs WHERE addr = ?1",
+            rusqlite::params![addr],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| format!("read pack health: {}", e))?;
+    let Some((status, miss_count, first_missed_at, last_miss_counted_at)) = row else {
+        return Ok(false);
+    };
+
+    let (new_status, new_miss, new_first, new_last) = match outcome {
+        PackFetchOutcome::Found => (PACK_STATUS_ACTIVE as i64, 0, 0, 0),
+        PackFetchOutcome::Tombstoned => (PACK_STATUS_REVOKED as i64, 0, 0, 0),
+        PackFetchOutcome::CleanMiss => {
+            if status == PACK_STATUS_REVOKED as i64 {
+                (status, miss_count, first_missed_at, last_miss_counted_at)
+            } else if now - last_miss_counted_at < PACK_MISS_RATELIMIT_SECS {
+                (status, miss_count, first_missed_at, last_miss_counted_at)
+            } else {
+                let first = if miss_count == 0 { now } else { first_missed_at };
+                let count = miss_count + 1;
+                let promoted = count >= PACK_MISS_PROMOTE_COUNT
+                    && now - first >= PACK_MISS_PROMOTE_SECS;
+                (
+                    if promoted { PACK_STATUS_MISSING as i64 } else { status },
+                    count,
+                    first,
+                    now,
+                )
+            }
+        }
+        PackFetchOutcome::Unreachable => unreachable!(),
+    };
+
+    let changed = new_status != status;
+    tx.execute(
+        "UPDATE emoji_packs SET status = ?2, miss_count = ?3, first_missed_at = ?4,
+             last_miss_counted_at = ?5,
+             status_changed_at = CASE WHEN status != ?2 THEN ?6 ELSE status_changed_at END
+         WHERE addr = ?1",
+        rusqlite::params![addr, new_status, new_miss, new_first, new_last, now],
+    )
+    .map_err(|e| format!("write pack health: {}", e))?;
+
+    // Dead pack: retire its emojis from the frequently-used engine (kind 1 =
+    // custom emoji rows, matched by image URL — shortcodes collide across packs).
+    if changed && new_status != PACK_STATUS_ACTIVE as i64 {
+        tx.execute(
+            "DELETE FROM emoji_usage WHERE kind = 1 AND url IN
+                 (SELECT url FROM emoji_pack_items WHERE pack_addr = ?1)",
+            rusqlite::params![addr],
+        )
+        .map_err(|e| format!("purge dead pack usage: {}", e))?;
+    }
+
+    tx.commit().map_err(|e| format!("commit pack health: {}", e))?;
+    Ok(changed)
+}
+
 pub fn save_subscriptions(addrs: &[String]) -> Result<(), String> {
     let mut conn = crate::db::get_write_connection_guard_static()?;
     let tx = conn.transaction()
@@ -588,7 +728,7 @@ pub fn load_cached_pack(addr: &str) -> Result<Option<EmojiPack>, String> {
     let conn = crate::db::get_db_connection_guard_static()?;
 
     let mut pack = match conn.query_row(
-        "SELECT pubkey, identifier, title, image_url, description, is_own, updated_at
+        "SELECT pubkey, identifier, title, image_url, description, is_own, updated_at, status
          FROM emoji_packs WHERE addr = ?1",
         rusqlite::params![addr],
         |row| {
@@ -602,6 +742,7 @@ pub fn load_cached_pack(addr: &str) -> Result<Option<EmojiPack>, String> {
                 is_own: row.get::<_, i32>(5)? != 0,
                 updated_at: row.get::<_, i64>(6)? as u64,
                 emojis: Vec::new(),
+                status: row.get::<_, i64>(7)? as u8,
             })
         },
     ) {
@@ -646,7 +787,7 @@ pub fn load_all_packs() -> Result<Vec<EmojiPack>, String> {
         // of the picker but stays on Nostr and in `emoji_packs` so a
         // later re-subscribe (paste naddr) restores it with `is_own` set.
         let mut stmt = conn.prepare(
-            "SELECT p.addr, p.pubkey, p.identifier, p.title, p.image_url, p.description, p.is_own, p.updated_at
+            "SELECT p.addr, p.pubkey, p.identifier, p.title, p.image_url, p.description, p.is_own, p.updated_at, p.status
              FROM emoji_packs p
              INNER JOIN emoji_pack_subscriptions s ON s.addr = p.addr
              ORDER BY p.is_own DESC, p.updated_at DESC"
@@ -668,6 +809,7 @@ pub fn load_all_packs() -> Result<Vec<EmojiPack>, String> {
                 is_own: row.get::<_, i32>(6)? != 0,
                 updated_at: row.get::<_, i64>(7)? as u64,
                 emojis: Vec::new(),
+                status: row.get::<_, i64>(8)? as u8,
             }))
         }).map_err(|e| format!("query packs: {}", e))?;
 
@@ -727,6 +869,10 @@ struct CachedRelayList {
     fetched_at: std::time::Instant,
     /// Empty fetches use the shorter TTL so transient outages recover fast.
     empty: bool,
+    /// True when the entry came from a SUCCESSFUL kind-10002 fetch. An
+    /// error-cached placeholder (kept so previews don't refetch-storm) must
+    /// never read as "author verifiably has no relays" to the health sweep.
+    verified: bool,
 }
 
 static NIP65_CACHE: std::sync::OnceLock<std::sync::RwLock<HashMap<PublicKey, CachedRelayList>>> =
@@ -749,6 +895,23 @@ fn cached_write_relays(pubkey: &PublicKey) -> Option<Vec<RelayUrl>> {
     }
 }
 
+/// Like [`cached_write_relays`], but only entries learned from a SUCCESSFUL
+/// kind-10002 fetch. Judging a pack's absence needs its canonical home to
+/// have really been resolved; an error placeholder must read as unknown.
+fn cached_write_relays_verified(pubkey: &PublicKey) -> Option<Vec<RelayUrl>> {
+    let cache = nip65_cache().read().ok()?;
+    let entry = cache.get(pubkey)?;
+    if !entry.verified {
+        return None;
+    }
+    let ttl = if entry.empty { NIP65_CACHE_TTL_ERROR_SECS } else { NIP65_CACHE_TTL_SECS };
+    if entry.fetched_at.elapsed() < std::time::Duration::from_secs(ttl) {
+        Some(entry.relays.clone())
+    } else {
+        None
+    }
+}
+
 /// Drop every cached relay list (account swap — entries hold contact-graph metadata
 /// from the prior session, mirroring the inbox-relay cache's swap hygiene).
 pub fn clear_nip65_cache() {
@@ -758,13 +921,14 @@ pub fn clear_nip65_cache() {
 }
 
 /// Store a freshly-resolved write-relay list for `pubkey` in the cache.
-fn cache_write_relays(pubkey: PublicKey, relays: Vec<RelayUrl>) {
+fn cache_write_relays(pubkey: PublicKey, relays: Vec<RelayUrl>, verified: bool) {
     if let Ok(mut cache) = nip65_cache().write() {
         let empty = relays.is_empty();
         cache.insert(pubkey, CachedRelayList {
             relays,
             fetched_at: std::time::Instant::now(),
             empty,
+            verified,
         });
     }
 }
@@ -806,7 +970,7 @@ async fn fetch_author_write_relays(client: &Client, pubkey: PublicKey) -> Vec<Re
     {
         Ok(evs) => evs,
         Err(_) => {
-            cache_write_relays(pubkey, Vec::new());
+            cache_write_relays(pubkey, Vec::new(), false);
             return Vec::new();
         }
     };
@@ -815,7 +979,7 @@ async fn fetch_author_write_relays(client: &Client, pubkey: PublicKey) -> Vec<Re
         .max_by_key(|e| e.created_at)
         .map(|ev| extract_write_relays(&ev))
         .unwrap_or_default();
-    cache_write_relays(pubkey, relays.clone());
+    cache_write_relays(pubkey, relays.clone(), true);
     relays
 }
 
@@ -856,7 +1020,7 @@ async fn prefetch_author_write_relays(client: &Client, authors: &[PublicKey]) {
     }
     for pk in uncached {
         let relays = newest.get(&pk).map(extract_write_relays).unwrap_or_default();
-        cache_write_relays(pk, relays);
+        cache_write_relays(pk, relays, true);
     }
 }
 
@@ -964,12 +1128,13 @@ fn addr_coord(addr: &PackAddress) -> String {
 /// One batched filter matches the cross-product of authors × identifiers, so it
 /// can return events we didn't ask for (author A's `d` that belongs to author
 /// B's pack). Match strictly by exact coordinate and keep the newest event per
-/// coordinate; strays are dropped.
-fn parse_packs_by_coord(
+/// coordinate; strays are dropped. Returns raw EVENTS (not parsed packs): an
+/// empty kind 30030 is a deletion tombstone, and parsing would erase exactly
+/// that evidence.
+fn newest_events_by_coord(
     events: impl IntoIterator<Item = Event>,
     wanted: &std::collections::HashSet<String>,
-    me: Option<&str>,
-) -> HashMap<String, EmojiPack> {
+) -> HashMap<String, Event> {
     let mut newest: HashMap<String, Event> = HashMap::new();
     for ev in events {
         if ev.kind.as_u16() != KIND_EMOJI_SET { continue; }
@@ -980,40 +1145,189 @@ fn parse_packs_by_coord(
             _ => { newest.insert(coord, ev); }
         }
     }
-    newest.into_iter()
-        .filter_map(|(coord, ev)| parse_pack_from_event(&ev, me).map(|p| (coord, p)))
+    newest
+}
+
+/// Merge a phase's newest-events into the accumulator, keeping the newer of
+/// the two per coordinate.
+fn merge_newest(acc: &mut HashMap<String, Event>, phase: HashMap<String, Event>) {
+    for (coord, ev) in phase {
+        match acc.get(&coord) {
+            Some(existing) if existing.created_at >= ev.created_at => {}
+            _ => { acc.insert(coord, ev); }
+        }
+    }
+}
+
+/// Batched NIP-09 deletion filter for the given packs: author-signed kind 5s
+/// that cite a pack coordinate in an `a` tag.
+fn deletion_filter(addrs: &[&PackAddress]) -> Filter {
+    Filter::new()
+        .authors(addrs.iter().map(|a| a.pubkey))
+        .kind(Kind::EventDeletion)
+        .custom_tags(
+            SingleLetterTag::lowercase(Alphabet::A),
+            addrs.iter().map(|a| a.to_addr_string()),
+        )
+}
+
+/// Does this kind-5, signed by the pack's author, cite the pack's coordinate?
+/// Third-party deletions never count — only the author may revoke.
+fn deletion_matches(ev: &Event, author: &PublicKey, raw_addr: &str) -> bool {
+    ev.kind == Kind::EventDeletion
+        && ev.pubkey == *author
+        && ev.tags.iter().any(|t| {
+            let s = t.as_slice();
+            s.len() >= 2 && s[0] == "a" && s[1] == raw_addr
+        })
+}
+
+/// URLs of relays that are CONNECTED and readable right now — the basis for
+/// judging whether an absence was observed against live relays or thin air.
+/// READ-flagged only for the main pool (fetches never touch write-only or
+/// GOSSIP-isolated community relays, so those must not inflate the count).
+async fn connected_read_relays(client: &Client, read_only: bool) -> std::collections::HashSet<String> {
+    client
+        .relays()
+        .await
+        .iter()
+        .filter(|(_, r)| r.status() == RelayStatus::Connected && (!read_only || r.flags().has_read()))
+        .map(|(url, _)| url.to_string())
         .collect()
 }
 
-/// Resolve MANY packs in a batch. Home relays in one request; any unresolved
-/// packs then get one batched NIP-65 prefetch + one batched outbox request via
-/// an isolated client. Returns the packs that resolved (in `addrs` order);
-/// callers keep cached copies for the rest.
-async fn fetch_packs_from_relays(client: &Client, addrs: &[PackAddress]) -> Vec<EmojiPack> {
+/// Is a pack's ABSENCE from this sweep judgeable as a clean miss? Pure so the
+/// gate combinations are table-testable.
+///
+/// - The home fetch must have completed against relays that were connected
+///   both before AND after it ran (`connect()` is non-blocking, so an
+///   after-only sample would bless a fetch that raced an empty pool).
+/// - At least two distinct live relays across the phases.
+/// - The author's NIP-65 write relays are the pack's canonical home:
+///   unknown (cache cold / fetch failed) means it was never really checked —
+///   not clean. Verifiably EMPTY means home evidence alone is the best
+///   anyone can do. Known means the outbox phase must have completed there.
+fn absence_is_clean(
+    home_ok: bool,
+    live_relays: usize,
+    author_writes: Option<&Vec<RelayUrl>>,
+    outbox_ok: bool,
+    outbox_live: usize,
+) -> bool {
+    if !home_ok || live_relays < 2 {
+        return false;
+    }
+    match author_writes {
+        None => false,
+        Some(w) if w.is_empty() => true,
+        Some(_) => outbox_ok && outbox_live >= 1,
+    }
+}
+
+/// Classify one pack from a sweep's evidence. Pure so the verdict table is
+/// unit-testable. Returns the parsed pack alongside `Found`.
+fn classify_pack(
+    newest_ev: Option<&Event>,
+    newest_deletion: Option<&Event>,
+    me: Option<&str>,
+    absence_clean: bool,
+) -> (PackFetchOutcome, Option<EmojiPack>) {
+    match newest_ev {
+        Some(ev) => match parse_pack_from_event(ev, me) {
+            Some(pack) => {
+                // A republish NEWER than the deletion revives the pack; on an
+                // equal timestamp the pack wins (fail-safe toward alive).
+                match newest_deletion {
+                    Some(del) if del.created_at > ev.created_at => {
+                        (PackFetchOutcome::Tombstoned, None)
+                    }
+                    _ => (PackFetchOutcome::Found, Some(pack)),
+                }
+            }
+            None => {
+                // No `emoji` tags at all: the author replaced the pack with an
+                // empty one — Vector's own delete flow publishes exactly this
+                // tombstone. An event that HAS emoji tags Vector merely can't
+                // validate is not a deletion; judge nothing from it.
+                let has_emoji_tags = ev.tags.iter().any(|t| {
+                    t.as_slice().first().map(|k| k == "emoji").unwrap_or(false)
+                });
+                if has_emoji_tags {
+                    (PackFetchOutcome::Unreachable, None)
+                } else {
+                    (PackFetchOutcome::Tombstoned, None)
+                }
+            }
+        },
+        None if newest_deletion.is_some() => (PackFetchOutcome::Tombstoned, None),
+        None if absence_clean => (PackFetchOutcome::CleanMiss, None),
+        None => (PackFetchOutcome::Unreachable, None),
+    }
+}
+
+/// Everything one refresh sweep learned: resolved packs (in `addrs` order)
+/// plus a per-addr verdict for the health engine.
+struct PackSweep {
+    packs: Vec<EmojiPack>,
+    /// raw `kind:pubkey:identifier` addr → verdict.
+    outcomes: HashMap<String, PackFetchOutcome>,
+}
+
+/// Resolve MANY packs in a batch and judge the ones that didn't resolve.
+/// Home relays in one request; any unresolved packs then get one batched
+/// NIP-65 prefetch + one batched outbox request via an isolated client, with
+/// author-signed kind-5 deletions fetched alongside each phase. Callers keep
+/// cached copies for anything that isn't `Found`.
+async fn sweep_packs_from_relays(client: &Client, addrs: &[PackAddress]) -> PackSweep {
     if addrs.is_empty() {
-        return Vec::new();
+        return PackSweep { packs: Vec::new(), outcomes: HashMap::new() };
     }
     let timeout = std::time::Duration::from_secs(FETCH_TIMEOUT_SECS);
     let me = crate::state::my_public_key().map(|pk| pk.to_hex());
     let wanted: std::collections::HashSet<String> = addrs.iter().map(addr_coord).collect();
+    let all_refs: Vec<&PackAddress> = addrs.iter().collect();
 
-    // 1) One batched home request for every subscribed pack.
+    // 1) One batched home request for every subscribed pack (+ deletions).
+    // Live-relay evidence is the INTERSECTION of connected READ relays before
+    // and after the fetch: `connect()` is non-blocking, so an after-only
+    // sample would bless a fetch that actually ran against an empty pool
+    // (boot, Tor cold start) — the exact false-positive the gauntlet must
+    // never produce.
+    let home_before = connected_read_relays(client, true).await;
     let home_filter = Filter::new()
         .authors(addrs.iter().map(|a| a.pubkey))
         .kind(Kind::Custom(KIND_EMOJI_SET))
         .identifiers(addrs.iter().map(|a| a.identifier.clone()));
-    let mut resolved: HashMap<String, EmojiPack> = match client.fetch_events(home_filter, timeout).await {
-        Ok(events) => parse_packs_by_coord(events, &wanted, me.as_deref()),
+    let mut newest: HashMap<String, Event> = HashMap::new();
+    let mut deletions: Vec<Event> = Vec::new();
+    let mut home_ok = false;
+    match client.fetch_events(home_filter, timeout).await {
+        Ok(events) => {
+            home_ok = true;
+            merge_newest(&mut newest, newest_events_by_coord(events, &wanted));
+        }
         Err(e) => {
             crate::log_warn!("[EmojiPacks] batched home fetch failed: {}", e);
-            HashMap::new()
         }
-    };
+    }
+    if home_ok {
+        match client.fetch_events(deletion_filter(&all_refs), timeout).await {
+            Ok(events) => deletions.extend(events),
+            Err(e) => crate::log_warn!("[EmojiPacks] home deletion fetch failed: {}", e),
+        }
+    }
+    let home_after = connected_read_relays(client, true).await;
+    let mut live_relays: std::collections::HashSet<String> =
+        home_before.intersection(&home_after).cloned().collect();
 
-    // 2) Outbox fallback for the misses, all in one shot.
+    // 2) Outbox fallback for the misses, all in one shot. A pack's canonical
+    // home is its author's NIP-65 write relays, so absence THERE is the
+    // signal that matters for the health verdict.
     let misses: Vec<&PackAddress> = addrs.iter()
-        .filter(|a| !resolved.contains_key(&addr_coord(a)))
+        .filter(|a| !newest.contains_key(&addr_coord(a)))
         .collect();
+    let mut outbox_ok = false;
+    let mut outbox_live = 0usize;
     if !misses.is_empty() {
         let miss_authors: Vec<PublicKey> = {
             let mut v: Vec<PublicKey> = misses.iter().map(|a| a.pubkey).collect();
@@ -1036,29 +1350,62 @@ async fn fetch_packs_from_relays(client: &Client, addrs: &[PackAddress]) -> Vec<
                 .identifiers(misses.iter().map(|a| a.identifier.clone()));
             let wanted_misses: std::collections::HashSet<String> =
                 misses.iter().map(|a| addr_coord(a)).collect();
-            if let Some(packs) = fetch_packs_via_isolated_client(
-                &outbox, miss_filter, timeout, &wanted_misses, me.as_deref(),
+            if let Some((events, dels, live)) = sweep_via_isolated_client(
+                &outbox, miss_filter, deletion_filter(&misses), timeout,
             ).await {
-                resolved.extend(packs);
+                outbox_ok = true;
+                outbox_live = live.len();
+                live_relays.extend(live);
+                merge_newest(&mut newest, newest_events_by_coord(events, &wanted_misses));
+                deletions.extend(dels);
             }
         }
     }
 
-    // Return in the caller's requested order.
-    addrs.iter()
-        .filter_map(|a| resolved.remove(&addr_coord(a)))
-        .collect()
+    // 3) Classify every pack (pure helpers; see their docs for the rules).
+    let mut packs: Vec<EmojiPack> = Vec::new();
+    let mut outcomes: HashMap<String, PackFetchOutcome> = HashMap::new();
+    for addr in addrs {
+        let coord = addr_coord(addr);
+        let raw_addr = addr.to_addr_string();
+        let newest_deletion = deletions.iter()
+            .filter(|d| deletion_matches(d, &addr.pubkey, &raw_addr))
+            .max_by_key(|d| d.created_at);
+        let author_writes = cached_write_relays_verified(&addr.pubkey);
+        let clean = absence_is_clean(
+            home_ok,
+            live_relays.len(),
+            author_writes.as_ref(),
+            outbox_ok,
+            outbox_live,
+        );
+        let (outcome, pack) = classify_pack(
+            newest.get(&coord),
+            newest_deletion,
+            me.as_deref(),
+            clean,
+        );
+        if let Some(p) = pack {
+            packs.push(p);
+        }
+        outcomes.insert(raw_addr, outcome);
+    }
+
+    PackSweep { packs, outcomes }
 }
 
-/// Batched sibling of `fetch_pack_via_isolated_client`: fetch many packs from a
-/// throwaway client connected to the given relays, matched by coordinate.
-async fn fetch_packs_via_isolated_client(
+/// Batched sibling of `fetch_pack_via_isolated_client`: fetch pack events and
+/// their kind-5 deletions from a throwaway client connected to the given
+/// relays. Returns `None` when the pack fetch itself errored (the sweep must
+/// not judge absences it never observed), plus the URLs of relays that were
+/// connected across the fetch (before ∩ after — `connect()` is non-blocking,
+/// so a fetch can race an empty pool) for the connectivity gate.
+async fn sweep_via_isolated_client(
     relays: &[RelayUrl],
-    filter: Filter,
+    pack_filter: Filter,
+    del_filter: Filter,
     timeout: std::time::Duration,
-    wanted: &std::collections::HashSet<String>,
-    my_pubkey_hex: Option<&str>,
-) -> Option<HashMap<String, EmojiPack>> {
+) -> Option<(Vec<Event>, Vec<Event>, std::collections::HashSet<String>)> {
     let scratch = ClientBuilder::new()
         .opts(crate::nostr_client_options())
         .build();
@@ -1067,11 +1414,32 @@ async fn fetch_packs_via_isolated_client(
         let _ = scratch.pool().add_relay(r.as_str(), opts).await;
     }
     scratch.connect().await;
-    let result = scratch.fetch_events(filter, timeout).await;
+    // `connect()` is non-blocking and this client is brand new, so wait for at
+    // least one handshake to complete (bounded) before sampling connectivity —
+    // an instant sample reads empty on every run, which would make before ∩
+    // after a tautological zero and outbox absences permanently unjudgeable.
+    let connect_deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    let before = loop {
+        let connected = connected_read_relays(&scratch, false).await;
+        if !connected.is_empty() || std::time::Instant::now() >= connect_deadline {
+            break connected;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    };
+    let result = scratch.fetch_events(pack_filter, timeout).await;
+    let dels = match &result {
+        Ok(_) => scratch.fetch_events(del_filter, timeout).await.ok(),
+        Err(_) => None,
+    };
+    let after = connected_read_relays(&scratch, false).await;
     scratch.shutdown().await;
 
     match result {
-        Ok(events) => Some(parse_packs_by_coord(events, wanted, my_pubkey_hex)),
+        Ok(events) => Some((
+            events.into_iter().collect(),
+            dels.map(|d| d.into_iter().collect()).unwrap_or_default(),
+            before.intersection(&after).cloned().collect(),
+        )),
         Err(e) => {
             crate::log_warn!("[EmojiPacks] batched outbox fetch failed: {}", e);
             None
@@ -1149,25 +1517,60 @@ pub async fn fetch_subscribed_packs(
     // Batched resolve: one home request for every subscribed pack, plus one
     // batched outbox pass for any not on our relays. Packs that still don't
     // resolve keep their cached copy (we never shrink the subscription set on
-    // a transient miss). The per-pack `fetch_pack_from_relays` is reserved for
-    // the independent preview/theme flows.
-    let fresh: Vec<EmojiPack> = fetch_packs_from_relays(client, &addrs).await;
-    let fetch_failures = addrs.len().saturating_sub(fresh.len());
-    if fetch_failures > 0 {
+    // a transient miss); the health engine below decides whether an absence
+    // is judgeable at all. The per-pack `fetch_pack_from_relays` is reserved
+    // for the independent preview/theme flows.
+    let PackSweep { packs: fresh, outcomes } = sweep_packs_from_relays(client, &addrs).await;
+    let tombstoned = outcomes.values().filter(|o| matches!(o, PackFetchOutcome::Tombstoned)).count();
+    let unresolved = addrs.len().saturating_sub(fresh.len()).saturating_sub(tombstoned);
+    if unresolved > 0 {
         crate::log_warn!(
             "[EmojiPacks] {} subscribed pack(s) not on relays — keeping cached copies",
-            fetch_failures,
+            unresolved,
         );
+    }
+    if tombstoned > 0 {
+        crate::log_info!("[EmojiPacks] {} subscribed pack(s) deleted by their creator", tombstoned);
     }
 
     if !session.is_valid() {
         return Ok(fresh);
     }
 
+    // Health verdicts BEFORE the save loop: save_pack's REPLACE resets the
+    // health columns, so `Found` must read the pre-save status or a revival
+    // (revoked back to active) would go unreported. Own packs are skipped:
+    // deleting an own pack removes its rows locally, so there's nothing to
+    // grieve, and a self-authored pack must never grey out over relay state.
+    let me_hex = my_pubkey.to_hex();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mut health_changed = false;
+    for addr in &addrs {
+        if addr.pubkey.to_hex() == me_hex { continue; }
+        let raw = addr.to_addr_string();
+        let Some(outcome) = outcomes.get(&raw) else { continue; };
+        match apply_pack_health(&raw, outcome, now) {
+            Ok(true) => {
+                health_changed = true;
+                crate::log_info!(
+                    "[EmojiPacks] pack `{}` health changed ({:?})",
+                    addr.identifier, outcome,
+                );
+            }
+            Ok(false) => {}
+            Err(e) => crate::log_warn!("[EmojiPacks] health update for `{}` failed: {}", addr.identifier, e),
+        }
+    }
     for pack in &fresh {
         if let Err(e) = save_pack(pack) {
             crate::log_warn!("[EmojiPacks] save pack {} failed: {}", pack.identifier, e);
         }
+    }
+    if health_changed {
+        crate::traits::emit_event("emoji_packs_updated", &());
     }
     // Persist the full subscription list (10030-driven, or local-mirror
     // when 10030 was missing). Per-pack fetch failures don't shrink it —
@@ -1180,8 +1583,8 @@ pub async fn fetch_subscribed_packs(
         "[EmojiPacks] Resolved {} of {} subscribed pack(s){}",
         fresh.len(),
         addrs.len(),
-        if fetch_failures > 0 {
-            format!(" ({} via cache)", fetch_failures)
+        if unresolved > 0 {
+            format!(" ({} via cache)", unresolved)
         } else {
             String::new()
         },
@@ -1602,6 +2005,240 @@ mod tests {
             .tags(tags)
             .sign_with_keys(k)
             .unwrap()
+    }
+
+    fn init_test_db() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
+        let guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        // Per-account row-id caches survive close_database; stale entries would
+        // point into a prior test's DB.
+        crate::db::clear_id_caches();
+        let tmp = tempfile::tempdir().unwrap();
+        let account = keys().public_key().to_bech32().unwrap();
+        std::fs::create_dir_all(tmp.path().join(&account)).unwrap();
+        crate::db::set_app_data_dir(tmp.path().to_path_buf());
+        crate::db::set_current_account(account.clone()).unwrap();
+        crate::db::init_database(&account).unwrap();
+        (tmp, guard)
+    }
+
+    /// Save a parsed pack + return its raw addr.
+    fn seed_pack(k: &Keys, d: &str, emojis: &[(&str, &str)]) -> String {
+        let ev = build_pack_event(k, d, None, None, None, emojis);
+        let pack = parse_pack_from_event(&ev, None).unwrap();
+        save_pack(&pack).unwrap();
+        pack.addr()
+    }
+
+    fn seed_usage(url: &str) {
+        let conn = crate::db::get_write_connection_guard_static().unwrap();
+        conn.execute(
+            "INSERT INTO emoji_usage (kind, id, url, score, last_used) VALUES (1, ?1, ?1, 1.0, 0)",
+            rusqlite::params![url],
+        ).unwrap();
+    }
+
+    fn usage_count() -> i64 {
+        let conn = crate::db::get_db_connection_guard_static().unwrap();
+        conn.query_row("SELECT COUNT(*) FROM emoji_usage", [], |r| r.get(0)).unwrap()
+    }
+
+    fn pack_status(addr: &str) -> u8 {
+        load_cached_pack(addr).unwrap().unwrap().status
+    }
+
+    fn build_deletion_event(k: &Keys, addr: &str) -> Event {
+        EventBuilder::new(Kind::EventDeletion, "")
+            .tag(Tag::custom(TagKind::custom("a"), [addr]))
+            .sign_with_keys(k)
+            .unwrap()
+    }
+
+    #[test]
+    fn classify_verdict_table() {
+        let k = keys();
+        let live = build_pack_event(&k, "p", None, None, None, &[("a", "https://e.x/a.png")]);
+        let empty = build_pack_event(&k, "p", None, None, None, &[]);
+        let addr = format!("30030:{}:p", k.public_key().to_hex());
+        let del = build_deletion_event(&k, &addr);
+
+        // Live event, no deletion → Found (regardless of the absence gate).
+        let (o, p) = classify_pack(Some(&live), None, None, false);
+        assert_eq!(o, PackFetchOutcome::Found);
+        assert!(p.is_some());
+
+        // Empty replacement (Vector's own delete shape) → Tombstoned.
+        let (o, _) = classify_pack(Some(&empty), None, None, true);
+        assert_eq!(o, PackFetchOutcome::Tombstoned);
+
+        // Kind-5 only, no event at all → Tombstoned.
+        let (o, _) = classify_pack(None, Some(&del), None, true);
+        assert_eq!(o, PackFetchOutcome::Tombstoned);
+
+        // Timestamps pinned: a second boundary between two wall-clock builders
+        // would otherwise flip the comparison and flake the test.
+        let ts = Timestamp::from_secs(1_700_000_000);
+        let live_pinned = EventBuilder::new(Kind::Custom(KIND_EMOJI_SET), "")
+            .tags(vec![
+                Tag::custom(TagKind::custom("d"), ["p"]),
+                Tag::custom(TagKind::custom("emoji"), ["a", "https://e.x/a.png"]),
+            ])
+            .custom_created_at(ts)
+            .sign_with_keys(&k)
+            .unwrap();
+        let del_at = |secs: u64| {
+            EventBuilder::new(Kind::EventDeletion, "")
+                .tag(Tag::custom(TagKind::custom("a"), [addr.as_str()]))
+                .custom_created_at(Timestamp::from_secs(secs))
+                .sign_with_keys(&k)
+                .unwrap()
+        };
+
+        // Kind-5 with an EQUAL timestamp to a live event: the pack wins
+        // (fail-safe toward alive).
+        let (o, _) = classify_pack(Some(&live_pinned), Some(&del_at(1_700_000_000)), None, false);
+        assert_eq!(o, PackFetchOutcome::Found);
+        // A NEWER deletion tombstones the older live event.
+        let (o, _) = classify_pack(Some(&live_pinned), Some(&del_at(1_700_000_001)), None, false);
+        assert_eq!(o, PackFetchOutcome::Tombstoned);
+        // An OLDER deletion loses to a republish.
+        let (o, _) = classify_pack(Some(&live_pinned), Some(&del_at(1_699_999_999)), None, false);
+        assert_eq!(o, PackFetchOutcome::Found);
+
+        // Nothing found: gate decides.
+        let (o, _) = classify_pack(None, None, None, true);
+        assert_eq!(o, PackFetchOutcome::CleanMiss);
+        let (o, _) = classify_pack(None, None, None, false);
+        assert_eq!(o, PackFetchOutcome::Unreachable);
+    }
+
+    #[test]
+    fn classify_invalid_emojis_is_not_a_tombstone() {
+        // An event that HAS emoji tags Vector merely can't validate (bad
+        // shortcode charset) must judge nothing, not brand the author.
+        let k = keys();
+        let ev = build_pack_event(&k, "weird", None, None, None, &[("bad!code", "https://e.x/a.png")]);
+        assert!(parse_pack_from_event(&ev, None).is_none(), "precondition: unparseable");
+        let (o, _) = classify_pack(Some(&ev), None, None, true);
+        assert_eq!(o, PackFetchOutcome::Unreachable);
+    }
+
+    #[test]
+    fn absence_gate_table() {
+        let some_writes = vec![RelayUrl::parse("wss://relay.author.example").unwrap()];
+        let no_writes: Vec<RelayUrl> = Vec::new();
+
+        // Home failed or too few live relays: never clean.
+        assert!(!absence_is_clean(false, 5, Some(&no_writes), true, 1));
+        assert!(!absence_is_clean(true, 1, Some(&no_writes), true, 1));
+        // Author outbox unknown (NIP-65 cold / fetch failed): not clean —
+        // the pack's canonical home was never really checked.
+        assert!(!absence_is_clean(true, 3, None, true, 1));
+        // Author verifiably lists no write relays: home evidence suffices.
+        assert!(absence_is_clean(true, 2, Some(&no_writes), false, 0));
+        // Author outbox known: it must have been swept live.
+        assert!(!absence_is_clean(true, 3, Some(&some_writes), false, 0));
+        assert!(!absence_is_clean(true, 3, Some(&some_writes), true, 0));
+        assert!(absence_is_clean(true, 3, Some(&some_writes), true, 1));
+    }
+
+    #[test]
+    fn deletion_matching_is_author_bound() {
+        let author = keys();
+        let stranger = keys();
+        let addr = format!("30030:{}:p", author.public_key().to_hex());
+        // A third party citing the coordinate must never count as a revocation.
+        let forged = build_deletion_event(&stranger, &addr);
+        assert!(!deletion_matches(&forged, &author.public_key(), &addr));
+        let real = build_deletion_event(&author, &addr);
+        assert!(deletion_matches(&real, &author.public_key(), &addr));
+    }
+
+    #[test]
+    fn tombstone_revokes_immediately_and_purges_frecency() {
+        let (_tmp, _guard) = init_test_db();
+        let k = keys();
+        let addr = seed_pack(&k, "deadpack", &[("boom", "https://e.x/boom.png")]);
+        seed_usage("https://e.x/boom.png");
+        seed_usage("https://e.x/unrelated.png");
+
+        let changed = apply_pack_health(&addr, &PackFetchOutcome::Tombstoned, 1_000).unwrap();
+        assert!(changed, "tombstone must flip status in one sweep");
+        assert_eq!(pack_status(&addr), PACK_STATUS_REVOKED);
+        assert_eq!(usage_count(), 1, "only the dead pack's usage rows purge");
+    }
+
+    #[test]
+    fn found_self_heals_from_revoked() {
+        let (_tmp, _guard) = init_test_db();
+        let k = keys();
+        let addr = seed_pack(&k, "phoenix", &[("rise", "https://e.x/r.png")]);
+        apply_pack_health(&addr, &PackFetchOutcome::Tombstoned, 1_000).unwrap();
+        assert_eq!(pack_status(&addr), PACK_STATUS_REVOKED);
+
+        let changed = apply_pack_health(&addr, &PackFetchOutcome::Found, 2_000).unwrap();
+        assert!(changed);
+        assert_eq!(pack_status(&addr), PACK_STATUS_ACTIVE, "a republished pack revives");
+    }
+
+    #[test]
+    fn clean_miss_gauntlet_rate_limit_and_promotion() {
+        let (_tmp, _guard) = init_test_db();
+        let k = keys();
+        let addr = seed_pack(&k, "fading", &[("bye", "https://e.x/bye.png")]);
+        let t0: i64 = 1_000_000;
+        let h = 3_600;
+
+        // First miss counts; a second inside the rate-limit window doesn't.
+        assert!(!apply_pack_health(&addr, &PackFetchOutcome::CleanMiss, t0).unwrap());
+        assert!(!apply_pack_health(&addr, &PackFetchOutcome::CleanMiss, t0 + h).unwrap());
+        // Two more spaced misses reach the count, but 48h hasn't elapsed yet.
+        assert!(!apply_pack_health(&addr, &PackFetchOutcome::CleanMiss, t0 + 13 * h).unwrap());
+        assert!(!apply_pack_health(&addr, &PackFetchOutcome::CleanMiss, t0 + 26 * h).unwrap());
+        assert_eq!(pack_status(&addr), PACK_STATUS_ACTIVE, "count alone must not promote");
+        // Past both thresholds: promoted.
+        let changed = apply_pack_health(&addr, &PackFetchOutcome::CleanMiss, t0 + 49 * h).unwrap();
+        assert!(changed);
+        assert_eq!(pack_status(&addr), PACK_STATUS_MISSING);
+    }
+
+    #[test]
+    fn unreachable_never_moves_counters() {
+        let (_tmp, _guard) = init_test_db();
+        let k = keys();
+        let addr = seed_pack(&k, "offline", &[("zz", "https://e.x/z.png")]);
+        for t in [1_000i64, 200_000, 400_000, 800_000] {
+            assert!(!apply_pack_health(&addr, &PackFetchOutcome::Unreachable, t).unwrap());
+        }
+        assert_eq!(pack_status(&addr), PACK_STATUS_ACTIVE);
+        let conn = crate::db::get_db_connection_guard_static().unwrap();
+        let miss: i64 = conn.query_row(
+            "SELECT miss_count FROM emoji_packs WHERE addr = ?1",
+            rusqlite::params![addr], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(miss, 0, "offline sweeps must not accrue misses");
+    }
+
+    #[test]
+    fn revoked_ignores_clean_misses() {
+        let (_tmp, _guard) = init_test_db();
+        let k = keys();
+        let addr = seed_pack(&k, "sealed", &[("x", "https://e.x/x.png")]);
+        apply_pack_health(&addr, &PackFetchOutcome::Tombstoned, 1_000).unwrap();
+        for t in [100_000i64, 300_000, 600_000] {
+            assert!(!apply_pack_health(&addr, &PackFetchOutcome::CleanMiss, t).unwrap());
+        }
+        assert_eq!(pack_status(&addr), PACK_STATUS_REVOKED, "misses can't downgrade a tombstone verdict");
+    }
+
+    #[test]
+    fn empty_pack_event_is_the_tombstone_shape() {
+        // Vector's own delete flow publishes an empty replacement; the parser
+        // must keep rejecting it so the sweep can read that rejection as a
+        // deterministic tombstone.
+        let k = keys();
+        let ev = build_pack_event(&k, "gone", None, None, None, &[]);
+        assert!(parse_pack_from_event(&ev, None).is_none());
     }
 
     #[test]

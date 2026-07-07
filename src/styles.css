@@ -6072,6 +6072,88 @@ img.emoji-img-loading {
   opacity: 1;
 }
 
+/* Dead emoji pack (revoked by its creator, or durably missing from relays):
+   the section stays visible but blurred behind an explanation + Remove button,
+   so the pack never silently vanishes from under the user. The section itself
+   is the positioning anchor (it's already position: relative for the cell
+   tooltip); the canvas stays a direct child so PackCanvasGrid's parent-based
+   sizing keeps working. */
+.emoji-pack-dead:not(.collapsed) {
+  /* Room for the overlay even on a one-row pack. */
+  min-height: 170px;
+}
+.emoji-pack-dead canvas {
+  filter: grayscale(1) blur(2.5px) opacity(0.35);
+  pointer-events: none;
+}
+/* Linux (WebKitGTK): blur doesn't render on the software fallback, so the
+   canvas hides entirely and the section becomes the notice alone. */
+.emoji-pack-dead-noblur canvas {
+  filter: none;
+  opacity: 0;
+}
+.emoji-pack-dead .emoji-section-header {
+  filter: grayscale(1) opacity(0.6);
+}
+.emoji-pack-dead-notice {
+  position: absolute;
+  /* Below the section header, over the emoji grid. */
+  top: 34px;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 12px;
+  text-align: center;
+  /* Header + collapse chevron stay clickable through the overlay;
+     the Remove button re-enables itself. */
+  pointer-events: none;
+}
+.emoji-section.collapsed .emoji-pack-dead-notice {
+  display: none;
+}
+/* Prefixed with .emoji-picker to out-rank the legacy
+   `.emoji-picker span { width: 30px; height: 30px }` cell catch-all,
+   which otherwise squishes these labels into emoji-sized boxes. */
+.emoji-picker .emoji-pack-dead-text {
+  width: auto;
+  height: auto;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1.35;
+  color: rgba(255, 255, 255, 0.85);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
+  cursor: default;
+}
+.emoji-picker .emoji-pack-dead-subtext {
+  width: auto;
+  height: auto;
+  padding: 0;
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: rgba(255, 255, 255, 0.55);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
+  margin-top: -4px;
+  cursor: default;
+}
+.emoji-pack-dead-remove {
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--icon-color-primary, #59fcb3);
+  background: rgba(0, 0, 0, 0.65);
+  color: var(--icon-color-primary, #59fcb3);
+  font-size: 12.5px;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.emoji-pack-tab-dead {
+  filter: grayscale(1) opacity(0.5);
+}
+
 /* Destination line in the link-open confirm: the full URL must wrap inside the
    popup, never overflow it. Accent color marks it as the load-bearing fact. */
 .link-confirm-url {

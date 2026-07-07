@@ -185,6 +185,7 @@ pub async fn emoji_pack_create(
         emojis,
         is_own: true,
         updated_at: 0,
+        status: emoji_packs::PACK_STATUS_ACTIVE,
     };
 
     emoji_packs::publish_pack(&pack).await

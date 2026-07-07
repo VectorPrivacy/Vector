@@ -2908,6 +2908,11 @@ async function setupRustListeners() {
         await removeCommunityFromUI(communityId);
     });
 
+    // A pack's health verdict changed (revoked / missing / revived) or a pack
+    // was deleted. Reload the local mirror so the picker greys out or revives
+    // the section live, instead of waiting for the next panel open.
+    _on('emoji_packs_updated', () => loadEmojiPacks());
+
     // A control change (banlist / roles / metadata / invite-mode) landed in REALTIME (via the 3308
     // control-plane subscription). Re-read this community's summary into the chat list + re-render the
     // overview if it's open, so online members see name/role/mode changes live, not just on next open.
@@ -7511,6 +7516,7 @@ function equippedEmojiTags() {
     const tags = [];
     const seen = new Set();
     for (const pack of (arrEmojiPacks || [])) {
+        if (packIsDead(pack)) continue;
         for (const e of (pack.emojis || [])) {
             const code = e.dispCode || e.shortcode;
             if (code && e.url && !seen.has(code)) {

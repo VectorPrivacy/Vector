@@ -729,5 +729,25 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // =========================================================================
+    // Migration 63: Emoji pack health (revocation / durable-absence tracking)
+    // =========================================================================
+    // `status`: 0 = active, 1 = revoked (a deterministic tombstone was seen: an
+    // empty kind-30030 replacement, or an author-signed kind-5 deletion),
+    // 2 = missing (absent across enough clean relay sweeps). The miss columns
+    // drive the promotion gauntlet in `emoji_packs::apply_pack_health`; a live
+    // fetch resets everything back to active.
+    run_atomic_migration(conn, 63, "Add health columns to emoji_packs", |tx| {
+        tx.execute_batch(
+            "ALTER TABLE emoji_packs ADD COLUMN status INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE emoji_packs ADD COLUMN miss_count INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE emoji_packs ADD COLUMN first_missed_at INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE emoji_packs ADD COLUMN last_miss_counted_at INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE emoji_packs ADD COLUMN status_changed_at INTEGER NOT NULL DEFAULT 0;",
+        )
+        .map_err(|e| format!("Failed to add emoji pack health columns: {}", e))?;
+        Ok(())
+    })?;
+
     Ok(())
 }
