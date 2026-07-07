@@ -100,6 +100,17 @@ impl SendCallback for TauriSendCallback {
 
     fn on_sent(&self, chat_id: &str, old_id: &str, msg: &Message) {
         UPLOAD_CANCEL_FLAGS.lock().unwrap().remove(old_id);
+        // Mid-flight persists (upload progress, previews) can land a DB row
+        // under the optimistic pending id; the finalized message saves under
+        // its real id, orphaning that row as a ghost duplicate on reload.
+        if old_id.starts_with("pending-") && old_id != msg.id {
+            let pending_id = old_id.to_string();
+            let session = vector_core::state::SessionGuard::capture();
+            tokio::spawn(async move {
+                if !session.is_valid() { return; }
+                let _ = vector_core::db::events::delete_event(&pending_id);
+            });
+        }
         if let Some(handle) = TAURI_APP.get() {
             handle.emit("message_update", serde_json::json!({
                 "old_id": old_id,

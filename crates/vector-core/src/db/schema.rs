@@ -749,5 +749,22 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // =========================================================================
+    // Migration 64: Drop orphaned pending-id event rows
+    // =========================================================================
+    // Mid-flight persists could land a row under a message's optimistic
+    // "pending-…" id; the finalized message then saved under its REAL id,
+    // orphaning the pending-keyed row as a ghost duplicate that renders on
+    // reload. Rows still flagged pending/failed are live send-state (the
+    // retry UI needs them) and stay.
+    run_atomic_migration(conn, 64, "Drop orphaned pending-id event rows", |tx| {
+        tx.execute(
+            "DELETE FROM events WHERE id LIKE 'pending-%' AND pending = 0 AND failed = 0",
+            [],
+        )
+        .map_err(|e| format!("Failed to drop orphaned pending rows: {}", e))?;
+        Ok(())
+    })?;
+
     Ok(())
 }
