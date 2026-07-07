@@ -159,25 +159,37 @@ pub fn split_ms(at_ms: u64) -> (u64, u16) {
 }
 
 /// Resolve a rumor's true millisecond time — STRICT per CORD-02 §5: an absent
-/// `ms` tag is offset 0; a present tag that isn't an integer in 0..=999 makes
-/// the event malformed (`BadMs` — drop it, never clamp), or the excess would
-/// smuggle arbitrary "future" past the coalesce clock checks.
+/// `ms` tag is offset 0; ANY present `ms` tag that isn't a lone integer in
+/// 0..=999 makes the event malformed (`BadMs` — drop it, never clamp), or the
+/// excess would smuggle arbitrary "future" past the coalesce clock checks.
+///
+/// A present-but-valueless `["ms"]` and a duplicated `ms` tag both count as
+/// malformed here — the generic `unique_tag_unsigned` treats a valueless tag as
+/// absent (correct for the binding path, which then rejects true absence as
+/// MissingTag), but for `ms` "present yet uninterpretable" must be BadMs, not a
+/// silent default, so this scans every occurrence of the tag name directly.
 pub fn resolve_ms_strict(rumor: &UnsignedEvent) -> Result<u64, StreamError> {
     let secs = rumor.created_at.as_secs();
-    let offset = match unique_tag_unsigned(rumor, TAG_MS)? {
-        None => 0u64,
-        Some(raw) => {
-            let n: u64 = raw.parse().map_err(|_| StreamError::BadMs)?;
-            if n > 999 || (raw.len() > 1 && raw.starts_with('0')) {
-                // Leading zeros violate the "decimal, no leading zeros" encoding
-                // rule and would let "0999…" style values dodge dedup of the
-                // canonical form.
-                return Err(StreamError::BadMs);
-            }
-            n
+    let mut offset: Option<u64> = None;
+    for t in rumor.tags.iter() {
+        let s = t.as_slice();
+        if s.first().map(|k| k.as_str()) != Some(TAG_MS) {
+            continue;
         }
-    };
-    Ok(secs.saturating_mul(1000).saturating_add(offset))
+        if offset.is_some() {
+            // A second ms occurrence (valued or not) is ambiguous.
+            return Err(StreamError::BadMs);
+        }
+        // Present but valueless, or not a lone 0..=999 decimal without leading
+        // zeros — malformed.
+        let raw = s.get(1).ok_or(StreamError::BadMs)?;
+        let n: u64 = raw.parse().map_err(|_| StreamError::BadMs)?;
+        if n > 999 || (raw.len() > 1 && raw.starts_with('0')) {
+            return Err(StreamError::BadMs);
+        }
+        offset = Some(n);
+    }
+    Ok(secs.saturating_mul(1000).saturating_add(offset.unwrap_or(0)))
 }
 
 // ── build side ───────────────────────────────────────────────────────────────
@@ -540,6 +552,46 @@ mod tests {
                 "ms={bad:?} must be malformed"
             );
         }
+    }
+
+    #[test]
+    fn a_valueless_or_duplicated_ms_tag_is_malformed_not_silently_zero() {
+        // A present-but-valueless ["ms"] must be BadMs, not treated as absent (a
+        // silent offset-0 default would honor a rumor a spec-strict peer drops).
+        let author = Keys::generate();
+        let bare = build_rumor_secs(
+            kind::MESSAGE,
+            author.public_key(),
+            "x",
+            vec![Tag::custom(TagKind::Custom("ms".into()), Vec::<String>::new())],
+            1_000,
+        );
+        assert!(matches!(resolve_ms_strict(&bare), Err(StreamError::BadMs)));
+        // A valued ms plus a valueless one must not let the valued one win — two
+        // ms occurrences are ambiguous.
+        let two = build_rumor_secs(
+            kind::MESSAGE,
+            author.public_key(),
+            "x",
+            vec![
+                Tag::custom(TagKind::Custom("ms".into()), Vec::<String>::new()),
+                Tag::custom(TagKind::Custom("ms".into()), ["5".to_string()]),
+            ],
+            1_000,
+        );
+        assert!(matches!(resolve_ms_strict(&two), Err(StreamError::BadMs)));
+        // Two valued ms tags are also ambiguous.
+        let two_valued = build_rumor_secs(
+            kind::MESSAGE,
+            author.public_key(),
+            "x",
+            vec![
+                Tag::custom(TagKind::Custom("ms".into()), ["1".to_string()]),
+                Tag::custom(TagKind::Custom("ms".into()), ["2".to_string()]),
+            ],
+            1_000,
+        );
+        assert!(matches!(resolve_ms_strict(&two_valued), Err(StreamError::BadMs)));
     }
 
     #[test]

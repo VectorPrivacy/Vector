@@ -408,7 +408,6 @@ pub fn coalesce(
 ) -> BTreeMap<PublicKey, MemberState> {
     let horizon = now_ms.saturating_add(MAX_FUTURE_MS);
     let mut fold: BTreeMap<PublicKey, MemberState> = BTreeMap::new();
-    let mut snap_seen: BTreeMap<[u8; 32], u64> = BTreeMap::new();
 
     for ev in events {
         if ev.entry.at_ms() > horizon {
@@ -453,16 +452,18 @@ pub fn coalesce(
                     },
                 );
             }
-            GuestbookEntry::Snapshot { refounder, members, snapshot_id, at_ms, .. } => {
+            GuestbookEntry::Snapshot { refounder, members, at_ms, .. } => {
                 if snapshot_authority != Some(refounder) {
                     continue;
                 }
-                match snap_seen.get(snapshot_id) {
-                    Some(pinned) if *pinned != *at_ms => continue,
-                    _ => {
-                        snap_seen.insert(*snapshot_id, *at_ms);
-                    }
-                }
+                // Each authorized chunk seeds its own members at its own at_ms,
+                // with NO cross-chunk consistency gate. CORD-02 §5: "chunks are
+                // independently useful ... there is no torn state to defend
+                // against." A first-seen timestamp pin would make a maliciously
+                // torn snapshot resolve differently by relay delivery order,
+                // breaking the deterministic-when-synced guarantee; the per-npub
+                // fold below (latest-ms wins, firsthand beats snapshot, lower
+                // rumor id ties) is commutative, so seeding every chunk converges.
                 for m in members {
                     apply(
                         &mut fold,
@@ -800,20 +801,26 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_chunks_disagreeing_with_their_siblings_timestamp_drop() {
+    fn a_torn_snapshot_coalesces_order_independently() {
+        // A maliciously (or buggily) torn snapshot — two chunks of one snap id
+        // carrying DIFFERENT timestamps — must fold to the SAME member set
+        // regardless of relay delivery order. (A first-seen timestamp pin made
+        // the dropped chunk order-dependent, violating determinism; per CORD-02
+        // §5 there is no torn state to defend against — every authorized chunk
+        // seeds its members.)
         let refounder = pk();
         let (a, b, c) = (pk(), pk(), pk());
-
         let c1 = snap_ev(refounder, vec![a], 0x01, (1, 2), 5_000, 1);
-        // Same snap id, different timestamp: violates one-id-one-time — drop.
         let torn = snap_ev(refounder, vec![b], 0x01, (2, 2), 6_000, 2);
-        // An independent snapshot id at its own timestamp is unaffected.
         let other = snap_ev(refounder, vec![c], 0x02, (1, 1), 6_000, 3);
 
-        let fold = coalesce(&[c1, torn, other], NOW, Some(&refounder), &always);
-        assert!(fold.contains_key(&a));
-        assert!(!fold.contains_key(&b), "the disagreeing chunk seeds nobody");
-        assert!(fold.contains_key(&c));
+        let forward = coalesce(&[c1.clone(), torn.clone(), other.clone()], NOW, Some(&refounder), &always);
+        let reverse = coalesce(&[other, torn, c1], NOW, Some(&refounder), &always);
+        // Both orders seed all three members, identically.
+        for m in [&a, &b, &c] {
+            assert!(forward.contains_key(m) && reverse.contains_key(m), "every authorized chunk seeds its members");
+        }
+        assert_eq!(forward, reverse, "a torn snapshot must coalesce identically regardless of order");
     }
 
     #[test]

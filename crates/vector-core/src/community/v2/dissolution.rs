@@ -69,21 +69,24 @@ impl From<StreamError> for DissolveError {
     }
 }
 
-/// The all-zero `eid` hex, 64 chars — the tombstone's chainless coordinate.
-fn zero_eid_hex() -> String {
-    crate::simd::hex::bytes_to_hex_32(&[0u8; 32])
-}
-
 /// Build the owner-dissolution tombstone rumor: kind 3308, empty content,
-/// `["vsk","10"]` + `["eid", 0…0]`, and CHAINLESS — no `ev`, `ep`, or `vac`.
+/// `["vsk","10"]` + `["eid", <community_id>]`, and CHAINLESS — no `ev`, `ep`, or
+/// `vac`.
 ///
-/// The `community_id` binds the tombstone through its ADDRESS (see
-/// [`seal_dissolved`]), not through the rumor, so it takes no id here — only the
-/// owner and a send time.
-pub fn dissolved_tombstone_rumor(owner: PublicKey, created_at_secs: u64) -> UnsignedEvent {
+/// **The `eid` MUST be the `community_id`, NOT the all-zero the CORD-02 §9 wire
+/// example shows.** The signed rumor is otherwise community-agnostic and the
+/// dissolved plane is addressed by the *public* `community_id` (it ships in every
+/// invite), so with a zero `eid` an owner's genuine tombstone for community X can
+/// be lifted and re-wrapped at the dissolved address of any OTHER community Y the
+/// same owner runs — the owner's signature validates for both, killing Y with no
+/// membership or ownership needed. Committing the `community_id` inside the signed
+/// payload makes a seal minted for X fail the binding check at Y. This is a
+/// deliberate divergence from the frozen §9 shape (a spec erratum to raise
+/// upstream — Armada carries the same replay hole).
+pub fn dissolved_tombstone_rumor(owner: PublicKey, community_id: &CommunityId, created_at_secs: u64) -> UnsignedEvent {
     let tags = vec![
         Tag::custom(TagKind::Custom(TAG_VSK.into()), [vsk::DISSOLVED.to_string()]),
-        Tag::custom(TagKind::Custom(TAG_EID.into()), [zero_eid_hex()]),
+        Tag::custom(TagKind::Custom(TAG_EID.into()), [crate::simd::hex::bytes_to_hex_32(&community_id.0)]),
     ];
     stream::build_rumor_secs(kind::CONTROL, owner, "", tags, created_at_secs)
 }
@@ -109,7 +112,10 @@ pub fn seal_dissolved(
 pub fn open_dissolved(wrap: &Event, community_id: &CommunityId) -> Result<DissolvedTombstone, DissolveError> {
     let group = dissolved_group_key(community_id);
     let opened = stream::open_wrap(wrap, &group)?;
-    if !is_tombstone_rumor(&opened.rumor) {
+    // The signed `eid` MUST commit to THIS community — a tombstone lifted from
+    // another community the same owner runs (re-wrapped at this public address)
+    // carries a foreign `eid` and is rejected here, before it can be honored.
+    if !is_tombstone_rumor(&opened.rumor, community_id) {
         return Err(DissolveError::NotATombstone);
     }
     Ok(DissolvedTombstone { owner: opened.author })
@@ -132,13 +138,15 @@ pub fn verify_dissolved(wrap: &Event, identity: &CommunityIdentity) -> bool {
     }
 }
 
-/// A chainless `vsk 10` tombstone: kind 3308, `vsk == "10"`, `eid == 0…0`. The
-/// seal form and any extra tags are irrelevant — the marker plus the (already
-/// seal-verified) owner signature is the whole state.
-fn is_tombstone_rumor(rumor: &UnsignedEvent) -> bool {
+/// A chainless `vsk 10` tombstone for THIS community: kind 3308, `vsk == "10"`,
+/// and `eid == community_id` (the replay binding — see [`dissolved_tombstone_rumor`]).
+/// The seal form and any extra tags are irrelevant — the marker plus the
+/// community binding plus the (already seal-verified) owner signature is the
+/// whole state.
+fn is_tombstone_rumor(rumor: &UnsignedEvent, community_id: &CommunityId) -> bool {
     rumor.kind.as_u16() == kind::CONTROL
         && first_tag(rumor, TAG_VSK).as_deref() == Some(vsk::DISSOLVED)
-        && first_tag(rumor, TAG_EID).as_deref() == Some(zero_eid_hex().as_str())
+        && first_tag(rumor, TAG_EID).as_deref() == Some(crate::simd::hex::bytes_to_hex_32(&community_id.0).as_str())
 }
 
 fn first_tag(rumor: &UnsignedEvent, name: &str) -> Option<String> {
@@ -159,14 +167,17 @@ mod tests {
         (identity, owner)
     }
 
+    /// Build a valid owner-signed tombstone wrap for `identity`.
+    fn tombstone_for(identity: &CommunityIdentity, owner: &Keys) -> Event {
+        let rumor = dissolved_tombstone_rumor(owner.public_key(), &identity.community_id, 1_725_000_000);
+        seal_dissolved(&rumor, &identity.community_id, owner, Timestamp::from_secs(1_725_000_000)).unwrap()
+    }
+
     #[test]
     fn owner_tombstone_round_trips_and_verifies() {
         let (identity, owner) = identity_and_owner();
-        let rumor = dissolved_tombstone_rumor(owner.public_key(), 1_725_000_000);
-        let wrap = seal_dissolved(&rumor, &identity.community_id, &owner, Timestamp::from_secs(1_725_000_000)).unwrap();
-
-        let opened = open_dissolved(&wrap, &identity.community_id).unwrap();
-        assert_eq!(opened.owner, owner.public_key());
+        let wrap = tombstone_for(&identity, &owner);
+        assert_eq!(open_dissolved(&wrap, &identity.community_id).unwrap().owner, owner.public_key());
         assert!(verify_dissolved(&wrap, &identity));
     }
 
@@ -176,7 +187,7 @@ mod tests {
         // Anyone holding the community_id can FIND the address and post there,
         // but only the committed owner's signature counts.
         let impostor = Keys::generate();
-        let rumor = dissolved_tombstone_rumor(impostor.public_key(), 1_725_000_000);
+        let rumor = dissolved_tombstone_rumor(impostor.public_key(), &identity.community_id, 1_725_000_000);
         let wrap = seal_dissolved(&rumor, &identity.community_id, &impostor, Timestamp::from_secs(1_725_000_000)).unwrap();
 
         // It opens (structurally valid, impostor-signed) but fails the authority gate.
@@ -187,8 +198,7 @@ mod tests {
     #[test]
     fn a_non_self_certifying_identity_fails_closed() {
         let (identity, owner) = identity_and_owner();
-        let rumor = dissolved_tombstone_rumor(owner.public_key(), 1_725_000_000);
-        let wrap = seal_dissolved(&rumor, &identity.community_id, &owner, Timestamp::from_secs(1_725_000_000)).unwrap();
+        let wrap = tombstone_for(&identity, &owner);
 
         // Same id, a claimed owner that doesn't reproduce the commitment.
         let attacker = Keys::generate();
@@ -204,8 +214,7 @@ mod tests {
     #[test]
     fn the_address_is_community_id_derived_and_epoch_free() {
         let (identity, owner) = identity_and_owner();
-        let rumor = dissolved_tombstone_rumor(owner.public_key(), 1_725_000_000);
-        let wrap = seal_dissolved(&rumor, &identity.community_id, &owner, Timestamp::from_secs(1_725_000_000)).unwrap();
+        let wrap = tombstone_for(&identity, &owner);
 
         // A fresh joiner holding ONLY the community_id resolves the same grave at
         // "any epoch" — the derivation takes none — and opens the tombstone.
@@ -221,13 +230,44 @@ mod tests {
     }
 
     #[test]
-    fn the_tombstone_rumor_is_chainless() {
+    fn a_tombstone_cannot_be_replayed_onto_another_community_of_the_same_owner() {
+        // The critical replay: one owner runs X and Y (both community_ids are
+        // PUBLIC — they ride in invites). O legitimately dissolves X. An attacker
+        // holding only the two public ids lifts X's owner-signed seal and re-wraps
+        // it at Y's (public-id-derived) dissolved address. Y members must NOT read
+        // it as death: the signed `eid` names X, not Y.
         let owner = Keys::generate();
-        let rumor = dissolved_tombstone_rumor(owner.public_key(), 1_725_000_000);
+        let x = CommunityIdentity::mint(&owner.public_key());
+        let y = CommunityIdentity::mint(&owner.public_key());
+        assert_ne!(x.community_id, y.community_id);
+
+        let wrap_x = tombstone_for(&x, &owner);
+        // Sanity: it kills X.
+        assert!(verify_dissolved(&wrap_x, &x));
+
+        // Attacker lifts the seal out of X's wrap and re-wraps at Y's address.
+        let x_group = dissolved_group_key(&x.community_id);
+        let opened_x = stream::open_wrap(&wrap_x, &x_group).unwrap();
+        let y_group = dissolved_group_key(&y.community_id);
+        let (replayed, _) = stream::wrap_seal(&opened_x.seal, &y_group, stream::KIND_WRAP, Timestamp::from_secs(1_725_000_100)).unwrap();
+
+        // The re-wrap opens at Y's address (valid owner signature) but the signed
+        // eid still names X, so it is NOT a tombstone for Y.
+        assert!(matches!(open_dissolved(&replayed, &y.community_id), Err(DissolveError::NotATombstone)));
+        assert!(!verify_dissolved(&replayed, &y), "an X tombstone must never kill Y");
+    }
+
+    #[test]
+    fn the_tombstone_rumor_is_chainless_and_binds_the_community() {
+        let owner = Keys::generate();
+        let cid = CommunityId([0x5a; 32]);
+        let rumor = dissolved_tombstone_rumor(owner.public_key(), &cid, 1_725_000_000);
         assert_eq!(rumor.kind.as_u16(), kind::CONTROL);
         assert!(rumor.content.is_empty());
         assert_eq!(first_tag(&rumor, TAG_VSK).as_deref(), Some(vsk::DISSOLVED));
-        assert_eq!(first_tag(&rumor, TAG_EID).as_deref(), Some(zero_eid_hex().as_str()));
+        // eid binds the community (the replay fix), NOT the spec's all-zero.
+        assert_eq!(first_tag(&rumor, TAG_EID).as_deref(), Some(crate::simd::hex::bytes_to_hex_32(&cid.0).as_str()));
+        assert_ne!(first_tag(&rumor, TAG_EID).as_deref(), Some(crate::simd::hex::bytes_to_hex_32(&[0u8; 32]).as_str()));
         // No chain machinery: ev / ep / vac are all absent.
         for machinery in ["ev", "ep", "vac"] {
             assert!(first_tag(&rumor, machinery).is_none(), "chainless: {machinery} must be absent");
