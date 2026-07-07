@@ -18,7 +18,10 @@
 pub mod chat;
 pub mod control;
 pub mod derive;
+pub mod dissolution;
 pub mod guestbook;
+pub mod invite;
+pub mod list;
 pub mod rekey;
 pub mod stream;
 
