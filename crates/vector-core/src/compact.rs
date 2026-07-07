@@ -44,12 +44,19 @@ fn hex_nibble(b: u8) -> u8 {
 // Pending ID Encoding
 // ============================================================================
 
-/// Marker byte for pending IDs (first byte = 0x01)
-/// Real event IDs are random SHA256 hashes, so this is safe.
+/// Marker byte for pending IDs (first byte = 0x01).
 const PENDING_ID_MARKER: u8 = 0x01;
 
+/// Trailing sentinel for encoded pending ids (bytes 17..32). The marker byte
+/// alone is NOT safe: real event ids are uniform hashes, so 1 in 256 begins
+/// with 0x01 and would decode as a phantom "pending-…" string — mangling read
+/// markers, frontend-facing ids, every decode consumer. Requiring marker AND
+/// sentinel makes that misread a ~2^-120 event.
+const PENDING_ID_SENTINEL: [u8; 15] = [0xFE; 15];
+
 /// Encode an ID string to 32 bytes, handling pending IDs specially.
-/// - Pending IDs ("pending-{nanoseconds}") are encoded with marker byte + timestamp
+/// - Pending IDs ("pending-{nanoseconds}") are encoded as marker byte +
+///   timestamp + sentinel tail
 /// - Regular hex IDs are decoded normally
 #[inline]
 pub fn encode_message_id(id: &str) -> [u8; 32] {
@@ -60,6 +67,7 @@ pub fn encode_message_id(id: &str) -> [u8; 32] {
         if let Ok(timestamp) = timestamp_str.parse::<u128>() {
             bytes[1..17].copy_from_slice(&timestamp.to_le_bytes());
         }
+        bytes[17..32].copy_from_slice(&PENDING_ID_SENTINEL);
         bytes
     } else {
         hex_to_bytes_32(id)
@@ -69,7 +77,7 @@ pub fn encode_message_id(id: &str) -> [u8; 32] {
 /// Decode 32 bytes back to an ID string, handling pending IDs specially.
 #[inline]
 pub fn decode_message_id(bytes: &[u8; 32]) -> String {
-    if bytes[0] == PENDING_ID_MARKER {
+    if bytes[0] == PENDING_ID_MARKER && bytes[17..32] == PENDING_ID_SENTINEL {
         // Decode pending ID: extract timestamp from bytes 1-16
         let mut timestamp_bytes = [0u8; 16];
         timestamp_bytes.copy_from_slice(&bytes[1..17]);
@@ -1595,6 +1603,34 @@ impl CompactMessage {
 mod tests {
     use super::*;
 
+    // A real event id that happens to start with the pending marker byte must
+    // round-trip EXACTLY — the marker alone once misread 1 in 256 real ids as
+    // phantom "pending-…" strings, wedging read markers among other consumers.
+    #[test]
+    fn real_id_starting_with_marker_byte_roundtrips() {
+        let id = "01b95c05179c6d6abbc60b9a35198fdee6e0ce5b80a0b7ac8d465d81d038a73d";
+        let encoded = encode_message_id(id);
+        assert_eq!(decode_message_id(&encoded), id);
+    }
+
+    #[test]
+    fn pending_id_roundtrips() {
+        let id = "pending-306878031314";
+        let encoded = encode_message_id(id);
+        assert_eq!(encoded[0], PENDING_ID_MARKER);
+        assert_eq!(decode_message_id(&encoded), id);
+    }
+
+    #[test]
+    fn marker_byte_without_sentinel_decodes_as_hex() {
+        // Marker byte + arbitrary tail (no sentinel) is a real id, not pending.
+        let mut bytes = [0xABu8; 32];
+        bytes[0] = PENDING_ID_MARKER;
+        let decoded = decode_message_id(&bytes);
+        assert!(!decoded.starts_with("pending-"));
+        assert_eq!(decoded.len(), 64);
+    }
+
     #[test]
     fn test_message_flags() {
         let mut flags = MessageFlags::NONE;
@@ -2145,15 +2181,14 @@ mod tests {
 
     #[test]
     fn pending_id_marker_distinguishes_from_real_id() {
-        // A real event ID starting with 01 should NOT be confused with pending
+        // A real event ID starting with 0x01 must NOT be confused with pending:
+        // 1 in 256 real ids begin with the marker byte, and misreading them
+        // mangled read markers into phantom "pending-…" strings. Only the
+        // marker + sentinel combination reads as pending.
         let hex = "0100000000000000000000000000000000000000000000000000000000000000";
         let encoded = encode_message_id(hex);
-        // The first byte is 0x01 which matches PENDING_ID_MARKER - but decode_message_id
-        // will treat it as pending. This is by design since real SHA256 IDs with first
-        // byte 0x01 are extremely rare and the probability is 1/256.
         let decoded = decode_message_id(&encoded);
-        // This will decode as pending since byte[0] == 0x01
-        assert!(decoded.starts_with("pending-"), "ID starting with 0x01 byte is treated as pending by design");
+        assert_eq!(decoded, hex, "marker-leading real id must roundtrip exactly");
     }
 
     #[test]
