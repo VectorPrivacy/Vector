@@ -827,7 +827,7 @@ mod tests {
         let c = test_channel();
 
         let mk = |n: &str, ext: &str| Attachment {
-            id: "x".into(), key: "0".repeat(64), nonce: format!("{:0<24}", n),
+            id: "x".into(), key: "0".repeat(64), nonce: format!("{:0<24}", crate::simd::hex::bytes_to_hex_string(n.as_bytes())),
             extension: ext.into(), name: n.into(), url: format!("https://b/{n}"),
             path: String::new(), size: 9, img_meta: None, downloading: false, downloaded: false,
             webxdc_topic: None, group_id: None, original_hash: Some("a".repeat(64)),

@@ -447,27 +447,30 @@ fn process_file_attachment(
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(0);
 
-    // Determine file path and download status. The basis (ox hash or nonce)
-    // is author-controlled and becomes an on-disk filename — require bounded
-    // plain hex before joining it into a path, mirroring the Community
-    // parser, so a crafted tag can't smuggle `../` traversal into `path`.
+    // Determine identity, file path and download status via the shared basis
+    // rules (ox for dedup when present, else a nonce+url digest — see
+    // `attachment_identity_basis`). The basis is author-controlled and
+    // becomes an on-disk filename — require bounded plain hex before joining
+    // it into a path, mirroring the Community parser, so a crafted tag can't
+    // smuggle `../` traversal into `path`.
     let valid_path_basis =
         |s: &str| !s.is_empty() && s.len() <= 128 && s.bytes().all(|b| b.is_ascii_hexdigit());
     let original_file_hash = original_file_hash.filter(|h| valid_path_basis(h));
     if !valid_path_basis(&decryption_nonce) {
         return Err("Invalid decryption-nonce tag".to_string());
     }
-    let (file_hash, file_path, downloaded) = if let Some(ox_hash) = original_file_hash {
-        let hash_file_path = download_dir.join(format!("{}.{}", ox_hash, extension));
-        if hash_file_path.exists() {
-            (ox_hash, hash_file_path.to_string_lossy().to_string(), true)
-        } else {
-            (ox_hash, hash_file_path.to_string_lossy().to_string(), false)
-        }
-    } else {
-        let nonce_file_path = download_dir.join(format!("{}.{}", decryption_nonce, extension));
-        (decryption_nonce.clone(), nonce_file_path.to_string_lossy().to_string(), false)
-    };
+    let file_hash = crate::crypto::attachment_identity_basis(
+        original_file_hash.as_deref(),
+        &decryption_nonce,
+        &content_url,
+    );
+    let hash_file_path = download_dir.join(format!("{}.{}", file_hash, extension));
+    // Arrival never claims downloaded: an ox-named file proves nothing about
+    // content (the download path re-verifies by hash before reuse), and the
+    // honest pipeline never writes digest-named files at all — a file found
+    // under one could only be a foreign plant.
+    let downloaded = false;
+    let file_path = hash_file_path.to_string_lossy().to_string();
 
     // Extract reply reference if present
     let replied_to = extract_reply_reference(&rumor);
@@ -499,7 +502,7 @@ fn process_file_attachment(
         downloaded,
         webxdc_topic,
         group_id: None,       // Kind 15 attachments use explicit key/nonce
-        original_hash: Some(file_hash), // ox tag value (original file hash)
+        original_hash: original_file_hash, // ox tag value (original file hash)
         scheme_version: None, // Kind 15 uses explicit encryption, not MIP-04
         mls_filename: None,   // Kind 15 uses explicit encryption, not MIP-04
     };
@@ -1390,8 +1393,9 @@ mod tests {
         let dir = temp_dir();
         let ctx = || dm_context(&keys);
 
-        // Traversal via ox: non-hex basis is ignored → path falls back to the
-        // (hex) nonce and never leaves the download dir.
+        // Traversal via ox: non-hex basis is ignored → the identity falls back
+        // to the nonce+url digest (always clean hex) and never leaves the
+        // download dir.
         let t = tags(vec![
             custom_tag("decryption-key", &["aabbccdd"]),
             custom_tag("decryption-nonce", &["11223344"]),
@@ -1400,11 +1404,12 @@ mod tests {
             custom_tag("name", &["x.jpg"]),
         ]);
         let rumor = make_rumor(&keys, Kind::from_u16(15), "https://blossom.example/x.jpg", t);
+        let expected_id = crate::crypto::attachment_identity_basis(None, "11223344", "https://blossom.example/x.jpg");
         match process_rumor(rumor, ctx(), &dir).unwrap() {
             RumorProcessingResult::FileAttachment(msg) => {
                 let att = &msg.attachments[0];
                 assert!(!att.path.contains(".."), "traversal basis must not reach the path: {}", att.path);
-                assert_eq!(att.id, "11223344", "id falls back to the hex nonce");
+                assert_eq!(att.id, expected_id, "id falls back to the nonce+url digest");
             }
             _ => panic!("Expected FileAttachment"),
         }

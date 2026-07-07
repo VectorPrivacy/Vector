@@ -97,17 +97,28 @@ pub fn attachment_from_imeta(tag: &Tag, download_dir: &Path) -> Option<Attachmen
         }
     };
 
-    // Local path keyed on the original hash (dedup across messages) when present, else
-    // the nonce (unique per send). The basis is author-controlled, so require it to be a
-    // bounded hex string before joining it into a filesystem path — a hostile member can't
-    // smuggle `../` traversal into the persisted `path` (defense-in-depth: `open_attachment`
-    // also re-checks the path is inside the download dir).
-    let basis = original_hash.clone().unwrap_or_else(|| nonce.clone());
+    // The nonce is author-controlled, feeds the identity digest, and must be
+    // hex for decryption anyway — reject garbage outright.
+    if nonce.is_empty() || nonce.len() > 128 || !nonce.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+
+    // Identity + local path via the shared basis rules (ox for dedup when
+    // present, else a nonce+url digest — see `attachment_identity_basis`).
+    // The ox basis is author-controlled, so require bounded hex before
+    // joining it into a filesystem path — a hostile member can't smuggle
+    // `../` traversal into the persisted `path` (defense-in-depth:
+    // `open_attachment` also re-checks the path is inside the download dir).
+    let basis = crate::crypto::attachment_identity_basis(original_hash.as_deref(), &nonce, &url);
     if basis.is_empty() || basis.len() > 128 || !basis.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     let path = download_dir.join(format!("{}.{}", basis, extension));
-    let downloaded = path.exists();
+    // Arrival never claims downloaded: an ox-named file proves nothing about
+    // content (the download path re-verifies by hash before reuse), and the
+    // honest pipeline never writes digest-named files at all — a file found
+    // under one could only be a foreign plant.
+    let downloaded = false;
 
     // Bounded sanity on the author-controlled topic: base32 alphabet only, 32-byte
     // payload (52 chars). Anything else is dropped, not propagated to the realtime layer.
@@ -171,6 +182,57 @@ mod tests {
             scheme_version: None,
             mls_filename: None,
         }
+    }
+
+    #[test]
+    fn nonce_reuse_yields_distinct_identities() {
+        // Two DIFFERENT uploads sharing a (reused) nonce and lacking ox must
+        // not share an identity or an on-disk path — that cross-binding is
+        // exactly how a new image rendered as an older one.
+        let dir = std::env::temp_dir();
+        let mut a = sample("", "png", false);
+        a.original_hash = None;
+        let mut b = sample("", "png", false);
+        b.original_hash = None;
+        b.url = "https://blossom.example/DIFFERENT".into();
+
+        let pa = attachment_from_imeta(&attachment_to_imeta(&a), &dir).unwrap();
+        let pb = attachment_from_imeta(&attachment_to_imeta(&b), &dir).unwrap();
+        assert_eq!(pa.nonce, pb.nonce, "precondition: shared nonce");
+        assert_ne!(pa.id, pb.id, "identity must differ per upload");
+        assert_ne!(pa.path, pb.path, "on-disk target must differ per upload");
+    }
+
+    #[test]
+    fn ox_identity_never_claims_downloaded_on_arrival() {
+        // A file existing at {ox}.{ext} proves nothing about content (ox is
+        // the sender's CLAIM); arrival must not bind to it. The download path
+        // re-verifies by hash before any reuse.
+        let dir = tempfile::tempdir().unwrap();
+        let att = sample("", "png", false);
+        let ox = att.original_hash.clone().unwrap();
+        std::fs::write(dir.path().join(format!("{}.png", ox)), b"some other image").unwrap();
+
+        let parsed = attachment_from_imeta(&attachment_to_imeta(&att), dir.path()).unwrap();
+        assert_eq!(parsed.id, ox, "ox stays the dedup identity");
+        assert!(!parsed.downloaded, "existence of an ox-named file is not proof of download");
+    }
+
+    #[test]
+    fn digest_identity_never_trusts_planted_files() {
+        // The honest pipeline never writes files under the digest name, so a
+        // file found there could only be a foreign plant (e.g. an attachment
+        // saved under an attacker-chosen 64-hex filename). Arrival must not
+        // bind to it.
+        let dir = tempfile::tempdir().unwrap();
+        let mut att = sample("", "png", false);
+        att.original_hash = None;
+        let digest = crate::crypto::attachment_identity_basis(None, &att.nonce, &att.url);
+        std::fs::write(dir.path().join(format!("{}.png", digest)), b"planted content").unwrap();
+
+        let parsed = attachment_from_imeta(&attachment_to_imeta(&att), dir.path()).unwrap();
+        assert_eq!(parsed.id, digest);
+        assert!(!parsed.downloaded, "a digest-named file is never proof of download");
     }
 
     #[test]

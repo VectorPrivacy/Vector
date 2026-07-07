@@ -294,18 +294,25 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                             } else {
                                 None
                             };
-                            let file_path = if hash_path.exists() {
+                            let expected_hash = util::bytes_to_hex_32(&attachment.id);
+                            // Reuse requires a content-hash match, whatever the filename:
+                            // an ox-named file proves nothing by itself (ox is the
+                            // sender's CLAIM), and the honest pipeline never writes
+                            // digest-named files at all — so a digest id can never match
+                            // and correctly falls through to a real download. Size gates
+                            // the read so an obvious mismatch skips the full hash.
+                            let content_matches = |p: &std::path::PathBuf| {
+                                let size_ok = attachment.size == 0
+                                    || std::fs::metadata(p).map(|m| m.len() == attachment.size).unwrap_or(false);
+                                size_ok
+                                    && std::fs::read(p)
+                                        .map(|b| util::calculate_file_hash(&b) == expected_hash)
+                                        .unwrap_or(false)
+                            };
+                            let file_path = if hash_path.exists() && content_matches(&hash_path) {
                                 Some(hash_path)
                             } else {
-                                // Only reuse a name-based file if its content hash matches
-                                let expected_hash = util::bytes_to_hex_32(&attachment.id);
-                                name_path.filter(|p| {
-                                    p.exists()
-                                        && std::fs::metadata(p).map(|m| m.len() == attachment.size).unwrap_or(false)
-                                        && std::fs::read(p)
-                                            .map(|b| util::calculate_file_hash(&b) == expected_hash)
-                                            .unwrap_or(false)
-                                })
+                                name_path.filter(|p| p.exists() && content_matches(p))
                             };
                             if let Some(file_path) = file_path {
                                 // File already exists! Update the state and return success

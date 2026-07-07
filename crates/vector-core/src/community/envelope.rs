@@ -553,7 +553,7 @@ mod tests {
         let mk = |name: &str, ext: &str, img: bool| Attachment {
             id: "x".into(),
             key: "0".repeat(64),
-            nonce: format!("{:0<24}", name),
+            nonce: format!("{:0<24}", crate::simd::hex::bytes_to_hex_string(name.as_bytes())),
             extension: ext.into(),
             name: name.into(),
             url: format!("https://blossom.example/{name}"),

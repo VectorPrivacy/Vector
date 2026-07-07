@@ -196,6 +196,28 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(&hasher.finalize())
 }
 
+/// Identity basis for a RECEIVED attachment: the sender's `ox` (plaintext
+/// hash) when provided — it's what enables honest cross-message dedup — else
+/// a digest of nonce+url. Never the raw nonce: senders can and do reuse
+/// nonces, which cross-bound DIFFERENT files to one identity (the "new image
+/// renders as an old one" class). The upload URL is unique per ciphertext,
+/// so the digest is collision-resistant even against nonce reuse. Nothing
+/// honest ever writes a file under the digest name, so existence of one is
+/// never proof of download — reuse decisions stay with the content-verified
+/// download path.
+pub fn attachment_identity_basis(ox: Option<&str>, nonce: &str, url: &str) -> String {
+    match ox.filter(|h| !h.is_empty()) {
+        Some(h) => h.to_string(),
+        None => {
+            let mut buf = Vec::with_capacity(nonce.len() + 1 + url.len());
+            buf.extend_from_slice(nonce.as_bytes());
+            buf.push(0);
+            buf.extend_from_slice(url.as_bytes());
+            sha256_hex(&buf)
+        }
+    }
+}
+
 /// Get MIME type from file extension.
 pub fn mime_from_extension(ext: &str) -> &'static str {
     match ext.to_lowercase().as_str() {
