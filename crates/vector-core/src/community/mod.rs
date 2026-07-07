@@ -27,6 +27,7 @@ pub mod roles;
 pub mod send;
 pub mod service;
 pub mod transport;
+pub mod v2;
 
 use nostr_sdk::prelude::PublicKey;
 use rand::RngCore;
