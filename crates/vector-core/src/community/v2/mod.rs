@@ -19,6 +19,7 @@ pub mod chat;
 pub mod control;
 pub mod derive;
 pub mod guestbook;
+pub mod rekey;
 pub mod stream;
 
 /// Inner rumor kinds (CORD-02 Appendix B). The *outer* event is always a wrap
