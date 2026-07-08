@@ -173,7 +173,12 @@ pub async fn fetch_channel<T: Transport + ?Sized>(
 /// Public channel carries the `community_root` as its "key" (the joiner derives
 /// the real secret from the root), a Private one its own key. The bundle
 /// self-certifies the owner, so the inviter's identity is irrelevant to trust.
-pub fn bundle_of(community: &CommunityV2, creator: Option<PublicKey>, expires_at_ms: Option<u64>) -> CommunityInvite {
+pub fn bundle_of(
+    community: &CommunityV2,
+    creator: Option<PublicKey>,
+    expires_at_ms: Option<u64>,
+    label: Option<String>,
+) -> CommunityInvite {
     let hex = crate::simd::hex::bytes_to_hex_32;
     let channels = community
         .channels
@@ -197,22 +202,26 @@ pub fn bundle_of(community: &CommunityV2, creator: Option<PublicKey>, expires_at
         icon: None,
         expires_at: expires_at_ms,
         creator_npub: creator.map(|p| p.to_hex()),
-        label: None,
+        label,
         extra: Default::default(),
     }
 }
 
 /// Gift-wrap a Direct Invite (kind 3313) of this community straight to `recipient`
-/// and publish it to the community relays. The bundle hands over the keys; the
-/// recipient consents by accepting (nothing joins on receipt). Returns the wrap.
+/// and publish it to the community relays. `expires_at_ms` (unix ms) optionally
+/// bounds its shelf life; `label` is echoed in the joiner's Guestbook Join. The
+/// bundle hands over the keys; the recipient consents by accepting (nothing joins
+/// on receipt). Returns the wrap.
 pub async fn send_direct_invite<T: Transport + ?Sized>(
     transport: &T,
     community: &CommunityV2,
     recipient: &PublicKey,
+    expires_at_ms: Option<u64>,
+    label: Option<String>,
 ) -> Result<Event, String> {
     let session = SessionGuard::capture();
     let inviter = local_keys()?;
-    let bundle = bundle_of(community, Some(inviter.public_key()), None);
+    let bundle = bundle_of(community, Some(inviter.public_key()), expires_at_ms, label);
     let wrap = invite::build_direct_invite(&inviter, recipient, &bundle).map_err(|e| e.to_string())?;
     if !session.is_valid() {
         return Err("account changed before sending invite".to_string());
@@ -240,12 +249,14 @@ pub async fn mint_public_link<T: Transport + ?Sized>(
     transport: &T,
     community: &CommunityV2,
     base: &str,
+    expires_at_ms: Option<u64>,
+    label: Option<String>,
 ) -> Result<MintedLink, String> {
     let session = SessionGuard::capture();
     let mut token = [0u8; super::derive::TOKEN_LEN];
     token.copy_from_slice(&super::super::random_32()[..super::derive::TOKEN_LEN]);
     let link_signer = Keys::generate();
-    let bundle = bundle_of(community, Some(local_keys()?.public_key()), None);
+    let bundle = bundle_of(community, Some(local_keys()?.public_key()), expires_at_ms, label);
     let bundle_key = super::derive::invite_bundle_key(&token);
     let bundle_event = invite::build_bundle_event(&link_signer, &bundle, &bundle_key).map_err(|e| e.to_string())?;
     let url = invite::build_invite_url(base, &link_signer.public_key(), &token, &community.relays).map_err(|e| e.to_string())?;
@@ -259,21 +270,25 @@ pub async fn mint_public_link<T: Transport + ?Sized>(
 
 /// Accept an already-unwrapped bundle: verify the owner commitment, persist the
 /// community, and announce a Guestbook Join (with invite attribution). Shared tail
-/// of both the Direct-Invite and public-link accept paths.
+/// of both accept paths. Takes the caller's `SessionGuard` (captured BEFORE any
+/// network fetch the caller did) so the `is_valid()` gate straddles that I/O.
 async fn accept_bundle<T: Transport + ?Sized>(
     transport: &T,
+    session: &SessionGuard,
     bundle: &CommunityInvite,
     invited_by: Option<PublicKey>,
 ) -> Result<CommunityV2, String> {
-    let session = SessionGuard::capture();
     let me = local_keys()?;
     let at_ms = now_ms();
     // Expiry gate: a past invite still previews but must not join (CORD-05 §1).
-    if bundle.expires_at.is_some_and(|exp| at_ms > exp) {
+    if bundle.expired(at_ms) {
         return Err("this invite has expired".to_string());
     }
+    // `from_bundle` re-validates bounds + the owner commitment fail-closed.
     let community = CommunityV2::from_bundle(bundle, at_ms)?;
 
+    // The account must not have swapped since the guard was captured (which was
+    // before any fetch the caller performed) — else we'd write A's join into B.
     if !session.is_valid() {
         return Err("account changed during join".to_string());
     }
@@ -295,24 +310,29 @@ async fn accept_bundle<T: Transport + ?Sized>(
 }
 
 /// Accept a Direct Invite: unwrap the 3313 giftwrap (Schnorr-verifying the seal),
-/// then run the shared accept path. The recipient's consent IS this call.
+/// then run the shared accept path. The recipient's consent IS this call. No
+/// network await precedes the accept, so the guard captured here suffices.
 pub async fn accept_direct_invite<T: Transport + ?Sized>(transport: &T, wrap: &Event) -> Result<CommunityV2, String> {
+    let session = SessionGuard::capture();
     let me = local_keys()?;
     let (inviter, bundle) = invite::unwrap_direct_invite(wrap, &me).map_err(|e| e.to_string())?;
-    accept_bundle(transport, &bundle, Some(inviter)).await
+    accept_bundle(transport, &session, &bundle, Some(inviter)).await
 }
 
-/// Accept a public invite link: parse it, fetch the addressable bundle at
-/// `(33301, link_signer, "")`, decrypt with the token key, and join. Refuses a
-/// revoked link (the fetcher finds the grave, not keys).
+/// Accept a public invite link: parse it, fetch every event at `(33301,
+/// link_signer, "")`, and join. **Revocation is authoritative-if-present**: if
+/// ANY signer-valid tombstone is among the fetched events, refuse — never trust
+/// fetch ordering (a cross-relay union has no global newest-first sort, so a
+/// stale Live could otherwise win a partial-propagation race). Otherwise pick the
+/// newest valid Live by `created_at`.
 pub async fn accept_public_link<T: Transport + ?Sized>(transport: &T, url: &str) -> Result<CommunityV2, String> {
+    // Capture BEFORE the network fetch so the join's is_valid() gate straddles it.
+    let session = SessionGuard::capture();
     let parsed = invite::parse_invite_link(url).map_err(|e| e.to_string())?;
-    // Fetch the bundle by its exact coordinate (author is the anti-squat guard).
     let query = Query {
         kinds: vec![super::kind::INVITE_BUNDLE],
         authors: vec![parsed.link_signer.to_hex()],
         d_tags: vec![String::new()],
-        limit: Some(1),
         ..Default::default()
     };
     let relays = if parsed.bootstrap_relays.is_empty() {
@@ -321,18 +341,56 @@ pub async fn accept_public_link<T: Transport + ?Sized>(transport: &T, url: &str)
         parsed.bootstrap_relays.clone()
     };
     let events = transport.fetch(&query, &relays).await?;
-    let event = events.first().ok_or("invite bundle not found on relays")?;
+    if !session.is_valid() {
+        return Err("account changed during join".to_string());
+    }
     let bundle_key = super::derive::invite_bundle_key(&parsed.token);
-    match invite::parse_bundle_event(event, &parsed.link_signer, &bundle_key).map_err(|e| e.to_string())? {
-        invite::BundleState::Live(bundle) => accept_bundle(transport, &bundle, None).await,
-        invite::BundleState::Revoked => Err("this invite link has been revoked".to_string()),
+
+    // Scan EVERY event: a tombstone beats a Live unconditionally (order-independent).
+    let mut newest_live: Option<(u64, CommunityInvite)> = None;
+    let mut found_any = false;
+    for event in &events {
+        match invite::parse_bundle_event(event, &parsed.link_signer, &bundle_key) {
+            Ok(invite::BundleState::Revoked) => return Err("this invite link has been revoked".to_string()),
+            Ok(invite::BundleState::Live(bundle)) => {
+                found_any = true;
+                let at = event.created_at.as_secs();
+                if newest_live.as_ref().is_none_or(|(t, _)| at > *t) {
+                    newest_live = Some((at, *bundle));
+                }
+            }
+            Err(_) => {} // a foreign/garbage event at the coordinate — ignore.
+        }
+    }
+    match newest_live {
+        Some((_, bundle)) => accept_bundle(transport, &session, &bundle, None).await,
+        None if found_any => unreachable!(),
+        None => Err("invite bundle not found on relays".to_string()),
     }
 }
 
-/// Fold the Complete Memberlist of a community from its Guestbook plane: fetch
-/// the Guestbook, coalesce (owner is always a member via genesis Join), and
-/// return the present npubs. Authority for kicks is resolved owner-only in the
-/// first cut (full roster folding lands with moderation).
+/// Leave a community: publish a Guestbook Leave and tear down the local hold.
+pub async fn leave_community<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<(), String> {
+    let session = SessionGuard::capture();
+    let me = local_keys()?;
+    let at_ms = now_ms();
+    let gb_group = super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
+    let leave_rumor = guestbook::build_leave_rumor(me.public_key(), at_ms);
+    if let Ok((wrap, _)) = guestbook::seal_guestbook_rumor(&leave_rumor, &gb_group, &me, Timestamp::from_secs(at_ms / 1000)) {
+        let _ = transport.publish(&wrap, &community.relays).await;
+    }
+    if !session.is_valid() {
+        return Err("account changed during leave".to_string());
+    }
+    crate::db::community::delete_community(&crate::simd::hex::bytes_to_hex_32(&community.id().0))?;
+    Ok(())
+}
+
+/// Fold the Complete Memberlist from the Guestbook plane. The proven owner is
+/// ALWAYS a member (derived from the self-certifying community_id — no network,
+/// so a lost/evicted genesis Join can't drop them). Observed authors — anyone
+/// seen publishing on a channel — are folded in FORWARD-only per CORD-02 §5, so a
+/// member whose Join was lost still counts.
 pub async fn memberlist<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<Vec<PublicKey>, String> {
     let gb_group = super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
     let query = Query {
@@ -342,7 +400,6 @@ pub async fn memberlist<T: Transport + ?Sized>(transport: &T, community: &Commun
         ..Default::default()
     };
     let wraps = transport.fetch(&query, &community.relays).await?;
-
     let owner = community.owner()?;
     let mut events = Vec::new();
     for wrap in &wraps {
@@ -352,12 +409,31 @@ pub async fn memberlist<T: Transport + ?Sized>(transport: &T, community: &Commun
             }
         }
     }
+    // Observed authors: fold each held channel's recent authorship (real author +
+    // newest ms), so a member who posted but whose Join was lost is still counted.
+    let mut observed: std::collections::BTreeMap<PublicKey, u64> = std::collections::BTreeMap::new();
+    for ch in &community.channels {
+        if let Ok(page) = fetch_channel(transport, community, &ch.id, 200).await {
+            for f in &page {
+                let e = observed.entry(f.event.opened().author).or_insert(0);
+                *e = (*e).max(f.event.opened().at_ms);
+            }
+        }
+    }
+
+    // Genesis / never-refounded community: NO snapshot authority (there is no
+    // refounder — an owner who didn't mint the epoch has no snapshot power). When
+    // rotation lands, thread the actual refounder of `root_epoch`.
+    let no_snapshots: Option<&PublicKey> = None;
     // First-cut authority: only the owner may kick (full roster fold is a follow-up).
     let can_kick = move |actor: &PublicKey, _target: &PublicKey| *actor == owner;
-    let coalesced = guestbook::coalesce(&events, now_ms(), Some(&owner), &can_kick);
+    let coalesced = guestbook::coalesce(&events, now_ms(), no_snapshots, &can_kick);
     let banlist = std::collections::BTreeSet::new();
-    let observed = std::collections::BTreeMap::new();
-    let members = guestbook::complete_memberlist(&coalesced, &observed, &banlist);
+    let mut members = guestbook::complete_memberlist(&coalesced, &observed, &banlist);
+    // The owner is a member by definition, independent of any fetched Join.
+    if !banlist.contains(&owner) {
+        members.insert(owner);
+    }
     Ok(members.into_iter().collect())
 }
 
@@ -453,6 +529,46 @@ mod tests {
         crate::state::MY_SECRET_KEY.store_from_keys(&owner, &[]);
         crate::state::set_my_public_key(owner.public_key());
         (tmp, guard, owner)
+    }
+
+    /// A transport that simulates a session swap landing DURING a fetch await —
+    /// so a join straddling the fetch sees an invalid session and aborts.
+    struct SwapMidFetch {
+        inner: MemoryRelay,
+    }
+    #[async_trait::async_trait]
+    impl Transport for SwapMidFetch {
+        async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> {
+            self.inner.publish(e, r).await
+        }
+        async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> {
+            self.inner.publish_durable(e, r).await
+        }
+        async fn fetch(&self, q: &Query, r: &[String]) -> Result<Vec<Event>, String> {
+            let out = self.inner.fetch(q, r).await;
+            crate::state::bump_session_generation();
+            out
+        }
+    }
+
+    /// A transport whose `fetch` returns a FIXED, UNSORTED event list — modelling
+    /// the production `LiveTransport` union (first-responding relay's batch, no
+    /// global newest-first sort), which `MemoryRelay` hides by sorting. This is
+    /// the only harness that can exercise the revocation-race ordering.
+    struct FixedFetch {
+        events: Vec<Event>,
+    }
+    #[async_trait::async_trait]
+    impl Transport for FixedFetch {
+        async fn publish(&self, _e: &Event, _r: &[String]) -> Result<(), String> {
+            Ok(())
+        }
+        async fn publish_durable(&self, _e: &Event, _r: &[String]) -> Result<(), String> {
+            Ok(())
+        }
+        async fn fetch(&self, _q: &Query, _r: &[String]) -> Result<Vec<Event>, String> {
+            Ok(self.events.clone())
+        }
     }
 
     /// Fetch a pending Direct Invite (kind 3313 giftwrap) addressed to `me` — the
@@ -558,7 +674,7 @@ mod tests {
         let community = create_community(&bed.relay, "Guild", bed.relays.clone(), None).await.unwrap();
         let general = community.channels[0].id;
         send_message(&bed.relay, &community, &general, "owner: welcome!").await.unwrap();
-        send_direct_invite(&bed.relay, &community, &member.keys.public_key()).await.unwrap();
+        send_direct_invite(&bed.relay, &community, &member.keys.public_key(), None, None).await.unwrap();
 
         // Member (a DIFFERENT account, no prior knowledge) finds + accepts the invite.
         bed.swap_to(&member);
@@ -600,7 +716,7 @@ mod tests {
         let general = community.channels[0].id;
         send_message(&bed.relay, &community, &general, "come on in").await.unwrap();
         // Mint a shareable link (a non-stock relay so the fragment carries it).
-        let link = mint_public_link(&bed.relay, &community, "https://vectorapp.io").await.unwrap();
+        let link = mint_public_link(&bed.relay, &community, "https://vectorapp.io", None, None).await.unwrap();
         assert!(link.url.starts_with("https://vectorapp.io/invite/"));
         assert!(link.url.contains('#'), "the fragment carries the token");
 
@@ -616,7 +732,7 @@ mod tests {
         let (bed, owner, member) = TestBed::new();
         bed.swap_to(&owner);
         let community = create_community(&bed.relay, "Revoked", bed.relays.clone(), None).await.unwrap();
-        let link = mint_public_link(&bed.relay, &community, "https://vectorapp.io").await.unwrap();
+        let link = mint_public_link(&bed.relay, &community, "https://vectorapp.io", None, None).await.unwrap();
         // Owner retires the link (re-posts the coordinate as a tombstone).
         let tombstone = invite::build_revocation(&link.link_signer).unwrap();
         bed.relay.publish_durable(&tombstone, &bed.relays).await.unwrap();
@@ -633,7 +749,7 @@ mod tests {
         let community = create_community(&bed.relay, "Expired", bed.relays.clone(), None).await.unwrap();
         // Hand-mint an invite that expired in the past.
         let inviter = owner.keys.clone();
-        let mut bundle = bundle_of(&community, Some(inviter.public_key()), Some(1_000));
+        let mut bundle = bundle_of(&community, Some(inviter.public_key()), Some(1_000), None);
         bundle.expires_at = Some(1_000); // unix ms, long past
         let wrap = invite::build_direct_invite(&inviter, &member.keys.public_key(), &bundle).unwrap();
         bed.relay.publish(&wrap, &bed.relays).await.unwrap();
@@ -642,6 +758,138 @@ mod tests {
         let invite_wrap = fetch_direct_invite(&bed.relay, &bed.relays, &member.keys.public_key()).await;
         let err = accept_direct_invite(&bed.relay, &invite_wrap).await.unwrap_err();
         assert!(err.contains("expired"), "a past-expiry invite refuses to join: {err}");
+    }
+
+    #[tokio::test]
+    async fn a_tombstone_beats_a_live_bundle_regardless_of_fetch_order() {
+        // The revocation-durability fix: if ANY signer-valid tombstone is among the
+        // fetched events, refuse — even when a Live bundle is returned FIRST (the
+        // production union has no newest-first sort, so a stale relay's Live can lead).
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Rev", bed.relays.clone(), None).await.unwrap();
+        let link = mint_public_link(&bed.relay, &community, "https://vectorapp.io", None, None).await.unwrap();
+        let tombstone = invite::build_revocation(&link.link_signer).unwrap();
+
+        // A relay union that hands back [Live, tombstone] — Live FIRST. Old
+        // `events.first()` would join the Live; the scan-all fix must refuse.
+        let union = FixedFetch { events: vec![link.bundle_event.clone(), tombstone] };
+
+        bed.swap_to(&member);
+        let err = accept_public_link(&union, &link.url).await.unwrap_err();
+        assert!(err.contains("revoked"), "a tombstone must beat a Live returned first: {err}");
+    }
+
+    #[test]
+    fn from_bundle_refuses_an_over_cap_bundle_before_allocating() {
+        // The accept-side DoS bound: from_bundle (which accept_bundle calls)
+        // rejects a >256-channel bundle via validate() BEFORE the Vec allocation.
+        // (The Direct-Invite wire path is additionally bounded by NIP-44's 64KB
+        // cap, which trips even earlier — but the count guard is the real defense
+        // for the single-layer public-link bundle.)
+        let owner = Keys::generate();
+        let identity = super::super::control::CommunityIdentity::mint(&owner.public_key());
+        let hex = crate::simd::hex::bytes_to_hex_32;
+        let root = [0x11u8; 32];
+        let mut bundle = CommunityInvite {
+            community_id: hex(&identity.community_id.0),
+            owner: hex(&identity.owner_xonly),
+            owner_salt: hex(&identity.owner_salt),
+            community_root: hex(&root),
+            root_epoch: 0,
+            channels: vec![],
+            relays: vec!["wss://r".into()],
+            name: "X".into(),
+            icon: None,
+            expires_at: None,
+            creator_npub: None,
+            label: None,
+            extra: Default::default(),
+        };
+        bundle.channels = (0..=invite::MAX_BUNDLE_CHANNELS)
+            .map(|i| {
+                let mut id = [0u8; 32];
+                id[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                invite::ChannelGrant { id: hex(&id), key: hex(&root), epoch: 0, name: "x".into() }
+            })
+            .collect();
+        assert!(CommunityV2::from_bundle(&bundle, 0).is_err(), "an over-cap bundle is refused before allocating");
+    }
+
+    #[tokio::test]
+    async fn a_join_swap_between_fetch_and_save_aborts_and_leaves_the_other_account_clean() {
+        // The SessionGuard straddle: a public-link accept fetches then saves. If the
+        // account swaps in that window, the join must abort — never write A's
+        // community into B's DB. SwapMidFetch bumps the session generation during
+        // the fetch await, exactly as a real swap_session would.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Straddle", bed.relays.clone(), None).await.unwrap();
+        let link = mint_public_link(&bed.relay, &community, "https://vectorapp.io", None, None).await.unwrap();
+        // A fresh swap-injecting transport holding the same bundle event.
+        let swap_relay = SwapMidFetch { inner: MemoryRelay::new() };
+        swap_relay.inner.publish_durable(&link.bundle_event, &bed.relays).await.unwrap();
+
+        bed.swap_to(&member);
+        let err = accept_public_link(&swap_relay, &link.url).await.unwrap_err();
+        assert!(err.contains("account changed"), "a swap mid-join must abort: {err}");
+        assert!(
+            crate::db::community::load_community_v2(community.id()).unwrap().is_none(),
+            "the aborted join wrote nothing to the (member) account DB"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_owner_is_a_member_even_without_a_fetched_genesis_join() {
+        // The owner is derived from the self-certifying community_id, so the
+        // memberlist includes them independent of any Guestbook fetch.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Owned", vec!["wss://r".into()], None).await.unwrap();
+        // A memberlist over an EMPTY guestbook (fetch a community-relay-less view)
+        // still contains the owner.
+        let empty = MemoryRelay::new();
+        let members = memberlist(&empty, &community).await.unwrap();
+        assert_eq!(members, vec![owner.public_key()], "owner present with no fetched Join");
+    }
+
+    #[tokio::test]
+    async fn an_expiring_minted_invite_refuses_after_the_deadline() {
+        // The mint path can now produce an expiring invite, and the accept gate
+        // trips on it (end-to-end through the real service, not a hand-built bundle).
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Timed", bed.relays.clone(), None).await.unwrap();
+        send_direct_invite(&bed.relay, &community, &member.keys.public_key(), Some(1_000), Some("beta".into()))
+            .await
+            .unwrap();
+
+        bed.swap_to(&member);
+        let invite_wrap = fetch_direct_invite(&bed.relay, &bed.relays, &member.keys.public_key()).await;
+        assert!(
+            accept_direct_invite(&bed.relay, &invite_wrap).await.unwrap_err().contains("expired"),
+            "a minted expiring invite refuses past its deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_member_who_leaves_drops_from_the_memberlist() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Leaving", bed.relays.clone(), None).await.unwrap();
+        send_direct_invite(&bed.relay, &community, &member.keys.public_key(), None, None).await.unwrap();
+
+        bed.swap_to(&member);
+        let invite_wrap = fetch_direct_invite(&bed.relay, &bed.relays, &member.keys.public_key()).await;
+        let joined = accept_direct_invite(&bed.relay, &invite_wrap).await.unwrap();
+        // Let the leave land strictly after the join.
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        leave_community(&bed.relay, &joined).await.unwrap();
+
+        bed.swap_to(&owner);
+        let members = memberlist(&bed.relay, &community).await.unwrap();
+        assert!(members.contains(&owner.keys.public_key()));
+        assert!(!members.contains(&member.keys.public_key()), "a member who left drops from the list");
     }
 
     #[tokio::test]

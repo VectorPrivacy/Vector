@@ -75,13 +75,15 @@ impl CommunityV2 {
     /// community_root (a Public channel's "key" is the root; a Private one
     /// carries its own).
     pub fn from_bundle(bundle: &CommunityInvite, created_at_ms: u64) -> Result<CommunityV2, String> {
+        // A bundle is attacker-crafted input (a fetched link, or a Direct Invite
+        // from any npub), so bound BEFORE allocating: `validate` enforces the
+        // 256-channel cap AND the owner commitment (CORD-05 §1). Never
+        // `Vec::with_capacity(bundle.channels.len())` on unbounded input.
+        bundle.validate().map_err(|e| e.to_string())?;
         let community_id = CommunityId(parse_hex32(&bundle.community_id, "community_id")?);
         let owner_xonly = parse_hex32(&bundle.owner, "owner")?;
         let owner_salt = parse_hex32(&bundle.owner_salt, "owner_salt")?;
         let identity = CommunityIdentity { community_id, owner_xonly, owner_salt };
-        if !identity.verify() {
-            return Err("invite bundle owner commitment does not reproduce the community_id".to_string());
-        }
         let community_root = parse_hex32(&bundle.community_root, "community_root")?;
 
         let mut channels = Vec::with_capacity(bundle.channels.len());

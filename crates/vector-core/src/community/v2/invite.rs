@@ -619,7 +619,7 @@ fn first_tag(event: &Event, name: &str) -> Option<String> {
 /// The NIP-44 bundle ciphertext under `bundle_key` used directly as the
 /// conversation key (CORD-05 §2 — not an ECDH pair). Standard-base64 payload so
 /// it interoperates with nostr-tools' `nip44.encrypt(json, bundle_key)`.
-fn seal_bundle(bundle_key: &[u8; 32], json: &str) -> Result<String, InviteError> {
+pub(crate) fn seal_bundle(bundle_key: &[u8; 32], json: &str) -> Result<String, InviteError> {
     let ck = ConversationKey::new(*bundle_key);
     let ct = encrypt_to_bytes(&ck, json.as_bytes()).map_err(|e| InviteError::Crypto(e.to_string()))?;
     Ok(base64_simd::STANDARD.encode_to_string(&ct))
