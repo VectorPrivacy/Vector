@@ -1114,6 +1114,25 @@ mod tests {
         assert!(parse_invite_link("https://x/invite/#frag").is_err());
     }
 
+    #[test]
+    fn v2_parser_rejects_a_v1_style_url_no_cross_protocol_confusion() {
+        // Dual-stack dispatch (VectorCore::join_community) tries the v2 parser
+        // first and falls through to v1 on failure, so the load-bearing invariant
+        // is that v2 NEVER accepts a v1 link. A v1 URL is `…/invite#<base64url>`
+        // (no naddr segment in the path), so the v2 parser fails at the naddr
+        // step. If this ever passes, a v1 invite would be mis-routed to v2.
+        let v1_url = "https://vectorapp.io/invite#AmR1bW15djFmcmFnbWVudA";
+        assert!(parse_invite_link(v1_url).is_err(), "v2 must reject a v1-format invite URL");
+        // A v1 URL with a trailing slash is likewise not a valid v2 naddr.
+        assert!(parse_invite_link("https://vectorapp.io/invite/#AmR1bW15").is_err());
+        // Sanity: a real v2 link still parses (bare naddr#fragment form).
+        let token = [0x07u8; TOKEN_LEN];
+        let signer = Keys::generate();
+        let naddr = bundle_naddr(&signer.public_key()).unwrap();
+        let frag = encode_fragment(&token, &[]).unwrap();
+        assert!(parse_invite_link(&format!("{naddr}#{frag}")).is_ok());
+    }
+
     // ── Registry ────────────────────────────────────────────────────────────────
 
     #[test]

@@ -750,22 +750,119 @@ impl VectorCore {
 
     /// List every Community held locally (owned or joined), each with its channels.
     pub async fn list_communities(&self) -> Vec<serde_json::Value> {
+        use crate::community::ConcordProtocol;
         let ids = crate::db::community::list_community_ids().unwrap_or_default();
         let mut out = Vec::new();
         for id in ids {
-            if let Ok(Some(c)) = crate::db::community::load_community(&id) {
-                out.push(serde_json::json!({
-                    "community_id": c.id.to_hex(),
-                    "name": c.name,
-                    "description": c.description,
-                    "is_owner": crate::community::service::is_proven_owner(&c),
-                    "channels": c.channels.iter()
-                        .map(|ch| serde_json::json!({ "channel_id": ch.id.to_hex(), "name": ch.name }))
-                        .collect::<Vec<_>>(),
-                }));
+            // Dual-stack: dispatch each held community by its stored protocol.
+            match crate::db::community::community_protocol(&id).ok().flatten() {
+                Some(ConcordProtocol::V2) => {
+                    if let Ok(Some(c)) = crate::db::community::load_community_v2(&id) {
+                        let me = state::my_public_key();
+                        let is_owner = me.is_some_and(|m| c.owner().is_ok_and(|o| o == m));
+                        out.push(serde_json::json!({
+                            "community_id": crate::simd::hex::bytes_to_hex_32(&c.identity.community_id.0),
+                            "version": 2,
+                            "name": c.name,
+                            "description": c.description,
+                            "is_owner": is_owner,
+                            "channels": c.channels.iter()
+                                .map(|ch| serde_json::json!({ "channel_id": crate::simd::hex::bytes_to_hex_32(&ch.id.0), "name": ch.name, "private": ch.private }))
+                                .collect::<Vec<_>>(),
+                        }));
+                    }
+                }
+                _ => {
+                    if let Ok(Some(c)) = crate::db::community::load_community(&id) {
+                        out.push(serde_json::json!({
+                            "community_id": c.id.to_hex(),
+                            "version": 1,
+                            "name": c.name,
+                            "description": c.description,
+                            "is_owner": crate::community::service::is_proven_owner(&c),
+                            "channels": c.channels.iter()
+                                .map(|ch| serde_json::json!({ "channel_id": ch.id.to_hex(), "name": ch.name }))
+                                .collect::<Vec<_>>(),
+                        }));
+                    }
+                }
             }
         }
         out
+    }
+
+    /// Create a fresh **Concord v2** community owned by the local identity (the
+    /// SDK's default; the GUI's `create_community` stays v1 during the migration
+    /// window). Mints the self-certifying id + genesis, persists, publishes, and
+    /// registers each channel as a chat. Returns a `version: 2` JSON summary.
+    pub async fn create_community_v2(&self, name: &str) -> Result<serde_json::Value> {
+        use crate::community::{v2::service as v2, transport::LiveTransport};
+        let relays: Vec<String> = crate::state::active_trusted_relays()
+            .await
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        if relays.is_empty() {
+            return Err(VectorError::Other("no relays available to host the Community".into()));
+        }
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        let community = v2::create_community(&transport, name, relays, None)
+            .await
+            .map_err(VectorError::Other)?;
+        self.register_v2_chats(&community).await;
+        Ok(Self::v2_summary(&community))
+    }
+
+    /// If `channel_id` belongs to a locally-held **v2** community, its
+    /// `CommunityId`; otherwise `None` (a v1 channel, or unknown). The routing
+    /// key for every dual-stack message op.
+    fn v2_community_for_channel(&self, channel_id: &str) -> Option<crate::community::CommunityId> {
+        use crate::community::ConcordProtocol;
+        let cid_hex = crate::db::community::community_id_for_channel(channel_id).ok().flatten()?;
+        let cid = crate::community::CommunityId(crate::simd::hex::hex_to_bytes_32(&cid_hex));
+        match crate::db::community::community_protocol(&cid).ok().flatten() {
+            Some(ConcordProtocol::V2) => Some(cid),
+            _ => None,
+        }
+    }
+
+    /// The `version: 2` JSON summary the SDK/facade hands back for a v2 community.
+    fn v2_summary(community: &crate::community::v2::community::CommunityV2) -> serde_json::Value {
+        let me = state::my_public_key();
+        let is_owner = me.is_some_and(|m| community.owner().is_ok_and(|o| o == m));
+        serde_json::json!({
+            "community_id": crate::simd::hex::bytes_to_hex_32(&community.identity.community_id.0),
+            "version": 2,
+            "name": community.name,
+            "description": community.description,
+            "is_owner": is_owner,
+            "channels": community.channels.iter()
+                .map(|c| serde_json::json!({ "channel_id": crate::simd::hex::bytes_to_hex_32(&c.id.0), "name": c.name, "private": c.private }))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    /// Register each of a v2 community's channels as a chat row (so it surfaces in
+    /// the chat list / `communities()`), mirroring the v1 create path.
+    async fn register_v2_chats(&self, community: &crate::community::v2::community::CommunityV2) {
+        let owner_npub = community.owner().ok().and_then(|p| ToBech32::to_bech32(&p).ok());
+        let me = state::my_public_key();
+        let is_owner = me.is_some_and(|m| community.owner().is_ok_and(|o| o == m));
+        let id_hex = crate::simd::hex::bytes_to_hex_32(&community.identity.community_id.0);
+        let mut st = state::STATE.lock().await;
+        for ch in &community.channels {
+            st.upsert_community_chat(
+                &crate::simd::hex::bytes_to_hex_32(&ch.id.0),
+                &community.name,
+                community.description.as_deref().unwrap_or(""),
+                &id_hex,
+                is_owner,
+                false,
+                owner_npub.as_deref(),
+                Some(community.created_at_ms),
+                community.dissolved,
+            );
+        }
     }
 
     /// Join a Community from a public invite URL (`vectorapp.io/invite#...`). Fetches the
@@ -773,6 +870,17 @@ impl VectorCore {
     /// as chats. Returns a JSON summary.
     pub async fn join_community(&self, invite_url: &str) -> Result<serde_json::Value> {
         use crate::community::{public_invite, service, transport::LiveTransport};
+        // Dual-stack: a v2 link is `…/invite/<naddr>#<fragment>` (a naddr in the
+        // path); a v1 link is `…/invite#<base64url>` (fragment only). Try the v2
+        // parser first — it only succeeds on the v2 shape — then fall through to v1.
+        if crate::community::v2::invite::parse_invite_link(invite_url).is_ok() {
+            let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+            let community = crate::community::v2::service::accept_public_link(&transport, invite_url)
+                .await
+                .map_err(VectorError::Other)?;
+            self.register_v2_chats(&community).await;
+            return Ok(Self::v2_summary(&community));
+        }
         let (relays, token) = public_invite::parse_invite_url(invite_url)
             .map_err(|e| VectorError::Other(e.to_string()))?;
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
@@ -1053,6 +1161,17 @@ impl VectorCore {
         replied_to: Option<&str>,
     ) -> Result<String> {
         use crate::community::{envelope, inbound, service, transport::LiveTransport};
+        // Dual-stack: route by the owning community's stored protocol.
+        if let Some(id) = self.v2_community_for_channel(channel_id) {
+            let community = crate::db::community::load_community_v2(&id)
+                .map_err(VectorError::Other)?
+                .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
+            let ch = crate::community::ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
+            let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+            return crate::community::v2::service::send_message(&transport, &community, &ch, content)
+                .await
+                .map_err(VectorError::Other);
+        }
         let (community, channel) = self.resolve_channel(channel_id)?;
         let author_pk = state::my_public_key().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
         let reply = replied_to.filter(|r| !r.is_empty());
@@ -2049,5 +2168,59 @@ mod facade_tests {
     async fn download_attachment_rejects_empty_url() {
         let att = crate::types::Attachment::default();
         assert!(VectorCore.download_attachment(&att).await.is_err());
+    }
+
+    /// The facade dual-stack dispatch: a v2 community surfaces in `list_communities`
+    /// with `version: 2`, and `v2_community_for_channel` routes its channels to the
+    /// v2 send path — while a v1 community is untouched (version 1).
+    #[tokio::test]
+    async fn list_communities_and_channel_routing_are_protocol_aware() {
+        use crate::community::transport::memory::MemoryRelay;
+        use nostr_sdk::prelude::Keys;
+
+        let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        crate::db::clear_id_caches();
+        let tmp = tempfile::tempdir().unwrap();
+        // A valid bech32-charset, npub-length account dir name.
+        let acct = {
+            const B: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+            let mut s = String::from("npub1");
+            for i in 0..58 {
+                s.push(B[(i * 7 + 3) % 32] as char);
+            }
+            s
+        };
+        std::fs::create_dir_all(tmp.path().join(&acct)).unwrap();
+        crate::db::set_app_data_dir(tmp.path().to_path_buf());
+        crate::db::set_current_account(acct.clone()).unwrap();
+        crate::db::init_database(&acct).unwrap();
+        let _ = crate::state::take_nostr_client();
+        let me = Keys::generate();
+        crate::state::MY_SECRET_KEY.store_from_keys(&me, &[]);
+        crate::state::set_my_public_key(me.public_key());
+
+        // Create a v2 community directly through the v2 service (offline).
+        let relay = MemoryRelay::new();
+        let community = crate::community::v2::service::create_community(&relay, "V2 Guild", vec!["wss://r".into()], None)
+            .await
+            .unwrap();
+        let channel_hex = crate::simd::hex::bytes_to_hex_32(&community.channels[0].id.0);
+
+        // The facade lists it as version 2, owned by me.
+        let listed = VectorCore.list_communities().await;
+        let v2 = listed.iter().find(|c| c["version"] == 2).expect("the v2 community is listed");
+        assert_eq!(v2["name"], "V2 Guild");
+        assert_eq!(v2["is_owner"], true);
+        assert_eq!(v2["channels"][0]["channel_id"], channel_hex);
+
+        // The channel routes to the v2 send path.
+        assert_eq!(
+            VectorCore.v2_community_for_channel(&channel_hex),
+            Some(community.identity.community_id),
+            "a v2 channel is routed to v2"
+        );
+        // An unknown channel routes nowhere (would fall through to v1).
+        assert_eq!(VectorCore.v2_community_for_channel(&"00".repeat(32)), None);
     }
 }
