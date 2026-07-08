@@ -1613,7 +1613,12 @@ pub async fn fetch_pack_by_naddr(naddr: &str) -> Result<EmojiPack, String> {
     let addr = parse_naddr(naddr)?;
     let client = nostr_client().ok_or_else(|| "Nostr client not initialised".to_string())?;
     fetch_pack_from_relays(&client, &addr).await
-        .ok_or_else(|| format!("Pack not found on any relay: {}:{}", addr.pubkey.to_hex(), addr.identifier))
+        .ok_or_else(|| {
+            // Coordinate goes to the log; the returned string is shown
+            // verbatim in the preview card, so keep it human-readable.
+            crate::log_debug!("[EmojiPacks] preview miss: {}:{}", addr.pubkey.to_hex(), addr.identifier);
+            "Pack not found on any relay".to_string()
+        })
 }
 
 /// Resolve a theme pack cache-first: return the locally-persisted copy

@@ -1054,6 +1054,52 @@ const _packPreviewCache = new Map(); // naddr -> { state: 'loading'|'ok'|'err', 
 // underlying string — the preview's Copy button is the only exposed share affordance.
 const NADDR_REGEX = /(?:https?:\/\/(?:www\.)?vectorapp\.io\/emojis\/pack\/|nostr:)(naddr1[ac-hj-np-z02-9]{20,})(?:\.html)?\/?|(^|[\s([{<"'])(naddr1[ac-hj-np-z02-9]{20,})/gi;
 
+// NIP-30 emoji sets are kind 30030; any other coordinate kind is not ours.
+const KIND_EMOJI_SET = 30030;
+
+const _naddrKindCache = new Map(); // naddr (lowercase) -> kind number | null (null = undecodable)
+const _BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+
+/**
+ * Decode the target kind out of a bech32 `naddr1...` (TLV type 3, 4-byte
+ * big-endian). Checksum is NOT verified — a corrupt string either fails
+ * decode (null) or gets rejected by the backend's strict parse; either
+ * way nothing wrong is fetched. Returns null on any malformed input.
+ */
+function _naddrKind(naddr) {
+    const key = naddr.toLowerCase();
+    if (_naddrKindCache.has(key)) return _naddrKindCache.get(key);
+    let kind = null;
+    // Drop the "naddr1" prefix and the 6-char checksum, then regroup the
+    // remaining 5-bit words into bytes and walk the TLV entries.
+    const data = key.slice(6, -6);
+    const bytes = [];
+    let acc = 0, bits = 0, valid = data.length > 0;
+    for (const ch of data) {
+        const v = _BECH32_CHARSET.indexOf(ch);
+        if (v === -1) { valid = false; break; }
+        acc = (acc << 5) | v;
+        bits += 5;
+        if (bits >= 8) {
+            bits -= 8;
+            bytes.push((acc >> bits) & 0xff);
+        }
+    }
+    if (valid) {
+        for (let i = 0; i + 2 <= bytes.length;) {
+            const t = bytes[i], len = bytes[i + 1];
+            if (i + 2 + len > bytes.length) break;
+            if (t === 3 && len === 4) {
+                kind = ((bytes[i + 2] << 24) | (bytes[i + 3] << 16) | (bytes[i + 4] << 8) | bytes[i + 5]) >>> 0;
+                break;
+            }
+            i += 2 + len;
+        }
+    }
+    _naddrKindCache.set(key, kind);
+    return kind;
+}
+
 /**
  * Strip every emoji-pack reference (bare naddr, `nostr:` URI, or
  * vectorapp.io share URL) from `text` so the in-chat preview card
@@ -1065,8 +1111,13 @@ function stripEmojiPackNaddrs(text) {
     if (!text) return text;
     return text
         // Keep the leading boundary char (group 2 — the space/bracket/quote that
-        // preceded a bare naddr); only the naddr itself is removed.
-        .replace(NADDR_REGEX, (_m, _urlNaddr, boundary) => boundary ?? '')
+        // preceded a bare naddr); only the naddr itself is removed. Coordinates
+        // pointing at any other kind stay in the text verbatim — no card is
+        // rendered for them, so stripping would silently eat the content.
+        .replace(NADDR_REGEX, (m, urlNaddr, boundary, bareNaddr) => {
+            if (_naddrKind(urlNaddr || bareNaddr) !== KIND_EMOJI_SET) return m;
+            return boundary ?? '';
+        })
         .replace(/[ \t]{2,}/g, ' ')
         .replace(/\n{3,}/g, '\n\n')
         .trim();
@@ -1091,6 +1142,9 @@ function renderEmojiPackPreviews(target, text) {
         const naddr = (match[1] || match[3]).toLowerCase();
         if (seen.has(naddr)) continue;
         seen.add(naddr);
+        // Only kind-30030 coordinates are emoji packs; anything else
+        // (articles, communities, ...) stays as plain text, never a card.
+        if (_naddrKind(naddr) !== KIND_EMOJI_SET) continue;
         const card = _buildPackPreviewCard(naddr);
         target.appendChild(card);
     }
