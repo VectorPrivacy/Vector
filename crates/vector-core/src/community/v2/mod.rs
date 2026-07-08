@@ -21,6 +21,7 @@ pub mod control;
 pub mod derive;
 pub mod dissolution;
 pub mod guestbook;
+pub mod inbound;
 pub mod invite;
 pub mod list;
 pub mod rekey;
