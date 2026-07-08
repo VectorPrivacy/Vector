@@ -805,11 +805,12 @@ impl VectorCore {
         if relays.is_empty() {
             return Err(VectorError::Other("no relays available to host the Community".into()));
         }
+        let session = state::SessionGuard::capture();
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
         let community = v2::create_community(&transport, name, relays, None)
             .await
             .map_err(VectorError::Other)?;
-        self.register_v2_chats(&community).await;
+        self.register_v2_chats(&community, &session).await;
         // Start streaming this community's planes right away.
         if let Some(client) = state::nostr_client() {
             crate::community::v2::realtime::refresh_subscription(&client).await;
@@ -847,13 +848,19 @@ impl VectorCore {
     }
 
     /// Register each of a v2 community's channels as a chat row (so it surfaces in
-    /// the chat list / `communities()`), mirroring the v1 create path.
-    async fn register_v2_chats(&self, community: &crate::community::v2::community::CommunityV2) {
+    /// the chat list / `communities()`), mirroring the v1 create path. `session`
+    /// is captured by the caller BEFORE its network I/O, so this STATE write is
+    /// skipped if the account swapped mid-flight (else we'd write A's community
+    /// into B's in-memory chats).
+    async fn register_v2_chats(&self, community: &crate::community::v2::community::CommunityV2, session: &state::SessionGuard) {
         let owner_npub = community.owner().ok().and_then(|p| ToBech32::to_bech32(&p).ok());
         let me = state::my_public_key();
         let is_owner = me.is_some_and(|m| community.owner().is_ok_and(|o| o == m));
         let id_hex = crate::simd::hex::bytes_to_hex_32(&community.identity.community_id.0);
         let mut st = state::STATE.lock().await;
+        if !session.is_valid() {
+            return; // account swapped during the join/create — don't write into the new one.
+        }
         for ch in &community.channels {
             st.upsert_community_chat(
                 &crate::simd::hex::bytes_to_hex_32(&ch.id.0),
@@ -878,11 +885,12 @@ impl VectorCore {
         // path); a v1 link is `…/invite#<base64url>` (fragment only). Try the v2
         // parser first — it only succeeds on the v2 shape — then fall through to v1.
         if crate::community::v2::invite::parse_invite_link(invite_url).is_ok() {
+            let session = state::SessionGuard::capture();
             let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
             let community = crate::community::v2::service::accept_public_link(&transport, invite_url)
                 .await
                 .map_err(VectorError::Other)?;
-            self.register_v2_chats(&community).await;
+            self.register_v2_chats(&community, &session).await;
             if let Some(client) = state::nostr_client() {
                 crate::community::v2::realtime::refresh_subscription(&client).await;
             }
@@ -1110,6 +1118,10 @@ impl VectorCore {
         }
         let cid = CommunityId(crate::simd::hex::hex_to_bytes_32(community_id));
         // Dual-stack: a v2 community sends a Direct Invite (3313 giftwrap).
+        // DELIBERATELY ungated, unlike v1's CREATE_INVITE + banlist pre-check: a
+        // Direct Invite is an ungateable key handoff (CORD-05 §6 — "any keyholder
+        // can whisper keys"), so any member may extend one; the real access cut is
+        // the rekey, not a permission on inviting.
         if let Some(Some(crate::community::ConcordProtocol::V2)) =
             crate::db::community::community_protocol(&cid).ok()
         {
@@ -2271,5 +2283,26 @@ mod facade_tests {
         );
         // An unknown channel routes nowhere (would fall through to v1).
         assert_eq!(VectorCore.v2_community_for_channel(&"00".repeat(32)), None);
+    }
+
+    /// The facade builds a v2 invite URL by trimming `/invite` off the v1
+    /// constant (v2's `build_invite_url` re-appends its own `/invite/<naddr>`).
+    /// Lock that the derived URL is v2-shaped and round-trips through the v2
+    /// parser — a stale constant or a double-`/invite` would silently break joins.
+    #[test]
+    fn v2_invite_url_base_derivation_round_trips() {
+        use crate::community::v2::derive::TOKEN_LEN;
+        use crate::community::v2::invite::{build_invite_url, parse_invite_link};
+        use nostr_sdk::prelude::Keys;
+        let base = crate::community::public_invite::INVITE_URL_BASE.trim_end_matches("/invite");
+        assert!(!base.ends_with("/invite"), "the bare domain must not carry /invite");
+        let signer = Keys::generate();
+        let token = [0x07u8; TOKEN_LEN];
+        let url = build_invite_url(base, &signer.public_key(), &token, &[]).unwrap();
+        assert!(url.contains("/invite/"), "a v2 URL carries the naddr path");
+        assert!(!url.contains("/invite/invite/"), "no doubled /invite from the base");
+        let parsed = parse_invite_link(&url).unwrap();
+        assert_eq!(parsed.link_signer, signer.public_key());
+        assert_eq!(parsed.token, token);
     }
 }

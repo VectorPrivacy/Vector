@@ -11,6 +11,7 @@
 //! (both `#p=me`) stay on the DM subscription — the author-set here never
 //! includes an identity key, so the two never collide.
 
+use std::collections::HashSet;
 use std::sync::{Arc, LazyLock};
 
 use nostr_sdk::prelude::{Client, Event, Filter, Kind, PublicKey, RelayStatus, RelayUrl, SubscriptionId};
@@ -19,7 +20,7 @@ use tokio::sync::Mutex;
 use super::community::CommunityV2;
 use super::stream;
 use super::{derive, inbound};
-use crate::community::{ConcordProtocol, Epoch};
+use crate::community::ConcordProtocol;
 use crate::event_handler::InboundEventHandler;
 use crate::state::SessionGuard;
 
@@ -30,6 +31,16 @@ static V2_POOLWIDE_SUB_ID: LazyLock<Mutex<Option<SubscriptionId>>> = LazyLock::n
 /// The current author-set (sorted hex) — an unchanged set skips a churny
 /// unsubscribe+resubscribe, exactly like v1's `COMMUNITY_SUB_SET`.
 static V2_SUB_SET: LazyLock<Mutex<Vec<String>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+/// Outer-wrap ids already dispatched, so the handler fires EXACTLY ONCE per
+/// message. The relay pool delivers the same wrap under both the targeted and
+/// pool-wide subs and from every relay independently, so without this a bot's
+/// `on_message` (and its reply) would run several times per message — the v1
+/// community path and the DM path dedup by outer id for the same reason. Cleared
+/// on session swap; coarsely bounded (a message's duplicates all arrive within a
+/// short window, so a recent-set suffices).
+static V2_SEEN_WRAPS: LazyLock<Mutex<HashSet<[u8; 32]>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+/// Bound on [`V2_SEEN_WRAPS`] before a coarse flush.
+const SEEN_WRAPS_CAP: usize = 8192;
 
 pub async fn subscription_id() -> Option<SubscriptionId> {
     V2_SUB_ID.lock().await.clone()
@@ -45,25 +56,27 @@ pub async fn clear() {
     *V2_SUB_ID.lock().await = None;
     *V2_POOLWIDE_SUB_ID.lock().await = None;
     V2_SUB_SET.lock().await.clear();
+    V2_SEEN_WRAPS.lock().await.clear();
 }
 
-/// Every plane pubkey a set of v2 communities publishes under — the subscription
-/// author-set. Per community: the control plane, the guestbook, the NEXT
-/// base-rekey address (so a live base rotation streams), each channel's current
-/// Chat-Plane address, and each PRIVATE channel's NEXT rekey address. Pure +
-/// deterministic (deduped, sorted) — the testable core.
+/// Every plane pubkey a set of v2 communities publishes under that
+/// [`inbound::dispatch_wrap`] currently handles — the subscription author-set.
+/// Per community: the guestbook, and each channel's current Chat-Plane address.
+/// Pure + deterministic (deduped, sorted) — the testable core.
+///
+/// **Deliberately NOT subscribed yet:** the control plane, the next base-rekey,
+/// and per-channel next-rekey addresses. Those wraps need live-follow logic
+/// (a control re-fold / a rekey catch-up) that isn't built for v2, so
+/// subscribing them would only deliver events the dispatcher drops. When
+/// control-follow + rekey-follow land, add their authors HERE together with
+/// their `dispatch_wrap` arms — never one without the other.
 pub fn plane_authors(communities: &[CommunityV2]) -> Vec<PublicKey> {
     let mut out = Vec::new();
     for c in communities {
-        out.push(derive::control_group_key(&c.community_root, c.id(), c.root_epoch).pk());
         out.push(derive::guestbook_group_key(&c.community_root, c.id(), c.root_epoch).pk());
-        out.push(derive::base_rekey_group_key(&c.community_root, c.id(), Epoch(c.root_epoch.0.saturating_add(1))).pk());
         for ch in &c.channels {
             let (secret, epoch) = c.channel_secret(ch);
             out.push(derive::channel_group_key(&secret, &ch.id, epoch).pk());
-            if ch.private {
-                out.push(derive::channel_rekey_group_key(&c.community_root, &ch.id, Epoch(ch.epoch.0.saturating_add(1))).pk());
-            }
         }
     }
     out.sort_by_key(|p| p.to_hex());
@@ -159,6 +172,19 @@ pub async fn dispatch_event(session: &SessionGuard, event: Event, handler: Arc<d
     if !session.is_valid() {
         return;
     }
+    // Fire EXACTLY ONCE per wrap: the pool re-delivers the same event under both
+    // subs and from every relay. `insert` returns false if already dispatched.
+    {
+        let mut seen = V2_SEEN_WRAPS.lock().await;
+        if !seen.insert(event.id.to_bytes()) {
+            return;
+        }
+        if seen.len() > SEEN_WRAPS_CAP {
+            let keep = event.id.to_bytes();
+            seen.clear();
+            seen.insert(keep);
+        }
+    }
     let communities = load_held_v2();
     for c in &communities {
         match inbound::dispatch_wrap(&event, c, &my_pk, &*handler) {
@@ -172,6 +198,7 @@ pub async fn dispatch_event(session: &SessionGuard, event: Event, handler: Arc<d
 mod tests {
     use super::*;
     use super::super::control::{genesis, CommunityMetadata};
+    use crate::community::Epoch;
     use nostr_sdk::prelude::Keys;
 
     fn a_community(name: &str) -> CommunityV2 {
@@ -181,23 +208,26 @@ mod tests {
     }
 
     #[test]
-    fn plane_authors_covers_control_guestbook_next_base_rekey_and_channels() {
+    fn plane_authors_covers_the_dispatched_planes_only() {
         let c = a_community("A");
         let authors = plane_authors(std::slice::from_ref(&c));
 
-        // Control, guestbook, next-base-rekey, and the one public channel — 4 planes.
-        let control = derive::control_group_key(&c.community_root, c.id(), c.root_epoch).pk();
+        // Subscribed: the guestbook + the one public channel (the planes
+        // dispatch_wrap handles). Just those two.
         let gb = derive::guestbook_group_key(&c.community_root, c.id(), c.root_epoch).pk();
-        let next_base = derive::base_rekey_group_key(&c.community_root, c.id(), Epoch(1)).pk();
         let general = {
             let (s, e) = c.channel_secret(&c.channels[0]);
             derive::channel_group_key(&s, &c.channels[0].id, e).pk()
         };
-        for pk in [control, gb, next_base, general] {
-            assert!(authors.contains(&pk), "author-set must include every plane");
-        }
-        // A public channel adds no channel-rekey address (public rotates with the base).
-        assert_eq!(authors.len(), 4);
+        assert!(authors.contains(&gb) && authors.contains(&general));
+        assert_eq!(authors.len(), 2, "only the guestbook + chat planes are subscribed");
+
+        // NOT subscribed (deferred until control/rekey follow is built — else we'd
+        // stream events the dispatcher only drops).
+        let control = derive::control_group_key(&c.community_root, c.id(), c.root_epoch).pk();
+        let next_base = derive::base_rekey_group_key(&c.community_root, c.id(), Epoch(1)).pk();
+        assert!(!authors.contains(&control));
+        assert!(!authors.contains(&next_base));
     }
 
     #[test]
@@ -263,18 +293,23 @@ mod tests {
         let wrap = relay.fetch(&q, &community.relays).await.unwrap().into_iter().next().unwrap();
 
         // The realtime dispatch (loading held v2 communities from the DB) routes it.
+        // Dispatch the SAME wrap TWICE — modelling the pool re-delivering it under
+        // the targeted + pool-wide subs (and from multiple relays). The handler
+        // must fire EXACTLY ONCE (no duplicate bot replies).
         let rec = Arc::new(Recorder::default());
         let session = SessionGuard::capture();
+        crate::community::v2::realtime::clear().await; // fresh seen-set for the test
+        dispatch_event(&session, wrap.clone(), rec.clone()).await;
         dispatch_event(&session, wrap, rec.clone()).await;
 
         let got = rec.got.lock().unwrap();
-        assert_eq!(got.len(), 1, "the live message reached the handler");
+        assert_eq!(got.len(), 1, "a re-delivered wrap fires the handler exactly once");
         assert_eq!(got[0].1, "live ping");
         assert_eq!(got[0].0, crate::simd::hex::bytes_to_hex_32(&general.0));
     }
 
     #[test]
-    fn a_private_channel_adds_its_next_rekey_address() {
+    fn a_private_channel_subscribes_to_its_own_chat_plane() {
         let mut c = a_community("Priv");
         c.channels.push(super::super::community::ChannelV2 {
             id: crate::community::ChannelId([0x33; 32]),
@@ -284,7 +319,11 @@ mod tests {
             epoch: Epoch(1),
         });
         let authors = plane_authors(std::slice::from_ref(&c));
+        // A private channel is read under its OWN key/epoch (not the root).
+        let priv_chat = derive::channel_group_key(&[0x44; 32], &c.channels[1].id, Epoch(1)).pk();
+        assert!(authors.contains(&priv_chat), "a private channel subscribes to its own chat plane");
+        // Its next-rekey address is NOT subscribed yet (rekey follow deferred).
         let next_rekey = derive::channel_rekey_group_key(&c.community_root, &c.channels[1].id, Epoch(2)).pk();
-        assert!(authors.contains(&next_rekey), "a private channel subscribes to its next rekey address");
+        assert!(!authors.contains(&next_rekey));
     }
 }
