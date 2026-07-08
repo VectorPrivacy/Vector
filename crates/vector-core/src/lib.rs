@@ -148,6 +148,15 @@ pub fn community_relay_options() -> nostr_sdk::RelayOptions {
     )
 }
 
+/// Relay options for a Discovery Relay (see `state::DISCOVERY_RELAYS`): the same
+/// GOSSIP|PING targeted-only isolation as Community relays — reachable via
+/// `fetch_events_from` / `send_event_to`, invisible to pool-wide DM/profile ops.
+/// An overlap with a user relay keeps the user's READ+WRITE flags (`add_relay`
+/// no-ops on an already-pooled url).
+pub fn discovery_relay_options() -> nostr_sdk::RelayOptions {
+    community_relay_options()
+}
+
 // === Event Storage ===
 pub mod stored_event;
 

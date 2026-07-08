@@ -671,6 +671,7 @@ pub async fn toggle_default_relay<R: Runtime>(handle: AppHandle<R>, url: String,
                 eprintln!("[Relay] Note: Could not disable default relay in pool: {}", e);
             } else {
                 println!("[Relay] Disabled default relay: {}", normalized_url);
+                restore_discovery_role(&client, &normalized_url).await;
             }
         }
         crate::inbox_relays::republish_inbox_relays_debounced();
@@ -747,6 +748,7 @@ pub async fn remove_custom_relay<R: Runtime>(handle: AppHandle<R>, url: String) 
             eprintln!("[Relay] Note: Could not remove relay from pool: {}", e);
         } else {
             println!("[Relay] Removed custom relay from pool: {}", url);
+            restore_discovery_role(&client, &url).await;
         }
     }
 
@@ -790,6 +792,7 @@ pub async fn toggle_custom_relay<R: Runtime>(handle: AppHandle<R>, url: String, 
                 eprintln!("[Relay] Note: Could not disable relay in pool: {}", e);
             } else {
                 println!("[Relay] Disabled custom relay: {}", url);
+                restore_discovery_role(&client, &url).await;
             }
         }
         crate::inbox_relays::republish_inbox_relays_debounced();
@@ -830,7 +833,10 @@ pub async fn update_relay_mode<R: Runtime>(handle: AppHandle<R>, url: String, mo
             let _ = client.pool().remove_relay(&url).await;
             match add_relay_failsafe(&client, &url, || relay_options_for_mode(&mode)).await {
                 Ok(_) => println!("[Relay] Updated relay mode: {} -> {}", url, mode),
-                Err(e) => eprintln!("[Relay] Failed to update relay mode: {}", e),
+                Err(e) => {
+                    eprintln!("[Relay] Failed to update relay mode: {}", e);
+                    restore_discovery_role(&client, &url).await;
+                }
             }
         }
         // Republish regardless — relay was removed and mode config changed either way
@@ -838,6 +844,225 @@ pub async fn update_relay_mode<R: Runtime>(handle: AppHandle<R>, url: String, mo
     }
 
     Ok(true)
+}
+
+/// Boot-time DM Relay List sync. The Relays tab IS the kind 10050 list:
+/// fetch the newest published copy, apply inbound changes locally (adopt new
+/// entries, revive re-listed ones, retire ones a newer list dropped), then
+/// run the merge-publish for any outbound diff.
+pub async fn reconcile_dm_relay_list<R: Runtime>(handle: AppHandle<R>) {
+    let session = vector_core::state::SessionGuard::capture();
+    let Some(client) = nostr_client() else { return };
+
+    let fetched = match vector_core::inbox_relays::fetch_own_inbox_list(&client).await {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("[Relay] DM relay list sync skipped: {}", e);
+            return;
+        }
+    };
+
+    // The fetch can straddle an account swap; nothing below may touch the
+    // per-account stores or KV on a stale session.
+    if !session.is_valid() {
+        return;
+    }
+
+    if let Some((remote, remote_ts)) = fetched.clone() {
+        let (ours, declined) = local_relay_view(&handle).await;
+
+        // The tab IS the list: entries both published and enabled locally are
+        // co-owned, whoever first listed them — else a disable on this device
+        // could never propagate (and would be reverted by other devices).
+        let shared: Vec<String> = ours
+            .iter()
+            .filter(|u| {
+                let n = vector_core::inbox_relays::normalize_relay_url(u);
+                remote
+                    .iter()
+                    .any(|r| vector_core::inbox_relays::normalize_relay_url(r) == n)
+            })
+            .cloned()
+            .collect();
+        vector_core::inbox_relays::note_contributed(&shared);
+
+        let plan =
+            vector_core::inbox_relays::plan_inbound_reconcile(&remote, remote_ts, &ours, &declined);
+        if plan.adopt.is_empty() && plan.revive.is_empty() && plan.retire.is_empty() {
+            vector_core::inbox_relays::note_list_seen(remote_ts);
+        } else {
+            apply_inbound_reconcile(&handle, &client, &session, plan, remote_ts).await;
+        }
+    }
+
+    if !session.is_valid() {
+        return;
+    }
+    // Publish against the store-derived list, not pool state (the pool can
+    // transiently hold a DM recipient's relays and miss a failed-connect
+    // adoptee).
+    let (ours_now, _) = local_relay_view(&handle).await;
+    if let Err(e) =
+        vector_core::inbox_relays::publish_inbox_relays_synced(&client, fetched, Some(ours_now))
+            .await
+    {
+        eprintln!("[Relay] Failed to publish inbox relays: {}", e);
+    }
+}
+
+/// (enabled, disabled) relay urls from the same per-account stores the
+/// Relays tab edits.
+async fn local_relay_view<R: Runtime>(handle: &AppHandle<R>) -> (Vec<String>, Vec<String>) {
+    let customs = load_custom_relays(handle).await.unwrap_or_default();
+    let disabled_defaults = get_disabled_default_relays(handle).await.unwrap_or_default();
+    let mut ours: Vec<String> = DEFAULT_RELAYS
+        .iter()
+        .filter(|d| !disabled_defaults.iter().any(|x| x.eq_ignore_ascii_case(d)))
+        .map(|s| s.to_string())
+        .collect();
+    let mut declined: Vec<String> = disabled_defaults;
+    for c in customs {
+        if c.enabled {
+            ours.push(c.url);
+        } else {
+            declined.push(c.url);
+        }
+    }
+    (ours, declined)
+}
+
+/// Apply an inbound reconcile plan: mutate the persisted relay stores in one
+/// tight load-mutate-save pass (bounding the race window against concurrent
+/// relay commands), then reconcile the live pool, then record ONLY the
+/// entries actually applied as our contribution (retire fires solely for
+/// contributed entries; without this a merge would resurrect a relay a newer
+/// remote list deliberately dropped).
+async fn apply_inbound_reconcile<R: Runtime>(
+    handle: &AppHandle<R>,
+    client: &nostr_sdk::Client,
+    session: &vector_core::state::SessionGuard,
+    plan: vector_core::inbox_relays::InboundReconcile,
+    remote_ts: u64,
+) {
+    use vector_core::inbox_relays::normalize_relay_url as norm;
+
+    let adopts: Vec<String> = plan
+        .adopt
+        .iter()
+        .filter_map(|u| validate_relay_url(u).ok())
+        .collect();
+
+    // Store mutation: no awaits between load and save beyond the loads
+    // themselves, so a user relay edit landing mid-apply isn't clobbered.
+    let mut customs = load_custom_relays(handle).await.unwrap_or_default();
+    let mut disabled_defaults = get_disabled_default_relays(handle).await.unwrap_or_default();
+    let mut customs_dirty = false;
+    let mut defaults_dirty = false;
+    let mut applied_adopts: Vec<String> = Vec::new();
+    let mut applied_revives: Vec<String> = Vec::new();
+    let mut applied_retires: Vec<String> = Vec::new();
+
+    for url in &adopts {
+        if customs.iter().any(|c| norm(&c.url) == norm(url)) {
+            continue;
+        }
+        customs.push(CustomRelay { url: url.clone(), enabled: true, mode: "both".to_string() });
+        customs_dirty = true;
+        applied_adopts.push(url.clone());
+    }
+    for url in &plan.revive {
+        let n = norm(url);
+        if let Some(pos) = disabled_defaults.iter().position(|d| norm(d) == n) {
+            applied_revives.push(disabled_defaults.remove(pos));
+            defaults_dirty = true;
+        } else if let Some(c) = customs.iter_mut().find(|c| norm(&c.url) == n) {
+            if !c.enabled {
+                c.enabled = true;
+                customs_dirty = true;
+                applied_revives.push(c.url.clone());
+            }
+        }
+    }
+    for url in &plan.retire {
+        let n = norm(url);
+        if let Some(d) = DEFAULT_RELAYS.iter().find(|d| norm(d) == n) {
+            if !disabled_defaults.iter().any(|x| norm(x) == n) {
+                disabled_defaults.push(d.to_string());
+                defaults_dirty = true;
+                applied_retires.push(url.clone());
+            }
+        } else if let Some(c) = customs.iter_mut().find(|c| norm(&c.url) == n) {
+            if c.enabled {
+                c.enabled = false;
+                customs_dirty = true;
+                applied_retires.push(url.clone());
+            }
+        }
+    }
+
+    // The loads above await; a swap could have landed since the caller's
+    // check. Nothing before this line has side effects.
+    if !session.is_valid() {
+        return;
+    }
+    if customs_dirty {
+        let _ = save_custom_relays(handle, &customs).await;
+    }
+    if defaults_dirty {
+        let _ = save_disabled_default_relays(handle, &disabled_defaults).await;
+    }
+
+    // Pool reconciliation for what was actually applied.
+    for url in &applied_adopts {
+        if let Err(e) = add_relay_failsafe(client, url, || relay_options_for_mode("both")).await {
+            eprintln!("[Relay] Adopted relay add failed for {}: {}", url, e);
+        }
+        println!("[Relay] Adopted from DM relay list: {}", url);
+        add_relay_log(url, "info", "Adopted from your DM relay list");
+    }
+    for url in &applied_revives {
+        let mode = customs
+            .iter()
+            .find(|c| norm(&c.url) == norm(url))
+            .map(|c| c.mode.clone())
+            .unwrap_or_else(|| "both".to_string());
+        let _ = add_relay_failsafe(client, url, || relay_options_for_mode(&mode)).await;
+        println!("[Relay] Re-enabled from DM relay list: {}", url);
+    }
+    for url in &applied_retires {
+        let _ = client.pool().remove_relay(url.as_str()).await;
+        restore_discovery_role(client, url).await;
+        println!("[Relay] Retired (removed on another device): {}", url);
+        add_relay_log(url, "info", "Disabled (removed from your DM relay list elsewhere)");
+    }
+
+    if !session.is_valid() {
+        return;
+    }
+    let mut contributed = applied_adopts;
+    contributed.extend(applied_revives);
+    vector_core::inbox_relays::note_contributed(&contributed);
+    vector_core::inbox_relays::note_list_seen(remote_ts);
+
+    // The Relays panel may be open; let it re-pull.
+    let _ = handle.emit("relay_list_updated", ());
+}
+
+/// A user remove/disable of a url that doubles as a Discovery Relay must
+/// demote it back to its discovery role, not evict it: nothing re-adds a
+/// lost Discovery Relay until the next full connect().
+async fn restore_discovery_role(client: &Client, url: &str) {
+    let norm = vector_core::inbox_relays::normalize_relay_url(url);
+    let is_discovery = vector_core::state::discovery_relay_iter()
+        .any(|d| vector_core::inbox_relays::normalize_relay_url(d) == norm);
+    if !is_discovery {
+        return;
+    }
+    let pool = client.pool();
+    if pool.add_relay(url, vector_core::discovery_relay_options()).await.is_ok() {
+        let _ = pool.connect_relay(url).await;
+        println!("[Relay] Restored Discovery Relay role: {}", url);
+    }
 }
 
 /// Validate a relay URL without saving it
@@ -1129,6 +1354,27 @@ pub async fn connect<R: Runtime>(handle: AppHandle<R>) -> bool {
         }
     }
 
+    // Add Discovery Relays (kind 10050 sync/publish only). GOSSIP|PING keeps
+    // them out of every pool-wide DM/profile op. Skipped when the url is
+    // already a user relay: the adds below race in parallel, and a discovery
+    // add landing first would pin the url to GOSSIP|PING, silencing a relay
+    // the user relies on for DMs.
+    for url in vector_core::state::discovery_relay_iter() {
+        let norm = vector_core::inbox_relays::normalize_relay_url(url);
+        let is_user_relay = relays_to_add
+            .iter()
+            .any(|(u, ..)| vector_core::inbox_relays::normalize_relay_url(u) == norm);
+        if is_user_relay {
+            continue;
+        }
+        relays_to_add.push((
+            url.to_string(),
+            vector_core::discovery_relay_options(),
+            false,
+            "discovery".to_string(),
+        ));
+    }
+
     // Add all relays in parallel
     let pool = client.pool();
     let add_futures: Vec<_> = relays_to_add.into_iter().map(|(url, opts, is_default, mode)| {
@@ -1161,18 +1407,14 @@ pub async fn connect<R: Runtime>(handle: AppHandle<R>) -> bool {
     // Connect to all added relays
     client.connect().await;
 
-    // Post-connect: publish our kind 10050 (DM Relay List) so other clients know
-    // where to send gift-wrapped DMs to us.
-    tokio::spawn(async {
+    // Post-connect: sync the DM Relay List (kind 10050). The Relays tab IS
+    // that list — inbound changes from other devices/apps apply locally,
+    // then any outbound diff merge-publishes.
+    let reconcile_handle = handle.clone();
+    tokio::spawn(async move {
         // Small delay to let relay connections stabilise
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        let client = match nostr_client() {
-            Some(c) => c,
-            None => return,
-        };
-        if let Err(e) = crate::inbox_relays::publish_inbox_relays(&client).await {
-            eprintln!("[Relay] Failed to publish inbox relays: {}", e);
-        }
+        reconcile_dm_relay_list(reconcile_handle).await;
     });
 
     true

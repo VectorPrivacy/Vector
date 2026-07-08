@@ -2913,6 +2913,10 @@ async function setupRustListeners() {
     // the section live, instead of waiting for the next panel open.
     _on('emoji_packs_updated', () => loadEmojiPacks());
 
+    // The boot DM-relay-list sync adopted/retired relays; repaint the Network
+    // panel so an already-open list reflects them without a reopen.
+    _on('relay_list_updated', () => renderRelayList());
+
     // A control change (banlist / roles / metadata / invite-mode) landed in REALTIME (via the 3308
     // control-plane subscription). Re-read this community's summary into the chat list + re-render the
     // overview if it's open, so online members see name/role/mode changes live, not just on next open.
