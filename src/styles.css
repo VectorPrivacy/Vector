@@ -4280,6 +4280,40 @@ img.emoji-img-loading {
 }
 .emoji-creator-cell.drop-before::before { left: -4px; }
 .emoji-creator-cell.drop-after::after  { right: -4px; }
+
+/* Equipped-pack sidebar drag-to-reorder (vertical list). */
+/* Suppress native image/text drag so a slow press starts our reorder, not a
+   raw-icon drag (WKWebView + desktop). */
+.emoji-pack-tab,
+.emoji-pack-tab img {
+  -webkit-user-drag: none;
+  user-select: none;
+}
+.emoji-pack-tab.is-dragging { opacity: 0.3; }
+.emoji-pack-tab-ghost {
+  opacity: 0.9;
+  transform: scale(0.85);
+  transform-origin: center center;
+  transition: none !important;
+  border-radius: 50%;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.55);
+}
+.emoji-pack-tab.drop-above,
+.emoji-pack-tab.drop-below { position: relative; }
+.emoji-pack-tab.drop-above::before,
+.emoji-pack-tab.drop-below::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  height: 3px;
+  border-radius: 2px;
+  background-color: var(--icon-color-primary);
+  box-shadow: 0 0 8px var(--icon-color-primary);
+  pointer-events: none;
+}
+.emoji-pack-tab.drop-above::before { top: -4px; }
+.emoji-pack-tab.drop-below::after  { bottom: -4px; }
 .emoji-creator-cell img {
   width: 70%;
   height: 70%;

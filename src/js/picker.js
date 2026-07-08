@@ -195,6 +195,7 @@ const THEME_EMOJI_PACKS = {
     vector: 'naddr1qqxx7mt2f945yvj0fdg8x3czyzu0jtnpuuw5tp4wdlnfwrmnm58ahzgpp9vfut6p00h5gkam4ykg6qcyqqq82nsstfm4j',
 };
 let _userEmojiPacks = [];          // backend (own + subscribed) packs, pre-theme-merge
+let _themeSlotAnchor = '';         // naddr the theme pack renders AFTER ('' = top); synced marker
 const _themePackCache = {};        // naddr -> pack | null (fetched; null = none/failed)
 const _themePackFetching = {};     // naddr -> in-flight Promise (dedupe concurrent fetches)
 
@@ -346,14 +347,20 @@ function _composeAndRenderPacks() {
         // a separate theme entry, so it can't double up.
         const subIdx = _userEmojiPacks.findIndex(p => p.id === themeNaddr);
         if (subIdx !== -1) {
-            const rest = _userEmojiPacks.filter((_, i) => i !== subIdx);
-            combined = [_userEmojiPacks[subIdx], ...rest];
+            // Subscribed → a real pack already sitting at its own reorderable
+            // position; no marker, drags like any other pack.
+            combined = _userEmojiPacks.slice();
         } else {
-            // Not subscribed → pin the fetched theme pack once we have it (no
-            // Remove, doesn't use a slot). Until the fetch lands, just the user
-            // packs render and the pack appears at the top when ready.
+            // Not subscribed → render the fetched theme pack at the theme-slot
+            // marker (no Remove, doesn't use a slot). Tag it so its tab drags as
+            // the marker. Until the fetch lands, just the user packs render.
             const themePack = _cachedThemePack();
-            combined = themePack ? [themePack, ..._userEmojiPacks] : _userEmojiPacks.slice();
+            if (themePack) {
+                themePack._isThemeSlot = true;
+                combined = _insertAtThemeSlot(_userEmojiPacks, themePack);
+            } else {
+                combined = _userEmojiPacks.slice();
+            }
         }
     }
     // Keep the send resolver in sync with the (non-subscribed) theme pack so
@@ -373,6 +380,16 @@ function _composeAndRenderPacks() {
         if (tab) tab.classList.add('active');
     }
     _refreshPackPreviewButtons();
+}
+
+// Place the (non-subscribed) theme pack at the theme-slot marker: right after
+// the pack whose naddr is `_themeSlotAnchor`, or at the top when the anchor is
+// empty or names a pack no longer equipped.
+function _insertAtThemeSlot(packs, themePack) {
+    if (!_themeSlotAnchor) return [themePack, ...packs];
+    const idx = packs.findIndex(p => p.id === _themeSlotAnchor);
+    if (idx === -1) return [themePack, ...packs];
+    return [...packs.slice(0, idx + 1), themePack, ...packs.slice(idx + 1)];
 }
 
 // Ensure the active theme's pack is fetched, then recompose so it appears.
@@ -623,6 +640,11 @@ async function loadEmojiPacks({ refresh = false } = {}) {
             }
         }
         _userEmojiPacks = arr;
+        // Theme-slot marker position (naddr the theme pack renders after, or ''
+        // for top). Synced via the kind-10030 list; read here so compose can
+        // place the pinned theme pack at the user's chosen spot.
+        try { _themeSlotAnchor = (await invoke('get_theme_slot_anchor')) || ''; }
+        catch (_e) { _themeSlotAnchor = ''; }
         // Render now (theme pack prepended if already cached); the signature
         // check inside guards against needless repaints. In-chat pack preview
         // cards are swept by the composer too (each Add/Remove button carries
@@ -917,10 +939,16 @@ function renderEmojiPackSidebar() {
         btn.className = 'emoji-category-btn emoji-pack-tab';
         if (packIsDead(pack)) btn.classList.add('emoji-pack-tab-dead');
         btn.dataset.packId = pack.id;
+        // The pinned (non-subscribed) theme pack drags as the synced marker,
+        // not as a real subscription.
+        if (pack._isThemeSlot) btn.dataset.themeSlot = '1';
         btn.title = pack.title || pack.identifier;
         if (pack.image_url) {
             const tabImg = document.createElement('img');
             tabImg.alt = '';
+            // Kill the browser's native image drag — otherwise a slow press
+            // grabs the raw icon instead of starting our tab reorder.
+            tabImg.draggable = false;
             bindCachedEmojiImg(tabImg, pack.image_url, 'emoji_pack_icon');
             btn.appendChild(tabImg);
         } else {
@@ -936,6 +964,7 @@ function renderEmojiPackSidebar() {
         // Right-click on desktop, long-press on Android — both open the
         // Share / Remove menu.
         attachLongPressContextMenu(btn, (x, y) => _showPackTabMenu(pack, x, y));
+        _installPackTabReorder(btn);
         sidebar.appendChild(btn);
     }
 
@@ -950,6 +979,134 @@ function renderEmojiPackSidebar() {
         openEmojiPackCreator();
     });
     sidebar.appendChild(createBtn);
+}
+
+// Vertical drag-to-reorder for the equipped-pack sidebar tabs. Same pointer-
+// driven approach as the in-pack emoji reorder (Tauri swallows HTML5 drag
+// events); before/after is decided by the pointer's Y vs each tab's midpoint.
+let _packTabDragActive = false;
+function _installPackTabReorder(tab) {
+    tab.addEventListener('pointerdown', (ev) => {
+        if (ev.button !== 0) return;
+        const startX = ev.clientX;
+        const startY = ev.clientY;
+        let dragging = false;
+        let ghost = null;
+        let offX = 0;
+        let offY = 0;
+
+        const onMove = (mv) => {
+            if (!dragging) {
+                if (Math.hypot(mv.clientX - startX, mv.clientY - startY) < _PC_DRAG_THRESHOLD_PX) return;
+                dragging = true;
+                _packTabDragActive = true;
+                tab.classList.add('is-dragging');
+                const rect = tab.getBoundingClientRect();
+                ghost = tab.cloneNode(true);
+                ghost.classList.add('emoji-pack-tab-ghost');
+                ghost.classList.remove('is-dragging');
+                ghost.style.position = 'fixed';
+                ghost.style.left = `${rect.left}px`;
+                ghost.style.top = `${rect.top}px`;
+                ghost.style.width = `${rect.width}px`;
+                ghost.style.height = `${rect.height}px`;
+                ghost.style.pointerEvents = 'none';
+                ghost.style.zIndex = '2200';
+                document.body.appendChild(ghost);
+                offX = rect.width / 2;
+                offY = rect.height / 2;
+            }
+            if (ghost) {
+                ghost.style.left = `${mv.clientX - offX}px`;
+                ghost.style.top = `${mv.clientY - offY}px`;
+            }
+            _updatePackTabDropTarget(mv.clientY);
+        };
+
+        const onUp = (up) => {
+            window.removeEventListener('pointermove', onMove);
+            window.removeEventListener('pointerup', onUp);
+            window.removeEventListener('pointercancel', onUp);
+            if (!dragging) return;
+            tab.dataset.suppressClick = '1';
+            tab.classList.remove('is-dragging');
+            _packTabDragActive = false;
+            if (ghost) ghost.remove();
+            const target = _resolvePackTabDropTarget(up.clientY);
+            _clearPackTabDropMarkers();
+            if (target) _applyPackTabReorder(tab, target);
+        };
+
+        window.addEventListener('pointermove', onMove);
+        window.addEventListener('pointerup', onUp);
+        window.addEventListener('pointercancel', onUp);
+    });
+}
+
+function _packTabs() {
+    const sidebar = document.querySelector('.emoji-sidebar');
+    return sidebar ? [...sidebar.querySelectorAll('.emoji-pack-tab')] : [];
+}
+
+function _clearPackTabDropMarkers() {
+    _packTabs().forEach(t => t.classList.remove('drop-above', 'drop-below'));
+}
+
+// Nearest tab by vertical-centre distance; before/after by the pointer's Y
+// against that tab's midpoint. Confined to the sidebar's vertical bounds.
+function _resolvePackTabDropTarget(y) {
+    const tabs = _packTabs();
+    if (!tabs.length) return null;
+    let best = null;
+    let bestDist = Infinity;
+    for (const t of tabs) {
+        const r = t.getBoundingClientRect();
+        const d = Math.abs(y - (r.top + r.height / 2));
+        if (d < bestDist) { bestDist = d; best = t; }
+    }
+    if (!best) return null;
+    const r = best.getBoundingClientRect();
+    return { targetTab: best, isBefore: y < r.top + r.height / 2 };
+}
+
+function _updatePackTabDropTarget(y) {
+    _clearPackTabDropMarkers();
+    const t = _resolvePackTabDropTarget(y);
+    if (t) t.targetTab.classList.add(t.isBefore ? 'drop-above' : 'drop-below');
+}
+
+// Apply the drop: reorder `arrEmojiPacks` optimistically + repaint, then
+// persist the full order (marker included) so it syncs. The theme-slot tab
+// maps to the `theme_slot` token; real tabs map to their pack id.
+function _applyPackTabReorder(draggedTab, target) {
+    const fromId = draggedTab.dataset.packId;
+    const toId = target.targetTab.dataset.packId;
+    if (fromId === toId) return;
+
+    const arr = arrEmojiPacks.slice();
+    const fromIdx = arr.findIndex(p => p.id === fromId);
+    if (fromIdx === -1) return;
+    const [moved] = arr.splice(fromIdx, 1);
+    const toIdx = arr.findIndex(p => p.id === toId);
+    if (toIdx === -1) return;
+    let insertAt = toIdx + (target.isBefore ? 0 : 1);
+    if (insertAt < 0) insertAt = 0;
+    if (insertAt > arr.length) insertAt = arr.length;
+    arr.splice(insertAt, 0, moved);
+
+    arrEmojiPacks = arr;
+    _lastPacksSignature = null;   // force a repaint past the idempotence guard
+    const activeAddr = document.querySelector('.emoji-pack-tab.active')?.dataset.packId;
+    renderEmojiPackSidebar();
+    renderEmojiPackSections();
+    if (activeAddr) {
+        const t = document.querySelector(`.emoji-pack-tab[data-pack-id="${CSS.escape(activeAddr)}"]`);
+        if (t) t.classList.add('active');
+    }
+
+    const orderedIds = arrEmojiPacks.map(p => (p._isThemeSlot ? 'theme_slot' : p.id));
+    invoke('reorder_emoji_packs', { orderedIds })
+        .catch(e => console.error('reorder_emoji_packs failed:', e));
 }
 
 /**
@@ -4451,6 +4608,13 @@ document.querySelector('.emoji-sidebar').addEventListener('click', async (e) => 
     const btn = e.target.closest('.emoji-category-btn');
     if (!btn) return;
     e.stopPropagation();
+
+    // A just-completed drag-reorder fires a trailing click — swallow it so the
+    // dragged tab doesn't also jump-scroll to its section.
+    if (btn.dataset.suppressClick === '1') {
+        delete btn.dataset.suppressClick;
+        return;
+    }
 
     // "+" creator tab — enter creator mode (handled in its own listener too,
     // but stopPropagation here keeps the active-tab toggle from cycling).
