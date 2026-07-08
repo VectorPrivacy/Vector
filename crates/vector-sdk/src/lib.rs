@@ -392,6 +392,11 @@ impl VectorBot {
     /// once per message with a clone of the bot (so it can reply) and an
     /// [`IncomingMessage`]. A slow handler won't hold up other messages.
     ///
+    /// **Ordering:** each message is handled on its own task, so delivery order is
+    /// NOT guaranteed — even within one chat, two messages (or an edit and its
+    /// delete) can be handled out of order. A handler that mutates shared state per
+    /// chat must tolerate reordering (e.g. key by message id, not arrival order).
+    ///
     /// ```no_run
     /// # use vector_sdk::VectorBot;
     /// # async fn run(bot: VectorBot) -> vector_sdk::Result<()> {

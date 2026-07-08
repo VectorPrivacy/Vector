@@ -357,15 +357,20 @@ impl VectorCore {
             .map_err(|e| VectorError::Nostr(format!("Failed to encode nsec: {}", e)))
     }
 
-    /// Send a NIP-17 gift-wrapped text DM using the full pipeline.
+    /// Send a NIP-17 gift-wrapped text DM using the full pipeline. Retries a
+    /// transient publish miss (headless preset, 3 attempts) so an SDK/CLI bot rides
+    /// out a relay blip instead of silently dropping the message on the first miss;
+    /// `self_send: false` keeps it a plain send (no inbox self-copy).
     pub async fn send_dm(&self, to_npub: &str, content: &str) -> Result<sending::SendResult> {
-        sending::send_dm(to_npub, content, None, &SendConfig::default(), Arc::new(NoOpSendCallback)).await
+        let config = SendConfig { self_send: false, ..SendConfig::headless() };
+        sending::send_dm(to_npub, content, None, &config, Arc::new(NoOpSendCallback)).await
             .map_err(|e| VectorError::Other(e))
     }
 
     /// Send a DM as a threaded reply to `replied_to` (an existing message's event id).
     pub async fn send_dm_reply(&self, to_npub: &str, replied_to: &str, content: &str) -> Result<sending::SendResult> {
-        sending::send_dm(to_npub, content, Some(replied_to), &SendConfig::default(), Arc::new(NoOpSendCallback)).await
+        let config = SendConfig { self_send: false, ..SendConfig::headless() };
+        sending::send_dm(to_npub, content, Some(replied_to), &config, Arc::new(NoOpSendCallback)).await
             .map_err(|e| VectorError::Other(e))
     }
 
@@ -1959,13 +1964,45 @@ impl VectorCore {
     /// fetch recent messages into local state for each channel. State-only (does not replay to an
     /// [`InboundEventHandler`]). Called at `listen()` start and periodically for outage resilience;
     /// also safe to call manually after a known disconnect.
+    ///
+    /// Protocol-aware: a v2 community re-folds its control + rekey planes (so a rotation / refounding
+    /// missed while offline is ADOPTED and the subscription re-derives — else the bot stays subscribed
+    /// to dead pseudonyms and goes dark). v2 message-history replay is deferred with v2 message
+    /// persistence; the control/rekey catch-up is the liveness-critical part.
     pub async fn sync_communities(&self) -> Result<()> {
         let ids = db::community::list_community_ids().map_err(VectorError::from)?;
+        let session = state::SessionGuard::capture();
+        let mut v2_changed = false;
         for id in ids {
-            if let Ok(Some(community)) = db::community::load_community(&id) {
+            if matches!(db::community::community_protocol(&id).ok().flatten(), Some(crate::community::ConcordProtocol::V2)) {
+                let transport = community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+                // Rekey first (a base adopt moves the control address); reload fresh between.
+                if let Ok(Some(c)) = db::community::load_community_v2(&id) {
+                    match community::v2::service::follow_rekeys(&transport, &c, &session).await {
+                        Ok(f) if f.self_removed => {
+                            let _ = db::community::delete_community(&crate::simd::hex::bytes_to_hex_32(&id.0));
+                            v2_changed = true;
+                            continue;
+                        }
+                        Ok(f) if f.updated.is_some() => v2_changed = true,
+                        _ => {}
+                    }
+                }
+                if let Ok(Some(c)) = db::community::load_community_v2(&id) {
+                    if let Ok(Some(_)) = community::v2::service::follow_control(&transport, &c, &session).await {
+                        v2_changed = true;
+                    }
+                }
+            } else if let Ok(Some(community)) = db::community::load_community(&id) {
                 for ch in &community.channels {
                     let _ = self.sync_community_channel(&ch.id.to_hex(), 50).await;
                 }
+            }
+        }
+        // A v2 adoption/removal changed the derived author-set — re-subscribe once.
+        if v2_changed {
+            if let Some(client) = state::nostr_client() {
+                community::v2::realtime::refresh_subscription(&client).await;
             }
         }
         Ok(())
@@ -2112,8 +2149,12 @@ impl VectorCore {
                         // DMs, files, reactions
                         let prepared = event_handler::prepare_event(*event, &c, my_pk).await;
                         event_handler::commit_prepared_event(prepared, true, &*handler).await;
-                    } else if community::realtime::subscription_id().await.as_ref() == Some(&subscription_id) {
-                        // Community (v1) channel messages / reactions / edits / control editions
+                    } else if community::realtime::subscription_id().await.as_ref() == Some(&subscription_id)
+                        || community::realtime::poolwide_subscription_id().await.as_ref() == Some(&subscription_id)
+                    {
+                        // Community (v1) channel messages / reactions / edits / control editions.
+                        // OR the pool-wide sub (the path that streams on Android) — else v1 events
+                        // arriving under it match no branch and are silently dropped.
                         let session = state::SessionGuard::capture();
                         community::realtime::dispatch_event(&session, *event, handler.clone()).await;
                     } else if community::v2::realtime::subscription_id().await.as_ref() == Some(&subscription_id)

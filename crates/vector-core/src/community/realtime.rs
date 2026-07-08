@@ -63,6 +63,14 @@ pub async fn subscription_id() -> Option<SubscriptionId> {
     COMMUNITY_SUB_ID.lock().await.clone()
 }
 
+/// The pool-wide subscription id (the path that streams on Android, where the
+/// targeted `subscribe_to` registers but never delivers). The listen loop must OR
+/// this with [`subscription_id`], else events arriving under the pool-wide sub
+/// match no branch and are silently dropped.
+pub async fn poolwide_subscription_id() -> Option<SubscriptionId> {
+    COMMUNITY_POOLWIDE_SUB_ID.lock().await.clone()
+}
+
 /// Clear all realtime route/subscription state. Call from `swap_session` so a swapped-in account
 /// can't read the prior account's channel keys / banned sets.
 pub async fn clear() {

@@ -1767,6 +1767,18 @@ pub fn save_community_v2(c: &crate::community::v2::community::CommunityV2) -> Re
 
     for ch in &c.channels {
         let ch_hex = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
+        // channel_id is the sole PRIMARY KEY, so an UPSERT keyed on it alone would
+        // let a bundle reusing ANOTHER community's channel_id overwrite that row's
+        // key/epoch/private in place (a chat-plane hijack). Channel ids are random-32
+        // (a genuine cross-community collision is negligible), so refuse rather than
+        // clobber a foreign community's row.
+        let owner_of: Option<String> = tx
+            .query_row("SELECT community_id FROM community_channels WHERE channel_id=?1", params![ch_hex], |r| r.get(0))
+            .optional()
+            .map_err(|e| format!("channel ownership check: {e}"))?;
+        if owner_of.is_some_and(|existing| existing != id_hex) {
+            return Err(format!("channel {ch_hex} is already owned by another community"));
+        }
         // A public channel has no independent key; store the community_root as a
         // placeholder so the NOT NULL column is satisfied (the real secret is
         // derived from the root at read time via `channel_secret`).

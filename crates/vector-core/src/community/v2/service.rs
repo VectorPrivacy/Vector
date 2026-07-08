@@ -339,27 +339,57 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
 ) -> Result<CommunityV2, String> {
     let owner = community.owner()?;
     let control = control_group_key(&community.community_root, community.id(), community.root_epoch);
-    let query = Query {
-        kinds: vec![stream::KIND_WRAP],
-        authors: vec![control.pk_hex()],
-        limit: Some(500),
-        ..Default::default()
-    };
-    let wraps = transport.fetch(&query, &community.relays).await?;
+    let control_pk = control.pk_hex();
+
+    // The control plane is writable by ANY community_root holder, so a single
+    // newest-first window could be flooded to evict the owner's genesis and DoS
+    // every join. Page OLDER with an `until` cursor until the owner genesis is
+    // found or the plane is exhausted (a short page). This fully fixes the organic
+    // case (a mature plane with >PAGE recent editions) and raises the flood bar to
+    // MAX_PAGES*PAGE events; a determined flood that pins >PAGE junk at the exact
+    // genesis timestamp is a residual whose real fix is binding the root into
+    // community_id (protocol item, deferred to the coordinated upgrade). The common
+    // case (fresh community) and the eclipse case (forged root, nothing owner-signed
+    // to find) both resolve on the first page.
+    const PAGE: usize = 500;
+    const MAX_PAGES: usize = 6;
     let mut editions: Vec<ParsedEdition> = Vec::new();
-    for w in &wraps {
-        if let Ok((ed, _)) = control::open_control_edition(w, &control) {
-            if ed.author == owner {
-                editions.push(ed);
+    let mut found_genesis = false;
+    let mut until: Option<u64> = None;
+    for _ in 0..MAX_PAGES {
+        let query = Query {
+            kinds: vec![stream::KIND_WRAP],
+            authors: vec![control_pk.clone()],
+            until,
+            limit: Some(PAGE),
+            ..Default::default()
+        };
+        let wraps = transport.fetch(&query, &community.relays).await?;
+        let got = wraps.len();
+        let mut oldest: Option<u64> = None;
+        for w in &wraps {
+            let ts = w.created_at.as_secs();
+            oldest = Some(oldest.map_or(ts, |o| o.min(ts)));
+            if let Ok((ed, _)) = control::open_control_edition(w, &control) {
+                if ed.author == owner {
+                    if ed.vsk == vsk::COMMUNITY_METADATA && ed.entity_id == community.id().0 {
+                        found_genesis = true;
+                    }
+                    editions.push(ed);
+                }
             }
         }
+        if found_genesis || got < PAGE {
+            break; // found the owner genesis, or exhausted the plane.
+        }
+        match oldest {
+            Some(o) if o > 0 => until = Some(o - 1),
+            _ => break,
+        }
     }
-    let root_authentic = editions
-        .iter()
-        .any(|e| e.vsk == vsk::COMMUNITY_METADATA && e.entity_id == community.id().0);
-    if !root_authentic {
+    if !found_genesis {
         return Err(
-            "could not verify this community from its relays (the invite may be forged, or the relays are unreachable); not joining"
+            "could not verify this community from its relays (the invite may be forged, the relays are unreachable, or the control plane is being flooded); not joining"
                 .to_string(),
         );
     }
@@ -1742,6 +1772,62 @@ mod tests {
         let reloaded = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
         assert!(reloaded.channel(&extra).is_none(), "a deleted channel must not resurrect on reload");
         assert_eq!(reloaded.channels.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn saving_a_channel_owned_by_another_community_is_refused() {
+        // The channel-id hijack: channel_id is the sole DB primary key, so a bundle
+        // reusing another community's channel_id would overwrite that row's key. The
+        // save must refuse rather than clobber a foreign community's channel.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let a = create_community(&relay, "A", vec!["wss://r".into()], None).await.unwrap();
+        let a_channel = a.channels[0].id;
+        let mut b = create_community(&relay, "B", vec!["wss://r".into()], None).await.unwrap();
+        b.channels[0].id = a_channel; // B tries to claim A's channel id.
+
+        let err = crate::db::community::save_community_v2(&b).unwrap_err();
+        assert!(err.contains("another community"), "reusing another community's channel id is refused: {err}");
+        // A's channel row is untouched.
+        let a_reloaded = crate::db::community::load_community_v2(a.id()).unwrap().unwrap();
+        assert_eq!(a_reloaded.channels[0].id.0, a_channel.0);
+        assert!(!a_reloaded.channels[0].private);
+    }
+
+    #[tokio::test]
+    async fn join_verify_pages_past_a_control_plane_flood_to_find_the_genesis() {
+        // The join-verify DoS mitigation: a member floods the control address with
+        // junk NEWER than the genesis, burying it past the newest-500 window. The
+        // `until`-paginated verify must walk past the flood and still find the owner
+        // genesis, so a legit join is not fail-closed by a griefer.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Flooded", bed.relays.clone(), None).await.unwrap();
+
+        // A rogue member (holds the root, so can sign at the control address) buries
+        // the genesis under 520 junk editions dated far in the future.
+        let control = control_group_key(&community.community_root, community.id(), community.root_epoch);
+        let rogue = Keys::generate();
+        for i in 0..520u64 {
+            let rumor = control::build_edition_rumor(
+                rogue.public_key(),
+                vsk::CHANNEL_METADATA,
+                &[0xAB; 32],
+                1,
+                None,
+                "{\"name\":\"junk\",\"private\":false}",
+                2_000_000_000 + i,
+                None,
+            );
+            let (wrap, _) = control::seal_control_edition(&rumor, &control, &rogue, Timestamp::from_secs(2_000_000_000 + i)).unwrap();
+            bed.relay.publish(&wrap, &bed.relays).await.unwrap();
+        }
+        send_direct_invite(&bed.relay, &community, &member.keys.public_key(), None, None).await.unwrap();
+
+        bed.swap_to(&member);
+        let invite_wrap = fetch_direct_invite(&bed.relay, &bed.relays, &member.keys.public_key()).await;
+        let joined = accept_direct_invite(&bed.relay, &invite_wrap).await.unwrap();
+        assert_eq!(joined.id().0, community.id().0, "pagination walks past the flood to the genesis");
     }
 
     /// LIVE smoke test (network) — ignored by default. Creates a v2 community on a
