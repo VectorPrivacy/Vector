@@ -139,6 +139,8 @@
     "allow-get-theme-emoji-pack",
     "allow-subscribe-emoji-pack",
     "allow-unsubscribe-emoji-pack",
+    "allow-reorder-emoji-packs",
+    "allow-get-theme-slot-anchor",
     "allow-bump-emoji-usage",
     "allow-bump-emoji-usage-batch",
     "allow-get-emoji-usage",

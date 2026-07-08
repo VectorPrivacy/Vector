@@ -725,6 +725,8 @@ pub fn run() {
             commands::emoji_packs::get_theme_emoji_pack,
             commands::emoji_packs::subscribe_emoji_pack,
             commands::emoji_packs::unsubscribe_emoji_pack,
+            commands::emoji_packs::reorder_emoji_packs,
+            commands::emoji_packs::get_theme_slot_anchor,
             commands::emoji_packs::bump_emoji_usage,
             commands::emoji_packs::bump_emoji_usage_batch,
             commands::emoji_packs::get_emoji_usage,

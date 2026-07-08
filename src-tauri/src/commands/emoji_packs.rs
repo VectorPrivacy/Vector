@@ -93,6 +93,22 @@ pub async fn unsubscribe_emoji_pack(id: String) -> Result<(), String> {
     emoji_packs::unsubscribe_pack(&id).await
 }
 
+/// Persist a user-defined display order for the equipped packs and republish
+/// kind 10030 so it syncs across devices. `ordered_ids` is the full display
+/// order: pack `id` naddrs for real packs, the literal "theme_slot" for the
+/// theme marker.
+#[tauri::command]
+pub async fn reorder_emoji_packs(ordered_ids: Vec<String>) -> Result<(), String> {
+    emoji_packs::reorder_emoji_packs(ordered_ids)
+}
+
+/// Return the theme-slot anchor as a naddr (the pack the theme slot renders
+/// immediately after), or "" when the slot is at the top.
+#[tauri::command]
+pub async fn get_theme_slot_anchor() -> Result<String, String> {
+    emoji_packs::get_theme_slot_anchor()
+}
+
 /// Register the active theme pack's emoji (shortcode + url) with the send
 /// resolver so its shortcodes get NIP-30 tags even though it isn't a real
 /// subscription. Pass an empty list to clear (e.g. on a theme with no pack,

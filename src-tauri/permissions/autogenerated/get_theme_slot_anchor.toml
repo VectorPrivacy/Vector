@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-theme-slot-anchor"
+description = "Enables the get_theme_slot_anchor command without any pre-configured scope."
+commands.allow = ["get_theme_slot_anchor"]
+
+[[permission]]
+identifier = "deny-get-theme-slot-anchor"
+description = "Denies the get_theme_slot_anchor command without any pre-configured scope."
+commands.deny = ["get_theme_slot_anchor"]

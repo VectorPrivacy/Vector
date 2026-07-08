@@ -766,5 +766,25 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // =========================================================================
+    // Migration 65: Add position to emoji pack subscriptions
+    // =========================================================================
+    // `subscribed_at` alone can't hold a user-defined order — save_subscriptions
+    // rewrites every row with the same `now`, so ties are unordered. `position`
+    // is the authoritative display order (cross-device synced via kind 10030).
+    // Backfill preserves the current rowid order so existing installs don't
+    // reshuffle on first launch.
+    run_atomic_migration(conn, 65, "Add position to emoji pack subscriptions", |tx| {
+        tx.execute_batch(
+            "ALTER TABLE emoji_pack_subscriptions ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
+             UPDATE emoji_pack_subscriptions SET position = (
+                 SELECT COUNT(*) FROM emoji_pack_subscriptions s2
+                 WHERE s2.rowid < emoji_pack_subscriptions.rowid
+             );",
+        )
+        .map_err(|e| format!("Failed to add position column: {}", e))?;
+        Ok(())
+    })?;
+
     Ok(())
 }
