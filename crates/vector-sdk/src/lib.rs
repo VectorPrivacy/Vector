@@ -356,6 +356,20 @@ impl VectorBot {
         Community { core: self.core, id: community_id.into() }
     }
 
+    /// Create a new Community owned by this bot and start receiving its channels.
+    /// Returns a handle to it (its `#general` channel is ready to message, and
+    /// `create_invite` / `invite` mint shareable links or Direct Invites). New
+    /// Communities are created on the modern protocol.
+    pub async fn create_community(&self, name: impl Into<String>) -> Result<Community> {
+        let summary = self.core.create_community_v2(&name.into()).await?;
+        let id = summary
+            .get("community_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::Other("community creation returned no id".into()))?
+            .to_string();
+        Ok(Community { core: self.core, id })
+    }
+
     /// Every Community this bot is a member of.
     pub async fn communities(&self) -> Vec<Community> {
         self.core

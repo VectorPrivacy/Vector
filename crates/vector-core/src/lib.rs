@@ -1065,6 +1065,23 @@ impl VectorCore {
         if community_id.len() != 64 {
             return Err(VectorError::Other("malformed community id".into()));
         }
+        let cid = CommunityId(crate::simd::hex::hex_to_bytes_32(community_id));
+        // Dual-stack: mint a v2 link for a v2 community (naddr#fragment).
+        if let Some(Some(crate::community::ConcordProtocol::V2)) =
+            crate::db::community::community_protocol(&cid).ok()
+        {
+            let community = crate::db::community::load_community_v2(&cid)
+                .map_err(VectorError::Other)?
+                .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
+            let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+            // v2 `build_invite_url` appends its own `/invite/<naddr>`, so pass the
+            // bare domain (strip the `/invite` the v1 constant carries).
+            let base = crate::community::public_invite::INVITE_URL_BASE.trim_end_matches("/invite");
+            let minted = crate::community::v2::service::mint_public_link(&transport, &community, base, None, None)
+                .await
+                .map_err(VectorError::Other)?;
+            return Ok(minted.url);
+        }
         let community = crate::db::community::load_community(&CommunityId(
             crate::simd::hex::hex_to_bytes_32(community_id),
         ))
@@ -1090,6 +1107,22 @@ impl VectorCore {
 
         if community_id.len() != 64 {
             return Err(VectorError::Other("malformed community id".into()));
+        }
+        let cid = CommunityId(crate::simd::hex::hex_to_bytes_32(community_id));
+        // Dual-stack: a v2 community sends a Direct Invite (3313 giftwrap).
+        if let Some(Some(crate::community::ConcordProtocol::V2)) =
+            crate::db::community::community_protocol(&cid).ok()
+        {
+            let community = crate::db::community::load_community_v2(&cid)
+                .map_err(VectorError::Other)?
+                .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
+            let recipient = nostr_sdk::prelude::PublicKey::parse(invitee_npub)
+                .map_err(|e| VectorError::Other(format!("bad invitee npub: {e}")))?;
+            let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+            crate::community::v2::service::send_direct_invite(&transport, &community, &recipient, None, None)
+                .await
+                .map_err(VectorError::Other)?;
+            return Ok(serde_json::json!({ "invited": invitee_npub, "version": 2 }));
         }
         let community = crate::db::community::load_community(&CommunityId(
             crate::simd::hex::hex_to_bytes_32(community_id),
