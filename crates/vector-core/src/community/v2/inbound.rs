@@ -67,6 +67,15 @@ pub enum DispatchedV2 {
     Typing { channel_id: String, npub: String },
     /// A Guestbook join/leave for `npub`.
     Presence { npub: String, joined: bool },
+    /// A wrap on this community's Control Plane — its metadata/channel set may
+    /// have changed. Recognized here (address match) but NOT folded: the fold
+    /// needs the whole edition chain, so the realtime layer re-fetches + re-folds
+    /// + re-subscribes. `community_id` is hex.
+    Control { community_id: String },
+    /// A wrap on one of this community's next-epoch rekey planes — a rotation is in
+    /// flight. Recognized by address; the realtime layer runs the stateful catch-up
+    /// ([`super::service::follow_rekeys`]) across every scope. `community_id` is hex.
+    Rekey { community_id: String },
     /// The wrap opened on a v2 plane but carries nothing the handler renders
     /// (e.g. a WebXDC signal, or a kick we don't surface in the first cut).
     Ignored,
@@ -107,6 +116,21 @@ pub fn dispatch_wrap(
             }
         }
         return DispatchedV2::Ignored;
+    }
+
+    // 3. Control plane: a metadata/channel edition. Recognized by address only —
+    // the fold needs the whole chain, which the realtime layer re-fetches. Shares
+    // one address helper with the subscription so the two can't drift.
+    if wrap.pubkey == super::realtime::control_author(community) {
+        return DispatchedV2::Control { community_id: crate::simd::hex::bytes_to_hex_32(&community.id().0) };
+    }
+
+    // 4. Rekey planes: a rotation in flight (base or a private channel), addressed
+    // at the next epoch. Same author-set the subscription rides — one source of
+    // truth ([`super::realtime::rekey_authors`]) so recognition and subscription
+    // can't drift.
+    if super::realtime::rekey_authors(community).iter().any(|p| *p == wrap.pubkey) {
+        return DispatchedV2::Rekey { community_id: crate::simd::hex::bytes_to_hex_32(&community.id().0) };
     }
 
     DispatchedV2::NotOurs

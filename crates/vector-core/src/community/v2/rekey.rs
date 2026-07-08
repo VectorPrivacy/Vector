@@ -501,6 +501,23 @@ impl Rotation {
     pub fn is_complete(&self) -> bool {
         self.declared_chunks >= 1 && (1..=self.declared_chunks).all(|i| self.held_chunks.contains(&i))
     }
+
+    /// This rotation's continuity against the `(epoch, key)` I hold for its scope
+    /// — the [`check_continuity`] verdict at the aggregated-rotation level (same
+    /// prevcommit test), so a follower can gate adoption without a raw chunk.
+    pub fn continuity(&self, held_epoch: Epoch, held_key: &[u8; 32]) -> Continuity {
+        if self.prev_epoch.0 == held_epoch.0 {
+            if epoch_key_commitment(held_epoch, held_key) == self.prev_commit {
+                Continuity::Extends
+            } else {
+                Continuity::Fork
+            }
+        } else if self.prev_epoch.0 > held_epoch.0 {
+            Continuity::Gap
+        } else {
+            Continuity::Fork
+        }
+    }
 }
 
 /// Group a batch of parsed chunks into rotations by correlation key. Chunks whose

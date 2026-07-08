@@ -11,7 +11,7 @@
 //! (both `#p=me`) stay on the DM subscription — the author-set here never
 //! includes an identity key, so the two never collide.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 
 use nostr_sdk::prelude::{Client, Event, Filter, Kind, PublicKey, RelayStatus, RelayUrl, SubscriptionId};
@@ -20,7 +20,7 @@ use tokio::sync::Mutex;
 use super::community::CommunityV2;
 use super::stream;
 use super::{derive, inbound};
-use crate::community::ConcordProtocol;
+use crate::community::{ConcordProtocol, Epoch};
 use crate::event_handler::InboundEventHandler;
 use crate::state::SessionGuard;
 
@@ -41,6 +41,17 @@ static V2_SUB_SET: LazyLock<Mutex<Vec<String>>> = LazyLock::new(|| Mutex::new(Ve
 static V2_SEEN_WRAPS: LazyLock<Mutex<HashSet<[u8; 32]>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 /// Bound on [`V2_SEEN_WRAPS`] before a coarse flush.
 const SEEN_WRAPS_CAP: usize = 8192;
+/// Coalesces control/rekey follow triggers per `(community_id_hex, plane)`. Any
+/// holder of the community_root can SIGN a wrap whose pubkey equals a plane
+/// address, and recognition is by address alone, so absent this a flood of
+/// distinct junk wraps would fan out into unbounded back-to-back re-fetches and
+/// starve message handling. At most one follow runs per key; a trigger arriving
+/// while one is in flight sets the value's rerun flag so the latest state is
+/// still captured after the burst. Cleared on session swap.
+static V2_FOLLOW_GATE: LazyLock<Mutex<HashMap<(String, u8), bool>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Plane discriminators for [`V2_FOLLOW_GATE`].
+const PLANE_CONTROL: u8 = 0;
+const PLANE_REKEY: u8 = 1;
 
 pub async fn subscription_id() -> Option<SubscriptionId> {
     V2_SUB_ID.lock().await.clone()
@@ -57,30 +68,62 @@ pub async fn clear() {
     *V2_POOLWIDE_SUB_ID.lock().await = None;
     V2_SUB_SET.lock().await.clear();
     V2_SEEN_WRAPS.lock().await.clear();
+    V2_FOLLOW_GATE.lock().await.clear();
 }
 
 /// Every plane pubkey a set of v2 communities publishes under that
-/// [`inbound::dispatch_wrap`] currently handles — the subscription author-set.
-/// Per community: the guestbook, and each channel's current Chat-Plane address.
-/// Pure + deterministic (deduped, sorted) — the testable core.
+/// [`inbound::dispatch_wrap`] handles — the subscription author-set. Per
+/// community: the guestbook, the control plane, and each channel's current
+/// Chat-Plane address. Pure + deterministic (deduped, sorted) — the testable core.
 ///
-/// **Deliberately NOT subscribed yet:** the control plane, the next base-rekey,
-/// and per-channel next-rekey addresses. Those wraps need live-follow logic
-/// (a control re-fold / a rekey catch-up) that isn't built for v2, so
-/// subscribing them would only deliver events the dispatcher drops. When
-/// control-follow + rekey-follow land, add their authors HERE together with
-/// their `dispatch_wrap` arms — never one without the other.
+/// The **control plane** rides here so a long-running bot follows metadata +
+/// public-channel edits live ([`super::service::follow_control`] re-folds on a
+/// recognized wrap).
+///
+/// **Deliberately NOT subscribed yet:** the next base-rekey and per-channel
+/// next-rekey addresses. Those wraps need the rekey catch-up (adopt-forward /
+/// removal), so subscribing them without that arm would only deliver events the
+/// dispatcher drops. When rekey-follow lands, add its authors HERE together with
+/// its `dispatch_wrap` arm — never one without the other.
 pub fn plane_authors(communities: &[CommunityV2]) -> Vec<PublicKey> {
     let mut out = Vec::new();
     for c in communities {
         out.push(derive::guestbook_group_key(&c.community_root, c.id(), c.root_epoch).pk());
+        out.push(control_author(c));
         for ch in &c.channels {
             let (secret, epoch) = c.channel_secret(ch);
             out.push(derive::channel_group_key(&secret, &ch.id, epoch).pk());
         }
+        out.extend(rekey_authors(c));
     }
     out.sort_by_key(|p| p.to_hex());
     out.dedup();
+    out
+}
+
+/// This community's Control Plane address at the current root epoch — the single
+/// source of truth shared by [`plane_authors`] (subscribe) and
+/// [`inbound::dispatch_wrap`] (recognize) so the two can't drift.
+pub(crate) fn control_author(c: &CommunityV2) -> PublicKey {
+    derive::control_group_key(&c.community_root, c.id(), c.root_epoch).pk()
+}
+
+/// The next-epoch rekey plane addresses for a community: the base rotation
+/// (`root_epoch + 1`) and each Private channel's rotation (`channel epoch + 1`),
+/// both under the CURRENT community_root. This is the single source of truth for
+/// which rekey wraps we subscribe AND recognize (`inbound::dispatch_wrap` calls
+/// it), so the two can never drift. A Public channel has no independent rotation
+/// (it rides the base), so only Private channels contribute a channel address.
+pub(crate) fn rekey_authors(c: &CommunityV2) -> Vec<PublicKey> {
+    // saturating: a bundle's epoch isn't covered by the community_id commitment, so
+    // it's attacker-influenced — never let `epoch + 1` overflow (a u64::MAX epoch
+    // just yields a dead address, never a panic).
+    let mut out = vec![derive::base_rekey_group_key(&c.community_root, c.id(), Epoch(c.root_epoch.0.saturating_add(1))).pk()];
+    for ch in &c.channels {
+        if ch.private {
+            out.push(derive::channel_rekey_group_key(&c.community_root, &ch.id, Epoch(ch.epoch.0.saturating_add(1))).pk());
+        }
+    }
     out
 }
 
@@ -189,7 +232,171 @@ pub async fn dispatch_event(session: &SessionGuard, event: Event, handler: Arc<d
     for c in &communities {
         match inbound::dispatch_wrap(&event, c, &my_pk, &*handler) {
             inbound::DispatchedV2::NotOurs => continue,
-            _ => return, // handled by this community's plane.
+            inbound::DispatchedV2::Control { community_id } => {
+                follow_control_and_refresh(session, c, &community_id, &*handler).await;
+                return;
+            }
+            inbound::DispatchedV2::Rekey { community_id } => {
+                follow_rekeys_and_refresh(session, c, &community_id, &*handler).await;
+                return;
+            }
+            _ => return, // chat/guestbook handled inline by the dispatcher.
+        }
+    }
+}
+
+/// Claim the follow slot for `key`. True → run the follow now; false → one is
+/// already in flight (a trailing rerun is requested so the burst's final state is
+/// still captured).
+async fn acquire_follow(key: &(String, u8)) -> bool {
+    let mut gate = V2_FOLLOW_GATE.lock().await;
+    if gate.contains_key(key) {
+        gate.insert(key.clone(), true);
+        false
+    } else {
+        gate.insert(key.clone(), false);
+        true
+    }
+}
+
+/// End a follow iteration. `force` releases and stops unconditionally. Otherwise:
+/// if a rerun was requested while this iteration ran, reset the flag and return
+/// true (caller loops on fresh state); else release and return false. Every exit
+/// path of a follow MUST reach this (with `force` on early breaks) or the slot leaks.
+async fn finish_follow(key: &(String, u8), force: bool) -> bool {
+    let mut gate = V2_FOLLOW_GATE.lock().await;
+    if force {
+        gate.remove(key);
+        return false;
+    }
+    match gate.get(key) {
+        Some(true) => {
+            gate.insert(key.clone(), false);
+            true
+        }
+        _ => {
+            gate.remove(key);
+            false
+        }
+    }
+}
+
+/// A control-plane wrap arrived for `community`: re-fold its control chain over a
+/// live transport, and on a real change persist (inside `follow_control`) then
+/// re-subscribe (a new public channel changes the author-set) + notify the
+/// handler. Coalesced via [`V2_FOLLOW_GATE`] so a junk-wrap flood can't fan out
+/// into unbounded re-fetches. No-op without a live client — unit tests drive
+/// [`super::service::follow_control`] directly against a `MemoryRelay`.
+async fn follow_control_and_refresh(
+    session: &SessionGuard,
+    community: &CommunityV2,
+    community_id: &str,
+    handler: &dyn InboundEventHandler,
+) {
+    if crate::state::nostr_client().is_none() {
+        return;
+    }
+    let key = (community_id.to_string(), PLANE_CONTROL);
+    if !acquire_follow(&key).await {
+        return; // already in flight — a rerun was requested for this burst.
+    }
+    let mut current = community.clone();
+    loop {
+        if let Some(client) = crate::state::nostr_client() {
+            let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+            match super::service::follow_control(&transport, &current, session).await {
+                Ok(Some(updated)) => {
+                    if !session.is_valid() {
+                        finish_follow(&key, true).await;
+                        return;
+                    }
+                    refresh_subscription(&client).await;
+                    handler.on_community_refreshed(community_id);
+                    current = updated;
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    finish_follow(&key, true).await;
+                    return;
+                }
+            }
+        }
+        if !finish_follow(&key, false).await {
+            break;
+        }
+        // A rerun was requested mid-flight — reload the freshest persisted view.
+        match crate::db::community::load_community_v2(current.id()) {
+            Ok(Some(c)) => current = c,
+            _ => {
+                finish_follow(&key, true).await;
+                break;
+            }
+        }
+    }
+}
+
+/// A rekey wrap arrived for `community`: run the stateful catch-up over a live
+/// transport. On adoption, re-subscribe (a base rotation moves every derived
+/// address; a channel rotation moves that channel's) + notify. On a base removal,
+/// tear the local hold down + notify. Coalesced via [`V2_FOLLOW_GATE`]. No-op
+/// without a live client — unit tests drive [`super::service::follow_rekeys`]
+/// directly against a `MemoryRelay`.
+async fn follow_rekeys_and_refresh(
+    session: &SessionGuard,
+    community: &CommunityV2,
+    community_id: &str,
+    handler: &dyn InboundEventHandler,
+) {
+    if crate::state::nostr_client().is_none() {
+        return;
+    }
+    let key = (community_id.to_string(), PLANE_REKEY);
+    if !acquire_follow(&key).await {
+        return;
+    }
+    let mut current = community.clone();
+    loop {
+        if let Some(client) = crate::state::nostr_client() {
+            let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+            match super::service::follow_rekeys(&transport, &current, session).await {
+                Ok(follow) if follow.self_removed => {
+                    if !session.is_valid() {
+                        finish_follow(&key, true).await;
+                        return;
+                    }
+                    // A base rotation dropped us — the community is no longer decryptable.
+                    let _ = crate::db::community::delete_community(community_id);
+                    refresh_subscription(&client).await;
+                    handler.on_community_self_removed(community_id);
+                    finish_follow(&key, true).await;
+                    return;
+                }
+                Ok(follow) => {
+                    if let Some(updated) = follow.updated {
+                        if !session.is_valid() {
+                            finish_follow(&key, true).await;
+                            return;
+                        }
+                        refresh_subscription(&client).await;
+                        handler.on_community_refreshed(community_id);
+                        current = updated;
+                    }
+                }
+                Err(_) => {
+                    finish_follow(&key, true).await;
+                    return;
+                }
+            }
+        }
+        if !finish_follow(&key, false).await {
+            break;
+        }
+        match crate::db::community::load_community_v2(current.id()) {
+            Ok(Some(c)) => current = c,
+            _ => {
+                finish_follow(&key, true).await;
+                break;
+            }
         }
     }
 }
@@ -212,22 +419,19 @@ mod tests {
         let c = a_community("A");
         let authors = plane_authors(std::slice::from_ref(&c));
 
-        // Subscribed: the guestbook + the one public channel (the planes
-        // dispatch_wrap handles). Just those two.
+        // Subscribed: the guestbook, the control plane, and the one public channel
+        // (the planes dispatch_wrap handles). Exactly those three.
         let gb = derive::guestbook_group_key(&c.community_root, c.id(), c.root_epoch).pk();
+        let control = derive::control_group_key(&c.community_root, c.id(), c.root_epoch).pk();
         let general = {
             let (s, e) = c.channel_secret(&c.channels[0]);
             derive::channel_group_key(&s, &c.channels[0].id, e).pk()
         };
-        assert!(authors.contains(&gb) && authors.contains(&general));
-        assert_eq!(authors.len(), 2, "only the guestbook + chat planes are subscribed");
-
-        // NOT subscribed (deferred until control/rekey follow is built — else we'd
-        // stream events the dispatcher only drops).
-        let control = derive::control_group_key(&c.community_root, c.id(), c.root_epoch).pk();
+        // Plus the next base-rekey address (rekey-follow). A public channel has no
+        // independent rotation, so #general contributes no channel-rekey address.
         let next_base = derive::base_rekey_group_key(&c.community_root, c.id(), Epoch(1)).pk();
-        assert!(!authors.contains(&control));
-        assert!(!authors.contains(&next_base));
+        assert!(authors.contains(&gb) && authors.contains(&control) && authors.contains(&general) && authors.contains(&next_base));
+        assert_eq!(authors.len(), 4, "guestbook + control + chat + base-rekey planes are subscribed");
     }
 
     #[test]
@@ -308,6 +512,24 @@ mod tests {
         assert_eq!(got[0].0, crate::simd::hex::bytes_to_hex_32(&general.0));
     }
 
+    #[tokio::test]
+    async fn follow_gate_coalesces_a_burst_and_runs_one_trailing_rerun() {
+        clear().await;
+        let key = ("cid".to_string(), PLANE_CONTROL);
+        // First trigger claims the slot; concurrent triggers during the run are
+        // coalesced (they only request a trailing rerun), bounding the fan-out.
+        assert!(acquire_follow(&key).await, "first trigger runs the follow");
+        assert!(!acquire_follow(&key).await, "a trigger while in-flight is coalesced");
+        assert!(!acquire_follow(&key).await, "a whole burst collapses to one rerun");
+        // The in-flight follow ends: a rerun was requested → loop once more.
+        assert!(finish_follow(&key, false).await, "a requested rerun makes the follow loop");
+        // No new trigger during the rerun → the next finish releases the slot.
+        assert!(!finish_follow(&key, false).await, "no further trigger → release");
+        // Released: a fresh trigger can claim it again (no leak).
+        assert!(acquire_follow(&key).await, "the released slot is re-acquirable");
+        finish_follow(&key, true).await; // clean up
+    }
+
     #[test]
     fn a_private_channel_subscribes_to_its_own_chat_plane() {
         let mut c = a_community("Priv");
@@ -322,8 +544,9 @@ mod tests {
         // A private channel is read under its OWN key/epoch (not the root).
         let priv_chat = derive::channel_group_key(&[0x44; 32], &c.channels[1].id, Epoch(1)).pk();
         assert!(authors.contains(&priv_chat), "a private channel subscribes to its own chat plane");
-        // Its next-rekey address is NOT subscribed yet (rekey follow deferred).
+        // Its next-rekey address IS subscribed (rekey-follow), keyed by the current
+        // root at the channel's next epoch — so a rotation is delivered.
         let next_rekey = derive::channel_rekey_group_key(&c.community_root, &c.channels[1].id, Epoch(2)).pk();
-        assert!(!authors.contains(&next_rekey));
+        assert!(authors.contains(&next_rekey), "a private channel's next rekey plane is subscribed");
     }
 }

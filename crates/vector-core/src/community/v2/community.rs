@@ -235,6 +235,33 @@ mod tests {
     }
 
     #[test]
+    fn from_bundle_rejects_an_out_of_range_epoch() {
+        // Epochs aren't covered by the owner commitment, so a hostile bundle can set
+        // root_epoch = u64::MAX to push a downstream `epoch + 1` toward overflow. The
+        // validate bound refuses it even though the owner commitment itself verifies.
+        let owner = Keys::generate();
+        let identity = CommunityIdentity::mint(&owner.public_key());
+        let hex = crate::simd::hex::bytes_to_hex_32;
+        let root = [0x11u8; 32];
+        let bundle = CommunityInvite {
+            community_id: hex(&identity.community_id.0),
+            owner: hex(&identity.owner_xonly),
+            owner_salt: hex(&identity.owner_salt),
+            community_root: hex(&root),
+            root_epoch: u64::MAX,
+            channels: vec![ChannelGrant { id: hex(&[0xa1; 32]), key: hex(&root), epoch: 0, name: "general".into() }],
+            relays: vec!["wss://r".into()],
+            name: "Overflow".into(),
+            icon: None,
+            expires_at: None,
+            creator_npub: None,
+            label: None,
+            extra: Default::default(),
+        };
+        assert!(CommunityV2::from_bundle(&bundle, 0).is_err(), "an out-of-range epoch is refused");
+    }
+
+    #[test]
     fn from_bundle_rejects_a_forged_owner_commitment() {
         let owner = Keys::generate();
         let attacker = Keys::generate();

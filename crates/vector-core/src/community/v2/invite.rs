@@ -39,6 +39,12 @@ use super::{kind, vsk};
 /// hold before allocating on its claims (CORD-05 §1).
 pub const MAX_BUNDLE_CHANNELS: usize = 256;
 
+/// Sanity ceiling on a bundle's `root_epoch` / channel epochs. Not a commitment
+/// (epochs aren't owner-signed), just a bound so attacker-set values can't push a
+/// later `epoch + 1` toward overflow. `2^40` is astronomically above any real
+/// rotation count.
+pub const MAX_BUNDLE_EPOCH: u64 = 1 << 40;
+
 /// The fragment format byte, which also selects the relay-dictionary generation
 /// (CORD-05 §3). Bumping it re-labels the dictionary universe.
 pub const FRAGMENT_VERSION: u8 = 4;
@@ -171,6 +177,13 @@ impl CommunityInvite {
     pub fn validate(&self) -> Result<(), InviteError> {
         if self.channels.len() > MAX_BUNDLE_CHANNELS {
             return Err(InviteError::TooManyChannels(self.channels.len()));
+        }
+        // Epochs aren't covered by the community_id commitment, so an attacker can
+        // set them freely. Bound them well below `u64::MAX` (no real community
+        // rotates a trillion times) so a downstream `epoch + 1` can't be pushed near
+        // overflow and a crafted bundle can't derive nonsense addresses.
+        if self.root_epoch > MAX_BUNDLE_EPOCH || self.channels.iter().any(|c| c.epoch > MAX_BUNDLE_EPOCH) {
+            return Err(InviteError::BadFragment("epoch out of range"));
         }
         let owner = hex32(&self.owner, "owner")?;
         let salt = hex32(&self.owner_salt, "owner_salt")?;
