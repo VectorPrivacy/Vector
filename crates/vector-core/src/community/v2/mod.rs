@@ -24,6 +24,7 @@ pub mod guestbook;
 pub mod invite;
 pub mod list;
 pub mod rekey;
+pub mod service;
 pub mod stream;
 
 /// Inner rumor kinds (CORD-02 Appendix B). The *outer* event is always a wrap

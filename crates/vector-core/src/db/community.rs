@@ -1715,6 +1715,180 @@ pub fn list_community_ids() -> Result<Vec<CommunityId>, String> {
     Ok(ids)
 }
 
+// ── Concord v2 storage (dual-stack) ──────────────────────────────────────────
+//
+// v2 communities reuse the shared community tables (migration 65 added the
+// `protocol`/`owner_pubkey`/`owner_salt`/`private` columns). The base access key
+// rides `server_root_key`/`server_root_epoch` (same role as v1's server root).
+// A public channel stores the community_root in `channel_key` as a placeholder
+// (its real secret is derived from the root); a private channel stores its own
+// key. At-rest encryption reuses the same `enc_*`/`dec_*` helpers.
+
+/// The protocol a stored community runs, or `None` if it isn't held locally.
+pub fn community_protocol(id: &CommunityId) -> Result<Option<crate::community::ConcordProtocol>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let n: Option<i64> = conn
+        .query_row("SELECT protocol FROM communities WHERE community_id = ?1", params![id.to_hex()], |r| r.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    Ok(n.map(crate::community::ConcordProtocol::from_i64))
+}
+
+/// Persist a v2 community + its channels atomically. UPSERT so a metadata
+/// re-save preserves banlist/roles (managed by the fold, not here).
+pub fn save_community_v2(c: &crate::community::v2::community::CommunityV2) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let id_hex = crate::simd::hex::bytes_to_hex_32(&c.identity.community_id.0);
+    let relays_json = serde_json::to_string(&c.relays).map_err(|e| e.to_string())?;
+    let created = (c.created_at_ms / 1000) as i64;
+
+    let enc_root = enc_key(&c.community_root)?;
+    let enc_name = enc_txt(&c.name)?;
+    let enc_relays = enc_txt(&relays_json)?;
+    let enc_desc = enc_txt_opt(&c.description)?;
+    let enc_owner_pk = enc_txt(&crate::simd::hex::bytes_to_hex_32(&c.identity.owner_xonly))?;
+    let enc_owner_salt = enc_txt(&crate::simd::hex::bytes_to_hex_32(&c.identity.owner_salt))?;
+
+    let tx = conn.unchecked_transaction().map_err(|e| format!("save v2 community tx: {e}"))?;
+    tx.execute(
+        "INSERT INTO communities
+            (community_id, server_root_key, name, relays, created_at, description,
+             server_root_epoch, dissolved, protocol, owner_pubkey, owner_salt)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 2, ?9, ?10)
+         ON CONFLICT(community_id) DO UPDATE SET
+            server_root_key=?2, name=?3, relays=?4, description=?6,
+            server_root_epoch=?7, dissolved=?8, protocol=2, owner_pubkey=?9, owner_salt=?10",
+        params![
+            id_hex, enc_root, enc_name, enc_relays, created, enc_desc,
+            c.root_epoch.0 as i64, c.dissolved as i64, enc_owner_pk, enc_owner_salt,
+        ],
+    )
+    .map_err(|e| format!("save v2 community: {e}"))?;
+
+    for ch in &c.channels {
+        let ch_hex = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
+        // A public channel has no independent key; store the community_root as a
+        // placeholder so the NOT NULL column is satisfied (the real secret is
+        // derived from the root at read time via `channel_secret`).
+        let stored_key = ch.key.unwrap_or(c.community_root);
+        let enc_ch_key = enc_key(&stored_key)?;
+        let enc_ch_name = enc_txt(&ch.name)?;
+        tx.execute(
+            "INSERT INTO community_channels
+                (channel_id, community_id, channel_key, epoch, name, created_at, private)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(channel_id) DO UPDATE SET
+                channel_key=?3, epoch=?4, name=?5, private=?7",
+            params![ch_hex, id_hex, enc_ch_key, ch.epoch.0 as i64, enc_ch_name, created, ch.private as i64],
+        )
+        .map_err(|e| format!("save v2 channel: {e}"))?;
+    }
+
+    tx.commit().map_err(|e| format!("commit v2 community: {e}"))?;
+    Ok(())
+}
+
+/// Load a v2 community by id, or `None` if absent / not a v2 community.
+pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2::community::CommunityV2>, String> {
+    use crate::community::v2::community::{ChannelV2, CommunityV2};
+    use crate::community::v2::control::CommunityIdentity;
+    let conn = super::get_db_connection_guard_static()?;
+    let id_hex = id.to_hex();
+
+    let row = conn
+        .query_row(
+            "SELECT server_root_key, name, relays, created_at, description,
+                    server_root_epoch, dissolved, protocol, owner_pubkey, owner_salt
+             FROM communities WHERE community_id = ?1",
+            params![id_hex],
+            |r| {
+                Ok((
+                    r.get::<_, Vec<u8>>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, i64>(7)?,
+                    r.get::<_, Option<String>>(8)?,
+                    r.get::<_, Option<String>>(9)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some((root_blob, name_e, relays_e, created, desc_e, root_epoch, dissolved, protocol, owner_pk_e, owner_salt_e)) = row
+    else {
+        return Ok(None);
+    };
+    if crate::community::ConcordProtocol::from_i64(protocol) != crate::community::ConcordProtocol::V2 {
+        return Ok(None);
+    }
+    let (Some(owner_pk_e), Some(owner_salt_e)) = (owner_pk_e, owner_salt_e) else {
+        return Err("v2 community row is missing its owner commitment".to_string());
+    };
+
+    let community_root = dec_key(&root_blob)?;
+    let owner_xonly = parse_hex32(&dec_txt(&owner_pk_e))?;
+    let owner_salt = parse_hex32(&dec_txt(&owner_salt_e))?;
+    let identity = CommunityIdentity { community_id: *id, owner_xonly, owner_salt };
+    let relays: Vec<String> = serde_json::from_str(&dec_txt(&relays_e)).unwrap_or_default();
+
+    let mut channels = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT channel_id, channel_key, epoch, name, private
+                 FROM community_channels WHERE community_id = ?1 ORDER BY created_at",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![id_hex], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, i64>(4)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            let (ch_hex, key_blob, epoch, name_e, private) = row.map_err(|e| e.to_string())?;
+            let private = private != 0;
+            let key = dec_key(&key_blob)?;
+            channels.push(ChannelV2 {
+                id: ChannelId(hex_id_to_32(&ch_hex)?),
+                name: dec_txt(&name_e),
+                private,
+                // A public channel derives from the root — drop the placeholder.
+                key: private.then_some(key),
+                epoch: Epoch(epoch as u64),
+            });
+        }
+    }
+
+    Ok(Some(CommunityV2 {
+        identity,
+        community_root,
+        root_epoch: Epoch(root_epoch as u64),
+        name: dec_txt(&name_e),
+        description: desc_e.map(|d| dec_txt(&d)),
+        relays,
+        channels,
+        dissolved: dissolved != 0,
+        created_at_ms: (created as u64).saturating_mul(1000),
+    }))
+}
+
+fn parse_hex32(hex: &str) -> Result<[u8; 32], String> {
+    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("stored value is not 32-byte hex".to_string());
+    }
+    Ok(crate::simd::hex::hex_to_bytes_32(hex))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
