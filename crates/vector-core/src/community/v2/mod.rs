@@ -24,6 +24,7 @@ pub mod guestbook;
 pub mod inbound;
 pub mod invite;
 pub mod list;
+pub mod realtime;
 pub mod rekey;
 pub mod service;
 pub mod stream;

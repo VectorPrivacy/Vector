@@ -810,6 +810,10 @@ impl VectorCore {
             .await
             .map_err(VectorError::Other)?;
         self.register_v2_chats(&community).await;
+        // Start streaming this community's planes right away.
+        if let Some(client) = state::nostr_client() {
+            crate::community::v2::realtime::refresh_subscription(&client).await;
+        }
         Ok(Self::v2_summary(&community))
     }
 
@@ -879,6 +883,9 @@ impl VectorCore {
                 .await
                 .map_err(VectorError::Other)?;
             self.register_v2_chats(&community).await;
+            if let Some(client) = state::nostr_client() {
+                crate::community::v2::realtime::refresh_subscription(&client).await;
+            }
             return Ok(Self::v2_summary(&community));
         }
         let (relays, token) = public_invite::parse_invite_url(invite_url)
@@ -1971,6 +1978,7 @@ impl VectorCore {
         // through the same handler, so `on_dm_received`/`on_community_message` share a sink.
         let dm_sub_id = self.subscribe_dms().await?;
         community::realtime::refresh_subscription(&client).await;
+        community::v2::realtime::refresh_subscription(&client).await;
 
         // Outage resilience via the relay Monitor — event-driven, not polling.
         //
@@ -1998,6 +2006,7 @@ impl VectorCore {
                         let _ = VectorCore.sync_dms(None, &NoOpEventHandler).await;
                         if let Some(c) = state::nostr_client() {
                             community::realtime::refresh_subscription(&c).await;
+                            community::v2::realtime::refresh_subscription(&c).await;
                         }
                         last_resync = Some(std::time::Instant::now());
                     }
@@ -2059,9 +2068,15 @@ impl VectorCore {
                         let prepared = event_handler::prepare_event(*event, &c, my_pk).await;
                         event_handler::commit_prepared_event(prepared, true, &*handler).await;
                     } else if community::realtime::subscription_id().await.as_ref() == Some(&subscription_id) {
-                        // Community channel messages / reactions / edits / control editions
+                        // Community (v1) channel messages / reactions / edits / control editions
                         let session = state::SessionGuard::capture();
                         community::realtime::dispatch_event(&session, *event, handler.clone()).await;
+                    } else if community::v2::realtime::subscription_id().await.as_ref() == Some(&subscription_id)
+                        || community::v2::realtime::poolwide_subscription_id().await.as_ref() == Some(&subscription_id)
+                    {
+                        // Concord v2 plane events (authors-addressed kind-1059/21059).
+                        let session = state::SessionGuard::capture();
+                        community::v2::realtime::dispatch_event(&session, *event, handler.clone()).await;
                     }
                 }
                 Ok(false)
@@ -2137,6 +2152,7 @@ impl VectorCore {
         // Community realtime route/subscription state is account-scoped (channel keys + banned sets);
         // drop it so a swapped-in account can't listen on the prior account's pseudonyms.
         crate::community::realtime::clear().await;
+        crate::community::v2::realtime::clear().await;
         // Theme-pack emoji tags are account-scoped; leaving the prior account's set active would tag the
         // next account's outbound messages with A's theme shortcodes (leaking A's pack Blossom URLs). The
         // frontend re-registers the new account's theme, but only if it HAS one — clear to be safe.
