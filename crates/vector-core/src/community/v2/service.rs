@@ -930,8 +930,18 @@ mod tests {
         crate::db::close_database();
         crate::db::clear_id_caches();
         let tmp = tempfile::tempdir().unwrap();
-        let keys = Keys::generate();
+        // Bring your own key (VECTOR_SMOKE_NSEC) to create a community you can log
+        // into elsewhere; otherwise a fresh throwaway.
+        let keys = match std::env::var("VECTOR_SMOKE_NSEC") {
+            Ok(n) => Keys::parse(&n).expect("VECTOR_SMOKE_NSEC is not a valid nsec"),
+            Err(_) => Keys::generate(),
+        };
         let npub = keys.public_key().to_bech32().unwrap();
+        // Off by default (never leak secrets from a committed test); set
+        // VECTOR_SMOKE_PRINT_NSEC=1 to print the owner nsec for cross-client login.
+        if std::env::var("VECTOR_SMOKE_PRINT_NSEC").is_ok() {
+            println!("[smoke] OWNER nsec (throwaway — do NOT reuse): {}", keys.secret_key().to_bech32().unwrap());
+        }
         std::fs::create_dir_all(tmp.path().join(&npub)).unwrap();
         crate::db::set_app_data_dir(tmp.path().to_path_buf());
         crate::db::set_current_account(npub.clone()).unwrap();
