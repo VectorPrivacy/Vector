@@ -1,10 +1,16 @@
-// Updater functionality for Vector
-const { check } = window.__TAURI__.updater;
-const { relaunch } = window.__TAURI__.process;
+// Updater functionality for Vector.
+// The updater/process plugins are desktop-only, so they are accessed lazily
+// inside the desktop paths — a top-level destructure would throw on Android
+// and kill this whole module.
 
 // Store update state
 let currentUpdate = null;
 let updateState = 'idle'; // idle, checking, available, downloading, ready
+
+// Android: where this build updates from — { has_store, label }. Resolved
+// once at init from whatever store installed the APK; drives the redirect
+// button's label and action. Defaults to sideload (website) until resolved.
+let androidInstallSource = { has_store: false, label: '' };
 
 // Get current version
 async function getCurrentVersion() {
@@ -38,17 +44,42 @@ function initializeUpdaterUI() {
     // Add click handler for restart button
     const restartButton = document.getElementById('restart-update-btn');
     if (restartButton) {
-        restartButton.addEventListener('click', () => relaunch());
+        restartButton.addEventListener('click', () => window.__TAURI__.process.relaunch());
     }
 }
 
 // Handle button click based on current state
 function handleButtonClick() {
     if (updateState === 'available') {
-        downloadUpdate();
+        if (platformFeatures.os === 'android') {
+            openAndroidUpdateSource();
+        } else {
+            downloadUpdate();
+        }
     } else {
         checkForUpdates(false);
     }
+}
+
+// Android can't self-update: hand off to whatever store shipped this APK.
+function androidUpdateButtonLabel() {
+    return androidInstallSource.has_store
+        ? `Update via ${androidInstallSource.label}`
+        : 'Download at vectorapp.io';
+}
+
+async function openAndroidUpdateSource() {
+    if (androidInstallSource.has_store) {
+        try {
+            const opened = await window.__TAURI__.core.invoke('open_update_source');
+            if (opened) return;
+        } catch (e) {
+            console.warn('Updater: store hand-off failed:', e);
+        }
+    }
+    // Sideload, or the store couldn't take the deep link: the website carries
+    // every build and links out to each store.
+    return openUrl('https://vectorapp.io');
 }
 
 // Update UI state
@@ -123,7 +154,9 @@ function updateUI(state, message = '', progress = 0) {
             }
             if (checkButton) {
                 checkButton.disabled = false;
-                checkButton.textContent = 'Download Update';
+                checkButton.textContent = (platformFeatures.os === 'android')
+                    ? androidUpdateButtonLabel()
+                    : 'Download Update';
                 checkButton.style.background = '';
                 checkButton.style.display = 'block';
             }
@@ -229,6 +262,32 @@ async function checkForUpdates(silent = false) {
         updateUI('checking');
     }
 
+    // Android: no updater plugin — the backend fetches the release manifest
+    // through its Tor-aware client and compares versions for us. The Tor
+    // gate here is for messaging only; the backend fails closed regardless.
+    if (platformFeatures.os === 'android') {
+        try {
+            const transport = await resolveUpdateTransport();
+            if (!transport.allowed) {
+                console.log('Updater: skipping update check (Tor enabled but not connected)');
+                if (!silent) updateUI('error', 'Update check paused until Tor connects');
+                return false;
+            }
+            const info = await window.__TAURI__.core.invoke('check_app_update');
+            if (!info.available) {
+                if (!silent) updateUI('no-updates');
+                return false;
+            }
+            currentUpdate = { version: info.latest, body: info.notes };
+            updateUI('available');
+            return true;
+        } catch (error) {
+            console.error('Updater: Error checking for updates:', error);
+            if (!silent) updateUI('error', 'Failed to check for updates');
+            return false;
+        }
+    }
+
     try {
         const transport = await resolveUpdateTransport();
         if (!transport.allowed) {
@@ -238,7 +297,7 @@ async function checkForUpdates(silent = false) {
             }
             return false;
         }
-        const update = await check(transport.proxy ? { proxy: transport.proxy } : undefined);
+        const update = await window.__TAURI__.updater.check(transport.proxy ? { proxy: transport.proxy } : undefined);
         
         if (!update) {
             if (!silent) {
@@ -303,10 +362,9 @@ async function downloadUpdate() {
 }
 
 // Auto-check for updates on app start (silent check)
-function initializeUpdater() {
-    // Skip updater on mobile platforms (Android/iOS)
-    if (platformFeatures.os === 'android' || platformFeatures.os === 'ios') {
-        // Hide the updates section in settings
+async function initializeUpdater() {
+    // iOS: no updater plugin and no store hand-off wired up yet.
+    if (platformFeatures.os === 'ios') {
         const updatesSection = document.getElementById('settings-updates');
         if (updatesSection) {
             updatesSection.style.display = 'none';
@@ -319,6 +377,16 @@ function initializeUpdater() {
         document.addEventListener('DOMContentLoaded', initializeUpdaterUI);
     } else {
         initializeUpdaterUI();
+    }
+
+    // Android: resolve the install source BEFORE the first check so an
+    // available-update button renders with the real store label instead of
+    // the sideload default. The action self-heals by click time; the label
+    // would otherwise stay wrong until the next check.
+    if (platformFeatures.os === 'android') {
+        try {
+            androidInstallSource = await window.__TAURI__.core.invoke('get_install_source');
+        } catch (e) { /* keep the sideload default */ }
     }
 
     // Check for updates immediately after app start

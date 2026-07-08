@@ -6,6 +6,7 @@ pub mod miniapp;
 pub mod miniapp_jni;
 pub mod permissions;
 pub mod storage;
+pub mod updates;
 pub mod utils;
 
 // Re-exports for common Android utilities

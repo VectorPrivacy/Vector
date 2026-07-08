@@ -592,6 +592,9 @@ pub fn run() {
             commands::system::set_background_service_enabled,
             commands::system::get_background_service_prompted,
             commands::system::set_background_service_prompted,
+            commands::updates::check_app_update,
+            commands::updates::get_install_source,
+            commands::updates::open_update_source,
             // Deep link commands
             deep_link::get_pending_deep_link,
             share::get_pending_share,

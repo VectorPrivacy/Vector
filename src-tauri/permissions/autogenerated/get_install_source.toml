@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-install-source"
+description = "Enables the get_install_source command without any pre-configured scope."
+commands.allow = ["get_install_source"]
+
+[[permission]]
+identifier = "deny-get-install-source"
+description = "Denies the get_install_source command without any pre-configured scope."
+commands.deny = ["get_install_source"]
