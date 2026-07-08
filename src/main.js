@@ -2625,7 +2625,8 @@ function updateChatHeaderSubtext(chat) {
  */
 function resolveMentionText(text) {
     if (!text) return text;
-    return text.replace(/@(npub1[a-z0-9]{58})/g, (full, npub) => {
+    // Same shapes renderMentions pills: @-, nostr:-prefixed, or bare npubs.
+    return text.replace(/(?<![\w/=?&#%.-])(?:@|nostr:)?(npub1[a-z0-9]{58})\b/g, (full, npub) => {
         const profile = getProfile(npub);
         if (profile) {
             return '@' + getName(npub);
@@ -3426,12 +3427,6 @@ async function setupRustListeners() {
             renderChatlist();
         }
         
-        // Update any profile previews in the chat messages for this npub (regardless of which chat is open)
-        const profilePreviews = document.querySelectorAll(`.msg-profile-preview[data-npub="${evt.payload.id}"]`);
-        profilePreviews.forEach(preview => {
-            updateNostrProfilePreview(preview, evt.payload);
-        });
-
         // Update already-painted message rows authored by this npub — name + avatar — so chat
         // history reflects the resolved profile without needing a reopen (matches the system-event
         // and member-list retro-resolve).
@@ -11137,7 +11132,7 @@ async function sendMessage(messageText) {
                     spanMessage.innerHTML = parseMarkdown(cleanedText.trim());
                     linkifyUrls(spanMessage);
                     processInlineImages(spanMessage);
-                    renderMentions(spanMessage, false);
+                    renderMentions(spanMessage, false, { allowBare: true, queueSync: true });
                     // Resolve custom emoji optimistically (before twemoji, mirroring
                     // the render path) so the edit doesn't flash `:shortcode:` while
                     // the backend's authoritative message_update is in flight.

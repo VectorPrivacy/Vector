@@ -179,11 +179,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
     // ---- Text content -------------------------------------------------------
     // Defensive against null/undefined content (attachment-only messages from
     // some clients can omit content entirely).
-    const npubInfoEarly = msg.content ? detectNostrProfile(msg.content) : null;
-    let displayContent = msg.content || '';
-    if (npubInfoEarly && npubInfoEarly.isAtEnd && npubInfoEarly.textWithoutNpub) {
-        displayContent = npubInfoEarly.textWithoutNpub;
-    }
+    const displayContent = msg.content || '';
 
     // Defensive: msg.content can be null/undefined for attachment-only messages.
     const safeContent = msg.content || '';
@@ -256,50 +252,11 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         renderCommunityInvitePreviews(content, msg.content);
     }
 
-    // ---- Nostr profile preview ---------------------------------------------
-    if (npubInfoEarly) {
-        const isOnlyNpub = msg.content.trim() === npubInfoEarly.originalMatch;
-        if (isOnlyNpub && textSpan) textSpan.style.display = 'none';
-
-        const cachedProfile = getProfile(npubInfoEarly.npub);
-        const profilePreview = renderNostrProfilePreview(npubInfoEarly, cachedProfile, isOnlyNpub);
-
-        const btnViewProfile = profilePreview.querySelector('.msg-profile-btn');
-        if (btnViewProfile) {
-            btnViewProfile.addEventListener('click', (e) => {
-                e.stopPropagation();
-                const npub = btnViewProfile.getAttribute('data-npub');
-                openProfile(getProfile(npub) || { id: npub });
-            });
-        }
-
-        const btnCopy = profilePreview.querySelector('.msg-profile-copy-btn');
-        if (btnCopy) {
-            btnCopy.addEventListener('click', async (e) => {
-                e.stopPropagation();
-                const npub = btnCopy.getAttribute('data-npub');
-                const profileUrl = `https://vectorapp.io/profile/${npub}`;
-                await navigator.clipboard.writeText(profileUrl);
-                btnCopy.innerHTML = '<span class="icon icon-check"></span>';
-                setTimeout(() => {
-                    btnCopy.innerHTML = '<span class="icon icon-copy"></span>';
-                }, 2000);
-            });
-        }
-
-        if (!cachedProfile) {
-            invoke('queue_profile_sync', {
-                npub: npubInfoEarly.npub,
-                priority: 'high',
-                forceRefresh: false,
-            }).catch(err => console.warn('Failed to queue profile sync for npub preview:', err));
-        }
-
-        content.appendChild(profilePreview);
-    }
 
     // ---- Link preview (OpenGraph) ------------------------------------------
-    const skipWebPreview = npubInfoEarly && npubInfoEarly.type === 'link';
+    // A vectorapp.io profile link renders as a mention pill; an OpenGraph
+    // card for the same URL would be redundant.
+    const skipWebPreview = /https?:\/\/vectorapp\.io\/profile\/npub1[a-z0-9]{58}/i.test(msg.content || '');
     if (!msg.pending && !msg.failed && fWebPreviewsEnabled && !skipWebPreview && !isRevealedBlockedMsg) {
         const previewEl = _dmsgBuildLinkPreview(msg);
         if (previewEl) content.appendChild(previewEl);
@@ -562,7 +519,9 @@ function _dmsgBuildText(msg, displayContent, fEmojiOnly, isGroupChat, currentCha
     const senderNpub = msg.mine ? strPubkey : (msg.npub || '');
     const senderIsAdmin = isGroupChat && (currentChat?.metadata?.admins?.includes(senderNpub)
         || currentChat?.metadata?.custom_fields?.owner_npub === senderNpub);
-    renderMentions(span, senderIsAdmin);
+    // Bare and nostr:-prefixed npubs (and vectorapp.io profile links) render
+    // as mention pills, same treatment as bios.
+    renderMentions(span, senderIsAdmin, { allowBare: true, queueSync: true });
 
     // NIP-30 custom emojis ride along on the rumor; resolve them before
     // the parent pass runs twemoji so a `:smile:` from a pack doesn't get

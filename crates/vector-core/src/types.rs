@@ -231,24 +231,31 @@ pub fn mention(npub: &str) -> String {
     format!("@{}", npub)
 }
 
-/// Extract all `@npub1...` mentions from a string.
+/// Extract every npub mentioned in a string: `@npub1...`, `nostr:npub1...`,
+/// or a bare `npub1...`. A full npub standing alone IS a mention (matching
+/// the render layer, which pills all three shapes); one glued into a longer
+/// alphanumeric token is not.
 ///
-/// Returns npub strings without the `@` prefix. Validates bech32 characters.
+/// Returns npub strings without any prefix. Validates bech32 characters.
 pub fn extract_mentions(content: &str) -> Vec<&str> {
     let bytes = content.as_bytes();
     let len = bytes.len();
     let mut mentions = Vec::new();
     let mut i = 0;
 
-    // npub = "npub1" (5) + 58 bech32 chars = 63 bytes; with '@' = 64
-    while i + 64 <= len {
-        if bytes[i] == b'@' && &bytes[i + 1..i + 6] == b"npub1" {
-            let npub_end = i + 1 + 63;
-            let valid = bytes[i + 6..npub_end]
-                .iter()
-                .all(|b| BECH32_CHARS.contains(&b.to_ascii_lowercase()));
+    // npub = "npub1" (5) + 58 bech32 chars = 63 bytes
+    while i + 63 <= len {
+        if &bytes[i..i + 5] == b"npub1" {
+            let npub_end = i + 63;
+            let prev_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+            let next_ok = npub_end >= len || !bytes[npub_end].is_ascii_alphanumeric();
+            let valid = prev_ok
+                && next_ok
+                && bytes[i + 5..npub_end]
+                    .iter()
+                    .all(|b| BECH32_CHARS.contains(&b.to_ascii_lowercase()));
             if valid {
-                mentions.push(&content[i + 1..npub_end]);
+                mentions.push(&content[i..npub_end]);
                 i = npub_end;
                 continue;
             }
@@ -848,5 +855,27 @@ mod tests {
     fn extract_mentions_at_everyone_not_npub() {
         let mentions = super::extract_mentions("hey @everyone");
         assert!(mentions.is_empty());
+    }
+
+    #[test]
+    fn extract_mentions_bare_and_prefixed_shapes() {
+        let npub = nostr_sdk::Keys::generate().public_key().to_bech32().unwrap();
+        for content in [
+            format!("{}", npub),
+            format!("rep given to nostr:{}! nice", npub),
+            format!("is {} yours?", npub),
+            format!("https://vectorapp.io/profile/{}", npub),
+        ] {
+            let mentions = super::extract_mentions(&content);
+            assert_eq!(mentions, vec![npub.as_str()], "shape: {}", content);
+        }
+    }
+
+    #[test]
+    fn extract_mentions_rejects_glued_tokens() {
+        let npub = nostr_sdk::Keys::generate().public_key().to_bech32().unwrap();
+        // Glued into a longer alphanumeric token on either side = not a mention.
+        assert!(super::extract_mentions(&format!("x{}", npub)).is_empty());
+        assert!(super::extract_mentions(&format!("{}9", npub)).is_empty());
     }
 }
