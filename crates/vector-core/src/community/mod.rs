@@ -34,6 +34,33 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+/// Which Concord protocol a community runs. Vector carries both for a migration
+/// window: v1 (the shipped `#z`-addressed stack) and v2 (the self-certifying-id
+/// CORD stack, `community::v2`). Persisted as the `communities.protocol` integer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConcordProtocol {
+    V1,
+    V2,
+}
+
+impl ConcordProtocol {
+    pub fn as_i64(self) -> i64 {
+        match self {
+            ConcordProtocol::V1 => 1,
+            ConcordProtocol::V2 => 2,
+        }
+    }
+
+    /// Map the stored integer; anything unrecognized (or a legacy NULL read as 0)
+    /// falls back to v1, the pre-migration default.
+    pub fn from_i64(n: i64) -> ConcordProtocol {
+        match n {
+            2 => ConcordProtocol::V2,
+            _ => ConcordProtocol::V1,
+        }
+    }
+}
+
 /// A Community's stable identity = a random 32-byte opaque id (NOT a
 /// timestamp-encoding snowflake, which would leak creation time).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

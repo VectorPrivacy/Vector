@@ -16,6 +16,7 @@
 //! number is burned forever, never reused.
 
 pub mod chat;
+pub mod community;
 pub mod control;
 pub mod derive;
 pub mod dissolution;
