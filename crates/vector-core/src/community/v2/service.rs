@@ -908,4 +908,71 @@ mod tests {
         );
         assert_eq!(crate::db::community::list_community_ids().unwrap().len(), 0);
     }
+
+    /// LIVE smoke test (network) — ignored by default. Creates a v2 community on a
+    /// REAL relay via `LiveTransport`, sends a message, fetches it back, and mints
+    /// a public link. A fresh throwaway identity in an isolated temp data dir, so
+    /// it never touches real accounts. Run explicitly:
+    /// ```sh
+    /// cargo test -p vector-core -- --ignored --nocapture live_smoke
+    /// ```
+    #[tokio::test]
+    #[ignore = "hits a real relay over the network"]
+    async fn live_smoke_create_send_fetch_on_a_real_relay() {
+        use crate::community::transport::LiveTransport;
+        use nostr_sdk::prelude::ToBech32;
+
+        let relay = std::env::var("VECTOR_SMOKE_RELAY").unwrap_or_else(|_| "wss://jskitty.com/nostr".to_string());
+        let relays = vec![relay.clone()];
+
+        // Isolated account + data dir (a fresh throwaway key — never a real account).
+        let _g = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        crate::db::clear_id_caches();
+        let tmp = tempfile::tempdir().unwrap();
+        let keys = Keys::generate();
+        let npub = keys.public_key().to_bech32().unwrap();
+        std::fs::create_dir_all(tmp.path().join(&npub)).unwrap();
+        crate::db::set_app_data_dir(tmp.path().to_path_buf());
+        crate::db::set_current_account(npub.clone()).unwrap();
+        crate::db::init_database(&npub).unwrap();
+        crate::state::MY_SECRET_KEY.store_from_keys(&keys, &[]);
+        crate::state::set_my_public_key(keys.public_key());
+        println!("[smoke] throwaway identity {npub}");
+
+        // A live client (LiveTransport rides the global NOSTR_CLIENT + warms relays).
+        let client = nostr_sdk::ClientBuilder::new().signer(keys.clone()).build();
+        client.pool().add_relay(relay.as_str(), nostr_sdk::RelayOptions::default()).await.ok();
+        client.connect().await;
+        crate::state::set_nostr_client(client);
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(15));
+
+        // Create → send → fetch-back → verify.
+        let community = create_community(&transport, "V2 Live Smoke", relays.clone(), None).await.expect("create");
+        let general = community.channels[0].id;
+        println!("[smoke] created community {} on {relay}", crate::simd::hex::bytes_to_hex_32(&community.id().0));
+
+        let text = "hello from a Vector Concord v2 live smoke test";
+        let sent_id = send_message(&transport, &community, &general, text).await.expect("send");
+        println!("[smoke] sent message {sent_id}");
+
+        // Give the relay a moment to store + be ready to serve it.
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+        let page = fetch_channel(&transport, &community, &general, 50).await.expect("fetch");
+        let texts: Vec<String> = page
+            .iter()
+            .filter_map(|f| match &f.event {
+                ChatEvent::Message { .. } => Some(f.event.opened().rumor.content.clone()),
+                _ => None,
+            })
+            .collect();
+        println!("[smoke] fetched {} message(s) back: {texts:?}", texts.len());
+        assert!(texts.contains(&text.to_string()), "the message did not round-trip through the real relay");
+
+        // Mint a shareable v2 link (the thing a bot hands out).
+        let link = mint_public_link(&transport, &community, "https://vectorapp.io", None, None).await.expect("mint link");
+        println!("[smoke] invite link: {}", link.url);
+        println!("[smoke] PASS — v2 create+send+fetch+invite round-tripped on {relay}");
+    }
 }
