@@ -297,7 +297,7 @@ async fn finish_follow(community_id: &str, force: bool) -> bool {
 /// control address, and a self-removal tears the community down (skipping control).
 /// Serialized + coalesced via [`V2_FOLLOW_GATE`]. No-op without a live client —
 /// unit tests drive `service::follow_control` / `follow_rekeys` directly.
-async fn follow_and_refresh(session: &SessionGuard, community_id: &str, handler: &dyn InboundEventHandler) {
+pub(crate) async fn follow_and_refresh(session: &SessionGuard, community_id: &str, handler: &dyn InboundEventHandler) {
     let Some(id) = crate::simd::hex::hex_to_bytes_32_checked(community_id).map(crate::community::CommunityId) else {
         return;
     };

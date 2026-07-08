@@ -1777,7 +1777,12 @@ pub fn save_community_v2(c: &crate::community::v2::community::CommunityV2) -> Re
             .optional()
             .map_err(|e| format!("channel ownership check: {e}"))?;
         if owner_of.is_some_and(|existing| existing != id_hex) {
-            return Err(format!("channel {ch_hex} is already owned by another community"));
+            // SKIP the foreign-owned channel rather than fail the whole save: a
+            // single replayed phantom (a same-owner cross-community vsk-2 edition)
+            // would otherwise wedge ALL of this community's control-plane persistence
+            // on every fold. The foreign row stays untouched; this community just
+            // never acquires a row for that id.
+            continue;
         }
         // A public channel has no independent key; store the community_root as a
         // placeholder so the NOT NULL column is satisfied (the real secret is

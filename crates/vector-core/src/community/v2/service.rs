@@ -343,19 +343,24 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
 
     // The control plane is writable by ANY community_root holder, so a single
     // newest-first window could be flooded to evict the owner's genesis and DoS
-    // every join. Page OLDER with an `until` cursor until the owner genesis is
-    // found or the plane is exhausted (a short page). This fully fixes the organic
-    // case (a mature plane with >PAGE recent editions) and raises the flood bar to
-    // MAX_PAGES*PAGE events; a determined flood that pins >PAGE junk at the exact
-    // genesis timestamp is a residual whose real fix is binding the root into
-    // community_id (protocol item, deferred to the coordinated upgrade). The common
-    // case (fresh community) and the eclipse case (forged root, nothing owner-signed
-    // to find) both resolve on the first page.
+    // every join. Page OLDER with an `until` cursor until the owner genesis is found
+    // or the plane is truly EMPTY. Two production-transport subtleties, both handled:
+    //   - Seed `until = now` (not `None`): a bounded-`until` fetch takes the
+    //     transport's AUTHORITATIVE drain-all-relays path, whereas an open `until`
+    //     can return only a fast relay's partial window and miss a genesis living on
+    //     a lagging relay.
+    //   - Terminate on an EMPTY page, NOT a short one: relays cap a page below PAGE,
+    //     so `got < PAGE` is not "exhausted" — keep paging until a page is empty.
+    // Bounded by MAX_PAGES. A determined flood that pins junk at the exact genesis
+    // timestamp (a cursor can't step past a single second) is the residual whose real
+    // fix is binding the root into community_id (protocol, deferred). The common case
+    // (fresh community) and the eclipse case (forged root, nothing owner-signed to
+    // find) both resolve on page one.
     const PAGE: usize = 500;
     const MAX_PAGES: usize = 6;
     let mut editions: Vec<ParsedEdition> = Vec::new();
     let mut found_genesis = false;
-    let mut until: Option<u64> = None;
+    let mut until: Option<u64> = Some(now_ms() / 1000);
     for _ in 0..MAX_PAGES {
         let query = Query {
             kinds: vec![stream::KIND_WRAP],
@@ -365,11 +370,12 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
             ..Default::default()
         };
         let wraps = transport.fetch(&query, &community.relays).await?;
-        let got = wraps.len();
-        let mut oldest: Option<u64> = None;
+        if wraps.is_empty() {
+            break; // truly exhausted the plane.
+        }
+        let mut oldest = u64::MAX;
         for w in &wraps {
-            let ts = w.created_at.as_secs();
-            oldest = Some(oldest.map_or(ts, |o| o.min(ts)));
+            oldest = oldest.min(w.created_at.as_secs());
             if let Ok((ed, _)) = control::open_control_edition(w, &control) {
                 if ed.author == owner {
                     if ed.vsk == vsk::COMMUNITY_METADATA && ed.entity_id == community.id().0 {
@@ -379,13 +385,10 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
                 }
             }
         }
-        if found_genesis || got < PAGE {
-            break; // found the owner genesis, or exhausted the plane.
+        if found_genesis || oldest == 0 {
+            break; // found the owner genesis, or can't page older than epoch 0.
         }
-        match oldest {
-            Some(o) if o > 0 => until = Some(o - 1),
-            _ => break,
-        }
+        until = Some(oldest - 1);
     }
     if !found_genesis {
         return Err(
@@ -1775,59 +1778,84 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn saving_a_channel_owned_by_another_community_is_refused() {
-        // The channel-id hijack: channel_id is the sole DB primary key, so a bundle
-        // reusing another community's channel_id would overwrite that row's key. The
-        // save must refuse rather than clobber a foreign community's channel.
+    async fn a_channel_owned_by_another_community_is_skipped_not_clobbered() {
+        // channel_id is the sole DB primary key, so a bundle/replay reusing another
+        // community's channel_id must NOT overwrite that row. It's skipped (not an
+        // error — erroring would wedge all of this community's control persistence).
         let (_tmp, _guard, _owner) = init_test_db();
         let relay = MemoryRelay::new();
         let a = create_community(&relay, "A", vec!["wss://r".into()], None).await.unwrap();
         let a_channel = a.channels[0].id;
         let mut b = create_community(&relay, "B", vec!["wss://r".into()], None).await.unwrap();
-        b.channels[0].id = a_channel; // B tries to claim A's channel id.
+        let b_channel = b.channels[0].id;
+        // B's set includes a phantom whose id collides with A's channel.
+        b.channels.push(ChannelV2 { id: a_channel, name: "phantom".into(), private: false, key: None, epoch: b.root_epoch });
 
-        let err = crate::db::community::save_community_v2(&b).unwrap_err();
-        assert!(err.contains("another community"), "reusing another community's channel id is refused: {err}");
+        crate::db::community::save_community_v2(&b).expect("save succeeds, the phantom is skipped");
         // A's channel row is untouched.
         let a_reloaded = crate::db::community::load_community_v2(a.id()).unwrap().unwrap();
+        assert!(!a_reloaded.channels.iter().any(|c| c.private), "A's channel is untouched");
         assert_eq!(a_reloaded.channels[0].id.0, a_channel.0);
-        assert!(!a_reloaded.channels[0].private);
+        // B keeps its own channel but never acquired a row for the foreign id.
+        let b_reloaded = crate::db::community::load_community_v2(b.id()).unwrap().unwrap();
+        assert!(b_reloaded.channel(&b_channel).is_some(), "B's own channel persists");
+        assert!(b_reloaded.channel(&a_channel).is_none(), "the foreign-owned channel is skipped, not stolen");
+    }
+
+    /// A single relay that CAPS every query below the page size (modelling a real
+    /// relay's maxFilterLimit) and honors `until` — so the join-verify walk MUST
+    /// paginate to reach an old genesis. MemoryRelay can't model this (it unions then
+    /// truncates the whole set), which is why a MemoryRelay flood test gives false
+    /// confidence about the production `LiveTransport` behaviour.
+    struct CappedRelay {
+        events: Vec<Event>,
+        cap: usize,
+    }
+    #[async_trait::async_trait]
+    impl Transport for CappedRelay {
+        async fn publish(&self, _e: &Event, _r: &[String]) -> Result<(), String> {
+            Ok(())
+        }
+        async fn publish_durable(&self, _e: &Event, _r: &[String]) -> Result<(), String> {
+            Ok(())
+        }
+        async fn fetch(&self, q: &Query, _r: &[String]) -> Result<Vec<Event>, String> {
+            let mut m: Vec<Event> = self
+                .events
+                .iter()
+                .filter(|e| q.authors.is_empty() || q.authors.contains(&e.pubkey.to_hex()))
+                .filter(|e| q.until.is_none_or(|u| e.created_at.as_secs() <= u))
+                .cloned()
+                .collect();
+            m.sort_by(|a, b| b.created_at.cmp(&a.created_at)); // newest first
+            m.truncate(self.cap.min(q.limit.unwrap_or(usize::MAX)));
+            Ok(m)
+        }
     }
 
     #[tokio::test]
-    async fn join_verify_pages_past_a_control_plane_flood_to_find_the_genesis() {
-        // The join-verify DoS mitigation: a member floods the control address with
-        // junk NEWER than the genesis, burying it past the newest-500 window. The
-        // `until`-paginated verify must walk past the flood and still find the owner
-        // genesis, so a legit join is not fail-closed by a griefer.
-        let (bed, owner, member) = TestBed::new();
-        bed.swap_to(&owner);
-        let community = create_community(&bed.relay, "Flooded", bed.relays.clone(), None).await.unwrap();
+    async fn verify_pages_a_capped_relay_past_a_flood_to_the_genesis() {
+        // The join-verify DoS mitigation, tested against a relay that caps below PAGE
+        // (production behaviour MemoryRelay hides): a rogue root-holder buries the
+        // genesis under junk, and the `until`-walk must page past it. Uses fixed OLD
+        // timestamps so `until = now` includes everything and the walk is deterministic.
+        let (_tmp, _guard, owner) = init_test_db();
+        let meta = control::CommunityMetadata { name: "Capped".into(), relays: vec!["wss://r".into()], ..Default::default() };
+        let g = control::genesis(&owner, meta, 1_000).unwrap();
+        let community = CommunityV2::from_genesis(&g, "Capped", None, vec!["wss://r".into()], 1_000);
 
-        // A rogue member (holds the root, so can sign at the control address) buries
-        // the genesis under 520 junk editions dated far in the future.
         let control = control_group_key(&community.community_root, community.id(), community.root_epoch);
         let rogue = Keys::generate();
-        for i in 0..520u64 {
-            let rumor = control::build_edition_rumor(
-                rogue.public_key(),
-                vsk::CHANNEL_METADATA,
-                &[0xAB; 32],
-                1,
-                None,
-                "{\"name\":\"junk\",\"private\":false}",
-                2_000_000_000 + i,
-                None,
-            );
-            let (wrap, _) = control::seal_control_edition(&rumor, &control, &rogue, Timestamp::from_secs(2_000_000_000 + i)).unwrap();
-            bed.relay.publish(&wrap, &bed.relays).await.unwrap();
+        let mut events: Vec<Event> = g.wraps.to_vec();
+        for i in 0..250u64 {
+            let rumor = control::build_edition_rumor(rogue.public_key(), vsk::CHANNEL_METADATA, &[0xAB; 32], 1, None, "{\"name\":\"junk\",\"private\":false}", 1_001 + i, None);
+            let (wrap, _) = control::seal_control_edition(&rumor, &control, &rogue, Timestamp::from_secs(1_001 + i)).unwrap();
+            events.push(wrap);
         }
-        send_direct_invite(&bed.relay, &community, &member.keys.public_key(), None, None).await.unwrap();
-
-        bed.swap_to(&member);
-        let invite_wrap = fetch_direct_invite(&bed.relay, &bed.relays, &member.keys.public_key()).await;
-        let joined = accept_direct_invite(&bed.relay, &invite_wrap).await.unwrap();
-        assert_eq!(joined.id().0, community.id().0, "pagination walks past the flood to the genesis");
+        // Cap 100/query forces the walk across ~3 pages down to the genesis at ts 1000.
+        let relay = CappedRelay { events, cap: 100 };
+        let verified = verify_owner_root_and_reconcile(&relay, community.clone()).await;
+        assert!(verified.is_ok(), "the until-walk pages a capped relay past the flood to the genesis: {:?}", verified.err());
     }
 
     /// LIVE smoke test (network) — ignored by default. Creates a v2 community on a
