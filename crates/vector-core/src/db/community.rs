@@ -1784,6 +1784,24 @@ pub fn save_community_v2(c: &crate::community::v2::community::CommunityV2) -> Re
         .map_err(|e| format!("save v2 channel: {e}"))?;
     }
 
+    // Prune channels no longer in the in-memory set — the persisted set is
+    // authoritative, so a control-follow delete or a rekey removal doesn't
+    // resurrect (with a stale key) on the next reload. No FK references
+    // community_channels, so this cascades to nothing.
+    let keep: Vec<String> = c.channels.iter().map(|ch| crate::simd::hex::bytes_to_hex_32(&ch.id.0)).collect();
+    if keep.is_empty() {
+        tx.execute("DELETE FROM community_channels WHERE community_id=?1", params![id_hex])
+            .map_err(|e| format!("prune v2 channels: {e}"))?;
+    } else {
+        let placeholders = std::iter::repeat("?").take(keep.len()).collect::<Vec<_>>().join(",");
+        let sql = format!("DELETE FROM community_channels WHERE community_id=? AND channel_id NOT IN ({placeholders})");
+        let mut binds: Vec<String> = Vec::with_capacity(keep.len() + 1);
+        binds.push(id_hex.clone());
+        binds.extend(keep);
+        tx.execute(&sql, rusqlite::params_from_iter(binds.iter()))
+            .map_err(|e| format!("prune v2 channels: {e}"))?;
+    }
+
     tx.commit().map_err(|e| format!("commit v2 community: {e}"))?;
     Ok(())
 }

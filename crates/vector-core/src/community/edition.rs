@@ -172,10 +172,13 @@ pub fn parse_edition_inner(inner: &Event) -> Result<ParsedEdition, EditionError>
     };
     let vsk = get(TAG_SUBKIND).ok_or(EditionError::MissingField("vsk"))?;
     let entity_id = decode_hash(&get(TAG_ENTITY).ok_or(EditionError::MissingField("eid"))?, "eid")?;
-    let version: u64 = get(TAG_EVERSION)
-        .ok_or(EditionError::MissingField("ev"))?
-        .parse()
-        .map_err(|_| EditionError::BadField("ev"))?;
+    // Digit-only: `u64::from_str` accepts a leading `+`, so "+5"/"5" would fold to
+    // one version as distinct signed inners (a convergence fork). Shared v1/v2 grammar.
+    let ev_raw = get(TAG_EVERSION).ok_or(EditionError::MissingField("ev"))?;
+    if ev_raw.is_empty() || !ev_raw.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(EditionError::BadField("ev"));
+    }
+    let version: u64 = ev_raw.parse().map_err(|_| EditionError::BadField("ev"))?;
     let prev_hash = match get(TAG_EPREV) {
         Some(h) => Some(decode_hash(&h, "ep")?),
         None => None,

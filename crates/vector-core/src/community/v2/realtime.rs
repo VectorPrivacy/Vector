@@ -233,11 +233,32 @@ pub async fn dispatch_event(session: &SessionGuard, event: Event, handler: Arc<d
         match inbound::dispatch_wrap(&event, c, &my_pk, &*handler) {
             inbound::DispatchedV2::NotOurs => continue,
             inbound::DispatchedV2::Control { community_id } => {
-                follow_control_and_refresh(session, c, &community_id, &*handler).await;
+                // Spawn off the dispatch hot path: the follow does network fetches and
+                // this dispatch is awaited inline in the single notification loop, so
+                // awaiting here would let a flood of (address-recognized, unopened) junk
+                // wraps head-of-line-block every DM + community. Detached + gated: the
+                // coalescing gate collapses a burst to one in-flight fetch.
+                let community = c.clone();
+                let handler = handler.clone();
+                let bg = SessionGuard::capture();
+                tokio::spawn(async move {
+                    if !bg.is_valid() {
+                        return;
+                    }
+                    follow_control_and_refresh(&bg, &community, &community_id, &*handler).await;
+                });
                 return;
             }
             inbound::DispatchedV2::Rekey { community_id } => {
-                follow_rekeys_and_refresh(session, c, &community_id, &*handler).await;
+                let community = c.clone();
+                let handler = handler.clone();
+                let bg = SessionGuard::capture();
+                tokio::spawn(async move {
+                    if !bg.is_valid() {
+                        return;
+                    }
+                    follow_rekeys_and_refresh(&bg, &community, &community_id, &*handler).await;
+                });
                 return;
             }
             _ => return, // chat/guestbook handled inline by the dispatcher.

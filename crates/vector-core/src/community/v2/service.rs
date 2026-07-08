@@ -270,10 +270,11 @@ pub async fn mint_public_link<T: Transport + ?Sized>(
     Ok(MintedLink { url, bundle_event, link_signer, token })
 }
 
-/// Accept an already-unwrapped bundle: verify the owner commitment, persist the
-/// community, and announce a Guestbook Join (with invite attribution). Shared tail
-/// of both accept paths. Takes the caller's `SessionGuard` (captured BEFORE any
-/// network fetch the caller did) so the `is_valid()` gate straddles that I/O.
+/// Accept an already-unwrapped bundle: verify the owner commitment AND that the
+/// delivered community_root is genuinely the owner's, persist the community, and
+/// announce a Guestbook Join (with invite attribution). Shared tail of both accept
+/// paths. Takes the caller's `SessionGuard` (captured BEFORE any network fetch the
+/// caller did) so the `is_valid()` gate straddles that I/O.
 async fn accept_bundle<T: Transport + ?Sized>(
     transport: &T,
     session: &SessionGuard,
@@ -289,8 +290,17 @@ async fn accept_bundle<T: Transport + ?Sized>(
     // `from_bundle` re-validates bounds + the owner commitment fail-closed.
     let community = CommunityV2::from_bundle(bundle, at_ms)?;
 
+    // Authenticate the delivered community_root before trusting it. The owner
+    // commitment proves WHO the owner is, but community_root (and channel keys) are
+    // NOT in that commitment, so a forged invite can pair a real (id, owner, salt)
+    // with an attacker-chosen root and silently partition the joiner onto planes
+    // only the attacker controls. Requiring the owner's genesis to open under the
+    // delivered root closes that eclipse; also reconciles channel classification.
+    let community = verify_owner_root_and_reconcile(transport, community).await?;
+
     // The account must not have swapped since the guard was captured (which was
-    // before any fetch the caller performed) — else we'd write A's join into B.
+    // before any fetch the caller / the verify above performed) — else we'd write
+    // A's join into B.
     if !session.is_valid() {
         return Err("account changed during join".to_string());
     }
@@ -309,6 +319,51 @@ async fn accept_bundle<T: Transport + ?Sized>(
     }
 
     Ok(community)
+}
+
+/// Prove the delivered `community_root` is genuinely the owner's, and reconcile
+/// channel classification from the owner's editions. `community_id` commits only
+/// to `(owner_xonly, owner_salt)` — both semi-public (they ride every bundle and
+/// every synced Community List) — so a forged invite can present a real community's
+/// id/owner/salt with an attacker-chosen root; every plane then derives from that
+/// root, silently eclipsing the joiner onto attacker-controlled addresses while the
+/// owner commitment still "verifies". The defense: the owner's genesis metadata
+/// edition (vsk-0, `eid == community_id`) only opens under the AUTHENTIC root — an
+/// attacker can't forge the owner's seal — so its presence on the control plane
+/// derived from the delivered root proves that root. Fail-closed: no owner genesis
+/// (forged invite, or relays unreachable) → refuse to join. On success, folds the
+/// owner's authoritative editions to heal a bundle that misclassified a channel.
+async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
+    transport: &T,
+    community: CommunityV2,
+) -> Result<CommunityV2, String> {
+    let owner = community.owner()?;
+    let control = control_group_key(&community.community_root, community.id(), community.root_epoch);
+    let query = Query {
+        kinds: vec![stream::KIND_WRAP],
+        authors: vec![control.pk_hex()],
+        limit: Some(500),
+        ..Default::default()
+    };
+    let wraps = transport.fetch(&query, &community.relays).await?;
+    let mut editions: Vec<ParsedEdition> = Vec::new();
+    for w in &wraps {
+        if let Ok((ed, _)) = control::open_control_edition(w, &control) {
+            if ed.author == owner {
+                editions.push(ed);
+            }
+        }
+    }
+    let root_authentic = editions
+        .iter()
+        .any(|e| e.vsk == vsk::COMMUNITY_METADATA && e.entity_id == community.id().0);
+    if !root_authentic {
+        return Err(
+            "could not verify this community from its relays (the invite may be forged, or the relays are unreachable); not joining"
+                .to_string(),
+        );
+    }
+    Ok(apply_control_fold(&community, &editions).unwrap_or(community))
 }
 
 /// Accept a Direct Invite: unwrap the 3313 giftwrap (Schnorr-verifying the seal),
@@ -537,6 +592,12 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition]) -> Op
                 changed |= apply_community_metadata(&mut out, meta);
             }
         } else if vsk_code == vsk::CHANNEL_METADATA {
+            // A vsk-2 edition carries no community binding (shared v1 grammar), so a
+            // same-owner cross-community replay can inject a phantom PUBLIC channel
+            // here. Bounded: its key is this community's root (no foreign secret
+            // bridges in) and eids don't collide, so real channels can't be
+            // renamed/deleted. Binding community_id into the signed edition is a wire
+            // change (breaks the shared edition_hash + Armada interop) — deferred.
             if let Ok(meta) = serde_json::from_str::<control::ChannelMetadata>(content) {
                 changed |= apply_channel_metadata(&mut out, ChannelId(*eid), meta);
             }
@@ -578,11 +639,22 @@ fn apply_channel_metadata(out: &mut CommunityV2, id: ChannelId, meta: control::C
     }
     match out.channels.iter_mut().find(|c| c.id.0 == id.0) {
         Some(existing) => {
+            let mut changed = false;
             if existing.name != meta.name {
                 existing.name = meta.name;
-                return true;
+                changed = true;
             }
-            false
+            // The owner's edition authoritatively declares visibility. A channel the
+            // owner marks PUBLIC must derive from the root (key = None) — this heals a
+            // bundle-time misclassification where an attacker set a public channel's
+            // grant key to their own, silently addressing it at a plane only they read.
+            // (public -> private needs a rekey-delivered key, so it's left to rekey.)
+            if !meta.private && (existing.private || existing.key.is_some()) {
+                existing.private = false;
+                existing.key = None;
+                changed = true;
+            }
+            changed
         }
         None if !meta.private => {
             // A public channel derives its Chat Plane from the community_root at the
@@ -1597,6 +1669,79 @@ mod tests {
         let follow = follow_rekeys(&bed.relay, &joined, &session).await.unwrap();
         assert!(follow.self_removed, "a complete base rotation dropping the member removes them");
         assert!(follow.updated.is_none(), "a removed member adopts nothing");
+    }
+
+    // ── Audit regressions ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn accept_rejects_a_bundle_with_a_forged_community_root() {
+        // The eclipse: community_id commits only to (owner, salt) — both semi-public
+        // — so a forged invite pairs the REAL triple with an attacker root, and every
+        // plane derives from it. The join-time owner-genesis check must refuse.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Real", bed.relays.clone(), None).await.unwrap();
+
+        let fake = crate::simd::hex::bytes_to_hex_32(&[0xEE; 32]);
+        let mut forged = bundle_of(&community, None, None, None);
+        forged.community_root = fake.clone();
+        for ch in &mut forged.channels {
+            ch.key = fake.clone();
+        }
+        let attacker = Keys::generate();
+        let wrap = invite::build_direct_invite(&attacker, &member.keys.public_key(), &forged).unwrap();
+        bed.relay.publish(&wrap, &bed.relays).await.unwrap();
+
+        bed.swap_to(&member);
+        let invite_wrap = fetch_direct_invite(&bed.relay, &bed.relays, &member.keys.public_key()).await;
+        let err = accept_direct_invite(&bed.relay, &invite_wrap).await.unwrap_err();
+        assert!(err.contains("could not verify"), "a forged root fails the owner-genesis check: {err}");
+        assert!(
+            crate::db::community::load_community_v2(community.id()).unwrap().is_none(),
+            "a rejected join persists nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn follow_control_heals_a_bundle_misclassified_public_channel() {
+        // A bundle can set a PUBLIC channel's grant key to the attacker's, so the
+        // joiner addresses it at a plane only the attacker reads. The owner's genuine
+        // public:false edition must override it on follow.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Heal", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let mut poisoned = community.clone();
+        poisoned.channels[0].private = true;
+        poisoned.channels[0].key = Some([0x66; 32]);
+        crate::db::community::save_community_v2(&poisoned).unwrap();
+
+        let session = SessionGuard::capture();
+        let healed = follow_control(&relay, &poisoned, &session).await.unwrap().expect("healed");
+        let ch = healed.channel(&general).unwrap();
+        assert!(!ch.private, "the owner's public declaration overrides the bundle");
+        assert_eq!(ch.key, None, "a healed public channel derives from the root");
+    }
+
+    #[tokio::test]
+    async fn a_deleted_channel_does_not_resurrect_on_reload() {
+        // save_community_v2 must prune orphan channel rows, or a control-follow delete
+        // reappears (with a stale key) on the next reload.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Prune", vec!["wss://r".into()], None).await.unwrap();
+        let extra = ChannelId([0x77; 32]);
+        let session = SessionGuard::capture();
+        publish_channel_edition(&relay, &community, &owner, &extra, "temp", false, 1, false).await;
+        let with_extra = follow_control(&relay, &community, &session).await.unwrap().unwrap();
+        assert!(with_extra.channel(&extra).is_some());
+        publish_channel_edition(&relay, &community, &owner, &extra, "temp", false, 2, true).await;
+        let after = follow_control(&relay, &with_extra, &session).await.unwrap().unwrap();
+        assert!(after.channel(&extra).is_none());
+
+        let reloaded = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert!(reloaded.channel(&extra).is_none(), "a deleted channel must not resurrect on reload");
+        assert_eq!(reloaded.channels.len(), 1);
     }
 
     /// LIVE smoke test (network) — ignored by default. Creates a v2 community on a

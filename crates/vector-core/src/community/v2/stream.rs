@@ -181,8 +181,13 @@ pub fn resolve_ms_strict(rumor: &UnsignedEvent) -> Result<u64, StreamError> {
             return Err(StreamError::BadMs);
         }
         // Present but valueless, or not a lone 0..=999 decimal without leading
-        // zeros — malformed.
+        // zeros — malformed. Digit-only FIRST: `u64::from_str` would otherwise
+        // accept a leading `+` ("+5", "+000"), a second byte-encoding a strict peer
+        // rejects — the exact cross-impl divergence this gate exists to prevent.
         let raw = s.get(1).ok_or(StreamError::BadMs)?;
+        if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(StreamError::BadMs);
+        }
         let n: u64 = raw.parse().map_err(|_| StreamError::BadMs)?;
         if n > 999 || (raw.len() > 1 && raw.starts_with('0')) {
             return Err(StreamError::BadMs);
@@ -538,8 +543,10 @@ mod tests {
             1_000,
         );
         assert_eq!(resolve_ms_strict(&ok).unwrap(), 1_000_999);
-        // 1000, negatives, non-integers, leading zeros: malformed — DROP, never clamp.
-        for bad in ["1000", "-1", "12.5", "abc", "007", ""] {
+        // 1000, negatives, non-integers, leading zeros, and a leading '+' (which
+        // `u64::from_str` would otherwise accept as a second byte-encoding):
+        // malformed — DROP, never clamp.
+        for bad in ["1000", "-1", "12.5", "abc", "007", "", "+5", "+0", "+000", "+999"] {
             let r = build_rumor_secs(
                 kind::MESSAGE,
                 author.public_key(),

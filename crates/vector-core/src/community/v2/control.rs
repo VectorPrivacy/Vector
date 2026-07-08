@@ -170,10 +170,14 @@ pub fn parse_edition_rumor(rumor: &UnsignedEvent) -> Result<ParsedEdition, Contr
     };
     let vsk = get(TAG_SUBKIND).ok_or(ControlError::Edition(EditionError::MissingField("vsk")))?;
     let entity_id = decode_hash(&get(TAG_ENTITY).ok_or(ControlError::Edition(EditionError::MissingField("eid")))?, "eid")?;
-    let version: u64 = get(TAG_EVERSION)
-        .ok_or(ControlError::Edition(EditionError::MissingField("ev")))?
-        .parse()
-        .map_err(|_| ControlError::Edition(EditionError::BadField("ev")))?;
+    // Digit-only: `u64::from_str` accepts a leading `+`, so "+5" and "5" would fold
+    // to the same version yet be distinct signed rumors (a convergence fork a strict
+    // peer resolves differently). Reject any non-decimal encoding.
+    let ev_raw = get(TAG_EVERSION).ok_or(ControlError::Edition(EditionError::MissingField("ev")))?;
+    if ev_raw.is_empty() || !ev_raw.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(ControlError::Edition(EditionError::BadField("ev")));
+    }
+    let version: u64 = ev_raw.parse().map_err(|_| ControlError::Edition(EditionError::BadField("ev")))?;
     let prev_hash = match get(TAG_EPREV) {
         Some(h) => Some(decode_hash(&h, "ep")?),
         None => None,
