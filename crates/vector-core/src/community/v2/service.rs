@@ -3048,6 +3048,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn full_lifecycle_e2e() {
+        // The whole stack end to end across two accounts: create -> Public link ->
+        // owner grants an admin -> member joins + reads history -> admin edits metadata
+        // (authorized fold) -> owner bans the member (CORD-04 §6: banlist + strip +
+        // Refounding) -> the banned member is severed AND stays banned across the new
+        // epoch -> pre-ban history still reads -> owner dissolves -> sealed.
+        let (bed, owner, member) = TestBed::new();
+
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Lifecycle", bed.relays.clone(), None).await.unwrap();
+        let general = community.channels[0].id;
+        send_message(&bed.relay, &community, &general, "owner: welcome").await.unwrap();
+
+        // Public link → the community reads Public.
+        let _minted = mint_public_link(&bed.relay, &community, "https://x", None, None).await.unwrap();
+        assert!(community_is_public(&bed.relay, &community).await, "a live link makes it Public");
+
+        // Owner defines + grants an Admin role (MANAGE_METADATA among the bits).
+        let rid = "aa".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::ADMIN_ALL), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &member.keys.public_key(), vec![rid], 1).await;
+
+        // Member joins from the bundle + reads the owner's message.
+        let bundle = bundle_of(&community, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&member);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        assert_eq!(texts_in(&bed.relay, &joined, &general).await, vec!["owner: welcome"]);
+        // The admin renames the community.
+        publish_community_meta(&bed.relay, &joined, &member.keys, "Lifecycle Renamed", 2).await;
+
+        // Owner follows: the admin's rename folds (authorized).
+        bed.swap_to(&owner);
+        let session = SessionGuard::capture();
+        let updated = follow_control(&bed.relay, &community, &session).await.unwrap().expect("the admin edit folds");
+        assert_eq!(updated.name, "Lifecycle Renamed", "an authorized admin's metadata edit is honored");
+
+        // Ban the member (the three-removal composition, in order).
+        set_banlist(&bed.relay, &updated, &[member.keys.public_key().to_hex()]).await.unwrap();
+        grant_roles(&bed.relay, &updated, &member.keys.public_key(), vec![]).await.unwrap();
+        let refounded = refound_community(&bed.relay, &updated, &[member.keys.public_key()]).await.unwrap();
+        assert_eq!(refounded.root_epoch, Epoch(1), "the ban rolled the root");
+        // The ban survives the Refounding (the banlist head compacted forward).
+        let post = fold_authority(&refounded, &fetch_control(&bed.relay, &refounded).await, &load_floors(&refounded));
+        assert!(post.banned.contains(&member.keys.public_key().to_hex()), "the ban survives the re-founding");
+        // Pre-ban history still reads across the new epoch.
+        assert!(
+            texts_in(&bed.relay, &refounded, &general).await.contains(&"owner: welcome".to_string()),
+            "pre-refounding history stays readable"
+        );
+
+        // The banned member's rekey-follow concludes they're severed.
+        bed.swap_to(&member);
+        let follow = follow_rekeys(&bed.relay, &joined, &session).await.unwrap();
+        assert!(follow.self_removed, "the banned member is cryptographically cut");
+
+        // Owner dissolves → sealed.
+        bed.swap_to(&owner);
+        dissolve_community(&bed.relay, &refounded).await.unwrap();
+        assert!(crate::db::community::load_community_v2(community.id()).unwrap().unwrap().dissolved, "the community is sealed");
+    }
+
+    #[tokio::test]
     async fn a_grant_revoke_survives_a_withholding_relay() {
         // Floor persistence on the delegation plane: after the owner revokes an admin,
         // a relay serving only the OLD (still owner-signed) grant can't resurrect it.
