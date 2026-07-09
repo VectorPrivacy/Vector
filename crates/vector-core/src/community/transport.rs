@@ -659,15 +659,17 @@ pub(crate) mod memory {
             if is_ephemeral(event.kind.as_u16()) {
                 return; // live-delivered above, never stored
             }
-            // Parameterized-replaceable kinds (30000-39999, e.g. a public-invite bundle): a relay keeps only
-            // the latest per (kind, pubkey, d-tag), so a new event at that coordinate REPLACES the old one
-            // (NIP-01). This is what makes a revocation tombstone overwrite the bundle even on relays that
-            // ignore deletions — model it so tests match real relay behavior.
+            // Replaceable kinds: parameterized (30000-39999, keyed by (kind, pubkey, d-tag)) AND
+            // standard (10000-19999, plus 0/3, keyed by (kind, pubkey) — the d-tag is "") — a relay keeps
+            // only the latest at that coordinate, so a new event REPLACES the old (NIP-01). This is what
+            // makes a revocation tombstone overwrite a bundle, and a fresh 13302 supersede the last one,
+            // even on relays that ignore deletions — model it so tests match real relay behavior.
             let d_tag = |e: &Event| e.tags.iter().find_map(|t| {
                 let s = t.as_slice();
                 (s.len() >= 2 && s[0] == "d").then(|| s[1].clone())
             }).unwrap_or_default();
-            let replaceable = (30000..40000).contains(&event.kind.as_u16());
+            let k = event.kind.as_u16();
+            let replaceable = (30000..40000).contains(&k) || (10000..20000).contains(&k) || k == 0 || k == 3;
             let coord = (event.kind.as_u16(), event.pubkey, d_tag(event));
             let mut map = self.per_relay.lock().unwrap();
             for r in relays {

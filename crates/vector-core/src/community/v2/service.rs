@@ -96,6 +96,8 @@ pub async fn create_community<T: Transport + ?Sized>(
         let _ = transport.publish(&join_wrap, &community.relays).await;
     }
 
+    // Sync the new membership across devices (CORD-02 §8) — best-effort.
+    let _ = republish_community_list(transport).await;
     Ok(community)
 }
 
@@ -339,6 +341,8 @@ async fn accept_bundle<T: Transport + ?Sized>(
         let _ = transport.publish(&join_wrap, &community.relays).await;
     }
 
+    // Record the membership across devices (CORD-02 §8) — best-effort.
+    let _ = republish_community_list(transport).await;
     Ok(community)
 }
 
@@ -528,6 +532,10 @@ pub async fn leave_community<T: Transport + ?Sized>(transport: &T, community: &C
     if !session.is_valid() {
         return Err("account changed during leave".to_string());
     }
+    // Tombstone the membership across devices (CORD-02 §8) BEFORE the local delete,
+    // to the leaving community's own relays (it's about to be gone locally) —
+    // best-effort.
+    let _ = tombstone_community_list(transport, community.id(), &community.relays).await;
     crate::db::community::delete_community(&crate::simd::hex::bytes_to_hex_32(&community.id().0))?;
     Ok(())
 }
@@ -616,6 +624,183 @@ pub async fn memberlist<T: Transport + ?Sized>(transport: &T, community: &Commun
         members.insert(owner);
     }
     Ok(members.into_iter().collect())
+}
+
+// ── The Community List (kind 13302, CORD-02 §8) ──────────────────────────────
+
+/// This community's MEMBERSHIP subset for the 13302 list (CORD-02 §8): never the
+/// icon (a rehydrating device folds it from the Control Plane), never the link
+/// fields. Only PRIVATE channel keys ride — public channels derive from the root.
+fn join_material(community: &CommunityV2) -> super::list::JoinMaterial {
+    let hex = crate::simd::hex::bytes_to_hex_32;
+    let channels = community
+        .channels
+        .iter()
+        .filter(|c| c.private)
+        .filter_map(|c| {
+            c.key.map(|k| super::list::ChannelKeyRef { id: hex(&c.id.0), key: hex(&k), epoch: c.epoch.0, name: c.name.clone() })
+        })
+        .collect();
+    super::list::JoinMaterial {
+        community_id: hex(&community.identity.community_id.0),
+        owner: hex(&community.identity.owner_xonly),
+        owner_salt: hex(&community.identity.owner_salt),
+        community_root: hex(&community.community_root),
+        root_epoch: community.root_epoch.0,
+        channels,
+        relays: community.relays.clone(),
+        name: community.name.clone(),
+        extra: Default::default(),
+    }
+}
+
+/// Rebuild an invite bundle from list join material, for a cross-device rehydrate
+/// (the material IS the membership subset of a bundle). The owner root is still
+/// verified over the network before the community is trusted (accept_bundle).
+fn material_to_invite(jm: &super::list::JoinMaterial) -> CommunityInvite {
+    let channels = jm
+        .channels
+        .iter()
+        .map(|c| invite::ChannelGrant { id: c.id.clone(), key: c.key.clone(), epoch: c.epoch, name: c.name.clone() })
+        .collect();
+    CommunityInvite {
+        community_id: jm.community_id.clone(),
+        owner: jm.owner.clone(),
+        owner_salt: jm.owner_salt.clone(),
+        community_root: jm.community_root.clone(),
+        root_epoch: jm.root_epoch,
+        channels,
+        relays: jm.relays.clone(),
+        name: jm.name.clone(),
+        icon: None,
+        expires_at: None,
+        creator_npub: None,
+        label: None,
+        extra: Default::default(),
+    }
+}
+
+/// The union of every held v2 community's relays — where this account's 13302 list
+/// lives (a fresh device that opens any held community reaches the same set).
+fn held_v2_relays() -> Vec<String> {
+    let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    if let Ok(ids) = crate::db::community::list_community_ids() {
+        for id in ids {
+            if matches!(crate::db::community::community_protocol(&id), Ok(Some(crate::community::ConcordProtocol::V2))) {
+                if let Ok(Some(c)) = crate::db::community::load_community_v2(&id) {
+                    set.extend(c.relays);
+                }
+            }
+        }
+    }
+    set.into_iter().collect()
+}
+
+/// Fetch this account's own 13302 Community List from `relays` (the newest wins;
+/// a decrypt/parse failure is "no news", never a clobber of the local mirror).
+async fn fetch_community_list<T: Transport + ?Sized>(transport: &T, relays: &[String]) -> Option<super::list::CommunityList> {
+    let me = local_keys().ok()?;
+    let query = Query {
+        kinds: vec![super::kind::COMMUNITY_LIST],
+        authors: vec![me.public_key().to_hex()],
+        limit: Some(4),
+        ..Default::default()
+    };
+    let events = transport.fetch(&query, relays).await.ok()?;
+    events
+        .into_iter()
+        .filter_map(|e| super::list::parse_list_event(&e, &me).ok().map(|l| (e.created_at.as_secs(), l)))
+        .max_by_key(|(at, _)| *at)
+        .map(|(_, l)| l)
+}
+
+/// Rebuild this account's 13302 from its held v2 communities, MERGE with the remote
+/// copy (preserving tombstones, other-device entries, unknown fields), and publish.
+/// Idempotent; called after any membership change. Best-effort — a list-publish
+/// failure never fails the membership change itself.
+pub async fn republish_community_list<T: Transport + ?Sized>(transport: &T) -> Result<(), String> {
+    let session = SessionGuard::capture();
+    let me = local_keys()?;
+    let relays = held_v2_relays();
+    if relays.is_empty() {
+        return Ok(()); // nothing held → nothing to sync
+    }
+    let remote = fetch_community_list(transport, &relays).await.unwrap_or_default();
+    let now = now_ms();
+    let mut local = super::list::CommunityList::default();
+    for id in crate::db::community::list_community_ids()? {
+        if !matches!(crate::db::community::community_protocol(&id), Ok(Some(crate::community::ConcordProtocol::V2))) {
+            continue;
+        }
+        let Some(c) = crate::db::community::load_community_v2(&id)? else { continue };
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&c.id().0);
+        // Keep an already-live entry's add time (no churn); a new or previously-left
+        // (now re-held) community adds/resurrects at `now`.
+        let added_at = if remote.is_live(&cid_hex) {
+            remote.entries.iter().find(|e| e.community_id == cid_hex).map(|e| e.added_at).unwrap_or(now)
+        } else {
+            now
+        };
+        let jm = join_material(&c);
+        local.entries.push(super::list::CommunityListEntry { community_id: cid_hex, seed: jm.clone(), current: jm, added_at, extra: Default::default() });
+    }
+    let merged = remote.merge(&local);
+    merged.assert_fits().map_err(|e| e.to_string())?;
+    let event = super::list::build_list_event(&me, &merged).map_err(|e| e.to_string())?;
+    if !session.is_valid() {
+        return Err("account changed during community-list publish".to_string());
+    }
+    transport.publish(&event, &relays).await
+}
+
+/// Record a permanent leave tombstone for `community_id` in the 13302, published to
+/// `relays` (the leaving community's own, since it's about to be deleted locally).
+async fn tombstone_community_list<T: Transport + ?Sized>(transport: &T, community_id: &crate::community::CommunityId, relays: &[String]) -> Result<(), String> {
+    let me = local_keys()?;
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community_id.0);
+    let mut doc = fetch_community_list(transport, relays).await.unwrap_or_default();
+    let now = now_ms();
+    doc.tombstones.retain(|t| t.community_id != cid_hex);
+    doc.tombstones.push(super::list::Tombstone { community_id: cid_hex, removed_at: now, extra: Default::default() });
+    doc.assert_fits().map_err(|e| e.to_string())?;
+    let event = super::list::build_list_event(&me, &doc).map_err(|e| e.to_string())?;
+    transport.publish(&event, relays).await
+}
+
+/// Sync memberships from the 13302 across devices: fetch this account's list from
+/// `bootstrap_relays` (its held communities' relays plus any caller-supplied set for
+/// a fresh device), and JOIN every live entry not already held — reconstructing the
+/// community from its join material and re-verifying the owner root. Returns the
+/// newly-rehydrated communities (so the caller can subscribe + notify).
+pub async fn sync_community_list<T: Transport + ?Sized>(transport: &T, bootstrap_relays: &[String]) -> Result<Vec<CommunityV2>, String> {
+    let session = SessionGuard::capture();
+    let mut relays = held_v2_relays();
+    relays.extend(bootstrap_relays.iter().cloned());
+    relays.sort();
+    relays.dedup();
+    if relays.is_empty() {
+        return Ok(vec![]);
+    }
+    let Some(list) = fetch_community_list(transport, &relays).await else {
+        return Ok(vec![]);
+    };
+    let mut joined = Vec::new();
+    for entry in list.live_entries() {
+        let Some(cid) = crate::simd::hex::hex_to_bytes_32_checked(&entry.community_id) else { continue };
+        if crate::db::community::load_community_v2(&crate::community::CommunityId(cid)).ok().flatten().is_some() {
+            continue; // already held
+        }
+        if !session.is_valid() {
+            return Err("account changed during community-list sync".to_string());
+        }
+        // The material IS a bundle; accept_bundle re-verifies the owner root, saves,
+        // seeds floors, and announces our Join (idempotent for an existing member).
+        let bundle = material_to_invite(&entry.current);
+        if let Ok(community) = accept_bundle(transport, &session, &bundle, None).await {
+            joined.push(community);
+        }
+    }
+    Ok(joined)
 }
 
 // ── Control edition authoring (CORD-04 roles / CORD-02 §6 / CORD-03 §2) ──────
@@ -2201,6 +2386,35 @@ mod tests {
         publish_banlist(&relay, &community, &rogue, &[], 2).await; // unauthorized higher, empty
         let authority = fold_authority(&community, &fetch_control(&relay, &community).await, &load_floors(&community));
         assert!(authority.banned.contains(&target), "an unauthorized higher banlist cannot un-ban");
+    }
+
+    #[tokio::test]
+    async fn the_community_list_syncs_a_membership_to_a_fresh_device() {
+        // CORD-02 §8: create publishes the 13302; a fresh device (community dropped
+        // locally, the 13302 + genesis still on the relay) rehydrates it on sync.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let relays = vec!["wss://r".to_string()];
+        let community = create_community(&relay, "Synced", relays.clone(), None).await.unwrap();
+        crate::db::community::delete_community(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap();
+        assert!(crate::db::community::load_community_v2(community.id()).unwrap().is_none());
+
+        let rehydrated = sync_community_list(&relay, &relays).await.unwrap();
+        assert_eq!(rehydrated.len(), 1, "the left-behind membership rehydrates");
+        assert_eq!(rehydrated[0].id().0, community.id().0);
+        assert!(crate::db::community::load_community_v2(community.id()).unwrap().is_some(), "and is now held locally");
+    }
+
+    #[tokio::test]
+    async fn a_leave_tombstones_the_membership_so_sync_does_not_rejoin() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let relays = vec!["wss://r".to_string()];
+        let community = create_community(&relay, "Left", relays.clone(), None).await.unwrap();
+        leave_community(&relay, &community).await.unwrap(); // tombstones the 13302 + deletes
+
+        let rehydrated = sync_community_list(&relay, &relays).await.unwrap();
+        assert!(rehydrated.is_empty(), "a tombstoned membership is not rejoined on sync");
     }
 
     #[tokio::test]

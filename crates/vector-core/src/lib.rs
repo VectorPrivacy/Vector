@@ -2032,6 +2032,28 @@ impl VectorCore {
     /// start and on reconnect; safe to call manually — the v2 enqueue is a no-op if
     /// no `listen()` worker is running.
     pub async fn sync_communities(&self) -> Result<()> {
+        // Discover + rehydrate memberships from the 13302 across devices (CORD-02 §8),
+        // bootstrapping from the client's connected relays so even a fresh device that
+        // holds no community yet can find them. Best-effort.
+        {
+            use crate::community::{transport::LiveTransport, v2::service as v2};
+            let bootstrap: Vec<String> = match crate::state::nostr_client() {
+                Some(client) => client.relays().await.keys().map(|r| r.to_string()).collect(),
+                None => Vec::new(),
+            };
+            let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+            if let Ok(joined) = v2::sync_community_list(&transport, &bootstrap).await {
+                for c in &joined {
+                    community::v2::realtime::enqueue_follow(c.id());
+                }
+                if !joined.is_empty() {
+                    if let Some(client) = crate::state::nostr_client() {
+                        community::v2::realtime::refresh_subscription(&client).await;
+                    }
+                }
+            }
+        }
+
         let ids = db::community::list_community_ids().map_err(VectorError::from)?;
         for id in ids {
             if matches!(db::community::community_protocol(&id).ok().flatten(), Some(crate::community::ConcordProtocol::V2)) {
