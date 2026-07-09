@@ -1647,9 +1647,13 @@ pub async fn fetch_subscribed_packs(
             crate::log_warn!("[EmojiPacks] save pack {} failed: {}", pack.identifier, e);
         }
     }
-    if health_changed {
-        crate::traits::emit_event("emoji_packs_updated", &());
-    }
+    // Detect a real list change (reorder, sub add/remove, or theme-slot move)
+    // against the pre-save state, so a cross-device edit repaints an OPEN
+    // picker live — not only on its next open. Our own republish echoes back
+    // unchanged, so this stays quiet on self-echo.
+    let list_changed = load_subscriptions().unwrap_or_default() != addr_strings
+        || fetched_anchor.as_deref().map_or(false, |a| a != load_theme_slot_anchor());
+
     // Persist the full subscription list (10030-driven, or local-mirror
     // when 10030 was missing). Per-pack fetch failures don't shrink it —
     // the user is still subscribed, they just have a cached copy for now.
@@ -1662,6 +1666,9 @@ pub async fn fetch_subscribed_packs(
         if let Err(e) = save_theme_slot_anchor(&anchor) {
             crate::log_warn!("[EmojiPacks] save theme slot anchor failed: {}", e);
         }
+    }
+    if health_changed || list_changed {
+        crate::traits::emit_event("emoji_packs_updated", &());
     }
 
     crate::log_info!(
