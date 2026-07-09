@@ -4693,7 +4693,8 @@ picker.addEventListener('click', (e) => {
         return;
     }
     insertAtCursor(`:${shortcode}:`, true);
-    picker.classList.remove('visible');
+    // Shift-click keeps the panel open for rapid multi-insert (Discord-style).
+    if (!e.shiftKey) picker.classList.remove('visible');
     if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
         domChatMessageInput.focus();
     }
@@ -4736,8 +4737,11 @@ picker.addEventListener('click', (e) => {
                 insertAtCursor(cEmoji.emoji, true);
             }
 
-            // Close the picker - use class instead of inline style
-            picker.classList.remove('visible');
+            // Shift-click (message compose, not reactions) keeps the panel open
+            // for rapid multi-insert (Discord-style).
+            if (!(e.shiftKey && !strCurrentReactionReference)) {
+                picker.classList.remove('visible');
+            }
             // Focus chat input (desktop only - mobile keyboards are disruptive)
             if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
                 domChatMessageInput.focus();
