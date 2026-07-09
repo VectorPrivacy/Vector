@@ -3498,6 +3498,19 @@ async function setupRustListeners() {
                 fresh.style.margin = '0';
                 av.replaceWith(fresh);
             });
+            // Reply-quote name + small avatar for this author resolve the same way.
+            document.querySelectorAll(`.dmsg-reply-name[data-npub="${id}"]`).forEach(n => {
+                n.textContent = newName;
+                twemojify(n);
+            });
+            document.querySelectorAll(`.dmsg-reply-avatar[data-npub="${id}"]`).forEach(av => {
+                const fresh = createAvatarImg(newAvatarSrc, 16);
+                fresh.classList.add('dmsg-reply-avatar');
+                fresh.dataset.npub = id;
+                // Re-wire the mini-profile opener the original render attached (replaceWith drops it).
+                fresh.addEventListener('click', (e) => { e.stopPropagation(); showMiniProfile(id, e.currentTarget); });
+                av.replaceWith(fresh);
+            });
             // Mention chips (@tags in chat + npub tags in profile bios) resolve their display name here too.
             document.querySelectorAll(`.mention[data-npub="${id}"]`).forEach(span => {
                 span.textContent = '@' + newName;

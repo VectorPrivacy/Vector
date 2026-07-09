@@ -170,10 +170,15 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         return row;
     }
 
-    // ---- Reply context ------------------------------------------------------
+    // ---- Reply context (Discord-style: above the header, elbow into the avatar) --
     if (msg.replied_to) {
         const replyDiv = _dmsgBuildReplyContext(msg, sender);
-        if (replyDiv) content.appendChild(replyDiv);
+        if (replyDiv) {
+            // Above the name (body's first child). The row class shifts the big avatar down so it
+            // aligns with the name rather than floating up to the reply line.
+            body.insertBefore(replyDiv, body.firstChild);
+            row.classList.add('dmsg--has-reply');
+        }
     }
 
     // ---- Text content -------------------------------------------------------
@@ -414,6 +419,13 @@ function _dmsgBuildReplyContext(msg, sender) {
         cSenderProfile = sender;
     }
 
+    // npub of the replied-to author — drives the small avatar + lets the profile_update handler
+    // retro-resolve both name and avatar once the profile lands.
+    const repliedToNpub = repliedToMine ? strPubkey
+        : (msg.replied_to_npub || cMsg?.npub || cSenderProfile?.id || '');
+    spanName.classList.add('dmsg-reply-name');
+    if (repliedToNpub) spanName.dataset.npub = repliedToNpub;
+
     if (cSenderProfile?.nickname || cSenderProfile?.name || cSenderProfile?.display_name) {
         spanName.textContent = cSenderProfile.nickname || cSenderProfile.name || cSenderProfile.display_name;
         twemojify(spanName);
@@ -461,8 +473,24 @@ function _dmsgBuildReplyContext(msg, sender) {
         spanRef.append(spanIcon, spanDesc);
     }
 
+    // Avatar + name + snippet on ONE line (Discord-style one-liner). The snippet ellipsis-truncates
+    // to the message width; see .dmsg-reply / .dmsg-reply-snippet. Cached/asset-only avatar src; the
+    // profile_update handler swaps in the real one when the image lands.
+    const replyAvatar = createAvatarImg(getProfileAvatarSrc(cSenderProfile), 16);
+    replyAvatar.classList.add('dmsg-reply-avatar');
+    if (repliedToNpub) replyAvatar.dataset.npub = repliedToNpub;
+    if (spanRef) spanRef.classList.add('dmsg-reply-snippet');
+
+    // Name + avatar open the replied-to author's mini profile; clicking anywhere else on the quote
+    // (elbow, snippet) bubbles to the row's jump-to-message handler.
+    if (repliedToNpub) {
+        const openReplyProfile = (e) => { e.stopPropagation(); showMiniProfile(repliedToNpub, e.currentTarget); };
+        spanName.addEventListener('click', openReplyProfile);
+        replyAvatar.addEventListener('click', openReplyProfile);
+    }
+
+    divRef.appendChild(replyAvatar);
     divRef.appendChild(spanName);
-    divRef.appendChild(document.createElement('br'));
     if (spanRef) divRef.appendChild(spanRef);
 
     return divRef;

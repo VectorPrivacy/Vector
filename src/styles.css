@@ -14934,14 +14934,21 @@ hr {
   /* Scoped tokens — override via theme to retune. */
   --dmsg-row-padding-y: 0px;
   --dmsg-row-padding-x: 2px;
-  --dmsg-streak-gap: 16px;
-  --dmsg-continuation-gap: 3px;
+  /* -2px each to offset the row's new 2px padding-bottom, so content-to-content spacing is
+   * unchanged — the 2px just moves from transparent margin into the row's highlighted padding. */
+  --dmsg-streak-gap: 14px;
+  --dmsg-continuation-gap: 1px;
   /* Symmetric breathing room for inline separators (timestamps, date + unread dividers,
    * system events). Applied top AND bottom so the divider sits centered between its
    * neighbours — the following row's top-margin is zeroed so it doesn't double up. */
   --dmsg-system-gap: 10px;
   --dmsg-gutter-width: 56px;
   --dmsg-avatar-size: 40px;
+  /* Discord-style reply: how far to push the big avatar down so it aligns with the name instead of
+   * the reply line above it, and the colour of the elbow connector. Tune the lift to the reply's
+   * rendered height (padding + one text line + margin-bottom). */
+  --dmsg-reply-lift: 24px;
+  --dmsg-reply-spine: rgba(255, 255, 255, 0.25);
   --dmsg-author-color: #ffffff;
   --dmsg-text-color: rgba(255, 255, 255, 0.85);
   --dmsg-time-color: rgba(255, 255, 255, 0.4);
@@ -14967,7 +14974,9 @@ hr {
   margin-left: -10px;
   margin-right: -10px;
   padding-top: var(--dmsg-row-padding-y);
-  padding-bottom: var(--dmsg-row-padding-y);
+  /* +2px so a short row's 40px avatar (and the last text line) don't touch the highlight's bottom
+   * edge; the top's breathing room already comes from the avatar's margin-top. */
+  padding-bottom: calc(var(--dmsg-row-padding-y) + 2px);
   padding-left: calc(10px + var(--dmsg-row-padding-x));
   padding-right: calc(10px + var(--dmsg-row-padding-x));
   border-left: 3px solid transparent;
@@ -15321,24 +15330,76 @@ hr {
  * shouldn't accidentally select the truncated preview when trying to copy
  * the actual message body. */
 .dmsg-reply {
-  display: block;
-  padding: 4px 0 4px 10px;
-  margin-bottom: 6px;
+  /* One-liner ABOVE the name (Discord-style): avatar + name + snippet on a single row, the snippet
+   * ellipsis-truncated, with an elbow connector rising from the big avatar (see ::before). */
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0 2px 3px;
+  margin-bottom: 4px;
   margin-top: 0;
-  border-left: 2px solid rgba(255, 255, 255, 0.25);
   line-height: 1.3;
   font-size: 13px;
   background: transparent;
+  max-width: 100%;
   user-select: none;
   -webkit-user-select: none;
-  /* Hover state darkens both the border and the whole quote (via .btn's
-   * opacity:0.75) so they move together. Transition lives on .dmsg-reply
-   * so it applies to opacity even though the opacity-flip itself comes
-   * from `.btn:hover`. */
-  transition: border-left-color 0.125s ease, opacity 0.125s ease;
+  transition: opacity 0.125s ease;
 }
-.dmsg-reply:hover {
-  border-left-color: rgba(255, 255, 255, 0.18);
+/* Elbow connector: curves up from the big avatar's centre (in the gutter) and points into the reply.
+ * Geometry is derived from the gutter/avatar tokens so it tracks any retune of those. */
+.dmsg-reply::before {
+  content: "";
+  position: absolute;
+  /* The avatar's centre column, minus half the 2px stroke so the visible line centres on the avatar
+   * rather than sitting a pixel to its right. */
+  left: calc(var(--dmsg-avatar-size) / 2 - var(--dmsg-gutter-width) - 1px);
+  /* Arm sits on the reply content's vertical centre (-2px trims the border thickness + line-box lead
+   * so it reads as centred, not slightly low). */
+  top: calc(50% - 2px);
+  /* Stop a few px short of BOTH avatars (the reply avatar on the right, the big one below) so the
+   * connector floats near them instead of touching. Height compensates the -2px top so the bottom
+   * gap is unchanged. */
+  width: calc(var(--dmsg-gutter-width) - var(--dmsg-avatar-size) / 2 - 2px);
+  height: calc(var(--dmsg-reply-lift) - 12px);
+  border-left: 2px solid var(--dmsg-reply-spine);
+  border-top: 2px solid var(--dmsg-reply-spine);
+  border-top-left-radius: 8px;
+  pointer-events: none;
+}
+/* Shift the big avatar down so it aligns with the name, not the reply line sitting above it, and
+ * keep it above the elbow connector so the line tucks behind it. */
+.dmsg--has-reply .dmsg-avatar {
+  margin-top: calc(2px + var(--dmsg-reply-lift)) !important;
+  position: relative;
+  z-index: 1;
+}
+.dmsg-reply-avatar {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  object-fit: cover;
+  /* Above the elbow connector so it's never painted over. */
+  position: relative;
+  z-index: 1;
+}
+.dmsg-reply-name {
+  flex-shrink: 0;
+  font-weight: 500;
+  white-space: nowrap;
+}
+/* Underline on hover like the primary author name — only when it's clickable (has a resolved npub,
+ * which also gates the mini-profile click). */
+.dmsg-reply-name[data-npub]:hover { text-decoration: underline; cursor: pointer; }
+/* The quoted content: takes the remaining width and ellipsis-truncates on one line. */
+.dmsg-reply-snippet {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Link preview card. */
