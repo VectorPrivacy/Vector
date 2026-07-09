@@ -1890,6 +1890,9 @@ impl VectorCore {
     /// Returns the count of brand-new messages applied. Best-effort: a fetch failure is 0.
     async fn v2_backfill_channel(id: &crate::community::CommunityId, channel_id: &str, limit: usize) -> usize {
         use crate::community::v2::inbound::{apply_chat_to_state, persist_chat, ChatPersist};
+        // Guard straddles the fetch: a swap mid-fetch must not persist account A's chat
+        // into account B's STATE/DB (the message ids are global).
+        let session = state::SessionGuard::capture();
         let Some(my_pk) = state::my_public_key() else { return 0 };
         let Ok(Some(community)) = crate::db::community::load_community_v2(id) else { return 0 };
         let ch = crate::community::ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
@@ -1899,6 +1902,11 @@ impl VectorCore {
         };
         let mut new = 0usize;
         for f in &page {
+            // Re-check every iteration — each persists a DB write, and a swap can land
+            // between them.
+            if !session.is_valid() {
+                break;
+            }
             // STATE mutation under the lock; the async DB persist after it drops.
             let outcome = {
                 let mut st = state::STATE.lock().await;

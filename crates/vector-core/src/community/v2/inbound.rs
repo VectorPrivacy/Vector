@@ -62,8 +62,10 @@ pub fn chat_message_to_message(
 pub enum ChatPersist {
     /// A brand-new message — save its row.
     New(Message),
-    /// A message whose row must be re-saved (a reaction landed on it).
-    Updated(Message),
+    /// A message changed: a reaction landed (`edit_event` None → re-save the row, which
+    /// carries reactions) or an edit applied (`edit_event` Some → save the folded
+    /// MESSAGE_EDIT event, event-sourced like v1 + DMs, never a row overwrite).
+    Updated { message: Message, edit_event: Option<Box<crate::stored_event::StoredEvent>> },
     /// A message removed by its author — drop its row.
     Removed(String),
 }
@@ -84,7 +86,11 @@ pub fn apply_chat_to_state(state: &mut ChatState, event: &ChatEvent, channel_id:
                 return None;
             }
             state.ensure_community_chat(channel_id);
-            state.add_message_to_chat(channel_id, msg.clone()).then_some(ChatPersist::New(msg))
+            // Persist regardless of the STATE-add result: `event_exists` already proved
+            // it's not in the DB, so a `false` here means only that another writer put it
+            // in STATE first — the row must still be saved, or it's lost until re-fetch.
+            state.add_message_to_chat(channel_id, msg.clone());
+            Some(ChatPersist::New(msg))
         }
         ChatEvent::Reaction { opened, target, emoji, emoji_url, .. } => {
             let target_id = crate::simd::hex::bytes_to_hex_32(target);
@@ -102,17 +108,71 @@ pub fn apply_chat_to_state(state: &mut ChatState, event: &ChatEvent, channel_id:
                 emoji_url: emoji_url.clone(),
             };
             let (_c, added) = state.add_reaction_to_message(&target_id, reaction)?;
-            added.then(|| state.find_message(&target_id).map(|(_c, m)| ChatPersist::Updated(m)))?
+            added.then(|| state.find_message(&target_id).map(|(_c, m)| ChatPersist::Updated { message: m, edit_event: None }))?
+        }
+        ChatEvent::Edit { opened, target, new_content } => {
+            let target_id = crate::simd::hex::bytes_to_hex_32(target);
+            // Author-scoped + same-channel: only the original author edits their own message.
+            let editor_npub = opened.author.to_bech32().ok()?;
+            if !matches!(state.find_message(&target_id), Some((chat, m)) if chat.id == channel_id && m.npub.as_deref() == Some(editor_npub.as_str())) {
+                return None;
+            }
+            // Apply to STATE via the shared canonical applier (seeds history with the
+            // original once, dedups by `edited_at`, swaps content) — reused from v1/DMs.
+            let edited_at = opened.at_ms;
+            let (_c, message) = state.update_message(&target_id, |m| m.apply_edit(new_content.clone(), edited_at, Vec::new()))?;
+            // Persist as a folded MESSAGE_EDIT event (chat_id set at save time), matching v1.
+            let edit_event = crate::stored_event::StoredEventBuilder::new()
+                .id(opened.rumor_id.to_hex())
+                .kind(crate::stored_event::event_kind::MESSAGE_EDIT)
+                .content(new_content.clone())
+                .reference_id(Some(target_id.clone()))
+                .created_at(edited_at / 1000)
+                .mine(opened.author == *my_pubkey)
+                .npub(opened.author.to_bech32().ok())
+                .build();
+            Some(ChatPersist::Updated { message, edit_event: Some(Box::new(edit_event)) })
         }
         ChatEvent::Delete { opened, target, .. } => {
             let target_id = crate::simd::hex::bytes_to_hex_32(target);
             // Author-scoped: a delete removes its author's OWN message. A moderation-hide
-            // (deleting another's message under MANAGE_MESSAGES) rides the gated increment-2 path.
+            // (deleting another's message under MANAGE_MESSAGES) is a gated follow-up.
             let own = matches!(state.find_message(&target_id), Some((_, m)) if m.npub.as_deref() == opened.author.to_bech32().ok().as_deref());
             own.then(|| state.remove_message(&target_id).map(|_| ChatPersist::Removed(target_id)))?
         }
-        ChatEvent::Edit { .. } | ChatEvent::Typing { .. } | ChatEvent::Webxdc { .. } => None,
+        ChatEvent::Typing { .. } | ChatEvent::Webxdc { .. } => None,
     }
+}
+
+/// Open a received wrap under `channel_id`'s plane and persist its chat event to the shared
+/// store — the LIVE counterpart of [`crate::VectorCore::v2_backfill_channel`]'s catch-up
+/// persistence. `channel_id` is the channel the dispatcher already matched. Best-effort: a
+/// non-chat / unopenable wrap is a no-op.
+pub async fn persist_incoming_chat(
+    community: &CommunityV2,
+    wrap: &nostr_sdk::Event,
+    channel_id: &str,
+    my_pubkey: &PublicKey,
+    session: &crate::state::SessionGuard,
+) -> Option<ChatPersist> {
+    let ch = community.channels.iter().find(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0) == channel_id)?;
+    let (secret, epoch) = community.channel_secret(ch);
+    let group = super::derive::channel_group_key(&secret, &ch.id, epoch);
+    let event = chat::open_chat_event(wrap, &group, &ch.id, epoch).ok()?;
+    let outcome = {
+        let mut st = crate::state::STATE.lock().await;
+        // A swap can land on the lock await: only mutate THIS account's STATE.
+        if !session.is_valid() {
+            return None;
+        }
+        apply_chat_to_state(&mut st, &event, channel_id, my_pubkey)
+    }?;
+    // …and only persist to THIS account's DB (the save straddles an await).
+    if !session.is_valid() {
+        return None;
+    }
+    persist_chat(channel_id, &outcome).await;
+    Some(outcome)
 }
 
 /// Persist an [`apply_chat_to_state`] outcome to the shared events DB — async, run by the
@@ -120,9 +180,25 @@ pub fn apply_chat_to_state(state: &mut ChatState, event: &ChatEvent, channel_id:
 /// re-saves the row; a delete drops it).
 pub async fn persist_chat(channel_id: &str, outcome: &ChatPersist) {
     match outcome {
-        ChatPersist::New(m) | ChatPersist::Updated(m) => {
+        ChatPersist::New(m) => {
             let _ = crate::db::events::save_message(channel_id, m).await;
         }
+        // An edit is event-sourced: save the MESSAGE_EDIT row (folded on reload), never a
+        // row overwrite. A reaction rides the message row, so re-save it.
+        ChatPersist::Updated { message, edit_event } => match edit_event {
+            Some(ev) => {
+                let mut ev = (**ev).clone();
+                // get-or-CREATE: a lookup-only id would leave a fresh channel's edit at
+                // chat_id 0 (orphaned, dropped on the reload fold).
+                if let Ok(cid) = crate::db::id_cache::get_or_create_chat_id(channel_id) {
+                    ev.chat_id = cid;
+                }
+                let _ = crate::db::events::save_event(&ev).await;
+            }
+            None => {
+                let _ = crate::db::events::save_message(channel_id, message).await;
+            }
+        },
         ChatPersist::Removed(id) => {
             let _ = crate::db::events::delete_event(id).await;
         }
@@ -247,18 +323,15 @@ fn dispatch_chat_event(
             handler.on_community_update(channel_id, &target_id, &msg);
             DispatchedV2::Update { channel_id: channel_id.to_string(), target_id }
         }
-        ChatEvent::Edit { opened, target, new_content } => {
-            let target_id = crate::simd::hex::bytes_to_hex_32(target);
-            let mut msg = chat_message_to_message(opened, &None, &[], my_pubkey);
-            msg.content = new_content.clone();
-            msg.edited = true;
-            handler.on_community_update(channel_id, &target_id, &msg);
-            DispatchedV2::Update { channel_id: channel_id.to_string(), target_id }
+        // Edit + Delete are AUTHOR-SCOPED (only the original author may edit/delete their
+        // own message). The author check needs the resident target, so its callback is
+        // fired by the realtime layer FROM the persist outcome — never optimistically here,
+        // or a forged edit/delete would grief the live view and then reappear on reload.
+        ChatEvent::Edit { target, .. } => {
+            DispatchedV2::Update { channel_id: channel_id.to_string(), target_id: crate::simd::hex::bytes_to_hex_32(target) }
         }
         ChatEvent::Delete { target, .. } => {
-            let target_id = crate::simd::hex::bytes_to_hex_32(target);
-            handler.on_community_removed(channel_id, &target_id);
-            DispatchedV2::Removed { channel_id: channel_id.to_string(), target_id }
+            DispatchedV2::Removed { channel_id: channel_id.to_string(), target_id: crate::simd::hex::bytes_to_hex_32(target) }
         }
         ChatEvent::Typing { opened } => {
             let npub = opened.author.to_bech32().unwrap_or_default();
@@ -448,6 +521,81 @@ mod tests {
             apply_chat_to_state(&mut st, &events[0], &cid, &me.public_key())
         };
         assert!(dup.is_none(), "a known message dedups on re-apply");
+    }
+
+    #[tokio::test]
+    async fn a_v2_edit_persists_as_a_folded_edit_event() {
+        let (_tmp, _guard, me) = init();
+        let relay = MemoryRelay::new();
+        let community = service::create_community(&relay, "Edit", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let cid = crate::simd::hex::bytes_to_hex_32(&general.0);
+        let group = super::super::derive::channel_group_key(&community.community_root, &general, community.root_epoch);
+
+        let msg_id = service::send_message(&relay, &community, &general, "original").await.unwrap();
+        service::send_edit(&relay, &community, &general, &msg_id, "edited!").await.unwrap();
+
+        // Apply messages BEFORE their edits (a target must be resident to edit).
+        let q = crate::community::transport::Query { kinds: vec![stream::KIND_WRAP], authors: vec![group.pk_hex()], ..Default::default() };
+        let wraps = relay.fetch(&q, &community.relays).await.unwrap();
+        let mut events: Vec<ChatEvent> = wraps.iter().filter_map(|w| chat::open_chat_event(w, &group, &general, community.root_epoch).ok()).collect();
+        events.sort_by_key(|e| (!matches!(e, ChatEvent::Message { .. }), e.opened().at_ms));
+        for ev in &events {
+            let outcome = {
+                let mut st = crate::state::STATE.lock().await;
+                apply_chat_to_state(&mut st, ev, &cid, &me.public_key())
+            };
+            if let Some(o) = outcome {
+                persist_chat(&cid, &o).await;
+            }
+        }
+
+        let content = {
+            let st = crate::state::STATE.lock().await;
+            st.find_message(&msg_id).map(|(_, m)| m.content)
+        };
+        assert_eq!(content.as_deref(), Some("edited!"), "the edit applied to the stored message");
+        let edit_id = events.iter().find_map(|e| matches!(e, ChatEvent::Edit { .. }).then(|| e.opened().rumor_id.to_hex())).unwrap();
+        assert!(crate::db::events::event_exists(&edit_id).unwrap(), "the MESSAGE_EDIT event is persisted (folds on reload)");
+    }
+
+    #[tokio::test]
+    async fn a_forged_delete_from_a_non_author_is_ignored() {
+        use nostr_sdk::prelude::Timestamp;
+        let (_tmp, _guard, me) = init();
+        let relay = MemoryRelay::new();
+        let community = service::create_community(&relay, "Forge", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let cid = crate::simd::hex::bytes_to_hex_32(&general.0);
+        let group = super::super::derive::channel_group_key(&community.community_root, &general, community.root_epoch);
+
+        // `me` posts a message and it's persisted into STATE.
+        let msg_id = service::send_message(&relay, &community, &general, "mine").await.unwrap();
+        let q = crate::community::transport::Query { kinds: vec![stream::KIND_WRAP], authors: vec![group.pk_hex()], ..Default::default() };
+        let wraps = relay.fetch(&q, &community.relays).await.unwrap();
+        for w in &wraps {
+            if let Ok(ev) = chat::open_chat_event(w, &group, &general, community.root_epoch) {
+                let mut st = crate::state::STATE.lock().await;
+                apply_chat_to_state(&mut st, &ev, &cid, &me.public_key());
+            }
+        }
+
+        // A STRANGER (a member, so holds the channel key) forges a delete of `me`'s message.
+        let stranger = nostr_sdk::prelude::Keys::generate();
+        let del = chat::build_delete_rumor(stranger.public_key(), &general, community.root_epoch, &msg_id, super::super::kind::MESSAGE, 9_000);
+        let (wrap, _) = chat::seal_chat_rumor(&del, &group, &stranger, Timestamp::from_secs(9), false).unwrap();
+        let event = chat::open_chat_event(&wrap, &group, &general, community.root_epoch).unwrap();
+
+        let outcome = {
+            let mut st = crate::state::STATE.lock().await;
+            apply_chat_to_state(&mut st, &event, &cid, &me.public_key())
+        };
+        assert!(outcome.is_none(), "a forged delete from a non-author yields no removal");
+        let survives = {
+            let st = crate::state::STATE.lock().await;
+            st.find_message(&msg_id).is_some()
+        };
+        assert!(survives, "the message survives the forged delete (live view + DB stay consistent)");
     }
 
     #[tokio::test]

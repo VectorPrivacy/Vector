@@ -258,7 +258,26 @@ pub async fn dispatch_event(session: &SessionGuard, event: Event, handler: Arc<d
                 handler.on_community_dissolved(&community_id);
                 return;
             }
-            _ => return, // chat/guestbook handled inline by the dispatcher.
+            // A chat event: dispatch_wrap already fired the message/reaction/typing callback
+            // (those aren't author-scoped). Persist it to the shared store so get_messages
+            // reflects live traffic, then fire the AUTHOR-CHECKED edit/delete callback from
+            // the persist outcome — a forged edit/delete never reaches the handler.
+            inbound::DispatchedV2::Message { channel_id, .. }
+            | inbound::DispatchedV2::Update { channel_id, .. }
+            | inbound::DispatchedV2::Removed { channel_id, .. } => {
+                if !session.is_valid() {
+                    return;
+                }
+                match inbound::persist_incoming_chat(c, &event, &channel_id, &my_pk, session).await {
+                    Some(inbound::ChatPersist::Removed(target_id)) => handler.on_community_removed(&channel_id, &target_id),
+                    Some(inbound::ChatPersist::Updated { message, edit_event: Some(_) }) => {
+                        handler.on_community_update(&channel_id, &message.id, &message)
+                    }
+                    _ => {} // New / reaction (Updated None): dispatch_wrap already fired it.
+                }
+                return;
+            }
+            _ => return, // guestbook/typing handled inline by the dispatcher.
         }
     }
 }
