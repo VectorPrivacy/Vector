@@ -95,6 +95,8 @@ pub fn plane_authors(communities: &[CommunityV2]) -> Vec<PublicKey> {
     for c in communities {
         out.push(derive::guestbook_group_key(&c.community_root, c.id(), c.root_epoch).pk());
         out.push(control_author(c));
+        // The dissolved plane (CORD-02 §9) — so a mid-session dissolution seals live.
+        out.push(super::derive::dissolved_group_key(c.id()).pk());
         for ch in &c.channels {
             let (secret, epoch) = c.channel_secret(ch);
             out.push(derive::channel_group_key(&secret, &ch.id, epoch).pk());
@@ -250,6 +252,12 @@ pub async fn dispatch_event(session: &SessionGuard, event: Event, handler: Arc<d
                 enqueue_follow(c.id());
                 return;
             }
+            inbound::DispatchedV2::Dissolved { community_id } => {
+                // Death wins (CORD-02 §9): seal read-only + surface the grave.
+                let _ = crate::db::community::set_community_dissolved(&community_id);
+                handler.on_community_dissolved(&community_id);
+                return;
+            }
             _ => return, // chat/guestbook handled inline by the dispatcher.
         }
     }
@@ -375,8 +383,16 @@ mod tests {
         // Plus the next base-rekey address (rekey-follow). A public channel has no
         // independent rotation, so #general contributes no channel-rekey address.
         let next_base = derive::base_rekey_group_key(&c.community_root, c.id(), Epoch(1)).pk();
-        assert!(authors.contains(&gb) && authors.contains(&control) && authors.contains(&general) && authors.contains(&next_base));
-        assert_eq!(authors.len(), 4, "guestbook + control + chat + base-rekey planes are subscribed");
+        // Plus the dissolved plane (CORD-02 §9), so a live dissolution is detected.
+        let dissolved = derive::dissolved_group_key(c.id()).pk();
+        assert!(
+            authors.contains(&gb)
+                && authors.contains(&control)
+                && authors.contains(&general)
+                && authors.contains(&next_base)
+                && authors.contains(&dissolved)
+        );
+        assert_eq!(authors.len(), 5, "guestbook + control + dissolved + chat + base-rekey planes are subscribed");
     }
 
     #[test]

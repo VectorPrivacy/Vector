@@ -313,6 +313,11 @@ async fn accept_bundle<T: Transport + ?Sized>(
     // delivered root closes that eclipse; also reconciles channel classification.
     let (community, join_heads) = verify_owner_root_and_reconcile(transport, community).await?;
 
+    // A dissolved community is a grave (CORD-02 §9): refuse to join it.
+    if is_dissolved(transport, &community).await {
+        return Err("this community has been dissolved".to_string());
+    }
+
     // The account must not have swapped since the guard was captured (which was
     // before any fetch the caller / the verify above performed) — else we'd write
     // A's join into B.
@@ -624,6 +629,49 @@ pub async fn memberlist<T: Transport + ?Sized>(transport: &T, community: &Commun
         members.insert(owner);
     }
     Ok(members.into_iter().collect())
+}
+
+// ── Dissolution (CORD-02 §9) ─────────────────────────────────────────────────
+
+/// Owner dissolution / "Delete Community" (CORD-02 §9): publish the terminal
+/// tombstone at the dissolved plane (`community_id`-derived, epoch-free, so every
+/// past or present member resolves the same grave and a Refounding can never strand
+/// it). The tombstone's presence IS the state; only the owner's seal counts.
+/// Irreversible — on success the local hold is sealed read-only.
+pub async fn dissolve_community<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<(), String> {
+    let session = SessionGuard::capture();
+    let me = local_keys()?;
+    if community.owner()? != me.public_key() {
+        return Err("only the owner can dissolve a community".to_string());
+    }
+    let at = now_ms() / 1000;
+    let rumor = super::dissolution::dissolved_tombstone_rumor(me.public_key(), community.id(), at);
+    let wrap = super::dissolution::seal_dissolved(&rumor, community.id(), &me, Timestamp::from_secs(at)).map_err(|e| e.to_string())?;
+    if !session.is_valid() {
+        return Err("account changed during dissolve".to_string());
+    }
+    // Durable broadcast: death must propagate (a rekey racing a dissolution loses).
+    transport.publish_durable(&wrap, &community.relays).await?;
+    crate::db::community::set_community_dissolved(&crate::simd::hex::bytes_to_hex_32(&community.id().0))?;
+    Ok(())
+}
+
+/// Whether a valid owner-signed dissolution tombstone exists for this community on
+/// its relays (CORD-02 §9). A join refuses a dead community, and a live follow seals
+/// on sight. Fail-OPEN on a fetch error (absence of proof is not death), but any
+/// owner-verified tombstone found is authoritative.
+pub async fn is_dissolved<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> bool {
+    let group = super::derive::dissolved_group_key(community.id());
+    let query = Query {
+        kinds: vec![stream::KIND_WRAP],
+        authors: vec![group.pk_hex()],
+        limit: Some(20),
+        ..Default::default()
+    };
+    let Ok(wraps) = transport.fetch(&query, &community.relays).await else {
+        return false;
+    };
+    wraps.iter().any(|w| super::dissolution::verify_dissolved(w, &community.identity))
 }
 
 // ── The Community List (kind 13302, CORD-02 §8) ──────────────────────────────
@@ -2415,6 +2463,47 @@ mod tests {
 
         let rehydrated = sync_community_list(&relay, &relays).await.unwrap();
         assert!(rehydrated.is_empty(), "a tombstoned membership is not rejoined on sync");
+    }
+
+    #[tokio::test]
+    async fn dissolution_blocks_a_join() {
+        // CORD-02 §9: the owner dissolves; a would-be joiner resolves the grave and
+        // refuses to join.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Doomed", bed.relays.clone(), None).await.unwrap();
+        let bundle = bundle_of(&community, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        dissolve_community(&bed.relay, &community).await.unwrap();
+        assert!(crate::db::community::load_community_v2(community.id()).unwrap().unwrap().dissolved, "the owner's local hold is sealed");
+
+        bed.swap_to(&member);
+        let err = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap_err();
+        assert!(err.contains("dissolved"), "a join refuses a dissolved community: {err}");
+    }
+
+    #[tokio::test]
+    async fn only_the_owner_can_dissolve() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Mine", bed.relays.clone(), None).await.unwrap();
+        bed.swap_to(&member);
+        assert!(dissolve_community(&bed.relay, &community).await.is_err(), "only the owner can dissolve");
+        assert!(!is_dissolved(&bed.relay, &community).await, "and no tombstone was published");
+    }
+
+    #[tokio::test]
+    async fn a_foreign_tombstone_is_not_death() {
+        // A non-owner sealing the dissolved plane is noise (verify_dissolved is
+        // owner-gated), so the community is not treated as dead.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Safe", vec!["wss://r".into()], None).await.unwrap();
+        let rogue = Keys::generate();
+        let rumor = crate::community::v2::dissolution::dissolved_tombstone_rumor(rogue.public_key(), community.id(), 1_000);
+        let wrap = crate::community::v2::dissolution::seal_dissolved(&rumor, community.id(), &rogue, Timestamp::from_secs(1_000)).unwrap();
+        relay.publish(&wrap, &community.relays).await.unwrap();
+        assert!(!is_dissolved(&relay, &community).await, "a foreign-signed tombstone is not death");
     }
 
     #[tokio::test]

@@ -1777,9 +1777,23 @@ impl VectorCore {
     /// retire the owner's own invite links, no rekey), sealing the community permanently. Owner-only
     /// (re-verified cryptographically in `service::dissolve_community`); irreversible.
     pub async fn dissolve_community(&self, community_id: &str) -> Result<()> {
-        use crate::community::{service, transport::LiveTransport};
-        let community = Self::load_community_hex(community_id)?;
+        use crate::community::{service, transport::LiveTransport, CommunityId};
+        if community_id.len() != 64 {
+            return Err(VectorError::Other("malformed community id".into()));
+        }
+        let cid = CommunityId(crate::simd::hex::hex_to_bytes_32(community_id));
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        // Dual-stack: a v2 community dissolves at its own `community_id`-derived
+        // dissolved plane (CORD-02 §9), NOT v1's control-plane roster edition.
+        if let Some(Some(crate::community::ConcordProtocol::V2)) = crate::db::community::community_protocol(&cid).ok() {
+            let community = crate::db::community::load_community_v2(&cid)
+                .map_err(VectorError::Other)?
+                .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
+            return crate::community::v2::service::dissolve_community(&transport, &community)
+                .await
+                .map_err(VectorError::Other);
+        }
+        let community = Self::load_community_hex(community_id)?;
         service::dissolve_community(&transport, &community).await.map_err(VectorError::Other)
     }
 

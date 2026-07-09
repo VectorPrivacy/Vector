@@ -83,6 +83,10 @@ pub trait InboundEventHandler: Send + Sync {
     /// A Community's control plane was refreshed in realtime (banlist/roles/metadata/mode change,
     /// or a re-founding followed). The platform re-reads display state.
     fn on_community_refreshed(&self, _community_id: &str) {}
+
+    /// A Community was DISSOLVED by its owner (CORD-02 §9): sealed read-only, held keys still open
+    /// history but nothing new is honored. The platform surfaces the grave.
+    fn on_community_dissolved(&self, _community_id: &str) {}
 }
 
 /// No-op handler for CLI/tests.

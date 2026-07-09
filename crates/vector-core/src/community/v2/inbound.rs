@@ -76,6 +76,9 @@ pub enum DispatchedV2 {
     /// flight. Recognized by address; the realtime layer runs the stateful catch-up
     /// ([`super::service::follow_rekeys`]) across every scope. `community_id` is hex.
     Rekey { community_id: String },
+    /// A verified owner-signed tombstone at the dissolved plane (CORD-02 §9): the
+    /// community is dead. The realtime layer seals it read-only. `community_id` is hex.
+    Dissolved { community_id: String },
     /// The wrap opened on a v2 plane but carries nothing the handler renders
     /// (e.g. a WebXDC signal, or a kick we don't surface in the first cut).
     Ignored,
@@ -131,6 +134,15 @@ pub fn dispatch_wrap(
     // can't drift.
     if super::realtime::rekey_authors(community).iter().any(|p| *p == wrap.pubkey) {
         return DispatchedV2::Rekey { community_id: crate::simd::hex::bytes_to_hex_32(&community.id().0) };
+    }
+
+    // 5. Dissolved plane: the terminal tombstone (CORD-02 §9). Honor ONLY a valid
+    // owner seal — a foreign event at this public address is noise.
+    if wrap.pubkey == super::derive::dissolved_group_key(community.id()).pk() {
+        if super::dissolution::verify_dissolved(wrap, &community.identity) {
+            return DispatchedV2::Dissolved { community_id: crate::simd::hex::bytes_to_hex_32(&community.id().0) };
+        }
+        return DispatchedV2::Ignored;
     }
 
     DispatchedV2::NotOurs
