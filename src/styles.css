@@ -4282,8 +4282,14 @@ img.emoji-img-loading {
 .emoji-creator-cell.drop-after::after  { right: -4px; }
 
 /* Equipped-pack sidebar drag-to-reorder (vertical list). */
-/* Suppress native image/text drag so a slow press starts our reorder, not a
-   raw-icon drag (WKWebView + desktop). */
+/* touch-action: none — the sidebar scrolls vertically, so without this the
+   browser claims a finger drag for scrolling before our reorder threshold
+   trips (no ghost, no drop marker, hold falls through to the context menu).
+   Suppress native image/text drag too, so a slow press starts our reorder
+   instead of grabbing the raw icon (WKWebView + desktop). */
+.emoji-pack-tab {
+  touch-action: none;
+}
 .emoji-pack-tab,
 .emoji-pack-tab img {
   -webkit-user-drag: none;
