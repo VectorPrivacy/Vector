@@ -17,7 +17,8 @@ use super::community::CommunityV2;
 use super::guestbook::{self, GuestbookEntry};
 use super::stream;
 use crate::event_handler::InboundEventHandler;
-use crate::types::{EmojiTag, Message};
+use crate::state::ChatState;
+use crate::types::{EmojiTag, Message, Reaction};
 
 /// Build a protocol-agnostic [`Message`] from an opened v2 chat Message event.
 /// Mirrors v1's `build_message` field-for-field (id = the rumor id, ms time,
@@ -51,6 +52,80 @@ pub fn chat_message_to_message(
             .collect(),
         wrapper_event_id: Some(opened.wrapper_id.to_hex()),
         ..Default::default()
+    }
+}
+
+/// What applying a v2 chat event to STATE yielded — the caller persists it (async)
+/// once the STATE lock is dropped. Mirrors v1's `IncomingEvent` for the chat sub-kinds:
+/// a message row is saved fresh or re-saved (a landed reaction rides the row), a delete
+/// drops it. Persistence is the caller's so the apply step stays sync + lock-scoped.
+pub enum ChatPersist {
+    /// A brand-new message — save its row.
+    New(Message),
+    /// A message whose row must be re-saved (a reaction landed on it).
+    Updated(Message),
+    /// A message removed by its author — drop its row.
+    Removed(String),
+}
+
+/// Apply an opened v2 [`ChatEvent`] to STATE (dedup + aggregate onto the SHARED
+/// [`ChatState`]), mirroring v1's `ingest_message`/`apply_reaction`/`apply_delete`. Sync:
+/// the DB dedup read + STATE mutation run under the caller's lock; the caller then does the
+/// async DB persist on the returned [`ChatPersist`] (see [`persist_chat`]). Returns `None`
+/// for a duplicate, a non-persisted kind (typing/webxdc), an edit (increment 2), or an
+/// aggregate whose target isn't resident in this channel.
+pub fn apply_chat_to_state(state: &mut ChatState, event: &ChatEvent, channel_id: &str, my_pubkey: &PublicKey) -> Option<ChatPersist> {
+    match event {
+        ChatEvent::Message { opened, reply_to, emoji } => {
+            let msg = chat_message_to_message(opened, reply_to, emoji, my_pubkey);
+            // DB dedup: a known inner id is already stored — don't re-ingest/re-emit (a
+            // catch-up sweep re-fetches the whole page; in-memory STATE holds only a window).
+            if crate::db::events::event_exists(&msg.id).unwrap_or(false) {
+                return None;
+            }
+            state.ensure_community_chat(channel_id);
+            state.add_message_to_chat(channel_id, msg.clone()).then_some(ChatPersist::New(msg))
+        }
+        ChatEvent::Reaction { opened, target, emoji, emoji_url, .. } => {
+            let target_id = crate::simd::hex::bytes_to_hex_32(target);
+            // Cross-channel guard: a reaction lands only on a target resident in the SAME
+            // channel it was sealed under (its binding authenticates its own channel, never
+            // the target's) — else a member could inject reactions across channels.
+            if !matches!(state.find_message(&target_id), Some((chat, _)) if chat.id == channel_id) {
+                return None;
+            }
+            let reaction = Reaction {
+                id: opened.rumor_id.to_hex(),
+                reference_id: target_id.clone(),
+                author_id: opened.author.to_hex(),
+                emoji: emoji.clone(),
+                emoji_url: emoji_url.clone(),
+            };
+            let (_c, added) = state.add_reaction_to_message(&target_id, reaction)?;
+            added.then(|| state.find_message(&target_id).map(|(_c, m)| ChatPersist::Updated(m)))?
+        }
+        ChatEvent::Delete { opened, target, .. } => {
+            let target_id = crate::simd::hex::bytes_to_hex_32(target);
+            // Author-scoped: a delete removes its author's OWN message. A moderation-hide
+            // (deleting another's message under MANAGE_MESSAGES) rides the gated increment-2 path.
+            let own = matches!(state.find_message(&target_id), Some((_, m)) if m.npub.as_deref() == opened.author.to_bech32().ok().as_deref());
+            own.then(|| state.remove_message(&target_id).map(|_| ChatPersist::Removed(target_id)))?
+        }
+        ChatEvent::Edit { .. } | ChatEvent::Typing { .. } | ChatEvent::Webxdc { .. } => None,
+    }
+}
+
+/// Persist an [`apply_chat_to_state`] outcome to the shared events DB — async, run by the
+/// caller AFTER the STATE lock drops (a message row carries its reactions, so a reaction
+/// re-saves the row; a delete drops it).
+pub async fn persist_chat(channel_id: &str, outcome: &ChatPersist) {
+    match outcome {
+        ChatPersist::New(m) | ChatPersist::Updated(m) => {
+            let _ = crate::db::events::save_message(channel_id, m).await;
+        }
+        ChatPersist::Removed(id) => {
+            let _ = crate::db::events::delete_event(id).await;
+        }
     }
 }
 
@@ -324,6 +399,55 @@ mod tests {
         assert_eq!(pres.len(), 1, "the owner's genesis Join fires one presence");
         assert!(pres[0].1, "it's a join");
         assert_eq!(pres[0].0, me.public_key().to_bech32().unwrap());
+    }
+
+    #[tokio::test]
+    async fn v2_chat_events_persist_into_the_shared_store() {
+        let (_tmp, _guard, me) = init();
+        let relay = MemoryRelay::new();
+        let community = service::create_community(&relay, "Persist", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let cid = crate::simd::hex::bytes_to_hex_32(&general.0);
+        let group = super::super::derive::channel_group_key(&community.community_root, &general, community.root_epoch);
+        let me_hex = me.public_key().to_hex();
+
+        let msg_id = service::send_message(&relay, &community, &general, "persist me").await.unwrap();
+        service::send_reaction(&relay, &community, &general, &msg_id, &me_hex, "🔥", None).await.unwrap();
+
+        // Open every chat wrap, oldest first (fetch_channel's order — a target must be
+        // resident before its reaction lands).
+        let q = crate::community::transport::Query { kinds: vec![stream::KIND_WRAP], authors: vec![group.pk_hex()], ..Default::default() };
+        let wraps = relay.fetch(&q, &community.relays).await.unwrap();
+        let mut events: Vec<ChatEvent> = wraps.iter().filter_map(|w| chat::open_chat_event(w, &group, &general, community.root_epoch).ok()).collect();
+        events.sort_by_key(|e| e.opened().at_ms);
+
+        let mut new = 0;
+        for ev in &events {
+            let outcome = {
+                let mut st = crate::state::STATE.lock().await;
+                apply_chat_to_state(&mut st, ev, &cid, &me.public_key())
+            };
+            if let Some(o) = outcome {
+                if matches!(o, ChatPersist::New(_)) {
+                    new += 1;
+                }
+                persist_chat(&cid, &o).await;
+            }
+        }
+        assert_eq!(new, 1, "exactly one new message persisted");
+        assert!(crate::db::events::event_exists(&msg_id).unwrap(), "the message row is in the shared events store");
+        let reacted = {
+            let st = crate::state::STATE.lock().await;
+            st.find_message(&msg_id).map(|(_, m)| m.reactions.iter().any(|r| r.emoji == "🔥")).unwrap_or(false)
+        };
+        assert!(reacted, "the reaction aggregated onto the stored message");
+
+        // Re-applying the same message event dedups against the DB.
+        let dup = {
+            let mut st = crate::state::STATE.lock().await;
+            apply_chat_to_state(&mut st, &events[0], &cid, &me.public_key())
+        };
+        assert!(dup.is_none(), "a known message dedups on re-apply");
     }
 
     #[tokio::test]

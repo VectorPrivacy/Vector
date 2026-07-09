@@ -1701,17 +1701,19 @@ impl VectorCore {
     pub async fn sync_community_channel(&self, channel_id: &str, limit: usize) -> Result<(usize, Vec<String>)> {
         use crate::community::{inbound, send, service, transport::LiveTransport};
         let my_pk = state::my_public_key().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
-        // v2: consensus catch-up only (rekeys then control refold) — chat history
-        // delivers over the live handler bridge, so `new` stays 0 here. With a
-        // running listen() the coalescing worker owns the follow (never run inline
-        // beside it — two concurrent follows can whole-row clobber); headless, walk
-        // it inline.
+        // v2: consensus catch-up (rekeys then control refold) + chat backfill. With a
+        // running listen() the coalescing worker owns the follow (never run inline beside
+        // it — two concurrent follows can whole-row clobber); headless, walk it inline.
+        // The chat page is fetched + persisted either way, so get_messages backfills.
         if let Some(id) = self.v2_community_for_channel(channel_id) {
-            if community::v2::realtime::follow_worker_running() {
+            let warnings = if community::v2::realtime::follow_worker_running() {
                 community::v2::realtime::enqueue_follow(&id);
-                return Ok((0, Vec::new()));
-            }
-            return Ok((0, Self::v2_inline_follow(&id).await));
+                Vec::new()
+            } else {
+                Self::v2_inline_follow(&id).await
+            };
+            let new = Self::v2_backfill_channel(&id, channel_id, limit).await;
+            return Ok((new, warnings));
         }
         let (community, _) = self.resolve_channel(channel_id)?;
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
@@ -1880,6 +1882,36 @@ impl VectorCore {
             }
         }
         warnings
+    }
+
+    /// Fetch a v2 channel's recent chat page and PERSIST it into the shared events tables
+    /// (the same store v1 uses), so `get_messages`/`get_new_messages` backfill for v2 exactly
+    /// like v1. Reuses the v2 inbound bridge (dedup + STATE aggregate) + the v1 save path.
+    /// Returns the count of brand-new messages applied. Best-effort: a fetch failure is 0.
+    async fn v2_backfill_channel(id: &crate::community::CommunityId, channel_id: &str, limit: usize) -> usize {
+        use crate::community::v2::inbound::{apply_chat_to_state, persist_chat, ChatPersist};
+        let Some(my_pk) = state::my_public_key() else { return 0 };
+        let Ok(Some(community)) = crate::db::community::load_community_v2(id) else { return 0 };
+        let ch = crate::community::ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        let Ok(page) = crate::community::v2::service::fetch_channel(&transport, &community, &ch, limit).await else {
+            return 0;
+        };
+        let mut new = 0usize;
+        for f in &page {
+            // STATE mutation under the lock; the async DB persist after it drops.
+            let outcome = {
+                let mut st = state::STATE.lock().await;
+                apply_chat_to_state(&mut st, &f.event, channel_id, &my_pk)
+            };
+            if let Some(outcome) = outcome {
+                if matches!(outcome, ChatPersist::New(_)) {
+                    new += 1;
+                }
+                persist_chat(channel_id, &outcome).await;
+            }
+        }
+        new
     }
 
     /// The held v2 community when `community_id` names one; `None` for v1 (or unknown).
