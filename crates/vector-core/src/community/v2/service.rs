@@ -933,17 +933,48 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
         .map(|(entity, f)| (entity, (f.1, f.2, f.3)))
         .collect();
     let current_control = control_group_key(&community.community_root, cid, community.root_epoch);
-    let control_query = Query {
-        kinds: vec![stream::KIND_WRAP],
-        authors: vec![current_control.pk_hex()],
-        limit: Some(FOLLOW_PAGE),
-        ..Default::default()
-    };
-    let control_wraps = transport.fetch(&control_query, &community.relays).await?;
-    let opened: Vec<(ParsedEdition, super::stream::OpenedStream)> =
-        control_wraps.iter().filter_map(|w| control::open_control_edition(w, &current_control).ok()).collect();
-    let editions: Vec<ParsedEdition> = opened.iter().map(|(e, _)| e.clone()).collect();
-    let authority = fold_authority(community, &editions, &floors);
+    // Page the ENTIRE control plane, not just the newest window: the compaction MUST
+    // carry EVERY committed (floored) entity to the new epoch, so a head buried under a
+    // flood of newer editions (100 roles + 400 grants already exceeds one page) or a
+    // head a relay withholds can't silently drop. CORD-06 §3 mandates aborting if the
+    // Refounder cannot fold all Control Events — a dropped Banlist would unban a member
+    // at the new epoch a fresh joiner bootstraps.
+    let mut opened: Vec<(ParsedEdition, super::stream::OpenedStream)> = Vec::new();
+    let mut seen_wraps: std::collections::HashSet<nostr_sdk::EventId> = std::collections::HashSet::new();
+    let mut oldest: Option<u64> = None;
+    let mut until: Option<u64> = None;
+    for _ in 0..FOLLOW_MAX_PAGES {
+        let query = Query {
+            kinds: vec![stream::KIND_WRAP],
+            authors: vec![current_control.pk_hex()],
+            until,
+            limit: Some(FOLLOW_PAGE),
+            ..Default::default()
+        };
+        let wraps = transport.fetch(&query, &community.relays).await?;
+        let mut fresh = 0usize;
+        for w in &wraps {
+            if !seen_wraps.insert(w.id) {
+                continue;
+            }
+            fresh += 1;
+            let at = w.created_at.as_secs();
+            if oldest.is_none_or(|o| at < o) {
+                oldest = Some(at);
+            }
+            if let Ok(parsed) = control::open_control_edition(w, &current_control) {
+                opened.push(parsed);
+            }
+        }
+        // Page until every committed entity has its editions in hand (raw coverage),
+        // so the floor-driven compaction below can fold each head.
+        let present: std::collections::HashSet<String> =
+            opened.iter().map(|(e, _)| crate::simd::hex::bytes_to_hex_32(&e.entity_id)).collect();
+        if floors.keys().all(|k| present.contains(k)) || fresh == 0 {
+            break;
+        }
+        until = oldest;
+    }
 
     let prev_epoch = community.root_epoch;
     let new_epoch = Epoch(prev_epoch.0.checked_add(1).ok_or("root epoch overflow")?);
@@ -957,16 +988,29 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
     let at = now_ms();
     let at_secs = at / 1000;
 
-    // ACQUIRE: re-wrap every current control HEAD under the new epoch (compaction,
-    // O(entities)). A head not fetchable ABORTS — before anything is published.
-    let control_fold = apply_control_fold(community, &editions, &floors, &authority);
+    // ACQUIRE + COVERAGE GATE (CORD-06 §3 MUST): re-wrap the head of EVERY committed
+    // (floored) entity under the new epoch — FLOOR-driven, so nothing silently drops,
+    // including entities the metadata/roster folds don't touch (the invite Registry
+    // vsk-8, whose coordinate survives the rekey per CORD-05 §5). A floor whose head
+    // can't be folded (buried past the pager / withheld) ABORTS before any publish.
+    use std::collections::BTreeMap;
+    let mut by_eid: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (i, (e, _)) in opened.iter().enumerate() {
+        by_eid.entry(crate::simd::hex::bytes_to_hex_32(&e.entity_id)).or_default().push(i);
+    }
     let mut carried: Vec<(FoldedHead, Event)> = Vec::new();
-    for h in control_fold.heads.iter().chain(authority.heads.iter()) {
-        let Some((_, os)) = opened.iter().find(|(e, _)| e.self_hash == h.self_hash) else {
-            return Err("re-founding aborted: a control head is not fetchable (relay drop / flood); no state published".to_string());
+    for (floor_key, floor) in &floors {
+        let idxs = by_eid.get(floor_key);
+        let fold_eds: Vec<version::Edition> =
+            idxs.map(|v| v.iter().map(|&i| opened[i].0.to_fold_edition()).collect()).unwrap_or_default();
+        let (Some(hi), _) = fold_head(&fold_eds, Some(floor)) else {
+            return Err(format!("re-founding aborted: control entity {floor_key} could not be folded (buried or withheld); no state published"));
         };
-        let (rewrapped, _) = super::stream::rewrap_seal(&os.seal, &new_control, Timestamp::from_secs(at_secs)).map_err(|e| e.to_string())?;
-        carried.push((h.clone(), rewrapped));
+        let head_idx = idxs.expect("a folded head implies present editions")[hi];
+        let (head_ed, head_os) = &opened[head_idx];
+        let h = FoldedHead { entity_hex: floor_key.clone(), version: head_ed.version, self_hash: head_ed.self_hash, inner_id: head_ed.inner_id };
+        let (rewrapped, _) = super::stream::rewrap_seal(&head_os.seal, &new_control, Timestamp::from_secs(at_secs)).map_err(|e| e.to_string())?;
+        carried.push((h, rewrapped));
     }
     if !session.is_valid() {
         return Err("account changed during re-founding acquire".to_string());
@@ -1955,6 +1999,11 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
     community: &CommunityV2,
     session: &SessionGuard,
 ) -> Result<RekeyFollow, String> {
+    // Death wins every race (CORD-02 §9): a dissolved community honors no epoch advance
+    // past its tombstone — don't adopt a rotation into a grave.
+    if crate::db::community::get_community_dissolved(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap_or(false) {
+        return Ok(RekeyFollow { updated: None, self_removed: false });
+    }
     let me = local_keys()?;
     let my_xonly = me.public_key().to_bytes();
     let owner = community.owner()?;
@@ -2945,6 +2994,33 @@ mod tests {
         let texts = texts_in(&relay, &refounded, &general).await;
         assert!(texts.contains(&"before the refounding".to_string()), "the epoch-0 message is still readable");
         assert!(texts.contains(&"after the refounding".to_string()), "the epoch-1 message reads too");
+    }
+
+    #[tokio::test]
+    async fn refounding_aborts_when_control_state_is_withheld() {
+        // B1 coverage gate (CORD-06 §3): a relay serving none of the committed control
+        // heads must ABORT the Refounding — never silently drop state (e.g. unban a
+        // member at the new epoch a fresh joiner bootstraps).
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Withheld", vec!["wss://good".into()], None).await.unwrap();
+        publish_banlist(&relay, &community, &owner, &["cc".repeat(32)], 1).await;
+        let session = SessionGuard::capture();
+        follow_control(&relay, &community, &session).await.unwrap(); // seed the banlist floor
+
+        // Re-point the held community to an EMPTY relay + save, so the Refounding (which
+        // reloads fresh state) fetches none of the committed heads.
+        let mut moved = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        moved.relays = vec!["wss://empty".into()];
+        crate::db::community::save_community_v2(&moved).unwrap();
+
+        let err = refound_community(&relay, &moved, &[]).await.unwrap_err();
+        assert!(err.contains("could not be folded"), "a withheld control head aborts the refounding: {err}");
+        assert_eq!(
+            crate::db::community::load_community_v2(community.id()).unwrap().unwrap().root_epoch,
+            Epoch(0),
+            "the epoch did NOT advance (zero published state)"
+        );
     }
 
     #[tokio::test]
