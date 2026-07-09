@@ -1587,6 +1587,7 @@ impl VectorCore {
     /// peers hide it, plus best-effort attachment cleanup.
     pub async fn delete_community_message_in(&self, channel_id: &str, message_id: &str) -> Result<()> {
         use crate::community::{service, transport::LiveTransport};
+        let session = state::SessionGuard::capture();
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
 
         // Attachment URLs come from local state when held (a headless v2 consumer
@@ -1628,7 +1629,11 @@ impl VectorCore {
                 }
             }
         }
-        // Local removal.
+        // Local removal — the publishes above straddled awaits; a swap must not let this
+        // strip the message from a swapped-in account's STATE + DB (message_id is global).
+        if !session.is_valid() {
+            return Ok(());
+        }
         let removed_chat = {
             let mut st = state::STATE.lock().await;
             st.remove_message(message_id).map(|(cid, _)| cid)
@@ -1922,6 +1927,15 @@ impl VectorCore {
             let me = state::my_public_key().ok_or_else(|| VectorError::Other("Not logged in".into()))?.to_hex();
             let owner_hex = v2.owner().map_err(VectorError::Other)?.to_hex();
             let roster = crate::db::community::get_community_roles(community_id).map_err(VectorError::Other)?;
+            // A banned member holds no standing (CORD-04 §4), even if a since-skipped
+            // roster persist still lists their grant — the banlist advances on its own gate.
+            let banned = crate::db::community::get_community_banlist(community_id).unwrap_or_default();
+            if banned.contains(&me) && me != owner_hex {
+                return Ok(serde_json::json!({
+                    "manage_metadata": false, "manage_channels": false, "create_invite": false, "kick": false,
+                    "ban": false, "manage_messages": false, "manage_roles": false, "manage_admin_role": false,
+                }));
+            }
             let has = |p: u64| roster.is_authorized(&me, Some(&owner_hex), p);
             return Ok(serde_json::json!({
                 "manage_metadata": has(Permissions::MANAGE_METADATA), "manage_channels": has(Permissions::MANAGE_CHANNELS),
@@ -1951,8 +1965,10 @@ impl VectorCore {
         if let Some(v2) = Self::load_v2_if_v2(community_id) {
             let owner = v2.owner().map_err(VectorError::Other)?;
             let roster = crate::db::community::get_community_roles(community_id).map_err(VectorError::Other)?;
+            // Exclude banned members from the admin list (a banned npub vanishes, §4).
+            let banned = crate::db::community::get_community_banlist(community_id).unwrap_or_default();
             let admins: Vec<String> = roster.grants.iter()
-                .filter(|g| roster.is_admin(&g.member))
+                .filter(|g| roster.is_admin(&g.member) && !banned.contains(&g.member))
                 .filter_map(|g| PublicKey::from_hex(&g.member).ok().and_then(|pk| pk.to_bech32().ok()))
                 .collect();
             return Ok(serde_json::json!({ "owner": owner.to_bech32().ok(), "admins": admins }));

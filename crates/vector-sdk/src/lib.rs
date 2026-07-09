@@ -93,8 +93,11 @@
 //!
 //! The SDK speaks the current community protocol only: communities you create or
 //! join through it are current-protocol, and legacy memberships an account may
-//! hold are ignored rather than surfaced (raw ids handed to [`VectorBot::channel`]
-//! bypass that filter).
+//! hold are ignored rather than surfaced. The discovery methods
+//! ([`communities`](VectorBot::communities), [`pending_invites`](VectorBot::pending_invites))
+//! filter to it, but a raw id handed straight to [`channel`](VectorBot::channel),
+//! [`community`](VectorBot::community), or [`accept_invite`](VectorBot::accept_invite)
+//! bypasses that filter — don't feed those a legacy id.
 //!
 //! When a message comes from a community, you get the sender as a member you can act on
 //! directly:
@@ -131,9 +134,11 @@
 //! ## Staying connected
 //!
 //! If the bot loses its connection, [`on_message`](VectorBot::on_message) /
-//! [`on_event`](VectorBot::on_event) reconnect on their own and catch up on what was
-//! missed. Your handler fires for messages that arrive while the
-//! bot is running; to read older history, use
+//! [`on_event`](VectorBot::on_event) reconnect on their own and catch up. Direct
+//! messages backfill; community-channel catch-up is bounded by what the relays still
+//! replay (there's no active back-paging), so after a long outage a community message
+//! older than the relays' horizon can be missed. Your handler fires for messages that
+//! arrive while the bot is running; to read older history, use
 //! [`bot.core().get_messages(...)`](VectorCore).
 //!
 //! ## Identity: bring your own, or let the bot make one
@@ -979,7 +984,9 @@ impl Community {
         Member { core: self.core, community_id: self.id.clone(), npub: npub.into() }
     }
 
-    /// Observed members (best-effort, from recent activity).
+    /// The community's members (best-effort). This hits the network (folds the member
+    /// list from relays) and returns empty on a transient failure, so don't call it in a
+    /// hot loop.
     pub async fn members(&self) -> Vec<Member> {
         self.core
             .get_community_members(&self.id)
@@ -989,7 +996,9 @@ impl Community {
             .collect()
     }
 
-    /// Invite an npub via a gift-wrapped private invite (requires the create-invite permission).
+    /// Invite an npub via a gift-wrapped private invite. Any member may invite: a Direct
+    /// Invite is an ungateable key handoff (whispering keys needs no permission), the
+    /// access cut is a rekey, not an invite gate.
     pub async fn invite(&self, npub: &str) -> Result<()> {
         self.core.invite_to_community(&self.id, npub).await.map(|_| ())
     }
@@ -1050,7 +1059,9 @@ impl Member {
         self.core.kick_member(&self.community_id, &self.npub).await
     }
 
-    /// Ban them (terminal; in a private community this triggers a read-cut rekey). Requires BAN.
+    /// Ban them (terminal). Requires BAN + outranking them. Composes the CORD-04 §6 removal:
+    /// banlist entry, role strip, then a Refounding read-cut — so a ban always rekeys the
+    /// community (a bunker/remote-signer bot can't complete the rekey step).
     pub async fn ban(&self) -> Result<()> {
         self.core.set_member_banned(&self.community_id, &self.npub, true).await
     }
