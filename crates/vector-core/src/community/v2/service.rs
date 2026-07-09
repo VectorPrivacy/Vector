@@ -1904,6 +1904,27 @@ mod tests {
         assert!(members.contains(&member.keys.public_key()), "the parked-invite joiner is a member");
     }
 
+    #[tokio::test]
+    async fn accept_parked_invite_rejects_a_forged_root_definitively() {
+        // A forged-root parked bundle (real identity triple, attacker-chosen root) fails
+        // accept with the DEFINITIVE "could not verify" signal — the facade keys the
+        // pending-row cleanup on this string, so a pre-planted poison self-clears on the
+        // victim's accept and a genuine re-invite can re-park under the same id.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Real", vec!["wss://r".into()], None).await.unwrap();
+        let mut forged = bundle_of(&community, None, None, None);
+        let fake = crate::simd::hex::bytes_to_hex_32(&[0xEE; 32]);
+        forged.community_root = fake.clone();
+        for ch in &mut forged.channels {
+            ch.key = fake.clone();
+        }
+        let bundle_json = serde_json::to_string(&forged).unwrap();
+
+        let err = accept_parked_invite(&relay, &bundle_json, None).await.unwrap_err();
+        assert!(err.contains("could not verify"), "a forged-root parked bundle fails definitively: {err}");
+    }
+
     #[test]
     fn v2_and_v1_bundles_are_distinguishable_by_parse() {
         // The protocol discriminator the facade list/accept relies on: a v2 bundle

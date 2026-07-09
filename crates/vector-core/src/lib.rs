@@ -962,9 +962,21 @@ impl VectorCore {
             let inviter = crate::db::community::list_pending_invites()
                 .ok()
                 .and_then(|rows| rows.into_iter().find(|p| p.community_id == community_id).map(|p| p.inviter_npub));
-            let community = crate::community::v2::service::accept_parked_invite(&transport, &bundle_json, inviter.as_deref())
-                .await
-                .map_err(VectorError::Other)?;
+            let community = match crate::community::v2::service::accept_parked_invite(&transport, &bundle_json, inviter.as_deref()).await {
+                Ok(c) => c,
+                Err(e) => {
+                    // A DEFINITIVE verify failure (relays reachable, but no owner-signed
+                    // genesis under the delivered root) means this parked bundle is
+                    // forged/unusable — clear it so a genuine re-invite can re-park (the
+                    // community_id dedup would otherwise let a pre-planted forged-root
+                    // bundle shadow the real one). A transient transport error is a
+                    // different message, so the row survives for a retry.
+                    if e.contains("could not verify") {
+                        let _ = crate::db::community::delete_pending_invite(community_id);
+                    }
+                    return Err(VectorError::Other(e));
+                }
+            };
             if !session.is_valid() {
                 return Err(VectorError::Other("account changed during join".into()));
             }

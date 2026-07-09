@@ -210,7 +210,7 @@ pub async fn prepare_event(
             Some((community_id, bundle_json)) => PreparedEvent::CommunityInviteV2 {
                 community_id,
                 bundle_json,
-                inviter: sender.to_hex(),
+                inviter: contact.clone(), // the seal signer's npub (bech32), like the v1 arm
                 is_mine,
                 wrapper_event_id_bytes,
                 wrapper_created_at,
@@ -510,6 +510,12 @@ pub async fn commit_prepared_event(
                 return false;
             }
             if crate::db::community::pending_invite_exists(&community_id).unwrap_or(false) {
+                return false;
+            }
+            // Supersession: a decline/leave tombstone (protocol-agnostic, keyed on
+            // community_id) suppresses a re-wrapped invite no newer than the decision,
+            // so a declined/left community can't be re-nagged by a fresh ephemeral wrap.
+            if crate::community::list::tombstone_suppresses(&community_id, wrapper_created_at) {
                 return false;
             }
             // Park for explicit consent — do NOT join/subscribe here. Accept via the command layer.

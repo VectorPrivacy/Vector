@@ -634,6 +634,10 @@ pub fn save_pending_invite(
     let conn = super::get_write_connection_guard_static()?;
     let enc_bundle = enc_txt(bundle_json)?;
     let enc_inviter = enc_txt(inviter_npub)?;
+    // First-wins: a parked invite is never silently overwritten by a later different
+    // bundle (that would let an attacker replace a genuine parked invite). For v2, a
+    // pre-planted forged-root bundle sharing a real community_id is instead cleared on
+    // a failed accept (see `accept_pending_invite`), so a genuine re-invite can re-park.
     let changed = conn
         .execute(
             "INSERT OR IGNORE INTO pending_community_invites
