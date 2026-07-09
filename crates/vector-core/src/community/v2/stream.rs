@@ -222,8 +222,12 @@ pub fn build_rumor_secs(
     tags: Vec<Tag>,
     at_secs: u64,
 ) -> UnsignedEvent {
+    // allow_self_tagging: EventBuilder silently strips a `p` naming the author,
+    // which would break a self-reaction's NIP-25 shape. Rumor tags are the
+    // builder's byte-verbatim contract — no hidden normalization.
     let mut rumor = EventBuilder::new(Kind::Custom(kind), content)
         .tags(tags)
+        .allow_self_tagging()
         .custom_created_at(Timestamp::from_secs(at_secs))
         .build(author);
     rumor.ensure_id();
