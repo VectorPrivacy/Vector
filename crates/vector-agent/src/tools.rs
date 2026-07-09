@@ -450,7 +450,7 @@ impl VectorAgent {
 
     #[tool(description = "List the public invite links this account holds for a Community (each with its hex token, url, and expiry). Use a token with revoke_public_invite.")]
     async fn list_public_invites(&self, Parameters(req): Parameters<CommunityIdRequest>) -> Result<CallToolResult, McpError> {
-        match self.core.list_public_invites(&req.community_id).await {
+        match self.core.list_public_invites(&req.community_id) {
             Ok(records) => Ok(CallToolResult::success(vec![Content::text(
                 serde_json::to_string_pretty(&records).unwrap_or_else(|_| "[]".into())
             )])),
@@ -541,7 +541,7 @@ impl VectorAgent {
 
     #[tool(description = "My management capabilities in a Community (manage_metadata, kick, ban, manage_roles, etc.). Use to confirm a promotion/demotion landed. Sync the channel first so the roster is current.")]
     async fn get_community_capabilities(&self, Parameters(req): Parameters<CommunityIdRequest>) -> Result<CallToolResult, McpError> {
-        match self.core.community_capabilities(&req.community_id).await {
+        match self.core.community_capabilities(&req.community_id) {
             Ok(v) => Ok(CallToolResult::success(vec![Content::text(serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".into()))])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
         }
@@ -549,7 +549,7 @@ impl VectorAgent {
 
     #[tool(description = "The Community's roles: the owner npub and the list of admin npubs. Sync the channel first so the roster is current.")]
     async fn get_community_roles(&self, Parameters(req): Parameters<CommunityIdRequest>) -> Result<CallToolResult, McpError> {
-        match self.core.community_roles(&req.community_id).await {
+        match self.core.community_roles(&req.community_id) {
             Ok(v) => Ok(CallToolResult::success(vec![Content::text(serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".into()))])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
         }

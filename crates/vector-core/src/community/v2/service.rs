@@ -389,7 +389,7 @@ pub async fn mint_public_link<T: Transport + ?Sized>(
     let mut token = [0u8; super::derive::TOKEN_LEN];
     token.copy_from_slice(&super::super::random_32()[..super::derive::TOKEN_LEN]);
     let link_signer = Keys::generate();
-    let bundle = bundle_of(community, Some(local_keys()?.public_key()), expires_at_ms, label);
+    let bundle = bundle_of(community, Some(local_keys()?.public_key()), expires_at_ms, label.clone());
     let bundle_key = super::derive::invite_bundle_key(&token);
     let bundle_event = invite::build_bundle_event(&link_signer, &bundle, &bundle_key).map_err(|e| e.to_string())?;
     let url = invite::build_invite_url(base, &link_signer.public_key(), &token, &community.relays).map_err(|e| e.to_string())?;
@@ -403,26 +403,15 @@ pub async fn mint_public_link<T: Transport + ?Sized>(
     // (vsk-8) so members see the community is Public. Best-effort — the link works
     // without the sync.
     let _ = record_minted_link(transport, community, &minted).await;
+    // Local mirror so `list_public_invites` stays a sync local read (v1 parity);
+    // the 13303 list remains the cross-device record.
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let token_hex = crate::simd::hex::bytes_to_hex_16(&minted.token);
+    let _ = crate::db::community::save_public_invite(&token_hex, &cid_hex, &minted.url, expires_at_ms.map(|e| e as i64), label.as_deref());
     Ok(minted)
 }
 
 // ── The Invite Registry (vsk 8) + Invite List (13303), CORD-05 §4/§5 ──────────
-
-/// This account's LIVE minted links for one community: the synced 13303 Invite
-/// List (the cross-device source of truth), minus tombstoned tokens.
-pub async fn list_minted_links<T: Transport + ?Sized>(
-    transport: &T,
-    community: &CommunityV2,
-) -> Vec<invite::InviteEntry> {
-    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-    let list = fetch_invite_list(transport, &community.relays).await.unwrap_or_default();
-    let dead: std::collections::BTreeSet<&str> = list.tombstones.iter().map(|t| t.token.as_str()).collect();
-    list.entries
-        .iter()
-        .filter(|e| e.community_id == cid_hex && !dead.contains(e.token.as_str()))
-        .cloned()
-        .collect()
-}
 
 /// Fetch the creator's own 13303 Invite List from `relays` (newest wins; a
 /// decrypt/parse failure is "no news", never a clobber of the local mirror).
@@ -521,7 +510,10 @@ pub async fn revoke_public_link<T: Transport + ?Sized>(transport: &T, community:
     let event = invite::build_invite_list_event(&me, &list).map_err(|e| e.to_string())?;
     transport.publish(&event, &community.relays).await?;
     let signers = live_signers_for(&list, &cid_hex);
-    publish_invite_registry(transport, community, &session, &signers).await
+    publish_invite_registry(transport, community, &session, &signers).await?;
+    // Drop the local mirror row (sibling of the mint-time save).
+    let _ = crate::db::community::delete_public_invite(token_hex);
+    Ok(())
 }
 
 /// Refresh every live public link's bundle behind its stable URL (CORD-05 §2) — e.g.
@@ -1824,6 +1816,21 @@ pub async fn follow_control<T: Transport + ?Sized>(
     // so the stored banlist is left intact — an anti-roster never silently un-bans).
     if let Some((banned, version)) = &authority.banlist_persist {
         crate::db::community::set_community_banlist(&cid_hex, banned, *version as i64)?;
+    }
+    // Persist the authorized roster so capabilities/roles stay sync LOCAL reads
+    // (v1 parity: the passive follow folds, reads never fetch). Guarded like v1's
+    // fetch path: only an aggregate built from roster editions at least as new as
+    // the stored one may replace it — a withholding relay serving NO roster
+    // editions folds an empty-but-ungapped aggregate (absence raises no gap flag),
+    // and that must RETAIN the stored roster, never wipe standing.
+    let newest_roster_at: i64 = editions
+        .iter()
+        .filter(|e| e.vsk == vsk::ROLE || e.vsk == vsk::GRANT || e.vsk == vsk::BANLIST)
+        .map(|e| e.created_at as i64)
+        .max()
+        .unwrap_or(0);
+    if !authority.gapped && newest_roster_at >= crate::db::community::get_community_roles_at(&cid_hex)? {
+        crate::db::community::set_community_roles(&cid_hex, &authority.roles, newest_roster_at)?;
     }
     match fold.updated {
         Some(u) => {
@@ -4671,6 +4678,35 @@ mod tests {
         assert!(!view.roles.is_admin(&member_hex), "revoked");
         assert!(view.roles.is_admin(&second.to_hex()), "the other admin is untouched");
         assert!(!view.roles.is_authorized(&member_hex, Some(&owner_hex), Permissions::KICK));
+    }
+
+    #[tokio::test]
+    async fn follow_control_persists_the_roster_for_sync_local_reads() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Persist", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let member_hex = member.keys.public_key().to_hex();
+        grant_admin(&bed.relay, &community, &member.keys.public_key()).await.unwrap();
+
+        // The passive follow folds + persists; the read is then LOCAL (v1 parity).
+        let session = crate::state::SessionGuard::capture();
+        follow_control(&bed.relay, &community, &session).await.unwrap();
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        assert!(roster.is_admin(&member_hex), "the persisted roster reads back without a fetch");
+
+        // A withholding relay serves nothing — an empty fold raises no gap flag, and
+        // the stored roster must be RETAINED, never wiped.
+        let withholding = MemoryRelay::new();
+        let _ = follow_control(&withholding, &community, &session).await;
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        assert!(roster.is_admin(&member_hex), "withholding never shrinks standing");
+
+        // A real revocation (a NEWER grant edition) does replace it.
+        revoke_admin(&bed.relay, &community, &member.keys.public_key()).await.unwrap();
+        follow_control(&bed.relay, &community, &session).await.unwrap();
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        assert!(!roster.is_admin(&member_hex), "the revoke folds + persists");
     }
 
     #[tokio::test]

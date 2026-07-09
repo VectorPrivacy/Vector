@@ -1244,28 +1244,11 @@ impl VectorCore {
         }))
     }
 
-    /// The public invite links this account holds for a Community (to list + revoke). Each carries the
-    /// hex `token` (the link secret) needed by [`Self::revoke_public_invite`]. For a v2 community,
-    /// `join_count` is not yet tracked and is always 0.
-    pub async fn list_public_invites(&self, community_id: &str) -> Result<Vec<crate::db::community::PublicInviteRecord>> {
-        // v2: the synced 13303 Invite List IS the record (cross-device); the local
-        // table is the v1 mirror.
-        if let Some(v2) = Self::load_v2_if_v2(community_id) {
-            let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-            return Ok(crate::community::v2::service::list_minted_links(&transport, &v2)
-                .await
-                .into_iter()
-                .map(|e| crate::db::community::PublicInviteRecord {
-                    token: e.token,
-                    community_id: e.community_id,
-                    url: e.url,
-                    expires_at: e.expires_at.map(|t| t as i64),
-                    created_at: e.created_at as i64,
-                    label: e.label,
-                    join_count: 0,
-                })
-                .collect());
-        }
+    /// The public invite links this account minted for a Community (to list + revoke). Each carries
+    /// the hex `token` (the link secret) needed by [`Self::revoke_public_invite`]. A local read for
+    /// both protocols — links minted on this device (a v2 mint also syncs the cross-device 13303
+    /// record; v2 `join_count` is not yet tracked and is always 0).
+    pub fn list_public_invites(&self, community_id: &str) -> Result<Vec<crate::db::community::PublicInviteRecord>> {
         crate::db::community::list_public_invites(community_id).map_err(VectorError::Other)
     }
 
@@ -1930,16 +1913,16 @@ impl VectorCore {
     }
 
     /// My effective management capabilities in a community (role engine — owner is just position 0). Use to
-    /// confirm a promotion/demotion landed.
-    pub async fn community_capabilities(&self, community_id: &str) -> Result<serde_json::Value> {
+    /// confirm a promotion/demotion landed. A local read: the roster is folded + persisted by the passive
+    /// sync (v1) / control follow (v2), never fetched here.
+    pub fn community_capabilities(&self, community_id: &str) -> Result<serde_json::Value> {
         use crate::community::service;
         if let Some(v2) = Self::load_v2_if_v2(community_id) {
             use crate::community::roles::Permissions;
             let me = state::my_public_key().ok_or_else(|| VectorError::Other("Not logged in".into()))?.to_hex();
             let owner_hex = v2.owner().map_err(VectorError::Other)?.to_hex();
-            let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-            let a = crate::community::v2::service::fetch_authority(&transport, &v2).await;
-            let has = |p: u64| a.roles.is_authorized(&me, Some(&owner_hex), p);
+            let roster = crate::db::community::get_community_roles(community_id).map_err(VectorError::Other)?;
+            let has = |p: u64| roster.is_authorized(&me, Some(&owner_hex), p);
             return Ok(serde_json::json!({
                 "manage_metadata": has(Permissions::MANAGE_METADATA), "manage_channels": has(Permissions::MANAGE_CHANNELS),
                 "create_invite": has(Permissions::CREATE_INVITE), "kick": has(Permissions::KICK), "ban": has(Permissions::BAN),
@@ -1961,15 +1944,15 @@ impl VectorCore {
         }))
     }
 
-    /// The community's owner npub + the admin npubs (role overview).
-    pub async fn community_roles(&self, community_id: &str) -> Result<serde_json::Value> {
+    /// The community's owner npub + the admin npubs (role overview). A local read,
+    /// like [`Self::community_capabilities`].
+    pub fn community_roles(&self, community_id: &str) -> Result<serde_json::Value> {
         use nostr_sdk::prelude::{PublicKey, ToBech32};
         if let Some(v2) = Self::load_v2_if_v2(community_id) {
             let owner = v2.owner().map_err(VectorError::Other)?;
-            let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-            let a = crate::community::v2::service::fetch_authority(&transport, &v2).await;
-            let admins: Vec<String> = a.roles.grants.iter()
-                .filter(|g| a.roles.is_admin(&g.member))
+            let roster = crate::db::community::get_community_roles(community_id).map_err(VectorError::Other)?;
+            let admins: Vec<String> = roster.grants.iter()
+                .filter(|g| roster.is_admin(&g.member))
                 .filter_map(|g| PublicKey::from_hex(&g.member).ok().and_then(|pk| pk.to_bech32().ok()))
                 .collect();
             return Ok(serde_json::json!({ "owner": owner.to_bech32().ok(), "admins": admins }));

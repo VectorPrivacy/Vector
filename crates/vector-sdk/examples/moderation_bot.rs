@@ -42,7 +42,7 @@ async fn main() -> vector_sdk::Result<()> {
                     return;
                 }
                 if let Some(member) = msg.member() {
-                    if member.is_admin().await {
+                    if member.is_admin() {
                         return; // never moderate admins or the owner
                     }
                     match member.ban().await {

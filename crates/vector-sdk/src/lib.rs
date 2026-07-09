@@ -103,7 +103,7 @@
 //! # use vector_sdk::IncomingMessage;
 //! # async fn run(msg: IncomingMessage) -> vector_sdk::Result<()> {
 //! if let Some(member) = msg.member() {     // the sender, as a Member of this community
-//!     if !member.is_admin().await {
+//!     if !member.is_admin() {
 //!         member.ban().await?;             // or .kick() / .unban() / .grant_admin()
 //!     }
 //! }
@@ -1015,13 +1015,13 @@ impl Community {
     }
 
     /// Your own role-based capabilities here (JSON flags: manage_*, create_invite, kick, ban, …).
-    pub async fn capabilities(&self) -> Result<serde_json::Value> {
-        self.core.community_capabilities(&self.id).await
+    pub fn capabilities(&self) -> Result<serde_json::Value> {
+        self.core.community_capabilities(&self.id)
     }
 
     /// The owner + admin npubs (`{ owner, admins: [...] }`).
-    pub async fn roles(&self) -> Result<serde_json::Value> {
-        self.core.community_roles(&self.id).await
+    pub fn roles(&self) -> Result<serde_json::Value> {
+        self.core.community_roles(&self.id)
     }
 }
 
@@ -1077,18 +1077,17 @@ impl Member {
     }
 
     /// Whether this member is the community owner.
-    pub async fn is_owner(&self) -> bool {
+    pub fn is_owner(&self) -> bool {
         self.core
             .community_roles(&self.community_id)
-            .await
             .ok()
             .and_then(|r| r.get("owner").and_then(|o| o.as_str()).map(|o| o == self.npub))
             .unwrap_or(false)
     }
 
     /// Whether this member is an admin (the owner counts as admin).
-    pub async fn is_admin(&self) -> bool {
-        let Ok(roles) = self.core.community_roles(&self.community_id).await else { return false };
+    pub fn is_admin(&self) -> bool {
+        let Ok(roles) = self.core.community_roles(&self.community_id) else { return false };
         let owner = roles.get("owner").and_then(|o| o.as_str()) == Some(self.npub.as_str());
         let admin = roles
             .get("admins")
