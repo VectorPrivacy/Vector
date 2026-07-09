@@ -2248,6 +2248,11 @@ html, body {
   border-radius: 30px;
   border-width: 1px;
   cursor: pointer;
+  /* No text in a chat row is worth selecting; disabling it stops a right-click
+     (context menu) from also highlighting the name/preview behind it. */
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
   justify-content: left;
   height: 50px;
   padding: 5px;

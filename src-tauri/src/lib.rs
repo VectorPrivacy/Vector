@@ -507,6 +507,7 @@ pub fn run() {
             profile::update_status,
             profile::upload_avatar,
             chat::mark_as_read,
+            chat::mark_as_unread,
             chat::toggle_chat_mute,
             profile::set_nickname,
             profile::block_user,

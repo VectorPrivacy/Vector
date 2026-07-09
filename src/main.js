@@ -2714,6 +2714,56 @@ function markChatCaughtUp(chat) {
     if (caughtUp) markAsRead(chat, caughtUp);
 }
 
+/** True when the chat's newest conversational message is from the other side (not us, not a
+ *  system event) — i.e. there's something to flag as unread. The precondition for the action. */
+function chatCanMarkUnread(chat) {
+    const msgs = chat?.messages;
+    if (!msgs?.length) return false;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].system_event) continue;
+        return !msgs[i].mine;
+    }
+    return false;
+}
+
+/** Mark a chat unread: the backend retreats last_read to just before the newest contact message,
+ *  computed from the full DB history (a community row may hold only a preview message in RAM, so we
+ *  can't pick the anchor here). Repaints only when the backend actually marked it, then re-derives
+ *  the authoritative count — so a no-op (we spoke last) never flashes a badge that snaps back. */
+async function markChatUnread(chat) {
+    let lastRead = null;
+    try { lastRead = await invoke('mark_as_unread', { chatId: chat.id }); } catch (_e) {}
+    if (lastRead === null || lastRead === undefined) return; // no-op (we spoke last / nothing to surface)
+    // Keep the cached marker in lock-step with the DB (empty string = never-read) so a follow-up
+    // Mark as Read isn't skipped by markAsRead's "already at last_read" guard.
+    chat.last_read = lastRead;
+    chat.unread = Math.max(1, chat.unread || 0);
+    renderChatlist();
+    refreshUnreadCounts();
+}
+
+/** Leave a community you don't own, from the chat-list context menu. Confirms,
+ *  calls leave_community, then drops its channels locally and repaints — mirrors
+ *  the Group Overview leave path's teardown. */
+async function leaveCommunityFromList(chat) {
+    const cf = chat?.metadata?.custom_fields || {};
+    const communityId = cf.community_id;
+    if (!communityId) return;
+    const name = cf.name || 'this community';
+    const confirmed = await popupConfirm('Leave Community', `Leave "<b>${escapeHtml(name)}</b>"? You'll need a new invite to rejoin.`, false, '', 'vector_warning.svg');
+    if (!confirmed) return;
+    try {
+        await invoke('leave_community', { communityId });
+        if (arrChats.some(c => c.metadata?.custom_fields?.community_id === communityId && c.id === strOpenChat)) {
+            await closeChat();
+        }
+        arrChats = arrChats.filter(c => c.metadata?.custom_fields?.community_id !== communityId);
+        renderChatlist();
+    } catch (e) {
+        await popupConfirm('Failed to Leave', escapeHtml(String(e)), true, '', 'vector_warning.svg');
+    }
+}
+
 /**
  * Per-chat unread badges are sourced from the DB (`chat.unread`), not by walking in-memory
  * messages — so they're correct even after a restart, when only the last message per chat is in
@@ -11885,6 +11935,12 @@ document.addEventListener('click', (e) => {
     const inCreateGroup = cg && cg.style.display !== 'none' && cg.contains(e.target);
     const chatlistItem = e.target.closest('.chatlist-contact');
     if (!inCreateGroup && chatlistItem) {
+        // A tap that dismissed an open context menu must only close it, not also
+        // open the chat behind it (the list is ~all rows, so a dismiss lands on
+        // one almost every time). Also swallow the trailing tap a long-press
+        // synthesises right after opening the menu.
+        if (wasContextMenuJustDismissed()) return;
+        if (Date.now() - (window._chatRowMenuAt || 0) < 500) { window._chatRowMenuAt = 0; return; }
         // Don't open chat if clicking on an invite item, or a community still joining (locked
         // until the control-fold/sync makes it read/writeable).
         if (chatlistItem.classList.contains("chatlist-invite") || chatlistItem.classList.contains("chatlist-joining")) {

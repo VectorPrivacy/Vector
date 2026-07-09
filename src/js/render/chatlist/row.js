@@ -192,7 +192,74 @@ function renderChat(chat, primaryColor) {
         divContact.appendChild(spanCount);
     }
 
+    // Right-click (desktop) / long-press (mobile) context menu.
+    attachLongPressContextMenu(divContact, (x, y) =>
+        _showChatRowContextMenu(chat, isGroup, nUnread, x, y));
+
     return divContact;
+}
+
+/**
+ * Row context menu (right-click / long-press): Mark as Read (when unread) or
+ * Mark as Unread (when caught up), a Mute/Unmute toggle, and — for DMs only —
+ * Block. Actions reuse the same backend commands as the profile/group panels
+ * and repaint the list.
+ */
+function _showChatRowContextMenu(chat, isGroup, nUnread, x, y) {
+    if (chat._joining) return; // nothing actionable until the join finalises
+    // A mobile long-press synthesises a trailing tap; stamp the time so the
+    // chatlist open handler can swallow it instead of opening the chat.
+    window._chatRowMenuAt = Date.now();
+
+    const items = [];
+    if (nUnread > 0) {
+        items.push({
+            label: 'Mark as Read',
+            icon: 'check',
+            onClick: () => { markChatCaughtUp(chat); renderChatlist(); },
+        });
+    } else if (!chat.muted && chatCanMarkUnread(chat)) {
+        // Muted chats never show an unread badge, so offering it there would be a silent no-op.
+        items.push({
+            label: 'Mark as Unread',
+            icon: 'eye-off',
+            onClick: () => markChatUnread(chat),
+        });
+    }
+    items.push({
+        label: chat.muted ? 'Unmute' : 'Mute',
+        icon: 'volume-mute',
+        onClick: async () => {
+            chat.muted = await invoke('toggle_chat_mute', { chatId: chat.id });
+            renderChatlist();
+        },
+    });
+    if (!isGroup) {
+        items.push({ divider: true });
+        items.push({
+            label: 'Block',
+            icon: 'x-user',
+            danger: true,
+            onClick: async () => {
+                const confirmed = await popupConfirm('Block User', 'Are you sure you want to block this user? You will no longer receive DMs from them.', false, '', 'vector_warning.svg');
+                if (!confirmed) return;
+                await invoke('block_user', { npub: chat.id });
+                showToast('User Blocked');
+                renderChatlist();
+            },
+        });
+    } else if (chat.metadata?.custom_fields?.is_owner !== 'true' && chat.metadata?.custom_fields?.community_id) {
+        // Owners get Delete (in Group Overview, type-to-confirm); everyone else
+        // gets a quick Leave here.
+        items.push({ divider: true });
+        items.push({
+            label: 'Leave',
+            icon: 'x-user',
+            danger: true,
+            onClick: () => leaveCommunityFromList(chat),
+        });
+    }
+    showContextMenu({ x, y, items });
 }
 
 

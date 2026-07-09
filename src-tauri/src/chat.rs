@@ -93,6 +93,42 @@ pub async fn mark_as_read(chat_id: String, message_id: Option<String>) -> bool {
     result
 }
 
+/// Retreat a chat's read marker so its newest contact message re-surfaces as unread. The anchor is
+/// computed from the full DB history — a community row may hold only a preview message in RAM, so
+/// the frontend can't pick it locally. Returns the new read marker as hex (empty string = never-read)
+/// so the frontend can sync its cached `last_read`, or `None` when nothing was marked (we spoke last
+/// / nothing to surface).
+#[tauri::command]
+pub async fn mark_as_unread(chat_id: String) -> Option<String> {
+    use vector_core::db::events::{compute_unread_anchor, UnreadMark};
+    // The DB read + STATE write straddle an await; re-check the session so a mid-flight account swap
+    // never writes account A's last_read into account B's chat.
+    let session = vector_core::state::SessionGuard::capture();
+
+    let (last_read, last_read_hex) = match compute_unread_anchor(&chat_id).await {
+        Ok(UnreadMark::Anchor(id)) => (encode_message_id(&id), id),
+        Ok(UnreadMark::Clear) => ([0u8; 32], String::new()),
+        Ok(UnreadMark::NoOp) | Err(_) => return None,
+    };
+
+    let slim = {
+        let mut state = crate::STATE.lock().await;
+        if !session.is_valid() { return None; }
+        let idx = match state.chats.iter().position(|c| c.id == chat_id) {
+            Some(i) => i,
+            None => return None,
+        };
+        state.chats[idx].last_read = last_read;
+        crate::db::chats::SlimChatDB::from_chat(&state.chats[idx], &state.interner)
+    };
+    let _ = crate::db::chats::save_slim_chat(slim).await;
+
+    if let Some(handle) = crate::TAURI_APP.get() {
+        let _ = crate::commands::messaging::update_unread_counter(handle.clone()).await;
+    }
+    Some(last_read_hex)
+}
+
 /// Toggles the muted status of a chat (DM or group).
 #[tauri::command]
 pub async fn toggle_chat_mute(chat_id: String) -> bool {
