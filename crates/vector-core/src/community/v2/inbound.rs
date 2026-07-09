@@ -156,6 +156,10 @@ pub async fn persist_incoming_chat(
     session: &crate::state::SessionGuard,
 ) -> Option<ChatPersist> {
     let ch = community.channels.iter().find(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0) == channel_id)?;
+    // A keyless private channel is unreadable — never derive it from the root plane.
+    if ch.private && ch.key.is_none() {
+        return None;
+    }
     let (secret, epoch) = community.channel_secret(ch);
     let group = super::derive::channel_group_key(&secret, &ch.id, epoch);
     let event = chat::open_chat_event(wrap, &group, &ch.id, epoch).ok()?;
@@ -249,6 +253,11 @@ pub fn dispatch_wrap(
 ) -> DispatchedV2 {
     // 1. Chat planes: try each held channel by its group key (author match).
     for ch in &community.channels {
+        // A keyless private channel is UNREADABLE — never address it at the root plane
+        // (channel_secret falls back to the root, which would be a private→public leak).
+        if ch.private && ch.key.is_none() {
+            continue;
+        }
         let (secret, epoch) = community.channel_secret(ch);
         let group = super::derive::channel_group_key(&secret, &ch.id, epoch);
         if wrap.pubkey != group.pk() {

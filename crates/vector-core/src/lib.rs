@@ -1340,11 +1340,16 @@ impl VectorCore {
         let client = state::nostr_client().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
         let signer = client.signer().await.map_err(|e| VectorError::Other(format!("Signer unavailable: {e}")))?;
         let inner = unsigned.sign(&signer).await.map_err(|e| VectorError::Other(format!("sign: {e}")))?;
+        let session = state::SessionGuard::capture();
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
         let outer = service::send_signed_message(&transport, &community, &channel, &inner)
             .await
             .map_err(VectorError::Other)?;
         // Local echo so get_messages reflects the send (the relay echo dedups on inner id).
+        // A swap during the publish must not echo account A's message into account B.
+        if !session.is_valid() {
+            return Ok(message_id);
+        }
         let echoed = {
             let mut st = state::STATE.lock().await;
             inbound::process_incoming(&mut st, &outer, &channel, &author_pk)
@@ -1670,10 +1675,15 @@ impl VectorCore {
         let client = state::nostr_client().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
         let signer = client.signer().await.map_err(|e| VectorError::Other(format!("Signer unavailable: {e}")))?;
         let inner = unsigned.sign(&signer).await.map_err(|e| VectorError::Other(format!("sign: {e}")))?;
+        let session = state::SessionGuard::capture();
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
         let outer = service::send_signed_message(&transport, &community, &channel, &inner)
             .await.map_err(VectorError::Other)?;
-        // Local echo + persist + emit (relay echo dedups on inner id).
+        // Local echo + persist + emit (relay echo dedups on inner id). A swap during the
+        // publish must not echo account A's control event into account B.
+        if !session.is_valid() {
+            return Ok(());
+        }
         let outcome = {
             let mut st = state::STATE.lock().await;
             inbound::process_incoming(&mut st, &outer, &channel, &author_pk)

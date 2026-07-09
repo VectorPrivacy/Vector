@@ -1025,10 +1025,12 @@ pub async fn memberlist<T: Transport + ?Sized>(transport: &T, community: &Commun
     let authority = fetch_authority(transport, community).await;
     let owner_hex = owner.to_hex();
 
-    // Genesis / never-refounded community: NO snapshot authority (there is no
-    // refounder — an owner who didn't mint the epoch has no snapshot power). The
-    // refounder of a rotated `root_epoch` is threaded once Refounding SEND lands.
-    let no_snapshots: Option<&PublicKey> = None;
+    // Snapshot authority (CORD-02 §5): a refounding rolls `root_epoch` and re-seeds the
+    // new epoch's Guestbook with a 3312 snapshot of the survivors. Refounding is OWNER-only,
+    // so the owner is the refounder whose snapshot is honored — without this, every silent
+    // survivor vanishes from the memberlist until they re-post. A genesis community
+    // (root_epoch 0) has no refounder, hence no snapshot power.
+    let snapshot_authority = (community.root_epoch.0 > 0).then_some(&owner);
     // Kick authority (CORD-04 §6): the signer must hold KICK AND strictly outrank the
     // target (the owner is supreme; equal cannot kick equal).
     let can_kick = |actor: &PublicKey, target: &PublicKey| {
@@ -1036,7 +1038,7 @@ pub async fn memberlist<T: Transport + ?Sized>(transport: &T, community: &Commun
             .roles
             .can_act_on_member(&actor.to_hex(), Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::KICK)
     };
-    let coalesced = guestbook::coalesce(&events, now_ms(), no_snapshots, &can_kick);
+    let coalesced = guestbook::coalesce(&events, now_ms(), snapshot_authority, &can_kick);
     // The authorized banlist, as pubkeys (a malformed hex entry is simply dropped).
     let banlist: std::collections::BTreeSet<PublicKey> =
         authority.banned.iter().filter_map(|h| PublicKey::from_hex(h).ok()).collect();
@@ -1205,13 +1207,19 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
     }
     let mut carried: Vec<(FoldedHead, Event)> = Vec::new();
     for (floor_key, floor) in &floors {
-        let idxs = by_eid.get(floor_key);
-        let fold_eds: Vec<version::Edition> =
-            idxs.map(|v| v.iter().map(|&i| opened[i].0.to_fold_edition()).collect()).unwrap_or_default();
-        let (Some(hi), _) = fold_head(&fold_eds, Some(floor)) else {
-            return Err(format!("re-founding aborted: control entity {floor_key} could not be folded (buried or withheld); no state published"));
+        // Re-wrap the AUTHORIZED head — the exact edition the persisted floor commits to
+        // (its self_hash). The floor advances ONLY to authorized heads (author-aware fold),
+        // so matching it is authority-correct across EVERY entity type. `fold_head`'s
+        // version-chain TIP is author-BLIND: a member can seal a forged higher-version
+        // edition chaining onto the floor, which the tip would carry and honest folders
+        // then DROP as unauthorized — silently suppressing that role/grant/banlist across
+        // the refounding. Abort if the committed head isn't served (fail-closed).
+        let head_idx = by_eid
+            .get(floor_key)
+            .and_then(|v| v.iter().copied().find(|&i| opened[i].0.self_hash == floor.1));
+        let Some(head_idx) = head_idx else {
+            return Err(format!("re-founding aborted: the committed head of control entity {floor_key} (v{}) was not served; no state published", floor.0));
         };
-        let head_idx = idxs.expect("a folded head implies present editions")[hi];
         let (head_ed, head_os) = &opened[head_idx];
         let h = FoldedHead { entity_hex: floor_key.clone(), version: head_ed.version, self_hash: head_ed.self_hash, inner_id: head_ed.inner_id };
         let (rewrapped, _) = super::stream::rewrap_seal(&head_os.seal, &new_control, Timestamp::from_secs(at_secs)).map_err(|e| e.to_string())?;
@@ -2180,12 +2188,20 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
     //   - withholding: when no authorized head is served, the persisted banlist is
     //     RETAINED (an anti-roster must not un-ban on a relay withholding the ban).
     let persisted_banned: Vec<String> = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
+    // An ALREADY-banned npub can't author the banlist (a banned member vanishes, §4), or
+    // a BAN-holder whose grant-strip hasn't yet folded could publish a list omitting their
+    // OWN ban to un-ban themselves (removals aren't outrank-checked). Exclude them from
+    // head eligibility, not just from the roster.
+    let banned_authors: std::collections::HashSet<&str> = persisted_banned.iter().map(String::as_str).collect();
     let banlist_authored: Vec<&ParsedEdition> = groups
         .get(&banlist_eid)
         .map(|g| {
             g.iter()
                 .copied()
-                .filter(|e| prelim.is_authorized(&e.author.to_hex(), owner_hex.as_deref(), Permissions::BAN))
+                .filter(|e| {
+                    let ah = e.author.to_hex();
+                    !banned_authors.contains(ah.as_str()) && prelim.is_authorized(&ah, owner_hex.as_deref(), Permissions::BAN)
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -3584,7 +3600,7 @@ mod tests {
         crate::db::community::save_community_v2(&moved).unwrap();
 
         let err = refound_community(&relay, &moved, &[]).await.unwrap_err();
-        assert!(err.contains("could not be folded"), "a withheld control head aborts the refounding: {err}");
+        assert!(err.contains("was not served"), "a withheld control head aborts the refounding: {err}");
         assert_eq!(
             crate::db::community::load_community_v2(community.id()).unwrap().unwrap().root_epoch,
             Epoch(0),
@@ -3760,6 +3776,61 @@ mod tests {
     /// persist (get_messages-level) → react/edit/delete → moderate (ban/unban) → dissolve.
     /// Every account, community, channel, and action is LOGGED (run with --nocapture) so it
     /// doubles as a reference transcript and a re-runnable regression.
+    #[tokio::test]
+    async fn a_forged_edition_cannot_suppress_a_role_across_a_refounding() {
+        // A member forges a higher-version role edition at the admin coordinate before a
+        // refounding. The compaction must carry the AUTHORIZED floor head, not the
+        // author-blind version tip — else the forgery is re-anchored, honest folders drop
+        // it, and the admin role vanishes at the new epoch (silent suppression).
+        let (bed, owner, member) = TestBed::new();
+        let attacker = Keys::generate();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "NoSuppress", bed.relays.clone(), None).await.unwrap();
+        let rid = crate::simd::hex::bytes_to_hex_32(&[0xa1; 32]);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::ADMIN_ALL), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &member.keys.public_key(), vec![rid.clone()], 1).await;
+        // Owner folds → the authorized role/grant heads are floored.
+        let session = SessionGuard::capture();
+        follow_control(&bed.relay, &community, &session).await.unwrap();
+        assert!(fetch_authority(&bed.relay, &community).await.roles.is_admin(&member.keys.public_key().to_hex()), "member is admin pre-attack");
+
+        // The attacker (a non-owner) forges v2 of the admin role, chaining onto v1.
+        publish_role(&bed.relay, &community, &attacker, &Role { role_id: rid.clone(), name: "pwn".into(), position: 1, permissions: Permissions(0), scope: RoleScope::Server, color: 0 }, 2).await;
+
+        // Owner refounds (keeping everyone).
+        let refounded = refound_community(&bed.relay, &community, &[]).await.unwrap();
+        assert_eq!(refounded.root_epoch, Epoch(1), "root rolled");
+
+        // Post-refound, the admin role SURVIVES (the authorized floor head was carried).
+        let post = fold_authority(&refounded, &fetch_control(&bed.relay, &refounded).await, &load_floors(&refounded));
+        assert!(post.roles.is_admin(&member.keys.public_key().to_hex()), "the admin role survives the refounding despite the forgery");
+    }
+
+    #[tokio::test]
+    async fn memberlist_survives_a_refounding_via_the_snapshot() {
+        // A silent survivor (didn't re-post at the new epoch) must stay in the memberlist
+        // after a refounding — the owner's 3312 snapshot re-seeds them (CORD-02 §5).
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Snapshot", bed.relays.clone(), None).await.unwrap();
+
+        // Member joins (a Guestbook Join at epoch 0).
+        let bundle = serde_json::to_string(&bundle_of(&community, Some(owner.keys.public_key()), None, None)).unwrap();
+        bed.swap_to(&member);
+        accept_parked_invite(&bed.relay, &bundle, None).await.unwrap();
+        bed.swap_to(&owner);
+        assert!(memberlist(&bed.relay, &community).await.unwrap().contains(&member.keys.public_key()), "member present pre-refound");
+
+        // Owner refounds keeping everyone (removed = []); survivors are snapshotted to epoch 1.
+        let refounded = refound_community(&bed.relay, &community, &[]).await.unwrap();
+        assert_eq!(refounded.root_epoch, Epoch(1), "the root rolled");
+
+        // The member is STILL a member at epoch 1 purely via the snapshot (never re-posted).
+        let members = memberlist(&bed.relay, &refounded).await.unwrap();
+        assert!(members.contains(&member.keys.public_key()), "a silent survivor stays a member after the refounding");
+        assert!(members.contains(&owner.keys.public_key()), "owner is always a member");
+    }
+
     #[tokio::test]
     async fn e2e_two_accounts_channels_converse_moderate() {
         use crate::community::v2::inbound::{apply_chat_to_state, persist_chat};
