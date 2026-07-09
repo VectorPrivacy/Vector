@@ -404,10 +404,14 @@ pub async fn mint_public_link<T: Transport + ?Sized>(
     // without the sync.
     let _ = record_minted_link(transport, community, &minted).await;
     // Local mirror so `list_public_invites` stays a sync local read (v1 parity);
-    // the 13303 list remains the cross-device record.
-    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-    let token_hex = crate::simd::hex::bytes_to_hex_16(&minted.token);
-    let _ = crate::db::community::save_public_invite(&token_hex, &cid_hex, &minted.url, expires_at_ms.map(|e| e as i64), label.as_deref());
+    // the 13303 list remains the cross-device record. Re-check the session: the
+    // publishes above straddled awaits, and this write must not land account A's
+    // link (secret token included) in a swapped-in account's DB.
+    if session.is_valid() {
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let token_hex = crate::simd::hex::bytes_to_hex_16(&minted.token);
+        let _ = crate::db::community::save_public_invite(&token_hex, &cid_hex, &minted.url, expires_at_ms.map(|e| e as i64), label.as_deref());
+    }
     Ok(minted)
 }
 
@@ -511,8 +515,10 @@ pub async fn revoke_public_link<T: Transport + ?Sized>(transport: &T, community:
     transport.publish(&event, &community.relays).await?;
     let signers = live_signers_for(&list, &cid_hex);
     publish_invite_registry(transport, community, &session, &signers).await?;
-    // Drop the local mirror row (sibling of the mint-time save).
-    let _ = crate::db::community::delete_public_invite(token_hex);
+    // Drop the local mirror row (sibling of the mint-time save) — only if still our session.
+    if session.is_valid() {
+        let _ = crate::db::community::delete_public_invite(token_hex);
+    }
     Ok(())
 }
 
@@ -932,7 +938,11 @@ pub async fn fetch_authority<T: Transport + ?Sized>(transport: &T, community: &C
     let mut seen_wraps: std::collections::HashSet<nostr_sdk::EventId> = std::collections::HashSet::new();
     let mut oldest: Option<u64> = None;
     let mut until: Option<u64> = None;
-    let mut a = AuthoritySet::owner_only();
+    // Seed from an EMPTY fold, not owner_only(): a fold over zero editions yields
+    // owner-only roles AND retains the PERSISTED banlist. So a first-page transport
+    // error returns the stored bans (fail-safe), never an empty banlist that would
+    // silently un-ban on withheld data.
+    let mut a = fold_authority(community, &[], &floors);
     for _ in 0..FOLLOW_MAX_PAGES {
         let query = Query {
             kinds: vec![stream::KIND_WRAP],
@@ -1606,11 +1616,17 @@ pub async fn ensure_admin_role<T: Transport + ?Sized>(
 /// before any publish keeps an unauthorized edition of the DETERMINISTIC admin
 /// entity from advancing this device's own floor onto a head readers reject.
 pub async fn grant_admin<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, member: &PublicKey) -> Result<(), String> {
+    // Guard spans the multi-page fetch below: a swap mid-fetch must not let the
+    // downstream publish's own (post-swap) guard write account A's floor into B.
+    let session = SessionGuard::capture();
     let me = local_keys()?;
     if me.public_key() != community.owner()? {
         return Err("only the community owner can grant @admin".to_string());
     }
     let view = fetch_authority(transport, community).await;
+    if !session.is_valid() {
+        return Err("account changed during grant".to_string());
+    }
     let member_hex = member.to_hex();
     require_grant_head(community, &view, &member_hex)?;
     let role_id = ensure_admin_role(transport, community, &view, true)
@@ -1633,11 +1649,15 @@ pub async fn grant_admin<T: Transport + ?Sized>(transport: &T, community: &Commu
 /// Strip the @admin role from the member's grant, preserving their other roles.
 /// A no-op when they don't hold it. Owner-only, like [`grant_admin`].
 pub async fn revoke_admin<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, member: &PublicKey) -> Result<(), String> {
+    let session = SessionGuard::capture();
     let me = local_keys()?;
     if me.public_key() != community.owner()? {
         return Err("only the community owner can revoke @admin".to_string());
     }
     let view = fetch_authority(transport, community).await;
+    if !session.is_valid() {
+        return Err("account changed during revoke".to_string());
+    }
     let member_hex = member.to_hex();
     require_grant_head(community, &view, &member_hex)?;
     let Some(role_id) = ensure_admin_role(transport, community, &view, false).await? else {
@@ -1829,7 +1849,21 @@ pub async fn follow_control<T: Transport + ?Sized>(
         .map(|e| e.created_at as i64)
         .max()
         .unwrap_or(0);
-    if !authority.gapped && newest_roster_at >= crate::db::community::get_community_roles_at(&cid_hex)? {
+    // Completeness gate: the `gapped` flag only covers entities present in the window.
+    // A role/grant floored on this device but with ZERO editions fetched (aged out of
+    // the paging reach) folds absent yet raises no gap — persisting would silently drop
+    // it. So if any CURRENTLY-STORED entity is floored but folded no head this round,
+    // RETAIN. A real revoke still folds a head (see select_authorized), so it persists.
+    let stored = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+    let head_ents: std::collections::HashSet<&str> = authority.heads.iter().map(|h| h.entity_hex.as_str()).collect();
+    let stored_complete = stored.roles.iter().all(|r| !floors.contains_key(&r.role_id) || head_ents.contains(r.role_id.as_str()))
+        && stored.grants.iter().all(|g| {
+            crate::simd::hex::hex_to_bytes_32_checked(&g.member).is_none_or(|m| {
+                let eid = crate::simd::hex::bytes_to_hex_32(&super::derive::grant_locator(community.id(), &m));
+                !floors.contains_key(&eid) || head_ents.contains(eid.as_str())
+            })
+        });
+    if !authority.gapped && stored_complete && newest_roster_at >= crate::db::community::get_community_roles_at(&cid_hex)? {
         crate::db::community::set_community_roles(&cid_hex, &authority.roles, newest_roster_at)?;
     }
     match fold.updated {
@@ -2019,8 +2053,7 @@ impl AuthoritySet {
 /// cap at the 100 lowest role_ids, a member at 64 roles, the banlist at 500. The
 /// banlist is enforced only if its head's signer held BAN in the authorized roster.
 fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &Floors) -> AuthoritySet {
-    use crate::community::roles::{CommunityRoles, MemberGrant, Permissions, Role};
-    use crate::community::roster::{authorize_delegation, FoldedRoster};
+    use crate::community::roles::Permissions;
     use std::collections::BTreeMap;
 
     let cid = community.id();
@@ -2037,101 +2070,65 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
         }
     }
 
-    let mut roles: Vec<Role> = Vec::new();
-    let mut role_authors: Vec<PublicKey> = Vec::new();
-    let mut grants: Vec<MemberGrant> = Vec::new();
-    let mut grant_authors: Vec<PublicKey> = Vec::new();
-    let mut heads: Vec<FoldedHead> = Vec::new();
+    // Per-entity CANDIDATE lists — every ≥floor edition of a role/grant, highest
+    // version first (lowest inner-id as the deterministic tiebreak). CORD-04 §1: an
+    // edition whose signer isn't authorized is SIMPLY DROPPED and the fold continues
+    // to the next candidate, so a forged higher-version edition can't suppress the
+    // authorized head beneath it (the author-blind collapse-to-one-head it replaces
+    // let any member vanish a role or a member's grant). `gapped` (drives older-
+    // paging) stays fold_head's per-entity flag.
+    let mut role_cands: BTreeMap<String, Vec<AuthorityCand>> = BTreeMap::new();
+    let mut grant_cands: BTreeMap<String, Vec<AuthorityCand>> = BTreeMap::new();
     let mut gapped = false;
 
     for (eid, group) in &groups {
-        // The banlist is folded author-aware AFTER the roster is known (below) — not
-        // here, where head selection is author-blind.
+        // The banlist is folded author-aware AFTER the roster is known (below).
         if *eid == banlist_eid {
             continue;
         }
         let entity_hex = crate::simd::hex::bytes_to_hex_32(eid);
         let fold_eds: Vec<version::Edition> = group.iter().map(|p| p.to_fold_edition()).collect();
-        let (hi, entity_gapped) = fold_head(&fold_eds, floors.get(&entity_hex));
+        let (_hi, entity_gapped) = fold_head(&fold_eds, floors.get(&entity_hex));
         gapped |= entity_gapped;
-        let Some(hi) = hi else { continue };
-        let head = group[hi];
-        let folded_head = FoldedHead { entity_hex: entity_hex.clone(), version: head.version, self_hash: head.self_hash, inner_id: head.inner_id };
+        let floor_v = floors.get(&entity_hex).map(|f| f.0).unwrap_or(0);
 
-        match head.vsk.as_str() {
-            vsk::ROLE => {
-                // Bind: the content's role_id IS the coordinate; position 0 is the owner's.
-                if let Some(role) = super::roles::parse_role_content(&head.content) {
-                    if role.role_id == entity_hex && role.position != 0 {
-                        roles.push(role);
-                        role_authors.push(head.author);
-                        heads.push(folded_head);
-                    }
-                }
+        for p in group {
+            // Refuse-downgrade: never consider an edition below the persisted floor.
+            if p.version < floor_v {
+                continue;
             }
-            vsk::GRANT => {
-                if let Some(mut grant) = super::roles::parse_grant_content(&head.content) {
-                    if let Some(member) = crate::simd::hex::hex_to_bytes_32_checked(&grant.member) {
-                        if super::derive::grant_locator(cid, &member) == *eid {
-                            grant.role_ids.truncate(super::roles::MAX_ROLES_PER_MEMBER);
-                            grants.push(grant);
-                            grant_authors.push(head.author);
-                            heads.push(folded_head);
+            let head = FoldedHead { entity_hex: entity_hex.clone(), version: p.version, self_hash: p.self_hash, inner_id: p.inner_id };
+            match p.vsk.as_str() {
+                vsk::ROLE => {
+                    // Bind: the content's role_id IS the coordinate; position 0 is the owner's.
+                    if let Some(role) = super::roles::parse_role_content(&p.content) {
+                        if role.role_id == entity_hex && role.position != 0 {
+                            role_cands.entry(entity_hex.clone()).or_default().push(AuthorityCand { role: Some(role), grant: None, author: p.author, head });
                         }
                     }
                 }
-            }
-            _ => {}
-        }
-    }
-
-    // Cap the community at the 100 lowest role_ids (deterministic), keeping the
-    // author list aligned.
-    if roles.len() > super::roles::MAX_ROLES_PER_COMMUNITY {
-        let mut order: Vec<usize> = (0..roles.len()).collect();
-        order.sort_by(|&a, &b| roles[a].role_id.cmp(&roles[b].role_id));
-        let keep: std::collections::HashSet<usize> = order.into_iter().take(super::roles::MAX_ROLES_PER_COMMUNITY).collect();
-        let (mut kr, mut ka) = (Vec::new(), Vec::new());
-        for (i, (r, a)) in roles.into_iter().zip(role_authors).enumerate() {
-            if keep.contains(&i) {
-                kr.push(r);
-                ka.push(a);
+                vsk::GRANT => {
+                    if let Some(mut grant) = super::roles::parse_grant_content(&p.content) {
+                        if let Some(member) = crate::simd::hex::hex_to_bytes_32_checked(&grant.member) {
+                            if super::derive::grant_locator(cid, &member) == *eid {
+                                grant.role_ids.truncate(super::roles::MAX_ROLES_PER_MEMBER);
+                                grant_cands.entry(entity_hex.clone()).or_default().push(AuthorityCand { role: None, grant: Some(grant), author: p.author, head });
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         }
-        roles = kr;
-        role_authors = ka;
+    }
+    for cands in role_cands.values_mut().chain(grant_cands.values_mut()) {
+        cands.sort_by(|a, b| b.head.version.cmp(&a.head.version).then(a.head.inner_id.cmp(&b.head.inner_id)));
     }
 
-    // Delegation-authorize a role/grant set (owner-seeded fixpoint). The unused
-    // FoldedRoster fields (metadata/channel/registry) are empty — authorize_delegation
-    // reads only roles + role_authors + grant_authors.
-    let authorize = |roles: Vec<Role>, role_authors: Vec<PublicKey>, grants: Vec<MemberGrant>, grant_authors: Vec<PublicKey>| {
-        let folded = FoldedRoster {
-            roles: CommunityRoles { roles, grants },
-            role_authors,
-            grant_authors,
-            gapped_entities: vec![],
-            skipped: 0,
-            fetched: 0,
-            heads: vec![],
-            banned: vec![],
-            banlist_author: None,
-            dissolved_by: vec![],
-            banlist_head: None,
-            invite_link_sets: vec![],
-            root_meta: None,
-            root_author: None,
-            root_head: None,
-            root_candidates: vec![],
-            channel_meta: vec![],
-            channel_candidates: vec![],
-        };
-        authorize_delegation(&folded, owner_hex.as_deref())
-    };
-
+    let empty: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     // Preliminary roster (bans not yet applied) — the authority view the banlist head
     // is judged against.
-    let prelim = authorize(roles.clone(), role_authors.clone(), grants.clone(), grant_authors.clone());
+    let (prelim, _) = select_authorized(&role_cands, &grant_cands, owner_hex.as_deref(), &empty);
 
     // Banlist (CORD-04 §4), folded AUTHORITY-aware so its two anti-roster hazards are
     // both closed:
@@ -2154,6 +2151,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
         })
         .unwrap_or_default();
     let mut banlist_persist: Option<(Vec<String>, u64)> = None;
+    let mut banlist_head: Option<FoldedHead> = None;
     let banned: std::collections::BTreeSet<String> = if banlist_authored.is_empty() {
         persisted_banned.into_iter().collect()
     } else {
@@ -2170,7 +2168,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
                     .filter(|t| prelim.can_act_on_member(&ah, owner_hex.as_deref(), t, Permissions::BAN))
                     .take(super::roles::MAX_BANLIST)
                     .collect();
-                heads.push(FoldedHead { entity_hex: banlist_hex.clone(), version: head.version, self_hash: head.self_hash, inner_id: head.inner_id });
+                banlist_head = Some(FoldedHead { entity_hex: banlist_hex.clone(), version: head.version, self_hash: head.self_hash, inner_id: head.inner_id });
                 banlist_persist = Some((list.clone(), head.version));
                 list.into_iter().collect()
             }
@@ -2178,30 +2176,112 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
         }
     };
 
-    // CORD-04 §4: a banned npub vanishes — every event from them is dropped. Re-
-    // authorize with editions AUTHORED by a banned npub removed, and grants TO a
-    // banned member removed (they hold no rank), so a banned admin loses authority.
-    let authorized = if banned.is_empty() {
-        prelim
-    } else {
-        let (mut fr, mut fra) = (Vec::new(), Vec::new());
-        for (r, a) in roles.into_iter().zip(role_authors) {
-            if !banned.contains(&a.to_hex()) {
-                fr.push(r);
-                fra.push(a);
-            }
-        }
-        let (mut fg, mut fga) = (Vec::new(), Vec::new());
-        for (g, a) in grants.into_iter().zip(grant_authors) {
-            if !banned.contains(&a.to_hex()) && !banned.contains(&g.member) {
-                fg.push(g);
-                fga.push(a);
-            }
-        }
-        authorize(fr, fra, fg, fga)
-    };
+    // Final roster (CORD-04 §4: a banned npub vanishes — every edition it authored is
+    // dropped, and a grant TO a banned member carries no rank). Re-run selection with
+    // the banned set excluded so a banned admin loses authority.
+    let (mut authorized, mut heads) = select_authorized(&role_cands, &grant_cands, owner_hex.as_deref(), &banned);
+    if let Some(bh) = banlist_head {
+        heads.push(bh);
+    }
+
+    // Cap the AUTHORIZED community at the 100 lowest role_ids — applied AFTER
+    // authorization, so an attacker's unauthorized roles can't consume cap slots and
+    // evict a legitimate one (the pre-authorize cap they replace let 100 forged low-id
+    // roles empty the roster).
+    if authorized.roles.len() > super::roles::MAX_ROLES_PER_COMMUNITY {
+        authorized.roles.sort_by(|a, b| a.role_id.cmp(&b.role_id));
+        authorized.roles.truncate(super::roles::MAX_ROLES_PER_COMMUNITY);
+        let kept: std::collections::HashSet<&str> = authorized.roles.iter().map(|r| r.role_id.as_str()).collect();
+        authorized.grants.iter_mut().for_each(|g| g.role_ids.retain(|rid| kept.contains(rid.as_str())));
+        authorized.grants.retain(|g| !g.role_ids.is_empty());
+    }
 
     AuthoritySet { roles: authorized, banned, heads, gapped, banlist_persist }
+}
+
+/// One candidate edition of a role/grant entity — the pool [`select_authorized`]
+/// draws the highest AUTHORIZED head from (exactly one of `role`/`grant` is set).
+struct AuthorityCand {
+    role: Option<crate::community::roles::Role>,
+    grant: Option<crate::community::roles::MemberGrant>,
+    author: PublicKey,
+    head: FoldedHead,
+}
+
+/// The owner-seeded delegation fixpoint (CORD-04 §1/§2), author-AWARE: per entity it
+/// takes the highest-version candidate whose author is authorized to author it under
+/// the roster resolved SO FAR, dropping unauthorized higher versions rather than
+/// vanishing the entity. Authority resolves outward from the owner (proven by
+/// `community_id`, never a Role), and the strict-outrank rule (no edition at/above its
+/// signer's own position) keeps the fixpoint monotone, so it converges. Returns the
+/// authorized roster plus the per-entity heads of the SELECTED editions (the floor
+/// advances only to authorized heads — an unauthorized forgery never poisons it).
+fn select_authorized(
+    role_cands: &std::collections::BTreeMap<String, Vec<AuthorityCand>>,
+    grant_cands: &std::collections::BTreeMap<String, Vec<AuthorityCand>>,
+    owner_hex: Option<&str>,
+    excluded: &std::collections::BTreeSet<String>,
+) -> (crate::community::roles::CommunityRoles, Vec<FoldedHead>) {
+    use crate::community::roles::{CommunityRoles, Permissions};
+    let mut accepted = CommunityRoles::default();
+    let mut heads: Vec<FoldedHead> = Vec::new();
+    // Jacobi iteration: authority propagates one delegation level per round, so a
+    // generous multiple of the entity count is an ample bound. Non-convergence (never
+    // seen for an owner-rooted chain) falls through fail-safe: only authorized editions
+    // are ever selected.
+    let bound = 2 * (role_cands.len() + grant_cands.len()) + 8;
+    for _ in 0..bound {
+        let mut next = CommunityRoles::default();
+        let mut next_heads: Vec<FoldedHead> = Vec::new();
+
+        for cands in role_cands.values() {
+            for c in cands {
+                let Some(role) = &c.role else { continue };
+                let ah = c.author.to_hex();
+                if excluded.contains(&ah) {
+                    continue;
+                }
+                if role.position != 0 && accepted.can_act_on_position(&ah, owner_hex, role.position, Permissions::MANAGE_ROLES) {
+                    next.roles.push(role.clone());
+                    next_heads.push(c.head.clone());
+                    break; // highest authorized candidate for this entity
+                }
+            }
+        }
+        for cands in grant_cands.values() {
+            for c in cands {
+                let Some(grant) = &c.grant else { continue };
+                let ah = c.author.to_hex();
+                if excluded.contains(&ah) || excluded.contains(&grant.member) {
+                    continue;
+                }
+                // The granter must outrank every granted role (resolved against the
+                // accepted roster) AND the member — the escalation defense (CORD-04 §2).
+                let positions: Option<Vec<u32>> = grant.role_ids.iter().map(|rid| accepted.role(rid).map(|r| r.position)).collect();
+                let Some(positions) = positions else { continue };
+                if positions.iter().all(|p| accepted.can_act_on_position(&ah, owner_hex, *p, Permissions::MANAGE_ROLES))
+                    && accepted.can_act_on_member(&ah, owner_hex, &grant.member, Permissions::MANAGE_ROLES)
+                {
+                    // Record the head even for an EMPTY grant (a revoke is a real chain
+                    // advance a completeness check must see), but don't carry the husk
+                    // into the roster.
+                    next_heads.push(c.head.clone());
+                    if !grant.role_ids.is_empty() {
+                        next.grants.push(grant.clone());
+                    }
+                    break;
+                }
+            }
+        }
+
+        let converged = next.roles == accepted.roles && next.grants == accepted.grants;
+        accepted = next;
+        heads = next_heads;
+        if converged {
+            break;
+        }
+    }
+    (accepted, heads)
 }
 
 /// Apply a folded community-metadata head. Relays only overwrite when the edition
@@ -3064,6 +3144,145 @@ mod tests {
 
     fn admin_role(role_id: &str, perms: u64) -> Role {
         Role { role_id: role_id.into(), name: "Admin".into(), position: 1, permissions: Permissions(perms), scope: RoleScope::Server, color: 0 }
+    }
+
+    // ── CORD-04 §1 author-aware fold: a seat-holder (holds community_root, so can seal
+    // any control edition) must not be able to SUPPRESS a role or grant by forging a
+    // higher version at its coordinate. Owner-only signers mask this entirely, so every
+    // attacker below signs as a NON-owner member.
+
+    #[tokio::test]
+    async fn a_non_owner_cannot_suppress_the_admin_role_by_forging_a_higher_version() {
+        let (bed, owner, attacker) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "AttackA", bed.relays.clone(), None).await.unwrap();
+        let victim = Keys::generate().public_key();
+        grant_admin(&bed.relay, &community, &victim).await.unwrap();
+
+        // The admin role sits at a deterministic, publicly-computable coordinate.
+        let admin_rid = fetch_authority(&bed.relay, &community)
+            .await
+            .roles
+            .roles
+            .iter()
+            .find(|r| r.permissions.contains(Permissions::ADMIN_ALL))
+            .unwrap()
+            .role_id
+            .clone();
+        // Attacker forges v2 of that exact role, stripping its powers.
+        publish_role(
+            &bed.relay,
+            &community,
+            &attacker.keys,
+            &Role { role_id: admin_rid.clone(), name: "pwned".into(), position: 1, permissions: Permissions(0), scope: RoleScope::Server, color: 0 },
+            2,
+        )
+        .await;
+
+        let authority = fold_authority(&community, &fetch_control(&bed.relay, &community).await, &load_floors(&community));
+        assert!(authority.roles.is_admin(&victim.to_hex()), "the forged strip is DROPPED; the owner's admin role survives beneath it");
+        assert!(
+            authority.heads.iter().any(|h| h.entity_hex == admin_rid && h.version == 1),
+            "the floor advances only to the AUTHORIZED head (owner v1)"
+        );
+        assert!(!authority.heads.iter().any(|h| h.version == 2), "the forged v2 never poisons the floor");
+    }
+
+    #[tokio::test]
+    async fn a_non_owner_cannot_strip_a_members_grant_by_forging_a_higher_version() {
+        let (bed, owner, attacker) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "AttackC", bed.relays.clone(), None).await.unwrap();
+        let victim = Keys::generate();
+        grant_admin(&bed.relay, &community, &victim.public_key()).await.unwrap();
+
+        // Attacker forges a higher-version EMPTY grant at the victim's grant coordinate.
+        publish_grant(&bed.relay, &community, &attacker.keys, &victim.public_key(), vec![], 9).await;
+
+        let authority = fold_authority(&community, &fetch_control(&bed.relay, &community).await, &load_floors(&community));
+        assert!(
+            authority.roles.is_admin(&victim.public_key().to_hex()),
+            "the forged strip is dropped; the owner's grant survives and the victim keeps admin"
+        );
+    }
+
+    #[tokio::test]
+    async fn forged_low_id_roles_by_a_non_owner_never_enter_the_authorized_roster() {
+        let (bed, owner, attacker) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "AttackB", bed.relays.clone(), None).await.unwrap();
+        let victim = Keys::generate().public_key();
+        grant_admin(&bed.relay, &community, &victim).await.unwrap();
+
+        // Low-id roles that WOULD evict the admin from a pre-authorize cap — but they're
+        // unauthorized, so the post-authorize cap never sees them.
+        for i in 0u8..6 {
+            let rid = crate::simd::hex::bytes_to_hex_32(&[i; 32]);
+            publish_role(&bed.relay, &community, &attacker.keys, &admin_role(&rid, Permissions::ADMIN_ALL), 1).await;
+        }
+
+        let authority = fold_authority(&community, &fetch_control(&bed.relay, &community).await, &load_floors(&community));
+        assert!(authority.roles.is_admin(&victim.to_hex()), "the legit admin survives the forged flood");
+        assert_eq!(authority.roles.roles.len(), 1, "only the owner's admin role is authorized; every forgery is dropped");
+    }
+
+    /// A transport that ACKs publishes but ERRORS every fetch — a relay outage / withhold.
+    struct FetchErrors(MemoryRelay);
+    #[async_trait::async_trait]
+    impl crate::community::transport::Transport for FetchErrors {
+        async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> {
+            self.0.publish(e, r).await
+        }
+        async fn fetch(&self, _q: &Query, _r: &[String]) -> Result<Vec<Event>, String> {
+            Err("relay down".to_string())
+        }
+        async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> {
+            self.0.publish_durable(e, r).await
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_authority_retains_the_persisted_banlist_on_a_transport_error() {
+        let (bed, owner, victim) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "BanRetain", bed.relays.clone(), None).await.unwrap();
+        let victim_hex = victim.keys.public_key().to_hex();
+        // A ban is persisted locally (as a completed set_banlist + follow leaves it).
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        crate::db::community::set_community_banlist(&cid_hex, &[victim_hex.clone()], 1).unwrap();
+
+        // A relay that ERRORS on fetch must degrade FAIL-SAFE: retain the ban, never
+        // return an empty banlist (which would silently un-ban on withheld data).
+        let down = FetchErrors(MemoryRelay::new());
+        let view = fetch_authority(&down, &community).await;
+        assert!(view.banned.contains(&victim_hex), "a transport error retains the persisted banlist");
+    }
+
+    #[tokio::test]
+    async fn follow_control_retains_the_roster_when_a_floored_role_ages_out() {
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Complete", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let (a, b) = (Keys::generate().public_key(), Keys::generate().public_key());
+        let rid = crate::simd::hex::bytes_to_hex_32(&[0x7c; 32]);
+
+        // Full state on relay1: an Admin role + two grants → both fold + persist as admins.
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::ADMIN_ALL), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &a, vec![rid.clone()], 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &b, vec![rid.clone()], 1).await;
+        let session = crate::state::SessionGuard::capture();
+        follow_control(&bed.relay, &community, &session).await.unwrap();
+        assert!(crate::db::community::get_community_roles(&cid_hex).unwrap().is_admin(&a.to_hex()), "seeded");
+
+        // relay2 serves A's grant but NOT the role (aged out of the window): the fold
+        // drops both admins yet raises no gap. The completeness gate must RETAIN the
+        // stored roster rather than persist the lossy one.
+        let relay2 = MemoryRelay::new();
+        publish_grant(&relay2, &community, &owner.keys, &a, vec![rid.clone()], 1).await;
+        follow_control(&relay2, &community, &session).await.unwrap();
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        assert!(roster.is_admin(&a.to_hex()) && roster.is_admin(&b.to_hex()), "a floored-but-unfetched role retains the stored roster");
     }
 
     #[tokio::test]
