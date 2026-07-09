@@ -24,7 +24,11 @@ async fn main() -> vector_sdk::Result<()> {
     // Create-and-invite is opt-in so a restart doesn't spawn a fresh community
     // each time (a real bot persists its community id and reuses it).
     if std::env::var("VECTOR_CREATE").is_ok() {
-        let community = bot.create_community("Vector v2 Demo").await?;
+        // Creation is one hop through the core facade (the ergonomic surface stays at
+        // the stable published API). A fresh community is created on the modern protocol.
+        let summary = bot.core().create_community_v2("Vector v2 Demo").await?;
+        let id = summary.get("community_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let community = bot.community(id);
         println!("created v2 community {}", community.id());
 
         let url = community.create_invite().await?;

@@ -1,6 +1,6 @@
 [package]
 name = "vector_sdk"
-version = "0.4.0"
+version = "0.3.1"
 edition = "2021"
 description = "Ergonomic Rust SDK for building Vector bots and clients on top of vector-core."
 license = "MIT"

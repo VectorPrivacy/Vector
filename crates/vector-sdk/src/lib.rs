@@ -91,14 +91,6 @@
 //!
 //! ## Communities
 //!
-//! The SDK speaks the current community protocol only: communities you create or
-//! join through it are current-protocol, and legacy memberships an account may
-//! hold are ignored rather than surfaced. The discovery methods
-//! ([`communities`](VectorBot::communities), [`pending_invites`](VectorBot::pending_invites))
-//! filter to it, but a raw id handed straight to [`channel`](VectorBot::channel),
-//! [`community`](VectorBot::community), or [`accept_invite`](VectorBot::accept_invite)
-//! bypasses that filter — don't feed those a legacy id.
-//!
 //! When a message comes from a community, you get the sender as a member you can act on
 //! directly:
 //!
@@ -134,11 +126,9 @@
 //! ## Staying connected
 //!
 //! If the bot loses its connection, [`on_message`](VectorBot::on_message) /
-//! [`on_event`](VectorBot::on_event) reconnect on their own and catch up. Direct
-//! messages backfill; community-channel catch-up is bounded by what the relays still
-//! replay (there's no active back-paging), so after a long outage a community message
-//! older than the relays' horizon can be missed. Your handler fires for messages that
-//! arrive while the bot is running; to read older history, use
+//! [`on_event`](VectorBot::on_event) reconnect on their own and catch up on what was
+//! missed. Your handler fires for messages that arrive while the
+//! bot is running; to read older history, use
 //! [`bot.core().get_messages(...)`](VectorCore).
 //!
 //! ## Identity: bring your own, or let the bot make one
@@ -287,21 +277,19 @@ impl VectorBot {
 
     /// Parked Community invites awaiting a decision — each `{ community_id, name, inviter_npub }`.
     /// (Auto-accepted invites are already gone; these are the ones held under
-    /// [`InvitePolicy::Manual`] or rejected by a whitelist.) The SDK is
-    /// current-protocol only: an invite to a legacy community never surfaces here.
+    /// [`InvitePolicy::Manual`] or rejected by a whitelist.)
     pub fn pending_invites(&self) -> Result<Vec<serde_json::Value>> {
-        Ok(self
-            .core
-            .list_pending_invites()?
-            .into_iter()
-            .filter(|i| i.get("version").and_then(|v| v.as_u64()) == Some(2))
-            .collect())
+        self.core.list_pending_invites()
     }
 
-    /// Accept a parked Community invite by id, then start receiving its channels
-    /// (the core refreshes the v2 realtime subscription itself).
+    /// Accept a parked Community invite by id, then start receiving its channels.
     pub async fn accept_invite(&self, community_id: &str) -> Result<serde_json::Value> {
-        self.core.accept_pending_invite(community_id).await
+        let res = self.core.accept_pending_invite(community_id).await?;
+        // The realtime sub was built without this community; refresh so its channels flow in.
+        if let Some(client) = vector_core::state::nostr_client() {
+            vector_core::community::realtime::refresh_subscription(&client).await;
+        }
+        Ok(res)
     }
 
     /// Apply the invite policy to every currently-parked invite — auto-joining the ones it allows.
@@ -311,7 +299,7 @@ impl VectorBot {
         if matches!(*self.invite_policy, InvitePolicy::Manual) {
             return;
         }
-        let Ok(invites) = self.pending_invites() else { return };
+        let Ok(invites) = self.core.list_pending_invites() else { return };
         for inv in invites {
             let Some(cid) = inv.get("community_id").and_then(|c| c.as_str()) else { continue };
             let inviter = inv.get("inviter_npub").and_then(|n| n.as_str());
@@ -329,16 +317,18 @@ impl VectorBot {
         if matches!(*self.invite_policy, InvitePolicy::Manual) {
             return;
         }
-        // Resolve the parked record (protocol-filtered) — the whitelist needs the
-        // inviter, and a legacy invite must never be auto-joined by a v2-only bot.
-        let Some(record) = self.pending_invites().ok().and_then(|invites| {
-            invites
-                .into_iter()
-                .find(|i| i.get("community_id").and_then(|c| c.as_str()) == Some(community_id))
-        }) else {
-            return;
-        };
-        let inviter = record.get("inviter_npub").and_then(|n| n.as_str()).map(String::from);
+        // Resolve the inviter from the parked record (needed for the whitelist check).
+        let inviter = self
+            .core
+            .list_pending_invites()
+            .ok()
+            .and_then(|invites| {
+                invites.into_iter().find_map(|i| {
+                    (i.get("community_id").and_then(|c| c.as_str()) == Some(community_id))
+                        .then(|| i.get("inviter_npub").and_then(|n| n.as_str()).map(String::from))
+                        .flatten()
+                })
+            });
         if self.invite_policy.accepts(inviter.as_deref()) {
             let _ = self.accept_invite(community_id).await;
         }
@@ -366,28 +356,12 @@ impl VectorBot {
         Community { core: self.core, id: community_id.into() }
     }
 
-    /// Create a new Community owned by this bot and start receiving its channels.
-    /// Returns a handle to it (its `#general` channel is ready to message, and
-    /// `create_invite` / `invite` mint shareable links or Direct Invites). New
-    /// Communities are created on the modern protocol.
-    pub async fn create_community(&self, name: impl Into<String>) -> Result<Community> {
-        let summary = self.core.create_community_v2(&name.into()).await?;
-        let id = summary
-            .get("community_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| Error::Other("community creation returned no id".into()))?
-            .to_string();
-        Ok(Community { core: self.core, id })
-    }
-
-    /// Every Community this bot is a member of. The SDK is current-protocol only:
-    /// a legacy (v1) membership held by this account is ignored, not surfaced.
+    /// Every Community this bot is a member of.
     pub async fn communities(&self) -> Vec<Community> {
         self.core
             .list_communities()
             .await
             .into_iter()
-            .filter(|v| v.get("version").and_then(|x| x.as_u64()) == Some(2))
             .filter_map(|v| {
                 v.get("community_id")
                     .or_else(|| v.get("id"))
@@ -403,11 +377,6 @@ impl VectorBot {
     /// file attachments until the client disconnects. The handler is invoked
     /// once per message with a clone of the bot (so it can reply) and an
     /// [`IncomingMessage`]. A slow handler won't hold up other messages.
-    ///
-    /// **Ordering:** each message is handled on its own task, so delivery order is
-    /// NOT guaranteed — even within one chat, two messages (or an edit and its
-    /// delete) can be handled out of order. A handler that mutates shared state per
-    /// chat must tolerate reordering (e.g. key by message id, not arrival order).
     ///
     /// ```no_run
     /// # use vector_sdk::VectorBot;
@@ -485,12 +454,10 @@ impl VectorBot {
         self.core.sync_dms(since_days, &NoOpEventHandler).await
     }
 
-    /// Catch up every Community this bot is in — rediscover memberships across
-    /// devices, then refold consensus (re-foundings / rekeys / banlist / metadata).
-    /// Runs automatically inside [`on_message`](Self::on_message)/`listen` on connect
-    /// and periodically for outage resilience; exposed for manual use (e.g. right
-    /// after a known reconnect). Inside a running listen loop the refold is queued
-    /// to its follow worker; headless, it runs inline before returning.
+    /// Catch up every Community this bot is in — refold consensus (re-foundings / rekeys / banlist /
+    /// metadata) and fetch recent messages into local state. Runs automatically inside
+    /// [`on_message`](Self::on_message)/`listen` on connect and periodically for outage resilience;
+    /// exposed for manual use (e.g. right after a known reconnect).
     pub async fn sync_communities(&self) -> Result<()> {
         self.core.sync_communities().await
     }
@@ -865,9 +832,7 @@ impl Channel {
     pub async fn delete(&self, message_id: &str) -> Result<()> {
         match self.kind {
             ChannelKind::Dm => self.core.delete_dm(message_id).await.map(|_| ()),
-            // The channel is this handle — never resolved from local history (a
-            // headless bot holds none).
-            ChannelKind::Community => self.core.delete_community_message_in(&self.id, message_id).await,
+            ChannelKind::Community => self.core.delete_community_message(message_id).await,
         }
     }
 
@@ -984,9 +949,7 @@ impl Community {
         Member { core: self.core, community_id: self.id.clone(), npub: npub.into() }
     }
 
-    /// The community's members (best-effort). This hits the network (folds the member
-    /// list from relays) and returns empty on a transient failure, so don't call it in a
-    /// hot loop.
+    /// Observed members (best-effort, from recent activity).
     pub async fn members(&self) -> Vec<Member> {
         self.core
             .get_community_members(&self.id)
@@ -996,9 +959,7 @@ impl Community {
             .collect()
     }
 
-    /// Invite an npub via a gift-wrapped private invite. Any member may invite: a Direct
-    /// Invite is an ungateable key handoff (whispering keys needs no permission), the
-    /// access cut is a rekey, not an invite gate.
+    /// Invite an npub via a gift-wrapped private invite (requires the create-invite permission).
     pub async fn invite(&self, npub: &str) -> Result<()> {
         self.core.invite_to_community(&self.id, npub).await.map(|_| ())
     }
@@ -1059,9 +1020,7 @@ impl Member {
         self.core.kick_member(&self.community_id, &self.npub).await
     }
 
-    /// Ban them (terminal). Requires BAN + outranking them. Composes the CORD-04 §6 removal:
-    /// banlist entry, role strip, then a Refounding read-cut — so a ban always rekeys the
-    /// community (a bunker/remote-signer bot can't complete the rekey step).
+    /// Ban them (terminal; in a private community this triggers a read-cut rekey). Requires BAN.
     pub async fn ban(&self) -> Result<()> {
         self.core.set_member_banned(&self.community_id, &self.npub, true).await
     }
