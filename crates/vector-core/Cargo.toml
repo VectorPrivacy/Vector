@@ -1,6 +1,6 @@
 [package]
 name = "vector-core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Core library for Vector — the single source of truth for all Vector clients, SDKs, and interfaces."
 license = "MIT"

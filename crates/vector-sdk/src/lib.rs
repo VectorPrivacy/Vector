@@ -91,6 +91,11 @@
 //!
 //! ## Communities
 //!
+//! The SDK speaks the current community protocol only: communities you create or
+//! join through it are current-protocol, and legacy memberships an account may
+//! hold are ignored rather than surfaced (raw ids handed to [`VectorBot::channel`]
+//! bypass that filter).
+//!
 //! When a message comes from a community, you get the sender as a member you can act on
 //! directly:
 //!
@@ -98,7 +103,7 @@
 //! # use vector_sdk::IncomingMessage;
 //! # async fn run(msg: IncomingMessage) -> vector_sdk::Result<()> {
 //! if let Some(member) = msg.member() {     // the sender, as a Member of this community
-//!     if !member.is_admin() {
+//!     if !member.is_admin().await {
 //!         member.ban().await?;             // or .kick() / .unban() / .grant_admin()
 //!     }
 //! }
@@ -277,19 +282,21 @@ impl VectorBot {
 
     /// Parked Community invites awaiting a decision — each `{ community_id, name, inviter_npub }`.
     /// (Auto-accepted invites are already gone; these are the ones held under
-    /// [`InvitePolicy::Manual`] or rejected by a whitelist.)
+    /// [`InvitePolicy::Manual`] or rejected by a whitelist.) The SDK is
+    /// current-protocol only: an invite to a legacy community never surfaces here.
     pub fn pending_invites(&self) -> Result<Vec<serde_json::Value>> {
-        self.core.list_pending_invites()
+        Ok(self
+            .core
+            .list_pending_invites()?
+            .into_iter()
+            .filter(|i| i.get("version").and_then(|v| v.as_u64()) == Some(2))
+            .collect())
     }
 
-    /// Accept a parked Community invite by id, then start receiving its channels.
+    /// Accept a parked Community invite by id, then start receiving its channels
+    /// (the core refreshes the v2 realtime subscription itself).
     pub async fn accept_invite(&self, community_id: &str) -> Result<serde_json::Value> {
-        let res = self.core.accept_pending_invite(community_id).await?;
-        // The realtime sub was built without this community; refresh so its channels flow in.
-        if let Some(client) = vector_core::state::nostr_client() {
-            vector_core::community::realtime::refresh_subscription(&client).await;
-        }
-        Ok(res)
+        self.core.accept_pending_invite(community_id).await
     }
 
     /// Apply the invite policy to every currently-parked invite — auto-joining the ones it allows.
@@ -299,7 +306,7 @@ impl VectorBot {
         if matches!(*self.invite_policy, InvitePolicy::Manual) {
             return;
         }
-        let Ok(invites) = self.core.list_pending_invites() else { return };
+        let Ok(invites) = self.pending_invites() else { return };
         for inv in invites {
             let Some(cid) = inv.get("community_id").and_then(|c| c.as_str()) else { continue };
             let inviter = inv.get("inviter_npub").and_then(|n| n.as_str());
@@ -317,18 +324,16 @@ impl VectorBot {
         if matches!(*self.invite_policy, InvitePolicy::Manual) {
             return;
         }
-        // Resolve the inviter from the parked record (needed for the whitelist check).
-        let inviter = self
-            .core
-            .list_pending_invites()
-            .ok()
-            .and_then(|invites| {
-                invites.into_iter().find_map(|i| {
-                    (i.get("community_id").and_then(|c| c.as_str()) == Some(community_id))
-                        .then(|| i.get("inviter_npub").and_then(|n| n.as_str()).map(String::from))
-                        .flatten()
-                })
-            });
+        // Resolve the parked record (protocol-filtered) — the whitelist needs the
+        // inviter, and a legacy invite must never be auto-joined by a v2-only bot.
+        let Some(record) = self.pending_invites().ok().and_then(|invites| {
+            invites
+                .into_iter()
+                .find(|i| i.get("community_id").and_then(|c| c.as_str()) == Some(community_id))
+        }) else {
+            return;
+        };
+        let inviter = record.get("inviter_npub").and_then(|n| n.as_str()).map(String::from);
         if self.invite_policy.accepts(inviter.as_deref()) {
             let _ = self.accept_invite(community_id).await;
         }
@@ -370,12 +375,14 @@ impl VectorBot {
         Ok(Community { core: self.core, id })
     }
 
-    /// Every Community this bot is a member of.
+    /// Every Community this bot is a member of. The SDK is current-protocol only:
+    /// a legacy (v1) membership held by this account is ignored, not surfaced.
     pub async fn communities(&self) -> Vec<Community> {
         self.core
             .list_communities()
             .await
             .into_iter()
+            .filter(|v| v.get("version").and_then(|x| x.as_u64()) == Some(2))
             .filter_map(|v| {
                 v.get("community_id")
                     .or_else(|| v.get("id"))
@@ -473,12 +480,12 @@ impl VectorBot {
         self.core.sync_dms(since_days, &NoOpEventHandler).await
     }
 
-    /// Catch up every Community this bot is in — refold consensus (re-foundings / rekeys / banlist /
-    /// metadata) and fetch recent messages into local state. Runs automatically inside
-    /// [`on_message`](Self::on_message)/`listen` on connect and periodically for outage resilience;
-    /// exposed for manual use (e.g. right after a known reconnect). A modern (v2) Community's refold
-    /// is queued to the follow worker that [`on_message`](Self::on_message)/`listen` runs, so a manual
-    /// call outside a running listen loop refolds legacy Communities only.
+    /// Catch up every Community this bot is in — rediscover memberships across
+    /// devices, then refold consensus (re-foundings / rekeys / banlist / metadata).
+    /// Runs automatically inside [`on_message`](Self::on_message)/`listen` on connect
+    /// and periodically for outage resilience; exposed for manual use (e.g. right
+    /// after a known reconnect). Inside a running listen loop the refold is queued
+    /// to its follow worker; headless, it runs inline before returning.
     pub async fn sync_communities(&self) -> Result<()> {
         self.core.sync_communities().await
     }
@@ -853,7 +860,9 @@ impl Channel {
     pub async fn delete(&self, message_id: &str) -> Result<()> {
         match self.kind {
             ChannelKind::Dm => self.core.delete_dm(message_id).await.map(|_| ()),
-            ChannelKind::Community => self.core.delete_community_message(message_id).await,
+            // The channel is this handle — never resolved from local history (a
+            // headless bot holds none).
+            ChannelKind::Community => self.core.delete_community_message_in(&self.id, message_id).await,
         }
     }
 
@@ -1006,13 +1015,13 @@ impl Community {
     }
 
     /// Your own role-based capabilities here (JSON flags: manage_*, create_invite, kick, ban, …).
-    pub fn capabilities(&self) -> Result<serde_json::Value> {
-        self.core.community_capabilities(&self.id)
+    pub async fn capabilities(&self) -> Result<serde_json::Value> {
+        self.core.community_capabilities(&self.id).await
     }
 
     /// The owner + admin npubs (`{ owner, admins: [...] }`).
-    pub fn roles(&self) -> Result<serde_json::Value> {
-        self.core.community_roles(&self.id)
+    pub async fn roles(&self) -> Result<serde_json::Value> {
+        self.core.community_roles(&self.id).await
     }
 }
 
@@ -1068,17 +1077,18 @@ impl Member {
     }
 
     /// Whether this member is the community owner.
-    pub fn is_owner(&self) -> bool {
+    pub async fn is_owner(&self) -> bool {
         self.core
             .community_roles(&self.community_id)
+            .await
             .ok()
             .and_then(|r| r.get("owner").and_then(|o| o.as_str()).map(|o| o == self.npub))
             .unwrap_or(false)
     }
 
     /// Whether this member is an admin (the owner counts as admin).
-    pub fn is_admin(&self) -> bool {
-        let Ok(roles) = self.core.community_roles(&self.community_id) else { return false };
+    pub async fn is_admin(&self) -> bool {
+        let Ok(roles) = self.core.community_roles(&self.community_id).await else { return false };
         let owner = roles.get("owner").and_then(|o| o.as_str()) == Some(self.npub.as_str());
         let admin = roles
             .get("admins")
