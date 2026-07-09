@@ -433,8 +433,12 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
     // the initial floor once the community row is saved — without that, the first
     // post-join follow would bootstrap floor-less and could persist a state BELOW
     // what this join already verified and showed.
+    // Join-time reconcile folds only the owner's editions (genesis-authenticated
+    // above), and the owner is supreme — so owner-only authority suffices. The full
+    // roster (admins) folds on the first post-join follow_control.
     let empty_floors = Floors::new();
-    let fold = apply_control_fold(&community, &editions, &empty_floors);
+    let authority = AuthoritySet::owner_only();
+    let fold = apply_control_fold(&community, &editions, &empty_floors, &authority);
     Ok((fold.updated.unwrap_or(community), fold.heads))
 }
 
@@ -563,20 +567,145 @@ pub async fn memberlist<T: Transport + ?Sized>(transport: &T, community: &Commun
         }
     }
 
+    // Fold the Control Plane roster + banlist (CORD-04) for Kick authority and the
+    // ban subtraction. A control fetch failure degrades to owner-only authority + no
+    // bans (fail-open on availability is safe here: a Kick still needs a real signer,
+    // and a missed ban only fails to HIDE, never to wrongly admit authority).
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, f)| f.0 == community.root_epoch.0)
+        .map(|(entity, f)| (entity, (f.1, f.2, f.3)))
+        .collect();
+    let control = control_group_key(&community.community_root, community.id(), community.root_epoch);
+    let control_query = Query {
+        kinds: vec![stream::KIND_WRAP],
+        authors: vec![control.pk_hex()],
+        limit: Some(FOLLOW_PAGE),
+        ..Default::default()
+    };
+    let control_eds: Vec<ParsedEdition> = transport
+        .fetch(&control_query, &community.relays)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|w| control::open_control_edition(w, &control).ok().map(|(ed, _)| ed))
+        .collect();
+    let authority = fold_authority(community, &control_eds, &floors);
+    let owner_hex = owner.to_hex();
+
     // Genesis / never-refounded community: NO snapshot authority (there is no
-    // refounder — an owner who didn't mint the epoch has no snapshot power). When
-    // rotation lands, thread the actual refounder of `root_epoch`.
+    // refounder — an owner who didn't mint the epoch has no snapshot power). The
+    // refounder of a rotated `root_epoch` is threaded once Refounding SEND lands.
     let no_snapshots: Option<&PublicKey> = None;
-    // First-cut authority: only the owner may kick (full roster fold is a follow-up).
-    let can_kick = move |actor: &PublicKey, _target: &PublicKey| *actor == owner;
+    // Kick authority (CORD-04 §6): the signer must hold KICK AND strictly outrank the
+    // target (the owner is supreme; equal cannot kick equal).
+    let can_kick = |actor: &PublicKey, target: &PublicKey| {
+        authority
+            .roles
+            .can_act_on_member(&actor.to_hex(), Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::KICK)
+    };
     let coalesced = guestbook::coalesce(&events, now_ms(), no_snapshots, &can_kick);
-    let banlist = std::collections::BTreeSet::new();
+    // The authorized banlist, as pubkeys (a malformed hex entry is simply dropped).
+    let banlist: std::collections::BTreeSet<PublicKey> =
+        authority.banned.iter().filter_map(|h| PublicKey::from_hex(h).ok()).collect();
     let mut members = guestbook::complete_memberlist(&coalesced, &observed, &banlist);
     // The owner is a member by definition, independent of any fetched Join.
     if !banlist.contains(&owner) {
         members.insert(owner);
     }
     Ok(members.into_iter().collect())
+}
+
+// ── Control edition authoring (CORD-04 roles / CORD-02 §6 / CORD-03 §2) ──────
+
+/// Publish one control edition (a role, grant, banlist, community-metadata, or
+/// channel-metadata edit) at the next version for its entity, chaining `prev` from
+/// our held head, and advance our local floor. Authority is enforced by every
+/// reader's roster fold (CORD-04 §5: authority is rejection, not prevention), so this
+/// requires only a valid local signer; a well-behaved client checks its own rank
+/// first, but a reader drops an unauthorized edition regardless.
+async fn publish_control_edition<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    session: &SessionGuard,
+    vsk: &str,
+    entity_id: &[u8; 32],
+    content: &str,
+    citation: Option<&crate::community::edition::AuthorityCitation>,
+) -> Result<(), String> {
+    let me = local_keys()?;
+    let control = control_group_key(&community.community_root, community.id(), community.root_epoch);
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let entity_hex = crate::simd::hex::bytes_to_hex_32(entity_id);
+    let (version, prev) = match crate::db::community::get_edition_head(&cid_hex, &entity_hex)? {
+        Some((v, h)) => (v + 1, Some(h)),
+        None => (1, None),
+    };
+    let at = now_ms() / 1000;
+    let rumor = control::build_edition_rumor(me.public_key(), vsk, entity_id, version, prev.as_ref(), content, at, citation);
+    let (wrap, _) = control::seal_control_edition(&rumor, &control, &me, Timestamp::from_secs(at)).map_err(|e| e.to_string())?;
+    if !session.is_valid() {
+        return Err("account changed before control publish".to_string());
+    }
+    transport.publish(&wrap, &community.relays).await?;
+    // Advance our own floor so a follow-up edit chains from this head and refuse-
+    // downgrade holds; open our own wrap to recover the self_hash + inner_id.
+    if let Ok((ed, _)) = control::open_control_edition(&wrap, &control) {
+        crate::db::community::set_edition_head_at_epoch(&cid_hex, &entity_hex, ed.version, &ed.self_hash, &ed.inner_id, community.root_epoch.0)?;
+    }
+    Ok(())
+}
+
+/// Create or edit a Role (vsk 1, CORD-04 §2). `role.role_id` is the coordinate; a
+/// rename or permission change is a versioned edit of the same id. Gated on the
+/// reader side by `MANAGE_ROLES` + outrank.
+pub async fn set_role<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, role: &crate::community::roles::Role) -> Result<(), String> {
+    let session = SessionGuard::capture();
+    super::roles::validate_role(role)?;
+    let content = super::roles::role_content_json(role)?;
+    let role_id = crate::simd::hex::hex_to_bytes_32_checked(&role.role_id).ok_or("role_id must be 32-byte hex")?;
+    publish_control_edition(transport, community, &session, vsk::ROLE, &role_id, &content, None).await
+}
+
+/// Grant or revoke a member's Roles (vsk 3, CORD-04 §2). Empty `role_ids` is a
+/// revoke. Gated on the reader side by `MANAGE_ROLES` + outrank of every role + the
+/// member.
+pub async fn grant_roles<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, member: &PublicKey, role_ids: Vec<String>) -> Result<(), String> {
+    let session = SessionGuard::capture();
+    let grant = crate::community::roles::MemberGrant { member: member.to_hex(), role_ids };
+    let content = super::roles::grant_content_json(&grant)?;
+    let eid = super::derive::grant_locator(community.id(), &member.to_bytes());
+    publish_control_edition(transport, community, &session, vsk::GRANT, &eid, &content, None).await
+}
+
+/// Replace the Banlist (vsk 4, CORD-04 §4) with `banned` (lowercase-hex npubs), the
+/// whole list on every edit. Gated on the reader side by `BAN`.
+pub async fn set_banlist<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, banned: &[String]) -> Result<(), String> {
+    let session = SessionGuard::capture();
+    super::roles::validate_banlist(banned)?;
+    let content = super::roles::banlist_content_json(banned)?;
+    let eid = super::derive::banlist_locator(community.id());
+    publish_control_edition(transport, community, &session, vsk::BANLIST, &eid, &content, None).await
+}
+
+/// Edit the community metadata (vsk 0, CORD-02 §6). Gated on the reader side by
+/// `MANAGE_METADATA`.
+pub async fn edit_community_metadata<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, meta: &control::CommunityMetadata) -> Result<(), String> {
+    let session = SessionGuard::capture();
+    control::validate_community_metadata(meta).map_err(|e| e.to_string())?;
+    let content = serde_json::to_string(meta).map_err(|e| e.to_string())?;
+    publish_control_edition(transport, community, &session, vsk::COMMUNITY_METADATA, &community.id().0, &content, None).await
+}
+
+/// Add or edit a channel's metadata (vsk 2, CORD-03 §2). `channel_id` is the
+/// coordinate. Gated on the reader side by `MANAGE_CHANNELS`.
+pub async fn edit_channel_metadata<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel_id: &ChannelId, meta: &control::ChannelMetadata) -> Result<(), String> {
+    let session = SessionGuard::capture();
+    control::validate_channel_metadata(meta).map_err(|e| e.to_string())?;
+    let content = serde_json::to_string(meta).map_err(|e| e.to_string())?;
+    publish_control_edition(transport, community, &session, vsk::CHANNEL_METADATA, &channel_id.0, &content, None).await
 }
 
 // ── Live control-follow (CORD-02 §6 / CORD-03 §2) ────────────────────────────
@@ -587,12 +716,12 @@ pub async fn memberlist<T: Transport + ?Sized>(transport: &T, community: &Commun
 /// edited description) so a long-running bot tracks the community mid-session
 /// instead of freezing at its join-time view.
 ///
-/// **Authority (first cut): owner-authored editions only.** The roster fold that
-/// resolves an admin's `MANAGE_METADATA`/`MANAGE_CHANNELS` grant is deferred, so
-/// a non-owner edition is not folded yet — a safe under-approximation (it never
-/// trusts a non-owner; it only lags an admin action until the owner's view lands
-/// or roster-follow ships). The owner is proven by the self-certifying
-/// community_id, so this needs no network trust.
+/// **Authority (CORD-04 §5):** the roster (roles/grants/banlist) folds first into
+/// the owner-seeded authorized set ([`fold_authority`]), then each metadata/channel
+/// edition is eligible only if its signer CURRENTLY holds the entity's management
+/// bit (`MANAGE_METADATA`/`MANAGE_CHANNELS`) — so an authorized admin's edits fold,
+/// a demoted one's drop. The owner is supreme, proven by the self-certifying
+/// community_id (no network trust).
 ///
 /// **Private channels are skipped here:** a Private channel's Chat-Plane key is
 /// delivered over the rekey plane (or an invite bundle), never derivable from a
@@ -607,7 +736,7 @@ pub async fn follow_control<T: Transport + ?Sized>(
     community: &CommunityV2,
     session: &SessionGuard,
 ) -> Result<Option<CommunityV2>, String> {
-    let owner = community.owner()?;
+    community.owner()?; // fail fast if the community is somehow unproven.
     let control = control_group_key(&community.community_root, community.id(), community.root_epoch);
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
 
@@ -631,6 +760,7 @@ pub async fn follow_control<T: Transport + ?Sized>(
     let mut oldest: Option<u64> = None;
     let mut until: Option<u64> = None;
     let mut fold = ControlFold { updated: None, heads: Vec::new(), gapped: false };
+    let mut authority = AuthoritySet::owner_only();
     for _ in 0..FOLLOW_MAX_PAGES {
         let query = Query {
             kinds: vec![stream::KIND_WRAP],
@@ -653,15 +783,19 @@ pub async fn follow_control<T: Transport + ?Sized>(
             if oldest.is_none_or(|o| at < o) {
                 oldest = Some(at);
             }
-            // Open + seal-verify; keep only the owner's (the authority gate).
+            // Open + seal-verify every edition; authority is resolved by the roster
+            // fold (CORD-04 §5), not by a signer filter here — an admin's edits fold.
             if let Ok((ed, _)) = control::open_control_edition(w, &control) {
-                if ed.author == owner && seen.insert(ed.inner_id) {
+                if seen.insert(ed.inner_id) {
                     editions.push(ed);
                 }
             }
         }
-        fold = apply_control_fold(community, &editions, &floors);
-        if !fold.gapped || fresh == 0 {
+        // Roster first (roles/grants/banlist → authorized set), then the authority-
+        // gated metadata/channel fold over the same edition set.
+        authority = fold_authority(community, &editions, &floors);
+        fold = apply_control_fold(community, &editions, &floors, &authority);
+        if !(fold.gapped || authority.gapped) || fresh == 0 {
             break;
         }
         until = oldest;
@@ -679,11 +813,17 @@ pub async fn follow_control<T: Transport + ?Sized>(
     }
     // Persist advanced floors BEFORE the state save (a failed floor write must not
     // let saved state outrun its floor), stamping the epoch this fold ran under —
-    // not the row's write-time value, which a concurrent re-founding can bump. Run
-    // both the advance (v+1) and same-version convergence (fork tiebreak) paths.
-    for h in &fold.heads {
+    // not the row's write-time value, which a concurrent re-founding can bump. Both
+    // the metadata/channel heads and the roster/banlist heads advance their floors;
+    // run the advance (v+1) and same-version convergence (fork tiebreak) paths.
+    for h in fold.heads.iter().chain(authority.heads.iter()) {
         crate::db::community::set_edition_head_at_epoch(&cid_hex, &h.entity_hex, h.version, &h.self_hash, &h.inner_id, community.root_epoch.0)?;
         crate::db::community::converge_edition_head_at_epoch(&cid_hex, &h.entity_hex, h.version, &h.self_hash, &h.inner_id, community.root_epoch.0)?;
+    }
+    // Persist the authorized banlist content (retained/withholding folds carry None,
+    // so the stored banlist is left intact — an anti-roster never silently un-bans).
+    if let Some((banned, version)) = &authority.banlist_persist {
+        crate::db::community::set_community_banlist(&cid_hex, banned, *version as i64)?;
     }
     match fold.updated {
         Some(u) => {
@@ -741,8 +881,11 @@ type Floors = std::collections::HashMap<String, (u64, [u8; 32], Option<[u8; 32]>
 /// a compacted head across a dangling `prev` (Armada doesn't persist a floor, so a
 /// Vector floor only makes Vector STRICTER locally — no wire change, honest-case
 /// convergence preserved).
-fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floors: &Floors) -> ControlFold {
+fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floors: &Floors, authority: &AuthoritySet) -> ControlFold {
+    use crate::community::roles::Permissions;
     use std::collections::BTreeMap;
+
+    let owner_hex = community.owner().ok().map(|o| o.to_hex());
 
     let mut groups: BTreeMap<(String, [u8; 32]), Vec<&ParsedEdition>> = BTreeMap::new();
     for e in editions {
@@ -754,83 +897,41 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
     let mut heads = Vec::new();
     let mut gapped = false;
     for ((vsk_code, eid), group) in &groups {
-        // This follow applies exactly two entities: community metadata (eid ==
-        // community_id) and channel metadata. Others carry no floor here. A vsk-2
-        // whose eid equals the community id is excluded — the floor row keys on the
-        // entity alone, so it would share (and corrupt) the metadata chain's floor.
+        // This fold applies exactly two entities: community metadata (eid ==
+        // community_id) and channel metadata. A vsk-2 whose eid equals the community
+        // id is excluded — the floor row keys on the entity alone, so it would share
+        // (and corrupt) the metadata chain's floor.
         let is_meta = vsk_code == vsk::COMMUNITY_METADATA && *eid == community.id().0;
         let is_channel = vsk_code == vsk::CHANNEL_METADATA && *eid != community.id().0;
         if !is_meta && !is_channel {
             continue;
         }
-        let entity_hex = crate::simd::hex::bytes_to_hex_32(eid);
-        let fold_eds: Vec<version::Edition> = group.iter().map(|p| p.to_fold_edition()).collect();
-        let floor = floors.get(&entity_hex);
-        let floor_v = floor.map(|f| f.0).unwrap_or(0);
-        let floor_hash = floor.map(|f| &f.1);
-        let held_inner = floor.and_then(|f| f.2);
-
-        let result = version::fold(&fold_eds, floor_v, floor_hash);
-        let hi = if floor_v == 0 {
-            // Bootstrap MUST win over the anchored arm: with {v1, v3} and a lost v2,
-            // the genesis still anchors — but a joiner must take the highest signed
-            // head (v3, what Armada shows), not the stale anchored prefix, or the
-            // seeded floor pins them below the network head for good.
-            match version::bootstrap_head(&fold_eds, 0) {
-                Some(i) => i,
-                None => continue,
-            }
-        } else if result.anchored {
-            gapped |= result.gap; // withheld versions above the verified prefix → page.
-            match result.head {
-                Some(i) => i,
-                None => continue,
-            }
-        } else if result.head.is_none() && !result.gap {
-            // Everything fetched is BELOW the floor: a merely-stale relay, not
-            // withholding — the held state already supersedes it; no paging.
+        // Authority gate (CORD-04 §5): only editions whose author CURRENTLY holds the
+        // entity's management bit are eligible. Pre-filtering before the fold means a
+        // demoted admin's (possibly higher-version) edition can't be the head; the
+        // highest AUTHORIZED head wins. The owner is supreme.
+        let required = if is_meta { Permissions::MANAGE_METADATA } else { Permissions::MANAGE_CHANNELS };
+        let authed: Vec<&ParsedEdition> = group
+            .iter()
+            .copied()
+            .filter(|e| {
+                let author = e.author.to_hex();
+                // A banned npub's edits are dropped (CORD-04 §4), even if they still
+                // held a bit via a not-yet-stripped grant.
+                !authority.banned.contains(&author) && authority.roles.is_authorized(&author, owner_hex.as_deref(), required)
+            })
+            .collect();
+        if authed.is_empty() {
             continue;
-        } else {
-            // Unanchored under a held floor: converge a same-version fork at the
-            // floor to its deterministic winner, else fail closed.
-            let fork = fold_eds
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| e.version == floor_v)
-                .min_by_key(|(_, e)| e.tiebreak_id);
-            let win_hash = match fork {
-                Some((_, w))
-                    if floor_hash != Some(&w.self_hash)
-                        && held_inner.is_none_or(|h| w.tiebreak_id < h) =>
-                {
-                    w.self_hash
-                }
-                _ => {
-                    // All ≥-floor editions are detached from our committed head (or
-                    // the only fork present LOSES the tiebreak): withholding.
-                    gapped = true;
-                    continue;
-                }
-            };
-            let re = version::fold(&fold_eds, floor_v, Some(&win_hash));
-            if !re.anchored {
-                gapped = true;
-                continue;
-            }
-            gapped |= re.gap;
-            match re.head {
-                Some(i) => i,
-                None => continue,
-            }
-        };
+        }
+        let entity_hex = crate::simd::hex::bytes_to_hex_32(eid);
+        let fold_eds: Vec<version::Edition> = authed.iter().map(|p| p.to_fold_edition()).collect();
+        let (hi, entity_gapped) = fold_head(&fold_eds, floors.get(&entity_hex));
+        gapped |= entity_gapped;
+        let Some(hi) = hi else { continue };
 
-        let head = group[hi];
-        heads.push(FoldedHead {
-            entity_hex,
-            version: head.version,
-            self_hash: head.self_hash,
-            inner_id: head.inner_id,
-        });
+        let head = authed[hi];
+        heads.push(FoldedHead { entity_hex, version: head.version, self_hash: head.self_hash, inner_id: head.inner_id });
         if is_meta {
             if let Ok(meta) = serde_json::from_str::<control::CommunityMetadata>(&head.content) {
                 changed |= apply_community_metadata(&mut out, meta);
@@ -843,6 +944,256 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
         }
     }
     ControlFold { updated: changed.then_some(out), heads, gapped }
+}
+
+/// Fold one entity's editions against its persisted floor into a head index (into the
+/// input slice) plus whether a TRACKING gap was hit (the caller pages older history).
+/// Encapsulates the W2 refuse-downgrade policy: bootstrap at floor 0 (highest signed
+/// head, what Armada shows across a compaction's dangling prev); adopt the chain-
+/// anchored head, paging on an upper gap; converge a same-version fork at the floor to
+/// the lower-inner-id winner; and fail closed otherwise.
+fn fold_head(fold_eds: &[version::Edition], floor: Option<&(u64, [u8; 32], Option<[u8; 32]>)>) -> (Option<usize>, bool) {
+    let floor_v = floor.map(|f| f.0).unwrap_or(0);
+    if floor_v == 0 {
+        return (version::bootstrap_head(fold_eds, 0), false);
+    }
+    let floor_hash = floor.map(|f| &f.1);
+    let held_inner = floor.and_then(|f| f.2);
+    let result = version::fold(fold_eds, floor_v, floor_hash);
+    if result.anchored {
+        return (result.head, result.gap); // verified prefix; page any upper gap.
+    }
+    if result.head.is_none() && !result.gap {
+        return (None, false); // everything below floor — a stale relay, no paging.
+    }
+    // Unanchored under a held floor: converge a same-version fork at the floor to its
+    // deterministic winner (lower inner id; a NULL held id is always replaceable),
+    // else fail closed.
+    let fork = fold_eds.iter().enumerate().filter(|(_, e)| e.version == floor_v).min_by_key(|(_, e)| e.tiebreak_id);
+    let win_hash = match fork {
+        Some((_, w)) if floor_hash != Some(&w.self_hash) && held_inner.is_none_or(|h| w.tiebreak_id < h) => w.self_hash,
+        _ => return (None, true), // detached from our committed head → withholding.
+    };
+    let re = version::fold(fold_eds, floor_v, Some(&win_hash));
+    if !re.anchored {
+        return (None, true);
+    }
+    (re.head, re.gap)
+}
+
+/// The folded, delegation-AUTHORIZED control-plane authority (CORD-04): the roster
+/// (roles + grants, owner-seeded fixpoint), the enforced banlist, and the
+/// role/grant/banlist heads to persist as refuse-downgrade floors. The owner is
+/// recomputed from the self-certifying community_id at each use.
+struct AuthoritySet {
+    roles: crate::community::roles::CommunityRoles,
+    banned: std::collections::BTreeSet<String>,
+    heads: Vec<FoldedHead>,
+    gapped: bool,
+    /// The authorized banlist `(content, version)` to persist when an authorized head
+    /// advanced the floor. `None` when the banlist was retained (no new authorized
+    /// head) or is empty — the caller then leaves the stored banlist untouched.
+    banlist_persist: Option<(Vec<String>, u64)>,
+}
+
+impl AuthoritySet {
+    /// Bootstrap authority for a community with no roster editions folded yet: only
+    /// the owner is authorized (supreme), nobody banned.
+    fn owner_only() -> Self {
+        AuthoritySet { roles: Default::default(), banned: Default::default(), heads: vec![], gapped: false, banlist_persist: None }
+    }
+}
+
+/// Fold the roster/banlist entities (vsk 1/3/4) from the control editions into the
+/// delegation-AUTHORIZED roster + enforced banlist (CORD-04 §2-§5). Each entity binds
+/// to its coordinate (role at role_id, grant at grant_locator(cid, member), banlist at
+/// banlist_locator(cid)); a content whose coordinate doesn't match is dropped. Roles
+/// cap at the 100 lowest role_ids, a member at 64 roles, the banlist at 500. The
+/// banlist is enforced only if its head's signer held BAN in the authorized roster.
+fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &Floors) -> AuthoritySet {
+    use crate::community::roles::{CommunityRoles, MemberGrant, Permissions, Role};
+    use crate::community::roster::{authorize_delegation, FoldedRoster};
+    use std::collections::BTreeMap;
+
+    let cid = community.id();
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&cid.0);
+    let owner = community.owner().ok();
+    let owner_hex = owner.map(|o| o.to_hex());
+    let banlist_eid = super::derive::banlist_locator(cid);
+    let banlist_hex = crate::simd::hex::bytes_to_hex_32(&banlist_eid);
+
+    let mut groups: BTreeMap<[u8; 32], Vec<&ParsedEdition>> = BTreeMap::new();
+    for e in editions {
+        if e.vsk == vsk::ROLE || e.vsk == vsk::GRANT || e.vsk == vsk::BANLIST {
+            groups.entry(e.entity_id).or_default().push(e);
+        }
+    }
+
+    let mut roles: Vec<Role> = Vec::new();
+    let mut role_authors: Vec<PublicKey> = Vec::new();
+    let mut grants: Vec<MemberGrant> = Vec::new();
+    let mut grant_authors: Vec<PublicKey> = Vec::new();
+    let mut heads: Vec<FoldedHead> = Vec::new();
+    let mut gapped = false;
+
+    for (eid, group) in &groups {
+        // The banlist is folded author-aware AFTER the roster is known (below) — not
+        // here, where head selection is author-blind.
+        if *eid == banlist_eid {
+            continue;
+        }
+        let entity_hex = crate::simd::hex::bytes_to_hex_32(eid);
+        let fold_eds: Vec<version::Edition> = group.iter().map(|p| p.to_fold_edition()).collect();
+        let (hi, entity_gapped) = fold_head(&fold_eds, floors.get(&entity_hex));
+        gapped |= entity_gapped;
+        let Some(hi) = hi else { continue };
+        let head = group[hi];
+        let folded_head = FoldedHead { entity_hex: entity_hex.clone(), version: head.version, self_hash: head.self_hash, inner_id: head.inner_id };
+
+        match head.vsk.as_str() {
+            vsk::ROLE => {
+                // Bind: the content's role_id IS the coordinate; position 0 is the owner's.
+                if let Some(role) = super::roles::parse_role_content(&head.content) {
+                    if role.role_id == entity_hex && role.position != 0 {
+                        roles.push(role);
+                        role_authors.push(head.author);
+                        heads.push(folded_head);
+                    }
+                }
+            }
+            vsk::GRANT => {
+                if let Some(mut grant) = super::roles::parse_grant_content(&head.content) {
+                    if let Some(member) = crate::simd::hex::hex_to_bytes_32_checked(&grant.member) {
+                        if super::derive::grant_locator(cid, &member) == *eid {
+                            grant.role_ids.truncate(super::roles::MAX_ROLES_PER_MEMBER);
+                            grants.push(grant);
+                            grant_authors.push(head.author);
+                            heads.push(folded_head);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Cap the community at the 100 lowest role_ids (deterministic), keeping the
+    // author list aligned.
+    if roles.len() > super::roles::MAX_ROLES_PER_COMMUNITY {
+        let mut order: Vec<usize> = (0..roles.len()).collect();
+        order.sort_by(|&a, &b| roles[a].role_id.cmp(&roles[b].role_id));
+        let keep: std::collections::HashSet<usize> = order.into_iter().take(super::roles::MAX_ROLES_PER_COMMUNITY).collect();
+        let (mut kr, mut ka) = (Vec::new(), Vec::new());
+        for (i, (r, a)) in roles.into_iter().zip(role_authors).enumerate() {
+            if keep.contains(&i) {
+                kr.push(r);
+                ka.push(a);
+            }
+        }
+        roles = kr;
+        role_authors = ka;
+    }
+
+    // Delegation-authorize a role/grant set (owner-seeded fixpoint). The unused
+    // FoldedRoster fields (metadata/channel/registry) are empty — authorize_delegation
+    // reads only roles + role_authors + grant_authors.
+    let authorize = |roles: Vec<Role>, role_authors: Vec<PublicKey>, grants: Vec<MemberGrant>, grant_authors: Vec<PublicKey>| {
+        let folded = FoldedRoster {
+            roles: CommunityRoles { roles, grants },
+            role_authors,
+            grant_authors,
+            gapped_entities: vec![],
+            skipped: 0,
+            fetched: 0,
+            heads: vec![],
+            banned: vec![],
+            banlist_author: None,
+            dissolved_by: vec![],
+            banlist_head: None,
+            invite_link_sets: vec![],
+            root_meta: None,
+            root_author: None,
+            root_head: None,
+            root_candidates: vec![],
+            channel_meta: vec![],
+            channel_candidates: vec![],
+        };
+        authorize_delegation(&folded, owner_hex.as_deref())
+    };
+
+    // Preliminary roster (bans not yet applied) — the authority view the banlist head
+    // is judged against.
+    let prelim = authorize(roles.clone(), role_authors.clone(), grants.clone(), grant_authors.clone());
+
+    // Banlist (CORD-04 §4), folded AUTHORITY-aware so its two anti-roster hazards are
+    // both closed:
+    //   - head selection: the head is the highest version whose author CURRENTLY holds
+    //     BAN — an unauthorized higher-version edition can't erase existing bans
+    //     (fail-open), and the floor never advances to one;
+    //   - per-target: each entry is kept only if the author STRICTLY OUTRANKS that
+    //     target (`can_act_on_member` — an admin can't ban a peer/superior, and the
+    //     owner is unbannable);
+    //   - withholding: when no authorized head is served, the persisted banlist is
+    //     RETAINED (an anti-roster must not un-ban on a relay withholding the ban).
+    let persisted_banned: Vec<String> = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
+    let banlist_authored: Vec<&ParsedEdition> = groups
+        .get(&banlist_eid)
+        .map(|g| {
+            g.iter()
+                .copied()
+                .filter(|e| prelim.is_authorized(&e.author.to_hex(), owner_hex.as_deref(), Permissions::BAN))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut banlist_persist: Option<(Vec<String>, u64)> = None;
+    let banned: std::collections::BTreeSet<String> = if banlist_authored.is_empty() {
+        persisted_banned.into_iter().collect()
+    } else {
+        let fold_eds: Vec<version::Edition> = banlist_authored.iter().map(|p| p.to_fold_edition()).collect();
+        let (hi, g) = fold_head(&fold_eds, floors.get(&banlist_hex));
+        gapped |= g;
+        match hi {
+            Some(hi) => {
+                let head = banlist_authored[hi];
+                let ah = head.author.to_hex();
+                let list: Vec<String> = super::roles::parse_banlist_content(&head.content)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|t| prelim.can_act_on_member(&ah, owner_hex.as_deref(), t, Permissions::BAN))
+                    .take(super::roles::MAX_BANLIST)
+                    .collect();
+                heads.push(FoldedHead { entity_hex: banlist_hex.clone(), version: head.version, self_hash: head.self_hash, inner_id: head.inner_id });
+                banlist_persist = Some((list.clone(), head.version));
+                list.into_iter().collect()
+            }
+            None => persisted_banned.into_iter().collect(),
+        }
+    };
+
+    // CORD-04 §4: a banned npub vanishes — every event from them is dropped. Re-
+    // authorize with editions AUTHORED by a banned npub removed, and grants TO a
+    // banned member removed (they hold no rank), so a banned admin loses authority.
+    let authorized = if banned.is_empty() {
+        prelim
+    } else {
+        let (mut fr, mut fra) = (Vec::new(), Vec::new());
+        for (r, a) in roles.into_iter().zip(role_authors) {
+            if !banned.contains(&a.to_hex()) {
+                fr.push(r);
+                fra.push(a);
+            }
+        }
+        let (mut fg, mut fga) = (Vec::new(), Vec::new());
+        for (g, a) in grants.into_iter().zip(grant_authors) {
+            if !banned.contains(&a.to_hex()) && !banned.contains(&g.member) {
+                fg.push(g);
+                fga.push(a);
+            }
+        }
+        authorize(fr, fra, fg, fga)
+    };
+
+    AuthoritySet { roles: authorized, banned, heads, gapped, banlist_persist }
 }
 
 /// Apply a folded community-metadata head. Relays only overwrite when the edition
@@ -1135,6 +1486,7 @@ fn advance_scope(
 mod tests {
     use super::super::super::transport::memory::MemoryRelay;
     use super::*;
+    use crate::community::roles::{MemberGrant, Permissions, Role, RoleScope};
 
     /// A distinct npub-shaped account-dir name (bech32 charset) per counter.
     fn account_name(n: u32) -> String {
@@ -1660,6 +2012,248 @@ mod tests {
         let rumor = control::build_edition_rumor(signer.public_key(), vsk::COMMUNITY_METADATA, &community.id().0, version, prev.as_ref(), &content, at_secs, None);
         let (wrap, _) = control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(at_secs)).unwrap();
         relay.publish(&wrap, &community.relays).await.unwrap();
+    }
+
+    /// Publish a Role edition (vsk 1) signed by `signer`, chained to the current head.
+    async fn publish_role(relay: &MemoryRelay, community: &CommunityV2, signer: &Keys, role: &Role, version: u64) {
+        let group = control_group_key(&community.community_root, community.id(), community.root_epoch);
+        let role_id = crate::simd::hex::hex_to_bytes_32_checked(&role.role_id).unwrap();
+        let prev = head_hash_on_relay(relay, community, &role_id).await;
+        let content = crate::community::v2::roles::role_content_json(role).unwrap();
+        let rumor = control::build_edition_rumor(signer.public_key(), vsk::ROLE, &role_id, version, prev.as_ref(), &content, 1_000, None);
+        let (wrap, _) = control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(1_000)).unwrap();
+        relay.publish(&wrap, &community.relays).await.unwrap();
+    }
+
+    /// Publish a Grant edition (vsk 3) signed by `signer`, at grant_locator(cid, member).
+    async fn publish_grant(relay: &MemoryRelay, community: &CommunityV2, signer: &Keys, member: &PublicKey, role_ids: Vec<String>, version: u64) {
+        let group = control_group_key(&community.community_root, community.id(), community.root_epoch);
+        let eid = crate::community::v2::derive::grant_locator(community.id(), &member.to_bytes());
+        let prev = head_hash_on_relay(relay, community, &eid).await;
+        let grant = MemberGrant { member: member.to_hex(), role_ids };
+        let content = crate::community::v2::roles::grant_content_json(&grant).unwrap();
+        let rumor = control::build_edition_rumor(signer.public_key(), vsk::GRANT, &eid, version, prev.as_ref(), &content, 1_000, None);
+        let (wrap, _) = control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(1_000)).unwrap();
+        relay.publish(&wrap, &community.relays).await.unwrap();
+    }
+
+    /// Publish a Banlist edition (vsk 4) signed by `signer`, at banlist_locator(cid).
+    async fn publish_banlist(relay: &MemoryRelay, community: &CommunityV2, signer: &Keys, banned: &[String], version: u64) {
+        let group = control_group_key(&community.community_root, community.id(), community.root_epoch);
+        let eid = crate::community::v2::derive::banlist_locator(community.id());
+        let prev = head_hash_on_relay(relay, community, &eid).await;
+        let content = crate::community::v2::roles::banlist_content_json(banned).unwrap();
+        let rumor = control::build_edition_rumor(signer.public_key(), vsk::BANLIST, &eid, version, prev.as_ref(), &content, 1_000, None);
+        let (wrap, _) = control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(1_000)).unwrap();
+        relay.publish(&wrap, &community.relays).await.unwrap();
+    }
+
+    fn admin_role(role_id: &str, perms: u64) -> Role {
+        Role { role_id: role_id.into(), name: "Admin".into(), position: 1, permissions: Permissions(perms), scope: RoleScope::Server, color: 0 }
+    }
+
+    #[tokio::test]
+    async fn an_authorized_admin_edits_metadata_but_a_demoted_one_cannot() {
+        // CORD-04 §5: an admin holding MANAGE_METADATA renames the community; once the
+        // owner revokes the grant, the (now unauthorized) admin's further edit drops
+        // and the name holds at the last authorized state.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Base", vec!["wss://r".into()], None).await.unwrap();
+        let admin = Keys::generate();
+        let rid = "a1".repeat(32);
+        publish_role(&relay, &community, &owner, &admin_role(&rid, Permissions::MANAGE_METADATA), 1).await;
+        publish_grant(&relay, &community, &owner, &admin.public_key(), vec![rid.clone()], 1).await;
+        publish_community_meta(&relay, &community, &admin, "Admin Rename", 2).await;
+
+        let session = SessionGuard::capture();
+        let updated = follow_control(&relay, &community, &session).await.unwrap().expect("admin edit authorized");
+        assert_eq!(updated.name, "Admin Rename", "an admin with MANAGE_METADATA renames");
+
+        publish_grant(&relay, &community, &owner, &admin.public_key(), vec![], 2).await; // revoke
+        publish_community_meta(&relay, &community, &admin, "Demoted Rename", 3).await;
+        let _ = follow_control(&relay, &community, &session).await.unwrap();
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(held.name, "Admin Rename", "a demoted admin's edit is dropped; the name holds");
+    }
+
+    #[tokio::test]
+    async fn a_roleless_member_cannot_edit_metadata() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Guarded", vec!["wss://r".into()], None).await.unwrap();
+        let stranger = Keys::generate();
+        publish_community_meta(&relay, &community, &stranger, "Hijacked", 2).await;
+        let session = SessionGuard::capture();
+        assert!(
+            follow_control(&relay, &community, &session).await.unwrap().is_none(),
+            "a roleless member's metadata edit never folds"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_self_signed_grant_is_not_authority() {
+        // The self-promotion defense: a member self-signs both a role and a grant of
+        // it to themselves. authorize_delegation drops both (their signer never traces
+        // to the owner), so their metadata edit stays unauthorized.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "NoSelfPromo", vec!["wss://r".into()], None).await.unwrap();
+        let rogue = Keys::generate();
+        let rid = "b2".repeat(32);
+        publish_role(&relay, &community, &rogue, &admin_role(&rid, Permissions::ADMIN_ALL), 1).await;
+        publish_grant(&relay, &community, &rogue, &rogue.public_key(), vec![rid.clone()], 1).await;
+        publish_community_meta(&relay, &community, &rogue, "Seized", 2).await;
+        let session = SessionGuard::capture();
+        assert!(
+            follow_control(&relay, &community, &session).await.unwrap().is_none(),
+            "a self-signed grant confers no authority"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_banlist_is_enforced_only_from_a_ban_holder() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Bans", vec!["wss://r".into()], None).await.unwrap();
+        let target = "cc".repeat(32);
+
+        // A non-BAN-holder's banlist edition is folded but NOT enforced.
+        let rogue = Keys::generate();
+        publish_banlist(&relay, &community, &rogue, &[target.clone()], 1).await;
+        let floors = load_floors(&community);
+        let editions = fetch_control(&relay, &community).await;
+        let authority = fold_authority(&community, &editions, &floors);
+        assert!(authority.banned.is_empty(), "a non-owner (no BAN) banlist is not enforced");
+
+        // The owner (supreme, holds BAN) bans the target: now enforced.
+        publish_banlist(&relay, &community, &owner, &[target.clone()], 2).await;
+        let editions = fetch_control(&relay, &community).await;
+        let authority = fold_authority(&community, &editions, &floors);
+        assert!(authority.banned.contains(&target), "the owner's banlist is enforced");
+    }
+
+    #[tokio::test]
+    async fn a_banned_admin_loses_all_authority() {
+        // CORD-04 §4: a banned npub vanishes — even holding an un-stripped grant, a
+        // banned admin's authority is dropped and their edits refused.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "BanAuth", vec!["wss://r".into()], None).await.unwrap();
+        let admin = Keys::generate();
+        let rid = "e5".repeat(32);
+        publish_role(&relay, &community, &owner, &admin_role(&rid, Permissions::MANAGE_METADATA), 1).await;
+        publish_grant(&relay, &community, &owner, &admin.public_key(), vec![rid.clone()], 1).await;
+        publish_banlist(&relay, &community, &owner, &[admin.public_key().to_hex()], 1).await; // ban, grant left intact
+        publish_community_meta(&relay, &community, &admin, "Banned Rename", 2).await;
+
+        let session = SessionGuard::capture();
+        assert!(
+            follow_control(&relay, &community, &session).await.unwrap().is_none(),
+            "a banned admin's edit is dropped even with an unstripped grant"
+        );
+        let authority = fold_authority(&community, &fetch_control(&relay, &community).await, &load_floors(&community));
+        assert!(authority.banned.contains(&admin.public_key().to_hex()));
+        assert!(
+            !authority.roles.is_authorized(&admin.public_key().to_hex(), Some(&owner.public_key().to_hex()), Permissions::MANAGE_METADATA),
+            "a banned admin holds no bit"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_ban_holder_cannot_ban_a_superior_or_the_owner() {
+        // CORD-04 §3/§5: BAN needs the bit AND a strict outrank of the target. A mod
+        // (pos 2, holds BAN) can ban a lower member but NOT a superior admin (pos 1)
+        // and NOT the owner (supreme, unbannable).
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Ranks", vec!["wss://r".into()], None).await.unwrap();
+        let admin = Keys::generate();
+        let moder = Keys::generate();
+        let stranger = Keys::generate();
+        let (admin_rid, mod_rid) = ("a1".repeat(32), "b2".repeat(32));
+        publish_role(&relay, &community, &owner, &Role { role_id: admin_rid.clone(), name: "Admin".into(), position: 1, permissions: Permissions(Permissions::ADMIN_ALL), scope: RoleScope::Server, color: 0 }, 1).await;
+        publish_role(&relay, &community, &owner, &Role { role_id: mod_rid.clone(), name: "Mod".into(), position: 2, permissions: Permissions(Permissions::BAN), scope: RoleScope::Server, color: 0 }, 1).await;
+        publish_grant(&relay, &community, &owner, &admin.public_key(), vec![admin_rid], 1).await;
+        publish_grant(&relay, &community, &owner, &moder.public_key(), vec![mod_rid], 1).await;
+        publish_banlist(&relay, &community, &moder, &[admin.public_key().to_hex(), owner.public_key().to_hex(), stranger.public_key().to_hex()], 1).await;
+
+        let authority = fold_authority(&community, &fetch_control(&relay, &community).await, &load_floors(&community));
+        assert!(!authority.banned.contains(&admin.public_key().to_hex()), "a mod cannot ban a superior admin");
+        assert!(!authority.banned.contains(&owner.public_key().to_hex()), "nobody can ban the owner");
+        assert!(authority.banned.contains(&stranger.public_key().to_hex()), "the mod CAN ban a lower-ranked member");
+    }
+
+    #[tokio::test]
+    async fn an_unauthorized_higher_banlist_cannot_unban() {
+        // CORD-04 §4 anti-roster fail-CLOSED: a rogue's higher-version empty banlist
+        // must not erase the owner's ban (author-aware head selection + persisted
+        // banlist retention).
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "NoUnban", vec!["wss://r".into()], None).await.unwrap();
+        let target = "cc".repeat(32);
+        publish_banlist(&relay, &community, &owner, &[target.clone()], 1).await;
+        let session = SessionGuard::capture();
+        follow_control(&relay, &community, &session).await.unwrap(); // persists the ban
+
+        let rogue = Keys::generate();
+        publish_banlist(&relay, &community, &rogue, &[], 2).await; // unauthorized higher, empty
+        let authority = fold_authority(&community, &fetch_control(&relay, &community).await, &load_floors(&community));
+        assert!(authority.banned.contains(&target), "an unauthorized higher banlist cannot un-ban");
+    }
+
+    #[tokio::test]
+    async fn a_grant_revoke_survives_a_withholding_relay() {
+        // Floor persistence on the delegation plane: after the owner revokes an admin,
+        // a relay serving only the OLD (still owner-signed) grant can't resurrect it.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Revoke", vec!["wss://good".into()], None).await.unwrap();
+        let admin = Keys::generate();
+        let rid = "d4".repeat(32);
+        publish_role(&relay, &community, &owner, &admin_role(&rid, Permissions::MANAGE_METADATA), 1).await;
+        publish_grant(&relay, &community, &owner, &admin.public_key(), vec![rid.clone()], 1).await;
+        let session = SessionGuard::capture();
+        follow_control(&relay, &community, &session).await.unwrap(); // seed floors incl. the grant at v1
+        publish_grant(&relay, &community, &owner, &admin.public_key(), vec![], 2).await; // revoke → grant floor v2
+        follow_control(&relay, &community, &session).await.unwrap();
+
+        // A stale relay serves only the grant prefix (v1, the live grant).
+        inject_stale_prefix(&relay, &community, 1, "wss://stale").await;
+        let mut stale = community.clone();
+        stale.relays = vec!["wss://stale".into()];
+        let floors = load_floors(&community);
+        let editions = fetch_control(&relay, &stale).await;
+        let authority = fold_authority(&stale, &editions, &floors);
+        assert!(
+            !authority.roles.is_authorized(&admin.public_key().to_hex(), Some(&owner.public_key().to_hex()), Permissions::MANAGE_METADATA),
+            "the persisted grant floor refuses the rolled-back (re-granted) view"
+        );
+    }
+
+    /// Load the current-epoch floors for a community (test mirror of follow_control).
+    fn load_floors(community: &CommunityV2) -> Floors {
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        crate::db::community::get_all_edition_heads_full(&cid_hex)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, f)| f.0 == community.root_epoch.0)
+            .map(|(e, f)| (e, (f.1, f.2, f.3)))
+            .collect()
+    }
+
+    /// Fetch + open every control edition at a community's control plane (test helper).
+    async fn fetch_control(relay: &MemoryRelay, community: &CommunityV2) -> Vec<ParsedEdition> {
+        let group = control_group_key(&community.community_root, community.id(), community.root_epoch);
+        let q = Query { kinds: vec![stream::KIND_WRAP], authors: vec![group.pk_hex()], limit: Some(500), ..Default::default() };
+        relay
+            .fetch(&q, &community.relays)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|w| control::open_control_edition(w, &group).ok().map(|(ed, _)| ed))
+            .collect()
     }
 
     #[tokio::test]

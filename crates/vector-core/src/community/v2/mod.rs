@@ -26,6 +26,7 @@ pub mod invite;
 pub mod list;
 pub mod realtime;
 pub mod rekey;
+pub mod roles;
 pub mod service;
 pub mod stream;
 
