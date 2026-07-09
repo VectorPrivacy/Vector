@@ -113,23 +113,119 @@ pub async fn send_message<T: Transport + ?Sized>(
     channel_id: &ChannelId,
     content: &str,
 ) -> Result<String, String> {
+    send_chat_message(transport, community, channel_id, content, None, &[], vec![]).await
+}
+
+/// Full chat send: threaded reply (NIP-C7 `q`, the parent's `(rumor_id, author)`
+/// hex pair), NIP-30 custom-emoji pairs, and verbatim extra tags (NIP-92 `imeta`
+/// attachments). Returns the message's rumor id (hex).
+pub async fn send_chat_message<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    channel_id: &ChannelId,
+    content: &str,
+    reply_to: Option<(&str, &str)>,
+    emoji: &[(&str, &str)],
+    extra_tags: Vec<nostr_sdk::prelude::Tag>,
+) -> Result<String, String> {
+    let (author, group, epoch, session) = chat_send_context(community, channel_id)?;
+    let at_ms = now_ms();
+    let rumor = chat::build_message_rumor(author.public_key(), channel_id, epoch, content, reply_to, emoji, extra_tags, at_ms);
+    publish_chat(transport, community, &session, &group, &author, rumor, at_ms, false).await
+}
+
+/// React to a channel message (kind 7, NIP-25 shape). `target_id_hex` /
+/// `target_author_hex` name the reacted-to message; `emoji` carries the NIP-30
+/// pair when `emoji_content` is a custom `:shortcode:`.
+pub async fn send_reaction<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    channel_id: &ChannelId,
+    target_id_hex: &str,
+    target_author_hex: &str,
+    emoji_content: &str,
+    emoji: Option<(&str, &str)>,
+) -> Result<String, String> {
+    let (author, group, epoch, session) = chat_send_context(community, channel_id)?;
+    let at_ms = now_ms();
+    let rumor = chat::build_reaction_rumor(author.public_key(), channel_id, epoch, target_id_hex, target_author_hex, emoji_content, emoji, at_ms);
+    publish_chat(transport, community, &session, &group, &author, rumor, at_ms, false).await
+}
+
+/// Edit one of your own messages (kind 3302): peers re-render `target_id_hex`
+/// with the replacement text. Author-enforced on the read side — only the
+/// original author's edit folds.
+pub async fn send_edit<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    channel_id: &ChannelId,
+    target_id_hex: &str,
+    new_content: &str,
+) -> Result<String, String> {
+    let (author, group, epoch, session) = chat_send_context(community, channel_id)?;
+    let at_ms = now_ms();
+    let rumor = chat::build_edit_rumor(author.public_key(), channel_id, epoch, target_id_hex, new_content, at_ms);
+    publish_chat(transport, community, &session, &group, &author, rumor, at_ms, false).await
+}
+
+/// Cooperative in-plane delete (kind 5, NIP-09 semantics): peers stop rendering
+/// `target_id_hex`. The wrap ciphertext on relays needs a separate NIP-09 scrub
+/// by its ephemeral key — not retained in this cut.
+pub async fn send_delete<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    channel_id: &ChannelId,
+    target_id_hex: &str,
+    target_kind: u16,
+) -> Result<String, String> {
+    let (author, group, epoch, session) = chat_send_context(community, channel_id)?;
+    let at_ms = now_ms();
+    let rumor = chat::build_delete_rumor(author.public_key(), channel_id, epoch, target_id_hex, target_kind, at_ms);
+    publish_chat(transport, community, &session, &group, &author, rumor, at_ms, false).await
+}
+
+/// Ephemeral typing indicator (kind 23311 in a 21059 wrap — relays never store it).
+pub async fn send_typing<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    channel_id: &ChannelId,
+) -> Result<(), String> {
+    let (author, group, epoch, session) = chat_send_context(community, channel_id)?;
+    let at_ms = now_ms();
+    let rumor = chat::build_typing_rumor(author.public_key(), channel_id, epoch, at_ms);
+    publish_chat(transport, community, &session, &group, &author, rumor, at_ms, true).await.map(|_| ())
+}
+
+/// Everything a chat-plane send needs: local keys, the channel's group key +
+/// epoch, and the session snapshot taken BEFORE any await. Refuses a keyless
+/// Private channel — deriving from the root would post to the public plane;
+/// its key arrives over the rekey plane.
+fn chat_send_context(community: &CommunityV2, channel_id: &ChannelId) -> Result<(Keys, GroupKey, Epoch, SessionGuard), String> {
     let session = SessionGuard::capture();
     let author = local_keys()?;
     let ch = community.channel(channel_id).ok_or("no such channel in this community")?;
-    // A keyless private channel can't be addressed (deriving from the root would post
-    // to the public plane); wait for the rekey to deliver its key.
     if ch.private && ch.key.is_none() {
         return Err("this private channel has no key yet (awaiting rekey delivery)".to_string());
     }
     let (secret, epoch) = community.channel_secret(ch);
-    let group = channel_group_key(&secret, channel_id, epoch);
+    Ok((author, channel_group_key(&secret, channel_id, epoch), epoch, session))
+}
 
-    let at_ms = now_ms();
-    let rumor = chat::build_message_rumor(author.public_key(), channel_id, epoch, content, None, &[], vec![], at_ms);
+/// Seal one chat rumor, re-check the session, publish. Returns the rumor id (hex).
+#[allow(clippy::too_many_arguments)]
+async fn publish_chat<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    session: &SessionGuard,
+    group: &GroupKey,
+    author: &Keys,
+    rumor: nostr_sdk::prelude::UnsignedEvent,
+    at_ms: u64,
+    ephemeral: bool,
+) -> Result<String, String> {
     let rumor_id = rumor.id.ok_or("rumor has no id")?.to_hex();
-    let (wrap, _ephemeral) = chat::seal_chat_rumor(&rumor, &group, &author, Timestamp::from_secs(at_ms / 1000), false)
+    let (wrap, _ephemeral_keys) = chat::seal_chat_rumor(&rumor, group, author, Timestamp::from_secs(at_ms / 1000), ephemeral)
         .map_err(|e| e.to_string())?;
-
     if !session.is_valid() {
         return Err("account changed before send".to_string());
     }
@@ -311,6 +407,22 @@ pub async fn mint_public_link<T: Transport + ?Sized>(
 }
 
 // ── The Invite Registry (vsk 8) + Invite List (13303), CORD-05 §4/§5 ──────────
+
+/// This account's LIVE minted links for one community: the synced 13303 Invite
+/// List (the cross-device source of truth), minus tombstoned tokens.
+pub async fn list_minted_links<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+) -> Vec<invite::InviteEntry> {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let list = fetch_invite_list(transport, &community.relays).await.unwrap_or_default();
+    let dead: std::collections::BTreeSet<&str> = list.tombstones.iter().map(|t| t.token.as_str()).collect();
+    list.entries
+        .iter()
+        .filter(|e| e.community_id == cid_hex && !dead.contains(e.token.as_str()))
+        .cloned()
+        .collect()
+}
 
 /// Fetch the creator's own 13303 Invite List from `relays` (newest wins; a
 /// decrypt/parse failure is "no news", never a clobber of the local mirror).
@@ -753,8 +865,120 @@ pub async fn leave_community<T: Transport + ?Sized>(transport: &T, community: &C
     // to the leaving community's own relays (it's about to be gone locally) —
     // best-effort.
     let _ = tombstone_community_list(transport, community.id(), &community.relays).await;
+    // The tombstone publish straddled an await — never delete from a swapped-in DB.
+    if !session.is_valid() {
+        return Err("account changed during leave".to_string());
+    }
     crate::db::community::delete_community(&crate::simd::hex::bytes_to_hex_32(&community.id().0))?;
     Ok(())
+}
+
+/// Cooperative Kick (CORD-04 §6, Guestbook plane): name the target; every reader
+/// honors it iff the signer holds KICK and strictly outranks them (the coalesce's
+/// `can_kick`), so publishing without authority is inert. A kicked member may
+/// rejoin with a fresh invite — cryptographic severance is the ban/refound path.
+pub async fn kick_member<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, target: &PublicKey) -> Result<(), String> {
+    let session = SessionGuard::capture();
+    let me = local_keys()?;
+    // Fast local pre-check; readers re-verify independently. The `vac` citation
+    // rides with the deferred citation-completeness pass (owner needs none).
+    let authority = fetch_authority(transport, community).await;
+    let owner_hex = community.owner()?.to_hex();
+    if !authority.roles.can_act_on_member(
+        &me.public_key().to_hex(),
+        Some(&owner_hex),
+        &target.to_hex(),
+        crate::community::roles::Permissions::KICK,
+    ) {
+        return Err("not authorized to kick this member".to_string());
+    }
+    let at_ms = now_ms();
+    let gb_group = super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
+    let rumor = guestbook::build_kick_rumor(me.public_key(), *target, None, at_ms);
+    let (wrap, _) = guestbook::seal_guestbook_rumor(&rumor, &gb_group, &me, Timestamp::from_secs(at_ms / 1000))
+        .map_err(|e| e.to_string())?;
+    if !session.is_valid() {
+        return Err("account changed before send".to_string());
+    }
+    transport.publish(&wrap, &community.relays).await?;
+    Ok(())
+}
+
+/// A community's folded, delegation-authorized authority — the on-demand read
+/// view (a paged control-plane fetch + fold, nothing persisted). `roles` is the
+/// owner-seeded authorized roster (shared algebra with v1); `banned` the
+/// enforced banlist. `floored`/`head_entities` let a writer detect a WITHHELD
+/// entity (floored locally but no head folded) before replacing it blind.
+pub struct AuthorityView {
+    pub roles: crate::community::roles::CommunityRoles,
+    pub banned: std::collections::BTreeSet<String>,
+    /// Any authority entity's fold hit a floor gap (withheld / evicted link).
+    pub gapped: bool,
+    /// Entity hexes holding a persisted floor at this epoch (all vsk kinds).
+    pub floored: std::collections::BTreeSet<String>,
+    /// Authority entities (role/grant/banlist) that folded a head this fetch.
+    pub head_entities: std::collections::BTreeSet<String>,
+}
+
+/// Fetch + fold the community's current authority (CORD-04), paging older like
+/// `follow_control` while the fold is gapped so a busy control plane can't push
+/// the roster off the newest window. A fetch failure degrades fail-safe:
+/// owner-only authority plus the PERSISTED banlist — nobody gains standing from
+/// an outage, and a ban never lifts on withheld data.
+pub async fn fetch_authority<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> AuthorityView {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, f)| f.0 == community.root_epoch.0)
+        .map(|(entity, f)| (entity, (f.1, f.2, f.3)))
+        .collect();
+    let control = control_group_key(&community.community_root, community.id(), community.root_epoch);
+
+    let mut editions: Vec<ParsedEdition> = Vec::new();
+    let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+    let mut seen_wraps: std::collections::HashSet<nostr_sdk::EventId> = std::collections::HashSet::new();
+    let mut oldest: Option<u64> = None;
+    let mut until: Option<u64> = None;
+    let mut a = AuthoritySet::owner_only();
+    for _ in 0..FOLLOW_MAX_PAGES {
+        let query = Query {
+            kinds: vec![stream::KIND_WRAP],
+            authors: vec![control.pk_hex()],
+            until,
+            limit: Some(FOLLOW_PAGE),
+            ..Default::default()
+        };
+        let Ok(wraps) = transport.fetch(&query, &community.relays).await else { break };
+        let mut fresh = 0usize;
+        for w in &wraps {
+            if !seen_wraps.insert(w.id) {
+                continue;
+            }
+            fresh += 1;
+            let at = w.created_at.as_secs();
+            if oldest.is_none_or(|o| at < o) {
+                oldest = Some(at);
+            }
+            if let Ok((ed, _)) = control::open_control_edition(w, &control) {
+                if seen.insert(ed.inner_id) {
+                    editions.push(ed);
+                }
+            }
+        }
+        a = fold_authority(community, &editions, &floors);
+        if !a.gapped || fresh == 0 {
+            break;
+        }
+        until = oldest;
+    }
+    AuthorityView {
+        roles: a.roles,
+        banned: a.banned,
+        gapped: a.gapped,
+        floored: floors.keys().cloned().collect(),
+        head_entities: a.heads.iter().map(|h| h.entity_hex.clone()).collect(),
+    }
 }
 
 /// Fold the Complete Memberlist from the Guestbook plane. The proven owner is
@@ -796,28 +1020,7 @@ pub async fn memberlist<T: Transport + ?Sized>(transport: &T, community: &Commun
     // ban subtraction. A control fetch failure degrades to owner-only authority + no
     // bans (fail-open on availability is safe here: a Kick still needs a real signer,
     // and a missed ban only fails to HIDE, never to wrongly admit authority).
-    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-    let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|(_, f)| f.0 == community.root_epoch.0)
-        .map(|(entity, f)| (entity, (f.1, f.2, f.3)))
-        .collect();
-    let control = control_group_key(&community.community_root, community.id(), community.root_epoch);
-    let control_query = Query {
-        kinds: vec![stream::KIND_WRAP],
-        authors: vec![control.pk_hex()],
-        limit: Some(FOLLOW_PAGE),
-        ..Default::default()
-    };
-    let control_eds: Vec<ParsedEdition> = transport
-        .fetch(&control_query, &community.relays)
-        .await
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|w| control::open_control_edition(w, &control).ok().map(|(ed, _)| ed))
-        .collect();
-    let authority = fold_authority(community, &control_eds, &floors);
+    let authority = fetch_authority(transport, community).await;
     let owner_hex = owner.to_hex();
 
     // Genesis / never-refounded community: NO snapshot authority (there is no
@@ -1374,6 +1577,107 @@ pub async fn grant_roles<T: Transport + ?Sized>(transport: &T, community: &Commu
     let content = super::roles::grant_content_json(&grant)?;
     let eid = super::derive::grant_locator(community.id(), &member.to_bytes());
     publish_control_edition(transport, community, &session, vsk::GRANT, &eid, &content, None).await
+}
+
+/// The community's @admin role id: the folded Server-scope ADMIN_ALL role when one
+/// exists, else (with `create_if_missing`) a DETERMINISTIC mint — the same id on
+/// every device, so concurrent grants converge as editions of ONE entity instead
+/// of forking two Admin roles.
+pub async fn ensure_admin_role<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    view: &AuthorityView,
+    create_if_missing: bool,
+) -> Result<Option<String>, String> {
+    use crate::community::roles::{Permissions, Role, RoleScope};
+    if let Some(r) = view
+        .roles
+        .roles
+        .iter()
+        .find(|r| matches!(r.scope, RoleScope::Server) && r.permissions.contains(Permissions::ADMIN_ALL))
+    {
+        return Ok(Some(r.role_id.clone()));
+    }
+    if !create_if_missing {
+        return Ok(None);
+    }
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let role_id = crate::crypto::sha256_hex(format!("vector/v2/role/admin/{cid_hex}").as_bytes());
+    set_role(transport, community, &Role::admin(role_id.clone())).await?;
+    Ok(Some(role_id))
+}
+
+/// Grant the @admin role (minting it deterministically when absent), MERGED into
+/// the member's existing grant — a grant entity replaces whole (CORD-04 §2), so a
+/// blind push would erase their other roles. Owner-only: the position-1 Admin is
+/// manageable only by position 0 (an equal never outranks it), and refusing
+/// before any publish keeps an unauthorized edition of the DETERMINISTIC admin
+/// entity from advancing this device's own floor onto a head readers reject.
+pub async fn grant_admin<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, member: &PublicKey) -> Result<(), String> {
+    let me = local_keys()?;
+    if me.public_key() != community.owner()? {
+        return Err("only the community owner can grant @admin".to_string());
+    }
+    let view = fetch_authority(transport, community).await;
+    let member_hex = member.to_hex();
+    require_grant_head(community, &view, &member_hex)?;
+    let role_id = ensure_admin_role(transport, community, &view, true)
+        .await?
+        .expect("create_if_missing yields an id");
+    let mut role_ids = view
+        .roles
+        .grants
+        .iter()
+        .find(|g| g.member == member_hex)
+        .map(|g| g.role_ids.clone())
+        .unwrap_or_default();
+    if role_ids.contains(&role_id) {
+        return Ok(()); // already admin — don't bump the grant edition for nothing.
+    }
+    role_ids.push(role_id);
+    grant_roles(transport, community, member, role_ids).await
+}
+
+/// Strip the @admin role from the member's grant, preserving their other roles.
+/// A no-op when they don't hold it. Owner-only, like [`grant_admin`].
+pub async fn revoke_admin<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, member: &PublicKey) -> Result<(), String> {
+    let me = local_keys()?;
+    if me.public_key() != community.owner()? {
+        return Err("only the community owner can revoke @admin".to_string());
+    }
+    let view = fetch_authority(transport, community).await;
+    let member_hex = member.to_hex();
+    require_grant_head(community, &view, &member_hex)?;
+    let Some(role_id) = ensure_admin_role(transport, community, &view, false).await? else {
+        return Ok(()); // no admin role exists — nothing to revoke.
+    };
+    let mut role_ids = view
+        .roles
+        .grants
+        .iter()
+        .find(|g| g.member == member_hex)
+        .map(|g| g.role_ids.clone())
+        .unwrap_or_default();
+    let before = role_ids.len();
+    role_ids.retain(|r| r != &role_id);
+    if role_ids.len() == before {
+        return Ok(());
+    }
+    grant_roles(transport, community, member, role_ids).await
+}
+
+/// A grant replaces whole — refuse the merge when this member's grant is FLOORED
+/// locally but no head folded (withheld / evicted): a blind push at that point
+/// would erase their other roles at a higher version.
+fn require_grant_head(community: &CommunityV2, view: &AuthorityView, member_hex: &str) -> Result<(), String> {
+    let Some(member) = crate::simd::hex::hex_to_bytes_32_checked(member_hex) else {
+        return Err("malformed member key".to_string());
+    };
+    let eid_hex = crate::simd::hex::bytes_to_hex_32(&super::derive::grant_locator(community.id(), &member));
+    if view.floored.contains(&eid_hex) && !view.head_entities.contains(&eid_hex) {
+        return Err("this member's current grant could not be fetched; try again once relays serve the control plane".to_string());
+    }
+    Ok(())
 }
 
 /// Replace the Banlist (vsk 4, CORD-04 §4) with `banned` (lowercase-hex npubs), the
@@ -4207,5 +4511,231 @@ mod tests {
         let link = mint_public_link(&transport, &community, "https://vectorapp.io", None, None).await.expect("mint link");
         println!("[smoke] invite link: {}", link.url);
         println!("[smoke] PASS — v2 create+send+fetch+invite round-tripped on {relay}");
+    }
+
+    #[tokio::test]
+    async fn chat_ops_react_edit_delete_round_trip() {
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Ops", bed.relays.clone(), None).await.unwrap();
+        let general = community.channels[0].id;
+        let me_hex = owner.keys.public_key().to_hex();
+
+        let msg_id = send_message(&bed.relay, &community, &general, "original").await.unwrap();
+        send_reaction(&bed.relay, &community, &general, &msg_id, &me_hex, ":fire:", Some(("fire", "https://e/f.png")))
+            .await
+            .unwrap();
+        send_edit(&bed.relay, &community, &general, &msg_id, "edited").await.unwrap();
+        send_delete(&bed.relay, &community, &general, &msg_id, super::super::kind::MESSAGE).await.unwrap();
+
+        let page = fetch_channel(&bed.relay, &community, &general, 50).await.unwrap();
+        let target = crate::simd::hex::hex_to_bytes_32(&msg_id);
+        let mut saw = (false, false, false);
+        for f in &page {
+            match &f.event {
+                ChatEvent::Reaction { target: t, emoji, emoji_url, .. } if *t == target => {
+                    assert_eq!(emoji, ":fire:");
+                    assert_eq!(emoji_url.as_deref(), Some("https://e/f.png"));
+                    saw.0 = true;
+                }
+                ChatEvent::Edit { target: t, new_content, .. } if *t == target => {
+                    assert_eq!(new_content, "edited");
+                    saw.1 = true;
+                }
+                ChatEvent::Delete { target: t, .. } if *t == target => saw.2 = true,
+                _ => {}
+            }
+        }
+        assert!(saw.0 && saw.1 && saw.2, "reaction/edit/delete all round-trip: {saw:?}");
+    }
+
+    #[tokio::test]
+    async fn a_typing_signal_rides_the_ephemeral_wrap_and_is_never_stored() {
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Typ", bed.relays.clone(), None).await.unwrap();
+        let general = community.channels[0].id;
+        let group = channel_group_key(&community.community_root, &general, community.root_epoch);
+
+        // A live subscriber sees the 21059 wrap and it opens as Typing…
+        let mut sub = bed.relay.subscribe(Query {
+            kinds: vec![stream::KIND_WRAP_EPHEMERAL],
+            authors: vec![group.pk_hex()],
+            ..Default::default()
+        });
+        send_typing(&bed.relay, &community, &general).await.unwrap();
+        let wrap = sub.try_recv().expect("the typing wrap streams to a live subscriber");
+        assert!(
+            matches!(chat::open_chat_event(&wrap, &group, &general, community.root_epoch), Ok(ChatEvent::Typing { .. })),
+            "the ephemeral wrap opens as a Typing event"
+        );
+
+        // …while nothing durable is stored (relays never keep the ephemeral tier),
+        // so channel history stays free of typing noise.
+        let page = fetch_channel(&bed.relay, &community, &general, 50).await.unwrap();
+        assert!(page.iter().all(|f| !matches!(f.event, ChatEvent::Typing { .. })));
+    }
+
+    #[tokio::test]
+    async fn send_chat_message_threads_the_reply_and_extra_tags() {
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Re", bed.relays.clone(), None).await.unwrap();
+        let general = community.channels[0].id;
+        let me_hex = owner.keys.public_key().to_hex();
+
+        let parent_id = send_message(&bed.relay, &community, &general, "parent").await.unwrap();
+        let imeta = nostr_sdk::prelude::Tag::custom(
+            nostr_sdk::prelude::TagKind::custom("imeta"),
+            ["url https://e/blob".to_string(), "m image/png".to_string()],
+        );
+        let child_id = send_chat_message(
+            &bed.relay, &community, &general, "child",
+            Some((parent_id.as_str(), me_hex.as_str())), &[], vec![imeta],
+        )
+        .await
+        .unwrap();
+
+        let page = fetch_channel(&bed.relay, &community, &general, 50).await.unwrap();
+        let child = page
+            .iter()
+            .find_map(|f| match &f.event {
+                ChatEvent::Message { opened, reply_to, .. } if opened.rumor_id.to_hex() == child_id => Some((opened, reply_to)),
+                _ => None,
+            })
+            .expect("the reply message round-trips");
+        let reply = child.1.as_ref().expect("the reply reference is carried");
+        assert_eq!(crate::simd::hex::bytes_to_hex_32(&reply.id), parent_id);
+        assert_eq!(reply.author, Some(owner.keys.public_key()));
+        assert!(
+            child.0.rumor.tags.iter().any(|t| t.kind() == nostr_sdk::prelude::TagKind::custom("imeta")),
+            "the imeta attachment tag rides the rumor verbatim"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_kick_needs_kick_authority_and_removes_the_target() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Kick", bed.relays.clone(), None).await.unwrap();
+
+        // The target announces a Join (as an accepted invite would).
+        let gb = super::super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
+        let join = guestbook::build_join_rumor(member.keys.public_key(), None, 2_000);
+        let (wrap, _) = guestbook::seal_guestbook_rumor(&join, &gb, &member.keys, Timestamp::from_secs(2)).unwrap();
+        bed.relay.publish(&wrap, &bed.relays).await.unwrap();
+        let before = memberlist(&bed.relay, &community).await.unwrap();
+        assert!(before.contains(&member.keys.public_key()), "the join lands first");
+
+        // An unprivileged member's kick of the owner is refused locally…
+        bed.swap_to(&member);
+        let err = kick_member(&bed.relay, &community, &owner.keys.public_key()).await.unwrap_err();
+        assert!(err.contains("not authorized"), "unprivileged kick refused: {err}");
+
+        // …and the owner (supreme, no grant needed) kicks the member out.
+        bed.swap_to(&owner);
+        kick_member(&bed.relay, &community, &member.keys.public_key()).await.unwrap();
+        let after = memberlist(&bed.relay, &community).await.unwrap();
+        assert!(!after.contains(&member.keys.public_key()), "the kicked member leaves the fold");
+        assert!(after.contains(&owner.keys.public_key()), "the owner remains");
+    }
+
+    #[tokio::test]
+    async fn grant_admin_mints_one_deterministic_role_and_revoke_strips_it() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Adm", bed.relays.clone(), None).await.unwrap();
+        let member_pk = member.keys.public_key();
+        let member_hex = member_pk.to_hex();
+        let owner_hex = owner.keys.public_key().to_hex();
+
+        grant_admin(&bed.relay, &community, &member_pk).await.unwrap();
+        let view = fetch_authority(&bed.relay, &community).await;
+        assert!(view.roles.is_admin(&member_hex), "the grant folds as admin");
+        assert!(view.roles.is_authorized(&member_hex, Some(&owner_hex), Permissions::MANAGE_ROLES));
+
+        // A second grant (any device) converges on the SAME role entity — and a
+        // repeat is a no-op, not a version bump.
+        let second = Keys::generate().public_key();
+        grant_admin(&bed.relay, &community, &second).await.unwrap();
+        grant_admin(&bed.relay, &community, &member_pk).await.unwrap();
+        let view = fetch_authority(&bed.relay, &community).await;
+        assert_eq!(view.roles.roles.len(), 1, "one Admin role, never a fork");
+        assert!(view.roles.is_admin(&member_hex) && view.roles.is_admin(&second.to_hex()));
+        let grant = view.roles.grants.iter().find(|g| g.member == member_hex).unwrap();
+        assert_eq!(grant.role_ids.len(), 1, "no duplicate role id in the grant");
+
+        // Revoke strips ONLY the admin role and de-authorizes.
+        revoke_admin(&bed.relay, &community, &member_pk).await.unwrap();
+        let view = fetch_authority(&bed.relay, &community).await;
+        assert!(!view.roles.is_admin(&member_hex), "revoked");
+        assert!(view.roles.is_admin(&second.to_hex()), "the other admin is untouched");
+        assert!(!view.roles.is_authorized(&member_hex, Some(&owner_hex), Permissions::KICK));
+    }
+
+    #[tokio::test]
+    async fn grant_admin_is_refused_for_a_non_owner_and_publishes_nothing() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "NoSquat", bed.relays.clone(), None).await.unwrap();
+
+        bed.swap_to(&member);
+        let err = grant_admin(&bed.relay, &community, &member.keys.public_key()).await.unwrap_err();
+        assert!(err.contains("owner"), "refused before any publish: {err}");
+
+        // The deterministic admin-role entity stays unsquatted — the owner's later
+        // legitimate mint is version 1 and folds cleanly.
+        bed.swap_to(&owner);
+        let view = fetch_authority(&bed.relay, &community).await;
+        assert!(view.roles.roles.is_empty(), "no role edition landed");
+        grant_admin(&bed.relay, &community, &member.keys.public_key()).await.unwrap();
+        let view = fetch_authority(&bed.relay, &community).await;
+        assert!(view.roles.is_admin(&member.keys.public_key().to_hex()));
+    }
+
+    #[tokio::test]
+    async fn grant_admin_merges_other_roles_and_refuses_a_withheld_grant() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Merge", bed.relays.clone(), None).await.unwrap();
+        let member_pk = member.keys.public_key();
+
+        // The member already holds a Mod role, granted through the real send path
+        // (so this device's floors track both entities).
+        let mod_rid = crate::simd::hex::bytes_to_hex_32(&[0x66; 32]);
+        set_role(&bed.relay, &community, &admin_role(&mod_rid, Permissions::BAN)).await.unwrap();
+        grant_roles(&bed.relay, &community, &member_pk, vec![mod_rid.clone()]).await.unwrap();
+
+        // A relay that withholds the control plane must refuse the merge — a blind
+        // push would erase the Mod role at a higher version.
+        let withholding = MemoryRelay::new();
+        let err = grant_admin(&withholding, &community, &member_pk).await.unwrap_err();
+        assert!(err.contains("could not be fetched"), "withheld grant refused: {err}");
+
+        // Against the full relay the merge preserves the Mod role.
+        grant_admin(&bed.relay, &community, &member_pk).await.unwrap();
+        let view = fetch_authority(&bed.relay, &community).await;
+        let grant = view.roles.grants.iter().find(|g| g.member == member_pk.to_hex()).unwrap();
+        assert_eq!(grant.role_ids.len(), 2, "admin ADDED to the existing grant, not replacing it");
+        assert!(grant.role_ids.contains(&mod_rid));
+    }
+
+    #[tokio::test]
+    async fn fetch_authority_reflects_a_granted_admin() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Auth", bed.relays.clone(), None).await.unwrap();
+        let rid = crate::simd::hex::bytes_to_hex_32(&[0x5a; 32]);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::ADMIN_ALL), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &member.keys.public_key(), vec![rid], 1).await;
+
+        let view = fetch_authority(&bed.relay, &community).await;
+        let member_hex = member.keys.public_key().to_hex();
+        assert!(view.roles.is_admin(&member_hex), "the granted member folds as admin");
+        assert!(
+            view.roles.is_authorized(&member_hex, Some(&owner.keys.public_key().to_hex()), Permissions::KICK),
+            "an ADMIN_ALL grant carries KICK"
+        );
+        assert!(view.banned.is_empty());
     }
 }

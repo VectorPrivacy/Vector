@@ -263,6 +263,13 @@ pub async fn dispatch_event(session: &SessionGuard, event: Event, handler: Arc<d
     }
 }
 
+/// Whether a live follow worker is draining the queue (a `listen()` is running).
+/// Headless callers use this to run a follow inline instead of enqueueing into
+/// the void.
+pub(crate) fn follow_worker_running() -> bool {
+    V2_FOLLOW_TX.lock().unwrap().as_ref().map(|tx| !tx.is_closed()).unwrap_or(false)
+}
+
 /// Queue a follow for `id` — NON-BLOCKING + coalesced. A burst (or a junk-wrap
 /// flood) collapses to at most one queued + one running follow per community. A
 /// no-op if no worker is running (no live `listen()`). Callers: dispatch,
