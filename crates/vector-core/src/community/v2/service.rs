@@ -1905,11 +1905,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accept_parked_invite_rejects_a_forged_root_definitively() {
+    async fn accept_parked_invite_rejects_a_forged_root() {
         // A forged-root parked bundle (real identity triple, attacker-chosen root) fails
-        // accept with the DEFINITIVE "could not verify" signal — the facade keys the
-        // pending-row cleanup on this string, so a pre-planted poison self-clears on the
-        // victim's accept and a genuine re-invite can re-park under the same id.
+        // accept — the shared accept path re-verifies the owner root, so a parked invite
+        // gets the same eclipse protection as a live one.
         let (_tmp, _guard, _owner) = init_test_db();
         let relay = MemoryRelay::new();
         let community = create_community(&relay, "Real", vec!["wss://r".into()], None).await.unwrap();
