@@ -1259,13 +1259,22 @@ impl VectorCore {
         if community_id.len() != 64 {
             return Err(VectorError::Other("malformed community id".into()));
         }
-        let token_bytes = crate::simd::hex::hex_to_bytes_32(token);
-        let community = crate::db::community::load_community(&CommunityId(
-            crate::simd::hex::hex_to_bytes_32(community_id),
-        ))
-        .map_err(VectorError::Other)?
-        .ok_or_else(|| VectorError::Other("community not found".into()))?;
+        let cid = CommunityId(crate::simd::hex::hex_to_bytes_32(community_id));
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(20));
+        // Dual-stack: a v2 link is retired by its 16-byte token hex (re-post the
+        // coordinate as a tombstone + tombstone the 13303 entry + refresh the Registry).
+        if let Some(Some(crate::community::ConcordProtocol::V2)) = crate::db::community::community_protocol(&cid).ok() {
+            let community = crate::db::community::load_community_v2(&cid)
+                .map_err(VectorError::Other)?
+                .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
+            return crate::community::v2::service::revoke_public_link(&transport, &community, token)
+                .await
+                .map_err(VectorError::Other);
+        }
+        let token_bytes = crate::simd::hex::hex_to_bytes_32(token);
+        let community = crate::db::community::load_community(&cid)
+            .map_err(VectorError::Other)?
+            .ok_or_else(|| VectorError::Other("community not found".into()))?;
         service::revoke_public_invite(&transport, &community, &token_bytes)
             .await
             .map_err(VectorError::Other)

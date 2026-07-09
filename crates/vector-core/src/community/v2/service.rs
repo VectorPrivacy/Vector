@@ -282,7 +282,196 @@ pub async fn mint_public_link<T: Transport + ?Sized>(
         return Err("account changed before minting link".to_string());
     }
     transport.publish_durable(&bundle_event, &community.relays).await?;
-    Ok(MintedLink { url, bundle_event, link_signer, token })
+    let minted = MintedLink { url, bundle_event, link_signer, token };
+    // Sync the link across the creator's devices (13303) + publish the Registry
+    // (vsk-8) so members see the community is Public. Best-effort — the link works
+    // without the sync.
+    let _ = record_minted_link(transport, community, &minted).await;
+    Ok(minted)
+}
+
+// ── The Invite Registry (vsk 8) + Invite List (13303), CORD-05 §4/§5 ──────────
+
+/// Fetch the creator's own 13303 Invite List from `relays` (newest wins; a
+/// decrypt/parse failure is "no news", never a clobber of the local mirror).
+async fn fetch_invite_list<T: Transport + ?Sized>(transport: &T, relays: &[String]) -> Option<invite::InviteList> {
+    let me = local_keys().ok()?;
+    let query = Query {
+        kinds: vec![super::kind::INVITE_LIST],
+        authors: vec![me.public_key().to_hex()],
+        limit: Some(4),
+        ..Default::default()
+    };
+    let events = transport.fetch(&query, relays).await.ok()?;
+    events
+        .into_iter()
+        .filter_map(|e| invite::parse_invite_list_event(&e, &me).ok().map(|l| (e.created_at.as_secs(), l)))
+        .max_by_key(|(at, _)| *at)
+        .map(|(_, l)| l)
+}
+
+/// The creator's LIVE (non-tombstoned) link-signer pubkeys for one community — the
+/// Registry's content (CORD-05 §5), derived from the stored link secrets.
+fn live_signers_for(list: &invite::InviteList, community_id_hex: &str) -> Vec<PublicKey> {
+    let dead: std::collections::HashSet<&str> = list.tombstones.iter().map(|t| t.token.as_str()).collect();
+    list.entries
+        .iter()
+        .filter(|e| e.community_id == community_id_hex && !dead.contains(e.token.as_str()))
+        .filter_map(|e| Keys::parse(&e.signer_sk).ok().map(|k| k.public_key()))
+        .collect()
+}
+
+/// Publish the creator's Registry (vsk-8) edition — their live link signers for this
+/// community — so members fold it into the Public/Private source of truth (a
+/// non-empty aggregate = Public).
+async fn publish_invite_registry<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, session: &SessionGuard, live_signers: &[PublicKey]) -> Result<(), String> {
+    let me = local_keys()?;
+    let eid = super::derive::invite_links_locator(community.id(), &me.public_key().to_bytes());
+    let content = invite::build_registry_content(live_signers);
+    publish_control_edition(transport, community, session, vsk::INVITE_LINKS, &eid, &content, None).await
+}
+
+/// Record a freshly-minted public link across the creator's devices: append it to the
+/// 13303 Invite List and refresh the Registry (CORD-05 §4/§5).
+async fn record_minted_link<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, minted: &MintedLink) -> Result<(), String> {
+    let session = SessionGuard::capture();
+    let me = local_keys()?;
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let token_hex = crate::simd::hex::bytes_to_hex_16(&minted.token);
+    let mut list = fetch_invite_list(transport, &community.relays).await.unwrap_or_default();
+    if !list.entries.iter().any(|e| e.token == token_hex) {
+        list.entries.push(invite::InviteEntry {
+            token: token_hex,
+            signer_sk: minted.link_signer.secret_key().to_secret_hex(),
+            community_id: cid_hex.clone(),
+            url: minted.url.clone(),
+            label: None,
+            created_at: now_ms() / 1000,
+            expires_at: None,
+            extra: Default::default(),
+        });
+    }
+    if !session.is_valid() {
+        return Err("account changed during link record".to_string());
+    }
+    let event = invite::build_invite_list_event(&me, &list).map_err(|e| e.to_string())?;
+    transport.publish(&event, &community.relays).await?;
+    let signers = live_signers_for(&list, &cid_hex);
+    publish_invite_registry(transport, community, &session, &signers).await
+}
+
+/// Revoke a public link by its token hex (CORD-05 §2/§5): re-post its coordinate as a
+/// revocation tombstone (retiring the bundle behind the URL, so a fetcher finds the
+/// grave), tombstone the Invite List entry, and refresh the Registry. Retiring the
+/// LAST live link empties the Registry → the community reads Private (a Refounding is
+/// the owner's separate read-cut).
+pub async fn revoke_public_link<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, token_hex: &str) -> Result<(), String> {
+    let session = SessionGuard::capture();
+    let me = local_keys()?;
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let mut list = fetch_invite_list(transport, &community.relays).await.ok_or("no invite list found to revoke from")?;
+    let entry = list
+        .entries
+        .iter()
+        .find(|e| e.token == token_hex && e.community_id == cid_hex)
+        .cloned()
+        .ok_or("no such link in the invite list")?;
+    // Re-post the bundle coordinate as a revocation tombstone (creator-signed).
+    let link_signer = Keys::parse(&entry.signer_sk).map_err(|_| "malformed link signer")?;
+    let revocation = invite::build_revocation(&link_signer).map_err(|e| e.to_string())?;
+    if !session.is_valid() {
+        return Err("account changed during revoke".to_string());
+    }
+    transport.publish_durable(&revocation, &community.relays).await?;
+    // Tombstone the Invite List entry (permanent — a stale device can't resurrect it).
+    list.tombstones.push(invite::InviteTombstone { token: token_hex.to_string(), community_id: cid_hex.clone(), extra: Default::default() });
+    list.entries.retain(|e| e.token != token_hex);
+    let event = invite::build_invite_list_event(&me, &list).map_err(|e| e.to_string())?;
+    transport.publish(&event, &community.relays).await?;
+    let signers = live_signers_for(&list, &cid_hex);
+    publish_invite_registry(transport, community, &session, &signers).await
+}
+
+/// Refresh every live public link's bundle behind its stable URL (CORD-05 §2) — e.g.
+/// after a Rekey/Refounding rolled the keys — by re-posting the bundle at the same
+/// coordinate with the CURRENT community state, so a link shared once keeps working
+/// across rotations. Best-effort.
+pub async fn refresh_public_links<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<(), String> {
+    let session = SessionGuard::capture();
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let Some(list) = fetch_invite_list(transport, &community.relays).await else {
+        return Ok(());
+    };
+    let creator = local_keys()?.public_key();
+    let dead: std::collections::HashSet<&str> = list.tombstones.iter().map(|t| t.token.as_str()).collect();
+    for entry in &list.entries {
+        if entry.community_id != cid_hex || dead.contains(entry.token.as_str()) || entry.token.len() != 2 * super::derive::TOKEN_LEN {
+            continue;
+        }
+        let Ok(link_signer) = Keys::parse(&entry.signer_sk) else { continue };
+        let token = crate::simd::hex::hex_to_bytes_16(&entry.token);
+        let bundle = bundle_of(community, Some(creator), entry.expires_at, entry.label.clone());
+        let bundle_key = super::derive::invite_bundle_key(&token);
+        if let Ok(event) = invite::build_bundle_event(&link_signer, &bundle, &bundle_key) {
+            if !session.is_valid() {
+                return Err("account changed during link refresh".to_string());
+            }
+            let _ = transport.publish_durable(&event, &community.relays).await;
+        }
+    }
+    Ok(())
+}
+
+/// Whether this community is PUBLIC (CORD-05 §5): fold every creator's Registry
+/// (vsk-8) that its author is authorized for (`CREATE_INVITE`, bound to their
+/// coordinate) into an aggregate live-link set — non-empty ⇒ a live link exists ⇒
+/// Public; empty ⇒ Private. Retiring the last link is what flips it back.
+pub async fn community_is_public<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> bool {
+    use crate::community::roles::Permissions;
+    use std::collections::BTreeMap;
+    let Ok(owner) = community.owner() else { return false };
+    let owner_hex = owner.to_hex();
+    let cid = community.id();
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&cid.0);
+    let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, f)| f.0 == community.root_epoch.0)
+        .map(|(entity, f)| (entity, (f.1, f.2, f.3)))
+        .collect();
+    let control = control_group_key(&community.community_root, cid, community.root_epoch);
+    let query = Query { kinds: vec![stream::KIND_WRAP], authors: vec![control.pk_hex()], limit: Some(FOLLOW_PAGE), ..Default::default() };
+    let editions: Vec<ParsedEdition> = transport
+        .fetch(&query, &community.relays)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|w| control::open_control_edition(w, &control).ok().map(|(ed, _)| ed))
+        .collect();
+    let authority = fold_authority(community, &editions, &floors);
+
+    let mut by_eid: BTreeMap<[u8; 32], Vec<&ParsedEdition>> = BTreeMap::new();
+    for e in &editions {
+        if e.vsk == vsk::INVITE_LINKS {
+            by_eid.entry(e.entity_id).or_default().push(e);
+        }
+    }
+    for (eid, group) in &by_eid {
+        let fold_eds: Vec<version::Edition> = group.iter().map(|p| p.to_fold_edition()).collect();
+        let (Some(hi), _) = fold_head(&fold_eds, floors.get(&crate::simd::hex::bytes_to_hex_32(eid))) else { continue };
+        let head = group[hi];
+        // The creator must hold CREATE_INVITE AND own this coordinate.
+        if !authority.roles.is_authorized(&head.author.to_hex(), Some(&owner_hex), Permissions::CREATE_INVITE) {
+            continue;
+        }
+        if super::derive::invite_links_locator(cid, &head.author.to_bytes()) != *eid {
+            continue;
+        }
+        if invite::parse_registry_content(&head.content).map(|s| !s.is_empty()).unwrap_or(false) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Accept an already-unwrapped bundle: verify the owner commitment AND that the
@@ -860,6 +1049,9 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
     for (h, _) in &carried {
         crate::db::community::set_edition_head_at_epoch(&cid_hex, &h.entity_hex, h.version, &h.self_hash, &h.inner_id, new_epoch.0)?;
     }
+    // Refresh any live public links so their bundles carry the NEW root behind the
+    // same URL (a link shared once survives the rotation, CORD-05 §2). Best-effort.
+    let _ = refresh_public_links(transport, &updated).await;
     Ok(updated)
 }
 
@@ -2771,6 +2963,45 @@ mod tests {
         let first = mint_or_reuse_rotation_key(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX, 1).unwrap();
         let second = mint_or_reuse_rotation_key(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX, 1).unwrap();
         assert_eq!(first, second, "a retry reuses the archived root, never double-mints");
+    }
+
+    #[tokio::test]
+    async fn minting_a_link_makes_the_community_public_and_revoke_makes_it_private() {
+        // CORD-05 §5: the Registry is the Public/Private source of truth. Minting a
+        // link publishes it (Public); retiring the last link empties it (Private).
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Invitable", vec!["wss://r".into()], None).await.unwrap();
+        assert!(!community_is_public(&relay, &community).await, "a fresh community is Private");
+
+        let minted = mint_public_link(&relay, &community, "https://x", None, None).await.unwrap();
+        assert!(community_is_public(&relay, &community).await, "a live link makes it Public");
+        let list = fetch_invite_list(&relay, &community.relays).await.expect("the 13303 list was published");
+        assert_eq!(list.entries.len(), 1, "the minted link is recorded across devices");
+
+        let token_hex = crate::simd::hex::bytes_to_hex_16(&minted.token);
+        revoke_public_link(&relay, &community, &token_hex).await.unwrap();
+        assert!(!community_is_public(&relay, &community).await, "retiring the last link makes it Private again");
+        let after = fetch_invite_list(&relay, &community.relays).await.unwrap();
+        assert!(after.entries.is_empty() && after.tombstones.len() == 1, "the link is tombstoned in the invite list");
+    }
+
+    #[tokio::test]
+    async fn a_registry_from_a_non_create_invite_holder_does_not_make_it_public() {
+        // The CREATE_INVITE gate: a rogue publishing a registry can't fake Public.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Gated", vec!["wss://r".into()], None).await.unwrap();
+        let rogue = Keys::generate();
+        // Rogue publishes a registry edition at THEIR coordinate with a fake signer.
+        let eid = crate::community::v2::derive::invite_links_locator(community.id(), &rogue.public_key().to_bytes());
+        let content = crate::community::v2::invite::build_registry_content(&[Keys::generate().public_key()]);
+        let group = control_group_key(&community.community_root, community.id(), community.root_epoch);
+        let rumor = control::build_edition_rumor(rogue.public_key(), vsk::INVITE_LINKS, &eid, 1, None, &content, 1_000, None);
+        let (wrap, _) = control::seal_control_edition(&rumor, &group, &rogue, Timestamp::from_secs(1_000)).unwrap();
+        relay.publish(&wrap, &community.relays).await.unwrap();
+        let _ = owner;
+        assert!(!community_is_public(&relay, &community).await, "a non-CREATE_INVITE registry is ignored");
     }
 
     #[tokio::test]

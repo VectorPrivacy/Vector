@@ -501,6 +501,30 @@ pub fn merge_invite_lists(a: InviteList, b: InviteList) -> InviteList {
     }
 }
 
+/// Build the creator's kind-13303 Invite List event (CORD-05 §4): the document
+/// NIP-44-encrypted to SELF and signed by the creator's real key. Replaceable, one
+/// per creator. On READ the caller MERGES into the local mirror, never replaces.
+pub fn build_invite_list_event(my_keys: &Keys, list: &InviteList) -> Result<Event, InviteError> {
+    use nostr_sdk::nips::nip44::{encrypt, Version};
+    let json = serde_json::to_string(list).map_err(|e| InviteError::Json(e.to_string()))?;
+    let content = encrypt(my_keys.secret_key(), &my_keys.public_key(), json.as_bytes(), Version::V2).map_err(|e| InviteError::Crypto(e.to_string()))?;
+    EventBuilder::new(Kind::Custom(kind::INVITE_LIST), content)
+        .sign_with_keys(my_keys)
+        .map_err(|e| InviteError::Crypto(e.to_string()))
+}
+
+/// Decrypt + parse a kind-13303 event with the creator's own keys. A decrypt/parse
+/// failure MUST be treated as "no news" by the caller — never a clobber of a
+/// populated local list.
+pub fn parse_invite_list_event(event: &Event, my_keys: &Keys) -> Result<InviteList, InviteError> {
+    use nostr_sdk::nips::nip44::decrypt;
+    if event.kind.as_u16() != kind::INVITE_LIST {
+        return Err(InviteError::BadEvent("not a kind-13303 invite list"));
+    }
+    let json = decrypt(my_keys.secret_key(), &my_keys.public_key(), &event.content).map_err(|e| InviteError::Crypto(e.to_string()))?;
+    serde_json::from_str(&json).map_err(|e| InviteError::Json(e.to_string()))
+}
+
 // ── 5. The Registry (vsk 8) ───────────────────────────────────────────────────
 
 /// Build the vsk-8 Registry entity content (CORD-05 §5): a JSON array of the
