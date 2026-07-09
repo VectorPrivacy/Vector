@@ -1061,6 +1061,7 @@ impl VectorCore {
         }
         Ok(serde_json::json!({
             "community_id": community.id.to_hex(),
+            "version": 1,
             "name": community.name,
             "channels": community.channels.iter()
                 .map(|c| serde_json::json!({ "channel_id": c.id.to_hex(), "name": c.name }))
@@ -1109,6 +1110,7 @@ impl VectorCore {
         }
         Ok(serde_json::json!({
             "community_id": community.id.to_hex(),
+            "version": 1,
             "name": community.name,
             "channels": community.channels.iter()
                 .map(|c| serde_json::json!({ "channel_id": c.id.to_hex(), "name": c.name }))
