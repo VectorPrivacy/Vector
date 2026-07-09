@@ -352,19 +352,20 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
     // T's genesis onto a fake root to MITM another T-joiner — is closed only by
     // binding the root into community_id (protocol, deferred).
     //
-    // Seed `until = now + skew`: a bounded `until` takes the transport's AUTHORITATIVE
-    // drain-ALL-relays path (an open `until` returns only a fast relay's partial
-    // window and misses a genesis on a lagging relay — routine over Tor), while the
-    // skew margin still admits a clock-skewed future-dated genesis (relays reject
-    // events far beyond their tolerance anyway). Break on an EMPTY page (a short page
-    // is a relay cap). A forged root walks to exhaustion and rejects; a flood/deep
-    // plane that buries the genesis past the walk is the deferred protocol residual.
+    // Seed `until` with a FAR-FUTURE constant (NOT now-based): `until.is_some()` takes
+    // the transport's AUTHORITATIVE drain-ALL-relays path (an open `until` returns only
+    // a fast relay's partial window and misses a genesis on a lagging relay — routine
+    // over Tor), while a constant beyond any real created_at clips NOTHING — so neither
+    // a clock-skewed future-dated genesis nor a >1h-slow-clock joiner is excluded (a
+    // now-based bound could clip either). Break on an EMPTY page (a short page is a
+    // relay cap). A forged root walks to exhaustion and rejects; a flood/deep plane
+    // that buries the genesis past the walk is the deferred protocol residual.
     const PAGE: usize = 500;
     const MAX_PAGES: usize = 4;
-    const SKEW_SECS: u64 = 3600;
+    const FAR_FUTURE_SECS: u64 = 4_102_444_800; // ~year 2100 — above any real edition, safe as a relay `until`.
     let mut editions: Vec<ParsedEdition> = Vec::new();
     let mut found_genesis = false;
-    let mut until: Option<u64> = Some(now_ms() / 1000 + SKEW_SECS);
+    let mut until: Option<u64> = Some(FAR_FUTURE_SECS);
     for _ in 0..MAX_PAGES {
         let query = Query {
             kinds: vec![stream::KIND_WRAP],
