@@ -2832,7 +2832,7 @@ mod tests {
 
     // ── Two-actor end-to-end (the create → invite → join → message loop) ──────
 
-    async fn texts_in(relay: &MemoryRelay, community: &CommunityV2, channel: &ChannelId) -> Vec<String> {
+    async fn texts_in<T: crate::community::transport::Transport + ?Sized>(relay: &T, community: &CommunityV2, channel: &ChannelId) -> Vec<String> {
         fetch_channel(relay, community, channel, 100)
             .await
             .unwrap()
@@ -3883,6 +3883,103 @@ mod tests {
         dissolve_community(&bed.relay, &refounded).await.unwrap();
         assert!(crate::db::community::load_community_v2(community.id()).unwrap().unwrap().dissolved, "the community is sealed");
         println!("[dissolve] community sealed (read-only)\n===== e2e PASS =====\n");
+    }
+
+    /// The same scenario on a REAL relay with TWO throwaway accounts, off by default. It
+    /// LOGS both nsecs (+ every id) so you can inspect the run and RE-RUN against the same
+    /// accounts by exporting `VECTOR_E2E_NSEC_A` / `_B`. Set `VECTOR_E2E_LOG=<path>` to also
+    /// append the transcript to a file, `VECTOR_E2E_RELAY=<url>` to pick the relay.
+    ///   cargo test -p vector-core -- --ignored --nocapture live_e2e_two_accounts
+    #[tokio::test]
+    #[ignore]
+    async fn live_e2e_two_accounts() {
+        use crate::community::transport::LiveTransport;
+        use nostr_sdk::prelude::{ClientBuilder, RelayOptions, ToBech32};
+
+        let relay = std::env::var("VECTOR_E2E_RELAY").unwrap_or_else(|_| "wss://jskitty.com/nostr".to_string());
+        let relays = vec![relay.clone()];
+        let _g = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        crate::db::clear_id_caches();
+        let tmp = tempfile::tempdir().unwrap();
+        crate::db::set_app_data_dir(tmp.path().to_path_buf());
+
+        // Throwaway (or bring-your-own via env for a re-run against the same accounts).
+        let a = std::env::var("VECTOR_E2E_NSEC_A").ok().and_then(|n| Keys::parse(&n).ok()).unwrap_or_else(Keys::generate);
+        let b = std::env::var("VECTOR_E2E_NSEC_B").ok().and_then(|n| Keys::parse(&n).ok()).unwrap_or_else(Keys::generate);
+
+        let log = |line: String| {
+            println!("{line}");
+            if let Ok(p) = std::env::var("VECTOR_E2E_LOG") {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+                    let _ = writeln!(f, "{line}");
+                }
+            }
+        };
+        log(format!("===== LIVE Concord v2 e2e on {relay} ====="));
+        log(format!("VECTOR_E2E_NSEC_A={}  ({})", a.secret_key().to_bech32().unwrap(), a.public_key().to_bech32().unwrap()));
+        log(format!("VECTOR_E2E_NSEC_B={}  ({})", b.secret_key().to_bech32().unwrap(), b.public_key().to_bech32().unwrap()));
+
+        for k in [&a, &b] {
+            let npub = k.public_key().to_bech32().unwrap();
+            std::fs::create_dir_all(tmp.path().join(&npub)).unwrap();
+            crate::db::set_current_account(npub.clone()).unwrap();
+            crate::db::init_database(&npub).unwrap();
+        }
+        // One relay connection: a v2 wrap is pre-signed (ephemeral p-key) and its seal is
+        // signed by MY_SECRET_KEY, so publishing needs no per-account client signer.
+        let client = ClientBuilder::new().signer(a.clone()).build();
+        client.pool().add_relay(relay.as_str(), RelayOptions::default()).await.ok();
+        client.connect().await;
+        crate::state::set_nostr_client(client);
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(15));
+        let become_acct = |k: &Keys| {
+            let npub = k.public_key().to_bech32().unwrap();
+            crate::db::set_current_account(npub.clone()).unwrap();
+            crate::db::init_database(&npub).unwrap();
+            crate::db::clear_id_caches();
+            crate::state::MY_SECRET_KEY.store_from_keys(k, &[]);
+            crate::state::set_my_public_key(k.public_key());
+        };
+        let settle = || tokio::time::sleep(std::time::Duration::from_secs(2));
+
+        // A: create + a channel + grant B admin + mint link.
+        become_acct(&a);
+        let mut community = create_community(&transport, "Live E2E", relays.clone(), None).await.expect("create");
+        let general = community.channels[0].id;
+        log(format!("[create] community {} · #general {}", crate::simd::hex::bytes_to_hex_32(&community.id().0), crate::simd::hex::bytes_to_hex_32(&general.0)));
+        send_message(&transport, &community, &general, "A: live hello").await.expect("send");
+        let ann = create_public_channel(&transport, &community, "announcements").await.expect("channel");
+        community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        log(format!("[channel] +public #announcements {}", crate::simd::hex::bytes_to_hex_32(&ann.0)));
+        grant_admin(&transport, &community, &b.public_key()).await.expect("grant admin");
+        let link = mint_public_link(&transport, &community, "https://vectorapp.io", None, None).await.expect("mint");
+        log(format!("[invite] B granted @admin · link {}", link.url));
+        let bundle_json = serde_json::to_string(&bundle_of(&community, Some(a.public_key()), None, None)).unwrap();
+        settle().await;
+
+        // B: join + read A's history + reply.
+        become_acct(&b);
+        let b_view = accept_parked_invite(&transport, &bundle_json, None).await.expect("join");
+        log(format!("[join] B joined; {} channels", b_view.channels.len()));
+        settle().await;
+        let seen = texts_in(&transport, &b_view, &general).await;
+        log(format!("[read] B sees #general: {seen:?}"));
+        assert!(seen.iter().any(|t| t == "A: live hello"), "B reads A's message over the real relay");
+        send_message(&transport, &b_view, &general, "B: live reply").await.expect("reply");
+        settle().await;
+
+        // A: ban B (three-removal) + dissolve.
+        become_acct(&a);
+        set_banlist(&transport, &community, &[b.public_key().to_hex()]).await.expect("banlist");
+        grant_roles(&transport, &community, &b.public_key(), vec![]).await.expect("strip");
+        let refounded = refound_community(&transport, &community, &[b.public_key()]).await.expect("refound");
+        log(format!("[ban] B banned; root → epoch {}", refounded.root_epoch.0));
+        settle().await;
+        dissolve_community(&transport, &refounded).await.expect("dissolve");
+        log("[dissolve] community sealed".to_string());
+        log("===== LIVE e2e PASS =====".to_string());
     }
 
     #[tokio::test]

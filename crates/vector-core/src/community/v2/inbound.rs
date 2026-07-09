@@ -378,7 +378,7 @@ mod tests {
     use crate::community::transport::memory::MemoryRelay;
     use crate::community::transport::Transport;
     use nostr_sdk::prelude::Keys;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     /// A handler that records every callback it receives.
     #[derive(Default)]
