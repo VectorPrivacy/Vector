@@ -414,6 +414,22 @@ pub async fn accept_direct_invite<T: Transport + ?Sized>(transport: &T, wrap: &E
     accept_bundle(transport, &session, &bundle, Some(inviter)).await
 }
 
+/// Accept a PARKED Direct Invite from its stored bundle JSON (the wrap was already
+/// unwrapped + owner-verified at park time). Re-parses through the same fail-closed
+/// bundle validation, then runs the shared accept path (which re-verifies the owner
+/// root over the network). `inviter_hex` is the parked seal signer, for Guestbook
+/// Join attribution.
+pub async fn accept_parked_invite<T: Transport + ?Sized>(
+    transport: &T,
+    bundle_json: &str,
+    inviter_hex: Option<&str>,
+) -> Result<CommunityV2, String> {
+    let session = SessionGuard::capture();
+    let bundle = CommunityInvite::from_bundle_json(bundle_json).map_err(|e| e.to_string())?;
+    let invited_by = inviter_hex.and_then(|h| PublicKey::parse(h).ok());
+    accept_bundle(transport, &session, &bundle, invited_by).await
+}
+
 /// Accept a public invite link: parse it, fetch every event at `(33301,
 /// link_signer, "")`, and join. **Revocation is authoritative-if-present**: if
 /// ANY signer-valid tombstone is among the fetched events, refuse — never trust
@@ -1861,6 +1877,60 @@ mod tests {
         let relay = CappedRelay { events, cap: 100 };
         let verified = verify_owner_root_and_reconcile(&relay, community.clone()).await;
         assert!(verified.is_ok(), "the until-walk pages a capped relay past the flood to the genesis: {:?}", verified.err());
+    }
+
+    #[tokio::test]
+    async fn accept_parked_invite_joins_from_the_stored_bundle() {
+        // The 3313 receive path: an invite is parked as its bundle JSON, then accepted
+        // from the stored bundle (re-verifying the owner root over the network).
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Parked", bed.relays.clone(), None).await.unwrap();
+        let general = community.channels[0].id;
+        send_message(&bed.relay, &community, &general, "owner: hi").await.unwrap();
+        let bundle = bundle_of(&community, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        let inviter_hex = owner.keys.public_key().to_hex();
+
+        bed.swap_to(&member);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, Some(&inviter_hex)).await.unwrap();
+        assert_eq!(joined.id().0, community.id().0, "joined the community from the parked bundle");
+        assert!(joined.identity.verify());
+        assert_eq!(texts_in(&bed.relay, &joined, &general).await, vec!["owner: hi"]);
+
+        // The Guestbook memberlist now folds both participants.
+        bed.swap_to(&owner);
+        let members = memberlist(&bed.relay, &community).await.unwrap();
+        assert!(members.contains(&member.keys.public_key()), "the parked-invite joiner is a member");
+    }
+
+    #[test]
+    fn v2_and_v1_bundles_are_distinguishable_by_parse() {
+        // The protocol discriminator the facade list/accept relies on: a v2 bundle
+        // (self-certifying: owner + owner_salt + community_root) parses; a v1-shaped
+        // one does not, so a parked invite routes to the right accept path.
+        let owner = Keys::generate();
+        let identity = super::super::control::CommunityIdentity::mint(&owner.public_key());
+        let hex = crate::simd::hex::bytes_to_hex_32;
+        let v2 = invite::CommunityInvite {
+            community_id: hex(&identity.community_id.0),
+            owner: hex(&identity.owner_xonly),
+            owner_salt: hex(&identity.owner_salt),
+            community_root: hex(&[0x11; 32]),
+            root_epoch: 0,
+            channels: vec![],
+            relays: vec!["wss://r".into()],
+            name: "V2".into(),
+            icon: None,
+            expires_at: None,
+            creator_npub: None,
+            label: None,
+            extra: Default::default(),
+        };
+        let v2_json = serde_json::to_string(&v2).unwrap();
+        assert!(invite::CommunityInvite::from_bundle_json(&v2_json).is_ok(), "a real v2 bundle parses");
+        let v1_like = r#"{"community_id":"aa","name":"X","relays":[]}"#;
+        assert!(invite::CommunityInvite::from_bundle_json(v1_like).is_err(), "a v1 bundle is not a v2 bundle");
     }
 
     #[tokio::test]

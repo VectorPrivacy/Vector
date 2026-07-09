@@ -923,13 +923,25 @@ impl VectorCore {
     pub fn list_pending_invites(&self) -> Result<Vec<serde_json::Value>> {
         let rows = crate::db::community::list_pending_invites().map_err(VectorError::Other)?;
         Ok(rows.iter().map(|p| {
-            let name = crate::community::invite::CommunityInvite::from_json(&p.bundle_json)
-                .ok().map(|i| i.name).unwrap_or_default();
-            serde_json::json!({
-                "community_id": p.community_id,
-                "name": name,
-                "inviter_npub": p.inviter_npub,
-            })
+            // A v2 bundle carries owner_salt/community_root and self-certifies its
+            // owner; a successful (validating) v2 parse means the modern protocol.
+            if let Ok(v2) = crate::community::v2::invite::CommunityInvite::from_bundle_json(&p.bundle_json) {
+                serde_json::json!({
+                    "community_id": p.community_id,
+                    "name": v2.name,
+                    "inviter_npub": p.inviter_npub,
+                    "version": 2,
+                })
+            } else {
+                let name = crate::community::invite::CommunityInvite::from_json(&p.bundle_json)
+                    .ok().map(|i| i.name).unwrap_or_default();
+                serde_json::json!({
+                    "community_id": p.community_id,
+                    "name": name,
+                    "inviter_npub": p.inviter_npub,
+                    "version": 1,
+                })
+            }
         }).collect())
     }
 
@@ -937,13 +949,38 @@ impl VectorCore {
     /// bundle, finalize the join exactly like a public link, then drop the pending row. Mirrors the
     /// desktop's consent-then-join for an invite delivered over a gift wrap.
     pub async fn accept_pending_invite(&self, community_id: &str) -> Result<serde_json::Value> {
-        use crate::community::{invite::{CommunityInvite, accept_invite}, transport::LiveTransport};
+        use crate::community::transport::LiveTransport;
         let bundle_json = crate::db::community::get_pending_invite(community_id)
             .map_err(VectorError::Other)?
             .ok_or_else(|| VectorError::Other(format!("no pending invite for {community_id}")))?;
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+
+        // Dual-stack: a validating v2 bundle parse means a v2 Direct Invite.
+        if crate::community::v2::invite::CommunityInvite::from_bundle_json(&bundle_json).is_ok() {
+            let session = state::SessionGuard::capture();
+            // The inviter's hex (parked at receive) attributes the Guestbook Join.
+            let inviter = crate::db::community::list_pending_invites()
+                .ok()
+                .and_then(|rows| rows.into_iter().find(|p| p.community_id == community_id).map(|p| p.inviter_npub));
+            let community = crate::community::v2::service::accept_parked_invite(&transport, &bundle_json, inviter.as_deref())
+                .await
+                .map_err(VectorError::Other)?;
+            if !session.is_valid() {
+                return Err(VectorError::Other("account changed during join".into()));
+            }
+            self.register_v2_chats(&community, &session).await;
+            if let Some(client) = state::nostr_client() {
+                crate::community::v2::realtime::refresh_subscription(&client).await;
+            }
+            crate::community::v2::realtime::enqueue_follow(community.id());
+            let _ = crate::db::community::delete_pending_invite(community_id);
+            return Ok(Self::v2_summary(&community));
+        }
+
+        // v1 route.
+        use crate::community::invite::{accept_invite, CommunityInvite};
         let invite = CommunityInvite::from_json(&bundle_json).map_err(VectorError::Other)?;
         let community = accept_invite(&invite).map_err(VectorError::Other)?;
-        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
         // Private invites carry no public-link label; the inviter attribution metric is link-only.
         let summary = self.finalize_member_join(community, &transport, None).await?;
         let _ = crate::db::community::delete_pending_invite(community_id);
@@ -1135,8 +1172,25 @@ impl VectorCore {
                 .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
             let recipient = nostr_sdk::prelude::PublicKey::parse(invitee_npub)
                 .map_err(|e| VectorError::Other(format!("bad invitee npub: {e}")))?;
-            let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-            crate::community::v2::service::send_direct_invite(&transport, &community, &recipient, None, None)
+            let client = crate::state::nostr_client().ok_or_else(|| VectorError::Other("Not connected".into()))?;
+            // Gift-wrap the 3313 Direct-Invite rumor (the bundle JSON) to the RECIPIENT'S
+            // inbox relays (kind-10050) — a not-yet-member sees it on their DM sub;
+            // the community relays wouldn't reach them. `#k=3313` per CORD-05 §6.
+            let bundle = crate::community::v2::service::bundle_of(&community, Some(my_pk), None, None);
+            let bundle_json = serde_json::to_string(&bundle).map_err(|e| VectorError::Other(e.to_string()))?;
+            let rumor = nostr_sdk::EventBuilder::new(
+                nostr_sdk::Kind::Custom(crate::community::v2::kind::DIRECT_INVITE),
+                bundle_json,
+            )
+            .build(my_pk);
+            let k_tag = nostr_sdk::Tag::custom(
+                nostr_sdk::TagKind::Custom("k".into()),
+                [crate::community::v2::kind::DIRECT_INVITE.to_string()],
+            );
+            if !session.is_valid() {
+                return Err(VectorError::Other("account changed".into()));
+            }
+            crate::inbox_relays::send_gift_wrap(&client, &recipient, rumor, [k_tag])
                 .await
                 .map_err(VectorError::Other)?;
             return Ok(serde_json::json!({ "invited": invitee_npub, "version": 2 }));
