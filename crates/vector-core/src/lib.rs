@@ -2164,6 +2164,32 @@ impl VectorCore {
         service::republish_community_metadata(&transport, &community).await.map_err(VectorError::Other)
     }
 
+    /// Create a new PUBLIC channel in a v2 community. Requires MANAGE_CHANNELS (reader-gated).
+    /// Returns the new channel id (hex). v2 only for now (private channels + v1 channel
+    /// management are separate); a Public channel derives from the community_root, so peers
+    /// fold it in with no key to distribute.
+    pub async fn create_community_channel(&self, community_id: &str, name: &str) -> Result<String> {
+        let v2 = Self::load_v2_if_v2(community_id)
+            .ok_or_else(|| VectorError::Other("channel creation is available on v2 communities".into()))?;
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        let id = crate::community::v2::service::create_public_channel(&transport, &v2, name)
+            .await
+            .map_err(VectorError::Other)?;
+        Ok(crate::simd::hex::bytes_to_hex_32(&id.0))
+    }
+
+    /// Delete (tombstone) a v2 community channel. Requires MANAGE_CHANNELS (reader-gated).
+    pub async fn delete_community_channel(&self, community_id: &str, channel_id: &str) -> Result<()> {
+        let v2 = Self::load_v2_if_v2(community_id)
+            .ok_or_else(|| VectorError::Other("channel deletion is available on v2 communities".into()))?;
+        let ch = crate::community::ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
+        let name = v2.channels.iter().find(|c| c.id.0 == ch.0).map(|c| c.name.clone()).unwrap_or_default();
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        crate::community::v2::service::delete_channel(&transport, &v2, &ch, &name)
+            .await
+            .map_err(VectorError::Other)
+    }
+
     /// Leave a Community: announce a best-effort "left" presence (before dropping keys), then
     /// drop the held keys + local channel chats. You need a fresh invite to rejoin.
     pub async fn leave_community(&self, community_id: &str) -> Result<()> {

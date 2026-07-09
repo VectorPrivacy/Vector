@@ -1720,6 +1720,45 @@ pub async fn edit_channel_metadata<T: Transport + ?Sized>(transport: &T, communi
     publish_control_edition(transport, community, &session, vsk::CHANNEL_METADATA, &channel_id.0, &content, None).await
 }
 
+/// Create a new PUBLIC channel (CORD-03 §2): mint a fresh id, publish its metadata
+/// edition (vsk 2), and add it to the held community. A Public channel derives its Chat
+/// Plane from the `community_root` (no per-channel key), so other members fold it in on
+/// their next control follow with nothing to distribute. Returns the new channel id.
+/// Reader-gated by `MANAGE_CHANNELS`. (A PRIVATE channel additionally needs a minted key
+/// delivered over the rekey plane — deferred, so this creates Public only.)
+pub async fn create_public_channel<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, name: &str) -> Result<ChannelId, String> {
+    let session = SessionGuard::capture();
+    let channel_id = ChannelId(super::super::random_32());
+    let meta = control::ChannelMetadata { name: name.to_string(), private: false, voice: None, deleted: None, custom: None, extra: Default::default() };
+    control::validate_channel_metadata(&meta).map_err(|e| e.to_string())?;
+    let content = serde_json::to_string(&meta).map_err(|e| e.to_string())?;
+    publish_control_edition(transport, community, &session, vsk::CHANNEL_METADATA, &channel_id.0, &content, None).await?;
+    if !session.is_valid() {
+        return Err("account changed during channel create".to_string());
+    }
+    // Add locally + persist so the creator can post immediately (peers fold it in).
+    let mut updated = community.clone();
+    updated.channels.push(ChannelV2 { id: channel_id, name: name.to_string(), private: false, key: None, epoch: updated.root_epoch });
+    crate::db::community::save_community_v2(&updated)?;
+    Ok(channel_id)
+}
+
+/// Tombstone a channel (CORD-03 §2, `deleted: true`) + drop it locally. Reader-gated by
+/// `MANAGE_CHANNELS`; the coordinate stays folded as a grave so peers hide it.
+pub async fn delete_channel<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel_id: &ChannelId, name: &str) -> Result<(), String> {
+    let session = SessionGuard::capture();
+    let meta = control::ChannelMetadata { name: name.to_string(), private: false, voice: None, deleted: Some(true), custom: None, extra: Default::default() };
+    let content = serde_json::to_string(&meta).map_err(|e| e.to_string())?;
+    publish_control_edition(transport, community, &session, vsk::CHANNEL_METADATA, &channel_id.0, &content, None).await?;
+    if !session.is_valid() {
+        return Err("account changed during channel delete".to_string());
+    }
+    let mut updated = community.clone();
+    updated.channels.retain(|c| c.id.0 != channel_id.0);
+    crate::db::community::save_community_v2(&updated)?;
+    Ok(())
+}
+
 // ── Live control-follow (CORD-02 §6 / CORD-03 §2) ────────────────────────────
 
 /// Re-fold this community's Control Plane and apply the current metadata +
@@ -3714,6 +3753,136 @@ mod tests {
         bed.swap_to(&owner);
         dissolve_community(&bed.relay, &refounded).await.unwrap();
         assert!(crate::db::community::load_community_v2(community.id()).unwrap().unwrap().dissolved, "the community is sealed");
+    }
+
+    /// The deep two-account e2e the way a real deployment runs: owner (A) + member (B)
+    /// over one shared relay, create → channels (public + private) → converse both ways →
+    /// persist (get_messages-level) → react/edit/delete → moderate (ban/unban) → dissolve.
+    /// Every account, community, channel, and action is LOGGED (run with --nocapture) so it
+    /// doubles as a reference transcript and a re-runnable regression.
+    #[tokio::test]
+    async fn e2e_two_accounts_channels_converse_moderate() {
+        use crate::community::v2::inbound::{apply_chat_to_state, persist_chat};
+        use nostr_sdk::prelude::ToBech32;
+        let (bed, a, b) = TestBed::new();
+        let (a_npub, b_npub) = (a.keys.public_key().to_bech32().unwrap(), b.keys.public_key().to_bech32().unwrap());
+        let (a_hex, b_hex) = (a.keys.public_key().to_hex(), b.keys.public_key().to_hex());
+        println!("\n===== Concord v2 deep e2e =====");
+        println!("[acct] A (owner)  = {a_npub}");
+        println!("[acct] B (member) = {b_npub}");
+
+        // ── A creates the community + a PRIVATE channel + two extra PUBLIC channels ──
+        bed.swap_to(&a);
+        let mut community = create_community(&bed.relay, "Deep E2E", bed.relays.clone(), None).await.unwrap();
+        let general = community.channels[0].id;
+        println!("[create] community {} · #general {}", crate::simd::hex::bytes_to_hex_32(&community.id().0), crate::simd::hex::bytes_to_hex_32(&general.0));
+
+        // A private channel (native private CREATION needs key distribution — deferred; here
+        // it's constructed then carried to B in the join bundle, exercising the private plane).
+        let priv_key = crate::community::random_32();
+        let priv_id = ChannelId(crate::community::random_32());
+        community.channels.push(ChannelV2 { id: priv_id, name: "mods".into(), private: true, key: Some(priv_key), epoch: community.root_epoch });
+        crate::db::community::save_community_v2(&community).unwrap();
+        println!("[channel] +private #mods {}", crate::simd::hex::bytes_to_hex_32(&priv_id.0));
+
+        // Two more PUBLIC channels via the real create path.
+        let announcements = create_public_channel(&bed.relay, &community, "announcements").await.unwrap();
+        community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let random = create_public_channel(&bed.relay, &community, "random").await.unwrap();
+        community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        println!("[channel] +public #announcements {} · #random {}", crate::simd::hex::bytes_to_hex_32(&announcements.0), crate::simd::hex::bytes_to_hex_32(&random.0));
+        assert_eq!(community.channels.len(), 4, "general + mods + announcements + random");
+
+        // A talks in a few channels.
+        let m1 = send_message(&bed.relay, &community, &general, "A: welcome to the deep e2e").await.unwrap();
+        send_message(&bed.relay, &community, &announcements, "A: read the rules").await.unwrap();
+        send_message(&bed.relay, &community, &priv_id, "A: mods-only channel").await.unwrap();
+        println!("[msg] A posted in #general / #announcements / #mods");
+
+        // ── A grants B admin, mints a public link, B joins from the bundle ──
+        let admin_rid = crate::simd::hex::bytes_to_hex_32(&[0xa1; 32]);
+        publish_role(&bed.relay, &community, &a.keys, &admin_role(&admin_rid, Permissions::ADMIN_ALL), 1).await;
+        publish_grant(&bed.relay, &community, &a.keys, &b.keys.public_key(), vec![admin_rid], 1).await;
+        let link = mint_public_link(&bed.relay, &community, "https://vectorapp.io", None, None).await.unwrap();
+        assert!(community_is_public(&bed.relay, &community).await, "a live link makes it Public");
+        println!("[invite] granted B @admin · minted link {}", link.url);
+
+        let bundle_json = serde_json::to_string(&bundle_of(&community, Some(a.keys.public_key()), None, None)).unwrap();
+        bed.swap_to(&b);
+        let mut b_view = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        println!("[join] B joined; sees {} channels", b_view.channels.len());
+        assert_eq!(b_view.channels.len(), 4, "B receives all four channels (incl. the private one's key) in the bundle");
+        assert!(b_view.channels.iter().any(|c| c.id.0 == priv_id.0 && c.private && c.key.is_some()), "B holds the private channel key");
+        assert!(texts_in(&bed.relay, &b_view, &general).await.contains(&"A: welcome to the deep e2e".to_string()), "B reads A's #general history");
+        assert!(texts_in(&bed.relay, &b_view, &priv_id).await.contains(&"A: mods-only channel".to_string()), "B reads the PRIVATE channel with the bundle key");
+
+        // ── Conversation both ways + persistence (get_messages-level) ──
+        send_message(&bed.relay, &b_view, &general, "B: thanks, glad to be here").await.unwrap();
+        send_message(&bed.relay, &b_view, &priv_id, "B: mods checking in").await.unwrap();
+        println!("[msg] B replied in #general + #mods");
+        // Persist B's own #general view into the shared store (what sync/live ingest does)
+        // and confirm it reads back via STATE — get_messages parity.
+        let my_pk = b.keys.public_key();
+        let gh = crate::simd::hex::bytes_to_hex_32(&general.0);
+        for f in fetch_channel(&bed.relay, &b_view, &general, 100).await.unwrap() {
+            let outcome = { let mut st = crate::state::STATE.lock().await; apply_chat_to_state(&mut st, &f.event, &gh, &my_pk) };
+            if let Some(o) = outcome { persist_chat(&gh, &o).await; }
+        }
+        assert!(crate::db::events::event_exists(&m1).unwrap(), "A's message persisted into B's shared store (get_messages backfill)");
+        println!("[persist] #general history persisted into the shared events store");
+
+        // B (admin) reacts to + the author edits/deletes — the chat-op surface.
+        send_reaction(&bed.relay, &b_view, &general, &m1, &a_hex, "🔥", None).await.unwrap();
+        bed.swap_to(&a);
+        let m_edit = send_message(&bed.relay, &community, &general, "A: this will be edited").await.unwrap();
+        send_edit(&bed.relay, &community, &general, &m_edit, "A: edited!").await.unwrap();
+        let m_del = send_message(&bed.relay, &community, &general, "A: this will be deleted").await.unwrap();
+        send_delete(&bed.relay, &community, &general, &m_del, super::super::kind::MESSAGE).await.unwrap();
+        println!("[ops] reaction + edit + delete round-tripped");
+
+        // ── B creates a channel as admin, A folds it in ──
+        bed.swap_to(&b);
+        let bugs = create_public_channel(&bed.relay, &b_view, "bug-reports").await.unwrap();
+        println!("[channel] B(admin) +public #bug-reports {}", crate::simd::hex::bytes_to_hex_32(&bugs.0));
+        bed.swap_to(&a);
+        let session = SessionGuard::capture();
+        if let Some(updated) = follow_control(&bed.relay, &community, &session).await.unwrap() {
+            community = updated;
+        }
+        assert!(community.channels.iter().any(|c| c.id.0 == bugs.0), "A folds in B's authorized new channel");
+        println!("[follow] A folded in B's #bug-reports (now {} channels)", community.channels.len());
+
+        // ── Members ──
+        let members = memberlist(&bed.relay, &community).await.unwrap();
+        let member_hexes: std::collections::BTreeSet<String> = members.iter().map(|m| m.to_hex()).collect();
+        assert!(member_hexes.contains(&a_hex) && member_hexes.contains(&b_hex), "A + B both in the memberlist");
+        println!("[members] {} members: A + B present", members.len());
+
+        // ── Moderate: ban B (banlist + strip + refound), verify severance + survival ──
+        set_banlist(&bed.relay, &community, &[b_hex.clone()]).await.unwrap();
+        grant_roles(&bed.relay, &community, &b.keys.public_key(), vec![]).await.unwrap();
+        let refounded = refound_community(&bed.relay, &community, &[b.keys.public_key()]).await.unwrap();
+        assert_eq!(refounded.root_epoch, Epoch(1), "the ban rolled the root");
+        let post = fold_authority(&refounded, &fetch_control(&bed.relay, &refounded).await, &load_floors(&refounded));
+        assert!(post.banned.contains(&b_hex), "the ban survives the refounding");
+        assert!(texts_in(&bed.relay, &refounded, &general).await.iter().any(|t| t == "A: welcome to the deep e2e"), "pre-ban history reads across the new epoch");
+        println!("[ban] B banned; root rolled to epoch 1; ban survives; pre-ban history intact");
+        // B concludes it's severed.
+        bed.swap_to(&b);
+        assert!(follow_rekeys(&bed.relay, &b_view, &session).await.unwrap().self_removed, "B is cryptographically cut by the ban-refound");
+        println!("[ban] B's rekey-follow: self_removed = true (severed)");
+
+        // ── Unban: A lifts the ban ──
+        bed.swap_to(&a);
+        set_banlist(&bed.relay, &refounded, &[]).await.unwrap();
+        let after_unban = fold_authority(&refounded, &fetch_control(&bed.relay, &refounded).await, &load_floors(&refounded));
+        assert!(!after_unban.banned.contains(&b_hex), "the unban clears B from the banlist");
+        println!("[unban] B removed from the banlist (re-invitable)");
+
+        // ── Dissolve ──
+        dissolve_community(&bed.relay, &refounded).await.unwrap();
+        assert!(crate::db::community::load_community_v2(community.id()).unwrap().unwrap().dissolved, "the community is sealed");
+        println!("[dissolve] community sealed (read-only)\n===== e2e PASS =====\n");
     }
 
     #[tokio::test]
