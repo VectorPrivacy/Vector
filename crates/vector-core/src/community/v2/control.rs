@@ -170,11 +170,15 @@ pub fn parse_edition_rumor(rumor: &UnsignedEvent) -> Result<ParsedEdition, Contr
     };
     let vsk = get(TAG_SUBKIND).ok_or(ControlError::Edition(EditionError::MissingField("vsk")))?;
     let entity_id = decode_hash(&get(TAG_ENTITY).ok_or(ControlError::Edition(EditionError::MissingField("eid")))?, "eid")?;
-    // Digit-only: `u64::from_str` accepts a leading `+`, so "+5" and "5" would fold
-    // to the same version yet be distinct signed rumors (a convergence fork a strict
-    // peer resolves differently). Reject any non-decimal encoding.
+    // Decimal, no leading zeros (CORD-01 Encoding): `u64::from_str` accepts a leading
+    // `+`, and "007"/"7" are distinct signed rumors that fold to the same version — a
+    // same-version convergence fork a strict peer (which drops the padded form)
+    // resolves differently. Reject any non-canonical decimal, matching the `ms` rule.
     let ev_raw = get(TAG_EVERSION).ok_or(ControlError::Edition(EditionError::MissingField("ev")))?;
-    if ev_raw.is_empty() || !ev_raw.bytes().all(|b| b.is_ascii_digit()) {
+    if ev_raw.is_empty()
+        || !ev_raw.bytes().all(|b| b.is_ascii_digit())
+        || (ev_raw.len() > 1 && ev_raw.starts_with('0'))
+    {
         return Err(ControlError::Edition(EditionError::BadField("ev")));
     }
     let version: u64 = ev_raw.parse().map_err(|_| ControlError::Edition(EditionError::BadField("ev")))?;
@@ -483,6 +487,25 @@ mod tests {
             parse_edition_rumor(&rumor),
             Err(ControlError::Edition(EditionError::BadField("duplicate authority tag")))
         ));
+    }
+
+    #[test]
+    fn a_non_canonical_ev_version_is_rejected() {
+        let owner = Keys::generate();
+        // A leading-zero (or `+`-prefixed) version is a distinct rumor that folds to
+        // the same numeric version — a same-version fork a strict peer drops.
+        for bad in ["007", "+5", "01"] {
+            let tags = vec![
+                Tag::custom(TagKind::Custom("vsk".into()), [vsk::GRANT]),
+                Tag::custom(TagKind::Custom("eid".into()), [crate::simd::hex::bytes_to_hex_32(&[0x55; 32])]),
+                Tag::custom(TagKind::Custom("ev".into()), [bad]),
+            ];
+            let rumor = stream::build_rumor_secs(kind::CONTROL, owner.public_key(), "{\"member\":\"aa\",\"role_ids\":[]}", tags, 100);
+            assert!(
+                matches!(parse_edition_rumor(&rumor), Err(ControlError::Edition(EditionError::BadField("ev")))),
+                "a non-canonical ev {bad:?} is rejected"
+            );
+        }
     }
 
     #[test]
