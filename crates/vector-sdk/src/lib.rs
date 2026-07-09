@@ -476,7 +476,9 @@ impl VectorBot {
     /// Catch up every Community this bot is in — refold consensus (re-foundings / rekeys / banlist /
     /// metadata) and fetch recent messages into local state. Runs automatically inside
     /// [`on_message`](Self::on_message)/`listen` on connect and periodically for outage resilience;
-    /// exposed for manual use (e.g. right after a known reconnect).
+    /// exposed for manual use (e.g. right after a known reconnect). A modern (v2) Community's refold
+    /// is queued to the follow worker that [`on_message`](Self::on_message)/`listen` runs, so a manual
+    /// call outside a running listen loop refolds legacy Communities only.
     pub async fn sync_communities(&self) -> Result<()> {
         self.core.sync_communities().await
     }

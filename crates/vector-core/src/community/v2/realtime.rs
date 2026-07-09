@@ -11,16 +11,17 @@
 //! (both `#p=me`) stay on the DM subscription — the author-set here never
 //! includes an identity key, so the two never collide.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, LazyLock};
+use std::collections::HashSet;
+use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 
 use nostr_sdk::prelude::{Client, Event, Filter, Kind, PublicKey, RelayStatus, RelayUrl, SubscriptionId};
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex;
 
 use super::community::CommunityV2;
 use super::stream;
 use super::{derive, inbound};
-use crate::community::{ConcordProtocol, Epoch};
+use crate::community::{CommunityId, ConcordProtocol, Epoch};
 use crate::event_handler::InboundEventHandler;
 use crate::state::SessionGuard;
 
@@ -41,15 +42,18 @@ static V2_SUB_SET: LazyLock<Mutex<Vec<String>>> = LazyLock::new(|| Mutex::new(Ve
 static V2_SEEN_WRAPS: LazyLock<Mutex<HashSet<[u8; 32]>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 /// Bound on [`V2_SEEN_WRAPS`] before a coarse flush.
 const SEEN_WRAPS_CAP: usize = 8192;
-/// Serializes + coalesces the combined control+rekey follow, keyed by
-/// `community_id_hex`. ONE follow runs per community at a time (control and rekey
-/// share this key, so they can't concurrently whole-row-save and clobber each
-/// other), and a trigger arriving while one is in flight sets the rerun flag so
-/// the burst's final state is still captured. This also bounds the amplification
-/// DoS: any community_root holder can sign a junk wrap at a plane address
-/// (recognition is address-only), but a flood collapses to one in-flight follow.
-/// Cleared on session swap.
-static V2_FOLLOW_GATE: LazyLock<Mutex<HashMap<String, bool>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// The per-community follow QUEUE. dispatch, boot catch-up, reconnect, and manual
+/// sync all just [`enqueue_follow`] — non-blocking + coalesced. A single spawned
+/// worker ([`spawn_follow_worker`]) drains it and runs one combined rekey+control
+/// follow per community at a time, so two triggers can never concurrently
+/// whole-row-save and clobber each other. This replaces the old gate/rerun/
+/// spawn-vs-await machinery: an enqueue never blocks its caller, and a junk-wrap
+/// flood coalesces to at most one queued + one running follow per community.
+/// Reset on session swap (the worker exits when its `SessionGuard` invalidates or
+/// its channel closes).
+static V2_FOLLOW_TX: LazyLock<StdMutex<Option<UnboundedSender<CommunityId>>>> = LazyLock::new(|| StdMutex::new(None));
+/// Community ids currently queued or processing — coalesces a burst to one follow.
+static V2_FOLLOW_PENDING: LazyLock<StdMutex<HashSet<[u8; 32]>>> = LazyLock::new(|| StdMutex::new(HashSet::new()));
 
 pub async fn subscription_id() -> Option<SubscriptionId> {
     V2_SUB_ID.lock().await.clone()
@@ -66,7 +70,10 @@ pub async fn clear() {
     *V2_POOLWIDE_SUB_ID.lock().await = None;
     V2_SUB_SET.lock().await.clear();
     V2_SEEN_WRAPS.lock().await.clear();
-    V2_FOLLOW_GATE.lock().await.clear();
+    // Drop the queue sender so the worker's channel closes and it exits (its
+    // SessionGuard also invalidates); the next login spawns a fresh worker.
+    *V2_FOLLOW_TX.lock().unwrap() = None;
+    V2_FOLLOW_PENDING.lock().unwrap().clear();
 }
 
 /// Every plane pubkey a set of v2 communities publishes under that
@@ -230,23 +237,12 @@ pub async fn dispatch_event(session: &SessionGuard, event: Event, handler: Arc<d
     for c in &communities {
         match inbound::dispatch_wrap(&event, c, &my_pk, &*handler) {
             inbound::DispatchedV2::NotOurs => continue,
-            // A control OR a rekey wrap both drive the SAME combined per-community
-            // follow — one gate key serializes them so they can't concurrently
-            // whole-row-save and clobber each other (a rekey-adopted root reverted by
-            // a stale control save, or a self-removed community resurrected by one).
-            inbound::DispatchedV2::Control { community_id } | inbound::DispatchedV2::Rekey { community_id } => {
-                // Spawn off the dispatch hot path: the follow does network fetches and
-                // this dispatch is awaited inline in the single notification loop, so
-                // awaiting here would let a flood of (address-recognized, unopened) junk
-                // wraps head-of-line-block every DM + community.
-                let handler = handler.clone();
-                let bg = SessionGuard::capture();
-                tokio::spawn(async move {
-                    if !bg.is_valid() {
-                        return;
-                    }
-                    follow_and_refresh(&bg, &community_id, &*handler).await;
-                });
+            // A control OR a rekey wrap: just enqueue a follow for this community.
+            // Non-blocking + coalesced — the single follow worker serializes control
+            // and rekey per community (no concurrent whole-row clobber) off this hot
+            // path, so a junk-wrap flood can't head-of-line-block the notification loop.
+            inbound::DispatchedV2::Control { .. } | inbound::DispatchedV2::Rekey { .. } => {
+                enqueue_follow(c.id());
                 return;
             }
             _ => return, // chat/guestbook handled inline by the dispatcher.
@@ -254,127 +250,95 @@ pub async fn dispatch_event(session: &SessionGuard, event: Event, handler: Arc<d
     }
 }
 
-/// Claim the follow slot for `community_id`. True → run the follow now; false →
-/// one is already in flight (a trailing rerun is requested so the burst's final
-/// state is still captured).
-async fn acquire_follow(community_id: &str) -> bool {
-    let mut gate = V2_FOLLOW_GATE.lock().await;
-    if gate.contains_key(community_id) {
-        gate.insert(community_id.to_string(), true);
-        false
-    } else {
-        gate.insert(community_id.to_string(), false);
-        true
+/// Queue a follow for `id` — NON-BLOCKING + coalesced. A burst (or a junk-wrap
+/// flood) collapses to at most one queued + one running follow per community. A
+/// no-op if no worker is running (no live `listen()`). Callers: dispatch,
+/// boot/reconnect catch-up, manual sync — none of them block or touch a lock for
+/// longer than the enqueue.
+pub(crate) fn enqueue_follow(id: &CommunityId) {
+    let mut pending = V2_FOLLOW_PENDING.lock().unwrap();
+    if !pending.insert(id.0) {
+        return; // already queued or processing — coalesce.
     }
-}
-
-/// End a follow iteration. `force` releases and stops unconditionally. Otherwise:
-/// if a rerun was requested while this iteration ran, reset the flag and return
-/// true (caller loops on fresh state); else release and return false. Every exit
-/// path of a follow MUST reach this (with `force` on early breaks) or the slot leaks.
-async fn finish_follow(community_id: &str, force: bool) -> bool {
-    let mut gate = V2_FOLLOW_GATE.lock().await;
-    if force {
-        gate.remove(community_id);
-        return false;
-    }
-    match gate.get(community_id) {
-        Some(true) => {
-            gate.insert(community_id.to_string(), false);
-            true
-        }
+    match V2_FOLLOW_TX.lock().unwrap().as_ref() {
+        Some(tx) if tx.send(*id).is_ok() => {}
         _ => {
-            gate.remove(community_id);
-            false
+            pending.remove(&id.0); // no worker / channel closed — nothing queued.
         }
     }
 }
 
-/// The combined per-community follow: on any control/rekey wrap, run the rekey
-/// catch-up THEN the control re-fold over a live transport, each against the
-/// FRESHLY-RELOADED persisted community (never a stale dispatch-time clone, so two
-/// planes can't lose each other's writes). Rekey runs first: a base adopt moves the
-/// control address, and a self-removal tears the community down (skipping control).
-/// Serialized + coalesced via [`V2_FOLLOW_GATE`]. No-op without a live client —
-/// unit tests drive `service::follow_control` / `follow_rekeys` directly.
-pub(crate) async fn follow_and_refresh(session: &SessionGuard, community_id: &str, handler: &dyn InboundEventHandler) {
-    let Some(id) = crate::simd::hex::hex_to_bytes_32_checked(community_id).map(crate::community::CommunityId) else {
-        return;
-    };
-    if crate::state::nostr_client().is_none() {
-        return;
-    }
-    if !acquire_follow(community_id).await {
-        return; // already in flight — a rerun was requested for this burst.
-    }
-    loop {
-        if follow_once(session, &id, community_id, handler).await == FollowOnce::SessionGone {
-            finish_follow(community_id, true).await;
-            return;
+/// Spawn the single follow worker for this session. Installs the queue sender and
+/// drains it, running one combined follow per community at a time. Replacing the
+/// sender (a re-`listen()`) or [`clear`] (a swap) closes the old channel so the old
+/// worker exits; the captured `SessionGuard` also stops it. Idempotent per session.
+pub(crate) fn spawn_follow_worker(handler: Arc<dyn InboundEventHandler>) {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CommunityId>();
+    *V2_FOLLOW_TX.lock().unwrap() = Some(tx);
+    V2_FOLLOW_PENDING.lock().unwrap().clear();
+    let session = SessionGuard::capture();
+    tokio::spawn(async move {
+        while let Some(id) = rx.recv().await {
+            if !session.is_valid() {
+                break;
+            }
+            // Remove from pending BEFORE running, so a trigger arriving DURING the
+            // follow re-enqueues (and is processed after) rather than being lost.
+            V2_FOLLOW_PENDING.lock().unwrap().remove(&id.0);
+            follow_community(&session, &id, &*handler).await;
         }
-        if !finish_follow(community_id, false).await {
-            break;
-        }
-        // A rerun was requested mid-flight — the next iteration reloads fresh state.
-    }
+    });
 }
 
-#[derive(PartialEq)]
-enum FollowOnce {
-    Done,
-    SessionGone,
-}
-
-/// One rekey-then-control pass against the freshly-reloaded community.
-async fn follow_once(
-    session: &SessionGuard,
-    id: &crate::community::CommunityId,
-    community_id: &str,
-    handler: &dyn InboundEventHandler,
-) -> FollowOnce {
+/// One combined rekey-then-control follow for a community, each pass against the
+/// FRESHLY-RELOADED persisted state (never a stale clone, so the two planes can't
+/// lose each other's writes). Rekey runs first: a base adopt moves the control
+/// address, and a self-removal tears the community down (skipping control). No-op
+/// without a live client — unit tests drive `service::follow_control` /
+/// `follow_rekeys` directly.
+async fn follow_community(session: &SessionGuard, id: &CommunityId, handler: &dyn InboundEventHandler) {
     let Some(client) = crate::state::nostr_client() else {
-        return FollowOnce::Done;
+        return;
     };
+    let community_id = crate::simd::hex::bytes_to_hex_32(&id.0);
     let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
 
-    // Rekey first (fresh DB state): a base adopt moves the control address, and a
-    // self-removal tears the community down before control runs.
+    // Rekey first (fresh DB state).
     let Ok(Some(current)) = crate::db::community::load_community_v2(id) else {
-        return FollowOnce::Done; // community gone (left / removed).
+        return; // community gone (left / removed).
     };
     match super::service::follow_rekeys(&transport, &current, session).await {
         Ok(follow) if follow.self_removed => {
             if !session.is_valid() {
-                return FollowOnce::SessionGone;
+                return;
             }
-            let _ = crate::db::community::delete_community(community_id);
+            let _ = crate::db::community::delete_community(&community_id);
             refresh_subscription(&client).await;
-            handler.on_community_self_removed(community_id);
-            return FollowOnce::Done;
+            handler.on_community_self_removed(&community_id);
+            return;
         }
         Ok(follow) if follow.updated.is_some() => {
             if !session.is_valid() {
-                return FollowOnce::SessionGone;
+                return;
             }
             refresh_subscription(&client).await;
-            handler.on_community_refreshed(community_id);
+            handler.on_community_refreshed(&community_id);
         }
         Ok(_) => {}
-        Err(_) => return FollowOnce::Done,
+        Err(_) => return,
     }
 
     // Control second, on the (possibly new-root) freshly-reloaded state.
     let Ok(Some(current)) = crate::db::community::load_community_v2(id) else {
-        return FollowOnce::Done;
+        return;
     };
     if let Ok(Some(_)) = super::service::follow_control(&transport, &current, session).await {
         if !session.is_valid() {
-            return FollowOnce::SessionGone;
+            return;
         }
         refresh_subscription(&client).await;
-        handler.on_community_refreshed(community_id);
+        handler.on_community_refreshed(&community_id);
     }
-    FollowOnce::Done
 }
 
 #[cfg(test)]
@@ -489,22 +453,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn follow_gate_coalesces_a_burst_and_runs_one_trailing_rerun() {
-        clear().await;
-        let cid = "cid";
-        // First trigger claims the slot; concurrent triggers during the run (control
-        // OR rekey — one key per community) are coalesced into a single trailing
-        // rerun, bounding the fan-out AND serializing the two planes.
-        assert!(acquire_follow(cid).await, "first trigger runs the follow");
-        assert!(!acquire_follow(cid).await, "a trigger while in-flight is coalesced");
-        assert!(!acquire_follow(cid).await, "a whole burst collapses to one rerun");
-        // The in-flight follow ends: a rerun was requested → loop once more.
-        assert!(finish_follow(cid, false).await, "a requested rerun makes the follow loop");
-        // No new trigger during the rerun → the next finish releases the slot.
-        assert!(!finish_follow(cid, false).await, "no further trigger → release");
-        // Released: a fresh trigger can claim it again (no leak).
-        assert!(acquire_follow(cid).await, "the released slot is re-acquirable");
-        finish_follow(cid, true).await; // clean up
+    async fn follow_queue_coalesces_a_burst_and_re_enqueues_after_processing() {
+        // Install a test channel in place of the worker's, so we can observe what the
+        // queue delivers without a live client.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CommunityId>();
+        *V2_FOLLOW_TX.lock().unwrap() = Some(tx);
+        V2_FOLLOW_PENDING.lock().unwrap().clear();
+
+        let id = CommunityId([0x11; 32]);
+        // A burst for one community collapses to a SINGLE queued follow (coalesced).
+        enqueue_follow(&id);
+        enqueue_follow(&id);
+        enqueue_follow(&id);
+        assert_eq!(rx.recv().await, Some(id), "first trigger queues a follow");
+        assert!(rx.try_recv().is_err(), "the burst coalesced to exactly one");
+
+        // The worker removes it from pending before running; a trigger AFTER that
+        // re-queues (so a change during a follow isn't lost).
+        V2_FOLLOW_PENDING.lock().unwrap().remove(&id.0);
+        enqueue_follow(&id);
+        assert_eq!(rx.recv().await, Some(id), "a trigger after processing re-queues");
+
+        // A different community is independent (not coalesced against the first).
+        let id2 = CommunityId([0x22; 32]);
+        enqueue_follow(&id2);
+        assert_eq!(rx.recv().await, Some(id2));
+
+        *V2_FOLLOW_TX.lock().unwrap() = None;
+        V2_FOLLOW_PENDING.lock().unwrap().clear();
     }
 
     #[test]

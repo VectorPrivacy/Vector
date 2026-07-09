@@ -1965,14 +1965,16 @@ impl VectorCore {
     /// [`InboundEventHandler`]). Called at `listen()` start and periodically for outage resilience;
     /// also safe to call manually after a known disconnect.
     ///
-    /// v1 only: v2 communities are caught up through the gated combined follow via
-    /// [`Self::catch_up_v2_communities`] (which serializes with the realtime follow +
-    /// fires lifecycle callbacks), so they're skipped here to avoid running the
-    /// v1 (#z-addressed) channel sync against v2-addressed data.
+    /// Catch up every locally-held Community. v1 channels are synced inline; a v2
+    /// community is ENQUEUED for the follow worker (control/rekey re-fold + adopt),
+    /// non-blocking. State-only (no handler replay of history). Called at `listen()`
+    /// start and on reconnect; safe to call manually — the v2 enqueue is a no-op if
+    /// no `listen()` worker is running.
     pub async fn sync_communities(&self) -> Result<()> {
         let ids = db::community::list_community_ids().map_err(VectorError::from)?;
         for id in ids {
             if matches!(db::community::community_protocol(&id).ok().flatten(), Some(crate::community::ConcordProtocol::V2)) {
+                community::v2::realtime::enqueue_follow(&id);
                 continue;
             }
             if let Ok(Some(community)) = db::community::load_community(&id) {
@@ -1984,26 +1986,6 @@ impl VectorCore {
         Ok(())
     }
 
-    /// Catch up every locally-held **v2** community through the gated combined
-    /// follow ([`community::v2::realtime::follow_and_refresh`]), so a rotation /
-    /// refounding / metadata change missed while offline is ADOPTED and the
-    /// subscription re-derives — and, crucially, this shares the per-community
-    /// `V2_FOLLOW_GATE` with the realtime follow, so a reconnect catch-up can't race
-    /// a live follow into a whole-row clobber. Fires lifecycle callbacks (incl.
-    /// `on_community_self_removed`) so a removal detected on catch-up notifies the
-    /// consumer exactly as a live one does. v2 message-history replay is deferred.
-    async fn catch_up_v2_communities(session: &state::SessionGuard, handler: &dyn InboundEventHandler) {
-        let ids = db::community::list_community_ids().unwrap_or_default();
-        for id in ids {
-            if !session.is_valid() {
-                return;
-            }
-            if matches!(db::community::community_protocol(&id).ok().flatten(), Some(crate::community::ConcordProtocol::V2)) {
-                let id_hex = crate::simd::hex::bytes_to_hex_32(&id.0);
-                community::v2::realtime::follow_and_refresh(session, &id_hex, handler).await;
-            }
-        }
-    }
 
     /// Start listening for incoming DMs.
     ///
@@ -2050,11 +2032,10 @@ impl VectorCore {
         // metadata / banlist changes (and recent messages) into local state, and subscribes at the
         // CURRENT epoch pseudonyms. This is state-only: historical messages are not replayed to the
         // handler (matches the gateway model) — query them via `get_messages`.
+        // Spawn the single per-community follow worker for this session; the v2
+        // follow queue (fed by dispatch, catch-up, and sync) drains through it.
+        community::v2::realtime::spawn_follow_worker(handler.clone());
         let _ = self.sync_communities().await;
-        {
-            let boot = state::SessionGuard::capture();
-            Self::catch_up_v2_communities(&boot, &*handler).await;
-        }
         let _ = self.sync_dms(None, &NoOpEventHandler).await;
 
         // Subscribe to DMs (GiftWraps) AND Community channel events — one loop dispatches both
@@ -2072,7 +2053,6 @@ impl VectorCore {
         if let Some(monitor) = client.monitor() {
             let mut rx = monitor.subscribe();
             let session = state::SessionGuard::capture();
-            let monitor_handler = handler.clone();
             tokio::spawn(async move {
                 // Debounce reconnect bursts: StatusChanged is per-relay, but one catch-up queries the
                 // whole pool — so coalesce Connected transitions within a short window into one resync.
@@ -2087,7 +2067,6 @@ impl VectorCore {
                             continue;
                         }
                         let _ = VectorCore.sync_communities().await;
-                        VectorCore::catch_up_v2_communities(&session, &*monitor_handler).await;
                         let _ = VectorCore.sync_dms(None, &NoOpEventHandler).await;
                         if let Some(c) = state::nostr_client() {
                             community::realtime::refresh_subscription(&c).await;

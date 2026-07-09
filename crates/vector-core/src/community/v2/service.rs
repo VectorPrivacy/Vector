@@ -341,26 +341,21 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
     let control = control_group_key(&community.community_root, community.id(), community.root_epoch);
     let control_pk = control.pk_hex();
 
-    // The control plane is writable by ANY community_root holder, so a single
-    // newest-first window could be flooded to evict the owner's genesis and DoS
-    // every join. Page OLDER with an `until` cursor until the owner genesis is found
-    // or the plane is truly EMPTY. Two production-transport subtleties, both handled:
-    //   - Seed `until = now` (not `None`): a bounded-`until` fetch takes the
-    //     transport's AUTHORITATIVE drain-all-relays path, whereas an open `until`
-    //     can return only a fast relay's partial window and miss a genesis living on
-    //     a lagging relay.
-    //   - Terminate on an EMPTY page, NOT a short one: relays cap a page below PAGE,
-    //     so `got < PAGE` is not "exhausted" — keep paging until a page is empty.
-    // Bounded by MAX_PAGES. A determined flood that pins junk at the exact genesis
-    // timestamp (a cursor can't step past a single second) is the residual whose real
-    // fix is binding the root into community_id (protocol, deferred). The common case
-    // (fresh community) and the eclipse case (forged root, nothing owner-signed to
-    // find) both resolve on page one.
+    // Authenticity = ANY owner-signed control edition at the root-derived control
+    // plane. An attacker's forged root has NONE (they can't forge the owner's seal);
+    // a genuine root always carries the owner's genesis + edits. This is far simpler
+    // and more robust than hunting the OLDEST genesis: an active community's owner
+    // editions sit in the newest window (page one), page one is UNBOUNDED so a
+    // clock-skewed future-dated genesis is never clipped, and a small bounded walk
+    // covers a lightly-flooded plane. A heavy flood that buries every owner edition
+    // past the walk is the residual whose real fix is binding the root into
+    // community_id (protocol, deferred). Break on an EMPTY page (a short page is a
+    // relay cap, not exhaustion). The eclipse case (forged root — nothing
+    // owner-signed to find) walks to exhaustion and rejects.
     const PAGE: usize = 500;
-    const MAX_PAGES: usize = 6;
+    const MAX_PAGES: usize = 4;
     let mut editions: Vec<ParsedEdition> = Vec::new();
-    let mut found_genesis = false;
-    let mut until: Option<u64> = Some(now_ms() / 1000);
+    let mut until: Option<u64> = None;
     for _ in 0..MAX_PAGES {
         let query = Query {
             kinds: vec![stream::KIND_WRAP],
@@ -371,26 +366,23 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
         };
         let wraps = transport.fetch(&query, &community.relays).await?;
         if wraps.is_empty() {
-            break; // truly exhausted the plane.
+            break;
         }
         let mut oldest = u64::MAX;
         for w in &wraps {
             oldest = oldest.min(w.created_at.as_secs());
             if let Ok((ed, _)) = control::open_control_edition(w, &control) {
                 if ed.author == owner {
-                    if ed.vsk == vsk::COMMUNITY_METADATA && ed.entity_id == community.id().0 {
-                        found_genesis = true;
-                    }
                     editions.push(ed);
                 }
             }
         }
-        if found_genesis || oldest == 0 {
-            break; // found the owner genesis, or can't page older than epoch 0.
+        if !editions.is_empty() || oldest == 0 {
+            break; // authenticated (an owner edition), or can't page older than epoch 0.
         }
         until = Some(oldest - 1);
     }
-    if !found_genesis {
+    if editions.is_empty() {
         return Err(
             "could not verify this community from its relays (the invite may be forged, the relays are unreachable, or the control plane is being flooded); not joining"
                 .to_string(),
