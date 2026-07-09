@@ -341,21 +341,30 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
     let control = control_group_key(&community.community_root, community.id(), community.root_epoch);
     let control_pk = control.pk_hex();
 
-    // Authenticity = ANY owner-signed control edition at the root-derived control
-    // plane. An attacker's forged root has NONE (they can't forge the owner's seal);
-    // a genuine root always carries the owner's genesis + edits. This is far simpler
-    // and more robust than hunting the OLDEST genesis: an active community's owner
-    // editions sit in the newest window (page one), page one is UNBOUNDED so a
-    // clock-skewed future-dated genesis is never clipped, and a small bounded walk
-    // covers a lightly-flooded plane. A heavy flood that buries every owner edition
-    // past the walk is the residual whose real fix is binding the root into
-    // community_id (protocol, deferred). Break on an EMPTY page (a short page is a
-    // relay cap, not exhaustion). The eclipse case (forged root — nothing
-    // owner-signed to find) walks to exhaustion and rejects.
+    // Authenticity = the owner's GENESIS metadata edition (vsk-0, `eid ==
+    // community_id`) at the root-derived control plane. The genesis eid pins it to
+    // THIS community, and it lives ONLY under the real root — so a forged root can't
+    // produce one: an edition's seal carries no community binding, but another
+    // community's genesis has a different eid, and this community's own genesis is
+    // unreadable without its real root (which the forger lacks). ("Any owner edition"
+    // is NOT sound: an owner sig from any co-owned community, rewrapped onto the fake
+    // plane, would pass — reopening the eclipse.) The residual — a T-member replaying
+    // T's genesis onto a fake root to MITM another T-joiner — is closed only by
+    // binding the root into community_id (protocol, deferred).
+    //
+    // Seed `until = now + skew`: a bounded `until` takes the transport's AUTHORITATIVE
+    // drain-ALL-relays path (an open `until` returns only a fast relay's partial
+    // window and misses a genesis on a lagging relay — routine over Tor), while the
+    // skew margin still admits a clock-skewed future-dated genesis (relays reject
+    // events far beyond their tolerance anyway). Break on an EMPTY page (a short page
+    // is a relay cap). A forged root walks to exhaustion and rejects; a flood/deep
+    // plane that buries the genesis past the walk is the deferred protocol residual.
     const PAGE: usize = 500;
     const MAX_PAGES: usize = 4;
+    const SKEW_SECS: u64 = 3600;
     let mut editions: Vec<ParsedEdition> = Vec::new();
-    let mut until: Option<u64> = None;
+    let mut found_genesis = false;
+    let mut until: Option<u64> = Some(now_ms() / 1000 + SKEW_SECS);
     for _ in 0..MAX_PAGES {
         let query = Query {
             kinds: vec![stream::KIND_WRAP],
@@ -373,16 +382,19 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
             oldest = oldest.min(w.created_at.as_secs());
             if let Ok((ed, _)) = control::open_control_edition(w, &control) {
                 if ed.author == owner {
+                    if ed.vsk == vsk::COMMUNITY_METADATA && ed.entity_id == community.id().0 {
+                        found_genesis = true;
+                    }
                     editions.push(ed);
                 }
             }
         }
-        if !editions.is_empty() || oldest == 0 {
-            break; // authenticated (an owner edition), or can't page older than epoch 0.
+        if found_genesis || oldest == 0 {
+            break; // authenticated (the owner genesis), or can't page older than epoch 0.
         }
         until = Some(oldest - 1);
     }
-    if editions.is_empty() {
+    if !found_genesis {
         return Err(
             "could not verify this community from its relays (the invite may be forged, the relays are unreachable, or the control plane is being flooded); not joining"
                 .to_string(),
@@ -1848,6 +1860,45 @@ mod tests {
         let relay = CappedRelay { events, cap: 100 };
         let verified = verify_owner_root_and_reconcile(&relay, community.clone()).await;
         assert!(verified.is_ok(), "the until-walk pages a capped relay past the flood to the genesis: {:?}", verified.err());
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_a_cross_community_owner_edition_replay() {
+        // The eclipse-via-replay: an owner-signed edition from community X (eid == X.id)
+        // rewrapped onto a FORGED community T's fake control plane must NOT authenticate
+        // T. T's genesis has eid == T.id, so X's edition — a genuine owner signature but
+        // a different eid — is not a valid proof of T's root. This is why "any owner
+        // edition" is unsound and the eid==community_id genesis pin is required.
+        let (_tmp, _guard, owner) = init_test_db();
+
+        // Community X (real), owned by `owner`.
+        let gx = control::genesis(&owner, control::CommunityMetadata { name: "X".into(), ..Default::default() }, 1_000).unwrap();
+        let x_control = control_group_key(&gx.community_root, &gx.identity.community_id, Epoch(0));
+        let (_ed, opened) = control::open_control_edition(&gx.wraps[0], &x_control).unwrap();
+
+        // Forged community T: the real owner triple but an ATTACKER-chosen root.
+        let t_identity = control::CommunityIdentity::mint(&owner.public_key());
+        let fake_root = [0xEE; 32];
+        let t = CommunityV2 {
+            identity: t_identity,
+            community_root: fake_root,
+            root_epoch: Epoch(0),
+            name: "T".into(),
+            description: None,
+            relays: vec!["wss://r".into()],
+            channels: vec![],
+            dissolved: false,
+            created_at_ms: 0,
+        };
+        // Rewrap X's owner-signed genesis onto T's fake control plane (the attacker
+        // controls the fake root, so they can derive its control group key).
+        let t_control = control_group_key(&fake_root, t.id(), t.root_epoch);
+        let (replayed, _) = stream::rewrap_seal(&opened.seal, &t_control, Timestamp::from_secs(1_000)).unwrap();
+        let relay = MemoryRelay::new();
+        relay.publish(&replayed, &t.relays).await.unwrap();
+
+        let verified = verify_owner_root_and_reconcile(&relay, t.clone()).await;
+        assert!(verified.is_err(), "a cross-community owner-edition replay must not authenticate a forged root");
     }
 
     /// LIVE smoke test (network) — ignored by default. Creates a v2 community on a

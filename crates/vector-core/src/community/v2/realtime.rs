@@ -146,6 +146,13 @@ pub fn load_held_v2() -> Vec<CommunityV2> {
 /// `{kinds:[1059,21059], authors:[…]}` on their relays (targeted + pool-wide,
 /// mirroring v1). Idempotent on an unchanged author-set.
 pub async fn refresh_subscription(client: &Client) {
+    // Snapshot the held state INSIDE the sub locks: the follow worker runs
+    // concurrently and may have just adopted a rotation, so the LAST locker must read
+    // the freshest persisted authors. An out-of-lock read lets a stale caller commit
+    // an old author-set over a fresh one and silently mute a rotated community.
+    let mut sub_guard = V2_SUB_ID.lock().await;
+    let mut set_guard = V2_SUB_SET.lock().await;
+
     let communities = load_held_v2();
     let authors = plane_authors(&communities);
     let mut relays: Vec<String> = communities.iter().flat_map(|c| c.relays.iter().cloned()).collect();
@@ -155,8 +162,6 @@ pub async fn refresh_subscription(client: &Client) {
     let mut new_set: Vec<String> = authors.iter().map(|p| p.to_hex()).collect();
     new_set.sort();
 
-    let mut sub_guard = V2_SUB_ID.lock().await;
-    let mut set_guard = V2_SUB_SET.lock().await;
     if sub_guard.is_some() && *set_guard == new_set {
         return; // unchanged — the pool re-applies the live sub across reconnects.
     }
