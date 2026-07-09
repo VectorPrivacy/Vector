@@ -69,6 +69,19 @@ pub async fn create_community<T: Transport + ?Sized>(
     if !session.is_valid() {
         return Err("account changed during community creation".to_string());
     }
+    // Seed the genesis edition heads (v1) as the owner's refuse-downgrade floor, so a
+    // later edit can't be rolled back by a relay serving only the genesis prefix. The
+    // live control sub is replay-free (limit 0), so the owner won't re-fold its own
+    // genesis to seed the floor otherwise. Floors land BEFORE the community row
+    // (floors-then-state ordering).
+    let control = control_group_key(&community.community_root, community.id(), community.root_epoch);
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    for wrap in &genesis.wraps {
+        if let Ok((ed, _)) = control::open_control_edition(wrap, &control) {
+            let entity_hex = crate::simd::hex::bytes_to_hex_32(&ed.entity_id);
+            crate::db::community::set_edition_head_at_epoch(&cid_hex, &entity_hex, ed.version, &ed.self_hash, &ed.inner_id, community.root_epoch.0)?;
+        }
+    }
     crate::db::community::save_community_v2(&community)?;
 
     // Publish the two genesis control editions at the epoch-0 control plane.
@@ -296,13 +309,21 @@ async fn accept_bundle<T: Transport + ?Sized>(
     // with an attacker-chosen root and silently partition the joiner onto planes
     // only the attacker controls. Requiring the owner's genesis to open under the
     // delivered root closes that eclipse; also reconciles channel classification.
-    let community = verify_owner_root_and_reconcile(transport, community).await?;
+    let (community, join_heads) = verify_owner_root_and_reconcile(transport, community).await?;
 
     // The account must not have swapped since the guard was captured (which was
     // before any fetch the caller / the verify above performed) — else we'd write
     // A's join into B.
     if !session.is_valid() {
         return Err("account changed during join".to_string());
+    }
+    // Seed the verified heads as the initial refuse-downgrade floor BEFORE the
+    // community row lands (floors-then-state, so a mid-seed error can't leave saved
+    // state outrunning its floor); the first post-join follow then can't persist a
+    // state below what this join already showed.
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    for h in &join_heads {
+        crate::db::community::set_edition_head_at_epoch(&cid_hex, &h.entity_hex, h.version, &h.self_hash, &h.inner_id, community.root_epoch.0)?;
     }
     crate::db::community::save_community_v2(&community)?;
 
@@ -336,7 +357,7 @@ async fn accept_bundle<T: Transport + ?Sized>(
 async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
     transport: &T,
     community: CommunityV2,
-) -> Result<CommunityV2, String> {
+) -> Result<(CommunityV2, Vec<FoldedHead>), String> {
     let owner = community.owner()?;
     let control = control_group_key(&community.community_root, community.id(), community.root_epoch);
     let control_pk = control.pk_hex();
@@ -366,6 +387,7 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
     let mut editions: Vec<ParsedEdition> = Vec::new();
     let mut found_genesis = false;
     let mut until: Option<u64> = Some(FAR_FUTURE_SECS);
+    let mut seen_wraps: std::collections::HashSet<nostr_sdk::EventId> = std::collections::HashSet::new();
     for _ in 0..MAX_PAGES {
         let query = Query {
             kinds: vec![stream::KIND_WRAP],
@@ -375,11 +397,16 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
             ..Default::default()
         };
         let wraps = transport.fetch(&query, &community.relays).await?;
-        if wraps.is_empty() {
-            break;
-        }
+        // INCLUSIVE `until` + wrap-id dedup: a `-1` step can skip same-second
+        // siblings at a page boundary (and the genesis with them); re-served
+        // boundary events are free, and no-new-events means exhausted.
         let mut oldest = u64::MAX;
+        let mut fresh = 0usize;
         for w in &wraps {
+            if !seen_wraps.insert(w.id) {
+                continue;
+            }
+            fresh += 1;
             oldest = oldest.min(w.created_at.as_secs());
             if let Ok((ed, _)) = control::open_control_edition(w, &control) {
                 if ed.author == owner {
@@ -390,10 +417,10 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
                 }
             }
         }
-        if found_genesis || oldest == 0 {
-            break; // authenticated (the owner genesis), or can't page older than epoch 0.
+        if found_genesis || fresh == 0 {
+            break; // authenticated (the owner genesis), or the relay is exhausted.
         }
-        until = Some(oldest - 1);
+        until = Some(oldest);
     }
     if !found_genesis {
         return Err(
@@ -401,7 +428,14 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
                 .to_string(),
         );
     }
-    Ok(apply_control_fold(&community, &editions).unwrap_or(community))
+    // Join-time reconcile: the joiner holds no floors yet (empty map → bootstrap per
+    // entity). The heads this fold verified are returned for the caller to SEED as
+    // the initial floor once the community row is saved — without that, the first
+    // post-join follow would bootstrap floor-less and could persist a state BELOW
+    // what this join already verified and showed.
+    let empty_floors = Floors::new();
+    let fold = apply_control_fold(&community, &editions, &empty_floors);
+    Ok((fold.updated.unwrap_or(community), fold.heads))
 }
 
 /// Accept a Direct Invite: unwrap the 3313 giftwrap (Schnorr-verifying the seal),
@@ -459,12 +493,10 @@ pub async fn accept_public_link<T: Transport + ?Sized>(transport: &T, url: &str)
 
     // Scan EVERY event: a tombstone beats a Live unconditionally (order-independent).
     let mut newest_live: Option<(u64, CommunityInvite)> = None;
-    let mut found_any = false;
     for event in &events {
         match invite::parse_bundle_event(event, &parsed.link_signer, &bundle_key) {
             Ok(invite::BundleState::Revoked) => return Err("this invite link has been revoked".to_string()),
             Ok(invite::BundleState::Live(bundle)) => {
-                found_any = true;
                 let at = event.created_at.as_secs();
                 if newest_live.as_ref().is_none_or(|(t, _)| at > *t) {
                     newest_live = Some((at, *bundle));
@@ -475,7 +507,6 @@ pub async fn accept_public_link<T: Transport + ?Sized>(transport: &T, url: &str)
     }
     match newest_live {
         Some((_, bundle)) => accept_bundle(transport, &session, &bundle, None).await,
-        None if found_any => unreachable!(),
         None => Err("invite bundle not found on relays".to_string()),
     }
 }
@@ -578,53 +609,139 @@ pub async fn follow_control<T: Transport + ?Sized>(
 ) -> Result<Option<CommunityV2>, String> {
     let owner = community.owner()?;
     let control = control_group_key(&community.community_root, community.id(), community.root_epoch);
-    let query = Query {
-        kinds: vec![stream::KIND_WRAP],
-        authors: vec![control.pk_hex()],
-        limit: Some(500),
-        ..Default::default()
-    };
-    let wraps = transport.fetch(&query, &community.relays).await?;
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
 
-    // Open + seal-verify every edition; keep only the owner's (the authority gate).
+    // Per-entity refuse-downgrade floors for the CURRENT epoch only. A head recorded
+    // under a prior epoch is excluded, so that entity auto-bootstraps after a
+    // Refounding (Armada accepts a compacted head across a dangling prev — matched).
+    // A read error FAILS CLOSED: an empty map would silently re-open the rollback
+    // window the floor exists to shut.
+    let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex)?
+        .into_iter()
+        .filter(|(_, f)| f.0 == community.root_epoch.0)
+        .map(|(entity, f)| (entity, (f.1, f.2, f.3)))
+        .collect();
+
+    // Newest window first; page OLDER only while a tracking entity is gapped (its
+    // floor link evicted from the window — H1/M8 refetch), bounded like the join
+    // verifier. A withholding relay still converges to fail-closed after the cap.
     let mut editions: Vec<ParsedEdition> = Vec::new();
-    for w in &wraps {
-        if let Ok((ed, _)) = control::open_control_edition(w, &control) {
-            if ed.author == owner {
-                editions.push(ed);
+    let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+    let mut seen_wraps: std::collections::HashSet<nostr_sdk::EventId> = std::collections::HashSet::new();
+    let mut oldest: Option<u64> = None;
+    let mut until: Option<u64> = None;
+    let mut fold = ControlFold { updated: None, heads: Vec::new(), gapped: false };
+    for _ in 0..FOLLOW_MAX_PAGES {
+        let query = Query {
+            kinds: vec![stream::KIND_WRAP],
+            authors: vec![control.pk_hex()],
+            until,
+            limit: Some(FOLLOW_PAGE),
+            ..Default::default()
+        };
+        let wraps = transport.fetch(&query, &community.relays).await?;
+        // The `until` cursor is INCLUSIVE (a `-1` step can skip same-second siblings
+        // at a page boundary); the wrap-id dedup makes re-served boundary events
+        // free, and a page with nothing new means the relay is exhausted.
+        let mut fresh = 0usize;
+        for w in &wraps {
+            if !seen_wraps.insert(w.id) {
+                continue;
+            }
+            fresh += 1;
+            let at = w.created_at.as_secs();
+            if oldest.is_none_or(|o| at < o) {
+                oldest = Some(at);
+            }
+            // Open + seal-verify; keep only the owner's (the authority gate).
+            if let Ok((ed, _)) = control::open_control_edition(w, &control) {
+                if ed.author == owner && seen.insert(ed.inner_id) {
+                    editions.push(ed);
+                }
             }
         }
+        fold = apply_control_fold(community, &editions, &floors);
+        if !fold.gapped || fresh == 0 {
+            break;
+        }
+        until = oldest;
     }
 
-    let Some(updated) = apply_control_fold(community, &editions) else {
-        return Ok(None);
-    };
-    // The fetch straddled an await; a swap since the guard was captured must not
+    // The fetches straddled awaits; a swap since the guard was captured must not
     // write account A's control state into B.
     if !session.is_valid() {
         return Err("account changed during control follow".to_string());
     }
-    crate::db::community::save_community_v2(&updated)?;
-    Ok(Some(updated))
+    // A leave/delete raced this follow: writing now would resurrect the community
+    // row and orphan floor rows past delete_community's wipe.
+    if crate::db::community::community_protocol(community.id())?.is_none() {
+        return Ok(None);
+    }
+    // Persist advanced floors BEFORE the state save (a failed floor write must not
+    // let saved state outrun its floor), stamping the epoch this fold ran under —
+    // not the row's write-time value, which a concurrent re-founding can bump. Run
+    // both the advance (v+1) and same-version convergence (fork tiebreak) paths.
+    for h in &fold.heads {
+        crate::db::community::set_edition_head_at_epoch(&cid_hex, &h.entity_hex, h.version, &h.self_hash, &h.inner_id, community.root_epoch.0)?;
+        crate::db::community::converge_edition_head_at_epoch(&cid_hex, &h.entity_hex, h.version, &h.self_hash, &h.inner_id, community.root_epoch.0)?;
+    }
+    match fold.updated {
+        Some(u) => {
+            crate::db::community::save_community_v2(&u)?;
+            Ok(Some(u))
+        }
+        None => Ok(None),
+    }
 }
 
-/// Fold a set of owner-authored control editions into an updated community
-/// (pure). Groups editions by `(vsk, entity_id)` and takes each entity's highest
-/// version *present in the fetched set* via [`version::bootstrap_head`] — the lens
-/// for a bootstrapping reader that holds no per-entity version floor and trusts
-/// the owner's signature (already verified upstream). Applies community metadata
-/// (name/description/relays) and public channel add/rename/delete. Returns `None`
-/// if nothing changed.
-///
-/// **Known limitation (no persisted floor):** because there's no stored per-entity
-/// version, this can be rolled BACKWARD by a relay that withholds the newest
-/// owner editions and serves only an older (still owner-signed) prefix — reverting
-/// a rename or resurrecting a deleted channel until the full set is re-fetched. It
-/// never trusts a non-owner, and self-heals once the complete chain arrives, but a
-/// tracking-grade fold (persist the applied version + `version::fold` with
-/// refuse-downgrade) is the durable fix, deferred with the broader floor-
-/// persistence work. See [[concord_v2_build]].
-fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition]) -> Option<CommunityV2> {
+/// Control-follow paging bounds: enough depth to re-anchor a long-offline floor
+/// (H1/M8 refetch) without letting a flooding relay stall the follow queue.
+const FOLLOW_MAX_PAGES: usize = 4;
+const FOLLOW_PAGE: usize = 500;
+
+/// A folded control head to persist as the per-entity refuse-downgrade floor.
+struct FoldedHead {
+    entity_hex: String,
+    version: u64,
+    self_hash: [u8; 32],
+    inner_id: [u8; 32],
+}
+
+/// The outcome of a floor-aware control fold: the updated community (if content
+/// changed), the heads to persist as the new floor (returned even when content is
+/// unchanged, so the floor still seeds/advances), and whether any TRACKING entity
+/// hit an unresolvable gap — the caller's signal to page older history and re-fold
+/// (CORD-04 H1/M8's refetch).
+struct ControlFold {
+    updated: Option<CommunityV2>,
+    heads: Vec<FoldedHead>,
+    gapped: bool,
+}
+
+/// Per-entity floor: `(version, self_hash, inner_id)` of the committed head.
+type Floors = std::collections::HashMap<String, (u64, [u8; 32], Option<[u8; 32]>)>;
+
+/// Fold owner-authored control editions into an updated community using the
+/// PERSISTED per-entity version floor (refuse-downgrade). Per entity, fold with
+/// [`version::fold`]`(floor, floor_hash)`:
+///   - ANCHORED: adopt the chain-verified head. A `gap` ABOVE it (withheld middles)
+///     doesn't block the verified prefix — refuse-downgrade holds for everything
+///     applied — but flags `gapped` so the caller pages for the rest.
+///   - UNANCHORED under a held floor: one legitimate cause is a same-version owner
+///     fork AT the floor whose deterministic winner (lower inner id; a NULL held id
+///     is always replaceable, mirroring v1's `decide()`) isn't our held edition —
+///     the floor CONVERGES to the winner and the chain re-anchors on it, so every
+///     client lands on the same head where a hash-strict floor would wedge forever.
+///     Anything else is withholding → fail closed + `gapped`.
+///   - BOOTSTRAPPING (`floor == 0` — a fresh joiner, or a fresh epoch after a
+///     Refounding, since the caller epoch-filters the floor) takes the highest
+///     signed head (author already owner-filtered).
+/// This matches CORD-04 §1 and mirrors v1's `fold_roster`. Epoch-filtering makes a
+/// compaction at a new epoch auto-bootstrap, converging with Armada's acceptance of
+/// a compacted head across a dangling `prev` (Armada doesn't persist a floor, so a
+/// Vector floor only makes Vector STRICTER locally — no wire change, honest-case
+/// convergence preserved).
+fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floors: &Floors) -> ControlFold {
     use std::collections::BTreeMap;
 
     let mut groups: BTreeMap<(String, [u8; 32]), Vec<&ParsedEdition>> = BTreeMap::new();
@@ -634,30 +751,98 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition]) -> Op
 
     let mut out = community.clone();
     let mut changed = false;
+    let mut heads = Vec::new();
+    let mut gapped = false;
     for ((vsk_code, eid), group) in &groups {
-        let fold_eds: Vec<version::Edition> = group.iter().map(|p| p.to_fold_edition()).collect();
-        let Some(hi) = version::bootstrap_head(&fold_eds, 0) else {
+        // This follow applies exactly two entities: community metadata (eid ==
+        // community_id) and channel metadata. Others carry no floor here. A vsk-2
+        // whose eid equals the community id is excluded — the floor row keys on the
+        // entity alone, so it would share (and corrupt) the metadata chain's floor.
+        let is_meta = vsk_code == vsk::COMMUNITY_METADATA && *eid == community.id().0;
+        let is_channel = vsk_code == vsk::CHANNEL_METADATA && *eid != community.id().0;
+        if !is_meta && !is_channel {
             continue;
-        };
-        let content = group[hi].content.as_str();
+        }
+        let entity_hex = crate::simd::hex::bytes_to_hex_32(eid);
+        let fold_eds: Vec<version::Edition> = group.iter().map(|p| p.to_fold_edition()).collect();
+        let floor = floors.get(&entity_hex);
+        let floor_v = floor.map(|f| f.0).unwrap_or(0);
+        let floor_hash = floor.map(|f| &f.1);
+        let held_inner = floor.and_then(|f| f.2);
 
-        if vsk_code == vsk::COMMUNITY_METADATA && *eid == community.id().0 {
-            if let Ok(meta) = serde_json::from_str::<control::CommunityMetadata>(content) {
+        let result = version::fold(&fold_eds, floor_v, floor_hash);
+        let hi = if floor_v == 0 {
+            // Bootstrap MUST win over the anchored arm: with {v1, v3} and a lost v2,
+            // the genesis still anchors — but a joiner must take the highest signed
+            // head (v3, what Armada shows), not the stale anchored prefix, or the
+            // seeded floor pins them below the network head for good.
+            match version::bootstrap_head(&fold_eds, 0) {
+                Some(i) => i,
+                None => continue,
+            }
+        } else if result.anchored {
+            gapped |= result.gap; // withheld versions above the verified prefix → page.
+            match result.head {
+                Some(i) => i,
+                None => continue,
+            }
+        } else if result.head.is_none() && !result.gap {
+            // Everything fetched is BELOW the floor: a merely-stale relay, not
+            // withholding — the held state already supersedes it; no paging.
+            continue;
+        } else {
+            // Unanchored under a held floor: converge a same-version fork at the
+            // floor to its deterministic winner, else fail closed.
+            let fork = fold_eds
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.version == floor_v)
+                .min_by_key(|(_, e)| e.tiebreak_id);
+            let win_hash = match fork {
+                Some((_, w))
+                    if floor_hash != Some(&w.self_hash)
+                        && held_inner.is_none_or(|h| w.tiebreak_id < h) =>
+                {
+                    w.self_hash
+                }
+                _ => {
+                    // All ≥-floor editions are detached from our committed head (or
+                    // the only fork present LOSES the tiebreak): withholding.
+                    gapped = true;
+                    continue;
+                }
+            };
+            let re = version::fold(&fold_eds, floor_v, Some(&win_hash));
+            if !re.anchored {
+                gapped = true;
+                continue;
+            }
+            gapped |= re.gap;
+            match re.head {
+                Some(i) => i,
+                None => continue,
+            }
+        };
+
+        let head = group[hi];
+        heads.push(FoldedHead {
+            entity_hex,
+            version: head.version,
+            self_hash: head.self_hash,
+            inner_id: head.inner_id,
+        });
+        if is_meta {
+            if let Ok(meta) = serde_json::from_str::<control::CommunityMetadata>(&head.content) {
                 changed |= apply_community_metadata(&mut out, meta);
             }
-        } else if vsk_code == vsk::CHANNEL_METADATA {
-            // A vsk-2 edition carries no community binding (shared v1 grammar), so a
-            // same-owner cross-community replay can inject a phantom PUBLIC channel
-            // here. Bounded: its key is this community's root (no foreign secret
-            // bridges in) and eids don't collide, so real channels can't be
-            // renamed/deleted. Binding community_id into the signed edition is a wire
-            // change (breaks the shared edition_hash + Armada interop) — deferred.
-            if let Ok(meta) = serde_json::from_str::<control::ChannelMetadata>(content) {
-                changed |= apply_channel_metadata(&mut out, ChannelId(*eid), meta);
-            }
+        } else if let Ok(meta) = serde_json::from_str::<control::ChannelMetadata>(&head.content) {
+            // vsk-2 carries no community binding (shared v1 grammar); a same-owner
+            // cross-community replay can inject a phantom PUBLIC channel (bounded:
+            // root-scoped key, eids don't collide). Binding is a deferred wire change.
+            changed |= apply_channel_metadata(&mut out, ChannelId(*eid), meta);
         }
     }
-    changed.then_some(out)
+    ControlFold { updated: changed.then_some(out), heads, gapped }
 }
 
 /// Apply a folded community-metadata head. Relays only overwrite when the edition
@@ -848,6 +1033,11 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
     }
     if !session.is_valid() {
         return Err("account changed during rekey follow".to_string());
+    }
+    // A leave/delete raced this follow: saving would resurrect the community row
+    // (the save is an upsert) with no floor rows behind it.
+    if crate::db::community::community_protocol(community.id())?.is_none() {
+        return Ok(RekeyFollow { updated: None, self_removed: false });
     }
     crate::db::community::save_community_v2(&cur)?;
     Ok(RekeyFollow { updated: Some(cur), self_removed: false })
@@ -1418,6 +1608,23 @@ mod tests {
     /// Publish an owner-grammar channel edition straight to the control plane,
     /// signed by `signer` (the owner for a legit edit, a stranger for the
     /// authority test). `version`/`deleted` drive add-vs-rename-vs-delete.
+    /// The entity's current head `self_hash` on the relay (highest version wins),
+    /// so a helper can chain a new edition the way a real owner client does.
+    async fn head_hash_on_relay(relay: &MemoryRelay, community: &CommunityV2, entity_id: &[u8; 32]) -> Option<[u8; 32]> {
+        let group = control_group_key(&community.community_root, community.id(), community.root_epoch);
+        let query = Query { kinds: vec![stream::KIND_WRAP], authors: vec![group.pk_hex()], limit: Some(500), ..Default::default() };
+        let wraps = relay.fetch(&query, &community.relays).await.ok()?;
+        let mut head: Option<(u64, [u8; 32])> = None;
+        for w in &wraps {
+            if let Ok((ed, _)) = control::open_control_edition(w, &group) {
+                if ed.entity_id == *entity_id && head.is_none_or(|(v, _)| ed.version > v) {
+                    head = Some((ed.version, ed.self_hash));
+                }
+            }
+        }
+        head.map(|(_, h)| h)
+    }
+
     async fn publish_channel_edition(
         relay: &MemoryRelay,
         community: &CommunityV2,
@@ -1429,20 +1636,29 @@ mod tests {
         deleted: bool,
     ) {
         let group = control_group_key(&community.community_root, community.id(), community.root_epoch);
+        let prev = head_hash_on_relay(relay, community, &channel_id.0).await;
         let meta = control::ChannelMetadata { name: name.into(), private, deleted: deleted.then_some(true), ..Default::default() };
         let content = serde_json::to_string(&meta).unwrap();
-        let rumor = control::build_edition_rumor(signer.public_key(), vsk::CHANNEL_METADATA, &channel_id.0, version, None, &content, 1_000, None);
+        let rumor = control::build_edition_rumor(signer.public_key(), vsk::CHANNEL_METADATA, &channel_id.0, version, prev.as_ref(), &content, 1_000, None);
         let (wrap, _) = control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(1_000)).unwrap();
         relay.publish(&wrap, &community.relays).await.unwrap();
     }
 
-    /// Publish an owner-grammar community-metadata edition (rename etc.).
+    /// Publish an owner-grammar community-metadata edition (rename etc.), chained
+    /// to the current relay head like a real owner client.
     async fn publish_community_meta(relay: &MemoryRelay, community: &CommunityV2, signer: &Keys, name: &str, version: u64) {
+        publish_community_meta_at(relay, community, signer, name, version, 1_000).await;
+    }
+
+    /// As [`publish_community_meta`] with an explicit timestamp, for tests that need
+    /// relay-side newest-first ordering (paging/eviction scenarios).
+    async fn publish_community_meta_at(relay: &MemoryRelay, community: &CommunityV2, signer: &Keys, name: &str, version: u64, at_secs: u64) {
         let group = control_group_key(&community.community_root, community.id(), community.root_epoch);
+        let prev = head_hash_on_relay(relay, community, &community.id().0).await;
         let meta = control::CommunityMetadata { name: name.into(), ..Default::default() };
         let content = serde_json::to_string(&meta).unwrap();
-        let rumor = control::build_edition_rumor(signer.public_key(), vsk::COMMUNITY_METADATA, &community.id().0, version, None, &content, 1_000, None);
-        let (wrap, _) = control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(1_000)).unwrap();
+        let rumor = control::build_edition_rumor(signer.public_key(), vsk::COMMUNITY_METADATA, &community.id().0, version, prev.as_ref(), &content, at_secs, None);
+        let (wrap, _) = control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(at_secs)).unwrap();
         relay.publish(&wrap, &community.relays).await.unwrap();
     }
 
@@ -1517,6 +1733,346 @@ mod tests {
         let updated = follow_control(&relay, &with_extra, &session).await.unwrap().expect("removed");
         assert!(updated.channel(&extra).is_none(), "a deleted channel folds out");
         assert_eq!(updated.channels.len(), 1, "only #general remains");
+    }
+
+    /// Re-inject only the OLD prefix (every edition at/below `max_version`) of a
+    /// community's control plane onto a second relay URL — the withholding-relay
+    /// simulation: everything it serves is genuinely owner-signed, just stale.
+    async fn inject_stale_prefix(relay: &MemoryRelay, community: &CommunityV2, max_version: u64, stale_relay: &str) {
+        let group = control_group_key(&community.community_root, community.id(), community.root_epoch);
+        let query = Query { kinds: vec![stream::KIND_WRAP], authors: vec![group.pk_hex()], limit: Some(500), ..Default::default() };
+        let wraps = relay.fetch(&query, &community.relays).await.unwrap();
+        for w in &wraps {
+            if let Ok((ed, _)) = control::open_control_edition(w, &group) {
+                if ed.version <= max_version {
+                    relay.inject(w, &[stale_relay.to_string()]);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_withholding_relay_cannot_roll_back_a_rename() {
+        // W2 persisted floor: after adopting the owner's v2 rename, a relay serving
+        // only the (owner-signed) v1 genesis must not revert the held name.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Original", vec!["wss://good".into()], None).await.unwrap();
+        publish_community_meta(&relay, &community, &owner, "Renamed", 2).await;
+
+        let session = SessionGuard::capture();
+        let updated = follow_control(&relay, &community, &session).await.unwrap().expect("rename adopted");
+        assert_eq!(updated.name, "Renamed");
+
+        // The stale relay holds only the genesis prefix; point the follow at it.
+        inject_stale_prefix(&relay, &community, 1, "wss://stale").await;
+        let mut stale_view = updated.clone();
+        stale_view.relays = vec!["wss://stale".into()];
+        assert!(
+            follow_control(&relay, &stale_view, &session).await.unwrap().is_none(),
+            "a stale-only relay must not change the held view"
+        );
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(held.name, "Renamed", "the persisted floor refuses the rollback");
+    }
+
+    #[tokio::test]
+    async fn a_withholding_relay_cannot_resurrect_a_deleted_channel() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Prune2", vec!["wss://good".into()], None).await.unwrap();
+        let extra = ChannelId([0x44; 32]);
+        let session = SessionGuard::capture();
+
+        // A same-content metadata edit: no visible change (None), but the floor must
+        // still advance to v2 (so the genesis metadata can't re-present below).
+        publish_community_meta(&relay, &community, &owner, "Prune2", 2).await;
+        assert!(follow_control(&relay, &community, &session).await.unwrap().is_none());
+
+        publish_channel_edition(&relay, &community, &owner, &extra, "temp", false, 1, false).await;
+        let with_extra = follow_control(&relay, &community, &session).await.unwrap().expect("added");
+        publish_channel_edition(&relay, &community, &owner, &extra, "temp", false, 2, true).await;
+        let pruned = follow_control(&relay, &with_extra, &session).await.unwrap().expect("removed");
+        assert!(pruned.channel(&extra).is_none());
+
+        // The stale relay serves the add (v1) but withholds the delete (v2).
+        inject_stale_prefix(&relay, &community, 1, "wss://stale").await;
+        let mut stale_view = pruned.clone();
+        stale_view.relays = vec!["wss://stale".into()];
+        assert!(
+            follow_control(&relay, &stale_view, &session).await.unwrap().is_none(),
+            "the withheld delete must not resurrect the channel"
+        );
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert!(held.channel(&extra).is_none(), "the deleted channel stays deleted");
+    }
+
+    #[tokio::test]
+    async fn a_new_epoch_bootstraps_past_an_old_epoch_floor() {
+        // The Armada-convergence carve-out: a Refounding compacts the chain and
+        // re-wraps a detached head at the NEW epoch's control plane. The old epoch's
+        // floor must not block it — epoch-filtering makes the entity bootstrap.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Before", vec!["wss://good".into()], None).await.unwrap();
+        let session = SessionGuard::capture();
+        publish_community_meta(&relay, &community, &owner, "Edited", 2).await;
+        let updated = follow_control(&relay, &community, &session).await.unwrap().expect("edit adopted");
+        assert_eq!(updated.name, "Edited");
+
+        // Refounding lands (epoch bump saved by the rekey path); the compacted head
+        // arrives DETACHED (high version, no prev) on the new epoch's plane.
+        let mut refounded = updated.clone();
+        refounded.root_epoch = crate::community::Epoch(1);
+        crate::db::community::save_community_v2(&refounded).unwrap();
+        publish_community_meta(&relay, &refounded, &owner, "Compacted", 5).await;
+
+        let adopted = follow_control(&relay, &refounded, &session).await.unwrap().expect("compacted head adopted");
+        assert_eq!(adopted.name, "Compacted", "a fresh epoch bootstraps despite the dangling prev");
+        // The persisted floor is stamped with the epoch the FOLD ran under.
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let heads = crate::db::community::get_all_edition_heads_epoched(&cid_hex).unwrap();
+        assert!(
+            heads.get(&cid_hex).is_some_and(|(e, v, _)| *e == 1 && *v == 5),
+            "the adopted head carries the fold's epoch + version"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_same_version_owner_fork_at_the_floor_converges_to_the_deterministic_winner() {
+        // Two owner-signed editions at the SAME version (publish retry / two owner
+        // devices): every client must land on the lower-inner-id winner. A hash-strict
+        // floor would wedge here forever while Armada converges — the floor must
+        // CONVERGE instead (the v1 decide() rule).
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Fork", vec!["wss://r".into()], None).await.unwrap();
+        let session = SessionGuard::capture();
+        let group = control_group_key(&community.community_root, community.id(), community.root_epoch);
+        let genesis_hash = head_hash_on_relay(&relay, &community, &community.id().0).await.unwrap();
+
+        publish_community_meta(&relay, &community, &owner, "Ours", 2).await;
+        let ours = follow_control(&relay, &community, &session).await.unwrap().expect("ours adopted");
+        assert_eq!(ours.name, "Ours");
+
+        // Our committed v2 edition's tiebreak id.
+        let our_inner = {
+            let q = Query { kinds: vec![stream::KIND_WRAP], authors: vec![group.pk_hex()], limit: Some(500), ..Default::default() };
+            let wraps = relay.fetch(&q, &community.relays).await.unwrap();
+            wraps
+                .iter()
+                .find_map(|w| {
+                    control::open_control_edition(w, &group)
+                        .ok()
+                        .filter(|(ed, _)| ed.version == 2 && ed.vsk == vsk::COMMUNITY_METADATA)
+                        .map(|(ed, _)| ed.inner_id)
+                })
+                .unwrap()
+        };
+
+        // Craft the concurrent fork so it WINS the deterministic tiebreak (vary the
+        // authored timestamp until its inner id is lower).
+        let meta = control::CommunityMetadata { name: "Theirs".into(), ..Default::default() };
+        let content = serde_json::to_string(&meta).unwrap();
+        let mut ts = 2_000u64;
+        let fork_wrap = loop {
+            let rumor = control::build_edition_rumor(owner.public_key(), vsk::COMMUNITY_METADATA, &community.id().0, 2, Some(&genesis_hash), &content, ts, None);
+            let inner = rumor.id.unwrap().to_bytes();
+            if inner < our_inner {
+                break control::seal_control_edition(&rumor, &group, &owner, Timestamp::from_secs(ts)).unwrap().0;
+            }
+            ts += 1;
+        };
+        relay.publish(&fork_wrap, &community.relays).await.unwrap();
+
+        let converged = follow_control(&relay, &ours, &session).await.unwrap().expect("fork winner adopted");
+        assert_eq!(converged.name, "Theirs", "the floor converges to the lower-inner-id winner");
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let held = crate::db::community::get_edition_head_inner_id(&cid_hex, &cid_hex).unwrap();
+        assert!(held.is_some_and(|h| h < our_inner), "the persisted floor's tiebreak key moved to the winner");
+    }
+
+    #[tokio::test]
+    async fn an_anchored_prefix_applies_while_a_gap_above_awaits_the_missing_link() {
+        // v2 chains to the floor; v4 arrives but its v3 link is withheld. The
+        // chain-verified prefix (v2) applies NOW — refuse-downgrade holds for it —
+        // while the detached v4 waits. When v3 lands, the chain heals to v4.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Prefix", vec!["wss://r".into()], None).await.unwrap();
+        let session = SessionGuard::capture();
+        let group = control_group_key(&community.community_root, community.id(), community.root_epoch);
+
+        publish_community_meta(&relay, &community, &owner, "Two", 2).await;
+        let v2_hash = head_hash_on_relay(&relay, &community, &community.id().0).await.unwrap();
+
+        // Craft v3 (held back) and v4 (published, chained to the withheld v3).
+        let c3 = serde_json::to_string(&control::CommunityMetadata { name: "Three".into(), ..Default::default() }).unwrap();
+        let r3 = control::build_edition_rumor(owner.public_key(), vsk::COMMUNITY_METADATA, &community.id().0, 3, Some(&v2_hash), &c3, 3_000, None);
+        let (w3, _) = control::seal_control_edition(&r3, &group, &owner, Timestamp::from_secs(3_000)).unwrap();
+        let (ed3, _) = control::open_control_edition(&w3, &group).unwrap();
+        let c4 = serde_json::to_string(&control::CommunityMetadata { name: "Four".into(), ..Default::default() }).unwrap();
+        let r4 = control::build_edition_rumor(owner.public_key(), vsk::COMMUNITY_METADATA, &community.id().0, 4, Some(&ed3.self_hash), &c4, 4_000, None);
+        let (w4, _) = control::seal_control_edition(&r4, &group, &owner, Timestamp::from_secs(4_000)).unwrap();
+        relay.publish(&w4, &community.relays).await.unwrap();
+
+        let updated = follow_control(&relay, &community, &session).await.unwrap().expect("the verified prefix applies");
+        assert_eq!(updated.name, "Two", "the anchored prefix lands; the detached v4 does not");
+
+        relay.publish(&w3, &community.relays).await.unwrap();
+        let healed = follow_control(&relay, &updated, &session).await.unwrap().expect("the chain heals");
+        assert_eq!(healed.name, "Four", "once the link arrives, the head advances past the prefix");
+    }
+
+    #[tokio::test]
+    async fn paging_rescues_a_floor_link_evicted_from_the_newest_window() {
+        // The held floor is v2; the owner publishes v3, then a flood of foreign junk
+        // wraps fills the newest window, then v4. Page 1 sees only v4 (detached →
+        // gapped); paging older must recover v3 (and the floor link) and heal to v4.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Paged", vec!["wss://r".into()], None).await.unwrap();
+        let session = SessionGuard::capture();
+        let group = control_group_key(&community.community_root, community.id(), community.root_epoch);
+
+        publish_community_meta(&relay, &community, &owner, "Two", 2).await;
+        let base = follow_control(&relay, &community, &session).await.unwrap().expect("floor at v2");
+        publish_community_meta(&relay, &base, &owner, "Three", 3).await; // ts 1_000 (old)
+        let v3_hash = head_hash_on_relay(&relay, &community, &community.id().0).await.unwrap();
+
+        // Rogue flood occupying the newest window (sealed to the control plane, but
+        // non-owner — the authority gate drops them; they only crowd the page).
+        let rogue = Keys::generate();
+        for i in 0..(FOLLOW_PAGE as u64 - 1) {
+            let rumor = control::build_edition_rumor(rogue.public_key(), vsk::CHANNEL_METADATA, &[0xCC; 32], 1, None, "{\"name\":\"junk\",\"private\":false}", 4_000 + i, None);
+            let (w, _) = control::seal_control_edition(&rumor, &group, &rogue, Timestamp::from_secs(4_000 + i)).unwrap();
+            relay.publish(&w, &community.relays).await.unwrap();
+        }
+        // v4 chained to the real v3 (crafted directly: the flood also blinds the
+        // helper's own newest-window head lookup), timestamped newest of all.
+        let c4 = serde_json::to_string(&control::CommunityMetadata { name: "Four".into(), ..Default::default() }).unwrap();
+        let r4 = control::build_edition_rumor(owner.public_key(), vsk::COMMUNITY_METADATA, &community.id().0, 4, Some(&v3_hash), &c4, 10_000, None);
+        let (w4, _) = control::seal_control_edition(&r4, &group, &owner, Timestamp::from_secs(10_000)).unwrap();
+        relay.publish(&w4, &community.relays).await.unwrap();
+
+        let healed = follow_control(&relay, &base, &session).await.unwrap().expect("paging recovered the chain");
+        assert_eq!(healed.name, "Four", "the gap paged past the flood to the floor link");
+    }
+
+    #[tokio::test]
+    async fn a_follow_after_delete_does_not_resurrect_the_community() {
+        // A leave/delete racing an in-flight follow: the follow must not re-insert
+        // the community row or floor rows past delete_community's wipe.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Gone", vec!["wss://r".into()], None).await.unwrap();
+        publish_community_meta(&relay, &community, &owner, "Edited", 2).await;
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        crate::db::community::delete_community(&cid_hex).unwrap();
+
+        let session = SessionGuard::capture();
+        assert!(
+            follow_control(&relay, &community, &session).await.unwrap().is_none(),
+            "a follow racing a delete is a no-op"
+        );
+        assert!(crate::db::community::load_community_v2(community.id()).unwrap().is_none(), "the community stays deleted");
+        assert!(crate::db::community::edition_head_entity_ids(&cid_hex).unwrap().is_empty(), "no orphan floor rows");
+    }
+
+    #[tokio::test]
+    async fn a_rekey_follow_after_delete_does_not_resurrect_the_community() {
+        // The rekey sibling of the follow_control guard: an owner rotation adopted
+        // mid-race must not upsert the community row back after a leave/delete.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "GoneKeys", vec!["wss://r".into()], None).await.unwrap();
+        let new_root = [0xB2; 32];
+        publish_base_rotation(&relay, &community, &owner, &[owner.public_key()], &new_root, &community.community_root).await;
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        crate::db::community::delete_community(&cid_hex).unwrap();
+
+        let session = SessionGuard::capture();
+        let follow = follow_rekeys(&relay, &community, &session).await.unwrap();
+        assert!(follow.updated.is_none() && !follow.self_removed, "a rekey follow racing a delete adopts nothing");
+        assert!(crate::db::community::load_community_v2(community.id()).unwrap().is_none(), "the community stays deleted");
+    }
+
+    #[tokio::test]
+    async fn a_joiner_bootstraps_the_highest_head_across_a_lost_middle_edition() {
+        // {v1, v3} on the relays with v2 lost at publish time (a rate-limiting relay
+        // that still ACKed): the genesis anchors, so an anchored-prefix-first fold
+        // would take v1 and SEED the joiner's floor there — pinning them below the
+        // head Armada shows, forever. A joiner (floor 0) must bootstrap v3.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Skip", bed.relays.clone(), None).await.unwrap();
+        let group = control_group_key(&community.community_root, community.id(), community.root_epoch);
+        let genesis_hash = head_hash_on_relay(&bed.relay, &community, &community.id().0).await.unwrap();
+
+        // v2 is crafted but NEVER published; v3 chains to it and is published.
+        let c2 = serde_json::to_string(&control::CommunityMetadata { name: "Two".into(), ..Default::default() }).unwrap();
+        let r2 = control::build_edition_rumor(owner.keys.public_key(), vsk::COMMUNITY_METADATA, &community.id().0, 2, Some(&genesis_hash), &c2, 2_000, None);
+        let (w2, _) = control::seal_control_edition(&r2, &group, &owner.keys, Timestamp::from_secs(2_000)).unwrap();
+        let (ed2, _) = control::open_control_edition(&w2, &group).unwrap();
+        let c3 = serde_json::to_string(&control::CommunityMetadata { name: "Three".into(), ..Default::default() }).unwrap();
+        let r3 = control::build_edition_rumor(owner.keys.public_key(), vsk::COMMUNITY_METADATA, &community.id().0, 3, Some(&ed2.self_hash), &c3, 3_000, None);
+        let (w3, _) = control::seal_control_edition(&r3, &group, &owner.keys, Timestamp::from_secs(3_000)).unwrap();
+        bed.relay.publish(&w3, &community.relays).await.unwrap();
+
+        let bundle = bundle_of(&community, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&member);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        assert_eq!(joined.name, "Three", "the joiner bootstraps the highest signed head, not the anchored stale prefix");
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&joined.id().0);
+        let head = crate::db::community::get_edition_head(&cid_hex, &cid_hex).unwrap();
+        assert!(head.is_some_and(|(v, _)| v == 3), "the seeded floor is the bootstrap head");
+    }
+
+    #[tokio::test]
+    async fn a_losing_same_version_fork_cannot_replace_the_held_floor() {
+        // The refusal half of fork convergence: a relay withholding OUR committed
+        // floor edition while serving only a same-version fork with a HIGHER inner
+        // id must be treated as withholding — held state and floor unchanged.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Fork2", vec!["wss://good".into()], None).await.unwrap();
+        let session = SessionGuard::capture();
+        let group = control_group_key(&community.community_root, community.id(), community.root_epoch);
+        let genesis_hash = head_hash_on_relay(&relay, &community, &community.id().0).await.unwrap();
+
+        publish_community_meta(&relay, &community, &owner, "Ours", 2).await;
+        let ours = follow_control(&relay, &community, &session).await.unwrap().expect("ours adopted");
+        assert_eq!(ours.name, "Ours");
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let held_before = crate::db::community::get_edition_head(&cid_hex, &cid_hex).unwrap().unwrap();
+        let our_inner = crate::db::community::get_edition_head_inner_id(&cid_hex, &cid_hex).unwrap().unwrap();
+
+        // Grind the fork to LOSE the tiebreak (higher inner id), then serve it —
+        // with the genesis but WITHOUT our v2 — from a withholding relay.
+        let meta = control::CommunityMetadata { name: "Theirs".into(), ..Default::default() };
+        let content = serde_json::to_string(&meta).unwrap();
+        let mut ts = 5_000u64;
+        let fork_wrap = loop {
+            let rumor = control::build_edition_rumor(owner.public_key(), vsk::COMMUNITY_METADATA, &community.id().0, 2, Some(&genesis_hash), &content, ts, None);
+            if rumor.id.unwrap().to_bytes() > our_inner {
+                break control::seal_control_edition(&rumor, &group, &owner, Timestamp::from_secs(ts)).unwrap().0;
+            }
+            ts += 1;
+        };
+        inject_stale_prefix(&relay, &community, 1, "wss://stale").await; // genesis only
+        relay.inject(&fork_wrap, &["wss://stale".to_string()]);
+        let mut stale_view = ours.clone();
+        stale_view.relays = vec!["wss://stale".into()];
+
+        assert!(
+            follow_control(&relay, &stale_view, &session).await.unwrap().is_none(),
+            "a losing fork served without our floor edition changes nothing"
+        );
+        let held_after = crate::db::community::get_edition_head(&cid_hex, &cid_hex).unwrap().unwrap();
+        assert_eq!(held_after, held_before, "the floor row is untouched");
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(held.name, "Ours", "the held state is untouched");
     }
 
     #[tokio::test]
@@ -1897,6 +2453,13 @@ mod tests {
         assert_eq!(joined.id().0, community.id().0, "joined the community from the parked bundle");
         assert!(joined.identity.verify());
         assert_eq!(texts_in(&bed.relay, &joined, &general).await, vec!["owner: hi"]);
+        // The join seeded the verified fold as the member's initial floor, so their
+        // first follow can't roll below the state the join just showed.
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&joined.id().0);
+        assert!(
+            crate::db::community::get_edition_head(&cid_hex, &cid_hex).unwrap().is_some(),
+            "the joiner's control floor is seeded from the join-time fold"
+        );
 
         // The Guestbook memberlist now folds both participants.
         bed.swap_to(&owner);
