@@ -1762,14 +1762,34 @@ impl VectorCore {
     /// Ban (`true`) or unban (`false`) a member. Ban is terminal (no rejoin); in a private community it also
     /// fires the read-cut rekey (needs a local key). Requires BAN + outrank.
     pub async fn set_member_banned(&self, community_id: &str, npub: &str, banned: bool) -> Result<()> {
-        use crate::community::{service, transport::LiveTransport};
-        let hex = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| VectorError::Other("invalid npub".into()))?.to_hex();
-        let community = Self::load_community_hex(community_id)?;
+        use crate::community::{service, transport::LiveTransport, CommunityId};
+        let pk = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| VectorError::Other("invalid npub".into()))?;
+        let hex = pk.to_hex();
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
         // Recompute the full list (latest-wins): drop any existing entry, then add if banning.
         let mut list = crate::db::community::get_community_banlist(community_id).map_err(VectorError::Other)?;
         list.retain(|h| h != &hex);
-        if banned { list.push(hex); }
-        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        if banned {
+            list.push(hex);
+        }
+        // Dual-stack: a v2 Ban is the CORD-04 §6 three-removal composition, in order —
+        // the Banlist edition first (instant silence), then the Grant strip (authority
+        // removal), then the Refounding read-cut (cryptographic severance).
+        if community_id.len() == 64 {
+            let cid = CommunityId(crate::simd::hex::hex_to_bytes_32(community_id));
+            if let Some(Some(crate::community::ConcordProtocol::V2)) = crate::db::community::community_protocol(&cid).ok() {
+                let community = crate::db::community::load_community_v2(&cid)
+                    .map_err(VectorError::Other)?
+                    .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
+                crate::community::v2::service::set_banlist(&transport, &community, &list).await.map_err(VectorError::Other)?;
+                if banned {
+                    crate::community::v2::service::grant_roles(&transport, &community, &pk, vec![]).await.map_err(VectorError::Other)?;
+                    crate::community::v2::service::refound_community(&transport, &community, &[pk]).await.map_err(VectorError::Other)?;
+                }
+                return Ok(());
+            }
+        }
+        let community = Self::load_community_hex(community_id)?;
         service::publish_banlist(&transport, &community, &list).await.map_err(VectorError::Other)
     }
 
@@ -1800,11 +1820,35 @@ impl VectorCore {
     /// Edit community metadata (name / description) as an authorized member (MANAGE_METADATA). `None` leaves
     /// a field unchanged; an empty description clears it.
     pub async fn edit_community_metadata(&self, community_id: &str, name: Option<&str>, description: Option<&str>) -> Result<()> {
-        use crate::community::{service, transport::LiveTransport};
+        use crate::community::{service, transport::LiveTransport, CommunityId};
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        // Dual-stack: a v2 metadata edit is an authorized vsk-0 control edition. (Full
+        // icon/custom round-trip preservation rides with the GUI wiring; a bot edit
+        // sets name/description/relays from the held community.)
+        if community_id.len() == 64 {
+            let cid = CommunityId(crate::simd::hex::hex_to_bytes_32(community_id));
+            if let Some(Some(crate::community::ConcordProtocol::V2)) = crate::db::community::community_protocol(&cid).ok() {
+                let community = crate::db::community::load_community_v2(&cid)
+                    .map_err(VectorError::Other)?
+                    .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
+                let meta = crate::community::v2::control::CommunityMetadata {
+                    name: name.unwrap_or(&community.name).to_string(),
+                    description: match description {
+                        Some("") => None,
+                        Some(d) => Some(d.to_string()),
+                        None => community.description.clone(),
+                    },
+                    relays: community.relays.clone(),
+                    ..Default::default()
+                };
+                return crate::community::v2::service::edit_community_metadata(&transport, &community, &meta)
+                    .await
+                    .map_err(VectorError::Other);
+            }
+        }
         let mut community = Self::load_community_hex(community_id)?;
         if let Some(n) = name { community.name = n.to_string(); }
         if let Some(d) = description { community.description = if d.is_empty() { None } else { Some(d.to_string()) }; }
-        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
         service::republish_community_metadata(&transport, &community).await.map_err(VectorError::Other)
     }
 

@@ -674,6 +674,210 @@ pub async fn is_dissolved<T: Transport + ?Sized>(transport: &T, community: &Comm
     wraps.iter().any(|w| super::dissolution::verify_dissolved(w, &community.identity))
 }
 
+// ── Refounding (CORD-06 §3) ──────────────────────────────────────────────────
+
+/// Owner/admin Refounding (CORD-06 §3): roll the `community_root` to
+/// cryptographically remove `removed` from a Private community (a Ban's read-cut).
+/// Compacts the Control Plane under the new root (re-wraps each head VERBATIM — the
+/// inner owner/actor signatures survive, so no re-authoring), rekeys the base plus
+/// every Private channel (each sealed under the PRIOR root, D2, so a base-fork loser
+/// can still open them), and seeds the new epoch's Guestbook snapshot. Requires BAN.
+///
+/// **Acquire-before-commit:** the compaction is fetched + re-sealed BEFORE any
+/// publish, and a head we can't fetch ABORTS with ZERO published state — so a
+/// transient miss never strands a published rekey with a half-anchored plane.
+pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, removed: &[PublicKey]) -> Result<CommunityV2, String> {
+    let session = SessionGuard::capture();
+    let cid = community.id();
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&cid.0);
+    // Death wins every race: a dissolved community never re-founds (CORD-02 §9).
+    if crate::db::community::get_community_dissolved(&cid_hex).unwrap_or(false) {
+        return Err("this community has been dissolved; it cannot be re-founded".to_string());
+    }
+    let me = local_keys()?;
+    // Reload the FRESHEST base state: a stale caller struct would address the rotation
+    // under a superseded root (a base fork with no heal). The community_id is
+    // self-certifying + stable, so re-loading by it is safe.
+    let fresh = crate::db::community::load_community_v2(cid)?.ok_or("community gone before re-founding")?;
+    let community = &fresh;
+    let owner = community.owner()?;
+
+    // OWNER-ONLY send: the receive counterpart (`advance_scope`) honors ONLY the
+    // owner's rotation, so a non-owner BAN-holder's Refounding would fork onto a root
+    // nobody follows and fail to sever the target. A non-owner's ban still silences
+    // (Banlist) + strips authority (Grant); the read-cut is the owner's action alone
+    // (CORD-06 §3 partial-removal degradation). Owner ⊃ BAN (supreme), so this is the
+    // stricter gate.
+    if me.public_key() != owner {
+        return Err("only the owner can re-found (the cryptographic read-cut)".to_string());
+    }
+
+    // Fold the current roster: the opened editions are reused for the compaction (their
+    // seals re-wrap under the new epoch), and the roster gates which admin-authored
+    // heads carry forward.
+    let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex)?
+        .into_iter()
+        .filter(|(_, f)| f.0 == community.root_epoch.0)
+        .map(|(entity, f)| (entity, (f.1, f.2, f.3)))
+        .collect();
+    let current_control = control_group_key(&community.community_root, cid, community.root_epoch);
+    let control_query = Query {
+        kinds: vec![stream::KIND_WRAP],
+        authors: vec![current_control.pk_hex()],
+        limit: Some(FOLLOW_PAGE),
+        ..Default::default()
+    };
+    let control_wraps = transport.fetch(&control_query, &community.relays).await?;
+    let opened: Vec<(ParsedEdition, super::stream::OpenedStream)> =
+        control_wraps.iter().filter_map(|w| control::open_control_edition(w, &current_control).ok()).collect();
+    let editions: Vec<ParsedEdition> = opened.iter().map(|(e, _)| e.clone()).collect();
+    let authority = fold_authority(community, &editions, &floors);
+
+    let prev_epoch = community.root_epoch;
+    let new_epoch = Epoch(prev_epoch.0.checked_add(1).ok_or("root epoch overflow")?);
+    let prev_commit = super::derive::epoch_key_commitment(prev_epoch, &community.community_root);
+    // Mint-or-REUSE the new root, keyed by (scope, new_epoch) and archived BEFORE any
+    // publish: a retried Refounding re-delivers the SAME root at this epoch/address, so
+    // it can't double-mint two roots a receiver's correlation dedup would collapse into
+    // a permanent fork (CORD-06 §3 idempotency).
+    let new_root = mint_or_reuse_rotation_key(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX, new_epoch.0)?;
+    let new_control = control_group_key(&new_root, cid, new_epoch);
+    let at = now_ms();
+    let at_secs = at / 1000;
+
+    // ACQUIRE: re-wrap every current control HEAD under the new epoch (compaction,
+    // O(entities)). A head not fetchable ABORTS — before anything is published.
+    let control_fold = apply_control_fold(community, &editions, &floors, &authority);
+    let mut carried: Vec<(FoldedHead, Event)> = Vec::new();
+    for h in control_fold.heads.iter().chain(authority.heads.iter()) {
+        let Some((_, os)) = opened.iter().find(|(e, _)| e.self_hash == h.self_hash) else {
+            return Err("re-founding aborted: a control head is not fetchable (relay drop / flood); no state published".to_string());
+        };
+        let (rewrapped, _) = super::stream::rewrap_seal(&os.seal, &new_control, Timestamp::from_secs(at_secs)).map_err(|e| e.to_string())?;
+        carried.push((h.clone(), rewrapped));
+    }
+    if !session.is_valid() {
+        return Err("account changed during re-founding acquire".to_string());
+    }
+
+    // Recipients: the current members minus `removed`, plus me (multi-device).
+    let members = memberlist(transport, community).await?;
+    let removed_set: std::collections::HashSet<[u8; 32]> = removed.iter().map(|p| p.to_bytes()).collect();
+    let mut recipients: Vec<PublicKey> = members.into_iter().filter(|m| !removed_set.contains(&m.to_bytes())).collect();
+    if !recipients.iter().any(|p| *p == me.public_key()) {
+        recipients.push(me.public_key());
+    }
+
+    // Base rekey blobs (the new root to each recipient), sealed under the PRIOR root.
+    let mut base_blobs = Vec::new();
+    for r in &recipients {
+        base_blobs.push(
+            super::rekey::build_blob_local(me.secret_key(), &me.public_key().to_bytes(), r, super::rekey::RekeyScope::Root, new_epoch, &new_root)
+                .map_err(|e| e.to_string())?,
+        );
+    }
+    let base_group = super::derive::base_rekey_group_key(&community.community_root, cid, new_epoch);
+    let base_chunks =
+        super::rekey::build_rekey_chunks_local(&me, &base_group, super::rekey::RekeyScope::Root, new_epoch, prev_epoch, &prev_commit, &base_blobs, at_secs)
+            .map_err(|e| e.to_string())?;
+
+    // Private-channel rekeys: each mints a fresh key at its next channel-epoch, sealed
+    // under the PRIOR root (D2). Public channels ride the base — no per-channel rekey.
+    let mut channel_updates: Vec<(ChannelId, [u8; 32], Epoch)> = Vec::new();
+    let mut channel_chunk_sets: Vec<Vec<Event>> = Vec::new();
+    for ch in &community.channels {
+        let (Some(old_key), true) = (ch.key, ch.private) else { continue };
+        let ch_new_epoch = Epoch(ch.epoch.0.checked_add(1).ok_or("channel epoch overflow")?);
+        // Mint-or-reuse per channel too, keyed by (channel_id, next epoch) — same
+        // retry-idempotency as the base root.
+        let ch_new_key = mint_or_reuse_rotation_key(&cid_hex, &crate::simd::hex::bytes_to_hex_32(&ch.id.0), ch_new_epoch.0)?;
+        let ch_prev_commit = super::derive::epoch_key_commitment(ch.epoch, &old_key);
+        let mut ch_blobs = Vec::new();
+        for r in &recipients {
+            ch_blobs.push(
+                super::rekey::build_blob_local(me.secret_key(), &me.public_key().to_bytes(), r, super::rekey::RekeyScope::Channel(ch.id), ch_new_epoch, &ch_new_key)
+                    .map_err(|e| e.to_string())?,
+            );
+        }
+        let ch_group = super::derive::channel_rekey_group_key(&community.community_root, &ch.id, ch_new_epoch);
+        let ch_chunks = super::rekey::build_rekey_chunks_local(&me, &ch_group, super::rekey::RekeyScope::Channel(ch.id), ch_new_epoch, ch.epoch, &ch_prev_commit, &ch_blobs, at_secs)
+            .map_err(|e| e.to_string())?;
+        channel_updates.push((ch.id, ch_new_key, ch_new_epoch));
+        channel_chunk_sets.push(ch_chunks);
+    }
+    if !session.is_valid() {
+        return Err("account changed during re-founding prepare".to_string());
+    }
+
+    // COMMIT (durable publishes only — all fetching is done). Base rekey first
+    // (delivers the new root), then channel rekeys, then the compacted control.
+    for c in &base_chunks {
+        transport.publish_durable(c, &community.relays).await?;
+    }
+    for set in &channel_chunk_sets {
+        for c in set {
+            transport.publish_durable(c, &community.relays).await?;
+        }
+    }
+    for (_, wrap) in &carried {
+        transport.publish_durable(wrap, &community.relays).await?;
+    }
+    // Guestbook snapshot at the new epoch — best-effort (a Refounding succeeds without
+    // it; an omitted member heals by publishing their own Join).
+    let gb_group = super::derive::guestbook_group_key(&new_root, cid, new_epoch);
+    let snap_id = crate::community::random_32();
+    for rumor in guestbook::build_snapshot_rumors(me.public_key(), &recipients, snap_id, at) {
+        if let Ok((wrap, _)) = guestbook::seal_guestbook_rumor(&rumor, &gb_group, &me, Timestamp::from_secs(at_secs)) {
+            let _ = transport.publish(&wrap, &community.relays).await;
+        }
+    }
+
+    // COMMIT locally, only now that the new root + compacted plane are on relays.
+    if !session.is_valid() {
+        return Err("account changed during re-founding commit".to_string());
+    }
+    if crate::db::community::community_protocol(cid)?.is_none() {
+        return Ok(community.clone()); // left/deleted mid-rotation — don't resurrect.
+    }
+    // Save the new root/epoch + rekeyed channel keys in ONE tx FIRST, so a crash can
+    // never leave the base root advanced while the channel keys lag (which would
+    // re-derive the channel rekey address under the wrong root and orphan them).
+    let mut updated = community.clone();
+    updated.community_root = new_root;
+    updated.root_epoch = new_epoch;
+    for (id, key, ep) in &channel_updates {
+        if let Some(c) = updated.channels.iter_mut().find(|c| c.id.0 == id.0) {
+            c.key = Some(*key);
+            c.epoch = *ep;
+        }
+    }
+    crate::db::community::save_community_v2(&updated)?;
+    // Archive the new epoch key + confirm the monotonic base head (the root was already
+    // archived by mint_or_reuse, so this is idempotent). Record the carried heads at
+    // the NEW epoch; if a crash skips this, the epoch-filtered floors bootstrap the
+    // compacted control on the next follow, so they self-heal.
+    crate::db::community::advance_server_root_epoch(&cid_hex, new_epoch.0, &new_root)?;
+    for (h, _) in &carried {
+        crate::db::community::set_edition_head_at_epoch(&cid_hex, &h.entity_hex, h.version, &h.self_hash, &h.inner_id, new_epoch.0)?;
+    }
+    Ok(updated)
+}
+
+/// Mint a fresh 32-byte rotation key for `(scope, new_epoch)`, or REUSE the one
+/// already archived from a prior (aborted) attempt — so a retried Refounding re-
+/// delivers the SAME key at the same epoch/address instead of double-minting two roots
+/// a receiver's correlation dedup would collapse into a permanent fork (CORD-06 §3
+/// idempotency). Archived BEFORE the first publish; `scope` is the all-zero server-root
+/// sentinel for a base rotation, else the channel_id hex.
+fn mint_or_reuse_rotation_key(community_id_hex: &str, scope_hex: &str, new_epoch: u64) -> Result<[u8; 32], String> {
+    if let Some(existing) = crate::db::community::held_epoch_key(community_id_hex, scope_hex, new_epoch)? {
+        return Ok(existing);
+    }
+    let fresh = crate::community::random_32();
+    crate::db::community::store_epoch_key(community_id_hex, scope_hex, new_epoch, &fresh)?;
+    Ok(fresh)
+}
+
 // ── The Community List (kind 13302, CORD-02 §8) ──────────────────────────────
 
 /// This community's MEMBERSHIP subset for the 13302 list (CORD-02 §8): never the
@@ -1073,6 +1277,7 @@ const FOLLOW_MAX_PAGES: usize = 4;
 const FOLLOW_PAGE: usize = 500;
 
 /// A folded control head to persist as the per-entity refuse-downgrade floor.
+#[derive(Clone)]
 struct FoldedHead {
     entity_hex: String,
     version: u64,
@@ -1700,11 +1905,12 @@ fn advance_scope(
         }
     }
     if !winners.is_empty() {
-        // `collect_rotations` correlates on `(rotator, scope, new_epoch, prev_commit)`
-        // and Extends pins `prev_commit`, so two owner candidates at this point merge
-        // into ONE rotation — `winners` holds one key in practice. The lowest-key
-        // tiebreak is defensive: it only engages if the owner double-mints one epoch
-        // with two distinct keys, and still converges every follower deterministically.
+        // `collect_rotations` correlates on `(rotator, scope, new_epoch, prev_commit)`,
+        // so a single rotator's blobs merge into ONE rotation (and a retried Refounding
+        // MINT-OR-REUSES its root, so it never emits two distinct roots to fork on).
+        // The lowest-key tiebreak engages only for CONCURRENT DISTINCT refounders (two
+        // rotators racing the same epoch — different `rotator`, so separate rotations):
+        // every follower converges on the same lowest new key.
         let idx = rekey::lowest_key_winner(&winners).expect("winners is non-empty");
         return Advance::Adopt { new_key: winners[idx] };
     }
@@ -2504,6 +2710,67 @@ mod tests {
         let wrap = crate::community::v2::dissolution::seal_dissolved(&rumor, community.id(), &rogue, Timestamp::from_secs(1_000)).unwrap();
         relay.publish(&wrap, &community.relays).await.unwrap();
         assert!(!is_dissolved(&relay, &community).await, "a foreign-signed tombstone is not death");
+    }
+
+    #[tokio::test]
+    async fn refounding_rolls_the_root_and_severs_a_removed_member() {
+        // CORD-06 §3: the owner re-founds, removing a member. The base root rolls, the
+        // epoch advances, and the removed member's rekey-follow concludes they're cut.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Refound", bed.relays.clone(), None).await.unwrap();
+        let bundle = bundle_of(&community, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&member);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+
+        bed.swap_to(&owner);
+        let refounded = refound_community(&bed.relay, &community, &[member.keys.public_key()]).await.unwrap();
+        assert_eq!(refounded.root_epoch, Epoch(1), "the epoch advanced");
+        assert_ne!(refounded.community_root, community.community_root, "the base root rolled");
+        // The owner still reads the compacted control plane at the new epoch.
+        let session = SessionGuard::capture();
+        assert_eq!(
+            crate::db::community::load_community_v2(community.id()).unwrap().unwrap().root_epoch,
+            Epoch(1),
+            "the owner committed the new epoch"
+        );
+
+        // The removed member, following rekeys, is severed (no blob in the rotation).
+        bed.swap_to(&member);
+        let follow = follow_rekeys(&bed.relay, &joined, &session).await.unwrap();
+        assert!(follow.self_removed, "the removed member is cut by the re-founding");
+    }
+
+    #[tokio::test]
+    async fn only_the_owner_re_founds_even_a_ban_holding_admin_cannot() {
+        // The receive side (advance_scope) honors ONLY the owner's rotation, so the
+        // SEND is owner-only — a non-owner BAN-holder's Refounding would fork onto a
+        // root nobody follows. Owner grants a member BAN; they still can't re-found.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Guarded", bed.relays.clone(), None).await.unwrap();
+        let rid = "b0".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &member.keys.public_key(), vec![rid], 1).await;
+        let bundle = bundle_of(&community, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&member);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        assert!(refound_community(&bed.relay, &joined, &[owner.keys.public_key()]).await.is_err(), "a non-owner BAN-holder can't re-found");
+    }
+
+    #[tokio::test]
+    async fn a_retried_refounding_reuses_the_same_root() {
+        // B1 idempotency: minting for the same (scope, epoch) twice yields the SAME
+        // root, so a retried Refounding re-delivers one root — never a double-mint fork.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Retry", vec!["wss://r".into()], None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let first = mint_or_reuse_rotation_key(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX, 1).unwrap();
+        let second = mint_or_reuse_rotation_key(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX, 1).unwrap();
+        assert_eq!(first, second, "a retry reuses the archived root, never double-mints");
     }
 
     #[tokio::test]
