@@ -83,6 +83,9 @@ pub async fn create_community<T: Transport + ?Sized>(
         }
     }
     crate::db::community::save_community_v2(&community)?;
+    // Archive the genesis root at epoch 0, so a later Refounding leaves this epoch's
+    // Public-channel history readable (CORD-03 §3 multi-epoch read).
+    let _ = crate::db::community::store_epoch_key(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX, community.root_epoch.0, &community.community_root);
 
     // Publish the two genesis control editions at the epoch-0 control plane.
     for wrap in &genesis.wraps {
@@ -113,6 +116,11 @@ pub async fn send_message<T: Transport + ?Sized>(
     let session = SessionGuard::capture();
     let author = local_keys()?;
     let ch = community.channel(channel_id).ok_or("no such channel in this community")?;
+    // A keyless private channel can't be addressed (deriving from the root would post
+    // to the public plane); wait for the rekey to deliver its key.
+    if ch.private && ch.key.is_none() {
+        return Err("this private channel has no key yet (awaiting rekey delivery)".to_string());
+    }
     let (secret, epoch) = community.channel_secret(ch);
     let group = channel_group_key(&secret, channel_id, epoch);
 
@@ -147,7 +155,19 @@ pub async fn fetch_channel<T: Transport + ?Sized>(
     limit: usize,
 ) -> Result<Vec<FetchedEvent>, String> {
     let ch = community.channel(channel_id).ok_or("no such channel in this community")?;
-    let coords = community.channel_read_coords(ch);
+    // A Public channel reads across EVERY held base-root epoch, so history spanning a
+    // Refounding stays continuous (CORD-03 §3); a Private channel reads its current key
+    // (private multi-epoch history is deferred with the per-channel key archive).
+    let coords: Vec<([u8; 32], Epoch)> = if ch.private {
+        community.channel_read_coords(ch)
+    } else {
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let mut roots = crate::db::community::held_epoch_keys(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX).unwrap_or_default();
+        if !roots.iter().any(|(ep, _)| *ep == community.root_epoch) {
+            roots.push((community.root_epoch, community.community_root));
+        }
+        roots.into_iter().map(|(ep, root)| (root, ep)).collect()
+    };
 
     // Address every held epoch by its Chat-Plane pubkey.
     let authors: Vec<String> = coords
@@ -522,6 +542,9 @@ async fn accept_bundle<T: Transport + ?Sized>(
         crate::db::community::set_edition_head_at_epoch(&cid_hex, &h.entity_hex, h.version, &h.self_hash, &h.inner_id, community.root_epoch.0)?;
     }
     crate::db::community::save_community_v2(&community)?;
+    // Archive the joined root at its epoch, so this member reads Public-channel
+    // history from their join epoch onward across later Refoundings (CORD-03 §3).
+    let _ = crate::db::community::store_epoch_key(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX, community.root_epoch.0, &community.community_root);
 
     // Announce our Guestbook Join, echoing the invite attribution when present.
     let attribution = invited_by
@@ -2902,6 +2925,26 @@ mod tests {
         let wrap = crate::community::v2::dissolution::seal_dissolved(&rumor, community.id(), &rogue, Timestamp::from_secs(1_000)).unwrap();
         relay.publish(&wrap, &community.relays).await.unwrap();
         assert!(!is_dissolved(&relay, &community).await, "a foreign-signed tombstone is not death");
+    }
+
+    #[tokio::test]
+    async fn a_public_channel_reads_history_across_a_refounding() {
+        // CORD-03 §3: after a Refounding rolls the base root, a Public channel's
+        // pre-rotation messages stay readable (the prior epoch's root is archived and
+        // the read fans out across held epochs).
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "History", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        send_message(&relay, &community, &general, "before the refounding").await.unwrap();
+
+        let refounded = refound_community(&relay, &community, &[]).await.unwrap();
+        assert_eq!(refounded.root_epoch, Epoch(1), "the epoch advanced");
+        send_message(&relay, &refounded, &general, "after the refounding").await.unwrap();
+
+        let texts = texts_in(&relay, &refounded, &general).await;
+        assert!(texts.contains(&"before the refounding".to_string()), "the epoch-0 message is still readable");
+        assert!(texts.contains(&"after the refounding".to_string()), "the epoch-1 message reads too");
     }
 
     #[tokio::test]

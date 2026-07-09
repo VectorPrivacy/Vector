@@ -141,6 +141,12 @@ impl CommunityV2 {
     /// first cut this is the single current head; the multi-epoch archive
     /// (across rekeys) layers on once rotation lands in the service.
     pub fn channel_read_coords(&self, ch: &ChannelV2) -> Vec<([u8; 32], Epoch)> {
+        // A keyless PRIVATE channel is UNREADABLE — never derive it from the root
+        // (that would address a private channel at the public plane, a leak). Its key
+        // rides the rekey plane; it surfaces only once follow_rekeys delivers it.
+        if ch.private && ch.key.is_none() {
+            return Vec::new();
+        }
         vec![self.channel_secret(ch)]
     }
 
