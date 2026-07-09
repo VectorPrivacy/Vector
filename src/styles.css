@@ -5755,9 +5755,15 @@ img.emoji-img-loading {
   max-height: 195px;
   overflow-x: hidden;
   overflow-y: auto;
+  /* Reserve the scrollbar gutter always. Edit-mode wobble (a rotation) grows
+     each item's bounding box a hair, transiently overflowing and flickering
+     the scrollbar; without a stable gutter that toggles the content width and
+     the 1fr columns shake. Only bites with few apps (scrollbar otherwise
+     absent); a full grid keeps it permanently shown. */
+  scrollbar-gutter: stable;
   padding: 1px;
   padding-top: 6px; /* Room for delete badges in edit mode */
-  padding-right: 12px; /* Scrollbar Room */
+  padding-right: 6px;
 }
 
 /* Responsive item sizing within mini apps grid */
