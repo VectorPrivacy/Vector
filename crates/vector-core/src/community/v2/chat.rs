@@ -129,10 +129,50 @@ pub fn build_message_rumor(
     stream::build_rumor_ms(kind::MESSAGE, author, content, tags, at_ms)
 }
 
+/// Build a kind-1111 threaded-reply rumor (NIP-22, CORD-03 §3). Uppercase
+/// `K`/`E`/`P` pin the immutable thread ROOT, lowercase `k`/`e`/`p` the
+/// immediate PARENT — all rumor ids. `parent_root` names the parent's own root
+/// when the parent is itself a reply (inherited verbatim, so the root stays
+/// stable at any depth — the exact shape Armada builds); `None` means the
+/// parent IS the root.
+#[allow(clippy::too_many_arguments)]
+pub fn build_comment_rumor(
+    author: PublicKey,
+    channel_id: &ChannelId,
+    epoch: Epoch,
+    content: &str,
+    parent_id_hex: &str,
+    parent_kind: u16,
+    parent_author_hex: &str,
+    parent_root: Option<(&str, u16, &str)>,
+    emoji: &[(&str, &str)],
+    at_ms: u64,
+) -> UnsignedEvent {
+    let mut tags = stream::channel_binding_tags(channel_id, epoch);
+    let (root_id, root_kind, root_author) = parent_root.unwrap_or((parent_id_hex, parent_kind, parent_author_hex));
+    tags.push(Tag::custom(TagKind::SingleLetter(SingleLetterTag::uppercase(Alphabet::K)), [root_kind.to_string()]));
+    tags.push(Tag::custom(
+        TagKind::SingleLetter(SingleLetterTag::uppercase(Alphabet::E)),
+        [root_id.to_string(), String::new(), root_author.to_string()],
+    ));
+    tags.push(Tag::custom(TagKind::SingleLetter(SingleLetterTag::uppercase(Alphabet::P)), [root_author.to_string()]));
+    tags.push(Tag::custom(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::K)), [parent_kind.to_string()]));
+    tags.push(Tag::custom(
+        TagKind::e(),
+        [parent_id_hex.to_string(), String::new(), parent_author_hex.to_string()],
+    ));
+    tags.push(Tag::custom(TagKind::p(), [parent_author_hex.to_string()]));
+    for (shortcode, url) in emoji {
+        tags.push(emoji_tag(shortcode, url));
+    }
+    stream::build_rumor_ms(kind::COMMENT, author, content, tags, at_ms)
+}
+
 /// Build a kind-7 reaction rumor (NIP-25): `e` = the target rumor id, `p` its
-/// author, `k` = "9" (reactions target messages). `emoji_content` is the
-/// reaction itself (`"+"`, an emoji, or a `:shortcode:`); `emoji` carries the
-/// NIP-30 pair when the content is a custom-emoji shortcode.
+/// author, `k` = the target's kind (`9` for a message, `1111` for a threaded
+/// reply). `emoji_content` is the reaction itself (`"+"`, an emoji, or a
+/// `:shortcode:`); `emoji` carries the NIP-30 pair when the content is a
+/// custom-emoji shortcode.
 #[allow(clippy::too_many_arguments)]
 pub fn build_reaction_rumor(
     author: PublicKey,
@@ -140,6 +180,7 @@ pub fn build_reaction_rumor(
     epoch: Epoch,
     target_rumor_id_hex: &str,
     target_author_hex: &str,
+    target_kind: u16,
     emoji_content: &str,
     emoji: Option<(&str, &str)>,
     at_ms: u64,
@@ -149,7 +190,7 @@ pub fn build_reaction_rumor(
     tags.push(Tag::custom(TagKind::p(), [target_author_hex.to_string()]));
     tags.push(Tag::custom(
         TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::K)),
-        [kind::MESSAGE.to_string()],
+        [target_kind.to_string()],
     ));
     if let Some((shortcode, url)) = emoji {
         tags.push(emoji_tag(shortcode, url));
@@ -252,8 +293,11 @@ pub struct ReplyRef {
 /// [`OpenedStream`] — the proven author, rumor id, and ms time live there.
 #[derive(Debug, Clone)]
 pub enum ChatEvent {
-    /// Kind 9 — text lives in `opened.rumor.content`; `emoji` is the NIP-30
+    /// Kind 9 (message; `reply_to` = its `q` inline quote) or kind 1111
+    /// (threaded reply; `reply_to` = its immediate parent, the lowercase `e`).
+    /// Text lives in `opened.rumor.content`; `emoji` is the NIP-30
     /// `(shortcode, url)` pairs (attachments ride the rumor's `imeta` tags).
+    /// `opened.rumor.kind` distinguishes the two when a caller needs to.
     Message {
         opened: OpenedStream,
         reply_to: Option<ReplyRef>,
@@ -349,7 +393,7 @@ pub fn open_chat_event_multi(
 fn is_chat_kind(k: u16) -> bool {
     matches!(
         k,
-        kind::MESSAGE | kind::REACTION | kind::DELETE | kind::EDIT | kind::WEBXDC | kind::TYPING
+        kind::MESSAGE | kind::COMMENT | kind::REACTION | kind::DELETE | kind::EDIT | kind::WEBXDC | kind::TYPING
     )
 }
 
@@ -367,6 +411,26 @@ fn parse_chat_rumor(opened: OpenedStream) -> Result<ChatEvent, ChatError> {
                     // slot is a SHOULD; absent or empty parses as unknown.
                     let author = match s.get(3).map(String::as_str).filter(|a| !a.is_empty()) {
                         Some(hex) => Some(PublicKey::from_hex(hex).map_err(|_| ChatError::BadTag(TAG_QUOTE))?),
+                        None => None,
+                    };
+                    Some(ReplyRef { id, author })
+                }
+            };
+            let emoji = collect_emoji(&opened.rumor);
+            Ok(ChatEvent::Message { opened, reply_to, emoji })
+        }
+        kind::COMMENT => {
+            // A threaded reply (NIP-22, CORD-03 §3). Vector's timeline renders it
+            // INLINE: the immediate parent (the lowercase `e`) becomes the reply
+            // context, exactly like a kind-9 quote — never dropped. The uppercase
+            // root tags stay on the rumor for a future thread view.
+            let reply_to = match unique_tag(&opened.rumor, TAG_TARGET)? {
+                None => None, // a parentless comment still renders as plain text.
+                Some(s) => {
+                    let id = decode_id32(value_of(s, TAG_TARGET)?, TAG_TARGET)?;
+                    // NIP-22 e tag: [e, id, relay-hint, pubkey] — author optional.
+                    let author = match s.get(3).map(String::as_str).filter(|a| !a.is_empty()) {
+                        Some(hex) => Some(PublicKey::from_hex(hex).map_err(|_| ChatError::BadTag(TAG_TARGET))?),
                         None => None,
                     };
                     Some(ReplyRef { id, author })
@@ -532,6 +596,136 @@ mod tests {
     }
 
     #[test]
+    fn a_threaded_reply_round_trips_as_a_message_with_its_parent_as_reply_context() {
+        // CORD-03 §3 kind-1111: Vector renders a thread reply inline — the
+        // immediate parent (lowercase e) is the reply context, never dropped.
+        let author = Keys::generate();
+        let root_author = Keys::generate();
+        let root_id = "cd".repeat(32);
+        let rumor = build_comment_rumor(
+            author.public_key(),
+            &chan(),
+            Epoch(0),
+            "replying in the thread!",
+            &root_id,
+            kind::MESSAGE,
+            &root_author.public_key().to_hex(),
+            None, // the parent IS the root
+            &[],
+            AT,
+        );
+        // The wire shape matches the spec example: K/E/P root + k/e/p parent.
+        assert!(rumor.tags.iter().any(|t| t.as_slice() == ["K", "9"]));
+        assert!(rumor.tags.iter().any(|t| t.as_slice()[0] == "E" && t.as_slice()[1] == root_id));
+        assert!(rumor.tags.iter().any(|t| t.as_slice() == ["k", "9"]));
+
+        let ChatEvent::Message { opened, reply_to, .. } = open(&seal(&rumor, &author)).unwrap() else {
+            panic!("a threaded reply parses as a Message");
+        };
+        assert_eq!(opened.rumor.kind.as_u16(), kind::COMMENT, "the wire kind is preserved on the rumor");
+        let reply = reply_to.expect("the immediate parent is the reply context");
+        assert_eq!(reply.id, [0xcd; 32]);
+        assert_eq!(reply.author, Some(root_author.public_key()));
+    }
+
+    #[test]
+    fn an_armada_shaped_threaded_reply_parses_verbatim() {
+        // The EXACT tag shape from the spec example (examples.md §2.2) built by
+        // hand — proving we parse the cross-client wire form, not just our own
+        // builder's output.
+        let author = Keys::generate();
+        let root_author = Keys::generate();
+        let parent_author = Keys::generate();
+        let root_id = "ef".repeat(32);
+        let parent_id = "12".repeat(32);
+        let tags = vec![
+            Tag::custom(TagKind::Custom("channel".into()), [crate::simd::hex::bytes_to_hex_32(&chan().0)]),
+            Tag::custom(TagKind::Custom("epoch".into()), ["0".to_string()]),
+            Tag::custom(TagKind::SingleLetter(SingleLetterTag::uppercase(Alphabet::K)), ["9".to_string()]),
+            Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::uppercase(Alphabet::E)),
+                [root_id.clone(), String::new(), root_author.public_key().to_hex()],
+            ),
+            Tag::custom(TagKind::SingleLetter(SingleLetterTag::uppercase(Alphabet::P)), [root_author.public_key().to_hex()]),
+            Tag::custom(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::K)), ["1111".to_string()]),
+            Tag::custom(TagKind::e(), [parent_id.clone(), String::new(), parent_author.public_key().to_hex()]),
+            Tag::custom(TagKind::p(), [parent_author.public_key().to_hex()]),
+        ];
+        let rumor = stream::build_rumor_ms(kind::COMMENT, author.public_key(), "nested reply", tags, AT);
+        let ChatEvent::Message { reply_to, .. } = open(&seal(&rumor, &author)).unwrap() else {
+            panic!("expected a Message");
+        };
+        // A NESTED reply: the immediate parent (lowercase e), not the root, is
+        // the inline context.
+        let reply = reply_to.expect("parent parses");
+        assert_eq!(reply.id, [0x12; 32]);
+        assert_eq!(reply.author, Some(parent_author.public_key()));
+    }
+
+    #[test]
+    fn a_nested_comment_inherits_its_root_tags_verbatim() {
+        let author = Keys::generate();
+        let root_id = "ab".repeat(32);
+        let root_author_hex = Keys::generate().public_key().to_hex();
+        let parent_id = "cd".repeat(32);
+        let parent_author_hex = Keys::generate().public_key().to_hex();
+        let rumor = build_comment_rumor(
+            author.public_key(),
+            &chan(),
+            Epoch(0),
+            "deep",
+            &parent_id,
+            kind::COMMENT, // the parent is itself a reply
+            &parent_author_hex,
+            Some((&root_id, kind::MESSAGE, &root_author_hex)),
+            &[],
+            AT,
+        );
+        // Root pinned to the ORIGINAL root (stable at any depth), parent to the
+        // immediate reply.
+        assert!(rumor.tags.iter().any(|t| t.as_slice()[0] == "E" && t.as_slice()[1] == root_id));
+        assert!(rumor.tags.iter().any(|t| t.as_slice() == ["K", "9"]));
+        assert!(rumor.tags.iter().any(|t| t.as_slice() == ["k", "1111"]));
+        assert!(rumor.tags.iter().any(|t| t.as_slice()[0] == "e" && t.as_slice()[1] == parent_id));
+    }
+
+    #[test]
+    fn a_comment_with_duplicate_parent_tags_is_rejected() {
+        // Two lowercase `e` tags = ambiguous parent (which did the author sign
+        // off on?) — same discipline as every target-bearing tag.
+        let author = Keys::generate();
+        let mut tags = stream::channel_binding_tags(&chan(), Epoch(0));
+        for id in ["ab", "ff"] {
+            tags.push(Tag::custom(TagKind::e(), [
+                id.repeat(32),
+                String::new(),
+                Keys::generate().public_key().to_hex(),
+            ]));
+        }
+        let rumor = stream::build_rumor_ms(kind::COMMENT, author.public_key(), "ambiguous", tags, AT);
+        let got = open(&seal(&rumor, &author));
+        assert!(matches!(&got, Err(ChatError::DuplicateTag("e"))), "got: {got:?}");
+    }
+
+    #[test]
+    fn a_reaction_to_a_threaded_reply_carries_k_1111() {
+        let author = Keys::generate();
+        let rumor = build_reaction_rumor(
+            author.public_key(),
+            &chan(),
+            Epoch(0),
+            &"bc".repeat(32),
+            &Keys::generate().public_key().to_hex(),
+            kind::COMMENT,
+            "🔥",
+            None,
+            AT,
+        );
+        assert!(rumor.tags.iter().any(|t| t.as_slice() == ["k", "1111"]), "the k tag names the target's kind");
+        assert!(matches!(open(&seal(&rumor, &author)).unwrap(), ChatEvent::Reaction { .. }));
+    }
+
+    #[test]
     fn reaction_round_trip_and_nip25_shape() {
         let author = Keys::generate();
         let target_author = Keys::generate();
@@ -542,6 +736,7 @@ mod tests {
             Epoch(0),
             &target_id,
             &target_author.public_key().to_hex(),
+            kind::MESSAGE,
             "🔥",
             None,
             AT,
@@ -571,6 +766,7 @@ mod tests {
             Epoch(0),
             &"bc".repeat(32),
             &Keys::generate().public_key().to_hex(),
+            kind::MESSAGE,
             ":catJAM:",
             Some(("catJAM", "https://x/cat.gif")),
             AT,
@@ -683,6 +879,7 @@ mod tests {
             Epoch(0),
             &"bc".repeat(32),
             &Keys::generate().public_key().to_hex(),
+            kind::MESSAGE,
             "🔥",
             None,
             AT,
@@ -794,6 +991,7 @@ mod tests {
             Epoch(0),
             &"zz".repeat(32),
             &Keys::generate().public_key().to_hex(),
+            kind::MESSAGE,
             "+",
             None,
             AT,

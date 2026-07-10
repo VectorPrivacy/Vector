@@ -135,20 +135,24 @@ pub async fn send_chat_message<T: Transport + ?Sized>(
 }
 
 /// React to a channel message (kind 7, NIP-25 shape). `target_id_hex` /
-/// `target_author_hex` name the reacted-to message; `emoji` carries the NIP-30
-/// pair when `emoji_content` is a custom `:shortcode:`.
+/// `target_author_hex` name the reacted-to message; `target_kind` is its rumor
+/// kind (`kind::MESSAGE`, or `kind::COMMENT` for a threaded reply); `emoji`
+/// carries the NIP-30 pair when `emoji_content` is a custom `:shortcode:`.
+#[allow(clippy::too_many_arguments)]
 pub async fn send_reaction<T: Transport + ?Sized>(
     transport: &T,
     community: &CommunityV2,
     channel_id: &ChannelId,
     target_id_hex: &str,
     target_author_hex: &str,
+    target_kind: u16,
     emoji_content: &str,
     emoji: Option<(&str, &str)>,
 ) -> Result<String, String> {
     let (author, group, epoch, session) = chat_send_context(community, channel_id)?;
     let at_ms = now_ms();
-    let rumor = chat::build_reaction_rumor(author.public_key(), channel_id, epoch, target_id_hex, target_author_hex, emoji_content, emoji, at_ms);
+    let rumor =
+        chat::build_reaction_rumor(author.public_key(), channel_id, epoch, target_id_hex, target_author_hex, target_kind, emoji_content, emoji, at_ms);
     publish_chat(transport, community, &session, &group, &author, channel_id, epoch, rumor, at_ms, false).await
 }
 
@@ -265,16 +269,38 @@ pub struct FetchedEvent {
     pub epoch: Epoch,
 }
 
-/// Fetch a channel's recent messages: query every held epoch's Chat-Plane
-/// address, open + bind each, drop foreign/malformed, dedup by rumor id, and
-/// order oldest→newest by the millisecond timestamp. `limit` is one relay-side
-/// bound across the whole epoch-author OR-set (a single query), not per epoch —
-/// a deep multi-epoch history needs paging, not a bigger limit.
+/// Fetch a channel's newest messages — one page of [`fetch_channel_history`].
+/// `limit` is one relay-side bound across the whole epoch-author OR-set, not
+/// per epoch; deeper history pages backwards via the walk.
 pub async fn fetch_channel<T: Transport + ?Sized>(
     transport: &T,
     community: &CommunityV2,
     channel_id: &ChannelId,
     limit: usize,
+) -> Result<Vec<FetchedEvent>, String> {
+    fetch_channel_history(transport, community, channel_id, limit, 1, |_| true).await
+}
+
+/// Walk a channel's history newest-first (CORD-03 §3 "clients load a Channel
+/// newest-first and paginate backwards"), querying every held epoch's Chat-Plane
+/// address one `page`-sized query at a time until `max_pages`, a drained relay,
+/// or `keep_paging` returns false for a page (the caller's "I already hold
+/// these" early stop — consulted only on pages that opened something, so junk
+/// at the address can't fake exhaustion). Pages step by INCLUSIVE `until` with
+/// wrap-id dedup, so a page boundary landing mid-second can't skip siblings; a
+/// full page of only-already-seen wraps is a same-second WALL (relay filters
+/// are second-granular) and steps past it accepting that unseen same-second
+/// siblings beyond the relay cap are unreachable — logged, and a protocol-level
+/// limitation (the `ms` tag can't be filtered server-side).
+///
+/// Returns everything opened, deduped by rumor id, oldest→newest.
+pub async fn fetch_channel_history<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    channel_id: &ChannelId,
+    page: usize,
+    max_pages: usize,
+    mut keep_paging: impl FnMut(&[FetchedEvent]) -> bool,
 ) -> Result<Vec<FetchedEvent>, String> {
     let ch = community.channel(channel_id).ok_or("no such channel in this community")?;
     // A Public channel reads across EVERY held base-root epoch, and a Private one
@@ -310,31 +336,71 @@ pub async fn fetch_channel<T: Transport + ?Sized>(
         .iter()
         .map(|(secret, epoch)| channel_group_key(secret, channel_id, *epoch).pk_hex())
         .collect();
-    let query = Query {
-        kinds: vec![stream::KIND_WRAP],
-        authors: authors.clone(),
-        limit: Some(limit),
-        ..Default::default()
-    };
-    let wraps = transport.fetch(&query, &community.relays).await?;
 
-    let mut seen = std::collections::HashSet::new();
+    let mut seen_wraps: std::collections::HashSet<nostr_sdk::EventId> = std::collections::HashSet::new();
+    let mut seen_rumors = std::collections::HashSet::new();
     let mut out: Vec<(u64, FetchedEvent)> = Vec::new();
-    for wrap in &wraps {
-        // Select the epoch whose group key authored this wrap (no trial decrypt).
-        for (secret, epoch) in &coords {
-            let group = channel_group_key(secret, channel_id, *epoch);
-            if wrap.pubkey != group.pk() {
-                continue;
-            }
-            if let Ok(event) = chat::open_chat_event(wrap, &group, channel_id, *epoch) {
-                let id = event.opened().rumor_id;
-                if seen.insert(id) {
-                    out.push((event.opened().at_ms, FetchedEvent { event, epoch: *epoch }));
-                }
-            }
+    let mut until: Option<u64> = None;
+    let mut oldest: Option<u64> = None;
+    for _ in 0..max_pages {
+        let query = Query {
+            kinds: vec![stream::KIND_WRAP],
+            authors: authors.clone(),
+            until,
+            limit: Some(page),
+            ..Default::default()
+        };
+        let wraps = transport.fetch(&query, &community.relays).await?;
+        if wraps.is_empty() {
             break;
         }
+        let mut fresh = 0usize;
+        let mut page_events: Vec<FetchedEvent> = Vec::new();
+        for wrap in &wraps {
+            if !seen_wraps.insert(wrap.id) {
+                continue;
+            }
+            fresh += 1;
+            let at = wrap.created_at.as_secs();
+            if oldest.is_none_or(|o| at < o) {
+                oldest = Some(at);
+            }
+            // Select the epoch whose group key authored this wrap (no trial decrypt).
+            for (secret, epoch) in &coords {
+                let group = channel_group_key(secret, channel_id, *epoch);
+                if wrap.pubkey != group.pk() {
+                    continue;
+                }
+                if let Ok(event) = chat::open_chat_event(wrap, &group, channel_id, *epoch) {
+                    let id = event.opened().rumor_id;
+                    if seen_rumors.insert(id) {
+                        page_events.push(FetchedEvent { event, epoch: *epoch });
+                    }
+                }
+                break;
+            }
+        }
+        if fresh == 0 {
+            if wraps.len() < page {
+                break; // drained — the relay has nothing older.
+            }
+            // A full page of already-seen wraps: a same-second WALL. Step past it;
+            // same-second siblings beyond the relay's cap are unreachable by a
+            // second-granular filter.
+            let Some(o) = oldest else { break };
+            if o == 0 {
+                break;
+            }
+            crate::log_warn!("v2: same-second history wall at {o} — stepping past it (messages beyond the relay page cap in that second are unreachable)");
+            until = Some(o - 1);
+            continue;
+        }
+        let stop = !page_events.is_empty() && !keep_paging(&page_events);
+        out.extend(page_events.into_iter().map(|e| (e.event.opened().at_ms, e)));
+        if stop {
+            break; // the caller holds everything from here back.
+        }
+        until = oldest; // inclusive — wrap-id dedup absorbs the boundary overlap.
     }
     out.sort_by_key(|(ms, _)| *ms);
     Ok(out.into_iter().map(|(_, e)| e).collect())
@@ -4204,7 +4270,7 @@ mod tests {
         println!("[persist] #general history persisted into the shared events store");
 
         // B (admin) reacts to + the author edits/deletes — the chat-op surface.
-        send_reaction(&bed.relay, &b_view, &general, &m1, &a_hex, "🔥", None).await.unwrap();
+        send_reaction(&bed.relay, &b_view, &general, &m1, &a_hex, super::super::kind::MESSAGE, "🔥", None).await.unwrap();
         bed.swap_to(&a);
         let m_edit = send_message(&bed.relay, &community, &general, "A: this will be edited").await.unwrap();
         send_edit(&bed.relay, &community, &general, &m_edit, "A: edited!").await.unwrap();
@@ -4423,6 +4489,184 @@ mod tests {
         dissolve_community(&transport, &refounded).await.expect("dissolve");
         log("[dissolve] community sealed".to_string());
         log("===== LIVE e2e PASS =====".to_string());
+    }
+
+    #[tokio::test]
+    async fn an_offline_member_catches_up_across_three_refoundings() {
+        // The deep offline-online scenario: a member sleeps through THREE
+        // Refoundings, per-refound private-channel rotations, a mid-life private
+        // channel CREATED while they slept, a public channel, a rename, and a
+        // ban — then returns and converges by follow alone (no rejoin).
+        use nostr_sdk::prelude::ToBech32;
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let mut community = create_community(&bed.relay, "Sleeper", bed.relays.clone(), None).await.unwrap();
+        let general = community.channels[0].id;
+        let mods = create_private_channel(&bed.relay, &community, "mods").await.unwrap();
+        community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        send_message(&bed.relay, &community, &general, "epoch0: hello").await.unwrap();
+        send_message(&bed.relay, &community, &mods, "epoch0: mods secret").await.unwrap();
+        let bundle_json = serde_json::to_string(&bundle_of(&community, Some(owner.keys.public_key()), None, None)).unwrap();
+
+        // Member joins at epoch 0, then goes OFFLINE.
+        bed.swap_to(&member);
+        let member_view = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        assert_eq!(member_view.root_epoch, Epoch(0));
+
+        // While they sleep, the owner reshapes everything across three epochs.
+        bed.swap_to(&owner);
+        let stranger = Keys::generate();
+        for epoch in 1..=3u64 {
+            community = refound_community(&bed.relay, &community, &[]).await.unwrap();
+            assert_eq!(community.root_epoch, Epoch(epoch));
+            send_message(&bed.relay, &community, &general, &format!("epoch{epoch}: general news")).await.unwrap();
+            send_message(&bed.relay, &community, &mods, &format!("epoch{epoch}: mods word")).await.unwrap();
+        }
+        let news = create_public_channel(&bed.relay, &community, "news").await.unwrap();
+        community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let vault = create_private_channel(&bed.relay, &community, "vault").await.unwrap();
+        community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        send_message(&bed.relay, &community, &vault, "epoch3: vault opened").await.unwrap();
+        set_banlist(&bed.relay, &community, &[stranger.public_key().to_hex()]).await.unwrap();
+        let meta = control::CommunityMetadata { name: "Sleeper Reborn".into(), relays: community.relays.clone(), ..Default::default() };
+        edit_community_metadata(&bed.relay, &community, &meta).await.unwrap();
+
+        // The member RETURNS: rekey+control follow to quiescence (the worker's
+        // loop, driven explicitly). Bounded — convergence must be fast.
+        bed.swap_to(&member);
+        let session = SessionGuard::capture();
+        let mut passes = 0;
+        loop {
+            passes += 1;
+            assert!(passes <= 6, "catch-up must converge, not churn");
+            let cur = crate::db::community::load_community_v2(member_view.id()).unwrap().unwrap();
+            let rekeyed = follow_rekeys(&bed.relay, &cur, &session).await.unwrap();
+            assert!(!rekeyed.self_removed, "the member was never removed");
+            let cur = crate::db::community::load_community_v2(member_view.id()).unwrap().unwrap();
+            let controlled = follow_control(&bed.relay, &cur, &session).await.unwrap();
+            if rekeyed.updated.is_none() && controlled.is_none() {
+                break;
+            }
+        }
+        let caught_up = crate::db::community::load_community_v2(member_view.id()).unwrap().unwrap();
+
+        // Base + name converged.
+        assert_eq!(caught_up.root_epoch, Epoch(3), "walked all three refoundings");
+        assert_eq!(caught_up.community_root, community.community_root, "landed on the owner's root");
+        assert_eq!(caught_up.name, "Sleeper Reborn");
+        // Channels: renamed set incl. the mid-sleep public + private ones.
+        assert!(caught_up.channels.iter().any(|c| c.id.0 == news.0), "folded the new public channel");
+        let m = caught_up.channel(&mods).expect("mods survived");
+        let owner_mods = community.channel(&mods).unwrap();
+        assert_eq!(m.epoch, owner_mods.epoch, "mods walked every per-refound rotation");
+        assert_eq!(m.key, owner_mods.key, "…to the owner's exact key");
+        let v = caught_up.channel(&vault).expect("vault folded in");
+        assert_eq!(v.key, community.channel(&vault).unwrap().key, "adopted the mid-sleep private channel's key");
+        // Banlist survived the compactions.
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&caught_up.id().0);
+        let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap();
+        assert!(banned.contains(&stranger.public_key().to_hex()), "the ban folded through");
+        // History reads across EVERY epoch (public via base-root archive, private
+        // via the per-channel archive built during the walk).
+        let gen_texts = texts_in(&bed.relay, &caught_up, &general).await;
+        for epoch in 0..=3u64 {
+            let needle = if epoch == 0 { "epoch0: hello".to_string() } else { format!("epoch{epoch}: general news") };
+            assert!(gen_texts.contains(&needle), "general history spans epoch {epoch}: {gen_texts:?}");
+        }
+        let mods_texts = texts_in(&bed.relay, &caught_up, &mods).await;
+        for epoch in 0..=3u64 {
+            let needle = if epoch == 0 { "epoch0: mods secret".to_string() } else { format!("epoch{epoch}: mods word") };
+            assert!(mods_texts.contains(&needle), "private history spans epoch {epoch}: {mods_texts:?}");
+        }
+        assert!(texts_in(&bed.relay, &caught_up, &vault).await.contains(&"epoch3: vault opened".to_string()));
+        // And the member can still speak.
+        send_message(&bed.relay, &caught_up, &general, "member: good morning").await.unwrap();
+        bed.swap_to(&owner);
+        assert!(
+            texts_in(&bed.relay, &community, &general).await.contains(&"member: good morning".to_string()),
+            "the caught-up member converses at the new epoch ({})",
+            member.keys.public_key().to_bech32().unwrap()
+        );
+    }
+
+    /// Seal `n` messages onto a community's #general, one per second starting at
+    /// `base_secs` (distinct wrap seconds so relay-side `until` paging engages).
+    async fn flood_general(relay: &MemoryRelay, community: &CommunityV2, author: &Keys, n: usize, base_secs: u64) {
+        let general = community.channels[0].id;
+        let group = channel_group_key(&community.community_root, &general, community.root_epoch);
+        for i in 0..n {
+            let at = base_secs + i as u64;
+            let rumor = chat::build_message_rumor(author.public_key(), &general, community.root_epoch, &format!("msg {i}"), None, &[], vec![], at * 1000);
+            let (wrap, _) = chat::seal_chat_rumor(&rumor, &group, author, Timestamp::from_secs(at), false).unwrap();
+            relay.publish(&wrap, &community.relays).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn the_history_walk_pages_past_a_multi_page_burst() {
+        // A bot offline through 120 messages must catch ALL of them, not the
+        // newest page — the v1 sync-gap class, closed by until-paging.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Burst", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        flood_general(&relay, &community, &owner, 120, 10_000).await;
+
+        let all = fetch_channel_history(&relay, &community, &general, 50, 8, |_| true).await.unwrap();
+        assert_eq!(all.len(), 120, "the walk pages the whole burst");
+        // Oldest→newest, no duplicates.
+        let contents: Vec<String> = all.iter().map(|f| f.event.opened().rumor.content.clone()).collect();
+        assert_eq!(contents.first().map(String::as_str), Some("msg 0"));
+        assert_eq!(contents.last().map(String::as_str), Some("msg 119"));
+        let unique: std::collections::HashSet<&String> = contents.iter().collect();
+        assert_eq!(unique.len(), 120, "wrap-id + rumor-id dedup holds across page boundaries");
+
+        // The single-page fetch stays a single page.
+        let one = fetch_channel(&relay, &community, &general, 50).await.unwrap();
+        assert_eq!(one.len(), 50, "fetch_channel is one newest page");
+        assert_eq!(one.last().map(|f| f.event.opened().rumor.content.clone()).as_deref(), Some("msg 119"));
+    }
+
+    #[tokio::test]
+    async fn the_history_walk_stops_when_the_caller_is_caught_up() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Caught", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        flood_general(&relay, &community, &owner, 120, 10_000).await;
+
+        // The caller says "I hold everything" after the first page — no deeper fetch.
+        let mut pages = 0usize;
+        let got = fetch_channel_history(&relay, &community, &general, 50, 8, |_| {
+            pages += 1;
+            false
+        })
+        .await
+        .unwrap();
+        assert_eq!(pages, 1, "the early stop is consulted once");
+        assert_eq!(got.len(), 50, "only the newest page is fetched");
+        assert_eq!(got.last().map(|f| f.event.opened().rumor.content.clone()).as_deref(), Some("msg 119"));
+    }
+
+    #[tokio::test]
+    async fn a_same_second_history_wall_terminates_instead_of_looping() {
+        // 60 messages in ONE second with a 25-wrap page: a second-granular
+        // `until` can never page past the wall — the walk must step over it
+        // (bounded loss, logged) rather than spin.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Wall", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let group = channel_group_key(&community.community_root, &general, community.root_epoch);
+        for i in 0..60usize {
+            let rumor = chat::build_message_rumor(owner.public_key(), &general, community.root_epoch, &format!("burst {i}"), None, &[], vec![], 5_000_000 + i as u64);
+            let (wrap, _) = chat::seal_chat_rumor(&rumor, &group, &owner, Timestamp::from_secs(5_000), false).unwrap();
+            relay.publish(&wrap, &community.relays).await.unwrap();
+        }
+        let got = fetch_channel_history(&relay, &community, &general, 25, 8, |_| true).await.unwrap();
+        assert!(got.len() >= 25, "at least the relay page is read");
+        assert!(got.len() <= 60, "sane bound");
+        // Termination is the assertion: reaching here means the wall didn't loop.
     }
 
     #[tokio::test]
@@ -5701,7 +5945,7 @@ mod tests {
         let me_hex = owner.keys.public_key().to_hex();
 
         let msg_id = send_message(&bed.relay, &community, &general, "original").await.unwrap();
-        send_reaction(&bed.relay, &community, &general, &msg_id, &me_hex, ":fire:", Some(("fire", "https://e/f.png")))
+        send_reaction(&bed.relay, &community, &general, &msg_id, &me_hex, super::super::kind::MESSAGE, ":fire:", Some(("fire", "https://e/f.png")))
             .await
             .unwrap();
         send_edit(&bed.relay, &community, &general, &msg_id, "edited").await.unwrap();

@@ -1556,8 +1556,12 @@ impl VectorCore {
                 return Err(VectorError::Other("account changed before send".into()));
             }
             let pair = emoji_tags.first().map(|t| (t.shortcode.as_str(), t.url.as_str()));
+            // The NIP-25 `k` names the target's rumor kind. Stored rows don't keep
+            // wire-kind fidelity yet, so a reaction to a received kind-1111 thread
+            // reply claims `9` — Armada's fold ignores reaction `k`, and exact
+            // threading lands with the thread-aware GUI.
             return crate::community::v2::service::send_reaction(
-                &transport, &community, &ch, message_id, &target_author.to_hex(), emoji, pair,
+                &transport, &community, &ch, message_id, &target_author.to_hex(), crate::community::v2::kind::MESSAGE, emoji, pair,
             )
             .await
             .map(|_| ())
@@ -1928,12 +1932,17 @@ impl VectorCore {
         warnings
     }
 
-    /// Fetch a v2 channel's recent chat page and PERSIST it into the shared events tables
-    /// (the same store v1 uses), so `get_messages`/`get_new_messages` backfill for v2 exactly
-    /// like v1. Reuses the v2 inbound bridge (dedup + STATE aggregate) + the v1 save path.
-    /// Returns the count of brand-new messages applied. Best-effort: a fetch failure is 0.
+    /// Fetch a v2 channel's recent chat history and PERSIST it into the shared events
+    /// tables (the same store v1 uses), so `get_messages`/`get_new_messages` backfill for
+    /// v2 exactly like v1. PAGES backwards until it reaches messages it already holds
+    /// (bounded), so a reconnecting bot that slept through more than one page of traffic
+    /// still catches the whole gap instead of only the newest `limit`. Reuses the v2
+    /// inbound bridge (dedup + STATE aggregate) + the v1 save path. Returns the count of
+    /// brand-new messages applied. Best-effort: a fetch failure is 0.
     async fn v2_backfill_channel(id: &crate::community::CommunityId, channel_id: &str, limit: usize) -> usize {
         use crate::community::v2::inbound::{apply_chat_to_state, persist_chat, ChatPersist};
+        /// Deepest catch-up walk: pages × page-size bounds one reconnect's fetch.
+        const MAX_BACKFILL_PAGES: usize = 8;
         // Guard straddles the fetch: a swap mid-fetch must not persist account A's chat
         // into account B's STATE/DB (the message ids are global).
         let session = state::SessionGuard::capture();
@@ -1941,7 +1950,18 @@ impl VectorCore {
         let Ok(Some(community)) = crate::db::community::load_community_v2(id) else { return 0 };
         let ch = crate::community::ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
         let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-        let Ok(page) = crate::community::v2::service::fetch_channel(&transport, &community, &ch, limit).await else {
+        let Ok(page) = crate::community::v2::service::fetch_channel_history(
+            &transport,
+            &community,
+            &ch,
+            limit.max(50),
+            MAX_BACKFILL_PAGES,
+            // Keep paging while a page still contains something we don't hold; a page
+            // of only-known rumors means we've reached our own history.
+            |page| page.iter().any(|f| !crate::db::events::event_exists(&f.event.opened().rumor_id.to_hex()).unwrap_or(false)),
+        )
+        .await
+        else {
             return 0;
         };
         let mut new = 0usize;

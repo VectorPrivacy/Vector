@@ -33,9 +33,14 @@ pub mod stream;
 /// Inner rumor kinds (CORD-02 Appendix B). The *outer* event is always a wrap
 /// ([`stream::KIND_WRAP`] / [`stream::KIND_WRAP_EPHEMERAL`]); these ride inside.
 pub mod kind {
-    /// Chat message (NIP-C7 shape: content = text, replies via `q` tag).
+    /// Chat message (NIP-C7 shape: content = text; a `q` tag = an INLINE quote).
     pub const MESSAGE: u16 = 9;
-    /// Reaction (NIP-25 shape: `e`/`p`/`k` tags name the target).
+    /// Threaded reply (NIP-22 comment, CORD-03 §3): uppercase `K`/`E`/`P` pin the
+    /// thread root, lowercase `k`/`e`/`p` the immediate parent — all rumor ids.
+    /// Deliberately distinct from a kind-9 inline quote.
+    pub const COMMENT: u16 = 1111;
+    /// Reaction (NIP-25 shape: `e`/`p`/`k` tags name the target — `k` is the
+    /// target's kind, `9` or `1111`).
     pub const REACTION: u16 = 7;
     /// Delete (NIP-09 shape: `e` names the author's own rumor id).
     pub const DELETE: u16 = 5;
