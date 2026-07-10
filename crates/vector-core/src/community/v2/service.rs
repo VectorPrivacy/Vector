@@ -2933,19 +2933,52 @@ async fn fetch_rekey_chunks<T: Transport + ?Sized>(
     relays: &[String],
     group: &GroupKey,
 ) -> Result<Vec<rekey::RekeyChunk>, String> {
-    let query = Query {
-        kinds: vec![stream::KIND_WRAP],
-        authors: vec![group.pk_hex()],
-        limit: Some(200),
-        ..Default::default()
-    };
-    let wraps = transport.fetch(&query, relays).await?;
+    // A rekey plane address is community_root-derived, so ANY member can seal junk
+    // 3303s there — a flood (or, organically, a large community's own multi-chunk
+    // rotation past the newest window) could bury the genuine owner/admin rotation
+    // in a single fixed page. PAGE backwards (inclusive until + wrap-id dedup, the
+    // control pager's discipline) so a buried authorized chunk is still recovered;
+    // the seal + authority filter downstream drops the junk. Bounded — a sustained
+    // flood past this depth degrades to "adopt one pass late", never a false state.
+    const REKEY_PAGE: usize = 200;
+    const REKEY_MAX_PAGES: usize = 6;
     let mut out = Vec::new();
-    for w in &wraps {
-        if let Ok(opened) = stream::open_wrap(w, group) {
-            if let Ok(chunk) = rekey::parse_rekey_chunk(&opened) {
-                out.push(chunk);
+    let mut seen: std::collections::HashSet<nostr_sdk::EventId> = std::collections::HashSet::new();
+    let mut until: Option<u64> = None;
+    let mut oldest: Option<u64> = None;
+    for _ in 0..REKEY_MAX_PAGES {
+        let query = Query {
+            kinds: vec![stream::KIND_WRAP],
+            authors: vec![group.pk_hex()],
+            until,
+            limit: Some(REKEY_PAGE),
+            ..Default::default()
+        };
+        let wraps = transport.fetch(&query, relays).await?;
+        let mut fresh = 0usize;
+        for w in &wraps {
+            if !seen.insert(w.id) {
+                continue;
             }
+            fresh += 1;
+            let at = w.created_at.as_secs();
+            if oldest.is_none_or(|o| at < o) {
+                oldest = Some(at);
+            }
+            if let Ok(opened) = stream::open_wrap(w, group) {
+                if let Ok(chunk) = rekey::parse_rekey_chunk(&opened) {
+                    out.push(chunk);
+                }
+            }
+        }
+        // Drained, or a same-second wall the pager can't step past (second-granular
+        // until) — either way stop; the accumulated set is what advance_scope folds.
+        if fresh == 0 || wraps.len() < REKEY_PAGE {
+            break;
+        }
+        match oldest {
+            Some(o) if o > 0 => until = Some(o),
+            _ => break,
         }
     }
     Ok(out)
@@ -5624,6 +5657,39 @@ mod tests {
         // A rename of the same public channel still works.
         let meta = control::ChannelMetadata { name: "lobby".into(), private: false, voice: None, deleted: None, custom: None, extra: Default::default() };
         edit_channel_metadata(&relay, &community, &general, &meta).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_rekey_plane_flood_cannot_bury_a_genuine_rotation() {
+        // An insider floods the next-epoch rekey address (community_root-derived,
+        // so any member can seal there) with >200 junk 3303s to push the owner's
+        // genuine rotation out of a single fetch window. The paginated fetch must
+        // still recover it and adopt.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Flooded", vec!["wss://r".into()], None).await.unwrap();
+        let new_root = [0xD9; 32];
+        let new_epoch = Epoch(1);
+        let group = base_rekey_group_key(&community.community_root, community.id(), new_epoch);
+
+        // The GENUINE owner rotation lands first (oldest).
+        publish_base_rotation(&relay, &community, &owner, &[owner.public_key()], &new_root, &community.community_root).await;
+
+        // Then a member floods 260 well-formed-but-unauthorized junk chunks ON TOP
+        // (newer), burying the genuine one past the 200 newest.
+        let rogue = Keys::generate();
+        let prev_commit = super::super::derive::epoch_key_commitment(Epoch(0), &community.community_root);
+        for i in 0..260u64 {
+            let blob = rekey::build_blob_local(rogue.secret_key(), &rogue.public_key().to_bytes(), &rogue.public_key(), RekeyScope::Root, new_epoch, &[0xEE; 32]).unwrap();
+            let rumor = rekey::build_rekey_rumor(rogue.public_key(), RekeyScope::Root, new_epoch, Epoch(0), &prev_commit, &[blob], 1, 1, 3_000 + i).unwrap();
+            let (wrap, _) = rekey::seal_rekey_chunk(&rumor, &group, &rogue, Timestamp::from_secs(3_000 + i)).unwrap();
+            relay.publish(&wrap, &community.relays).await.unwrap();
+        }
+
+        let session = SessionGuard::capture();
+        let updated = follow_rekeys(&relay, &community, &session).await.unwrap().updated.expect("the genuine rotation is recovered past the flood");
+        assert_eq!(updated.root_epoch, Epoch(1));
+        assert_eq!(updated.community_root, new_root, "adopted the owner's root, not a junk one");
     }
 
     #[tokio::test]
