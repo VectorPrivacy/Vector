@@ -208,8 +208,15 @@ pub async fn send_typing<T: Transport + ?Sized>(
 fn chat_send_context(community: &CommunityV2, channel_id: &ChannelId) -> Result<(Keys, GroupKey, Epoch, SessionGuard), String> {
     let session = SessionGuard::capture();
     let author = local_keys()?;
-    if crate::db::community::get_community_dissolved(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap_or(false) {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    if crate::db::community::get_community_dissolved(&cid_hex).unwrap_or(false) {
         return Err("this community has been dissolved".to_string());
+    }
+    // A self-ban: every honest peer drops our events (CORD-04 §4) and the send
+    // echo would silently no-op, so fail loudly instead of a message that seems
+    // to send but shows up nowhere.
+    if crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default().contains(&author.public_key().to_hex()) {
+        return Err("you are banned from this community".to_string());
     }
     let ch = community.channel(channel_id).ok_or("no such channel in this community")?;
     if ch.private && ch.key.is_none() {

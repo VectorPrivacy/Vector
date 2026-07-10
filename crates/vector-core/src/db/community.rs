@@ -1658,14 +1658,19 @@ pub fn set_read_cut_pending(community_id: &str, pending: bool) -> Result<(), Str
 /// Set the owner-dissolution SEAL on a community — PERMANENT + irreversible (no clear path; there
 /// is no un-dissolve). Idempotent: re-setting an already-dissolved community is a harmless no-op. Once
 /// set, the control fold stops advancing and the inbound path drops every subsequent event.
-pub fn set_community_dissolved(community_id: &str) -> Result<(), String> {
+/// Seal a community as dissolved. Returns whether this call TRANSITIONED it (a
+/// live→dissolved flip) so the caller can fire the one-time death notification
+/// exactly once — a re-wrapped tombstone (fresh outer id, same owner seal) then
+/// can't spam the handler.
+pub fn set_community_dissolved(community_id: &str) -> Result<bool, String> {
     let conn = super::get_write_connection_guard_static()?;
-    conn.execute(
-        "UPDATE communities SET dissolved = 1 WHERE community_id = ?1",
-        params![community_id],
-    )
-    .map_err(|e| format!("set dissolved: {e}"))?;
-    Ok(())
+    let changed = conn
+        .execute(
+            "UPDATE communities SET dissolved = 1 WHERE community_id = ?1 AND dissolved = 0",
+            params![community_id],
+        )
+        .map_err(|e| format!("set dissolved: {e}"))?;
+    Ok(changed > 0)
 }
 
 /// Whether a community has been sealed by a folded + owner-verified GroupDissolved tombstone.

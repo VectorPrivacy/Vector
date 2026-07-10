@@ -150,12 +150,17 @@ pub(crate) fn rekey_authors(c: &CommunityV2) -> Vec<PublicKey> {
     out
 }
 
-/// Load every locally-held **v2** community (dispatching each id by its stored
-/// protocol). The realtime layer folds these into the subscription + routing.
+/// Load every locally-held, LIVE **v2** community (dispatching each id by its
+/// stored protocol). The realtime layer folds these into the subscription +
+/// routing, so excluding a DISSOLVED community here is what enforces CORD-02 §9
+/// on the receive side: its chat/control/rekey planes stop being subscribed and
+/// an arriving wrap for it is `NotOurs` (dropped, never honored). Held keys still
+/// open old history through the explicit read paths — this only stops NEW events.
 pub fn load_held_v2() -> Vec<CommunityV2> {
     let ids = crate::db::community::list_community_ids().unwrap_or_default();
     ids.iter()
         .filter(|id| matches!(crate::db::community::community_protocol(id).ok().flatten(), Some(ConcordProtocol::V2)))
+        .filter(|id| !crate::db::community::get_community_dissolved(&crate::simd::hex::bytes_to_hex_32(&id.0)).unwrap_or(false))
         .filter_map(|id| crate::db::community::load_community_v2(id).ok().flatten())
         .collect()
 }
@@ -285,9 +290,16 @@ pub async fn dispatch_event(session: &SessionGuard, event: Event, handler: Arc<d
                 return;
             }
             inbound::DispatchedV2::Dissolved { community_id } => {
-                // Death wins (CORD-02 §9): seal read-only + surface the grave.
-                let _ = crate::db::community::set_community_dissolved(&community_id);
-                handler.on_community_dissolved(&community_id);
+                // Death wins (CORD-02 §9): seal read-only + surface the grave, ONCE
+                // (a re-wrapped tombstone with a fresh outer id must not re-fire the
+                // handler). The next load_held_v2 excludes it, so its planes also
+                // stop being subscribed + routed.
+                if crate::db::community::set_community_dissolved(&community_id).unwrap_or(false) {
+                    handler.on_community_dissolved(&community_id);
+                    if let Some(client) = crate::state::nostr_client() {
+                        refresh_subscription(&client).await;
+                    }
+                }
                 return;
             }
             // A chat event, opened but NOT yet applied: persist first (dedup by inner
@@ -586,6 +598,84 @@ mod tests {
 
         *V2_FOLLOW_TX.lock().unwrap() = None;
         V2_FOLLOW_PENDING.lock().unwrap().clear();
+    }
+
+    #[tokio::test]
+    async fn a_dissolved_community_honors_no_new_events_and_fires_death_once() {
+        use super::super::service;
+        use crate::community::transport::memory::MemoryRelay;
+        use crate::community::transport::Transport;
+        use crate::types::Message;
+        use std::sync::Mutex as StdMutex;
+
+        #[derive(Default)]
+        struct Recorder {
+            messages: StdMutex<Vec<String>>,
+            deaths: StdMutex<Vec<String>>,
+        }
+        impl InboundEventHandler for Recorder {
+            fn on_community_message(&self, _chat: &str, msg: &Message, _new: bool) {
+                self.messages.lock().unwrap().push(msg.content.clone());
+            }
+            fn on_community_dissolved(&self, community_id: &str) {
+                self.deaths.lock().unwrap().push(community_id.to_string());
+            }
+        }
+
+        let _g = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        crate::db::clear_id_caches();
+        let tmp = tempfile::tempdir().unwrap();
+        let acct = {
+            const B: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+            let mut s = String::from("npub1");
+            for i in 0..58 {
+                s.push(B[(i * 3 + 2) % 32] as char);
+            }
+            s
+        };
+        std::fs::create_dir_all(tmp.path().join(&acct)).unwrap();
+        crate::db::set_app_data_dir(tmp.path().to_path_buf());
+        crate::db::set_current_account(acct.clone()).unwrap();
+        crate::db::init_database(&acct).unwrap();
+        let _ = crate::state::take_nostr_client();
+        let me = Keys::generate();
+        crate::state::MY_SECRET_KEY.store_from_keys(&me, &[]);
+        crate::state::set_my_public_key(me.public_key());
+
+        let relay = MemoryRelay::new();
+        let community = service::create_community(&relay, "Doomed", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+
+        // The owner's tombstone arrives as a MEMBER sees it (local flag still 0 —
+        // build + publish it directly rather than via dissolve_community, which
+        // would seal our own DB first and make it the owner-published case). `me`
+        // is the owner, so the seal verifies.
+        let rumor = super::super::dissolution::dissolved_tombstone_rumor(me.public_key(), community.id(), 8_000);
+        let tombstone = super::super::dissolution::seal_dissolved(&rumor, community.id(), &me, nostr_sdk::prelude::Timestamp::from_secs(8_000)).unwrap();
+        let _ = relay.publish(&tombstone, &community.relays).await;
+        assert!(!crate::db::community::get_community_dissolved(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap(), "not yet locally sealed");
+
+        let rec = Arc::new(Recorder::default());
+        let session = SessionGuard::capture();
+        clear().await;
+        // Fire the SAME tombstone twice AND a fresh re-wrap of its verified seal
+        // (distinct outer id) — death must be announced exactly once.
+        dispatch_event(&session, tombstone.clone(), rec.clone()).await;
+        dispatch_event(&session, tombstone, rec.clone()).await;
+        assert!(crate::db::community::get_community_dissolved(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap());
+
+        // A member posts a fresh message to #general AFTER the tombstone. It must
+        // not be honored (the community is excluded from load_held_v2, so its
+        // plane is NotOurs).
+        let member = Keys::generate();
+        let cgroup = derive::channel_group_key(&community.community_root, &general, community.root_epoch);
+        let rumor = super::super::chat::build_message_rumor(member.public_key(), &general, community.root_epoch, "into the grave", None, &[], vec![], 9_000);
+        let (mw, _) = super::super::chat::seal_chat_rumor(&rumor, &cgroup, &member, nostr_sdk::prelude::Timestamp::from_secs(9), false).unwrap();
+        dispatch_event(&session, mw, rec.clone()).await;
+
+        assert_eq!(rec.deaths.lock().unwrap().len(), 1, "death is announced exactly once");
+        assert!(rec.messages.lock().unwrap().is_empty(), "a post-tombstone message is never honored (CORD-02 §9)");
     }
 
     #[test]

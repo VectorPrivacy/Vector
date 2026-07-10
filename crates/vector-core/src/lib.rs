@@ -1949,6 +1949,12 @@ impl VectorCore {
         // into account B's STATE/DB (the message ids are global).
         let session = state::SessionGuard::capture();
         let Some(my_pk) = state::my_public_key() else { return 0 };
+        // CORD-02 §9: a dissolved community honors no NEW events — old history reads
+        // through the explicit paths, but a catch-up sweep must not ingest anything
+        // authored into the grave.
+        if crate::db::community::get_community_dissolved(&crate::simd::hex::bytes_to_hex_32(&id.0)).unwrap_or(false) {
+            return 0;
+        }
         let Ok(Some(community)) = crate::db::community::load_community_v2(id) else { return 0 };
         let ch = crate::community::ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
         let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
