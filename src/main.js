@@ -1074,6 +1074,9 @@ const domChatMessagesScrollReturnBtn = document.getElementById('chat-scroll-retu
 const domChatMessageInput = document.getElementById('chat-input');
 const domChatMessageInputFile = document.getElementById('chat-input-file');
 const domChatMessageInputCancel = document.getElementById('chat-input-cancel');
+const domChatReplyBarName = document.getElementById('chat-reply-bar-name');
+const domChatReplyBarSnippet = document.getElementById('chat-reply-bar-snippet');
+const domChatReplyBarCancel = document.getElementById('chat-reply-bar-cancel');
 const domChatMessageInputEmoji = document.getElementById('chat-input-emoji');
 const domAttachmentPanel = document.getElementById('attachment-panel');
 const domAttachmentPanelMain = document.getElementById('attachment-panel-main');
@@ -7463,10 +7466,9 @@ async function deleteFailedMessage(msgId) {
  * Cancel any ongoing replies and reset the messaging interface
  */
 function cancelReply() {
-    // Reset the message UI
-    domChatMessageInputFile.style.display = '';
-    domChatMessageInputCancel.style.display = 'none';
-    domChatMessageInput.setAttribute('placeholder', strOriginalInputPlaceholder);
+    // Hide the reply bar. Its content is left in place so the collapse
+    // animation doesn't slide out an empty shell; the next reply overwrites it
+    domChatMessageBox.classList.remove('replying');
 
     // Focus the message input (desktop only - mobile keyboards are disruptive)
     if (!platformFeatures.is_mobile) {
@@ -10895,6 +10897,8 @@ window.addEventListener("DOMContentLoaded", async () => {
         }
     };
 
+    domChatReplyBarCancel.onclick = () => cancelReply();
+
     // Hook up a scroll handler in the chat to display UI elements at certain scroll depths
     createScrollHandler(domChatMessages, domChatMessagesScrollReturnBtn, {
         threshold: 500,
@@ -11278,6 +11282,8 @@ async function sendMessage(messageText) {
         if (mentionCtrl) mentionCtrl.clearMentions();
     } catch(e) {
         console.error('Failed to send message:', e);
+    } finally {
+        domChatMessageInput.setAttribute('placeholder', 'Enter message...');
     }
 }
 

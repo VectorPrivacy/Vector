@@ -564,11 +564,14 @@ function _dmsgOpenReactionPicker(targetMsgId) {
 }
 
 /**
- * Mark the row as the active reply target and configure the chat input for
- * a reply (cancel button visible, placeholder, focus). Replaces the prior
- * row's highlight (so only one row is ever highlighted as the reply target).
+ * Mark the row as the active reply target and show the reply bar above the
+ * composer (accent name + one-line snippet, Discord-style). Replaces the
+ * prior row's highlight (so only one row is ever highlighted as the target).
  */
 function _dmsgSelectReply(targetMsgId) {
+    // Editing and replying are mutually exclusive composer states
+    if (strCurrentEditMessageId) cancelEdit();
+
     if (strCurrentReplyReference) {
         const prev = document.getElementById(strCurrentReplyReference);
         if (prev) clearHighlight(prev, 'replying');
@@ -576,12 +579,61 @@ function _dmsgSelectReply(targetMsgId) {
 
     strCurrentReplyReference = targetMsgId;
 
-    domChatMessageInputFile.style.display = 'none';
-    domChatMessageInputCancel.style.display = '';
-    domChatMessageInput.setAttribute('placeholder', 'Enter reply...');
-    if (!platformFeatures.is_mobile) {
-        domChatMessageInput.focus();
+    // Resolve the target's author the same way the in-chat reply quotes do:
+    // own messages resolve to self, group messages carry their npub, and a
+    // DM counterpart's chat id IS their npub
+    const chat = arrChats.find(c => c.id === strOpenChat);
+    const cMsg = chat?.messages.find(m => m.id === targetMsgId);
+    let cProfile;
+    if (cMsg?.mine) cProfile = getProfile(strPubkey);
+    else if (cMsg?.npub) cProfile = getProfile(cMsg.npub);
+    else cProfile = getProfile(strOpenChat);
+    domChatReplyBarName.textContent = cProfile?.nickname || cProfile?.name || cProfile?.display_name
+        || (cProfile?.id ? cProfile.id.substring(0, 10) + '…' : 'Unknown');
+    twemojify(domChatReplyBarName);
+
+    domChatReplyBarSnippet.textContent = '';
+    if (cMsg?.content) {
+        domChatReplyBarSnippet.innerHTML = buildReplyPreviewHtml(cMsg.content);
+        twemojify(domChatReplyBarSnippet);
+        if (cMsg.emoji_tags?.length) renderCustomEmojiShortcodes(domChatReplyBarSnippet, cMsg.emoji_tags);
+    } else if (cMsg?.attachments?.length) {
+        const ext = cMsg.attachments[0].extension;
+        domChatReplyBarSnippet.textContent = ext ? getFileTypeInfo(ext).description : 'Attachment';
     }
+
+    // Showing the bar shrinks the chat viewport as it slides in; a user pinned
+    // to the live tail stays glued to the bottom frame-by-frame for the length
+    // of the transition, so the newest message rides up with the bar instead of
+    // being clipped. Same windowing guard as softChatScroll: away from the data
+    // bottom, a DOM-bottom scroll would cascade window extensions.
+    const fBarWasHidden = !domChatMessageBox.classList.contains('replying');
+    const fRepin = fBarWasHidden && chatPinnedToBottom
+        && (!CHAT_WINDOW_ENABLED || isAtDataBottom());
+    // Center the cancel icon over the mic/send column: those buttons
+    // flex-shrink with window width, so the offset is measured, not assumed
+    const slotBtn = domChatMessageInputVoice.offsetParent ? domChatMessageInputVoice : domChatMessageInputSend;
+    const slotRect = slotBtn.getBoundingClientRect();
+    if (slotRect.width > 0) {
+        const barRect = domChatReplyBarCancel.parentElement.getBoundingClientRect();
+        // 11.6 = half the 24px button minus a 0.4px optical correction (the
+        // glyphs' visual centers sit a hair off their geometric boxes)
+        domChatReplyBarCancel.style.right = `${(barRect.right - slotRect.left - slotRect.width / 2 - 11.6).toFixed(1)}px`;
+    }
+
+    domChatMessageBox.classList.add('replying');
+    if (fRepin) {
+        const start = performance.now();
+        const followPin = () => {
+            beginProgrammaticScroll();
+            domChatMessages.scrollTop = domChatMessages.scrollHeight;
+            if (performance.now() - start < 280) requestAnimationFrame(followPin);
+        };
+        requestAnimationFrame(followPin);
+    }
+    // Focus on every platform: replying implies typing intent, so mobile
+    // should open the virtual keyboard right away
+    domChatMessageInput.focus();
 
     const target = document.getElementById(targetMsgId);
     if (target) applyHighlight(target, 'replying');

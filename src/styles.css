@@ -3377,6 +3377,148 @@ body.chat-bg-disabled .chat-messages::before {
   position: relative;  /* anchor for #msg-bottom-fade hanging above */
 }
 
+/* ===== Reply bar (Discord-style, docks onto the composer's top edge) =====
+   The bar is absolutely positioned and permanently tucked 12px BEHIND the
+   composer's top edge; opening grows the box's padding-top (layout) while the
+   bar's height grows on the identical curve (pixels), so it slides out from
+   underneath the composer. The composer's rounded corners are always backed
+   by the bar's surface while any of it shows, and never need to animate:
+   both the themed-gap streak and the square-corner streak are impossible. */
+#chat-box {
+  transition: padding-top 0.22s cubic-bezier(0.33, 1, 0.68, 1);
+}
+
+#chat-box.replying {
+  padding-top: 39px;   /* base 5px + the bar's 34px visible strip */
+}
+
+#chat-reply-bar {
+  position: absolute;
+  box-sizing: border-box;  /* height includes the tuck inset, so content
+                              centers in the visible strip, not the full box */
+  top: 5px;            /* rides the box's top edge (its base padding) */
+  left: 8px;           /* matches the composer's side margins */
+  right: 8px;
+  height: 12px;        /* fully hidden behind the composer when closed */
+  z-index: 0;          /* the composer paints over the tucked strip */
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 44px 12px 12px;  /* bottom inset = the tucked strip, so content
+                                 centers in the visible part only; right inset
+                                 clears the absolutely-anchored cancel button */
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: default;
+  background-color: #0d0d0d;
+  background-color: color-mix(in srgb, var(--accent-color, #59fcb3) 6%, #060606);
+  border-radius: 10px 10px 0 0;
+  overflow: hidden;
+  transition: height 0.22s cubic-bezier(0.33, 1, 0.68, 1);
+}
+
+#chat-box.replying #chat-reply-bar {
+  height: 46px;        /* 34px visible + the 12px tuck */
+}
+
+/* Fade the CONTENT, never the bar surface: a translucent bar mid-collapse
+   would let the themed composer background bleed through where the bar
+   hasn't finished shrinking yet */
+#chat-reply-bar::before,
+#chat-reply-bar > * {
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+
+#chat-box.replying #chat-reply-bar::before,
+#chat-box.replying #chat-reply-bar > * {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #chat-box,
+  #chat-reply-bar,
+  #chat-reply-bar::before,
+  #chat-reply-bar > * {
+    transition: none;
+  }
+}
+
+#chat-reply-bar::before {
+  content: '';
+  width: 3px;
+  height: 16px;
+  border-radius: 2px;
+  background-color: var(--accent-color, #59fcb3);
+  flex-shrink: 0;
+}
+
+#chat-reply-bar-label {
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 13.5px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+#chat-reply-bar-name {
+  color: var(--accent-color, #59fcb3);
+  font-weight: 600;
+}
+
+#chat-reply-bar-snippet {
+  flex: 1;
+  min-width: 0;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 13px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Twemoji + custom emoji must render at text size in the one-line bar
+   (same constraint as .chatlist-contact-preview .emoji) */
+#chat-reply-bar-name img,
+#chat-reply-bar-snippet img {
+  width: 15px !important;
+  height: 15px !important;
+  display: inline-block;
+  vertical-align: -2px;
+  border-radius: 0;
+  min-width: unset;
+  min-height: unset;
+}
+
+/* Anchored to the bar, not in its flex flow: the mic/send buttons below
+   flex-shrink with window width, so the exact right-offset that centers the
+   X over them is measured in JS each time the bar opens */
+#chat-reply-bar-cancel {
+  position: absolute;
+  right: 10.5px;                   /* fallback until the live measure runs */
+  top: calc((100% - 12px) / 2);    /* center of the visible strip */
+  transform: translateY(-50%);
+  width: 24px;
+  height: 24px;
+  padding: 3px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+
+#chat-reply-bar-cancel .icon-cancel {
+  position: relative;
+  display: block;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  background-color: var(--danger-color);
+  transition: filter 0.15s ease;
+}
+
+#chat-reply-bar-cancel:hover .icon-cancel {
+  filter: brightness(1.25);
+}
+
 .chat-input-container {
   position: relative;
   width: 100%;
@@ -3416,6 +3558,31 @@ body.chat-bg-disabled .chat-messages::before {
   background-color: #B2B2B2;
 }
 
+/* Standard composer icons: muted by default, full white on hover. Stateful
+   colors (send .active accent, voice-preview accent, edit-cancel danger) are
+   declared later or more specifically, so they keep winning. The file button
+   is color-only here: its own rule above carries the rotate transition, and
+   redeclaring transition would clobber the spin. */
+#chat-input-file .icon,
+#chat-input-emoji .icon,
+#chat-input-voice .icon,
+#chat-input-send .icon {
+  background-color: #B2B2B2;
+}
+
+#chat-input-emoji .icon,
+#chat-input-voice .icon,
+#chat-input-send .icon {
+  transition: background-color 0.15s ease;
+}
+
+#chat-input-file:hover .icon,
+#chat-input-emoji:hover .icon,
+#chat-input-voice:hover .icon,
+#chat-input-send:hover .icon {
+  background-color: #FFFFFF;
+}
+
 #chat-input {
   width: -webkit-fill-available;
   line-height: inherit;
@@ -3433,9 +3600,9 @@ body.chat-bg-disabled .chat-messages::before {
   user-select: none;
 }
 
-/* Vector Send Button - white by default, stays visible when active */
+/* Vector Send Button - muted by default, stays visible when active */
 #chat-input-send .icon {
-  background-color: white;
+  background-color: #B2B2B2;
   transition: background 0.3s ease;
   width: 20px !important;
   height: 20px !important;
