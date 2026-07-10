@@ -4496,10 +4496,38 @@ mod tests {
         let b_view = accept_parked_invite(&transport, &bundle_json, None).await.expect("join");
         log(format!("[join] B joined; {} channels", b_view.channels.len()));
         settle().await;
-        let seen = texts_in(&transport, &b_view, &general).await;
+        let page = fetch_channel(&transport, &b_view, &general, 50).await.expect("fetch");
+        let seen: Vec<String> = page.iter().map(|f| f.event.opened().rumor.content.clone()).collect();
         log(format!("[read] B sees #general: {seen:?}"));
         assert!(seen.iter().any(|t| t == "A: live hello"), "B reads A's message over the real relay");
         send_message(&transport, &b_view, &general, "B: live reply").await.expect("reply");
+
+        // B posts a NIP-22 kind-1111 THREADED REPLY to A's message (the shape Armada
+        // sends) directly onto the chat plane — proving the cross-client thread
+        // RECEIVE path works live, not just in the offline fixture.
+        let hello = page.iter().find(|f| f.event.opened().rumor.content == "A: live hello").expect("A's message");
+        let hello_id = hello.event.opened().rumor_id.to_hex();
+        let bkeys = crate::state::MY_SECRET_KEY.to_keys().unwrap();
+        let cgroup = channel_group_key(&b_view.community_root, &general, b_view.root_epoch);
+        let reply_rumor = chat::build_comment_rumor(bkeys.public_key(), &general, b_view.root_epoch, "B: threaded reply to hello", &hello_id, super::super::kind::MESSAGE, &a.public_key().to_hex(), None, &[], now_ms());
+        let (reply_wrap, _) = chat::seal_chat_rumor(&reply_rumor, &cgroup, &bkeys, Timestamp::from_secs(now_ms() / 1000), false).expect("seal 1111");
+        transport.publish(&reply_wrap, &b_view.relays).await.expect("publish 1111");
+        log("[thread] B published a kind-1111 threaded reply to A's message".to_string());
+        settle().await;
+
+        // A reads the thread reply back, rendered inline with A's message as parent.
+        become_acct(&a);
+        community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let a_page = fetch_channel(&transport, &community, &general, 50).await.expect("A fetch");
+        let thread = a_page.iter().find(|f| f.event.opened().rumor.content == "B: threaded reply to hello").expect("A sees the 1111");
+        if let chat::ChatEvent::Message { reply_to, opened, .. } = &thread.event {
+            assert_eq!(opened.rumor.kind.as_u16(), super::super::kind::COMMENT, "wire kind preserved as 1111");
+            assert_eq!(reply_to.as_ref().map(|r| crate::simd::hex::bytes_to_hex_32(&r.id)), Some(hello_id.clone()), "the 1111 renders inline with A's message as parent");
+        } else {
+            panic!("the 1111 parsed as a Message");
+        }
+        log("[thread] A read B's threaded reply, parent resolved — cross-client 1111 interop OK".to_string());
+        become_acct(&b);
         settle().await;
 
         // A: create a PRIVATE channel while B is already a member — B is a recipient
