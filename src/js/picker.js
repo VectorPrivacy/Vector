@@ -512,6 +512,20 @@ function _isCacheableEmojiUrl(url) {
     return typeof url === 'string' && url.startsWith('https://');
 }
 
+/**
+ * Drop every memoized emoji path and re-resolve all emoji <img>s on screen.
+ * Called after the disk cache is cleared: the memos (and any rendered srcs)
+ * point at deleted files, and left alone they'd short-circuit the re-download
+ * forever, leaving broken images until a full reload.
+ */
+function reloadCachedEmojiImgs() {
+    _emojiCacheMemo.clear();
+    _emojiFailReason.clear();
+    document.querySelectorAll('img[data-cache-token]').forEach(img => {
+        bindCachedEmojiImg(img, img.dataset.cacheToken, img.dataset.cacheKind || 'emoji');
+    });
+}
+
 /** Returns the memoized local path for `url`, or null if not yet cached
  *  in this session. Synchronous — safe to call from render-fast paths. */
 function cachedEmojiPath(url) {
@@ -573,6 +587,7 @@ function bindCachedEmojiImg(img, url, kind = 'emoji', onUnavailable = null) {
     };
     if (!_isCacheableEmojiUrl(url)) {
         delete img.dataset.cacheToken;
+        delete img.dataset.cacheKind;
         unavailable();
         return;
     }
@@ -580,8 +595,10 @@ function bindCachedEmojiImg(img, url, kind = 'emoji', onUnavailable = null) {
     // rebound to a different URL before our async resolve lands, the
     // stale `.then` would overwrite the newer src. Reused elements
     // (e.g. the naming-overlay preview cycling through a batch) are the
-    // common offenders.
+    // common offenders. The kind rides along so a cache-clear rebind
+    // resolves into the same cache subdir.
     img.dataset.cacheToken = url;
+    img.dataset.cacheKind = kind;
     const memo = _emojiCacheMemo.get(url);
     if (memo) {
         img.src = convertFileSrc(memo);
@@ -2319,7 +2336,7 @@ class PackCanvasGrid {
                 const idx = this._cellAtEvent(e);
                 if (idx < 0) return;
                 e.stopPropagation();
-                _handlePackEmojiSelect(this.pack, this.emojis[idx]);
+                _handlePackEmojiSelect(this.pack, this.emojis[idx], e.shiftKey);
             });
         }
     }
@@ -4157,7 +4174,7 @@ async function _pcDelete() {
     });
 })();
 
-function _handlePackEmojiSelect(pack, emoji) {
+function _handlePackEmojiSelect(pack, emoji, keepOpen = false) {
     if (!emoji) return;
     // Insert the disambiguated code (`love~2`) so duplicate-name emojis resolve
     // to the exact image the user clicked.
@@ -4171,7 +4188,8 @@ function _handlePackEmojiSelect(pack, emoji) {
         return;
     }
     insertAtCursor(`:${code}:`, true);
-    picker.classList.remove('visible');
+    // Shift-click keeps the panel open for rapid multi-insert (Discord-style).
+    if (!keepOpen) picker.classList.remove('visible');
     if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
         domChatMessageInput.focus();
     }

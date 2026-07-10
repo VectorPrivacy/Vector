@@ -1416,6 +1416,13 @@
                     </div>
                     <div id="storage-legend"></div>
                   </div>
+                  <div class="form-group" id="storage-gallery-group" style="display: none; margin-top: 15px;">
+                    <label class="toggle-container">
+                      <span><span id="storage-gallery-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: middle; margin-right: 8px;"></span>Hide Media from Gallery</span>
+                      <input type="checkbox" id="storage-gallery-toggle">
+                      <span class="neon-toggle"></span>
+                    </label>
+                  </div>
                   <div class="form-group" style="margin-top: 15px;">
                     <label class="toggle-container">
                       <span><span id="auto-download-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: middle; margin-right: 8px;"></span>Auto-Download Media</span>
@@ -1436,13 +1443,6 @@
                         <option value="104857600">100 MB</option>
                       </select>
                     </div>
-                  </div>
-                  <div class="form-group" id="storage-gallery-group" style="display: none; margin-top: 15px;">
-                    <label class="toggle-container">
-                      <span><span id="storage-gallery-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Hide Media from Gallery</span>
-                      <input type="checkbox" id="storage-gallery-toggle">
-                      <span class="neon-toggle"></span>
-                    </label>
                   </div>
                   <div class="form-group" style="display: flex; align-items: center; margin-top: 15px;">
                     <span id="clear-storage-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; flex-shrink: 0; margin-right: 8px;"></span>
@@ -1556,22 +1556,6 @@
                 <img class="warning-icon" alt="">
                 Logout
               </button>
-            </div>
-          </div>
-        </div>
-
-        <!-- Donors & Contributors Section -->
-        <div id="settings-donors" class="settings-section" style="text-align: center;">
-          <hr class="divider settings-divider" style="background-color: #171717;">
-          <h3 style="opacity: 0.6; font-weight: 500; display: inline-flex; align-items: center; justify-content: center; margin-bottom: 5px;">Donors & Contributors
-            <span id="donors-info" class="icon icon-info btn" style="width: 16px; height: 16px; position: relative; display: inline-block; margin-left: 8px;"></span>
-          </h3>
-          <div class="donors-list" style="display: flex; flex-wrap: wrap; gap: 25px; justify-content: center; padding: 15px 0;">
-            <div id="donor-pivx" class="btn" style="cursor: pointer;">
-              <img src="./icons/PIVX-White.svg" alt="PIVX" style="height: 40px; width: auto;">
-            </div>
-            <div id="donor-gitcoin" class="btn" style="cursor: pointer;">
-              <img src="./icons/gitcoin-white.svg" alt="Gitcoin" style="height: 40px; width: auto;">
             </div>
           </div>
         </div>
