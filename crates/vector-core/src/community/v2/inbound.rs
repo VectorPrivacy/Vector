@@ -597,6 +597,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_reaction_after_a_rekey_aggregates_onto_a_prior_epoch_message() {
+        // Sync stability across a rekey: a message written at epoch 0 and a reaction
+        // to it written at epoch 1 (its wrap sealed + bound under the NEW epoch key)
+        // must still aggregate — STATE keys by rumor id, not epoch, so a reaction to
+        // pre-refound history lands. The reaction's OWN binding is epoch 1; the
+        // target's is epoch 0.
+        use nostr_sdk::prelude::Timestamp;
+        let (_tmp, _guard, me) = init();
+        let relay = MemoryRelay::new();
+        let community = service::create_community(&relay, "Rekeyed", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let cid = crate::simd::hex::bytes_to_hex_32(&general.0);
+        let session = crate::state::SessionGuard::capture();
+
+        // Epoch-0 message, opened under the epoch-0 public key, persisted.
+        let member = Keys::generate();
+        let g0 = super::super::derive::channel_group_key(&community.community_root, &general, community.root_epoch);
+        let msg = chat::build_message_rumor(member.public_key(), &general, community.root_epoch, "before the rekey", None, &[], vec![], 5_000);
+        let msg_id = msg.id.unwrap().to_hex();
+        let (mw, _) = chat::seal_chat_rumor(&msg, &g0, &member, Timestamp::from_secs(5), false).unwrap();
+        let ev = chat::open_chat_event(&mw, &g0, &general, community.root_epoch).unwrap();
+        assert!(matches!(persist_chat_event(&ev, &cid, &me.public_key(), &session).await, Some(ChatPersist::New(_))));
+
+        // Epoch-1 reaction (same root, next epoch → a distinct channel key) to that
+        // epoch-0 message, opened under the epoch-1 key.
+        let next = crate::community::Epoch(community.root_epoch.0 + 1);
+        let g1 = super::super::derive::channel_group_key(&community.community_root, &general, next);
+        let reaction = chat::build_reaction_rumor(member.public_key(), &general, next, &msg_id, &member.public_key().to_hex(), super::super::kind::MESSAGE, "🎉", None, 6_000);
+        let (rw, _) = chat::seal_chat_rumor(&reaction, &g1, &member, Timestamp::from_secs(6), false).unwrap();
+        let rev = chat::open_chat_event(&rw, &g1, &general, next).unwrap();
+        let outcome = persist_chat_event(&rev, &cid, &me.public_key(), &session).await;
+        assert!(matches!(outcome, Some(ChatPersist::Updated { .. })), "the cross-epoch reaction updates the target");
+
+        let reacted = {
+            let st = crate::state::STATE.lock().await;
+            st.find_message(&msg_id).map(|(_, m)| m.reactions.iter().any(|r| r.emoji == "🎉")).unwrap_or(false)
+        };
+        assert!(reacted, "the epoch-1 reaction aggregated onto the epoch-0 message");
+    }
+
+    #[tokio::test]
     async fn a_v2_message_with_an_imeta_attachment_surfaces_as_an_attachment() {
         use nostr_sdk::prelude::Timestamp;
         let (_tmp, _guard, me) = init();

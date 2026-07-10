@@ -3810,6 +3810,87 @@ mod tests {
         assert_eq!(authority.roles.roles.len(), 1, "only the owner's admin role is authorized; every forgery is dropped");
     }
 
+    /// A canonical (order-independent) fingerprint of an AuthoritySet's authorized
+    /// roster + banlist — two clients converge iff these match.
+    fn authority_fingerprint(a: &AuthoritySet) -> String {
+        let mut roles = a.roles.roles.clone();
+        roles.sort_by(|x, y| x.role_id.cmp(&y.role_id));
+        let mut grants = a.roles.grants.clone();
+        for g in &mut grants {
+            g.role_ids.sort();
+        }
+        grants.sort_by(|x, y| x.member.cmp(&y.member));
+        let banned: Vec<&String> = a.banned.iter().collect();
+        serde_json::json!({ "roles": roles, "grants": grants, "banned": banned }).to_string()
+    }
+
+    #[tokio::test]
+    async fn the_v2_authority_fold_is_order_independent() {
+        // THE core consensus property: two honest clients that receive the SAME
+        // control editions in DIFFERENT arrival orders must resolve the IDENTICAL
+        // authorized roster + banlist (author-aware select_authorized + banlist
+        // fold + cap, all deterministic). A divergence here would fork the
+        // community's moderation state between honest members.
+        let (bed, owner, _a) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Determinism", bed.relays.clone(), None).await.unwrap();
+
+        // A rich control plane: two admins, an extra role, two grants (one of them a
+        // grant to a member the owner then bans), a banlist, a rename, a channel.
+        let admin1 = Keys::generate().public_key();
+        let admin2 = Keys::generate().public_key();
+        grant_admin(&bed.relay, &community, &admin1).await.unwrap();
+        grant_admin(&bed.relay, &community, &admin2).await.unwrap();
+        let mod_rid = "5c".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&mod_rid, Permissions::KICK | Permissions::MANAGE_MESSAGES), 1).await;
+        let member = Keys::generate().public_key();
+        publish_grant(&bed.relay, &community, &owner.keys, &member, vec![mod_rid.clone()], 1).await;
+        let banned_member = Keys::generate().public_key();
+        publish_grant(&bed.relay, &community, &owner.keys, &banned_member, vec![mod_rid], 1).await;
+        set_banlist(&bed.relay, &community, &[banned_member.to_hex()]).await.unwrap();
+        let meta = control::CommunityMetadata { name: "Renamed".into(), relays: community.relays.clone(), ..Default::default() };
+        edit_community_metadata(&bed.relay, &community, &meta).await.unwrap();
+        create_public_channel(&bed.relay, &community, "extra").await.unwrap();
+
+        let editions = fetch_control(&bed.relay, &community).await;
+        let floors = load_floors(&community);
+        assert!(editions.len() >= 6, "a rich plane was built ({} editions)", editions.len());
+
+        let baseline = authority_fingerprint(&fold_authority(&community, &editions, &floors));
+
+        // Fold under many arrival permutations: reversed, and several deterministic
+        // rotations/interleavings. Every one must match the baseline.
+        let mut orders: Vec<Vec<ParsedEdition>> = Vec::new();
+        let mut rev = editions.clone();
+        rev.reverse();
+        orders.push(rev);
+        for shift in [1usize, 3, 5, 7] {
+            let n = editions.len();
+            orders.push((0..n).map(|i| editions[(i + shift) % n].clone()).collect());
+        }
+        // A deterministic "shuffle": interleave from both ends.
+        let mut zip = Vec::with_capacity(editions.len());
+        let (mut lo, mut hi) = (0isize, editions.len() as isize - 1);
+        while lo <= hi {
+            zip.push(editions[lo as usize].clone());
+            if lo != hi {
+                zip.push(editions[hi as usize].clone());
+            }
+            lo += 1;
+            hi -= 1;
+        }
+        orders.push(zip);
+
+        for (i, order) in orders.iter().enumerate() {
+            let got = authority_fingerprint(&fold_authority(&community, order, &floors));
+            assert_eq!(got, baseline, "arrival order #{i} must resolve the identical authority (consensus)");
+        }
+        // Sanity: the fingerprint reflects real state (the banned member is out, the
+        // honest admins are in).
+        assert!(baseline.contains(&admin1.to_hex()) || baseline.contains(&member.to_hex()), "grants are present in the fingerprint");
+        assert!(baseline.contains(&banned_member.to_hex()), "the banlist entry is in the fingerprint");
+    }
+
     /// A transport that ACKs publishes but ERRORS every fetch — a relay outage / withhold.
     struct FetchErrors(MemoryRelay);
     #[async_trait::async_trait]
@@ -4047,6 +4128,66 @@ mod tests {
 
         let rehydrated = sync_community_list(&relay, &relays).await.unwrap();
         assert!(rehydrated.is_empty(), "a tombstoned membership is not rejoined on sync");
+    }
+
+    #[tokio::test]
+    async fn a_severed_member_can_be_unbanned_and_re_admitted() {
+        // The full moderation HEAL lifecycle: ban (banlist + grant strip + refound)
+        // severs a member; the owner then unbans + sends a FRESH invite carrying the
+        // NEW root; the member rejoins at the new epoch and converses again. Proves
+        // a ban is reversible end-to-end, not a one-way door.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let mut community = create_community(&bed.relay, "Redeemable", bed.relays.clone(), None).await.unwrap();
+        let general = community.channels[0].id;
+        send_direct_invite(&bed.relay, &community, &member.keys.public_key(), None, None).await.unwrap();
+        send_message(&bed.relay, &community, &general, "owner: welcome").await.unwrap();
+
+        bed.swap_to(&member);
+        let invite = fetch_direct_invite(&bed.relay, &bed.relays, &member.keys.public_key()).await;
+        let joined = accept_direct_invite(&bed.relay, &invite).await.unwrap();
+        assert!(texts_in(&bed.relay, &joined, &general).await.contains(&"owner: welcome".to_string()));
+
+        // Owner bans the member (CORD-04 §6 three-removal) → refound severs them.
+        bed.swap_to(&owner);
+        set_banlist(&bed.relay, &community, &[member.keys.public_key().to_hex()]).await.unwrap();
+        grant_roles(&bed.relay, &community, &member.keys.public_key(), vec![]).await.unwrap();
+        community = refound_community(&bed.relay, &community, &[member.keys.public_key()]).await.unwrap();
+        assert_eq!(community.root_epoch, Epoch(1));
+        send_message(&bed.relay, &community, &general, "owner: after the ban").await.unwrap();
+
+        // The member's follow concludes severance (no blob at the new epoch).
+        bed.swap_to(&member);
+        let session = SessionGuard::capture();
+        assert!(follow_rekeys(&bed.relay, &joined, &session).await.unwrap().self_removed, "the member is cryptographically severed");
+
+        // Owner unbans + re-invites: build the fresh epoch-1 bundle (accept it
+        // directly, so the test picks the NEW invite unambiguously rather than an
+        // arbitrary one of the two pending 3313s).
+        bed.swap_to(&owner);
+        set_banlist(&bed.relay, &community, &[]).await.unwrap();
+        community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(community.root_epoch, Epoch(1), "the owner's bundle carries epoch 1");
+        let fresh_bundle = serde_json::to_string(&bundle_of(&community, Some(owner.keys.public_key()), None, None)).unwrap();
+
+        // Member accepts the fresh invite → rejoins at epoch 1, reads current + posts.
+        bed.swap_to(&member);
+        let rejoined = accept_parked_invite(&bed.relay, &fresh_bundle, None).await.unwrap();
+        assert_eq!(rejoined.root_epoch, Epoch(1), "rejoined at the current epoch");
+        assert_eq!(rejoined.community_root, community.community_root, "holds the NEW root");
+        let seen = texts_in(&bed.relay, &rejoined, &general).await;
+        assert!(seen.contains(&"owner: after the ban".to_string()), "reads post-ban history with the new root");
+        send_message(&bed.relay, &rejoined, &general, "member: i am back").await.unwrap();
+
+        bed.swap_to(&owner);
+        community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert!(
+            texts_in(&bed.relay, &community, &general).await.contains(&"member: i am back".to_string()),
+            "the re-admitted member converses again at the new epoch"
+        );
+        // And they're back in the memberlist.
+        let members = memberlist(&bed.relay, &community).await.unwrap();
+        assert!(members.contains(&member.keys.public_key()), "the re-admitted member is in the list");
     }
 
     #[tokio::test]
