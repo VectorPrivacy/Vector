@@ -1646,17 +1646,19 @@ async function initStorageSection() {
     }
 }
 
-// Storage donut: fixed spectral palette (not the theme accent) so categories stay
-// distinguishable at a glance; tones are matched so no slice visually dominates.
 const STORAGE_CATEGORIES = [
-    { name: 'Images', color: '#eda15f', exts: ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg', 'avif', 'heic', 'heif', 'tif', 'tiff', 'ico'], title: 'Delete all Images?', noun: 'downloaded images' },
-    { name: 'Video', color: '#5cc296', exts: ['mp4', 'mov', 'avi', 'mkv', 'flv', 'wmv', '3gp', 'webm', 'm4v', 'mpeg', 'mpg'], title: 'Delete all Videos?', noun: 'downloaded videos' },
-    { name: 'Audio', color: '#e6c860', exts: ['mp3', 'wav', 'ogg', 'oga', 'opus', 'flac', 'm4a', 'aac', 'weba', 'wma', 'aiff'], title: 'Delete all Audio?', noun: 'downloaded audio and voice messages' },
-    { name: 'Apps', color: '#e0616e', exts: ['xdc', 'jsdos'], title: 'Delete all Mini Apps?', noun: 'downloaded Mini Apps' },
-    { name: 'AI', color: '#9070e8', key: '/ai_models', title: 'Delete AI Models?' },
-    { name: 'Cache', color: '#5eb3ea', key: '/cache', title: 'Clear the Cache?' },
-    { name: 'Files', color: '#9aa0a8', rest: true, title: 'Delete all Files?', noun: 'downloaded files' }
+    { name: 'Images', exts: ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg', 'avif', 'heic', 'heif', 'tif', 'tiff', 'ico'], title: 'Delete all Images?', noun: 'downloaded images' },
+    { name: 'Video', exts: ['mp4', 'mov', 'avi', 'mkv', 'flv', 'wmv', '3gp', 'webm', 'm4v', 'mpeg', 'mpg'], title: 'Delete all Videos?', noun: 'downloaded videos' },
+    { name: 'Audio', exts: ['mp3', 'wav', 'ogg', 'oga', 'opus', 'flac', 'm4a', 'aac', 'weba', 'wma', 'aiff'], title: 'Delete all Audio?', noun: 'downloaded audio and voice messages' },
+    { name: 'Apps', exts: ['xdc', 'jsdos'], title: 'Delete all Mini Apps?', noun: 'downloaded Mini Apps' },
+    { name: 'AI', key: '/ai_models', title: 'Delete AI Models?' },
+    { name: 'Cache', key: '/cache', title: 'Clear the Cache?' },
+    { name: 'Files', rest: true, title: 'Delete all Files?', noun: 'downloaded files' }
 ];
+
+// Slice colors rank by size rather than category identity: the largest slice
+// is always purple, descending through the ramp to gray.
+const STORAGE_SLICE_RAMP = ['#9D5DF9', '#5EC4F7', '#4AD99D', '#FBA35B', '#FBC85B', '#B2B2B2'];
 
 /** Category-aware confirmation for a storage delete; returns the user's choice. */
 async function confirmStorageDelete(cat, sizeText) {
@@ -1725,9 +1727,10 @@ function renderStorageDonut(typeDistribution) {
     }
 
     const segments = STORAGE_CATEGORIES
-        .map(c => ({ name: c.name, color: c.color, size: sizes.get(c.name) }))
+        .map(c => ({ name: c.name, size: sizes.get(c.name) }))
         .filter(s => s.size > 0)
-        .sort((a, b) => b.size - a.size);
+        .sort((a, b) => b.size - a.size)
+        .map((s, i) => ({ ...s, color: STORAGE_SLICE_RAMP[Math.min(i, STORAGE_SLICE_RAMP.length - 1)] }));
     const total = segments.reduce((sum, s) => sum + s.size, 0);
 
     const setCenter = (value, label) => {
