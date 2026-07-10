@@ -29,6 +29,7 @@ pub mod rekey;
 pub mod roles;
 pub mod service;
 pub mod stream;
+pub mod streamauth;
 
 /// Inner rumor kinds (CORD-02 Appendix B). The *outer* event is always a wrap
 /// ([`stream::KIND_WRAP`] / [`stream::KIND_WRAP_EPHEMERAL`]); these ride inside.

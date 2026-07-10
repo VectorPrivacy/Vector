@@ -88,6 +88,9 @@ pub async fn clear() {
     *V2_FOLLOW_TX.lock().unwrap() = None;
     V2_FOLLOW_PENDING.lock().unwrap().clear();
     V2_FOLLOW_LOCKS.lock().unwrap().clear();
+    // Account A's stream keys must not keep authenticating (or answering relay
+    // challenges) once account B is live.
+    super::streamauth::clear();
 }
 
 /// Every plane pubkey a set of v2 communities publishes under that
@@ -194,6 +197,14 @@ pub async fn refresh_subscription(client: &Client) {
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
+            // AUTH-gating relays serve the planes only to a stream-authenticated
+            // connection, and a live subscription isn't auto-retried after the gate.
+            // Register every held plane's key + prime the connection auth (a cheap
+            // gated fetch the responder answers) so the subscription below streams.
+            for c in &communities {
+                super::streamauth::register_community(c);
+            }
+            super::streamauth::prime_auth(client, &relays).await;
         }
     }
 

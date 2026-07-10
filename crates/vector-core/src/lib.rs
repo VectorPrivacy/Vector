@@ -83,7 +83,13 @@ pub mod tor;
 /// Callers should use this rather than `ClientOptions::new()` directly so the
 /// Tor toggle automatically covers their relay traffic.
 pub fn nostr_client_options() -> nostr_sdk::ClientOptions {
-    let opts = nostr_sdk::ClientOptions::new();
+    // NIP-42: authenticate to relays that challenge, using the account signer. Many
+    // Concord/Armada communities live on AUTH-gating relays (Ditto's default gates
+    // kind-1059), where an unauthenticated client silently reads back ZERO events —
+    // so a join's control-plane verify fails closed and every community fetch comes
+    // up empty. Auto-auth unlocks those reads; a relay that doesn't challenge is
+    // unaffected.
+    let opts = nostr_sdk::ClientOptions::new().automatic_authentication(true);
     #[cfg(all(feature = "tor", not(target_arch = "wasm32")))]
     {
         match tor::transport_state() {

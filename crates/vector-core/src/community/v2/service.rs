@@ -839,6 +839,14 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
     let control = control_group_key(&community.community_root, community.id(), community.root_epoch);
     let control_pk = control.pk_hex();
 
+    // AUTH-gating relays (ditto-relay's default gates kind-1059) serve a plane's
+    // wraps ONLY to a connection authenticated AS the stream key — Concord's
+    // group-addressed wraps aren't p-tagged to the joiner, so the login alone can't
+    // satisfy the gate and the control plane reads back empty. Register this
+    // community's stream keys + start the challenge responder so the fetch below
+    // (whose REQ triggers the relay's AUTH challenge) reads the plane after auth.
+    super::streamauth::prime(&community);
+
     // Authenticity = the owner's GENESIS metadata edition (vsk-0, `eid ==
     // community_id`) at the root-derived control plane. The genesis eid pins it to
     // THIS community, and it lives ONLY under the real root — so a forged root can't
