@@ -2248,6 +2248,11 @@ html, body {
   border-radius: 30px;
   border-width: 1px;
   cursor: pointer;
+  /* No text in a chat row is worth selecting; disabling it stops a right-click
+     (context menu) from also highlighting the name/preview behind it. */
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
   justify-content: left;
   height: 50px;
   padding: 5px;
@@ -2874,108 +2879,6 @@ body.chat-bg-disabled .chat-messages::before {
   background-color: rgba(0, 0, 0, 0.4);
 }
 
-
-/* Nostr Profile Preview (for shared npubs and profile links).
-   Width is explicitly capped using viewport units to prevent overflow on
-   narrow chat widths. The 160px reserves space for chat padding + scrollbar. */
-.msg-profile-preview {
-  display: flex;
-  align-items: center;
-  padding: 10px;
-  border-radius: 16px;
-  margin-top: 10px;
-  border: 1px solid var(--accent);
-  background-color: var(--accent-transparent);
-  gap: 10px;
-  width: 100%;
-  max-width: min(470px, calc(100vw - 160px));
-  min-width: 0;
-  box-sizing: border-box;
-  overflow: hidden;
-}
-
-.msg-profile-avatar {
-  flex-shrink: 0;
-}
-
-.msg-profile-avatar img,
-.msg-profile-avatar .placeholder-avatar {
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  object-fit: cover;
-  vertical-align: middle;
-}
-
-.msg-profile-info {
-  display: block;
-  min-width: 0;
-  line-height: 18px;
-  flex: 1;
-  overflow: hidden;
-}
-
-.msg-profile-name {
-  display: block;
-  width: 100%;
-  font-weight: 600;
-  font-size: 14px;
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.msg-profile-npub {
-  display: block;
-  width: 100%;
-  font-size: 11px;
-  color: var(--text-secondary);
-  font-family: monospace;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.msg-profile-buttons {
-  display: flex;
-  flex-shrink: 0;
-  margin-left: auto;
-  gap: 6px;
-  align-items: center;
-}
-
-.msg-profile-copy-btn {
-  padding: 6px 10px;
-  font-size: 12px;
-  background-color: rgba(0, 0, 0, 0.2);
-  color: var(--text);
-  border: none;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: opacity 0.2s;
-}
-
-.msg-profile-copy-btn:hover {
-  opacity: 0.7;
-}
-
-.msg-profile-btn {
-  flex-shrink: 0;
-  padding: 6px 12px;
-  font-size: 12px;
-  background-color: var(--accent);
-  color: var(--text);
-  border: none;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: opacity 0.2s;
-}
-
-.msg-profile-btn:hover {
-  opacity: 0.8;
-}
-
 /* The `highlightMessage` animation is defined in `/themes/*` */
 
 /* Used for "New" elements, like new incoming messages, or other new elements added to a list */
@@ -3474,6 +3377,148 @@ body.chat-bg-disabled .chat-messages::before {
   position: relative;  /* anchor for #msg-bottom-fade hanging above */
 }
 
+/* ===== Reply bar (Discord-style, docks onto the composer's top edge) =====
+   The bar is absolutely positioned and permanently tucked 12px BEHIND the
+   composer's top edge; opening grows the box's padding-top (layout) while the
+   bar's height grows on the identical curve (pixels), so it slides out from
+   underneath the composer. The composer's rounded corners are always backed
+   by the bar's surface while any of it shows, and never need to animate:
+   both the themed-gap streak and the square-corner streak are impossible. */
+#chat-box {
+  transition: padding-top 0.22s cubic-bezier(0.33, 1, 0.68, 1);
+}
+
+#chat-box.replying {
+  padding-top: 39px;   /* base 5px + the bar's 34px visible strip */
+}
+
+#chat-reply-bar {
+  position: absolute;
+  box-sizing: border-box;  /* height includes the tuck inset, so content
+                              centers in the visible strip, not the full box */
+  top: 5px;            /* rides the box's top edge (its base padding) */
+  left: 8px;           /* matches the composer's side margins */
+  right: 8px;
+  height: 12px;        /* fully hidden behind the composer when closed */
+  z-index: 0;          /* the composer paints over the tucked strip */
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 44px 12px 12px;  /* bottom inset = the tucked strip, so content
+                                 centers in the visible part only; right inset
+                                 clears the absolutely-anchored cancel button */
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: default;
+  background-color: #0d0d0d;
+  background-color: color-mix(in srgb, var(--accent-color, #59fcb3) 6%, #060606);
+  border-radius: 10px 10px 0 0;
+  overflow: hidden;
+  transition: height 0.22s cubic-bezier(0.33, 1, 0.68, 1);
+}
+
+#chat-box.replying #chat-reply-bar {
+  height: 46px;        /* 34px visible + the 12px tuck */
+}
+
+/* Fade the CONTENT, never the bar surface: a translucent bar mid-collapse
+   would let the themed composer background bleed through where the bar
+   hasn't finished shrinking yet */
+#chat-reply-bar::before,
+#chat-reply-bar > * {
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+
+#chat-box.replying #chat-reply-bar::before,
+#chat-box.replying #chat-reply-bar > * {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #chat-box,
+  #chat-reply-bar,
+  #chat-reply-bar::before,
+  #chat-reply-bar > * {
+    transition: none;
+  }
+}
+
+#chat-reply-bar::before {
+  content: '';
+  width: 3px;
+  height: 16px;
+  border-radius: 2px;
+  background-color: var(--accent-color, #59fcb3);
+  flex-shrink: 0;
+}
+
+#chat-reply-bar-label {
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 13.5px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+#chat-reply-bar-name {
+  color: var(--accent-color, #59fcb3);
+  font-weight: 600;
+}
+
+#chat-reply-bar-snippet {
+  flex: 1;
+  min-width: 0;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 13px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Twemoji + custom emoji must render at text size in the one-line bar
+   (same constraint as .chatlist-contact-preview .emoji) */
+#chat-reply-bar-name img,
+#chat-reply-bar-snippet img {
+  width: 15px !important;
+  height: 15px !important;
+  display: inline-block;
+  vertical-align: -2px;
+  border-radius: 0;
+  min-width: unset;
+  min-height: unset;
+}
+
+/* Anchored to the bar, not in its flex flow: the mic/send buttons below
+   flex-shrink with window width, so the exact right-offset that centers the
+   X over them is measured in JS each time the bar opens */
+#chat-reply-bar-cancel {
+  position: absolute;
+  right: 10.5px;                   /* fallback until the live measure runs */
+  top: calc((100% - 12px) / 2);    /* center of the visible strip */
+  transform: translateY(-50%);
+  width: 24px;
+  height: 24px;
+  padding: 3px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+
+#chat-reply-bar-cancel .icon-cancel {
+  position: relative;
+  display: block;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  background-color: var(--danger-color);
+  transition: filter 0.15s ease;
+}
+
+#chat-reply-bar-cancel:hover .icon-cancel {
+  filter: brightness(1.25);
+}
+
 .chat-input-container {
   position: relative;
   width: 100%;
@@ -3513,6 +3558,31 @@ body.chat-bg-disabled .chat-messages::before {
   background-color: #B2B2B2;
 }
 
+/* Standard composer icons: muted by default, full white on hover. Stateful
+   colors (send .active accent, voice-preview accent, edit-cancel danger) are
+   declared later or more specifically, so they keep winning. The file button
+   is color-only here: its own rule above carries the rotate transition, and
+   redeclaring transition would clobber the spin. */
+#chat-input-file .icon,
+#chat-input-emoji .icon,
+#chat-input-voice .icon,
+#chat-input-send .icon {
+  background-color: #B2B2B2;
+}
+
+#chat-input-emoji .icon,
+#chat-input-voice .icon,
+#chat-input-send .icon {
+  transition: background-color 0.15s ease;
+}
+
+#chat-input-file:hover .icon,
+#chat-input-emoji:hover .icon,
+#chat-input-voice:hover .icon,
+#chat-input-send:hover .icon {
+  background-color: #FFFFFF;
+}
+
 #chat-input {
   width: -webkit-fill-available;
   line-height: inherit;
@@ -3530,9 +3600,9 @@ body.chat-bg-disabled .chat-messages::before {
   user-select: none;
 }
 
-/* Vector Send Button - white by default, stays visible when active */
+/* Vector Send Button - muted by default, stays visible when active */
 #chat-input-send .icon {
-  background-color: white;
+  background-color: #B2B2B2;
   transition: background 0.3s ease;
   width: 20px !important;
   height: 20px !important;
@@ -4382,6 +4452,46 @@ img.emoji-img-loading {
 }
 .emoji-creator-cell.drop-before::before { left: -4px; }
 .emoji-creator-cell.drop-after::after  { right: -4px; }
+
+/* Equipped-pack sidebar drag-to-reorder (vertical list). */
+/* touch-action: none — the sidebar scrolls vertically, so without this the
+   browser claims a finger drag for scrolling before our reorder threshold
+   trips (no ghost, no drop marker, hold falls through to the context menu).
+   Suppress native image/text drag too, so a slow press starts our reorder
+   instead of grabbing the raw icon (WKWebView + desktop). */
+.emoji-pack-tab {
+  touch-action: none;
+}
+.emoji-pack-tab,
+.emoji-pack-tab img {
+  -webkit-user-drag: none;
+  user-select: none;
+}
+.emoji-pack-tab.is-dragging { opacity: 0.3; }
+.emoji-pack-tab-ghost {
+  opacity: 0.9;
+  transform: scale(0.85);
+  transform-origin: center center;
+  transition: none !important;
+  border-radius: 50%;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.55);
+}
+.emoji-pack-tab.drop-above,
+.emoji-pack-tab.drop-below { position: relative; }
+.emoji-pack-tab.drop-above::before,
+.emoji-pack-tab.drop-below::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  height: 3px;
+  border-radius: 2px;
+  background-color: var(--icon-color-primary);
+  box-shadow: 0 0 8px var(--icon-color-primary);
+  pointer-events: none;
+}
+.emoji-pack-tab.drop-above::before { top: -4px; }
+.emoji-pack-tab.drop-below::after  { bottom: -4px; }
 .emoji-creator-cell img {
   width: 70%;
   height: 70%;
@@ -5817,9 +5927,15 @@ img.emoji-img-loading {
   max-height: 195px;
   overflow-x: hidden;
   overflow-y: auto;
+  /* Reserve the scrollbar gutter always. Edit-mode wobble (a rotation) grows
+     each item's bounding box a hair, transiently overflowing and flickering
+     the scrollbar; without a stable gutter that toggles the content width and
+     the 1fr columns shake. Only bites with few apps (scrollbar otherwise
+     absent); a full grid keeps it permanently shown. */
+  scrollbar-gutter: stable;
   padding: 1px;
   padding-top: 6px; /* Room for delete badges in edit mode */
-  padding-right: 12px; /* Scrollbar Room */
+  padding-right: 6px;
 }
 
 /* Responsive item sizing within mini apps grid */
@@ -7858,6 +7974,143 @@ select {
 .toggle-container.disabled {
   opacity: 0.45;
   pointer-events: none;
+}
+
+/* Auto-Download Limit row greys out while Auto-Download is toggled off. */
+#auto-download-limit-group.disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+/* ===== Storage donut chart ===== */
+#storage-donut-wrap {
+  position: relative;
+  width: 190px;
+  margin: 14px auto 2px;
+}
+
+#storage-donut {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.storage-slice {
+  transform-box: view-box;
+  transform-origin: 50% 50%;
+  /* Dim/undim must feel instant so the chart and legend read as one control;
+     only the pop transform gets a springy ride */
+  transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.08s ease-out, filter 0.08s ease-out;
+  animation: storage-slice-in 0.5s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+.storage-slice.pop {
+  transform: scale(1.05);
+  filter: brightness(1.12);
+}
+
+.storage-slice.dim {
+  opacity: 0.35;
+}
+
+@keyframes storage-slice-in {
+  from {
+    opacity: 0;
+    transform: scale(0.55);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+#storage-donut-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+#storage-donut-value {
+  font-size: 19px;
+  font-weight: 600;
+  color: #fff;
+}
+
+#storage-donut-label {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+  margin-top: 1px;
+  max-width: 100px;
+}
+
+/* Delete button for the selected slice; lives in the donut hole, so it must
+   re-enable pointer events (the center overlay is click-through) */
+#storage-donut-delete {
+  pointer-events: auto;
+  margin-top: 5px;
+  padding: 4px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  background: rgba(224, 97, 110, 0.18);
+  border: 1px solid rgba(224, 97, 110, 0.55);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+#storage-donut-delete:hover {
+  background: rgba(224, 97, 110, 0.4);
+  border-color: #e0616e;
+}
+
+#storage-donut-delete:disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+#storage-legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px 20px;
+  margin-top: 14px;
+}
+
+#storage-legend:empty {
+  display: none;
+}
+
+.storage-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 14px;
+  transition: opacity 0.08s ease-out;
+}
+
+.storage-legend-item.dim {
+  opacity: 0.4;
+}
+
+.storage-legend-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .storage-slice {
+    animation: none;
+  }
 }
 
 /* Notification Content Privacy row: label left, dropdown right (matches the
@@ -14985,14 +15238,21 @@ hr {
   /* Scoped tokens — override via theme to retune. */
   --dmsg-row-padding-y: 0px;
   --dmsg-row-padding-x: 2px;
-  --dmsg-streak-gap: 16px;
-  --dmsg-continuation-gap: 3px;
+  /* -2px each to offset the row's new 2px padding-bottom, so content-to-content spacing is
+   * unchanged — the 2px just moves from transparent margin into the row's highlighted padding. */
+  --dmsg-streak-gap: 14px;
+  --dmsg-continuation-gap: 1px;
   /* Symmetric breathing room for inline separators (timestamps, date + unread dividers,
    * system events). Applied top AND bottom so the divider sits centered between its
    * neighbours — the following row's top-margin is zeroed so it doesn't double up. */
   --dmsg-system-gap: 10px;
   --dmsg-gutter-width: 56px;
   --dmsg-avatar-size: 40px;
+  /* Discord-style reply: how far to push the big avatar down so it aligns with the name instead of
+   * the reply line above it, and the colour of the elbow connector. Tune the lift to the reply's
+   * rendered height (padding + one text line + margin-bottom). */
+  --dmsg-reply-lift: 24px;
+  --dmsg-reply-spine: rgba(255, 255, 255, 0.25);
   --dmsg-author-color: #ffffff;
   --dmsg-text-color: rgba(255, 255, 255, 0.85);
   --dmsg-time-color: rgba(255, 255, 255, 0.4);
@@ -15018,7 +15278,9 @@ hr {
   margin-left: -10px;
   margin-right: -10px;
   padding-top: var(--dmsg-row-padding-y);
-  padding-bottom: var(--dmsg-row-padding-y);
+  /* +2px so a short row's 40px avatar (and the last text line) don't touch the highlight's bottom
+   * edge; the top's breathing room already comes from the avatar's margin-top. */
+  padding-bottom: calc(var(--dmsg-row-padding-y) + 2px);
   padding-left: calc(10px + var(--dmsg-row-padding-x));
   padding-right: calc(10px + var(--dmsg-row-padding-x));
   border-left: 3px solid transparent;
@@ -15372,24 +15634,76 @@ hr {
  * shouldn't accidentally select the truncated preview when trying to copy
  * the actual message body. */
 .dmsg-reply {
-  display: block;
-  padding: 4px 0 4px 10px;
-  margin-bottom: 6px;
+  /* One-liner ABOVE the name (Discord-style): avatar + name + snippet on a single row, the snippet
+   * ellipsis-truncated, with an elbow connector rising from the big avatar (see ::before). */
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0 2px 3px;
+  margin-bottom: 4px;
   margin-top: 0;
-  border-left: 2px solid rgba(255, 255, 255, 0.25);
   line-height: 1.3;
   font-size: 13px;
   background: transparent;
+  max-width: 100%;
   user-select: none;
   -webkit-user-select: none;
-  /* Hover state darkens both the border and the whole quote (via .btn's
-   * opacity:0.75) so they move together. Transition lives on .dmsg-reply
-   * so it applies to opacity even though the opacity-flip itself comes
-   * from `.btn:hover`. */
-  transition: border-left-color 0.125s ease, opacity 0.125s ease;
+  transition: opacity 0.125s ease;
 }
-.dmsg-reply:hover {
-  border-left-color: rgba(255, 255, 255, 0.18);
+/* Elbow connector: curves up from the big avatar's centre (in the gutter) and points into the reply.
+ * Geometry is derived from the gutter/avatar tokens so it tracks any retune of those. */
+.dmsg-reply::before {
+  content: "";
+  position: absolute;
+  /* The avatar's centre column, minus half the 2px stroke so the visible line centres on the avatar
+   * rather than sitting a pixel to its right. */
+  left: calc(var(--dmsg-avatar-size) / 2 - var(--dmsg-gutter-width) - 1px);
+  /* Arm sits on the reply content's vertical centre (-2px trims the border thickness + line-box lead
+   * so it reads as centred, not slightly low). */
+  top: calc(50% - 2px);
+  /* Stop a few px short of BOTH avatars (the reply avatar on the right, the big one below) so the
+   * connector floats near them instead of touching. Height compensates the -2px top so the bottom
+   * gap is unchanged. */
+  width: calc(var(--dmsg-gutter-width) - var(--dmsg-avatar-size) / 2 - 2px);
+  height: calc(var(--dmsg-reply-lift) - 12px);
+  border-left: 2px solid var(--dmsg-reply-spine);
+  border-top: 2px solid var(--dmsg-reply-spine);
+  border-top-left-radius: 8px;
+  pointer-events: none;
+}
+/* Shift the big avatar down so it aligns with the name, not the reply line sitting above it, and
+ * keep it above the elbow connector so the line tucks behind it. */
+.dmsg--has-reply .dmsg-avatar {
+  margin-top: calc(2px + var(--dmsg-reply-lift)) !important;
+  position: relative;
+  z-index: 1;
+}
+.dmsg-reply-avatar {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  object-fit: cover;
+  /* Above the elbow connector so it's never painted over. */
+  position: relative;
+  z-index: 1;
+}
+.dmsg-reply-name {
+  flex-shrink: 0;
+  font-weight: 500;
+  white-space: nowrap;
+}
+/* Underline on hover like the primary author name — only when it's clickable (has a resolved npub,
+ * which also gates the mini-profile click). */
+.dmsg-reply-name[data-npub]:hover { text-decoration: underline; cursor: pointer; }
+/* The quoted content: takes the remaining width and ellipsis-truncates on one line. */
+.dmsg-reply-snippet {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Link preview card. */
@@ -15465,15 +15779,6 @@ hr {
   user-select: none;
   -webkit-user-select: none;
   vertical-align: baseline;
-}
-.dmsg-attachments ~ .dmsg-status,
-.dmsg-preview ~ .dmsg-status,
-.msg-profile-preview ~ .dmsg-status,
-.msg-pivx-payment ~ .dmsg-status {
-  display: none !important;
-  text-align: right;
-  margin-left: 0;
-  margin-top: 2px;
 }
 .dmsg-status .icon {
   display: inline-block;

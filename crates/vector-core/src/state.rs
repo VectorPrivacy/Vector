@@ -66,6 +66,37 @@ pub static TRUSTED_RELAYS: &[&str] = &[
     "wss://nostr.computingcache.com",
 ];
 
+/// Discovery Relays: widely-used indexers queried/written for relay-list
+/// events (kind 10050) ONLY — never DMs, profiles, or communities. They give
+/// list syncs and publishes a rendezvous point that doesn't depend on the
+/// user's own relay set overlapping anyone else's. Every entry must be
+/// verified to ACCEPT AND SERVE kind 10050 from unknown pubkeys (write +
+/// readback); accept-then-silently-drop policy relays reduce coverage
+/// invisibly.
+pub static DISCOVERY_RELAYS: &[&str] = &[
+    "wss://purplepag.es",
+    "wss://relay.primal.net",
+    "wss://nos.lol",
+    "wss://relay.snort.social",
+];
+
+/// Read-only Discovery Relays: queried when SYNCING relay lists but never
+/// published to. Ditto acks stranger kind-10050 writes with OK true and then
+/// silently drops them, so counting it as a publish landing would falsely
+/// advance the list-freshness anchor — but it serves ESTABLISHED accounts'
+/// lists honestly, and those are exactly the users whose existing list a
+/// fresh Vector login must find before it dares bootstrap-publish.
+pub static DISCOVERY_READ_ONLY_RELAYS: &[&str] = &["wss://relay.ditto.pub"];
+
+/// Every discovery relay url (writable + read-only) — the fetch/pool/identity
+/// set. Publish copies use `DISCOVERY_RELAYS` alone.
+pub fn discovery_relay_iter() -> impl Iterator<Item = &'static str> {
+    DISCOVERY_RELAYS
+        .iter()
+        .chain(DISCOVERY_READ_ONLY_RELAYS.iter())
+        .copied()
+}
+
 pub async fn active_trusted_relays() -> Vec<&'static str> {
     let Some(client) = nostr_client() else { return Vec::new() };
     let pool_relays = client.relays().await;

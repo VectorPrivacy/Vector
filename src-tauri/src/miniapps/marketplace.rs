@@ -771,6 +771,38 @@ pub async fn check_app_installed<R: tauri::Runtime>(
     }
 }
 
+/// Re-derive every cached app's install status from what's actually on disk.
+/// Convergent by construction: safe to run after a storage clear even if an
+/// install was in flight, since disk is the single source of truth.
+pub async fn sync_install_status_from_disk<R: tauri::Runtime>(handle: &tauri::AppHandle<R>) {
+    let apps_info: Vec<(String, String)> = {
+        let state = MARKETPLACE_STATE.read().await;
+        state.get_apps().iter().map(|a| (a.id.clone(), a.version.clone())).collect()
+    };
+
+    for (app_id, marketplace_version) in apps_info {
+        if let Some(path) = check_app_installed(handle, &app_id).await {
+            // App is installed, check version for updates
+            let installed_version = crate::db::get_miniapp_installed_version(&app_id)
+                .unwrap_or(None);
+
+            let update_available = match &installed_version {
+                Some(installed_ver) => installed_ver != &marketplace_version,
+                None => false, // No version recorded - assume current (file exists, so treat as up-to-date)
+            };
+
+            let mut state = MARKETPLACE_STATE.write().await;
+            state.set_install_status(&app_id, InstallStatus::Installed { path });
+            state.set_app_version_info(&app_id, installed_version, update_available);
+        } else {
+            // File doesn't exist, mark as not installed
+            let mut state = MARKETPLACE_STATE.write().await;
+            state.set_install_status(&app_id, InstallStatus::NotInstalled);
+            state.set_app_version_info(&app_id, None, false);
+        }
+    }
+}
+
 /// Uninstall a marketplace app by deleting the file and removing from history
 pub async fn uninstall_marketplace_app<R: tauri::Runtime>(
     handle: &tauri::AppHandle<R>,

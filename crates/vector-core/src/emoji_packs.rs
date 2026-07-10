@@ -489,6 +489,13 @@ pub fn parse_naddr(naddr: &str) -> Result<PackAddress, String> {
     })
 }
 
+/// One-element sentinel tuple (`["theme_slot"]`) marking WHERE the theme pack
+/// renders in the equipped-pack order. Carried inside the kind-10030 encrypted
+/// content so the slot position syncs across devices. Ignored by
+/// `parse_inner_tag_list` (keeps only `a` tags) and by every other Nostr client
+/// (content is NIP-44 self-encrypted), so it degrades gracefully.
+const THEME_SLOT_TOKEN: &str = "theme_slot";
+
 /// Parse a NIP-51 inner tag list (the JSON array of tag tuples that
 /// lives inside the NIP-44-encrypted `content` of an encrypted-items
 /// list). Pulls out `a` tags as pack addresses; malformed inner
@@ -512,6 +519,38 @@ fn parse_inner_tag_list(plaintext: &str) -> Vec<PackAddress> {
         .collect()
 }
 
+/// Like [`parse_inner_tag_list`], but preserves the raw addr order AND
+/// extracts the theme-slot anchor. The anchor is the raw addr of the pack the
+/// `["theme_slot"]` marker sits immediately after; `""` means the marker is at
+/// the top (before every pack). Returns `None` for the anchor when no marker
+/// tuple is present at all (an old-format list predating the theme-slot
+/// feature). Malformed `a` tags are dropped so one bad row can't nuke the list.
+fn parse_inner_tag_list_with_anchor(plaintext: &str) -> (Vec<String>, Option<String>) {
+    let inner: Vec<Vec<String>> = match serde_json::from_str(plaintext) {
+        Ok(v) => v,
+        Err(e) => {
+            crate::log_warn!("[EmojiPacks] emoji list JSON parse failed: {}", e);
+            return (Vec::new(), None);
+        }
+    };
+    let mut addrs: Vec<String> = Vec::new();
+    let mut anchor: Option<String> = None;
+    for tup in inner {
+        if tup.len() >= 2 && tup[0] == "a" {
+            // Normalise through parse → to_addr_string so the stored anchor
+            // matches what load_subscriptions/save_subscriptions round-trip.
+            if let Ok(pa) = parse_pack_address(&tup[1]) {
+                addrs.push(pa.to_addr_string());
+            }
+        } else if anchor.is_none() && tup.first().map(String::as_str) == Some(THEME_SLOT_TOKEN) {
+            // Anchor = last real addr before the marker, or "" (top) if the
+            // marker precedes every pack. First marker wins on a malformed list.
+            anchor = Some(addrs.last().cloned().unwrap_or_default());
+        }
+    }
+    (addrs, anchor)
+}
+
 /// Decrypt + parse a kind 10030 event's encrypted subscription list.
 ///
 /// Vector's emoji list is fully private by design — every `a` tag is
@@ -524,24 +563,53 @@ pub async fn decrypt_subscribed_addresses(
     my_pk: &PublicKey,
     event: &Event,
 ) -> Vec<PackAddress> {
+    match decrypt_emoji_list_plaintext(client, my_pk, event).await {
+        Some(plaintext) => parse_inner_tag_list(&plaintext),
+        None => Vec::new(),
+    }
+}
+
+/// NIP-44-self-decrypt a kind 10030 event's content. `None` = empty /
+/// undecryptable / no-signer (all treated as "no subscriptions").
+async fn decrypt_emoji_list_plaintext(
+    client: &Client,
+    my_pk: &PublicKey,
+    event: &Event,
+) -> Option<String> {
     if event.content.is_empty() {
-        return Vec::new();
+        return None;
     }
     let signer = match client.signer().await {
         Ok(s) => s,
         Err(e) => {
             crate::log_warn!("[EmojiPacks] signer unavailable for emoji list decrypt: {}", e);
-            return Vec::new();
+            return None;
         }
     };
-    let plaintext = match signer.nip44_decrypt(my_pk, &event.content).await {
-        Ok(p) => p,
+    match signer.nip44_decrypt(my_pk, &event.content).await {
+        Ok(p) => Some(p),
         Err(e) => {
             crate::log_warn!("[EmojiPacks] emoji list decrypt failed: {}", e);
-            return Vec::new();
+            None
         }
-    };
-    parse_inner_tag_list(&plaintext)
+    }
+}
+
+/// Like [`decrypt_subscribed_addresses`], but also returns the theme-slot
+/// anchor carried in the encrypted list (`None` = old-format list, no marker).
+async fn decrypt_subscribed_addresses_with_anchor(
+    client: &Client,
+    my_pk: &PublicKey,
+    event: &Event,
+) -> (Vec<PackAddress>, Option<String>) {
+    match decrypt_emoji_list_plaintext(client, my_pk, event).await {
+        Some(plaintext) => {
+            let (raw, anchor) = parse_inner_tag_list_with_anchor(&plaintext);
+            let addrs = raw.iter().filter_map(|s| parse_pack_address(s).ok()).collect();
+            (addrs, anchor)
+        }
+        None => (Vec::new(), None),
+    }
 }
 
 // ============================================================================
@@ -695,11 +763,14 @@ pub fn save_subscriptions(addrs: &[String]) -> Result<(), String> {
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-    for addr in addrs {
+    // `position` (the slice index) is the authoritative display order — the
+    // DELETE-all-reinsert stamps every row with the same `now`, so ordering
+    // by `subscribed_at` alone would be unstable.
+    for (pos, addr) in addrs.iter().enumerate() {
         tx.execute(
-            "INSERT OR REPLACE INTO emoji_pack_subscriptions (addr, subscribed_at)
-             VALUES (?1, ?2)",
-            rusqlite::params![addr, now],
+            "INSERT OR REPLACE INTO emoji_pack_subscriptions (addr, subscribed_at, position)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![addr, now, pos as i64],
         ).map_err(|e| format!("Failed to insert subscription: {}", e))?;
     }
 
@@ -709,7 +780,7 @@ pub fn save_subscriptions(addrs: &[String]) -> Result<(), String> {
 
 pub fn load_subscriptions() -> Result<Vec<String>, String> {
     let conn = crate::db::get_db_connection_guard_static()?;
-    let mut stmt = conn.prepare("SELECT addr FROM emoji_pack_subscriptions ORDER BY subscribed_at ASC")
+    let mut stmt = conn.prepare("SELECT addr FROM emoji_pack_subscriptions ORDER BY position ASC, subscribed_at ASC")
         .map_err(|e| format!("prepare: {}", e))?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(0))
         .map_err(|e| format!("query: {}", e))?;
@@ -790,7 +861,7 @@ pub fn load_all_packs() -> Result<Vec<EmojiPack>, String> {
             "SELECT p.addr, p.pubkey, p.identifier, p.title, p.image_url, p.description, p.is_own, p.updated_at, p.status
              FROM emoji_packs p
              INNER JOIN emoji_pack_subscriptions s ON s.addr = p.addr
-             ORDER BY p.is_own DESC, p.updated_at DESC"
+             ORDER BY s.position ASC"
         ).map_err(|e| format!("prepare packs: {}", e))?;
 
         let rows = stmt.query_map([], |row| {
@@ -1495,6 +1566,9 @@ pub async fn fetch_subscribed_packs(
         .unwrap_or(0);
 
     let list_event = list_events.into_iter().max_by_key(|e| e.created_at);
+    // Anchor only rides in from a TRUSTED relay list — a stale/absent event
+    // falls back to local subs and leaves the local KV anchor untouched.
+    let mut fetched_anchor: Option<String> = None;
     let addrs: Vec<PackAddress> = match list_event {
         Some(ev) if ev.created_at.as_secs() < our_last_publish => {
             crate::log_debug!(
@@ -1503,7 +1577,11 @@ pub async fn fetch_subscribed_packs(
             );
             local_addrs()
         }
-        Some(ev) => decrypt_subscribed_addresses(client, &my_pubkey, &ev).await,
+        Some(ev) => {
+            let (a, anchor) = decrypt_subscribed_addresses_with_anchor(client, &my_pubkey, &ev).await;
+            fetched_anchor = anchor;
+            a
+        }
         None => {
             crate::log_debug!(
                 "[EmojiPacks] kind 10030 not on relays — refreshing local subs only",
@@ -1569,14 +1647,28 @@ pub async fn fetch_subscribed_packs(
             crate::log_warn!("[EmojiPacks] save pack {} failed: {}", pack.identifier, e);
         }
     }
-    if health_changed {
-        crate::traits::emit_event("emoji_packs_updated", &());
-    }
+    // Detect a real list change (reorder, sub add/remove, or theme-slot move)
+    // against the pre-save state, so a cross-device edit repaints an OPEN
+    // picker live — not only on its next open. Our own republish echoes back
+    // unchanged, so this stays quiet on self-echo.
+    let list_changed = load_subscriptions().unwrap_or_default() != addr_strings
+        || fetched_anchor.as_deref().map_or(false, |a| a != load_theme_slot_anchor());
+
     // Persist the full subscription list (10030-driven, or local-mirror
     // when 10030 was missing). Per-pack fetch failures don't shrink it —
     // the user is still subscribed, they just have a cached copy for now.
     if let Err(e) = save_subscriptions(&addr_strings) {
         crate::log_warn!("[EmojiPacks] save subscriptions failed: {}", e);
+    }
+    // Sync the theme-slot position from the trusted list (old-format lists
+    // carry no marker → leave the local anchor as-is).
+    if let Some(anchor) = fetched_anchor {
+        if let Err(e) = save_theme_slot_anchor(&anchor) {
+            crate::log_warn!("[EmojiPacks] save theme slot anchor failed: {}", e);
+        }
+    }
+    if health_changed || list_changed {
+        crate::traits::emit_event("emoji_packs_updated", &());
     }
 
     crate::log_info!(
@@ -1613,7 +1705,12 @@ pub async fn fetch_pack_by_naddr(naddr: &str) -> Result<EmojiPack, String> {
     let addr = parse_naddr(naddr)?;
     let client = nostr_client().ok_or_else(|| "Nostr client not initialised".to_string())?;
     fetch_pack_from_relays(&client, &addr).await
-        .ok_or_else(|| format!("Pack not found on any relay: {}:{}", addr.pubkey.to_hex(), addr.identifier))
+        .ok_or_else(|| {
+            // Coordinate goes to the log; the returned string is shown
+            // verbatim in the preview card, so keep it human-readable.
+            crate::log_debug!("[EmojiPacks] preview miss: {}:{}", addr.pubkey.to_hex(), addr.identifier);
+            "Pack not found on any relay".to_string()
+        })
 }
 
 /// Resolve a theme pack cache-first: return the locally-persisted copy
@@ -1669,23 +1766,69 @@ pub async fn get_or_fetch_theme_pack(naddr: &str) -> Result<Option<EmojiPack>, S
     }
 }
 
+/// KV setting holding the raw addr (`30030:pk:d`) of the pack the theme slot
+/// sits immediately AFTER. Empty string = slot at the top (first); a never-set
+/// key defaults to `""`, matching the historic "theme pinned first" behaviour.
+/// Kept OUT of `emoji_pack_subscriptions` so the DELETE-all-reinsert in
+/// `save_subscriptions` can't wipe it (the theme pack is not a real sub row).
+const THEME_SLOT_ANCHOR_KEY: &str = "emoji_theme_slot_anchor";
+
+/// Read the theme-slot anchor (raw addr), defaulting to `""` (top).
+fn load_theme_slot_anchor() -> String {
+    crate::db::settings::get_sql_setting(THEME_SLOT_ANCHOR_KEY.to_string())
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
+/// Persist the theme-slot anchor (raw addr, or `""` for top).
+fn save_theme_slot_anchor(raw_addr: &str) -> Result<(), String> {
+    crate::db::settings::set_sql_setting(THEME_SLOT_ANCHOR_KEY.to_string(), raw_addr.to_string())
+}
+
+/// Build the kind-10030 inner tuple list from the subscription order, splicing
+/// in exactly one `["theme_slot"]` marker at the anchored position. Empty
+/// anchor (or an anchor naming a pack no longer subscribed) puts the marker at
+/// the top. Pure so the interleave is unit-testable.
+fn build_inner_tags_with_marker(addrs: &[String], anchor: &str) -> Vec<Vec<String>> {
+    let mut inner: Vec<Vec<String>> = Vec::with_capacity(addrs.len() + 1);
+    let mut placed = false;
+    if anchor.is_empty() {
+        inner.push(vec![THEME_SLOT_TOKEN.to_string()]);
+        placed = true;
+    }
+    for addr in addrs {
+        inner.push(vec!["a".to_string(), addr.clone()]);
+        if !placed && addr == anchor {
+            inner.push(vec![THEME_SLOT_TOKEN.to_string()]);
+            placed = true;
+        }
+    }
+    // Anchor named a pack that's gone: fall back to the top so we always emit
+    // exactly one marker.
+    if !placed {
+        inner.insert(0, vec![THEME_SLOT_TOKEN.to_string()]);
+    }
+    inner
+}
+
 /// Publish a kind 10030 "Emojis" list containing every subscribed pack.
 ///
 /// Encrypted-items mode: the entire subscription set lives inside a
 /// NIP-44-self-encrypted JSON array of `["a", "30030:pk:d"]` tuples
-/// stored in `content`. The event's public `tags` field is left empty
+/// stored in `content`, plus one `["theme_slot"]` marker recording where the
+/// theme pack renders. The event's public `tags` field is left empty
 /// — Vector treats which packs a user follows as private information,
 /// matching the NIP-51 "encrypted items" pattern that mute lists use.
 /// Replaceable per spec, so peers (the same npub on another device)
 /// always read the freshest set on next sync.
 pub async fn publish_emoji_list(client: &Client) -> Result<(), String> {
     let addrs = load_subscriptions()?;
+    let anchor = load_theme_slot_anchor();
     let my_pk = crate::state::my_public_key()
         .ok_or_else(|| "Not logged in".to_string())?;
 
-    let inner_tags: Vec<Vec<String>> = addrs.iter()
-        .map(|addr| vec!["a".to_string(), addr.clone()])
-        .collect();
+    let inner_tags = build_inner_tags_with_marker(&addrs, &anchor);
     let plaintext = serde_json::to_string(&inner_tags)
         .map_err(|e| format!("Serialise emoji list: {}", e))?;
 
@@ -1965,6 +2108,55 @@ pub async fn unsubscribe_pack(id: &str) -> Result<(), String> {
     republish_emoji_list_debounced();
     crate::traits::emit_event("emoji_packs_updated", &());
     Ok(())
+}
+
+/// Persist a user-defined display order for the equipped packs (including the
+/// theme slot) and republish kind 10030 so it syncs across devices.
+///
+/// `ordered_ids` is the FULL display order from the frontend: each element is a
+/// pack `id` (naddr) for a real subscribed pack, or the literal
+/// [`THEME_SLOT_TOKEN`] for the theme marker. Real packs are persisted in the
+/// given order; the anchor is set to the raw addr of the pack immediately
+/// before the marker (`""` = top / marker absent).
+pub fn reorder_emoji_packs(ordered_ids: Vec<String>) -> Result<(), String> {
+    let session = crate::state::SessionGuard::capture();
+
+    let mut real_addrs: Vec<String> = Vec::with_capacity(ordered_ids.len());
+    let mut anchor = String::new();
+    let mut marker_present = false;
+    for id in &ordered_ids {
+        if id == THEME_SLOT_TOKEN {
+            marker_present = true;
+            anchor = real_addrs.last().cloned().unwrap_or_default();
+        } else {
+            real_addrs.push(parse_naddr(id)?.to_addr_string());
+        }
+    }
+
+    if !session.is_valid() {
+        return Err("Account swapped during reorder — aborted".to_string());
+    }
+    save_subscriptions(&real_addrs)?;
+    // Only the theme-slot's own drag moves the marker. A reorder that omits it
+    // (theme pack inactive, so its tab isn't shown) leaves the anchor put, so
+    // the user's theme-slot placement survives reordering the real packs.
+    if marker_present {
+        save_theme_slot_anchor(&anchor)?;
+    }
+    republish_emoji_list_debounced();
+    crate::traits::emit_event("emoji_packs_updated", &());
+    Ok(())
+}
+
+/// Return the theme-slot anchor as a NADDR (the pack the theme slot renders
+/// immediately after), or `""` when the slot is at the top. Degrades to top on
+/// a malformed stored anchor rather than breaking the picker.
+pub fn get_theme_slot_anchor() -> Result<String, String> {
+    let raw = load_theme_slot_anchor();
+    if raw.is_empty() {
+        return Ok(String::new());
+    }
+    Ok(naddr_from_addr(&raw).unwrap_or_default())
 }
 
 // ============================================================================
@@ -2490,6 +2682,52 @@ mod tests {
     fn parse_inner_tag_list_returns_empty_on_malformed_json() {
         assert!(parse_inner_tag_list("not json").is_empty());
         assert!(parse_inner_tag_list("").is_empty());
+    }
+
+    #[test]
+    fn theme_slot_marker_round_trips_through_publish_and_parse() {
+        // Three packs, theme slot anchored after the 2nd. Build the inner
+        // tuples exactly as publish does, serialise, then parse back.
+        let a = keys().public_key().to_hex();
+        let b = keys().public_key().to_hex();
+        let c = keys().public_key().to_hex();
+        let addr_a = format!("30030:{}:packA", a);
+        let addr_b = format!("30030:{}:packB", b);
+        let addr_c = format!("30030:{}:packC", c);
+        let addrs = vec![addr_a.clone(), addr_b.clone(), addr_c.clone()];
+
+        let inner = build_inner_tags_with_marker(&addrs, &addr_b);
+        let marker_count = inner.iter()
+            .filter(|t| t.first().map(String::as_str) == Some(THEME_SLOT_TOKEN))
+            .count();
+        assert_eq!(marker_count, 1, "exactly one marker is emitted");
+
+        let plaintext = serde_json::to_string(&inner).unwrap();
+        let (parsed, anchor) = parse_inner_tag_list_with_anchor(&plaintext);
+        assert_eq!(parsed, addrs, "addr order survives the round trip");
+        assert_eq!(anchor.as_deref(), Some(addr_b.as_str()), "anchor is the 2nd pack");
+
+        // Old-format list (no marker tuple) → None anchor.
+        let old = format!(r#"[["a","{}"],["a","{}"]]"#, addr_a, addr_b);
+        let (old_addrs, old_anchor) = parse_inner_tag_list_with_anchor(&old);
+        assert_eq!(old_addrs, vec![addr_a.clone(), addr_b.clone()]);
+        assert_eq!(old_anchor, None, "a list without the marker has no anchor");
+
+        // Marker at the top → empty-string anchor.
+        let top = build_inner_tags_with_marker(&addrs, "");
+        assert_eq!(top[0], vec![THEME_SLOT_TOKEN.to_string()]);
+        let (_, top_anchor) =
+            parse_inner_tag_list_with_anchor(&serde_json::to_string(&top).unwrap());
+        assert_eq!(top_anchor.as_deref(), Some(""), "top slot = empty anchor");
+
+        // Anchor naming a pack no longer subscribed falls back to the top.
+        let gone = format!("30030:{}:ghost", keys().public_key().to_hex());
+        let fallback = build_inner_tags_with_marker(&addrs, &gone);
+        assert_eq!(fallback[0], vec![THEME_SLOT_TOKEN.to_string()]);
+        let fb_markers = fallback.iter()
+            .filter(|t| t.first().map(String::as_str) == Some(THEME_SLOT_TOKEN))
+            .count();
+        assert_eq!(fb_markers, 1, "still exactly one marker on the fallback path");
     }
 
     #[test]

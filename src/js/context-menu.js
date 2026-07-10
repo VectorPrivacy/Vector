@@ -17,6 +17,14 @@
 
 let _ctxMenuEl = null;
 let _ctxMenuVisible = false;
+let _ctxMenuDismissedAt = 0; // timestamp of the last outside-tap dismissal
+
+/** True if an outside tap just dismissed a visible menu. Lets an underlying
+ *  click handler (e.g. the chatlist open) swallow that same tap, so dismissing
+ *  the menu doesn't also activate whatever sat behind it. */
+function wasContextMenuJustDismissed() {
+    return Date.now() - _ctxMenuDismissedAt < 400;
+}
 
 function _ensureContextMenu() {
     if (_ctxMenuEl) return _ctxMenuEl;
@@ -153,7 +161,10 @@ function attachLongPressContextMenu(el, fireMenu) {
 
 // Global dismissal listeners — install once.
 (function _installContextMenuDismiss() {
-    document.addEventListener('mousedown', () => hideContextMenu());
+    document.addEventListener('mousedown', () => {
+        if (_ctxMenuVisible) _ctxMenuDismissedAt = Date.now();
+        hideContextMenu();
+    });
     document.addEventListener('scroll', () => hideContextMenu(), true);
     document.addEventListener('keydown', (e) => {
         // Gate on visibility so the listener doesn't fight other Escape

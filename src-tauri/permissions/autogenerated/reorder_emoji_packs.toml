@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-reorder-emoji-packs"
+description = "Enables the reorder_emoji_packs command without any pre-configured scope."
+commands.allow = ["reorder_emoji_packs"]
+
+[[permission]]
+identifier = "deny-reorder-emoji-packs"
+description = "Denies the reorder_emoji_packs command without any pre-configured scope."
+commands.deny = ["reorder_emoji_packs"]

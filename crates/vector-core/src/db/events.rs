@@ -1345,6 +1345,65 @@ pub async fn unread_counts() -> Result<std::collections::HashMap<String, u32>, S
     Ok(out)
 }
 
+/// What [`compute_unread_anchor`] decided a chat's read marker should become to surface its newest
+/// contact message as unread. Computed from the full DB history (RAM may hold only a preview
+/// message for an unopened community).
+#[derive(Debug, PartialEq)]
+pub enum UnreadMark {
+    /// Nothing to surface: no contact message, or a strictly-newer own message (we spoke last).
+    NoOp,
+    /// Reset to the never-read anchor: the target is the chat's earliest message.
+    Clear,
+    /// Retreat `last_read` to this event id (the newest message in a strictly earlier second).
+    Anchor(String),
+}
+
+/// Decide how to mark `chat_identifier` unread. Anchors on the newest message strictly before the
+/// newest contact message's second — the count query compares whole seconds with a strict `>`, so a
+/// same-second anchor would leave the target on the boundary and it would read as caught-up.
+pub async fn compute_unread_anchor(chat_identifier: &str) -> Result<UnreadMark, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let (k0, k1, k2) = (
+        event_kind::CHAT_MESSAGE as i32,
+        event_kind::PRIVATE_DIRECT_MESSAGE as i32,
+        event_kind::FILE_ATTACHMENT as i32,
+    );
+    // Newest non-mine message second (the target) and newest overall (to detect we spoke last).
+    let (target_ts, newest_ts): (Option<i64>, Option<i64>) = conn
+        .query_row(
+            "SELECT MAX(CASE WHEN e.mine = 0 THEN e.created_at END), MAX(e.created_at) \
+             FROM events e JOIN chats c ON e.chat_id = c.id \
+             WHERE c.chat_identifier = ?1 AND e.kind IN (?2, ?3, ?4)",
+            rusqlite::params![chat_identifier, k0, k1, k2],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| format!("unread anchor target: {e}"))?;
+
+    let target_ts = match target_ts {
+        Some(t) => t,
+        None => return Ok(UnreadMark::NoOp), // no contact message to surface
+    };
+    if newest_ts.map_or(false, |n| n > target_ts) {
+        return Ok(UnreadMark::NoOp); // a strictly-newer own message → we spoke last
+    }
+
+    let anchor_id: Option<String> = conn
+        .query_row(
+            "SELECT e.id FROM events e JOIN chats c ON e.chat_id = c.id \
+             WHERE c.chat_identifier = ?1 AND e.kind IN (?2, ?3, ?4) AND e.created_at < ?5 \
+             ORDER BY e.created_at DESC LIMIT 1",
+            rusqlite::params![chat_identifier, k0, k1, k2, target_ts],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("unread anchor prev: {e}"))?;
+
+    Ok(match anchor_id {
+        Some(id) => UnreadMark::Anchor(id),
+        None => UnreadMark::Clear,
+    })
+}
+
 /// Batch save messages for a chat.
 pub async fn save_chat_messages(chat_id: &str, messages: &[Message]) -> Result<(), String> {
     if messages.is_empty() {
@@ -1493,6 +1552,64 @@ mod tests {
         assert_eq!(unread().await, 0, "last_read=m8 clears all");
         save_message(chat, &mk("m9", 2004, false)).await.unwrap();
         assert_eq!(unread().await, 1, "one arrival after last_read");
+    }
+
+    // Mark-as-unread anchors from the FULL DB history (a community row often holds only a preview
+    // message in RAM). The anchor lands strictly before the target's second so the count query's
+    // strict `>` still counts the newest contact message. Covers the community repro + edge cases.
+    #[tokio::test]
+    async fn compute_unread_anchor_covers_the_cases() {
+        let (_tmp, _guard) = init_test_db();
+        let mk = |id: &str, secs: u64, mine: bool| Message {
+            id: id.into(), content: "x".into(), at: secs * 1000, mine,
+            npub: (!mine).then(|| "npub1sender".to_string()),
+            ..Default::default()
+        };
+        let unread = |chat: &'static str| async move {
+            unread_counts().await.unwrap().get(chat).copied().unwrap_or(0)
+        };
+        let set_lr = |chat: &str, lr: &str| {
+            let conn = crate::db::get_write_connection_guard_static().unwrap();
+            conn.execute("UPDATE chats SET last_read = ?1 WHERE chat_identifier = ?2",
+                rusqlite::params![lr, chat]).unwrap();
+        };
+
+        // (A) The community repro: we spoke long ago, they kept talking. Anchor = second-newest
+        // contact message → exactly one unread, whatever the RAM cache held.
+        let a = "npub1anchorA";
+        save_message(a, &mk("a_mine", 1000, true)).await.unwrap();
+        for i in 0..8u64 { save_message(a, &mk(&format!("a{i}"), 2000 + i, false)).await.unwrap(); }
+        assert_eq!(compute_unread_anchor(a).await.unwrap(), UnreadMark::Anchor("a6".into()));
+        set_lr(a, "a6");
+        assert_eq!(unread(a).await, 1, "A: newest contact message is the sole unread");
+
+        // (B) We spoke last → NoOp (no phantom badge, no snap-back jiggle).
+        let b = "npub1anchorB";
+        save_message(b, &mk("b0", 2000, false)).await.unwrap();
+        save_message(b, &mk("b_mine", 2001, true)).await.unwrap();
+        assert_eq!(compute_unread_anchor(b).await.unwrap(), UnreadMark::NoOp);
+
+        // (C) Same-second tail: the two newest share a second. The anchor must skip to a strictly
+        // earlier second, so both same-second messages surface instead of snapping back to read.
+        let c = "npub1anchorC";
+        save_message(c, &mk("c0", 3000, false)).await.unwrap();
+        save_message(c, &mk("c1", 3005, false)).await.unwrap();
+        save_message(c, &mk("c2", 3005, false)).await.unwrap();
+        assert_eq!(compute_unread_anchor(c).await.unwrap(), UnreadMark::Anchor("c0".into()));
+        set_lr(c, "c0");
+        assert_eq!(unread(c).await, 2, "C: same-second tail both count");
+
+        // (D) The newest contact message is the chat's first → Clear (never-read) → it still counts.
+        let d = "npub1anchorD";
+        save_message(d, &mk("d0", 4000, false)).await.unwrap();
+        assert_eq!(compute_unread_anchor(d).await.unwrap(), UnreadMark::Clear);
+        set_lr(d, "");
+        assert_eq!(unread(d).await, 1, "D: lone contact message surfaces");
+
+        // (E) No contact message at all (only our own) → NoOp.
+        let e = "npub1anchorE";
+        save_message(e, &mk("e_mine", 5000, true)).await.unwrap();
+        assert_eq!(compute_unread_anchor(e).await.unwrap(), UnreadMark::NoOp);
     }
 
     // Regression: a "read to here" marker that lands on a system event (kind 30078, not a counted

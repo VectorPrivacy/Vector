@@ -1837,37 +1837,7 @@ pub async fn marketplace_check_installed(
 pub async fn marketplace_sync_install_status(
     app: AppHandle,
 ) -> Result<(), Error> {
-    let apps_info: Vec<(String, String)> = {
-        let state = MARKETPLACE_STATE.read().await;
-        state.get_apps().iter().map(|a| (a.id.clone(), a.version.clone())).collect()
-    };
-
-    for (app_id, marketplace_version) in apps_info {
-        if let Some(path) = super::marketplace::check_app_installed(&app, &app_id).await {
-            // App is installed, check version for updates
-            let installed_version = crate::db::get_miniapp_installed_version(&app_id)
-                .unwrap_or(None);
-
-            let update_available = match &installed_version {
-                Some(installed_ver) => installed_ver != &marketplace_version,
-                None => false, // No version recorded - assume current (file exists, so treat as up-to-date)
-            };
-
-            let mut state = MARKETPLACE_STATE.write().await;
-            state.set_install_status(&app_id, InstallStatus::Installed { path });
-
-            // Update version info on the cached app
-            state.set_app_version_info(&app_id, installed_version, update_available);
-        } else {
-            // File doesn't exist, mark as not installed
-            let mut state = MARKETPLACE_STATE.write().await;
-            state.set_install_status(&app_id, InstallStatus::NotInstalled);
-
-            // Clear version info
-            state.set_app_version_info(&app_id, None, false);
-        }
-    }
-
+    super::marketplace::sync_install_status_from_disk(&app).await;
     Ok(())
 }
 

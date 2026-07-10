@@ -1,9 +1,14 @@
 package io.vectorapp.miniapp
 
+import android.annotation.SuppressLint
 import android.app.Activity
+import android.graphics.Color
+import android.graphics.RectF
 import android.view.ViewGroup
 import android.view.animation.AccelerateInterpolator
 import android.view.animation.DecelerateInterpolator
+import android.webkit.JavascriptInterface
+import android.widget.FrameLayout
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -23,6 +28,7 @@ object MiniAppManager {
     private const val TAG = "MiniAppManager"
 
     private var currentMiniApp: MiniAppInstance? = null
+    private var overlayWebView: OverlayWebView? = null
     private var rootView: ViewGroup? = null
     private var activity: Activity? = null
 
@@ -64,7 +70,8 @@ object MiniAppManager {
         packagePath: String,
         chatId: String,
         messageId: String,
-        href: String?
+        href: String?,
+        overlayHtml: String
     ) {
         val act = activity ?: run {
             Logger.error(TAG, "Cannot open Mini App: Activity not initialized", null)
@@ -95,6 +102,13 @@ object MiniAppManager {
                     .setDuration(300)
                     .setInterpolator(DecelerateInterpolator())
                     .start()
+
+                // Vector overlay ABOVE the Mini App: immersive mode hides the system bars,
+                // so gesture-nav / no-hardware-back devices have no other way out. The UI is
+                // HTML (overlay.html) so it is shared cross-platform and can grow past a chip.
+                val overlay = createOverlayWebView(act, overlayHtml)
+                root.addView(overlay)
+                overlayWebView = overlay
             }
 
             // Build the URL
@@ -143,6 +157,13 @@ object MiniAppManager {
 
         // Exit immersive mode to restore system UI
         exitImmersiveMode()
+
+        // Drop the overlay up-front so it never lingers over the slide-out.
+        overlayWebView?.let {
+            rootView?.removeView(it)
+            it.destroy()
+        }
+        overlayWebView = null
 
         // Notify Rust first
         try {
@@ -290,6 +311,46 @@ object MiniAppManager {
     @JvmStatic
     fun handlePermissionResult(requestCode: Int, grantResults: IntArray) {
         currentMiniApp?.webView?.handlePermissionResult(requestCode, grantResults)
+    }
+
+    /**
+     * Build the transparent overlay WebView that renders Vector's overlay.html above the
+     * Mini App. The __vectorOverlay bridge lets the HTML request a close and report which
+     * region is interactive (so the rest of the surface passes touches through).
+     */
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun createOverlayWebView(act: Activity, html: String): OverlayWebView {
+        val density = act.resources.displayMetrics.density
+        val overlay = OverlayWebView(act).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+            setBackgroundColor(Color.TRANSPARENT)
+            settings.javaScriptEnabled = true
+        }
+
+        // Bridge methods run on the JavaBridge thread, not the UI thread:
+        //  - close() funnels through closeMiniApp(), which already hops to the UI thread.
+        //  - setHitRect() only writes a @Volatile field, safe from any thread.
+        overlay.addJavascriptInterface(object {
+            @JavascriptInterface
+            fun close() {
+                closeMiniApp()
+            }
+
+            @JavascriptInterface
+            fun setHitRect(x: Double, y: Double, w: Double, h: Double) {
+                val left = (x * density).toFloat()
+                val top = (y * density).toFloat()
+                overlay.setHitRectPx(
+                    RectF(left, top, left + (w * density).toFloat(), top + (h * density).toFloat())
+                )
+            }
+        }, "__vectorOverlay")
+
+        overlay.loadDataWithBaseURL("http://overlay.localhost/", html, "text/html", "utf-8", null)
+        return overlay
     }
 
     /**

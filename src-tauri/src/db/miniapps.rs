@@ -171,6 +171,44 @@ pub fn remove_miniapp_from_history(
     Ok(())
 }
 
+/// Remove history entries whose package file no longer exists on disk (e.g.
+/// after a storage clear deleted the .xdc). A dead ref renders a broken tile
+/// that can only ever open to a file-not-found error.
+pub fn prune_dangling_miniapp_history() -> Result<u32, String> {
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
+
+    let rows: Vec<(i64, Option<String>)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, attachment_ref FROM miniapps_history"
+        ).map_err(|e| format!("Failed to query Mini Apps history: {}", e))?;
+        let mapped = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
+        }).map_err(|e| format!("Failed to iterate Mini Apps history: {}", e))?;
+        mapped.filter_map(|r| r.ok()).collect()
+    };
+
+    let mut removed = 0u32;
+    for (id, path) in rows {
+        // attachment_ref is the local package path; entries without one can't be validated
+        let Some(path) = path else { continue };
+        if path.is_empty() {
+            continue;
+        }
+        // Fail closed: only prune on a definite "missing". A stat error
+        // (permissions, unmounted Android storage) must not delete valid rows
+        if !matches!(std::path::Path::new(&path).try_exists(), Ok(false)) {
+            continue;
+        }
+        conn.execute(
+            "DELETE FROM miniapps_history WHERE id = ?1",
+            rusqlite::params![id],
+        ).map_err(|e| format!("Failed to prune Mini App history entry: {}", e))?;
+        removed += 1;
+    }
+
+    Ok(removed)
+}
+
 /// Update the installed version for a marketplace app
 pub fn update_miniapp_version(
     marketplace_id: &str,

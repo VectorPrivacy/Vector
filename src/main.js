@@ -1074,6 +1074,9 @@ const domChatMessagesScrollReturnBtn = document.getElementById('chat-scroll-retu
 const domChatMessageInput = document.getElementById('chat-input');
 const domChatMessageInputFile = document.getElementById('chat-input-file');
 const domChatMessageInputCancel = document.getElementById('chat-input-cancel');
+const domChatReplyBarName = document.getElementById('chat-reply-bar-name');
+const domChatReplyBarSnippet = document.getElementById('chat-reply-bar-snippet');
+const domChatReplyBarCancel = document.getElementById('chat-reply-bar-cancel');
 const domChatMessageInputEmoji = document.getElementById('chat-input-emoji');
 const domAttachmentPanel = document.getElementById('attachment-panel');
 const domAttachmentPanelMain = document.getElementById('attachment-panel-main');
@@ -2625,7 +2628,8 @@ function updateChatHeaderSubtext(chat) {
  */
 function resolveMentionText(text) {
     if (!text) return text;
-    return text.replace(/@(npub1[a-z0-9]{58})/g, (full, npub) => {
+    // Same shapes renderMentions pills: @-, nostr:-prefixed, or bare npubs.
+    return text.replace(/(?<![\w/=?&#%.-])(?:@|nostr:)?(npub1[a-z0-9]{58})\b/g, (full, npub) => {
         const profile = getProfile(npub);
         if (profile) {
             return '@' + getName(npub);
@@ -2711,6 +2715,56 @@ function markAsRead(chat, message) {
 function markChatCaughtUp(chat) {
     const caughtUp = findLatestContactMessage(chat?.messages);
     if (caughtUp) markAsRead(chat, caughtUp);
+}
+
+/** True when the chat's newest conversational message is from the other side (not us, not a
+ *  system event) — i.e. there's something to flag as unread. The precondition for the action. */
+function chatCanMarkUnread(chat) {
+    const msgs = chat?.messages;
+    if (!msgs?.length) return false;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].system_event) continue;
+        return !msgs[i].mine;
+    }
+    return false;
+}
+
+/** Mark a chat unread: the backend retreats last_read to just before the newest contact message,
+ *  computed from the full DB history (a community row may hold only a preview message in RAM, so we
+ *  can't pick the anchor here). Repaints only when the backend actually marked it, then re-derives
+ *  the authoritative count — so a no-op (we spoke last) never flashes a badge that snaps back. */
+async function markChatUnread(chat) {
+    let lastRead = null;
+    try { lastRead = await invoke('mark_as_unread', { chatId: chat.id }); } catch (_e) {}
+    if (lastRead === null || lastRead === undefined) return; // no-op (we spoke last / nothing to surface)
+    // Keep the cached marker in lock-step with the DB (empty string = never-read) so a follow-up
+    // Mark as Read isn't skipped by markAsRead's "already at last_read" guard.
+    chat.last_read = lastRead;
+    chat.unread = Math.max(1, chat.unread || 0);
+    renderChatlist();
+    refreshUnreadCounts();
+}
+
+/** Leave a community you don't own, from the chat-list context menu. Confirms,
+ *  calls leave_community, then drops its channels locally and repaints — mirrors
+ *  the Group Overview leave path's teardown. */
+async function leaveCommunityFromList(chat) {
+    const cf = chat?.metadata?.custom_fields || {};
+    const communityId = cf.community_id;
+    if (!communityId) return;
+    const name = cf.name || 'this community';
+    const confirmed = await popupConfirm('Leave Community', `Leave "<b>${escapeHtml(name)}</b>"? You'll need a new invite to rejoin.`, false, '', 'vector_warning.svg');
+    if (!confirmed) return;
+    try {
+        await invoke('leave_community', { communityId });
+        if (arrChats.some(c => c.metadata?.custom_fields?.community_id === communityId && c.id === strOpenChat)) {
+            await closeChat();
+        }
+        arrChats = arrChats.filter(c => c.metadata?.custom_fields?.community_id !== communityId);
+        renderChatlist();
+    } catch (e) {
+        await popupConfirm('Failed to Leave', escapeHtml(String(e)), true, '', 'vector_warning.svg');
+    }
 }
 
 /**
@@ -2912,6 +2966,10 @@ async function setupRustListeners() {
     // was deleted. Reload the local mirror so the picker greys out or revives
     // the section live, instead of waiting for the next panel open.
     _on('emoji_packs_updated', () => loadEmojiPacks());
+
+    // The boot DM-relay-list sync adopted/retired relays; repaint the Network
+    // panel so an already-open list reflects them without a reopen.
+    _on('relay_list_updated', () => renderRelayList());
 
     // A control change (banlist / roles / metadata / invite-mode) landed in REALTIME (via the 3308
     // control-plane subscription). Re-read this community's summary into the chat list + re-render the
@@ -3422,12 +3480,6 @@ async function setupRustListeners() {
             renderChatlist();
         }
         
-        // Update any profile previews in the chat messages for this npub (regardless of which chat is open)
-        const profilePreviews = document.querySelectorAll(`.msg-profile-preview[data-npub="${evt.payload.id}"]`);
-        profilePreviews.forEach(preview => {
-            updateNostrProfilePreview(preview, evt.payload);
-        });
-
         // Update already-painted message rows authored by this npub — name + avatar — so chat
         // history reflects the resolved profile without needing a reopen (matches the system-event
         // and member-list retro-resolve).
@@ -3447,6 +3499,19 @@ async function setupRustListeners() {
                 fresh.classList.add('dmsg-avatar', 'btn');
                 fresh.dataset.npub = id;
                 fresh.style.margin = '0';
+                av.replaceWith(fresh);
+            });
+            // Reply-quote name + small avatar for this author resolve the same way.
+            document.querySelectorAll(`.dmsg-reply-name[data-npub="${id}"]`).forEach(n => {
+                n.textContent = newName;
+                twemojify(n);
+            });
+            document.querySelectorAll(`.dmsg-reply-avatar[data-npub="${id}"]`).forEach(av => {
+                const fresh = createAvatarImg(newAvatarSrc, 16);
+                fresh.classList.add('dmsg-reply-avatar');
+                fresh.dataset.npub = id;
+                // Re-wire the mini-profile opener the original render attached (replaceWith drops it).
+                fresh.addEventListener('click', (e) => { e.stopPropagation(); showMiniProfile(id, e.currentTarget); });
                 av.replaceWith(fresh);
             });
             // Mention chips (@tags in chat + npub tags in profile bios) resolve their display name here too.
@@ -7401,10 +7466,9 @@ async function deleteFailedMessage(msgId) {
  * Cancel any ongoing replies and reset the messaging interface
  */
 function cancelReply() {
-    // Reset the message UI
-    domChatMessageInputFile.style.display = '';
-    domChatMessageInputCancel.style.display = 'none';
-    domChatMessageInput.setAttribute('placeholder', strOriginalInputPlaceholder);
+    // Hide the reply bar. Its content is left in place so the collapse
+    // animation doesn't slide out an empty shell; the next reply overwrites it
+    domChatMessageBox.classList.remove('replying');
 
     // Focus the message input (desktop only - mobile keyboards are disruptive)
     if (!platformFeatures.is_mobile) {
@@ -10833,6 +10897,8 @@ window.addEventListener("DOMContentLoaded", async () => {
         }
     };
 
+    domChatReplyBarCancel.onclick = () => cancelReply();
+
     // Hook up a scroll handler in the chat to display UI elements at certain scroll depths
     createScrollHandler(domChatMessages, domChatMessagesScrollReturnBtn, {
         threshold: 500,
@@ -11133,7 +11199,7 @@ async function sendMessage(messageText) {
                     spanMessage.innerHTML = parseMarkdown(cleanedText.trim());
                     linkifyUrls(spanMessage);
                     processInlineImages(spanMessage);
-                    renderMentions(spanMessage, false);
+                    renderMentions(spanMessage, false, { allowBare: true, queueSync: true });
                     // Resolve custom emoji optimistically (before twemoji, mirroring
                     // the render path) so the edit doesn't flash `:shortcode:` while
                     // the backend's authoritative message_update is in flight.
@@ -11216,6 +11282,8 @@ async function sendMessage(messageText) {
         if (mentionCtrl) mentionCtrl.clearMentions();
     } catch(e) {
         console.error('Failed to send message:', e);
+    } finally {
+        domChatMessageInput.setAttribute('placeholder', 'Enter message...');
     }
 }
 
@@ -11886,6 +11954,12 @@ document.addEventListener('click', (e) => {
     const inCreateGroup = cg && cg.style.display !== 'none' && cg.contains(e.target);
     const chatlistItem = e.target.closest('.chatlist-contact');
     if (!inCreateGroup && chatlistItem) {
+        // A tap that dismissed an open context menu must only close it, not also
+        // open the chat behind it (the list is ~all rows, so a dismiss lands on
+        // one almost every time). Also swallow the trailing tap a long-press
+        // synthesises right after opening the menu.
+        if (wasContextMenuJustDismissed()) return;
+        if (Date.now() - (window._chatRowMenuAt || 0) < 500) { window._chatRowMenuAt = 0; return; }
         // Don't open chat if clicking on an invite item, or a community still joining (locked
         // until the control-fold/sync makes it read/writeable).
         if (chatlistItem.classList.contains("chatlist-invite") || chatlistItem.classList.contains("chatlist-joining")) {

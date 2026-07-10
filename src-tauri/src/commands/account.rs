@@ -1228,6 +1228,14 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
                     &marker[..14.min(marker.len())],
                 );
                 crate::account_manager::reset_session().await;
+                // reset_session closed the DB pool and cleared CURRENT_ACCOUNT,
+                // so re-point them at the marker account (+ re-seed the
+                // encryption atomic) before the cold path reads its stored key.
+                // Without this the pool is still the aborted account's, so the
+                // PIN decrypts the wrong key and is rejected every time.
+                if let Some(handle) = TAURI_APP.get() {
+                    let _ = crate::account_manager::boot_select_account(handle);
+                }
                 // NOSTR_CLIENT is now None; we fall through to the cold
                 // path which decrypts the marker account's stored key.
             }

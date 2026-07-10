@@ -1,6 +1,9 @@
 const { open } = window.__TAURI__.dialog;
 
+let AUTO_DOWNLOAD_ENABLED = true;
 let MAX_AUTO_DOWNLOAD_BYTES = 10_485_760;
+/** Smallest selectable auto-download limit; also the value a migrated-off account lands on. */
+const AUTO_DOWNLOAD_MIN_BYTES = 1_048_576;
 
 /** Set of attachment IDs currently being downloaded — prevents duplicate download requests */
 const downloadingAttachmentIds = new Set();
@@ -1523,38 +1526,103 @@ async function clearStorage() {
 }
 
 /**
+ * Load the auto-download settings into their globals, migrating pre-split accounts.
+ *
+ * Before v0.4.1 there was a single "Auto-Download Limit" where "Off" (0 bytes) doubled as the
+ * disable switch — which users didn't discover. It's now a toggle + a limit. Migration: a stored
+ * limit of 0 (was Off) becomes toggle OFF with the limit reset to the minimum; any positive limit
+ * becomes toggle ON keeping that value; a fresh account gets the defaults (on, 10 MB). Runs at
+ * boot so the toggle is honored before Settings is ever opened.
+ */
+async function initAutoDownloadSettings() {
+    const enabledRaw = await loadAutoDownloadEnabledRaw();
+    const limitRaw = await invoke('get_sql_setting', { key: 'max_auto_download_bytes' });
+    const storedLimit = (limitRaw !== null && limitRaw !== undefined) ? parseInt(limitRaw, 10) : null;
+
+    if (enabledRaw === 'true' || enabledRaw === 'false') {
+        // Already split.
+        AUTO_DOWNLOAD_ENABLED = enabledRaw === 'true';
+        MAX_AUTO_DOWNLOAD_BYTES = (storedLimit && storedLimit > 0) ? storedLimit : 10_485_760;
+        return;
+    }
+
+    // Not yet split → migrate from the legacy single setting.
+    if (storedLimit === 0) {
+        AUTO_DOWNLOAD_ENABLED = false;
+        MAX_AUTO_DOWNLOAD_BYTES = AUTO_DOWNLOAD_MIN_BYTES;
+    } else if (storedLimit && storedLimit > 0) {
+        AUTO_DOWNLOAD_ENABLED = true;
+        MAX_AUTO_DOWNLOAD_BYTES = storedLimit;
+    } else {
+        AUTO_DOWNLOAD_ENABLED = true;
+        MAX_AUTO_DOWNLOAD_BYTES = 10_485_760;
+    }
+    await saveAutoDownloadEnabled(AUTO_DOWNLOAD_ENABLED);
+    await saveMaxAutoDownloadBytes(MAX_AUTO_DOWNLOAD_BYTES);
+}
+
+/**
  * Initialize the Storage section in settings
  */
 async function initStorageSection() {
     // Get and display storage info
     const storageInfo = await getStorageInfo();
     if (storageInfo) {
-        // Update storage summary with formatted total size
+        // Total = the same per-category sum the donut slices use, so the two never disagree
+        const distTotal = Object.values(storageInfo.type_distribution || {}).reduce((sum, val) => sum + val, 0);
         const storageSummary = document.getElementById('storage-summary');
         if (storageSummary) {
-            if (storageInfo.total_bytes === 0) {
-                storageSummary.textContent = "A breakdown of Vector's storage use.";
-            } else {
-                storageSummary.textContent = `A breakdown of Vector's ${storageInfo.total_formatted} in files.`;
-            }
+            storageSummary.textContent = distTotal === 0
+                ? "A breakdown of Vector's storage use."
+                : `Total Storage Used: ${formatBytes(distTotal, 1)}`;
         }
-        
-        // Render file type distribution bar
-        renderFileTypeDistribution(storageInfo.type_distribution, storageInfo.file_count);
+        renderStorageDonut(storageInfo.type_distribution);
     }
 
-    // Auto-download limit
-    const savedLimit = await loadMaxAutoDownloadBytes();
-    MAX_AUTO_DOWNLOAD_BYTES = savedLimit;
-    const limitSelect = document.getElementById('auto-download-limit');
-    if (limitSelect) {
-        limitSelect.value = String(savedLimit);
-        limitSelect.addEventListener('change', async () => {
-            const bytes = parseInt(limitSelect.value, 10);
-            MAX_AUTO_DOWNLOAD_BYTES = bytes;
-            await saveMaxAutoDownloadBytes(bytes);
-        });
+    // Auto-download: an explicit toggle plus a size limit that greys out when the toggle is off.
+    // Values + the pre-split migration load at boot (initAutoDownloadSettings); here we only
+    // reflect them into the UI and wire the controls. onchange (not addEventListener) since
+    // initStorageSection re-runs (theme change / Clear Storage) and must not stack listeners.
+    const adToggle = document.getElementById('auto-download-toggle');
+    const adLimitGroup = document.getElementById('auto-download-limit-group');
+    const adLimit = document.getElementById('auto-download-limit');
+    const applyAutoDownloadState = () => {
+        if (adLimit) adLimit.disabled = !AUTO_DOWNLOAD_ENABLED;
+        if (adLimitGroup) adLimitGroup.classList.toggle('disabled', !AUTO_DOWNLOAD_ENABLED);
+    };
+    if (adToggle) {
+        adToggle.checked = AUTO_DOWNLOAD_ENABLED;
+        adToggle.onchange = async () => {
+            AUTO_DOWNLOAD_ENABLED = adToggle.checked;
+            await saveAutoDownloadEnabled(AUTO_DOWNLOAD_ENABLED);
+            applyAutoDownloadState();
+        };
     }
+    if (adLimit) {
+        adLimit.value = String(MAX_AUTO_DOWNLOAD_BYTES);
+        adLimit.onchange = async () => {
+            MAX_AUTO_DOWNLOAD_BYTES = parseInt(adLimit.value, 10);
+            await saveMaxAutoDownloadBytes(MAX_AUTO_DOWNLOAD_BYTES);
+        };
+    }
+    applyAutoDownloadState();
+
+    // Explainer (i) icons. preventDefault so the toggle-row icon doesn't flip the switch.
+    const adInfo = document.getElementById('auto-download-info');
+    if (adInfo) adInfo.onclick = (e) => {
+        e.preventDefault(); e.stopPropagation();
+        popupConfirm('Auto-Download Media', 'When enabled, Vector automatically downloads incoming photos, videos, voice messages and files (up to the size limit below).<br><br>Turn this off to keep attachments as previews and download them by hand, one at a time.', true);
+    };
+    const adLimitInfo = document.getElementById('auto-download-limit-info');
+    if (adLimitInfo) adLimitInfo.onclick = (e) => {
+        e.preventDefault(); e.stopPropagation();
+        popupConfirm('Auto-Download Limit', 'The largest attachment size Vector will fetch automatically.<br><br>Anything above this waits for you to tap Download. Only applies while Auto-Download Media is on.', true);
+    };
+    const clearInfo = document.getElementById('clear-storage-info');
+    if (clearInfo) clearInfo.onclick = (e) => {
+        e.preventDefault(); e.stopPropagation();
+        popupConfirm('Clear Storage', 'Deletes the downloaded and sent files Vector has cached on this device, to free up space.<br><br>Your messages stay. Attachments can be downloaded again later if they are still available from their sender.', true);
+    };
 
     // Hide Media from Gallery (Android only — the backend command is a no-op on
     // desktop, and the gallery concept doesn't apply there). onchange (not
@@ -1578,306 +1646,274 @@ async function initStorageSection() {
     }
 }
 
-function renderFileTypeDistribution(typeDistribution, totalBytes) {
-    const storageBar = document.getElementById('storage-bar');
-    if (!storageBar) return;
-    
-    // Clear existing segments and tooltips
-    storageBar.innerHTML = '';
-    
-    // Remove any existing tooltip if it exists
-    const existingTooltip = document.getElementById('storage-tooltip');
-    if (existingTooltip) {
-        existingTooltip.remove();
+const STORAGE_CATEGORIES = [
+    { name: 'Images', exts: ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg', 'avif', 'heic', 'heif', 'tif', 'tiff', 'ico'], title: 'Delete all Images?', noun: 'downloaded images' },
+    { name: 'Video', exts: ['mp4', 'mov', 'avi', 'mkv', 'flv', 'wmv', '3gp', 'webm', 'm4v', 'mpeg', 'mpg'], title: 'Delete all Videos?', noun: 'downloaded videos' },
+    { name: 'Audio', exts: ['mp3', 'wav', 'ogg', 'oga', 'opus', 'flac', 'm4a', 'aac', 'weba', 'wma', 'aiff'], title: 'Delete all Audio?', noun: 'downloaded audio and voice messages' },
+    { name: 'Apps', exts: ['xdc', 'jsdos'], title: 'Delete all Mini Apps?', noun: 'downloaded Mini Apps' },
+    { name: 'AI', key: '/ai_models', title: 'Delete AI Models?' },
+    { name: 'Cache', key: '/cache', title: 'Clear the Cache?' },
+    { name: 'Files', rest: true, title: 'Delete all Files?', noun: 'downloaded files' }
+];
+
+// Slice colors rank by size rather than category identity: the largest slice
+// is always purple, descending through the ramp to gray.
+const STORAGE_SLICE_RAMP = ['#9D5DF9', '#5EC4F7', '#4AD99D', '#FBA35B', '#FBC85B', '#B2B2B2'];
+
+/** Category-aware confirmation for a storage delete; returns the user's choice. */
+async function confirmStorageDelete(cat, sizeText) {
+    let body;
+    if (cat.key === '/ai_models') {
+        body = `This will delete ${sizeText} of downloaded AI models from this device.<br><br>Voice transcription will download a model again when needed.`;
+    } else if (cat.key === '/cache') {
+        body = `This will delete ${sizeText} of cached avatars, banners and images.<br><br>Vector rebuilds this cache automatically over time.`;
+    } else {
+        body = `This will delete ${sizeText} of ${cat.noun} from this device.<br><br>You can download them again from their chats later, if they are still available.`;
     }
-    
-    // Actual storage total = sum of the per-type byte sizes. (The `totalBytes`
-    // param is really file_count, which excludes cache / AI-model bytes that have
-    // no file count — so it falsely reads 0 on Android where attachments live
-    // outside the walked dir and only cache contributes.)
-    const total = Object.values(typeDistribution || {}).reduce((sum, val) => sum + val, 0);
+    return popupConfirm(cat.title, body, false, '', 'vector_warning.svg');
+}
+
+/**
+ * Annular sector between gap center-lines a0..a1 (radians from 12 o'clock,
+ * clockwise). Each edge is inset by an angle of (gap/2)/r, which scales with
+ * radius so the gap stays a constant linear width along its whole length.
+ */
+function donutSlicePath(cx, cy, rIn, rOut, a0, a1, gapPx) {
+    const pt = (r, a) => `${(cx + r * Math.sin(a)).toFixed(2)} ${(cy - r * Math.cos(a)).toFixed(2)}`;
+    const gOut = (gapPx / 2) / rOut;
+    const gIn = (gapPx / 2) / rIn;
+    const largeOut = (a1 - a0 - 2 * gOut) > Math.PI ? 1 : 0;
+    const largeIn = (a1 - a0 - 2 * gIn) > Math.PI ? 1 : 0;
+    return `M ${pt(rOut, a0 + gOut)} A ${rOut} ${rOut} 0 ${largeOut} 1 ${pt(rOut, a1 - gOut)} ` +
+           `L ${pt(rIn, a1 - gIn)} A ${rIn} ${rIn} 0 ${largeIn} 0 ${pt(rIn, a0 + gIn)} Z`;
+}
+
+function renderStorageDonut(typeDistribution) {
+    const svg = document.getElementById('storage-donut');
+    const legend = document.getElementById('storage-legend');
+    const centerValue = document.getElementById('storage-donut-value');
+    const centerLabel = document.getElementById('storage-donut-label');
+    const deleteBtn = document.getElementById('storage-donut-delete');
+    if (!svg || !legend) return;
+
+    if (deleteBtn) {
+        deleteBtn.style.display = 'none';
+        deleteBtn.disabled = false;
+        deleteBtn.textContent = 'Delete';
+    }
+    if (centerLabel) centerLabel.style.display = '';
+
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+    const CX = 100, CY = 100, R_OUT = 96, R_IN = 57;
+
+    svg.innerHTML = '';
+    legend.innerHTML = '';
+    // svg persists across re-renders; reset its handlers (assignment, not
+    // addEventListener, so they can never stack)
+    svg.onmousemove = svg.onmouseleave = svg.onclick = null;
+    svg.style.cursor = '';
+
+    // Fold the per-extension byte map into display categories
+    const restCat = STORAGE_CATEGORIES.find(c => c.rest);
+    const extOwner = new Map();
+    for (const cat of STORAGE_CATEGORIES) {
+        if (cat.exts) for (const ext of cat.exts) extOwner.set(ext, cat.name);
+    }
+    const sizes = new Map(STORAGE_CATEGORIES.map(c => [c.name, 0]));
+    for (const [key, bytes] of Object.entries(typeDistribution || {})) {
+        const special = STORAGE_CATEGORIES.find(c => c.key === key);
+        const owner = special ? special.name : (extOwner.get(key) || restCat.name);
+        sizes.set(owner, sizes.get(owner) + bytes);
+    }
+
+    const segments = STORAGE_CATEGORIES
+        .map(c => ({ name: c.name, size: sizes.get(c.name) }))
+        .filter(s => s.size > 0)
+        .sort((a, b) => b.size - a.size)
+        .map((s, i) => ({ ...s, color: STORAGE_SLICE_RAMP[Math.min(i, STORAGE_SLICE_RAMP.length - 1)] }));
+    const total = segments.reduce((sum, s) => sum + s.size, 0);
+
+    const setCenter = (value, label) => {
+        centerValue.textContent = value;
+        centerLabel.textContent = label;
+    };
+    setCenter(formatBytes(total, 1), 'Total');
+
     if (total === 0) {
-        storageBar.innerHTML = '<div style="width: 100%; height: 100%; background-color: #333; display: flex; align-items: center; justify-content: center; color: #888; font-size: 12px;">No Storage Used</div>';
+        const ring = document.createElementNS(SVG_NS, 'circle');
+        ring.setAttribute('cx', CX);
+        ring.setAttribute('cy', CY);
+        ring.setAttribute('r', (R_OUT + R_IN) / 2);
+        ring.setAttribute('fill', 'none');
+        ring.setAttribute('stroke', 'rgba(255, 255, 255, 0.07)');
+        ring.setAttribute('stroke-width', R_OUT - R_IN);
+        svg.appendChild(ring);
         return;
     }
-    
-    // Create tooltip element
-    const tooltip = document.createElement('div');
-    tooltip.id = 'storage-tooltip';
-    tooltip.style.position = 'absolute';
-    tooltip.style.backgroundColor = '#333';
-    tooltip.style.color = 'white';
-    tooltip.style.padding = '8px 12px';
-    tooltip.style.borderRadius = '6px';
-    tooltip.style.fontSize = '12px';
-    tooltip.style.pointerEvents = 'none';
-    tooltip.style.opacity = '0';
-    tooltip.style.display = 'none';
-    tooltip.style.transition = 'opacity 0.2s ease';
-    tooltip.style.zIndex = '1000';
-    tooltip.style.whiteSpace = 'nowrap';
-    tooltip.style.boxShadow = '0 2px 10px rgba(0, 0, 0, 0.3)';
-    document.body.appendChild(tooltip);
-    
-    // Define file type categories with their extensions
-    const categories = [
-        {
-            name: 'Images',
-            extensions: ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg']
-        },
-        {
-            name: 'Video',
-            extensions: ['mp4', 'mov', 'avi', 'mkv', 'flv', 'wmv', '3gp', 'ogg', 'webm']
+
+    const slices = [];
+    const legendItems = [];
+    // Hover previews a slice; click sticky-selects it, which reveals the Delete
+    // button in the hole. The button only shows while the readout matches the
+    // selection, so a preview can never be deleted by mistake.
+    let selectedIdx = -1;
+    const highlight = (idx) => {
+        segments.forEach((_, i) => {
+            slices[i].classList.toggle('pop', i === idx);
+            slices[i].classList.toggle('dim', idx !== -1 && i !== idx);
+            legendItems[i].classList.toggle('dim', idx !== -1 && i !== idx);
+        });
+        if (idx === -1) {
+            setCenter(formatBytes(total, 1), 'Total');
+        } else {
+            const s = segments[idx];
+            const pct = (s.size / total) * 100;
+            setCenter(formatBytes(s.size, 1), `${s.name} · ${pct < 1 ? '<1' : Math.round(pct)}%`);
         }
-    ];
-    
-    // Calculate sizes for each category
-    const categorySizes = categories.map(category => {
-        let size = 0;
-        for (const ext of category.extensions) {
-            if (typeDistribution[ext]) {
-                size += typeDistribution[ext];
+        // The button swaps in for the name/percent line; three stacked rows
+        // don't fit the hole comfortably
+        const showBtn = idx !== -1 && idx === selectedIdx;
+        if (deleteBtn) deleteBtn.style.display = showBtn ? '' : 'none';
+        centerLabel.style.display = showBtn ? 'none' : '';
+    };
+    const select = (idx) => {
+        selectedIdx = selectedIdx === idx ? -1 : idx;
+        highlight(selectedIdx);
+    };
+    const wireSlice = (el, i) => {
+        el.classList.add('storage-slice');
+        el.style.animationDelay = `${i * 55}ms`;
+        svg.appendChild(el);
+        slices.push(el);
+    };
+
+    if (deleteBtn) deleteBtn.onclick = async () => {
+        if (selectedIdx === -1 || deleteBtn.disabled) return;
+        const seg = segments[selectedIdx];
+        const cat = STORAGE_CATEGORIES.find(c => c.name === seg.name);
+        if (!(await confirmStorageDelete(cat, formatBytes(seg.size, 1)))) return;
+
+        let category = 'files';
+        let exts = [];
+        if (cat.key === '/ai_models') {
+            category = 'ai';
+        } else if (cat.key === '/cache') {
+            category = 'cache';
+        } else if (cat.exts) {
+            exts = cat.exts;
+        } else {
+            // Rest bucket: derive the exact extension list from the live
+            // distribution so it deletes precisely what the slice counted
+            const categorized = new Set();
+            for (const c of STORAGE_CATEGORIES) {
+                if (c.exts) c.exts.forEach(e => categorized.add(e));
+                if (c.key) categorized.add(c.key);
             }
+            exts = Object.keys(typeDistribution || {}).filter(k => !categorized.has(k));
         }
-        return { name: category.name, size: size };
+
+        deleteBtn.disabled = true;
+        deleteBtn.textContent = 'Deleting...';
+        try {
+            const res = await invoke('clear_storage_category', { category, exts });
+            showToast(`Freed ${res.freed_formatted}`);
+        } catch (e) {
+            await popupConfirm('Delete Failed', `Could not delete: ${escapeHtml(String(e))}`, true, '', 'vector_warning.svg');
+        }
+        deleteBtn.disabled = false;
+        deleteBtn.textContent = 'Delete';
+        initStorageSection();
+    };
+
+    // Start angle of each slice (gap center-line), for ring hit-testing
+    const bounds = [];
+    if (segments.length === 1) {
+        // A lone category is a full ring; the arc path degenerates at 360 degrees
+        const ring = document.createElementNS(SVG_NS, 'circle');
+        ring.setAttribute('cx', CX);
+        ring.setAttribute('cy', CY);
+        ring.setAttribute('r', (R_OUT + R_IN) / 2);
+        ring.setAttribute('fill', 'none');
+        ring.setAttribute('stroke', segments[0].color);
+        ring.setAttribute('stroke-width', R_OUT - R_IN);
+        bounds.push(0);
+        wireSlice(ring, 0);
+    } else {
+        // Slice angles span gap center-line to center-line; the constant-width
+        // gap is carved inside donutSlicePath. Slivers get a floor so they stay
+        // visible and tappable, paid for out of the largest slice (sorted
+        // first). The floor must exceed GAP_PX / R_IN or the inner arc inverts.
+        const GAP_PX = 5;
+        const MIN_SWEEP = 0.13;
+        let stolen = 0;
+        const sweeps = segments.map(s => {
+            const a = Math.PI * 2 * (s.size / total);
+            if (a < MIN_SWEEP) { stolen += MIN_SWEEP - a; return MIN_SWEEP; }
+            return a;
+        });
+        sweeps[0] -= stolen;
+        let angle = 0;
+        segments.forEach((s, i) => {
+            const a0 = angle;
+            const a1 = a0 + sweeps[i];
+            angle = a1;
+            bounds.push(a0);
+            const path = document.createElementNS(SVG_NS, 'path');
+            path.setAttribute('d', donutSlicePath(CX, CY, R_IN, R_OUT, a0, a1, GAP_PX));
+            path.setAttribute('fill', s.color);
+            wireSlice(path, i);
+        });
+    }
+
+    // Hover/click hit-test the whole ring by angle instead of per-path events:
+    // the gaps then belong to their nearest slice, so dragging the cursor
+    // across a gap can't flash the idle view in between
+    const sliceAtPoint = (e) => {
+        const rect = svg.getBoundingClientRect();
+        if (!rect.width) return -1;
+        const vx = (e.clientX - rect.left) * (200 / rect.width) - CX;
+        const vy = (e.clientY - rect.top) * (200 / rect.height) - CY;
+        const dist = Math.hypot(vx, vy);
+        if (dist < R_IN - 2 || dist > R_OUT + 6) return -1;
+        let a = Math.atan2(vx, -vy);
+        if (a < 0) a += Math.PI * 2;
+        let idx = 0;
+        for (let i = 0; i < bounds.length; i++) if (a >= bounds[i]) idx = i;
+        return idx;
+    };
+    let hoverIdx = -1;
+    svg.onmousemove = (e) => {
+        const idx = sliceAtPoint(e);
+        if (idx === hoverIdx) return;
+        hoverIdx = idx;
+        svg.style.cursor = idx === -1 ? '' : 'pointer';
+        highlight(idx === -1 ? selectedIdx : idx);
+    };
+    svg.onmouseleave = () => {
+        hoverIdx = -1;
+        svg.style.cursor = '';
+        highlight(selectedIdx);
+    };
+    svg.onclick = (e) => {
+        const idx = sliceAtPoint(e);
+        if (idx !== -1) select(idx);
+    };
+
+    segments.forEach((s, i) => {
+        const item = document.createElement('div');
+        item.className = 'storage-legend-item';
+        const swatch = document.createElement('span');
+        swatch.className = 'storage-legend-swatch';
+        swatch.style.backgroundColor = s.color;
+        const name = document.createElement('span');
+        name.textContent = s.name;
+        item.append(swatch, name);
+        item.addEventListener('mouseenter', () => highlight(i));
+        item.addEventListener('mouseleave', () => highlight(selectedIdx));
+        item.addEventListener('click', () => select(i));
+        legend.appendChild(item);
+        legendItems.push(item);
     });
-    
-    // Add AI Models category if ai_models exists in type distribution
-    if (typeDistribution['ai_models']) {
-        categorySizes.push({
-            name: 'AI',
-            size: typeDistribution['ai_models']
-        });
-    }
-
-    // Add Cache category if cache exists in type distribution (avatars, banners, icons)
-    if (typeDistribution['cache']) {
-        categorySizes.push({
-            name: 'Cache',
-            size: typeDistribution['cache']
-        });
-    }
-
-    // Calculate size for other files (excluding special categories)
-    let otherSize = 0;
-    for (const ext in typeDistribution) {
-        let isCategorized = false;
-        // Skip special categories as they're already handled
-        if (ext === 'ai_models' || ext === 'cache') continue;
-        
-        for (const category of categories) {
-            if (category.extensions.includes(ext)) {
-                isCategorized = true;
-                break;
-            }
-        }
-        if (!isCategorized) {
-            otherSize += typeDistribution[ext];
-        }
-    }
-    
-    // Create segments array with all categories and sort by size (descending)
-    const segments = [];
-    for (const category of categorySizes) {
-        if (category.size > 0) {
-            segments.push({
-                name: category.name,
-                size: category.size
-            });
-        }
-    }
-    
-    // Add "Other" if there are any uncategorized files
-    if (otherSize > 0) {
-        segments.push({
-            name: 'Other',
-            size: otherSize
-        });
-    }
-    
-    // Sort segments by size (largest first)
-    segments.sort((a, b) => b.size - a.size);
-    
-    // Get primary color from theme
-    const root = document.documentElement;
-    const primaryColor = getComputedStyle(root).getPropertyValue('--icon-color-primary').trim();
-    
-    // Create segments in the bar
-    const largestSize = segments[0].size;
-    
-    for (const segmentData of segments) {
-        const size = segmentData.size;
-        // Use sum of all typeDistribution values as total, since totalBytes is incorrect
-        const total = Object.values(typeDistribution).reduce((sum, val) => sum + val, 0);
-        const percentage = (size / total) * 100;
-        // Convert hex to RGB and set opacity
-        const rgbColor = hexToRgb(primaryColor);
-        
-        // Calculate opacity relative to the largest segment
-        // Largest segment gets 100% opacity, others get proportionally less
-        const relativeOpacity = size / largestSize;
-        
-        // Round to 2 decimal places to avoid floating point precision issues
-        const roundedPercentage = Math.round(percentage * 100) / 100;
-        const segment = document.createElement('div');
-        segment.style.width = `${roundedPercentage}%`;
-        segment.style.flexShrink = '0';
-        segment.style.boxSizing = 'border-box';
-        // Ensure minimum opacity of 1% for visibility
-        const preciseOpacity = Math.max(0.01, relativeOpacity);
-        // Set background color using CSS variable and opacity
-        // Apply opacity directly to background using existing primaryColor and rgbColor
-        const backgroundColor = `rgba(${rgbColor.r}, ${rgbColor.g}, ${rgbColor.b}, ${preciseOpacity})`;
-        segment.style.backgroundColor = backgroundColor;
-        // Set position relative to enable absolute positioning of child elements
-        segment.style.position = 'relative';
-        
-        // Add text label if percentage is greater than 20%
-        if (roundedPercentage > 20) {
-            const label = document.createElement('div');
-            label.textContent = `${segmentData.name} (${roundedPercentage.toFixed(0)}%)`;
-            label.style.position = 'absolute';
-            label.style.top = '50%';
-            label.style.left = '50%';
-            label.style.transform = 'translate(-50%, -50%)';
-            // Change text color to black when opacity is 50% or above
-            label.style.color = preciseOpacity >= 0.5 ? 'black' : 'white';
-            label.style.textAlign = 'center';
-            label.style.fontWeight = 'bold';
-            label.style.fontSize = '12px';
-            label.style.fontFamily = 'Arial, sans-serif';
-            label.style.whiteSpace = 'nowrap';
-            label.style.cursor = 'default';
-            segment.appendChild(label);
-        }
-        
-        segment.dataset.type = segmentData.name;
-        segment.dataset.size = segmentData.size;
-        
-        segment.addEventListener('mouseenter', (e) => {
-            const tooltip = document.getElementById('storage-tooltip');
-            if (tooltip) {
-                // Format size in human-readable format
-                const formattedSize = `${segmentData.name} - ${formatBytes(segmentData.size)}`;
-                tooltip.textContent = formattedSize;
-                tooltip.style.display = 'block';
-                tooltip.style.opacity = '1';
-                
-                // Position tooltip above the cursor with edge detection
-                const tooltipWidth = tooltip.offsetWidth;
-                const tooltipHeight = tooltip.offsetHeight;
-                const viewportWidth = window.innerWidth;
-                const viewportHeight = window.innerHeight;
-                
-                // Calculate tooltip position based on cursor position
-                let leftPos = e.clientX + window.scrollX;
-                let topPos = e.clientY + window.scrollY - tooltipHeight - 10;
-                
-                // Check if tooltip would overflow right edge
-                if (leftPos + tooltipWidth > viewportWidth) {
-                    // Position tooltip to the left of cursor
-                    leftPos = e.clientX + window.scrollX - tooltipWidth;
-                }
-                
-                // Check if tooltip would overflow left edge
-                if (leftPos < 0) {
-                    leftPos = 10;
-                }
-                
-                // Check if tooltip would overflow bottom edge
-                if (topPos + tooltipHeight > viewportHeight) {
-                    // Position tooltip above cursor
-                    topPos = e.clientY + window.scrollY + 10;
-                }
-                
-                // Ensure tooltip doesn't go off top edge
-                if (topPos < 0) {
-                    topPos = 10;
-                }
-                
-                tooltip.style.left = `${leftPos}px`;
-                tooltip.style.top = `${topPos}px`;
-            }
-        });
-        
-        segment.addEventListener('mouseleave', () => {
-            const tooltip = document.getElementById('storage-tooltip');
-            if (tooltip) {
-                tooltip.style.opacity = '0';
-                setTimeout(() => {
-                    if (tooltip.style.opacity === '0') {
-                        tooltip.style.display = 'none';
-                    }
-                }, 200);
-            }
-        });
-        
-        storageBar.appendChild(segment);
-    }
-    
-    // If no files or all segments are empty, ensure the bar is filled
-    if (totalBytes === 0 || segments.length === 0) {
-        const segment = document.createElement('div');
-        segment.style.flex = '1';
-        // Use primary color with very low opacity for empty state
-        const rgbColor = hexToRgb(primaryColor);
-        segment.style.backgroundColor = `rgba(${rgbColor.r}, ${rgbColor.g}, ${rgbColor.b}, 0.1)`;
-        segment.dataset.type = 'NONE';
-        segment.dataset.size = 0;
-        
-        segment.addEventListener('mouseenter', (e) => {
-            const tooltip = document.getElementById('storage-tooltip');
-            if (tooltip) {
-                tooltip.textContent = 'No files found';
-                tooltip.style.opacity = '1';
-                
-                // Position tooltip above the segment with edge detection
-                const rect = e.target.getBoundingClientRect();
-                const tooltipWidth = tooltip.offsetWidth;
-                const viewportWidth = window.innerWidth;
-                
-                // Calculate tooltip position
-                let leftPos = rect.left + window.scrollX;
-                
-                // Check if tooltip would overflow right edge
-                if (leftPos + tooltipWidth > viewportWidth) {
-                    // Position tooltip to the left of the segment
-                    leftPos = rect.right + window.scrollX - tooltipWidth;
-                }
-                
-                // Ensure tooltip doesn't go off left edge
-                if (leftPos < 0) {
-                    leftPos = 0;
-                }
-                
-                tooltip.style.left = `${leftPos}px`;
-                tooltip.style.top = `${rect.top + window.scrollY - 30}px`;
-            }
-        });
-        
-        segment.addEventListener('mouseleave', () => {
-            const tooltip = document.getElementById('storage-tooltip');
-            if (tooltip) {
-                tooltip.style.opacity = '0';
-            }
-        });
-        
-        storageBar.appendChild(segment);
-    }
-    
-    // Helper function to convert hex color to RGB
-    function hexToRgb(hex) {
-        // Remove # if present
-        hex = hex.replace('#', '');
-        
-        // Parse hex to RGB
-        const bigint = parseInt(hex, 16);
-        return {
-            r: (bigint >> 16) & 255,
-            g: (bigint >> 8) & 255,
-            b: bigint & 255
-        };
-    }
 }
 
 // ============================================================================
@@ -2140,6 +2176,10 @@ async function initSettings() {
     fWebPreviewsEnabled = await loadWebPreviews();
     fStripTrackingEnabled = await loadStripTracking();
     fSendTypingIndicators = await loadSendTypingIndicators();
+
+    // Auto-download toggle + limit (migrates pre-split accounts). At boot so the
+    // gate in message-row.js is correct before Settings is opened.
+    await initAutoDownloadSettings();
 
     // Set initial toggle states
     const webPreviewsToggle = document.getElementById('privacy-web-previews-toggle');
