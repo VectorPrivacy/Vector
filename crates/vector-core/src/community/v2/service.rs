@@ -201,12 +201,16 @@ pub async fn send_typing<T: Transport + ?Sized>(
 }
 
 /// Everything a chat-plane send needs: local keys, the channel's group key +
-/// epoch, and the session snapshot taken BEFORE any await. Refuses a keyless
-/// Private channel — deriving from the root would post to the public plane;
-/// its key arrives over the rekey plane.
+/// epoch, and the session snapshot taken BEFORE any await. Refuses a dissolved
+/// community (every honest member sealed it read-only) and a keyless Private
+/// channel — deriving from the root would post to the public plane; its key
+/// arrives over the rekey plane.
 fn chat_send_context(community: &CommunityV2, channel_id: &ChannelId) -> Result<(Keys, GroupKey, Epoch, SessionGuard), String> {
     let session = SessionGuard::capture();
     let author = local_keys()?;
+    if crate::db::community::get_community_dissolved(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap_or(false) {
+        return Err("this community has been dissolved".to_string());
+    }
     let ch = community.channel(channel_id).ok_or("no such channel in this community")?;
     if ch.private && ch.key.is_none() {
         return Err("this private channel has no key yet (awaiting rekey delivery)".to_string());
@@ -2672,6 +2676,9 @@ pub struct RekeyFollow {
     /// A base rotation removed us — the caller tears the local hold down (the
     /// updated community is not persisted in that case).
     pub self_removed: bool,
+    /// An owner tombstone sits on the dissolved plane (CORD-02 §9) — the local
+    /// flag is already set; the caller surfaces the death and stops following.
+    pub dissolved: bool,
 }
 
 /// The most archived base roots a channel-rekey lookup fans across per step. A
@@ -2720,7 +2727,18 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
     // past its tombstone — don't adopt a rotation into a grave.
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     if crate::db::community::get_community_dissolved(&cid_hex).unwrap_or(false) {
-        return Ok(RekeyFollow { updated: None, self_removed: false });
+        return Ok(RekeyFollow { updated: None, self_removed: false, dissolved: true });
+    }
+    // An offline member must also LEARN of a death: the tombstone rides its own
+    // public plane, which the live sub watches but no catch-up fetch touched —
+    // without this, a member who slept through a dissolution follows (and posts
+    // into) a grave forever. Fail-open on transport failure: availability is
+    // never death.
+    if is_dissolved(transport, community).await {
+        if session.is_valid() {
+            let _ = crate::db::community::set_community_dissolved(&cid_hex);
+        }
+        return Ok(RekeyFollow { updated: None, self_removed: false, dissolved: true });
     }
     let me = local_keys()?;
     let my_xonly = me.public_key().to_bytes();
@@ -2865,7 +2883,7 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
                     if !session.is_valid() {
                         return Err("account changed during rekey follow".to_string());
                     }
-                    return Ok(RekeyFollow { updated: None, self_removed: true });
+                    return Ok(RekeyFollow { updated: None, self_removed: true, dissolved: false });
                 }
                 Advance::Stay => {}
             }
@@ -2877,7 +2895,7 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
     }
 
     if !changed {
-        return Ok(RekeyFollow { updated: None, self_removed: false });
+        return Ok(RekeyFollow { updated: None, self_removed: false, dissolved: false });
     }
     if !session.is_valid() {
         return Err("account changed during rekey follow".to_string());
@@ -2885,10 +2903,10 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
     // A leave/delete raced this follow: saving would resurrect the community row
     // (the save is an upsert) with no floor rows behind it.
     if crate::db::community::community_protocol(community.id())?.is_none() {
-        return Ok(RekeyFollow { updated: None, self_removed: false });
+        return Ok(RekeyFollow { updated: None, self_removed: false, dissolved: false });
     }
     crate::db::community::save_community_v2(&cur)?;
-    Ok(RekeyFollow { updated: Some(cur), self_removed: false })
+    Ok(RekeyFollow { updated: Some(cur), self_removed: false, dissolved: false })
 }
 
 /// One scope's catch-up decision from the rekey chunks fetched at its next-epoch
@@ -4489,6 +4507,40 @@ mod tests {
         dissolve_community(&transport, &refounded).await.expect("dissolve");
         log("[dissolve] community sealed".to_string());
         log("===== LIVE e2e PASS =====".to_string());
+    }
+
+    #[tokio::test]
+    async fn an_offline_member_learns_of_a_dissolution_on_catch_up() {
+        // The tombstone rides its own public plane, watched live — an OFFLINE
+        // member's catch-up must fetch it too, or they follow (and post into) a
+        // grave forever.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Doomed", bed.relays.clone(), None).await.unwrap();
+        let general = community.channels[0].id;
+        send_direct_invite(&bed.relay, &community, &member.keys.public_key(), None, None).await.unwrap();
+
+        bed.swap_to(&member);
+        let invite_wrap = fetch_direct_invite(&bed.relay, &bed.relays, &member.keys.public_key()).await;
+        let joined = accept_direct_invite(&bed.relay, &invite_wrap).await.unwrap();
+
+        // The owner dissolves while the member sleeps.
+        bed.swap_to(&owner);
+        dissolve_community(&bed.relay, &community).await.unwrap();
+
+        // The member's catch-up learns of the death, seals, and refuses to post.
+        bed.swap_to(&member);
+        let session = SessionGuard::capture();
+        let follow = follow_rekeys(&bed.relay, &joined, &session).await.unwrap();
+        assert!(follow.dissolved, "the catch-up surfaces the tombstone");
+        assert!(!follow.self_removed && follow.updated.is_none());
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&joined.id().0);
+        assert!(crate::db::community::get_community_dissolved(&cid_hex).unwrap(), "sealed read-only locally");
+        let err = send_message(&bed.relay, &joined, &general, "into the void").await.unwrap_err();
+        assert!(err.contains("dissolved"), "sends refuse a grave: {err}");
+        // Subsequent follows take the local fast path — still dissolved, no churn.
+        let again = follow_rekeys(&bed.relay, &joined, &session).await.unwrap();
+        assert!(again.dissolved && again.updated.is_none());
     }
 
     #[tokio::test]

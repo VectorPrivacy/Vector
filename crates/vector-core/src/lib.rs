@@ -1904,6 +1904,8 @@ impl VectorCore {
         };
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&id.0);
         match crate::community::v2::service::follow_rekeys(&transport, &community, &session).await {
+            // A tombstone surfaced during catch-up — sealed read-only; stop here.
+            Ok(f) if f.dissolved => return warnings,
             Ok(f) if f.self_removed => {
                 // An authorized rotation that excluded us IS a removal — but the
                 // follow straddled awaits, so never delete from a swapped-in DB.
@@ -1956,9 +1958,22 @@ impl VectorCore {
             &ch,
             limit.max(50),
             MAX_BACKFILL_PAGES,
-            // Keep paging while a page still contains something we don't hold; a page
-            // of only-known rumors means we've reached our own history.
-            |page| page.iter().any(|f| !crate::db::events::event_exists(&f.event.opened().rumor_id.to_hex()).unwrap_or(false)),
+            // Keep paging while a page still contains a MESSAGE we don't hold; a page
+            // whose messages are all known means we've reached our own history. Only
+            // message kinds get their own rows (reactions/edits fold into their
+            // targets), so a page with no messages is undecidable — keep paging.
+            |page| {
+                let mut saw_message = false;
+                for f in page {
+                    if matches!(&f.event, crate::community::v2::chat::ChatEvent::Message { .. }) {
+                        saw_message = true;
+                        if !crate::db::events::event_exists(&f.event.opened().rumor_id.to_hex()).unwrap_or(false) {
+                            return true;
+                        }
+                    }
+                }
+                !saw_message
+            },
         )
         .await
         else {

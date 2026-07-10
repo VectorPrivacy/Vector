@@ -384,6 +384,15 @@ async fn follow_community(session: &SessionGuard, id: &CommunityId, handler: &dy
         return; // community gone (left / removed).
     };
     match super::service::follow_rekeys(&transport, &current, session).await {
+        // A tombstone surfaced during catch-up (an offline member learning of a
+        // death) — the flag is set; seal + surface, and stop following.
+        Ok(follow) if follow.dissolved => {
+            if !session.is_valid() {
+                return;
+            }
+            handler.on_community_dissolved(&community_id);
+            return;
+        }
         Ok(follow) if follow.self_removed => {
             if !session.is_valid() {
                 return;
