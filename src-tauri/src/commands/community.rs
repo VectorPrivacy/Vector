@@ -119,14 +119,52 @@ fn summarize(community: &vector_core::community::Community) -> CommunitySummary 
     }
 }
 
+/// The [`CommunitySummary`] for a **v2** community — the owner is the
+/// self-certifying `community_id` commitment (no v1 attestation), and a public
+/// v2 channel has no independent key.
+fn summarize_v2(c: &vector_core::community::v2::community::CommunityV2) -> CommunitySummary {
+    use nostr_sdk::prelude::ToBech32;
+    let me = vector_core::my_public_key();
+    let owner = c.owner().ok();
+    CommunitySummary {
+        community_id: vector_core::simd::hex::bytes_to_hex_32(&c.identity.community_id.0),
+        name: c.name.clone(),
+        description: c.description.clone(),
+        is_owner: matches!((me, owner), (Some(m), Some(o)) if m == o),
+        has_icon: false,
+        channels: c
+            .channels
+            .iter()
+            .map(|ch| ChannelSummary {
+                channel_id: vector_core::simd::hex::bytes_to_hex_32(&ch.id.0),
+                name: ch.name.clone(),
+            })
+            .collect(),
+        owner_npub: owner.and_then(|pk| pk.to_bech32().ok()),
+        dissolved: c.dissolved,
+        preloaded: false,
+    }
+}
+
+/// Protocol-aware summary by community id — the shared read path for
+/// list/get/join surfaces.
+fn summarize_any(id: &CommunityId) -> Option<CommunitySummary> {
+    match vector_core::db::community::community_protocol(id).ok().flatten() {
+        Some(vector_core::community::ConcordProtocol::V2) => {
+            vector_core::db::community::load_community_v2(id).ok().flatten().map(|c| summarize_v2(&c))
+        }
+        _ => vector_core::db::community::load_community(id).ok().flatten().map(|c| summarize(&c)),
+    }
+}
+
 /// List every Community the local user holds (owned or joined), for the chat list.
 #[tauri::command]
 pub async fn list_communities() -> Result<Vec<CommunitySummary>, String> {
     let ids = vector_core::db::community::list_community_ids()?;
     let mut out = Vec::with_capacity(ids.len());
     for id in ids {
-        if let Some(c) = vector_core::db::community::load_community(&id)? {
-            out.push(summarize(&c));
+        if let Some(summary) = summarize_any(&id) {
+            out.push(summary);
         }
     }
     Ok(out)
@@ -382,9 +420,7 @@ async fn set_member_banned(community_id: &str, npub: &str, banned: bool) -> Resu
 #[tauri::command]
 pub async fn get_community(community_id: String) -> Result<CommunitySummary, String> {
     let id_bytes = hex_to_id32(&community_id)?;
-    let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
-        .ok_or("Community not found")?;
-    Ok(summarize(&community))
+    summarize_any(&CommunityId(id_bytes)).ok_or_else(|| "Community not found".to_string())
 }
 
 /// Leave a Community: drop all local state (keys, channels, invites) and stop
@@ -624,6 +660,36 @@ pub async fn send_community_message(
     let community_id = vector_core::db::community::community_id_for_channel(&channel_id)?
         .ok_or("Unknown Community channel")?;
     let id_bytes = hex_to_id32(&community_id)?;
+
+    // Dual-stack: a v2 channel routes through the facade (v2 seal + publish +
+    // STATE/DB echo). The echo is emit-silent (bots must not receive their own
+    // sends), so surface it to the frontend here. No pre-network optimistic
+    // bubble for v2 yet — the message renders on send-complete.
+    if matches!(
+        vector_core::db::community::community_protocol(&CommunityId(id_bytes)).ok().flatten(),
+        Some(vector_core::community::ConcordProtocol::V2)
+    ) {
+        use vector_core::sending::SendCallback;
+        let callback = crate::message::sending::TauriSendCallback;
+        let sent_id = vector_core::VectorCore
+            .send_community_message(&channel_id, &content, reply.as_deref())
+            .await
+            .map_err(|e| e.to_string())?;
+        if !session.is_valid() {
+            return Ok(());
+        }
+        let echoed = {
+            let st = vector_core::state::STATE.lock().await;
+            st.find_message(&sent_id).map(|(_, m)| m.clone())
+        };
+        if let Some(msg) = echoed {
+            callback.on_pending(&channel_id, &msg);
+            callback.on_sent(&channel_id, &sent_id, &msg);
+            callback.on_persist(&channel_id, &msg);
+        }
+        return Ok(());
+    }
+
     let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
         .ok_or("Community not found")?;
     let channel = community
@@ -1255,6 +1321,30 @@ async fn sync_community_channel_inner(
     let community_id = vector_core::db::community::community_id_for_channel(channel_id)?
         .ok_or("Unknown Community channel")?;
     let id_bytes = hex_to_id32(&community_id)?;
+
+    // Dual-stack: a v2 channel catches up through the facade (consensus refold +
+    // chat backfill into the shared events tables). The frontend re-queries
+    // get_messages from those tables, so the page renders identically to v1.
+    if matches!(
+        vector_core::db::community::community_protocol(&CommunityId(id_bytes)).ok().flatten(),
+        Some(vector_core::community::ConcordProtocol::V2)
+    ) {
+        let limit: usize = 50;
+        let new = vector_core::VectorCore
+            .sync_community_channel(channel_id, limit)
+            .await
+            .map(|(n, _warnings)| n)
+            .unwrap_or(0);
+        if !session.is_valid() {
+            return Ok(CommunitySyncResult::default());
+        }
+        // A short page means we reached the channel's start; emit a refresh so the
+        // frontend re-queries the backfilled DB rows.
+        let reached_start = new < limit;
+        vector_core::emit_event("community_channel_synced", &serde_json::json!({ "channel_id": channel_id }));
+        return Ok(CommunitySyncResult { new_messages: new as u32, reached_start, oldest_ms: None });
+    }
+
     let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
         .ok_or("Community not found")?;
     // Epochs the realtime subscription is currently pinned to (it was built from the DB's last-synced
@@ -1868,18 +1958,59 @@ pub async fn sync_communities_boot() -> Result<(), String> {
         return Ok(());
     }
 
+    // v2 cross-device discovery: fold the 13302 Community List (a community joined
+    // on another device auto-appears here) + enqueue a refold per held v2
+    // community. Bootstrapped from the client's connected relays so even a fresh
+    // device holding no v2 community yet can find one.
+    {
+        use vector_core::community::{transport::LiveTransport, v2::service as v2};
+        let bootstrap: Vec<String> = match vector_core::state::nostr_client() {
+            Some(client) => client.relays().await.keys().map(|r| r.to_string()).collect(),
+            None => Vec::new(),
+        };
+        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+        if let Ok(joined) = v2::sync_community_list(&transport, &bootstrap).await {
+            for c in &joined {
+                vector_core::community::v2::realtime::enqueue_follow(c.id());
+            }
+            if !joined.is_empty() {
+                if let Some(client) = vector_core::state::nostr_client() {
+                    vector_core::community::v2::realtime::refresh_subscription(&client).await;
+                }
+            }
+        }
+        for c in vector_core::community::v2::realtime::load_held_v2() {
+            vector_core::community::v2::realtime::enqueue_follow(c.id());
+        }
+    }
+    if !session.is_valid() {
+        return Ok(());
+    }
+
     // Newest-message time per chat, for activity ordering.
     let last_msgs = crate::db::get_all_chats_last_messages().await.unwrap_or_default();
     let activity = |cid: &str| -> u64 {
         last_msgs.get(cid).and_then(|v| v.first().map(|m| m.at)).unwrap_or(0)
     };
 
-    // Flatten every joined Community's channels.
+    // Flatten every joined Community's channels (protocol-agnostic: a v2 community
+    // must load through its own reader, not the v1 one).
     let mut channels: Vec<String> = Vec::new();
     for id in vector_core::db::community::list_community_ids()? {
-        if let Ok(Some(community)) = vector_core::db::community::load_community(&id) {
-            for ch in &community.channels {
-                channels.push(ch.id.to_hex());
+        match vector_core::db::community::community_protocol(&id).ok().flatten() {
+            Some(vector_core::community::ConcordProtocol::V2) => {
+                if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&id) {
+                    for ch in &c.channels {
+                        channels.push(vector_core::simd::hex::bytes_to_hex_32(&ch.id.0));
+                    }
+                }
+            }
+            _ => {
+                if let Ok(Some(community)) = vector_core::db::community::load_community(&id) {
+                    for ch in &community.channels {
+                        channels.push(ch.id.to_hex());
+                    }
+                }
             }
         }
     }
@@ -2429,6 +2560,20 @@ pub async fn accept_community_invite(community_id: String) -> Result<CommunitySu
     // rejected accept must leave the invite parked so the user can retry or decline.
     let bundle_json = vector_core::db::community::get_pending_invite(&community_id)?
         .ok_or("No pending invite for that Community")?;
+
+    // Dual-stack: a parked v2 Direct-Invite bundle self-describes (owner_salt +
+    // community_root), so a successful v2 parse routes to the facade accept
+    // (verify + join + subscribe). The v1 parser would misparse it.
+    if vector_core::community::v2::invite::CommunityInvite::from_bundle_json(&bundle_json).is_ok() {
+        let summary = vector_core::VectorCore.accept_pending_invite(&community_id).await.map_err(|e| e.to_string())?;
+        let cid = summary
+            .get("community_id")
+            .or_else(|| summary.get("id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(&community_id);
+        let id_bytes = hex_to_id32(cid)?;
+        return summarize_any(&CommunityId(id_bytes)).ok_or_else(|| "accepted community not found".to_string());
+    }
     let invite = CommunityInvite::from_json(&bundle_json)?;
 
     // Guarded save (caps + owner/authority-collision checks + its own SessionGuard). On
@@ -2793,6 +2938,15 @@ pub struct PublicInvitePreviewInfo {
 /// Fetch + decrypt the preview for a public-invite URL (shown before joining). Read-only.
 #[tauri::command]
 pub async fn preview_public_invite(url: String) -> Result<PublicInvitePreviewInfo, String> {
+    // v2 link: the community id lives in the (encrypted) bundle, not the link, so
+    // a rich pre-join preview needs a fetch (a follow-up). For now a lightweight
+    // placeholder card; the accept fetches + fills the real metadata.
+    if vector_core::community::v2::invite::parse_invite_link(&url).is_ok() {
+        return Ok(PublicInvitePreviewInfo {
+            preview: PublicInvitePreview { name: "Concord community".into(), description: None, icon: None },
+            community_id: String::new(),
+        });
+    }
     let (relays, token) = parse_invite_url(&url).map_err(|e| e.to_string())?;
     let transport = LiveTransport::with_timeout(Duration::from_secs(12));
     let bundle = service::fetch_public_invite(&transport, &relays, &token).await?;
@@ -2834,6 +2988,19 @@ pub async fn preview_public_invite(url: String) -> Result<PublicInvitePreviewInf
 #[tauri::command]
 pub async fn accept_public_invite(url: String) -> Result<CommunitySummary, String> {
     let session = vector_core::state::SessionGuard::capture();
+    // Dual-stack: a v2 link (`…/invite/<naddr>#<fragment>`) routes through the
+    // facade join, which verifies the owner root, persists, registers chats,
+    // publishes the cross-device join, and starts the v2 planes.
+    if vector_core::community::v2::invite::parse_invite_link(&url).is_ok() {
+        let summary = vector_core::VectorCore.join_community(&url).await.map_err(|e| e.to_string())?;
+        let cid = summary
+            .get("community_id")
+            .or_else(|| summary.get("id"))
+            .and_then(|v| v.as_str())
+            .ok_or("v2 join returned no community id")?;
+        let id_bytes = hex_to_id32(cid)?;
+        return summarize_any(&CommunityId(id_bytes)).ok_or_else(|| "joined community not found".to_string());
+    }
     let (relays, token) = parse_invite_url(&url).map_err(|e| e.to_string())?;
     let transport = LiveTransport::with_timeout(Duration::from_secs(12));
     let bundle = service::fetch_public_invite(&transport, &relays, &token).await?;
