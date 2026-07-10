@@ -877,7 +877,7 @@ impl VectorCore {
     /// is captured by the caller BEFORE its network I/O, so this STATE write is
     /// skipped if the account swapped mid-flight (else we'd write A's community
     /// into B's in-memory chats).
-    async fn register_v2_chats(&self, community: &crate::community::v2::community::CommunityV2, session: &state::SessionGuard) {
+    pub async fn register_v2_chats(&self, community: &crate::community::v2::community::CommunityV2, session: &state::SessionGuard) {
         let owner_npub = community.owner().ok().and_then(|p| ToBech32::to_bech32(&p).ok());
         let me = state::my_public_key();
         let is_owner = me.is_some_and(|m| community.owner().is_ok_and(|o| o == m));

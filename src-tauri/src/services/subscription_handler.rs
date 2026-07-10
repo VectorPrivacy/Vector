@@ -143,6 +143,19 @@ async fn handle_community_event(
     vector_core::community::realtime::dispatch_event(session, event, handler).await;
 }
 
+/// v2 twin of [`handle_community_event`]: the same Tauri handler surface fed by
+/// the v2 dispatcher (authors-addressed 1059/21059 wraps → open → route →
+/// persist-gated callbacks), so a v2 message emits to the frontend identically
+/// to a v1 one.
+async fn handle_community_v2_event(
+    session: &vector_core::state::SessionGuard,
+    event: Event,
+) {
+    let handler: std::sync::Arc<dyn vector_core::InboundEventHandler> =
+        std::sync::Arc::new(super::event_handler::TauriEventHandler);
+    vector_core::community::v2::realtime::dispatch_event(session, event, handler).await;
+}
+
 /// Routes "straggler" community events — ones a slower relay returned after a racing
 /// `LiveTransport::fetch` already handed the caller the fast relay's batch — back through the SAME
 /// realtime ingest path. So a historical message, control edition, or rekey that only a slow relay
@@ -291,6 +304,18 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
     // account B's DB.
     let session = vector_core::state::SessionGuard::capture();
 
+    // v2 stream-AUTH responder BEFORE any subscription: a gating relay issues ONE
+    // NIP-42 challenge per connection and the DM subscribe below consumes it via
+    // the user auto-auth — the responder must witness (and remember) it, or
+    // stream keys registered later can never authenticate and the v2 sub dies
+    // silently on gated relays.
+    vector_core::community::v2::streamauth::ensure_responder(&client);
+    // The single v2 follow worker (control/rekey refolds) — same Tauri handler
+    // surface as live dispatch, so a refold emits to the frontend identically.
+    vector_core::community::v2::realtime::spawn_follow_worker(std::sync::Arc::new(
+        super::event_handler::TauriEventHandler,
+    ));
+
     // GiftWrap subscription via vector-core (DMs, files)
     let core = vector_core::VectorCore;
     let gift_sub_id = core.subscribe_dms().await.map_err(|e| e.to_string())?;
@@ -298,9 +323,47 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
     // Community (kind-3300) subscription — scoped to our channels' epoch pseudonyms.
     refresh_community_subscription().await;
 
+    // v2 plane subscription (authors-addressed wraps) + boot catch-up: enqueue a
+    // refold per held v2 community so anything missed offline (rotations, control
+    // edits, messages) folds in — coalesced, drained by the worker off this path.
+    vector_core::community::v2::realtime::refresh_subscription(&client).await;
+    for c in vector_core::community::v2::realtime::load_held_v2() {
+        vector_core::community::v2::realtime::enqueue_follow(c.id());
+    }
+
     // Self-sync subscription — our own replaceable settings lists (Community List + emoji list). Covers
     // boot, reconnect, AND instant cross-device in one open subscription.
     subscribe_self_sync().await;
+
+    // v2 reconnect catch-up: a `limit(0)` sub never replays what a relay missed
+    // while down, so each Connected transition enqueues a refold + re-tracks the
+    // subs at the current epochs (debounced across a reconnect burst). v1 leans
+    // on open-sub replay; v2's consensus planes need the explicit fold.
+    if let Some(monitor) = client.monitor() {
+        let mut rx = monitor.subscribe();
+        let monitor_session = vector_core::state::SessionGuard::capture();
+        tokio::spawn(async move {
+            let mut last: Option<std::time::Instant> = None;
+            while let Ok(n) = rx.recv().await {
+                if !monitor_session.is_valid() {
+                    return;
+                }
+                let MonitorNotification::StatusChanged { status, .. } = n;
+                if status == RelayStatus::Connected {
+                    if last.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(3)) {
+                        continue;
+                    }
+                    for c in vector_core::community::v2::realtime::load_held_v2() {
+                        vector_core::community::v2::realtime::enqueue_follow(c.id());
+                    }
+                    if let Some(c) = crate::nostr_client() {
+                        vector_core::community::v2::realtime::refresh_subscription(&c).await;
+                    }
+                    last = Some(std::time::Instant::now());
+                }
+            }
+        });
+    }
 
     // Notification loop: dispatch GiftWraps through Tauri's event handler,
     // Community messages through the Community handler.
@@ -322,6 +385,11 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                         // z-pseudonym, and process_incoming dedups by outer-event id, so handling every
                         // community event the pool surfaces is correct and idempotent.
                         handle_community_event(&session, *event).await;
+                    } else if k == 1059 || k == 21059 {
+                        // v2 wraps (plane-key authors). DM gift wraps matched the gift sub above;
+                        // any other wrap-kind event tries the v2 route — the dispatcher dedups by
+                        // wrap id and drops NotOurs (e.g. a stray DM copy on another sub) for free.
+                        handle_community_v2_event(&session, *event).await;
                     } else if SELFSYNC_SUB_IDS.lock().await.contains(&subscription_id) {
                         handle_self_sync_event(&session, *event).await;
                     }

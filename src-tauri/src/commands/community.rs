@@ -532,27 +532,46 @@ pub async fn create_community(
     }
     let channel_name = channel_name.unwrap_or_else(|| "general".to_string());
 
+    // New communities are Concord v2 (the upstream CORD stack); existing v1
+    // communities keep working through the dual-stack read/send paths.
+    let session = vector_core::state::SessionGuard::capture();
     let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-    let community =
-        service::create_community(&transport, &name, &channel_name, relays).await?;
+    let mut community =
+        vector_core::community::v2::service::create_community(&transport, &name, relays, None).await?;
 
-    let channel_id = community.channels[0].id.to_hex();
-    // Persist the channel chat(s) with display metadata so they load like any DM.
-    sync_community_chats(&community).await;
-    // record the join in the cross-device list so our other devices auto-join silently.
-    vector_core::community::list::add_membership(&community);
-    // Start receiving on the new channel.
-    crate::services::subscription_handler::refresh_community_subscription().await;
+    // Genesis mints the first channel as "general"; honor a custom name.
+    if channel_name != "general" {
+        if let Some(ch) = community.channels.first().cloned() {
+            let meta = vector_core::community::v2::control::ChannelMetadata {
+                name: channel_name.clone(),
+                private: false,
+                voice: None,
+                deleted: None,
+                custom: None,
+                extra: Default::default(),
+            };
+            vector_core::community::v2::service::edit_channel_metadata(&transport, &community, &ch.id, &meta).await?;
+            if let Ok(Some(fresh)) = vector_core::db::community::load_community_v2(community.id()) {
+                community = fresh;
+            }
+        }
+    }
 
-    // Proven owner npub (verified attestation) so the frontend can stamp the crown
-    // immediately, rather than waiting for the next reload to re-derive it.
-    let community_id = community.id.to_hex();
-    let owner_npub = community
-        .owner_attestation
-        .as_ref()
-        .and_then(|att| vector_core::community::owner::verify_owner_attestation(att, &community_id))
-        .and_then(|pk| pk.to_bech32().ok());
+    let community_id = vector_core::simd::hex::bytes_to_hex_32(&community.id().0);
+    let channel_id = community
+        .channels
+        .first()
+        .map(|ch| vector_core::simd::hex::bytes_to_hex_32(&ch.id.0))
+        .ok_or("created community has no channel")?;
+    // Surface the channel chat row(s) like any DM. (The v2 service already
+    // published the cross-device Community List during create.)
+    vector_core::VectorCore.register_v2_chats(&community, &session).await;
+    // Start receiving on the new planes.
+    if let Some(client) = crate::nostr_client() {
+        vector_core::community::v2::realtime::refresh_subscription(&client).await;
+    }
 
+    let owner_npub = community.owner().ok().and_then(|pk| pk.to_bech32().ok());
     Ok(CreatedCommunity { community_id, channel_id, owner_npub })
 }
 

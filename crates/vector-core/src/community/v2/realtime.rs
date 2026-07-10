@@ -368,7 +368,7 @@ pub async fn dispatch_event(session: &SessionGuard, event: Event, handler: Arc<d
 /// Whether a live follow worker is draining the queue (a `listen()` is running).
 /// Headless callers use this to run a follow inline instead of enqueueing into
 /// the void.
-pub(crate) fn follow_worker_running() -> bool {
+pub fn follow_worker_running() -> bool {
     V2_FOLLOW_TX.lock().unwrap().as_ref().map(|tx| !tx.is_closed()).unwrap_or(false)
 }
 
@@ -377,7 +377,7 @@ pub(crate) fn follow_worker_running() -> bool {
 /// no-op if no worker is running (no live `listen()`). Callers: dispatch,
 /// boot/reconnect catch-up, manual sync — none of them block or touch a lock for
 /// longer than the enqueue.
-pub(crate) fn enqueue_follow(id: &CommunityId) {
+pub fn enqueue_follow(id: &CommunityId) {
     let mut pending = V2_FOLLOW_PENDING.lock().unwrap();
     if !pending.insert(id.0) {
         return; // already queued or processing — coalesce.
@@ -394,7 +394,7 @@ pub(crate) fn enqueue_follow(id: &CommunityId) {
 /// drains it, running one combined follow per community at a time. Replacing the
 /// sender (a re-`listen()`) or [`clear`] (a swap) closes the old channel so the old
 /// worker exits; the captured `SessionGuard` also stops it. Idempotent per session.
-pub(crate) fn spawn_follow_worker(handler: Arc<dyn InboundEventHandler>) {
+pub fn spawn_follow_worker(handler: Arc<dyn InboundEventHandler>) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CommunityId>();
     *V2_FOLLOW_TX.lock().unwrap() = Some(tx);
     V2_FOLLOW_PENDING.lock().unwrap().clear();
