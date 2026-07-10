@@ -100,7 +100,7 @@ pub async fn create_community<T: Transport + ?Sized>(
     }
 
     // Sync the new membership across devices (CORD-02 §8) — best-effort.
-    let _ = republish_community_list(transport).await;
+    let _ = republish_community_list(transport, Some(community.id())).await;
     Ok(community)
 }
 
@@ -651,7 +651,24 @@ pub async fn revoke_public_link<T: Transport + ?Sized>(transport: &T, community:
 pub async fn refresh_public_links<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<(), String> {
     let session = SessionGuard::capture();
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-    let Some(list) = fetch_invite_list(transport, &community.relays).await else {
+    // Fetch inline (not via fetch_invite_list) so a TRANSPORT FAILURE propagates as
+    // Err — the caller (a post-refounding refresh) must be able to retry, or live
+    // links keep serving the PRE-refound root and new joiners land on the dead
+    // epoch. A genuinely-empty list is Ok (nothing to refresh).
+    let me = local_keys()?;
+    let query = Query {
+        kinds: vec![super::kind::INVITE_LIST],
+        authors: vec![me.public_key().to_hex()],
+        limit: Some(4),
+        ..Default::default()
+    };
+    let events = transport.fetch(&query, &community.relays).await?;
+    let list = events
+        .into_iter()
+        .filter_map(|e| invite::parse_invite_list_event(&e, &me).ok().map(|l| (e.created_at.as_secs(), l)))
+        .max_by_key(|(at, _)| *at)
+        .map(|(_, l)| l);
+    let Some(list) = list else {
         return Ok(());
     };
     let creator = local_keys()?.public_key();
@@ -798,7 +815,7 @@ async fn accept_bundle<T: Transport + ?Sized>(
     }
 
     // Record the membership across devices (CORD-02 §8) — best-effort.
-    let _ = republish_community_list(transport).await;
+    let _ = republish_community_list(transport, Some(community.id())).await;
     Ok(community)
 }
 
@@ -1119,20 +1136,44 @@ pub async fn fetch_authority<T: Transport + ?Sized>(transport: &T, community: &C
 /// member whose Join was lost still counts.
 pub async fn memberlist<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<Vec<PublicKey>, String> {
     let gb_group = super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
-    let query = Query {
-        kinds: vec![stream::KIND_WRAP],
-        authors: vec![gb_group.pk_hex()],
-        limit: Some(500),
-        ..Default::default()
-    };
-    let wraps = transport.fetch(&query, &community.relays).await?;
+    // PAGE the Guestbook (bounded until-walk + wrap-id dedup): a single 500-window
+    // silently drops a member whose Join aged out (organic growth, or an insider
+    // flooding throwaway Joins), and `refound_community` consumes this list as its
+    // rekey recipient set — a dropped member is SEVERED. Beyond this depth a
+    // community needs sharding (documented); the granted-member union below is the
+    // consensus-complete backstop regardless of Guestbook depth.
+    const GB_PAGE: usize = 500;
+    const GB_MAX_PAGES: usize = 12;
     let owner = community.owner()?;
     let mut events = Vec::new();
-    for wrap in &wraps {
-        if let Ok(opened) = stream::open_wrap(wrap, &gb_group) {
-            if let Ok(ev) = guestbook::parse_guestbook_event(&opened) {
-                events.push(ev);
+    let mut seen: std::collections::HashSet<nostr_sdk::EventId> = std::collections::HashSet::new();
+    let mut until: Option<u64> = None;
+    let mut oldest: Option<u64> = None;
+    for _ in 0..GB_MAX_PAGES {
+        let query = Query { kinds: vec![stream::KIND_WRAP], authors: vec![gb_group.pk_hex()], until, limit: Some(GB_PAGE), ..Default::default() };
+        let wraps = transport.fetch(&query, &community.relays).await?;
+        let mut fresh = 0usize;
+        for wrap in &wraps {
+            if !seen.insert(wrap.id) {
+                continue;
             }
+            fresh += 1;
+            let at = wrap.created_at.as_secs();
+            if oldest.is_none_or(|o| at < o) {
+                oldest = Some(at);
+            }
+            if let Ok(opened) = stream::open_wrap(wrap, &gb_group) {
+                if let Ok(ev) = guestbook::parse_guestbook_event(&opened) {
+                    events.push(ev);
+                }
+            }
+        }
+        if fresh == 0 || wraps.len() < GB_PAGE {
+            break;
+        }
+        match oldest {
+            Some(o) if o > 0 => until = Some(o),
+            _ => break,
         }
     }
     // Observed authors: fold each held channel's recent authorship (real author +
@@ -1153,6 +1194,18 @@ pub async fn memberlist<T: Transport + ?Sized>(transport: &T, community: &Commun
     // and a missed ban only fails to HIDE, never to wrongly admit authority).
     let authority = fetch_authority(transport, community).await;
     let owner_hex = owner.to_hex();
+
+    // CONSENSUS-COMPLETE backstop: every member the folded roster GRANTS a role to
+    // is provably a member (a Grant binds member_xonly, CORD-02 A.6) — count them
+    // even if their Join aged out of the Guestbook entirely and they never posted.
+    // This is what keeps a Refounding from severing a lurking admin. `observed`
+    // carries them at ts 0 (presence, not recency); the banlist subtraction below
+    // still removes a banned grantee whose grant wasn't yet stripped.
+    for g in &authority.roles.grants {
+        if let Some(pk) = PublicKey::from_hex(&g.member).ok().filter(|_| !g.role_ids.is_empty()) {
+            observed.entry(pk).or_insert(0);
+        }
+    }
 
     // Snapshot authority (CORD-02 §5): a refounding rolls `root_epoch` and re-seeds the
     // new epoch's Guestbook with a 3312 snapshot of the survivors. Refounding is OWNER-only,
@@ -1464,8 +1517,20 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
         crate::db::community::set_edition_head_at_epoch(&cid_hex, &h.entity_hex, h.version, &h.self_hash, &h.inner_id, new_epoch.0)?;
     }
     // Refresh any live public links so their bundles carry the NEW root behind the
-    // same URL (a link shared once survives the rotation, CORD-05 §2). Best-effort.
-    let _ = refresh_public_links(transport, &updated).await;
+    // same URL (a link shared once survives the rotation, CORD-05 §2). Idempotent,
+    // so retry a transient failure — a stranded link lands a new joiner on the dead
+    // pre-refound epoch, and there's no other trigger to heal it before the next
+    // refounding. A persistent failure is logged (refound already succeeded).
+    for attempt in 0..3u8 {
+        match refresh_public_links(transport, &updated).await {
+            Ok(()) => break,
+            Err(_) if !session.is_valid() => break, // swapped — stop touching this account
+            Err(e) if attempt == 2 => {
+                crate::log_warn!("v2: post-refounding public-link refresh failed after retries ({e}); live links may serve the prior root until the next refresh");
+            }
+            Err(_) => continue,
+        }
+    }
     Ok(updated)
 }
 
@@ -1556,34 +1621,48 @@ fn held_v2_relays() -> Vec<String> {
 
 /// Fetch this account's own 13302 Community List from `relays` (the newest wins;
 /// a decrypt/parse failure is "no news", never a clobber of the local mirror).
-async fn fetch_community_list<T: Transport + ?Sized>(transport: &T, relays: &[String]) -> Option<super::list::CommunityList> {
-    let me = local_keys().ok()?;
+/// Fetch this account's newest 13302 list. `Err` = the transport FAILED (a caller
+/// must NOT drive a replaceable-event write from a failed read — it would clobber
+/// the live list); `Ok(None)` = genuinely no list yet; `Ok(Some)` = the list.
+async fn fetch_community_list<T: Transport + ?Sized>(transport: &T, relays: &[String]) -> Result<Option<super::list::CommunityList>, String> {
+    let me = local_keys()?;
     let query = Query {
         kinds: vec![super::kind::COMMUNITY_LIST],
         authors: vec![me.public_key().to_hex()],
         limit: Some(4),
         ..Default::default()
     };
-    let events = transport.fetch(&query, relays).await.ok()?;
-    events
+    let events = transport.fetch(&query, relays).await?;
+    Ok(events
         .into_iter()
         .filter_map(|e| super::list::parse_list_event(&e, &me).ok().map(|l| (e.created_at.as_secs(), l)))
         .max_by_key(|(at, _)| *at)
-        .map(|(_, l)| l)
+        .map(|(_, l)| l))
 }
 
 /// Rebuild this account's 13302 from its held v2 communities, MERGE with the remote
 /// copy (preserving tombstones, other-device entries, unknown fields), and publish.
-/// Idempotent; called after any membership change. Best-effort — a list-publish
-/// failure never fails the membership change itself.
-pub async fn republish_community_list<T: Transport + ?Sized>(transport: &T) -> Result<(), String> {
+/// `just_joined` is the community THIS call is recording a create/join for — the
+/// ONLY community whose entry is (re)stamped `now`, so it beats any prior tombstone
+/// (a deliberate re-join resurrects). Every OTHER held community that the remote
+/// has tombstoned is left tombstoned (a sibling device's leave is NOT undone just
+/// because we joined something else — the W1 resurrection hole). Idempotent;
+/// best-effort — a list-publish failure never fails the membership change itself.
+pub async fn republish_community_list<T: Transport + ?Sized>(transport: &T, just_joined: Option<&crate::community::CommunityId>) -> Result<(), String> {
     let session = SessionGuard::capture();
     let me = local_keys()?;
     let relays = held_v2_relays();
     if relays.is_empty() {
         return Ok(()); // nothing held → nothing to sync
     }
-    let remote = fetch_community_list(transport, &relays).await.unwrap_or_default();
+    // A FAILED remote fetch must not drive this replaceable-event write: publishing
+    // a list built without the remote seeds would drop older-epoch backfill anchors
+    // and re-stamp add-times (the W2 seed-regression + a resurrection window).
+    let remote = match fetch_community_list(transport, &relays).await {
+        Ok(r) => r.unwrap_or_default(),
+        Err(_) => return Ok(()),
+    };
+    let just_joined_hex = just_joined.map(|c| crate::simd::hex::bytes_to_hex_32(&c.0));
     let now = now_ms();
     let mut local = super::list::CommunityList::default();
     for id in crate::db::community::list_community_ids()? {
@@ -1592,9 +1671,16 @@ pub async fn republish_community_list<T: Transport + ?Sized>(transport: &T) -> R
         }
         let Some(c) = crate::db::community::load_community_v2(&id)? else { continue };
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&c.id().0);
-        // Keep an already-live entry's add time (no churn); a new or previously-left
-        // (now re-held) community adds/resurrects at `now`.
-        let added_at = if remote.is_live(&cid_hex) {
+        let is_join = just_joined_hex.as_deref() == Some(cid_hex.as_str());
+        // A held community the remote has tombstoned (a sibling device left it) that
+        // we are NOT currently (re)joining stays LEFT — don't re-add it, or joining a
+        // different community would silently undo the leave everywhere.
+        if !is_join && !remote.is_live(&cid_hex) && remote.tombstones.iter().any(|t| t.community_id == cid_hex) {
+            continue;
+        }
+        // Keep an already-live entry's add time (no churn); the joined community (or a
+        // genuinely-new one) stamps `now` so a re-join beats a stale tombstone.
+        let added_at = if remote.is_live(&cid_hex) && !is_join {
             remote.entries.iter().find(|e| e.community_id == cid_hex).map(|e| e.added_at).unwrap_or(now)
         } else {
             now
@@ -1616,7 +1702,13 @@ pub async fn republish_community_list<T: Transport + ?Sized>(transport: &T) -> R
 async fn tombstone_community_list<T: Transport + ?Sized>(transport: &T, community_id: &crate::community::CommunityId, relays: &[String]) -> Result<(), String> {
     let me = local_keys()?;
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community_id.0);
-    let mut doc = fetch_community_list(transport, relays).await.unwrap_or_default();
+    // A failed fetch here would drop other communities' entries (only the
+    // tombstone would survive); preserve them by bailing — the leave re-records
+    // on the next attempt, and the local teardown already happened.
+    let mut doc = match fetch_community_list(transport, relays).await {
+        Ok(d) => d.unwrap_or_default(),
+        Err(e) => return Err(e),
+    };
     let now = now_ms();
     doc.tombstones.retain(|t| t.community_id != cid_hex);
     doc.tombstones.push(super::list::Tombstone { community_id: cid_hex, removed_at: now, extra: Default::default() });
@@ -1639,9 +1731,29 @@ pub async fn sync_community_list<T: Transport + ?Sized>(transport: &T, bootstrap
     if relays.is_empty() {
         return Ok(vec![]);
     }
-    let Some(list) = fetch_community_list(transport, &relays).await else {
-        return Ok(vec![]);
+    let list = match fetch_community_list(transport, &relays).await {
+        Ok(Some(l)) => l,
+        Ok(None) | Err(_) => return Ok(vec![]),
     };
+    // Receive-side teardown (the counterpart to the republish tombstone guard):
+    // a community this device still holds but the synced list shows TOMBSTONED (a
+    // sibling device left it) and NOT live gets torn down here, so a leave on one
+    // device propagates to the others. A re-join would have re-added it live
+    // (beating the tombstone), so is_live short-circuits the honest case.
+    for t in &list.tombstones {
+        if list.is_live(&t.community_id) {
+            continue;
+        }
+        let Some(cid) = crate::simd::hex::hex_to_bytes_32_checked(&t.community_id) else { continue };
+        let id = crate::community::CommunityId(cid);
+        if crate::db::community::load_community_v2(&id).ok().flatten().is_none() {
+            continue; // not held — nothing to tear down
+        }
+        if !session.is_valid() {
+            return Err("account changed during community-list sync".to_string());
+        }
+        let _ = crate::db::community::delete_community(&t.community_id);
+    }
     let mut joined = Vec::new();
     for entry in list.live_entries() {
         let Some(cid) = crate::simd::hex::hex_to_bytes_32_checked(&entry.community_id) else { continue };
@@ -5752,6 +5864,167 @@ mod tests {
         // A rename of the same public channel still works.
         let meta = control::ChannelMetadata { name: "lobby".into(), private: false, voice: None, deleted: None, custom: None, extra: Default::default() };
         edit_channel_metadata(&relay, &community, &general, &meta).await.unwrap();
+    }
+
+    /// Publish a 13302 (signed by `me`) carrying a leave tombstone for `cid_hex` at
+    /// `removed_at` — simulating a sibling device having left that community.
+    async fn publish_remote_tombstone(relay: &MemoryRelay, me: &Keys, relays: &[String], cid_hex: &str, removed_at: u64) {
+        let doc = super::super::list::CommunityList {
+            entries: vec![],
+            tombstones: vec![super::super::list::Tombstone { community_id: cid_hex.to_string(), removed_at, extra: Default::default() }],
+            extra: Default::default(),
+        };
+        let event = super::super::list::build_list_event(me, &doc).unwrap();
+        relay.publish(&event, relays).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn joining_one_community_does_not_resurrect_a_sibling_left_community() {
+        // W1 (send side): a sibling device left X (a remote tombstone). Joining a
+        // DIFFERENT community must not re-add X to the 13302 with added_at=now,
+        // which would silently undo the leave everywhere.
+        let (_tmp, _guard, me) = init_test_db();
+        let relay = MemoryRelay::new();
+        let x = create_community(&relay, "X", vec!["wss://r".into()], None).await.unwrap();
+        let x_hex = crate::simd::hex::bytes_to_hex_32(&x.id().0);
+
+        // A sibling leaves X: a remote tombstone strictly newer than X's add.
+        publish_remote_tombstone(&relay, &me, &x.relays, &x_hex, now_ms() + 10_000).await;
+
+        // Now join a different community Y → republish(just_joined = Y).
+        let y = create_community(&relay, "Y", vec!["wss://r".into()], None).await.unwrap();
+        republish_community_list(&relay, Some(y.id())).await.unwrap();
+
+        // X must still read as LEFT in the published list; Y must be live.
+        let list = fetch_community_list(&relay, &x.relays).await.unwrap().unwrap();
+        assert!(!list.is_live(&x_hex), "joining Y did not resurrect the sibling-left X");
+        assert!(list.is_live(&crate::simd::hex::bytes_to_hex_32(&y.id().0)), "Y is live");
+    }
+
+    #[tokio::test]
+    async fn sync_tears_down_a_community_a_sibling_left() {
+        // W1 (receive side): a community still held locally that the synced 13302
+        // shows tombstoned-and-not-live is torn down, so a leave propagates.
+        let (_tmp, _guard, me) = init_test_db();
+        let relay = MemoryRelay::new();
+        let x = create_community(&relay, "Leaveme", vec!["wss://r".into()], None).await.unwrap();
+        let x_hex = crate::simd::hex::bytes_to_hex_32(&x.id().0);
+        assert!(crate::db::community::load_community_v2(x.id()).unwrap().is_some(), "held before sync");
+
+        publish_remote_tombstone(&relay, &me, &x.relays, &x_hex, now_ms() + 10_000).await;
+        sync_community_list(&relay, &x.relays).await.unwrap();
+        assert!(crate::db::community::load_community_v2(x.id()).unwrap().is_none(), "the sibling's leave tore X down locally");
+    }
+
+    #[tokio::test]
+    async fn a_rejoined_community_survives_a_stale_tombstone_on_sync() {
+        // The re-join case must NOT be torn down: a fresh join re-adds live (beating
+        // the tombstone), so a later sync keeps it.
+        let (_tmp, _guard, me) = init_test_db();
+        let relay = MemoryRelay::new();
+        let x = create_community(&relay, "Rejoin", vec!["wss://r".into()], None).await.unwrap();
+        let x_hex = crate::simd::hex::bytes_to_hex_32(&x.id().0);
+        // A stale tombstone from a prior leave (OLDER than the current hold's re-add).
+        publish_remote_tombstone(&relay, &me, &x.relays, &x_hex, 1).await;
+        // Re-record the membership (a re-join) → live entry at now >> 1.
+        republish_community_list(&relay, Some(x.id())).await.unwrap();
+        sync_community_list(&relay, &x.relays).await.unwrap();
+        assert!(crate::db::community::load_community_v2(x.id()).unwrap().is_some(), "a re-joined community is not torn down by a stale tombstone");
+    }
+
+    #[tokio::test]
+    async fn a_failed_remote_fetch_never_clobbers_the_published_list() {
+        // W2: a transient fetch failure during republish must not drive the
+        // replaceable-event write (which would drop other entries / regress seeds).
+        let (_tmp, _guard, _me) = init_test_db();
+        let good = MemoryRelay::new();
+        let community = create_community(&good, "Seeded", vec!["wss://r".into()], None).await.unwrap();
+        assert!(fetch_community_list(&good, &community.relays).await.unwrap().is_some());
+
+        // A transport whose fetch always errors: republish must bail, publishing nothing.
+        struct FetchErrors;
+        #[async_trait::async_trait]
+        impl Transport for FetchErrors {
+            async fn publish(&self, _e: &Event, _r: &[String]) -> Result<(), String> {
+                panic!("republish must NOT publish when the remote fetch failed");
+            }
+            async fn publish_durable(&self, _e: &Event, _r: &[String]) -> Result<(), String> {
+                Ok(())
+            }
+            async fn fetch(&self, _q: &Query, _r: &[String]) -> Result<Vec<Event>, String> {
+                Err("relay unreachable".to_string())
+            }
+        }
+        // Returns Ok (best-effort) but must not have published (the panic guards it).
+        republish_community_list(&FetchErrors, Some(community.id())).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_granted_member_survives_a_refounding_even_with_no_guestbook_join() {
+        // B1 regression: refound_community's recipient set = memberlist. A member
+        // the owner GRANTED a role to but who never left a (surviving) Guestbook
+        // Join — a lurking admin, or one whose Join aged out of the window — must
+        // still be a rekey recipient, or the Refounding SEVERS them. The folded
+        // roster's granted members are the consensus-complete backstop.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Backstop", vec!["wss://r".into()], None).await.unwrap();
+
+        // A lurker gets an admin grant but publishes NO Guestbook Join and no chat.
+        let lurker = Keys::generate();
+        let rid = "b1".repeat(32);
+        publish_role(&relay, &community, &owner, &admin_role(&rid, Permissions::ADMIN_ALL), 1).await;
+        publish_grant(&relay, &community, &owner, &lurker.public_key(), vec![rid.clone()], 1).await;
+
+        // memberlist includes the lurker purely via the roster backstop.
+        let members = memberlist(&relay, &community).await.unwrap();
+        assert!(members.contains(&lurker.public_key()), "a granted member with no Join is still a member");
+
+        // A banned grantee whose grant wasn't stripped is NOT re-admitted.
+        let banned_grantee = Keys::generate();
+        publish_grant(&relay, &community, &owner, &banned_grantee.public_key(), vec![rid], 1).await;
+        set_banlist(&relay, &community, &[banned_grantee.public_key().to_hex()]).await.unwrap();
+        let members = memberlist(&relay, &community).await.unwrap();
+        assert!(members.contains(&lurker.public_key()), "the honest grantee still counts");
+        assert!(!members.contains(&banned_grantee.public_key()), "a banned grantee is not re-admitted by the union");
+
+        // And the Refounding actually delivers the new root to the lurker.
+        let refounded = refound_community(&relay, &community, &[]).await.unwrap();
+        assert_eq!(refounded.root_epoch, Epoch(1));
+        let base_group = base_rekey_group_key(&community.community_root, community.id(), Epoch(1));
+        let chunks = fetch_rekey_chunks(&relay, &community.relays, &base_group).await.unwrap();
+        let rotations = rekey::collect_rotations(&chunks);
+        let lurker_x = lurker.public_key().to_bytes();
+        let delivered = rotations.iter().any(|r| {
+            rekey::find_my_blob(&r.blobs, &r.rotator.to_bytes(), &lurker_x, r.scope, r.new_epoch).is_some()
+        });
+        assert!(delivered, "the Refounding delivered the new root to the granted lurker");
+    }
+
+    #[tokio::test]
+    async fn the_memberlist_pages_past_a_guestbook_flood() {
+        // The roleless-member half of B1: >500 Guestbook events must not evict an
+        // honest member's Join from the counted set (an insider can flood throwaway
+        // Joins to force exactly this). The pager sees them all.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "GBFlood", vec!["wss://r".into()], None).await.unwrap();
+        let gb = super::super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
+
+        // An honest member's Join (oldest), then 600 throwaway Joins on top.
+        let honest = Keys::generate();
+        let join = guestbook::build_join_rumor(honest.public_key(), None, 1_000);
+        let (w, _) = guestbook::seal_guestbook_rumor(&join, &gb, &honest, Timestamp::from_secs(1)).unwrap();
+        relay.publish(&w, &community.relays).await.unwrap();
+        for i in 0..600u64 {
+            let throwaway = Keys::generate();
+            let j = guestbook::build_join_rumor(throwaway.public_key(), None, 2_000 + i);
+            let (w, _) = guestbook::seal_guestbook_rumor(&j, &gb, &throwaway, Timestamp::from_secs(2 + i)).unwrap();
+            relay.publish(&w, &community.relays).await.unwrap();
+        }
+
+        let members = memberlist(&relay, &community).await.unwrap();
+        assert!(members.contains(&honest.public_key()), "the honest member's aged-out Join is still counted past the flood");
     }
 
     #[tokio::test]

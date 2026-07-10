@@ -597,6 +597,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_v2_message_with_an_imeta_attachment_surfaces_as_an_attachment() {
+        use nostr_sdk::prelude::Timestamp;
+        let (_tmp, _guard, me) = init();
+        let relay = MemoryRelay::new();
+        let community = service::create_community(&relay, "Files", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let cid = crate::simd::hex::bytes_to_hex_32(&general.0);
+        let group = super::super::derive::channel_group_key(&community.community_root, &general, community.root_epoch);
+        let session = crate::state::SessionGuard::capture();
+
+        // Build a valid NIP-92 imeta tag via the same encoder the v2 file pipeline
+        // uses, so the round-trip mirrors production exactly.
+        let attachment = crate::types::Attachment {
+            id: "a".repeat(64),
+            key: "0".repeat(64),
+            nonce: "1".repeat(32),
+            extension: "png".into(),
+            name: "photo.png".into(),
+            url: "https://blossom.example/abc".into(),
+            path: String::new(),
+            size: 4096,
+            img_meta: None,
+            downloading: false,
+            downloaded: false,
+            webxdc_topic: None,
+            group_id: None,
+            original_hash: Some("b".repeat(64)),
+            scheme_version: None,
+            mls_filename: None,
+        };
+        let imeta = crate::community::attachments::attachment_to_imeta(&attachment);
+        let member = Keys::generate();
+        let rumor = chat::build_message_rumor(member.public_key(), &general, community.root_epoch, "here's a file", None, &[], vec![imeta], 5_000);
+        let (wrap, _) = chat::seal_chat_rumor(&rumor, &group, &member, Timestamp::from_secs(5), false).unwrap();
+        let ev = chat::open_chat_event(&wrap, &group, &general, community.root_epoch).unwrap();
+
+        let outcome = persist_chat_event(&ev, &cid, &me.public_key(), &session).await;
+        let Some(ChatPersist::New(msg)) = outcome else {
+            panic!("the file message persists as new");
+        };
+        assert_eq!(msg.attachments.len(), 1, "the imeta tag parsed into one attachment");
+        let att = &msg.attachments[0];
+        assert!(att.url.contains("blossom.example"), "attachment url carried through: {}", att.url);
+        assert_eq!(att.extension, "png", "extension carried through");
+    }
+
+    #[tokio::test]
     async fn a_banned_members_every_chat_event_is_dropped_on_sight() {
         // CORD-04 §4: a banned npub vanishes — message, reaction, edit, delete,
         // typing, and presence alike. Severance only cuts their READ; this fold
