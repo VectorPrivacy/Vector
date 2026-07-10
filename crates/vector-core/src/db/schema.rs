@@ -766,7 +766,7 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
-    // Migration 65: Concord v2 dual-stack columns. A community is v1 (the shipped
+    // Migration 66: Concord v2 dual-stack columns. A community is v1 (the shipped
     // protocol) or v2 (the self-certifying-id CORD stack); the two coexist per
     // account. Existing rows default to v1. v2 stores the owner commitment inputs
     // (owner_pubkey + owner_salt reproduce the community_id) in place of v1's
@@ -774,7 +774,7 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // community_root/root_epoch (same base-key role, reused columns). A channel's
     // `private` flag selects v2 keying: public channels derive from the root (no
     // stored key), private ones carry an independent key.
-    run_atomic_migration(conn, 65, "Concord v2 dual-stack columns", |tx| {
+    run_atomic_migration(conn, 66, "Concord v2 dual-stack columns", |tx| {
         for (table, col, ddl) in [
             ("communities", "protocol", "INTEGER NOT NULL DEFAULT 1"),
             ("communities", "owner_pubkey", "TEXT"),
