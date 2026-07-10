@@ -8057,16 +8057,16 @@ select {
   font-size: 12px;
   font-weight: 600;
   color: #fff;
-  background: rgba(224, 97, 110, 0.18);
-  border: 1px solid rgba(224, 97, 110, 0.55);
+  background: color-mix(in srgb, var(--danger-color) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger-color) 55%, transparent);
   border-radius: 999px;
   cursor: pointer;
   transition: background 0.15s ease, border-color 0.15s ease;
 }
 
 #storage-donut-delete:hover {
-  background: rgba(224, 97, 110, 0.4);
-  border-color: #e0616e;
+  background: color-mix(in srgb, var(--danger-color) 40%, transparent);
+  border-color: var(--danger-color);
 }
 
 #storage-donut-delete:disabled {
