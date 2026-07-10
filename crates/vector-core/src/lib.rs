@@ -2631,6 +2631,14 @@ impl VectorCore {
         let my_pk = state::my_public_key()
             .ok_or(VectorError::Other("Not logged in".into()))?;
 
+        // Start the stream-AUTH responder BEFORE any relay interaction: a gating
+        // relay issues its NIP-42 challenge ONCE per connection, and the DM
+        // subscribe below consumes it via nostr-sdk's user auto-auth — if the
+        // responder isn't already watching, that challenge is never remembered
+        // and the stream keys registered later can NEVER authenticate (the relay
+        // won't re-challenge an authed connection; the v2 sub dies silently).
+        community::v2::streamauth::ensure_responder(&client);
+
         // Outage resilience — catch up on connect, then re-sync periodically.
         //
         // Catch up BEFORE going realtime so a bot that was offline folds any missed re-foundings /
