@@ -42,6 +42,37 @@ pub const KIND_BOT_MANIFEST: u16 = 33304;
 /// routing, not authority — bots authorize by SENDER, never by tag.
 pub const TAG_BOT: &str = "bot";
 
+/// Recipient tags honored per message (routing metadata must stay cheap).
+pub const MAX_BOT_TAGS: usize = 8;
+
+/// Build the recipient tag a picker attaches: `["bot", <hex>]`.
+pub fn bot_tag(bot: &nostr_sdk::prelude::PublicKey) -> Tag {
+    Tag::custom(nostr_sdk::prelude::TagKind::Custom(TAG_BOT.into()), [bot.to_hex()])
+}
+
+/// Extract the addressed bots from a rumor's tags as npubs (deduped, capped,
+/// invalid values skipped). Empty = untagged/broadcast.
+pub fn addressed_bots<'a, I: IntoIterator<Item = &'a Tag>>(tags: I) -> Vec<String> {
+    use nostr_sdk::prelude::ToBech32;
+    let mut out: Vec<String> = Vec::new();
+    for t in tags {
+        let s = t.as_slice();
+        if s.first().map(|k| k.as_str()) != Some(TAG_BOT) {
+            continue;
+        }
+        let Some(v) = s.get(1) else { continue };
+        let Ok(pk) = nostr_sdk::prelude::PublicKey::from_hex(v) else { continue };
+        let Ok(npub) = pk.to_bech32() else { continue };
+        if !out.contains(&npub) {
+            out.push(npub);
+        }
+        if out.len() >= MAX_BOT_TAGS {
+            break;
+        }
+    }
+    out
+}
+
 /// Bounds (validated on BOTH build and parse — a foreign manifest is untrusted
 /// input and must never cost unbounded memory or render work).
 pub const MAX_COMMANDS: usize = 64;
@@ -573,6 +604,29 @@ mod tests {
         assert!(parse_command_text(&m, "/unknown x").is_none());
         assert!(parse_command_text(&m, "not a command").is_none());
         assert!(parse_command_text(&m, "/").is_none());
+    }
+
+    #[test]
+    fn bot_recipient_tags_extract_dedup_and_cap() {
+        use nostr_sdk::prelude::ToBech32;
+        let a = Keys::generate().public_key();
+        let b = Keys::generate().public_key();
+        let tags: Vec<Tag> = vec![
+            bot_tag(&a),
+            bot_tag(&a), // dup
+            bot_tag(&b),
+            Tag::custom(nostr_sdk::prelude::TagKind::Custom(TAG_BOT.into()), ["nothex"]),
+            Tag::custom(nostr_sdk::prelude::TagKind::Custom("p".into()), [a.to_hex()]), // not ours
+        ];
+        let out = addressed_bots(tags.iter());
+        assert_eq!(out, vec![a.to_bech32().unwrap(), b.to_bech32().unwrap()]);
+
+        // Cap: 20 distinct tags → MAX_BOT_TAGS honored.
+        let many: Vec<Tag> = (0..20).map(|_| bot_tag(&Keys::generate().public_key())).collect();
+        assert_eq!(addressed_bots(many.iter()).len(), MAX_BOT_TAGS);
+
+        // Untagged → empty (broadcast).
+        assert!(addressed_bots([].iter()).is_empty());
     }
 
     #[test]

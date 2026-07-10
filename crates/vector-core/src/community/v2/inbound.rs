@@ -50,6 +50,7 @@ pub fn chat_message_to_message(
             .iter()
             .map(|(shortcode, url)| EmojiTag { shortcode: shortcode.clone(), url: url.clone() })
             .collect(),
+        addressed_bots: crate::bot_interface::addressed_bots(opened.rumor.tags.iter()),
         wrapper_event_id: Some(opened.wrapper_id.to_hex()),
         ..Default::default()
     }

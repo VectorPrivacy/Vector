@@ -1038,6 +1038,7 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
             npub: event.npub, wrapper_event_id: event.wrapper_event_id,
             edited, edit_history,
             emoji_tags,
+            addressed_bots: Vec::new(),
         });
     }
 
@@ -1299,6 +1300,7 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
             npub: event.npub, wrapper_event_id: event.wrapper_event_id,
             edited, edit_history,
             emoji_tags,
+            addressed_bots: Vec::new(),
         });
     }
 

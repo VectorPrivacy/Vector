@@ -45,6 +45,12 @@ pub struct Message {
     /// uses this map to swap `:shortcode:` for `<img>` before twemoji runs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub emoji_tags: Vec<EmojiTag>,
+    /// `["bot", <pubkey hex>]` recipient tags that travelled with the rumor
+    /// (bot-command addressing), surfaced as npubs. Empty = untagged/broadcast:
+    /// any matching bot may answer. Populated on live parse only (not persisted
+    /// — commands are actioned at delivery, never replayed from history).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub addressed_bots: Vec<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -75,6 +81,7 @@ impl Default for Message {
             edited: false,
             edit_history: None,
             emoji_tags: Vec::new(),
+            addressed_bots: Vec::new(),
         }
     }
 }
@@ -627,6 +634,7 @@ mod tests {
                 edited_at: 1699999999,
             }]),
             emoji_tags: Vec::new(),
+            addressed_bots: Vec::new(),
         };
 
         let json = serde_json::to_string(&msg).expect("serialize should succeed");

@@ -190,6 +190,13 @@ impl VectorBot {
         if incoming.is_mine() || self.commands().is_empty() {
             return false;
         }
+        // Recipient-tagged for other bot(s) only → ordinary chat for us, even on
+        // a manifest match (two bots may share a command name). Untagged =
+        // broadcast — the legacy-client path — so the tag is never REQUIRED.
+        let addressed = &incoming.message.addressed_bots;
+        if !addressed.is_empty() && !addressed.iter().any(|n| n == self.npub()) {
+            return false;
+        }
         let content = incoming.text().trim();
         if !content.starts_with('/') {
             return false;
@@ -318,6 +325,48 @@ mod tests {
         assert!(reg
             .insert(CommandSpec { name: "alpha".into(), description: String::new(), args: vec![] }, noop)
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn recipient_tag_routes_commands() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use vector_core::VectorCore;
+
+        let ran = Arc::new(AtomicBool::new(false));
+        let me = "npub1me000000000000000000000000000000000000000000000000000000".to_string();
+        let bot = VectorBot {
+            core: VectorCore,
+            npub: me.clone(),
+            invite_policy: Arc::new(crate::InvitePolicy::Manual),
+            commands: Arc::new(Default::default()),
+        };
+        let flag = ran.clone();
+        bot.command("ping", "test").run(move |_ctx| {
+            let flag = flag.clone();
+            async move {
+                flag.store(true, Ordering::SeqCst);
+            }
+        });
+
+        let incoming = |bots: Vec<String>| crate::IncomingMessage {
+            chat_id: "chan".into(),
+            is_group: true,
+            is_file: false,
+            message: vector_core::Message {
+                content: "/ping".into(),
+                addressed_bots: bots,
+                ..Default::default()
+            },
+        };
+
+        // Tagged for another bot: NOT consumed (ordinary chat for us).
+        assert!(!bot.try_command(&incoming(vec!["npub1other".into()])));
+        // Tagged for us: consumed + handler runs.
+        assert!(bot.try_command(&incoming(vec![me.clone()])));
+        // Untagged broadcast: consumed.
+        assert!(bot.try_command(&incoming(vec![])));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(ran.load(Ordering::SeqCst));
     }
 
     #[test]
