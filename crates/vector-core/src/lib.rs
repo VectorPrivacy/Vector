@@ -67,6 +67,7 @@ pub mod inbox_relays;
 pub mod emoji_packs;
 pub mod emoji_usage;
 pub mod badges;
+pub mod bot_interface;
 pub mod webxdc;
 #[cfg(feature = "tor")]
 pub mod tor;

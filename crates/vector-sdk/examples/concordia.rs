@@ -98,6 +98,27 @@ async fn main() -> vector_sdk::Result<()> {
         }
     }
 
+    // Slash commands (Bot Interface Phase 1): registered here, published as the
+    // kind-33304 manifest at listen start, invoked by PLAIN TEXT from any client.
+    bot.command("ping", "Round-trip latency check").run(|ctx| async move {
+        let _ = ctx.reply(format!("pong 🏓 ({} ms)", now_ms())).await;
+    });
+    bot.command("roll", "Roll a die")
+        .int("sides", "How many sides (default 6)", false)
+        .run(|ctx| async move {
+            let sides = ctx.int("sides").unwrap_or(6).clamp(2, 1_000_000);
+            let roll = (now_ms() as i64 % sides) + 1;
+            let _ = ctx.reply(format!("🎲 rolled {roll} on a d{sides}")).await;
+        });
+    bot.command("announce", "Format a two-part announcement")
+        .string("title", "Announcement title", true)
+        .string("body", "Announcement body", true)
+        .run(|ctx| async move {
+            let title = ctx.str("title").unwrap_or("(untitled)").to_string();
+            let body = ctx.str("body").unwrap_or_default().to_string();
+            let _ = ctx.reply(format!("📣 {title}\n{body}")).await;
+        });
+
     // The join snapshot folds only owner-authored channels; admin-created ones
     // arrive on the first control follow, so re-print once that has landed.
     print_channels(&bot, "channels visible (startup)").await;
