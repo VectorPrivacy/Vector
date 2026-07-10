@@ -4584,6 +4584,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_wide_community_survives_refoundings_and_an_offline_member_converges() {
+        // Scale stress: MANY private channels, each rotated on every Refounding.
+        // A member offline across two refoundings must converge on all of them
+        // (the per-channel rotation fan in refound + the follow's channel×root×step
+        // loops stay bounded) with every channel's history readable.
+        const PRIV_CHANNELS: usize = 6;
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let mut community = create_community(&bed.relay, "Wide", bed.relays.clone(), None).await.unwrap();
+        let mut priv_ids = Vec::new();
+        for i in 0..PRIV_CHANNELS {
+            let id = create_private_channel(&bed.relay, &community, &format!("priv{i}")).await.unwrap();
+            community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+            send_message(&bed.relay, &community, &id, &format!("priv{i} epoch0")).await.unwrap();
+            priv_ids.push(id);
+        }
+        let bundle_json = serde_json::to_string(&bundle_of(&community, Some(owner.keys.public_key()), None, None)).unwrap();
+
+        // Member joins at epoch 0 with all channel keys, then goes offline.
+        bed.swap_to(&member);
+        let member_view = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        assert_eq!(member_view.channels.iter().filter(|c| c.private && c.key.is_some()).count(), PRIV_CHANNELS, "joined with all private keys");
+
+        // Two refoundings (each rotates the base + every private channel).
+        bed.swap_to(&owner);
+        for epoch in 1..=2u64 {
+            community = refound_community(&bed.relay, &community, &[]).await.unwrap();
+            assert_eq!(community.root_epoch, Epoch(epoch));
+            for id in &priv_ids {
+                send_message(&bed.relay, &community, id, &format!("{} epoch{epoch}", crate::simd::hex::bytes_to_hex_32(&id.0))).await.unwrap();
+            }
+        }
+
+        // Member returns: bounded follow to quiescence.
+        bed.swap_to(&member);
+        let session = SessionGuard::capture();
+        let mut passes = 0;
+        loop {
+            passes += 1;
+            assert!(passes <= 8, "a wide catch-up must converge, not churn (pass {passes})");
+            let cur = crate::db::community::load_community_v2(member_view.id()).unwrap().unwrap();
+            let rk = follow_rekeys(&bed.relay, &cur, &session).await.unwrap();
+            assert!(!rk.self_removed);
+            let cur = crate::db::community::load_community_v2(member_view.id()).unwrap().unwrap();
+            let ctl = follow_control(&bed.relay, &cur, &session).await.unwrap();
+            if rk.updated.is_none() && ctl.is_none() {
+                break;
+            }
+        }
+        let caught_up = crate::db::community::load_community_v2(member_view.id()).unwrap().unwrap();
+        assert_eq!(caught_up.root_epoch, Epoch(2), "walked both refoundings");
+        // Every private channel converged to the owner's current key + reads all epochs.
+        for id in &priv_ids {
+            let mine = caught_up.channel(id).expect("channel survived");
+            let theirs = community.channel(id).unwrap();
+            assert_eq!(mine.key, theirs.key, "channel {} converged on the owner key", crate::simd::hex::bytes_to_hex_32(&id.0));
+            assert_eq!(mine.epoch, theirs.epoch, "…at the same epoch");
+            let texts = texts_in(&bed.relay, &caught_up, id).await;
+            let id_hex = crate::simd::hex::bytes_to_hex_32(&id.0);
+            assert!(texts.iter().any(|t| t.contains("epoch0")), "channel {id_hex} reads epoch-0 history");
+            for epoch in 1..=2u64 {
+                assert!(texts.iter().any(|t| t.contains(&format!("epoch{epoch}"))), "channel {id_hex} reads epoch-{epoch} history");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn an_offline_member_catches_up_across_three_refoundings() {
         // The deep offline-online scenario: a member sleeps through THREE
         // Refoundings, per-refound private-channel rotations, a mid-life private
