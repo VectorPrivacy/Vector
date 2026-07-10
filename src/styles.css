@@ -7809,6 +7809,12 @@ select {
   pointer-events: none;
 }
 
+/* Auto-Download Limit row greys out while Auto-Download is toggled off. */
+#auto-download-limit-group.disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
 /* Notification Content Privacy row: label left, dropdown right (matches the
    toggle rows). Stacks vertically on narrow screens so the label can't squash. */
 #notif-privacy-group {

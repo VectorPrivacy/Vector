@@ -1,10 +1,14 @@
-async function loadMaxAutoDownloadBytes() {
-    const value = await invoke('get_sql_setting', { key: 'max_auto_download_bytes' });
-    return value !== null && value !== undefined ? parseInt(value, 10) : 10485760;
-}
-
 async function saveMaxAutoDownloadBytes(bytes) {
     await invoke('set_sql_setting', { key: 'max_auto_download_bytes', value: String(bytes) });
+}
+
+/** Raw stored auto-download toggle: 'true' / 'false', or null when never set (pre-split accounts). */
+async function loadAutoDownloadEnabledRaw() {
+    return await invoke('get_sql_setting', { key: 'auto_download_enabled' });
+}
+
+async function saveAutoDownloadEnabled(enabled) {
+    await invoke('set_sql_setting', { key: 'auto_download_enabled', value: enabled ? 'true' : 'false' });
 }
 
 /**

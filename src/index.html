@@ -1405,11 +1405,18 @@
                       <div id="storage-bar" style="height: 100%; display: flex;"></div>
                     </div>
                   </div>
-                  <div class="form-group" style="display: flex; align-items: center; margin-top: 15px;">
-                    <span style="flex: 1;">Auto-Download Limit</span>
+                  <div class="form-group" style="margin-top: 15px;">
+                    <label class="toggle-container">
+                      <span><span id="auto-download-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: middle; margin-right: 8px;"></span>Auto-Download Media</span>
+                      <input type="checkbox" id="auto-download-toggle">
+                      <span class="neon-toggle"></span>
+                    </label>
+                  </div>
+                  <div class="form-group" id="auto-download-limit-group" style="display: flex; align-items: center; margin-top: 15px;">
+                    <span id="auto-download-limit-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; flex-shrink: 0; margin-right: 8px;"></span>
+                    <span style="flex: 1; text-align: left; color: rgba(255, 255, 255, 0.8);">Auto-Download Limit</span>
                     <div class="select-container" style="margin: 0;">
                       <select id="auto-download-limit" style="margin-bottom: 0 !important;">
-                        <option value="0">Off</option>
                         <option value="1048576">1 MB</option>
                         <option value="5242880">5 MB</option>
                         <option value="10485760" selected>10 MB</option>
@@ -1426,8 +1433,10 @@
                       <span class="neon-toggle"></span>
                     </label>
                   </div>
-                  <div class="form-group" style="margin-top: 15px;">
-                    <button id="clear-storage-btn" class="btn cancel-btn">Clear Storage</button>
+                  <div class="form-group" style="display: flex; align-items: center; margin-top: 15px;">
+                    <span id="clear-storage-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; flex-shrink: 0; margin-right: 8px;"></span>
+                    <span style="flex: 1; text-align: left; color: rgba(255, 255, 255, 0.8);">Clear Storage</span>
+                    <button id="clear-storage-btn" class="btn cancel-btn" style="margin: 0;">Clear</button>
                   </div>
                 </div>
 

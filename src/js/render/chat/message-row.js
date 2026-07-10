@@ -943,7 +943,7 @@ function _dmsgRenderDownloadingAttachment(target, msg, sender, isGroupChat, cAtt
 }
 
 function _dmsgRenderUndownloadedAttachment(target, msg, sender, isGroupChat, cAttachment, isRevealedBlockedMsg) {
-    const willAutoDownload = !isRevealedBlockedMsg && cAttachment.size > 0
+    const willAutoDownload = AUTO_DOWNLOAD_ENABLED && !isRevealedBlockedMsg && cAttachment.size > 0
         && cAttachment.size <= MAX_AUTO_DOWNLOAD_BYTES && !cAttachment.download_failed;
 
     if (['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif', 'ico'].includes(cAttachment.extension)) {

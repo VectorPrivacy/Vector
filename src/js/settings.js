@@ -1,6 +1,9 @@
 const { open } = window.__TAURI__.dialog;
 
+let AUTO_DOWNLOAD_ENABLED = true;
 let MAX_AUTO_DOWNLOAD_BYTES = 10_485_760;
+/** Smallest selectable auto-download limit; also the value a migrated-off account lands on. */
+const AUTO_DOWNLOAD_MIN_BYTES = 1_048_576;
 
 /** Set of attachment IDs currently being downloaded — prevents duplicate download requests */
 const downloadingAttachmentIds = new Set();
@@ -1523,6 +1526,42 @@ async function clearStorage() {
 }
 
 /**
+ * Load the auto-download settings into their globals, migrating pre-split accounts.
+ *
+ * Before v0.4.1 there was a single "Auto-Download Limit" where "Off" (0 bytes) doubled as the
+ * disable switch — which users didn't discover. It's now a toggle + a limit. Migration: a stored
+ * limit of 0 (was Off) becomes toggle OFF with the limit reset to the minimum; any positive limit
+ * becomes toggle ON keeping that value; a fresh account gets the defaults (on, 10 MB). Runs at
+ * boot so the toggle is honored before Settings is ever opened.
+ */
+async function initAutoDownloadSettings() {
+    const enabledRaw = await loadAutoDownloadEnabledRaw();
+    const limitRaw = await invoke('get_sql_setting', { key: 'max_auto_download_bytes' });
+    const storedLimit = (limitRaw !== null && limitRaw !== undefined) ? parseInt(limitRaw, 10) : null;
+
+    if (enabledRaw === 'true' || enabledRaw === 'false') {
+        // Already split.
+        AUTO_DOWNLOAD_ENABLED = enabledRaw === 'true';
+        MAX_AUTO_DOWNLOAD_BYTES = (storedLimit && storedLimit > 0) ? storedLimit : 10_485_760;
+        return;
+    }
+
+    // Not yet split → migrate from the legacy single setting.
+    if (storedLimit === 0) {
+        AUTO_DOWNLOAD_ENABLED = false;
+        MAX_AUTO_DOWNLOAD_BYTES = AUTO_DOWNLOAD_MIN_BYTES;
+    } else if (storedLimit && storedLimit > 0) {
+        AUTO_DOWNLOAD_ENABLED = true;
+        MAX_AUTO_DOWNLOAD_BYTES = storedLimit;
+    } else {
+        AUTO_DOWNLOAD_ENABLED = true;
+        MAX_AUTO_DOWNLOAD_BYTES = 10_485_760;
+    }
+    await saveAutoDownloadEnabled(AUTO_DOWNLOAD_ENABLED);
+    await saveMaxAutoDownloadBytes(MAX_AUTO_DOWNLOAD_BYTES);
+}
+
+/**
  * Initialize the Storage section in settings
  */
 async function initStorageSection() {
@@ -1543,18 +1582,50 @@ async function initStorageSection() {
         renderFileTypeDistribution(storageInfo.type_distribution, storageInfo.file_count);
     }
 
-    // Auto-download limit
-    const savedLimit = await loadMaxAutoDownloadBytes();
-    MAX_AUTO_DOWNLOAD_BYTES = savedLimit;
-    const limitSelect = document.getElementById('auto-download-limit');
-    if (limitSelect) {
-        limitSelect.value = String(savedLimit);
-        limitSelect.addEventListener('change', async () => {
-            const bytes = parseInt(limitSelect.value, 10);
-            MAX_AUTO_DOWNLOAD_BYTES = bytes;
-            await saveMaxAutoDownloadBytes(bytes);
-        });
+    // Auto-download: an explicit toggle plus a size limit that greys out when the toggle is off.
+    // Values + the pre-split migration load at boot (initAutoDownloadSettings); here we only
+    // reflect them into the UI and wire the controls. onchange (not addEventListener) since
+    // initStorageSection re-runs (theme change / Clear Storage) and must not stack listeners.
+    const adToggle = document.getElementById('auto-download-toggle');
+    const adLimitGroup = document.getElementById('auto-download-limit-group');
+    const adLimit = document.getElementById('auto-download-limit');
+    const applyAutoDownloadState = () => {
+        if (adLimit) adLimit.disabled = !AUTO_DOWNLOAD_ENABLED;
+        if (adLimitGroup) adLimitGroup.classList.toggle('disabled', !AUTO_DOWNLOAD_ENABLED);
+    };
+    if (adToggle) {
+        adToggle.checked = AUTO_DOWNLOAD_ENABLED;
+        adToggle.onchange = async () => {
+            AUTO_DOWNLOAD_ENABLED = adToggle.checked;
+            await saveAutoDownloadEnabled(AUTO_DOWNLOAD_ENABLED);
+            applyAutoDownloadState();
+        };
     }
+    if (adLimit) {
+        adLimit.value = String(MAX_AUTO_DOWNLOAD_BYTES);
+        adLimit.onchange = async () => {
+            MAX_AUTO_DOWNLOAD_BYTES = parseInt(adLimit.value, 10);
+            await saveMaxAutoDownloadBytes(MAX_AUTO_DOWNLOAD_BYTES);
+        };
+    }
+    applyAutoDownloadState();
+
+    // Explainer (i) icons. preventDefault so the toggle-row icon doesn't flip the switch.
+    const adInfo = document.getElementById('auto-download-info');
+    if (adInfo) adInfo.onclick = (e) => {
+        e.preventDefault(); e.stopPropagation();
+        popupConfirm('Auto-Download Media', 'When enabled, Vector automatically downloads incoming photos, videos, voice messages and files (up to the size limit below).<br><br>Turn this off to keep attachments as previews and download them by hand, one at a time.', true);
+    };
+    const adLimitInfo = document.getElementById('auto-download-limit-info');
+    if (adLimitInfo) adLimitInfo.onclick = (e) => {
+        e.preventDefault(); e.stopPropagation();
+        popupConfirm('Auto-Download Limit', 'The largest attachment size Vector will fetch automatically.<br><br>Anything above this waits for you to tap Download. Only applies while Auto-Download Media is on.', true);
+    };
+    const clearInfo = document.getElementById('clear-storage-info');
+    if (clearInfo) clearInfo.onclick = (e) => {
+        e.preventDefault(); e.stopPropagation();
+        popupConfirm('Clear Storage', 'Deletes the downloaded and sent files Vector has cached on this device, to free up space.<br><br>Your messages stay. Attachments can be downloaded again later if they are still available from their sender.', true);
+    };
 
     // Hide Media from Gallery (Android only — the backend command is a no-op on
     // desktop, and the gallery concept doesn't apply there). onchange (not
@@ -2140,6 +2211,10 @@ async function initSettings() {
     fWebPreviewsEnabled = await loadWebPreviews();
     fStripTrackingEnabled = await loadStripTracking();
     fSendTypingIndicators = await loadSendTypingIndicators();
+
+    // Auto-download toggle + limit (migrates pre-split accounts). At boot so the
+    // gate in message-row.js is correct before Settings is opened.
+    await initAutoDownloadSettings();
 
     // Set initial toggle states
     const webPreviewsToggle = document.getElementById('privacy-web-previews-toggle');
