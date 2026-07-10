@@ -48,8 +48,9 @@ Concordia — a multi-purpose Concord bot:
 #[tokio::main]
 async fn main() -> vector_sdk::Result<()> {
     // Identity: VECTOR_NSEC override, else the persisted <data_dir>/identity.nsec
-    // (created on first run by the builder).
-    let mut builder = VectorBot::builder();
+    // (created on first run by the builder). Public invite policy: any member can
+    // pull the bot into their community with a direct invite (v1 or v2).
+    let mut builder = VectorBot::builder().public();
     if let Ok(nsec) = std::env::var("VECTOR_NSEC") {
         builder = builder.nsec(nsec);
     }
