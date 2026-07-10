@@ -54,6 +54,19 @@ const SEEN_WRAPS_CAP: usize = 8192;
 static V2_FOLLOW_TX: LazyLock<StdMutex<Option<UnboundedSender<CommunityId>>>> = LazyLock::new(|| StdMutex::new(None));
 /// Community ids currently queued or processing — coalesces a burst to one follow.
 static V2_FOLLOW_PENDING: LazyLock<StdMutex<HashSet<[u8; 32]>>> = LazyLock::new(|| StdMutex::new(HashSet::new()));
+/// Per-community follow serialization, shared by the queue worker AND the inline
+/// (headless) follow path. The worker-vs-inline CHOICE is a benign race
+/// (`follow_worker_running` is check-then-act; a worker can spawn right after a
+/// `false`), so correctness can't ride on it: whichever path runs, the follow body
+/// executes under this lock and two follows of one community can never interleave
+/// their whole-row saves. Bounded by the held-community count; reset on swap.
+static V2_FOLLOW_LOCKS: LazyLock<StdMutex<std::collections::HashMap<[u8; 32], Arc<Mutex<()>>>>> =
+    LazyLock::new(|| StdMutex::new(std::collections::HashMap::new()));
+
+/// The follow lock for one community (created on first use).
+pub(crate) fn follow_lock(id: &CommunityId) -> Arc<Mutex<()>> {
+    V2_FOLLOW_LOCKS.lock().unwrap().entry(id.0).or_default().clone()
+}
 
 pub async fn subscription_id() -> Option<SubscriptionId> {
     V2_SUB_ID.lock().await.clone()
@@ -74,6 +87,7 @@ pub async fn clear() {
     // SessionGuard also invalidates); the next login spawns a fresh worker.
     *V2_FOLLOW_TX.lock().unwrap() = None;
     V2_FOLLOW_PENDING.lock().unwrap().clear();
+    V2_FOLLOW_LOCKS.lock().unwrap().clear();
 }
 
 /// Every plane pubkey a set of v2 communities publishes under that
@@ -83,13 +97,9 @@ pub async fn clear() {
 ///
 /// The **control plane** rides here so a long-running bot follows metadata +
 /// public-channel edits live ([`super::service::follow_control`] re-folds on a
-/// recognized wrap).
-///
-/// **Deliberately NOT subscribed yet:** the next base-rekey and per-channel
-/// next-rekey addresses. Those wraps need the rekey catch-up (adopt-forward /
-/// removal), so subscribing them without that arm would only deliver events the
-/// dispatcher drops. When rekey-follow lands, add its authors HERE together with
-/// its `dispatch_wrap` arm — never one without the other.
+/// recognized wrap), and the next-epoch rekey planes ride via [`rekey_authors`]
+/// (each subscribed author has its `dispatch_wrap` arm — never one without the
+/// other).
 pub fn plane_authors(communities: &[CommunityV2]) -> Vec<PublicKey> {
     let mut out = Vec::new();
     for c in communities {
@@ -98,6 +108,12 @@ pub fn plane_authors(communities: &[CommunityV2]) -> Vec<PublicKey> {
         // The dissolved plane (CORD-02 §9) — so a mid-session dissolution seals live.
         out.push(super::derive::dissolved_group_key(c.id()).pk());
         for ch in &c.channels {
+            // A KEYLESS private channel has no readable chat plane — channel_secret's
+            // root fallback would subscribe the PUBLIC plane for it. Its rekey plane
+            // (below) is still watched, which is how its key arrives.
+            if ch.private && ch.key.is_none() {
+                continue;
+            }
             let (secret, epoch) = c.channel_secret(ch);
             out.push(derive::channel_group_key(&secret, &ch.id, epoch).pk());
         }
@@ -148,10 +164,41 @@ pub fn load_held_v2() -> Vec<CommunityV2> {
 /// `{kinds:[1059,21059], authors:[…]}` on their relays (targeted + pool-wide,
 /// mirroring v1). Idempotent on an unchanged author-set.
 pub async fn refresh_subscription(client: &Client) {
-    // Snapshot the held state INSIDE the sub locks: the follow worker runs
-    // concurrently and may have just adopted a rotation, so the LAST locker must read
-    // the freshest persisted authors. An out-of-lock read lets a stale caller commit
-    // an old author-set over a fresh one and silently mute a rotated community.
+    // Phase 1, LOCK-FREE: make sure the community relays are added + connected —
+    // the slow part (a connect wait of up to ~6s). Holding the sub locks across
+    // this stalled every concurrent dispatch/refresh behind one caller's connect.
+    {
+        let communities = load_held_v2();
+        let mut relays: Vec<String> = communities.iter().flat_map(|c| c.relays.iter().cloned()).collect();
+        relays.sort();
+        relays.dedup();
+        if !relays.is_empty() {
+            // Community relays ride GOSSIP|PING (warm but excluded from pool-wide DM ops).
+            for r in &relays {
+                let _ = client.pool().add_relay(r.as_str(), crate::community_relay_options()).await;
+            }
+            client.connect().await;
+            // Wait briefly for at least one relay to actually connect (a subscribe
+            // against a still-connecting relay silently fails to register — same
+            // trap as v1).
+            let wanted: Vec<RelayUrl> = relays.iter().filter_map(|r| RelayUrl::parse(r).ok()).collect();
+            for _ in 0..24 {
+                let pool = client.pool().all_relays().await;
+                if wanted.iter().any(|u| pool.get(u).map(|r| r.status() == RelayStatus::Connected).unwrap_or(false)) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+        }
+    }
+
+    // Phase 2, LOCKED + bounded (no connect waits): RE-snapshot the held state
+    // INSIDE the sub locks — the follow worker runs concurrently and may have just
+    // adopted a rotation, so the LAST locker must read the freshest persisted
+    // authors. An out-of-lock read lets a stale caller commit an old author-set
+    // over a fresh one and silently mute a rotated community. (A community whose
+    // relays appeared between the phases subscribes now and connects on the next
+    // refresh — the follow that discovers it always triggers one.)
     let mut sub_guard = V2_SUB_ID.lock().await;
     let mut set_guard = V2_SUB_SET.lock().await;
 
@@ -164,8 +211,11 @@ pub async fn refresh_subscription(client: &Client) {
     let mut new_set: Vec<String> = authors.iter().map(|p| p.to_hex()).collect();
     new_set.sort();
 
-    if sub_guard.is_some() && *set_guard == new_set {
-        return; // unchanged — the pool re-applies the live sub across reconnects.
+    // Unchanged-set fast path — but only when BOTH subs actually registered (a
+    // failed pool-wide subscribe would otherwise stay absent until the author-set
+    // changes, and Android streams via the pool-wide path).
+    if sub_guard.is_some() && *set_guard == new_set && (authors.is_empty() || V2_POOLWIDE_SUB_ID.lock().await.is_some()) {
+        return; // the pool re-applies the live subs across reconnects.
     }
     if let Some(old) = sub_guard.take() {
         client.unsubscribe(&old).await;
@@ -177,24 +227,6 @@ pub async fn refresh_subscription(client: &Client) {
             client.unsubscribe(&old_pw).await;
         }
         return;
-    }
-
-    // Community relays ride GOSSIP|PING (warm but excluded from pool-wide DM ops).
-    for r in &relays {
-        let _ = client.pool().add_relay(r.as_str(), crate::community_relay_options()).await;
-    }
-    client.connect().await;
-    // Wait briefly for at least one relay to actually connect (a subscribe against
-    // a still-connecting relay silently fails to register — same trap as v1).
-    {
-        let wanted: Vec<RelayUrl> = relays.iter().filter_map(|r| RelayUrl::parse(r).ok()).collect();
-        for _ in 0..24 {
-            let pool = client.pool().all_relays().await;
-            if wanted.iter().any(|u| pool.get(u).map(|r| r.status() == RelayStatus::Connected).unwrap_or(false)) {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        }
     }
 
     let filter = Filter::new()
@@ -258,22 +290,23 @@ pub async fn dispatch_event(session: &SessionGuard, event: Event, handler: Arc<d
                 handler.on_community_dissolved(&community_id);
                 return;
             }
-            // A chat event: dispatch_wrap already fired the message/reaction/typing callback
-            // (those aren't author-scoped). Persist it to the shared store so get_messages
-            // reflects live traffic, then fire the AUTHOR-CHECKED edit/delete callback from
-            // the persist outcome — a forged edit/delete never reaches the handler.
-            inbound::DispatchedV2::Message { channel_id, .. }
-            | inbound::DispatchedV2::Update { channel_id, .. }
-            | inbound::DispatchedV2::Removed { channel_id, .. } => {
+            // A chat event, opened but NOT yet applied: persist first (dedup by inner
+            // id + the author-scoped edit/delete checks), then fire the callback from
+            // the outcome — v1's exact model. A re-wrapped duplicate (any keyholder
+            // can re-seal a signed rumor into a fresh 1059), the relay echo of our
+            // own send, or a forged edit/delete yields no outcome and re-fires
+            // nothing.
+            inbound::DispatchedV2::Chat { channel_id, event } => {
                 if !session.is_valid() {
                     return;
                 }
-                match inbound::persist_incoming_chat(c, &event, &channel_id, &my_pk, session).await {
+                match inbound::persist_chat_event(&event, &channel_id, &my_pk, session).await {
+                    Some(inbound::ChatPersist::New(message)) => handler.on_community_message(&channel_id, &message, true),
+                    // A reaction or an edit: the folded TARGET row (its id is the
+                    // target's) — the same payload v1 hands this callback.
+                    Some(inbound::ChatPersist::Updated { message, .. }) => handler.on_community_update(&channel_id, &message.id, &message),
                     Some(inbound::ChatPersist::Removed(target_id)) => handler.on_community_removed(&channel_id, &target_id),
-                    Some(inbound::ChatPersist::Updated { message, edit_event: Some(_) }) => {
-                        handler.on_community_update(&channel_id, &message.id, &message)
-                    }
-                    _ => {} // New / reaction (Updated None): dispatch_wrap already fired it.
+                    None => {}
                 }
                 return;
             }
@@ -339,6 +372,10 @@ async fn follow_community(session: &SessionGuard, id: &CommunityId, handler: &dy
     let Some(client) = crate::state::nostr_client() else {
         return;
     };
+    // Serialize against an inline (headless) follow of the same community — the
+    // queue only serializes triggers routed THROUGH it.
+    let lock = follow_lock(id);
+    let _guard = lock.lock().await;
     let community_id = crate::simd::hex::bytes_to_hex_32(&id.0);
     let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
 
@@ -377,6 +414,12 @@ async fn follow_community(session: &SessionGuard, id: &CommunityId, handler: &dy
         }
         refresh_subscription(&client).await;
         handler.on_community_refreshed(&community_id);
+        // A control change can reveal rekey work that predates it — a just-announced
+        // private channel's key crate is already sitting on its rekey plane (the key
+        // ships BEFORE the vsk-2), and this pass's rekey walk ran before the channel
+        // existed. Queue one more pass; it coalesces and converges (an unchanged
+        // control fold doesn't re-queue).
+        enqueue_follow(id);
     }
 }
 
@@ -474,19 +517,25 @@ mod tests {
         crate::state::MY_SECRET_KEY.store_from_keys(&me, &[]);
         crate::state::set_my_public_key(me.public_key());
 
-        // Create a v2 community (persisted), post a message, and grab the raw wrap.
+        // Create a v2 community (persisted), then ANOTHER member (holds the root)
+        // posts — the incoming case a live sub delivers (an OWN send is echoed at
+        // send time, so its relay copy correctly dedups instead of firing).
         let relay = MemoryRelay::new();
         let community = super::super::service::create_community(&relay, "Live", vec!["wss://r".into()], None).await.unwrap();
         let general = community.channels[0].id;
-        super::super::service::send_message(&relay, &community, &general, "live ping").await.unwrap();
-        let author = derive::channel_group_key(&community.community_root, &general, community.root_epoch).pk_hex();
-        let q = Query { kinds: vec![stream::KIND_WRAP], authors: vec![author], ..Default::default() };
-        let wrap = relay.fetch(&q, &community.relays).await.unwrap().into_iter().next().unwrap();
+        let member = Keys::generate();
+        let group = derive::channel_group_key(&community.community_root, &general, community.root_epoch);
+        let rumor = super::super::chat::build_message_rumor(member.public_key(), &general, community.root_epoch, "live ping", None, &[], vec![], 5_000);
+        let (wrap, _) = super::super::chat::seal_chat_rumor(&rumor, &group, &member, nostr_sdk::prelude::Timestamp::from_secs(5), false).unwrap();
+        let _ = relay.publish(&wrap, &community.relays).await;
+        let q = Query { kinds: vec![stream::KIND_WRAP], authors: vec![group.pk_hex()], ..Default::default() };
+        let wrap = relay.fetch(&q, &community.relays).await.unwrap().into_iter().find(|w| w.pubkey == group.pk()).unwrap();
 
         // The realtime dispatch (loading held v2 communities from the DB) routes it.
         // Dispatch the SAME wrap TWICE — modelling the pool re-delivering it under
         // the targeted + pool-wide subs (and from multiple relays). The handler
-        // must fire EXACTLY ONCE (no duplicate bot replies).
+        // must fire EXACTLY ONCE (no duplicate bot replies) — and only AFTER the
+        // persist outcome (the callbacks-from-persist model).
         let rec = Arc::new(Recorder::default());
         let session = SessionGuard::capture();
         crate::community::v2::realtime::clear().await; // fresh seen-set for the test

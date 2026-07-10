@@ -824,16 +824,20 @@ impl VectorCore {
     }
 
     /// If `channel_id` belongs to a locally-held **v2** community, its
-    /// `CommunityId`; otherwise `None` (a v1 channel, or unknown). The routing
-    /// key for every dual-stack message op.
-    fn v2_community_for_channel(&self, channel_id: &str) -> Option<crate::community::CommunityId> {
+    /// `CommunityId`; `Ok(None)` for a v1 channel or unknown. The routing key for
+    /// every dual-stack message op — a DB read error PROPAGATES (fail-closed)
+    /// instead of silently routing a v2 channel down the v1 path on a transient
+    /// failure.
+    fn v2_community_for_channel(&self, channel_id: &str) -> Result<Option<crate::community::CommunityId>> {
         use crate::community::ConcordProtocol;
-        let cid_hex = crate::db::community::community_id_for_channel(channel_id).ok().flatten()?;
+        let Some(cid_hex) = crate::db::community::community_id_for_channel(channel_id).map_err(VectorError::Other)? else {
+            return Ok(None);
+        };
         let cid = crate::community::CommunityId(crate::simd::hex::hex_to_bytes_32(&cid_hex));
-        match crate::db::community::community_protocol(&cid).ok().flatten() {
+        Ok(match crate::db::community::community_protocol(&cid).map_err(VectorError::Other)? {
             Some(ConcordProtocol::V2) => Some(cid),
             _ => None,
-        }
+        })
     }
 
     /// The `version: 2` JSON summary the SDK/facade hands back for a v2 community.
@@ -1293,7 +1297,7 @@ impl VectorCore {
     ) -> Result<String> {
         use crate::community::{envelope, inbound, service, transport::LiveTransport};
         // Dual-stack: route by the owning community's stored protocol.
-        if let Some(id) = self.v2_community_for_channel(channel_id) {
+        if let Some(id) = self.v2_community_for_channel(channel_id)? {
             let community = crate::db::community::load_community_v2(&id)
                 .map_err(VectorError::Other)?
                 .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
@@ -1378,7 +1382,7 @@ impl VectorCore {
         let session = state::SessionGuard::capture();
         // Dual-stack: resolve the destination BEFORE the upload so a bad channel
         // fails fast (never spend an upload on an unroutable send).
-        let v2_target = match self.v2_community_for_channel(channel_id) {
+        let v2_target = match self.v2_community_for_channel(channel_id)? {
             Some(id) => Some(
                 crate::db::community::load_community_v2(&id)
                     .map_err(VectorError::Other)?
@@ -1483,7 +1487,7 @@ impl VectorCore {
     /// Send an ephemeral typing indicator to a Community channel.
     pub async fn send_community_typing(&self, channel_id: &str) -> Result<()> {
         use crate::community::{service, transport::LiveTransport};
-        if let Some(id) = self.v2_community_for_channel(channel_id) {
+        if let Some(id) = self.v2_community_for_channel(channel_id)? {
             let community = crate::db::community::load_community_v2(&id)
                 .map_err(VectorError::Other)?
                 .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
@@ -1515,20 +1519,28 @@ impl VectorCore {
             }
             _ => Vec::new(),
         };
-        if let Some(id) = self.v2_community_for_channel(channel_id) {
+        if let Some(id) = self.v2_community_for_channel(channel_id)? {
             let session = state::SessionGuard::capture();
             let community = crate::db::community::load_community_v2(&id)
                 .map_err(VectorError::Other)?
                 .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
             let ch = crate::community::ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
             let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-            // NIP-25 names the reacted-to author (a required `p`). STATE first; a
-            // headless consumer holds no v2 history, so fall back to the channel page.
+            // NIP-25 names the reacted-to author (a required `p`). STATE first, then
+            // the persisted row (v2 history + the send echo live in the shared events
+            // store, so this almost always resolves locally); the channel-page fetch
+            // is the last resort for a target this device never saw.
             let held = {
                 let st = state::STATE.lock().await;
                 st.find_message(message_id)
                     .and_then(|(_, m)| m.npub.as_deref().and_then(|n| nostr_sdk::prelude::PublicKey::parse(n).ok()))
             };
+            let held = held.or_else(|| {
+                crate::db::events::event_author(message_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|n| nostr_sdk::prelude::PublicKey::parse(&n).ok())
+            });
             let target_author = match held {
                 Some(pk) => pk,
                 None => crate::community::v2::service::fetch_channel(&transport, &community, &ch, 500)
@@ -1559,7 +1571,7 @@ impl VectorCore {
     /// Edit one of your own Community messages.
     pub async fn edit_community_message(&self, channel_id: &str, message_id: &str, new_content: &str) -> Result<()> {
         let emoji_tags = emoji_packs::resolve_outbound_emoji_tags(new_content);
-        if let Some(id) = self.v2_community_for_channel(channel_id) {
+        if let Some(id) = self.v2_community_for_channel(channel_id)? {
             let community = crate::db::community::load_community_v2(&id)
                 .map_err(VectorError::Other)?
                 .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
@@ -1606,7 +1618,7 @@ impl VectorCore {
                 .unwrap_or_default()
         };
 
-        if let Some(id) = self.v2_community_for_channel(channel_id) {
+        if let Some(id) = self.v2_community_for_channel(channel_id)? {
             // v2: the cooperative in-plane kind-5 (the wrap-ciphertext scrub needs
             // the ephemeral wrap key, not retained in this cut).
             let community = crate::db::community::load_community_v2(&id)
@@ -1717,7 +1729,7 @@ impl VectorCore {
         // running listen() the coalescing worker owns the follow (never run inline beside
         // it — two concurrent follows can whole-row clobber); headless, walk it inline.
         // The chat page is fetched + persisted either way, so get_messages backfills.
-        if let Some(id) = self.v2_community_for_channel(channel_id) {
+        if let Some(id) = self.v2_community_for_channel(channel_id)? {
             let warnings = if community::v2::realtime::follow_worker_running() {
                 community::v2::realtime::enqueue_follow(&id);
                 Vec::new()
@@ -1846,15 +1858,20 @@ impl VectorCore {
     pub async fn get_community_members(&self, community_id: &str) -> Vec<serde_json::Value> {
         use nostr_sdk::prelude::ToBech32;
         // v2: the Complete Memberlist (guestbook fold + observed authors − banlist).
-        if let Some(community) = Self::load_v2_if_v2(community_id) {
-            let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-            return crate::community::v2::service::memberlist(&transport, &community)
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|pk| pk.to_bech32().ok())
-                .map(|npub| serde_json::json!({ "npub": npub }))
-                .collect();
+        match Self::load_v2_if_v2(community_id) {
+            Ok(Some(community)) => {
+                let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+                return crate::community::v2::service::memberlist(&transport, &community)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|pk| pk.to_bech32().ok())
+                    .map(|npub| serde_json::json!({ "npub": npub }))
+                    .collect();
+            }
+            Ok(None) => {} // genuinely v1 / unknown — fall through.
+            // Can't determine the protocol: best-effort empty, never a v1 guess.
+            Err(_) => return Vec::new(),
         }
         crate::db::community::community_member_activity(community_id)
             .unwrap_or_default()
@@ -1869,6 +1886,12 @@ impl VectorCore {
     async fn v2_inline_follow(id: &crate::community::CommunityId) -> Vec<String> {
         use crate::community::transport::LiveTransport;
         let session = state::SessionGuard::capture();
+        // Serialize with the live follow worker: `follow_worker_running` is
+        // check-then-act, so a worker can spawn right after a caller saw `false` —
+        // this shared per-community lock is what actually prevents two follows of
+        // one community interleaving their whole-row saves.
+        let lock = crate::community::v2::realtime::follow_lock(id);
+        let _guard = lock.lock().await;
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
         let mut warnings: Vec<String> = Vec::new();
         let Ok(Some(community)) = crate::db::community::load_community_v2(id) else {
@@ -1889,8 +1912,17 @@ impl VectorCore {
             Err(e) => warnings.push(format!("v2 rekey follow failed: {e}")),
         }
         if let Ok(Some(fresh)) = crate::db::community::load_community_v2(id) {
-            if let Err(e) = crate::community::v2::service::follow_control(&transport, &fresh, &session).await {
-                warnings.push(format!("v2 control follow failed: {e}"));
+            match crate::community::v2::service::follow_control(&transport, &fresh, &session).await {
+                // A control change can reveal rekey work that predates it (a
+                // just-announced private channel's key crate already sits on its
+                // rekey plane), so walk the rekeys once more on the fresh state.
+                Ok(Some(changed)) => {
+                    if let Err(e) = crate::community::v2::service::follow_rekeys(&transport, &changed, &session).await {
+                        warnings.push(format!("v2 rekey follow failed: {e}"));
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => warnings.push(format!("v2 control follow failed: {e}")),
             }
         }
         warnings
@@ -1934,15 +1966,17 @@ impl VectorCore {
         new
     }
 
-    /// The held v2 community when `community_id` names one; `None` for v1 (or unknown).
-    fn load_v2_if_v2(community_id: &str) -> Option<crate::community::v2::community::CommunityV2> {
+    /// The held v2 community when `community_id` names one; `Ok(None)` for v1 (or
+    /// unknown). A DB read error PROPAGATES (fail-closed) instead of falling open
+    /// to the v1 route on a transient failure.
+    fn load_v2_if_v2(community_id: &str) -> Result<Option<crate::community::v2::community::CommunityV2>> {
         if community_id.len() != 64 {
-            return None;
+            return Ok(None);
         }
         let cid = crate::community::CommunityId(crate::simd::hex::hex_to_bytes_32(community_id));
-        match crate::db::community::community_protocol(&cid) {
-            Ok(Some(crate::community::ConcordProtocol::V2)) => crate::db::community::load_community_v2(&cid).ok().flatten(),
-            _ => None,
+        match crate::db::community::community_protocol(&cid).map_err(VectorError::Other)? {
+            Some(crate::community::ConcordProtocol::V2) => crate::db::community::load_community_v2(&cid).map_err(VectorError::Other),
+            _ => Ok(None),
         }
     }
 
@@ -1974,7 +2008,7 @@ impl VectorCore {
     /// sync (v1) / control follow (v2), never fetched here.
     pub fn community_capabilities(&self, community_id: &str) -> Result<serde_json::Value> {
         use crate::community::service;
-        if let Some(v2) = Self::load_v2_if_v2(community_id) {
+        if let Some(v2) = Self::load_v2_if_v2(community_id)? {
             use crate::community::roles::Permissions;
             let me = state::my_public_key().ok_or_else(|| VectorError::Other("Not logged in".into()))?.to_hex();
             let owner_hex = v2.owner().map_err(VectorError::Other)?.to_hex();
@@ -2014,7 +2048,7 @@ impl VectorCore {
     /// like [`Self::community_capabilities`].
     pub fn community_roles(&self, community_id: &str) -> Result<serde_json::Value> {
         use nostr_sdk::prelude::{PublicKey, ToBech32};
-        if let Some(v2) = Self::load_v2_if_v2(community_id) {
+        if let Some(v2) = Self::load_v2_if_v2(community_id)? {
             let owner = v2.owner().map_err(VectorError::Other)?;
             let roster = crate::db::community::get_community_roles(community_id).map_err(VectorError::Other)?;
             // Exclude banned members from the admin list (a banned npub vanishes, §4).
@@ -2041,7 +2075,7 @@ impl VectorCore {
         use crate::community::{service, transport::LiveTransport};
         let member = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| VectorError::Other("invalid npub".into()))?;
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-        if let Some(v2) = Self::load_v2_if_v2(community_id) {
+        if let Some(v2) = Self::load_v2_if_v2(community_id)? {
             return crate::community::v2::service::grant_admin(&transport, &v2, &member)
                 .await
                 .map_err(VectorError::Other);
@@ -2056,7 +2090,7 @@ impl VectorCore {
         use crate::community::{service, transport::LiveTransport};
         let member = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| VectorError::Other("invalid npub".into()))?;
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-        if let Some(v2) = Self::load_v2_if_v2(community_id) {
+        if let Some(v2) = Self::load_v2_if_v2(community_id)? {
             return crate::community::v2::service::revoke_admin(&transport, &v2, &member)
                 .await
                 .map_err(VectorError::Other);
@@ -2071,7 +2105,7 @@ impl VectorCore {
         use crate::community::{service, transport::LiveTransport};
         let pk = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| VectorError::Other("invalid npub".into()))?;
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-        if let Some(v2) = Self::load_v2_if_v2(community_id) {
+        if let Some(v2) = Self::load_v2_if_v2(community_id)? {
             return crate::community::v2::service::kick_member(&transport, &v2, &pk)
                 .await
                 .map_err(VectorError::Other);
@@ -2174,23 +2208,32 @@ impl VectorCore {
         service::republish_community_metadata(&transport, &community).await.map_err(VectorError::Other)
     }
 
-    /// Create a new PUBLIC channel in a v2 community. Requires MANAGE_CHANNELS (reader-gated).
-    /// Returns the new channel id (hex). v2 only for now (private channels + v1 channel
-    /// management are separate); a Public channel derives from the community_root, so peers
-    /// fold it in with no key to distribute.
-    pub async fn create_community_channel(&self, community_id: &str, name: &str) -> Result<String> {
-        let v2 = Self::load_v2_if_v2(community_id)
+    /// Create a new channel in a v2 community. A PUBLIC channel derives from the
+    /// community_root, so peers fold it in with nothing to distribute; a PRIVATE one
+    /// mints an independent key at channel-epoch 1 and delivers it to every current
+    /// member over the rekey plane (CORD-03 §2 / CORD-06). Requires MANAGE_CHANNELS.
+    /// Returns the new channel id (hex).
+    pub async fn create_community_channel(&self, community_id: &str, name: &str, private: bool) -> Result<String> {
+        let v2 = Self::load_v2_if_v2(community_id)?
             .ok_or_else(|| VectorError::Other("channel creation is available on v2 communities".into()))?;
         let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-        let id = crate::community::v2::service::create_public_channel(&transport, &v2, name)
-            .await
-            .map_err(VectorError::Other)?;
+        let id = if private {
+            crate::community::v2::service::create_private_channel(&transport, &v2, name).await
+        } else {
+            crate::community::v2::service::create_public_channel(&transport, &v2, name).await
+        }
+        .map_err(VectorError::Other)?;
+        // Subscribe the new channel's chat plane now — waiting on the round-trip of
+        // our own vsk-2 edition would leave the creator deaf to first replies.
+        if let Some(client) = state::nostr_client() {
+            crate::community::v2::realtime::refresh_subscription(&client).await;
+        }
         Ok(crate::simd::hex::bytes_to_hex_32(&id.0))
     }
 
     /// Delete (tombstone) a v2 community channel. Requires MANAGE_CHANNELS (reader-gated).
     pub async fn delete_community_channel(&self, community_id: &str, channel_id: &str) -> Result<()> {
-        let v2 = Self::load_v2_if_v2(community_id)
+        let v2 = Self::load_v2_if_v2(community_id)?
             .ok_or_else(|| VectorError::Other("channel deletion is available on v2 communities".into()))?;
         let ch = crate::community::ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
         let name = v2.channels.iter().find(|c| c.id.0 == ch.0).map(|c| c.name.clone()).unwrap_or_default();
@@ -2209,7 +2252,7 @@ impl VectorCore {
         }
         let id = CommunityId(crate::simd::hex::hex_to_bytes_32(community_id));
         // v2: guestbook Leave + cross-device List tombstone + local delete, in the service.
-        if let Some(v2) = Self::load_v2_if_v2(community_id) {
+        if let Some(v2) = Self::load_v2_if_v2(community_id)? {
             let session = state::SessionGuard::capture();
             let channel_ids: Vec<String> =
                 v2.channels.iter().map(|ch| crate::simd::hex::bytes_to_hex_32(&ch.id.0)).collect();
@@ -2815,12 +2858,12 @@ mod facade_tests {
 
         // The channel routes to the v2 send path.
         assert_eq!(
-            VectorCore.v2_community_for_channel(&channel_hex),
+            VectorCore.v2_community_for_channel(&channel_hex).unwrap(),
             Some(community.identity.community_id),
             "a v2 channel is routed to v2"
         );
         // An unknown channel routes nowhere (would fall through to v1).
-        assert_eq!(VectorCore.v2_community_for_channel(&"00".repeat(32)), None);
+        assert_eq!(VectorCore.v2_community_for_channel(&"00".repeat(32)).unwrap(), None);
     }
 
     /// The facade builds a v2 invite URL by trimming `/invite` off the v1

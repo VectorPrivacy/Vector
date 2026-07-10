@@ -131,7 +131,7 @@ pub async fn send_chat_message<T: Transport + ?Sized>(
     let (author, group, epoch, session) = chat_send_context(community, channel_id)?;
     let at_ms = now_ms();
     let rumor = chat::build_message_rumor(author.public_key(), channel_id, epoch, content, reply_to, emoji, extra_tags, at_ms);
-    publish_chat(transport, community, &session, &group, &author, rumor, at_ms, false).await
+    publish_chat(transport, community, &session, &group, &author, channel_id, epoch, rumor, at_ms, false).await
 }
 
 /// React to a channel message (kind 7, NIP-25 shape). `target_id_hex` /
@@ -149,7 +149,7 @@ pub async fn send_reaction<T: Transport + ?Sized>(
     let (author, group, epoch, session) = chat_send_context(community, channel_id)?;
     let at_ms = now_ms();
     let rumor = chat::build_reaction_rumor(author.public_key(), channel_id, epoch, target_id_hex, target_author_hex, emoji_content, emoji, at_ms);
-    publish_chat(transport, community, &session, &group, &author, rumor, at_ms, false).await
+    publish_chat(transport, community, &session, &group, &author, channel_id, epoch, rumor, at_ms, false).await
 }
 
 /// Edit one of your own messages (kind 3302): peers re-render `target_id_hex`
@@ -165,7 +165,7 @@ pub async fn send_edit<T: Transport + ?Sized>(
     let (author, group, epoch, session) = chat_send_context(community, channel_id)?;
     let at_ms = now_ms();
     let rumor = chat::build_edit_rumor(author.public_key(), channel_id, epoch, target_id_hex, new_content, at_ms);
-    publish_chat(transport, community, &session, &group, &author, rumor, at_ms, false).await
+    publish_chat(transport, community, &session, &group, &author, channel_id, epoch, rumor, at_ms, false).await
 }
 
 /// Cooperative in-plane delete (kind 5, NIP-09 semantics): peers stop rendering
@@ -181,7 +181,7 @@ pub async fn send_delete<T: Transport + ?Sized>(
     let (author, group, epoch, session) = chat_send_context(community, channel_id)?;
     let at_ms = now_ms();
     let rumor = chat::build_delete_rumor(author.public_key(), channel_id, epoch, target_id_hex, target_kind, at_ms);
-    publish_chat(transport, community, &session, &group, &author, rumor, at_ms, false).await
+    publish_chat(transport, community, &session, &group, &author, channel_id, epoch, rumor, at_ms, false).await
 }
 
 /// Ephemeral typing indicator (kind 23311 in a 21059 wrap — relays never store it).
@@ -193,7 +193,7 @@ pub async fn send_typing<T: Transport + ?Sized>(
     let (author, group, epoch, session) = chat_send_context(community, channel_id)?;
     let at_ms = now_ms();
     let rumor = chat::build_typing_rumor(author.public_key(), channel_id, epoch, at_ms);
-    publish_chat(transport, community, &session, &group, &author, rumor, at_ms, true).await.map(|_| ())
+    publish_chat(transport, community, &session, &group, &author, channel_id, epoch, rumor, at_ms, true).await.map(|_| ())
 }
 
 /// Everything a chat-plane send needs: local keys, the channel's group key +
@@ -211,7 +211,8 @@ fn chat_send_context(community: &CommunityV2, channel_id: &ChannelId) -> Result<
     Ok((author, channel_group_key(&secret, channel_id, epoch), epoch, session))
 }
 
-/// Seal one chat rumor, re-check the session, publish. Returns the rumor id (hex).
+/// Seal one chat rumor, re-check the session, publish, and echo the send into the
+/// shared store. Returns the rumor id (hex).
 #[allow(clippy::too_many_arguments)]
 async fn publish_chat<T: Transport + ?Sized>(
     transport: &T,
@@ -219,6 +220,8 @@ async fn publish_chat<T: Transport + ?Sized>(
     session: &SessionGuard,
     group: &GroupKey,
     author: &Keys,
+    channel_id: &ChannelId,
+    epoch: Epoch,
     rumor: nostr_sdk::prelude::UnsignedEvent,
     at_ms: u64,
     ephemeral: bool,
@@ -230,6 +233,28 @@ async fn publish_chat<T: Transport + ?Sized>(
         return Err("account changed before send".to_string());
     }
     transport.publish(&wrap, &community.relays).await?;
+    // Local echo (v1 parity): open our OWN wrap through the exact inbound path so
+    // send-then-read works with no listen loop, and the relay's re-delivery dedups
+    // against this row instead of re-firing callbacks. Best-effort — the publish
+    // already succeeded. Ephemeral kinds (typing) apply to nothing and skip out.
+    if !ephemeral {
+        if let Ok(event) = chat::open_chat_event(&wrap, group, channel_id, epoch) {
+            let channel_hex = crate::simd::hex::bytes_to_hex_32(&channel_id.0);
+            let outcome = {
+                let mut st = crate::state::STATE.lock().await;
+                if !session.is_valid() {
+                    return Ok(rumor_id); // swapped on the lock await — never echo into another account.
+                }
+                super::inbound::apply_chat_to_state(&mut st, &event, &channel_hex, &author.public_key())
+            };
+            if let Some(outcome) = outcome {
+                if !session.is_valid() {
+                    return Ok(rumor_id);
+                }
+                super::inbound::persist_chat(&channel_hex, &outcome).await;
+            }
+        }
+    }
     Ok(rumor_id)
 }
 
@@ -242,8 +267,9 @@ pub struct FetchedEvent {
 
 /// Fetch a channel's recent messages: query every held epoch's Chat-Plane
 /// address, open + bind each, drop foreign/malformed, dedup by rumor id, and
-/// order oldest→newest by the millisecond timestamp. `limit` bounds the newest
-/// slice fetched from each address.
+/// order oldest→newest by the millisecond timestamp. `limit` is one relay-side
+/// bound across the whole epoch-author OR-set (a single query), not per epoch —
+/// a deep multi-epoch history needs paging, not a bigger limit.
 pub async fn fetch_channel<T: Transport + ?Sized>(
     transport: &T,
     community: &CommunityV2,
@@ -251,19 +277,33 @@ pub async fn fetch_channel<T: Transport + ?Sized>(
     limit: usize,
 ) -> Result<Vec<FetchedEvent>, String> {
     let ch = community.channel(channel_id).ok_or("no such channel in this community")?;
-    // A Public channel reads across EVERY held base-root epoch, so history spanning a
-    // Refounding stays continuous (CORD-03 §3); a Private channel reads its current key
-    // (private multi-epoch history is deferred with the per-channel key archive).
+    // A Public channel reads across EVERY held base-root epoch, and a Private one
+    // across its OWN held epochs (CORD-03 §3), so history spanning a rotation stays
+    // continuous either way. A keyless Private channel is unreadable — never derived
+    // from the root (that would address the public plane).
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let coords: Vec<([u8; 32], Epoch)> = if ch.private {
-        community.channel_read_coords(ch)
+        let Some(current) = ch.key else {
+            return Ok(Vec::new());
+        };
+        let ch_hex = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
+        let mut held = crate::db::community::held_epoch_keys(&cid_hex, &ch_hex).unwrap_or_default();
+        if !held.iter().any(|(ep, _)| *ep == ch.epoch) {
+            held.push((ch.epoch, current));
+        }
+        // Only real grants are archived, but keep the invariant local: a private
+        // plane is never read with the root value.
+        held.into_iter().filter(|(_, k)| *k != community.community_root).map(|(ep, k)| (k, ep)).collect()
     } else {
-        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
         let mut roots = crate::db::community::held_epoch_keys(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX).unwrap_or_default();
         if !roots.iter().any(|(ep, _)| *ep == community.root_epoch) {
             roots.push((community.root_epoch, community.community_root));
         }
         roots.into_iter().map(|(ep, root)| (root, ep)).collect()
     };
+    if coords.is_empty() {
+        return Ok(Vec::new());
+    }
 
     // Address every held epoch by its Chat-Plane pubkey.
     let authors: Vec<String> = coords
@@ -316,6 +356,11 @@ pub fn bundle_of(
     let channels = community
         .channels
         .iter()
+        // A KEYLESS private channel can't be granted (we hold no key) — carrying the
+        // root placeholder would make the joiner classify it PUBLIC and address a
+        // private channel at the public plane. It joins their view via control-follow
+        // (keyless) and keys up at the channel's next rotation.
+        .filter(|c| !(c.private && c.key.is_none()))
         .map(|c| invite::ChannelGrant {
             id: hex(&c.id.0),
             key: hex(&c.key.unwrap_or(community.community_root)),
@@ -655,6 +700,13 @@ async fn accept_bundle<T: Transport + ?Sized>(
     // Archive the joined root at its epoch, so this member reads Public-channel
     // history from their join epoch onward across later Refoundings (CORD-03 §3).
     let _ = crate::db::community::store_epoch_key(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX, community.root_epoch.0, &community.community_root);
+    // Same for each granted Private-channel key: the archive is what lets its
+    // history stay readable after the channel rotates away from this key.
+    for ch in &community.channels {
+        if let (true, Some(key)) = (ch.private, ch.key) {
+            let _ = crate::db::community::store_epoch_key(&cid_hex, &crate::simd::hex::bytes_to_hex_32(&ch.id.0), ch.epoch.0, &key);
+        }
+    }
 
     // Announce our Guestbook Join, echoing the invite attribution when present.
     let attribution = invited_by
@@ -1114,6 +1166,11 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
         return Err("this community has been dissolved; it cannot be re-founded".to_string());
     }
     let me = local_keys()?;
+    // Serialize with the follow worker for the whole rotation: the commit tail
+    // whole-row-saves, and an unserialized concurrent follow could otherwise be
+    // rolled back (or adopt a half-published sibling of this very rotation).
+    let lock = super::realtime::follow_lock(cid);
+    let _guard = lock.lock().await;
     // Reload the FRESHEST base state: a stale caller struct would address the rotation
     // under a superseded root (a base fork with no heal). The community_id is
     // self-certifying + stable, so re-loading by it is safe.
@@ -1561,6 +1618,12 @@ async fn publish_control_edition<T: Transport + ?Sized>(
     transport.publish(&wrap, &community.relays).await?;
     // Advance our own floor so a follow-up edit chains from this head and refuse-
     // downgrade holds; open our own wrap to recover the self_hash + inner_id.
+    // Re-check the session AFTER the publish await: a swap mid-publish means the
+    // pool now points at another account's DB — skipping is safe (the next own
+    // edit rebuilds the same head from the relay's copy).
+    if !session.is_valid() {
+        return Ok(());
+    }
     if let Ok((ed, _)) = control::open_control_edition(&wrap, &control) {
         crate::db::community::set_edition_head_at_epoch(&cid_hex, &entity_hex, ed.version, &ed.self_hash, &ed.inner_id, community.root_epoch.0)?;
     }
@@ -1723,19 +1786,61 @@ pub async fn edit_community_metadata<T: Transport + ?Sized>(transport: &T, commu
 /// coordinate. Gated on the reader side by `MANAGE_CHANNELS`.
 pub async fn edit_channel_metadata<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel_id: &ChannelId, meta: &control::ChannelMetadata) -> Result<(), String> {
     let session = SessionGuard::capture();
+    let me = local_keys()?;
+    ensure_channel_manager(community, &me.public_key())?;
+    // Public → private CONVERSION is a key rotation (CORD-03 §2) this build doesn't
+    // mint yet — refuse the flag flip rather than publish an edition no reader can
+    // key (members would keep posting on the root-derived plane, splitting the
+    // channel). Private → public works (readers heal to the root derivation).
+    if meta.private {
+        if let Some(held) = community.channel(channel_id) {
+            if !held.private {
+                return Err("converting a public channel to private is not supported yet".to_string());
+            }
+        }
+    }
     control::validate_channel_metadata(meta).map_err(|e| e.to_string())?;
     let content = serde_json::to_string(meta).map_err(|e| e.to_string())?;
     publish_control_edition(transport, community, &session, vsk::CHANNEL_METADATA, &channel_id.0, &content, None).await
+}
+
+/// The local mirror of the reader's `MANAGE_CHANNELS` fold gate (CORD-03 §2): the
+/// owner, or a roster-authorized manager who isn't banned. Refusing BEFORE any
+/// publish keeps an unauthorized device from advancing its own edition floor onto
+/// a head every reader rejects (wedging its later, legitimately-authorized edits
+/// behind a rejected chain).
+fn ensure_channel_manager(community: &CommunityV2, me: &PublicKey) -> Result<(), String> {
+    let owner = community.owner()?;
+    if *me == owner {
+        return Ok(());
+    }
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let me_hex = me.to_hex();
+    if crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default().contains(&me_hex) {
+        return Err("you are banned from this community".to_string());
+    }
+    let roster = crate::db::community::get_community_roles(&cid_hex)?;
+    if roster.is_authorized(&me_hex, Some(&owner.to_hex()), crate::community::roles::Permissions::MANAGE_CHANNELS) {
+        Ok(())
+    } else {
+        Err("managing channels here needs the MANAGE_CHANNELS permission".to_string())
+    }
 }
 
 /// Create a new PUBLIC channel (CORD-03 §2): mint a fresh id, publish its metadata
 /// edition (vsk 2), and add it to the held community. A Public channel derives its Chat
 /// Plane from the `community_root` (no per-channel key), so other members fold it in on
 /// their next control follow with nothing to distribute. Returns the new channel id.
-/// Reader-gated by `MANAGE_CHANNELS`. (A PRIVATE channel additionally needs a minted key
-/// delivered over the rekey plane — deferred, so this creates Public only.)
+/// Reader-gated by `MANAGE_CHANNELS`.
 pub async fn create_public_channel<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, name: &str) -> Result<ChannelId, String> {
     let session = SessionGuard::capture();
+    // Serialize with the follow worker: the save below writes the WHOLE community
+    // row from this caller's struct, so an unserialized concurrent follow adopting
+    // a rotation would be rolled back to a stale root (a deaf community).
+    let lock = super::realtime::follow_lock(community.id());
+    let _guard = lock.lock().await;
+    let me = local_keys()?;
+    ensure_channel_manager(community, &me.public_key())?;
     let channel_id = ChannelId(super::super::random_32());
     let meta = control::ChannelMetadata { name: name.to_string(), private: false, voice: None, deleted: None, custom: None, extra: Default::default() };
     control::validate_channel_metadata(&meta).map_err(|e| e.to_string())?;
@@ -1751,10 +1856,85 @@ pub async fn create_public_channel<T: Transport + ?Sized>(transport: &T, communi
     Ok(channel_id)
 }
 
+/// Create a new PRIVATE channel (CORD-03 §2): mint a fresh id + an independent
+/// random key at channel-epoch 1, deliver the key to every current member over the
+/// rekey plane (CORD-06 §1), then announce the channel (vsk 2, `private`). Epoch 0
+/// is the root generation ("the first privatisation is epoch 1"), so the delivery
+/// commits its continuity to `(0, community_root)` — verifiable by every member and
+/// bound to THIS community's root. The key ships BEFORE the announcement: an
+/// aborted attempt leaves only an unannounced crate (invisible), and a retry mints
+/// a fresh id, so there is no same-coordinate double-mint to fork on. Live public
+/// links are refreshed so a joiner's bundle carries the key; a member who joins
+/// through the stale-bundle window keys up at the channel's next rotation.
+pub async fn create_private_channel<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, name: &str) -> Result<ChannelId, String> {
+    let session = SessionGuard::capture();
+    // Serialize with the follow worker across the whole fetch→publish→save span
+    // (the memberlist fetch is seconds long; an unserialized follow adopting a
+    // rotation meanwhile would be rolled back by the whole-row save below).
+    let lock = super::realtime::follow_lock(community.id());
+    let _guard = lock.lock().await;
+    let me = local_keys()?;
+    ensure_channel_manager(community, &me.public_key())?;
+    let meta = control::ChannelMetadata { name: name.to_string(), private: true, voice: None, deleted: None, custom: None, extra: Default::default() };
+    control::validate_channel_metadata(&meta).map_err(|e| e.to_string())?;
+    let content = serde_json::to_string(&meta).map_err(|e| e.to_string())?;
+
+    let channel_id = ChannelId(super::super::random_32());
+    let channel_key = super::super::random_32();
+    let epoch = Epoch(1);
+
+    // Recipients: every current member, plus me (multi-device).
+    let mut recipients = memberlist(transport, community).await?;
+    if !recipients.iter().any(|p| *p == me.public_key()) {
+        recipients.push(me.public_key());
+    }
+    let prev_commit = super::derive::epoch_key_commitment(Epoch(0), &community.community_root);
+    let mut blobs = Vec::with_capacity(recipients.len());
+    for r in &recipients {
+        blobs.push(
+            rekey::build_blob_local(me.secret_key(), &me.public_key().to_bytes(), r, RekeyScope::Channel(channel_id), epoch, &channel_key)
+                .map_err(|e| e.to_string())?,
+        );
+    }
+    let group = channel_rekey_group_key(&community.community_root, &channel_id, epoch);
+    let at_secs = now_ms() / 1000;
+    let chunks = rekey::build_rekey_chunks_local(&me, &group, RekeyScope::Channel(channel_id), epoch, Epoch(0), &prev_commit, &blobs, at_secs)
+        .map_err(|e| e.to_string())?;
+    if !session.is_valid() {
+        return Err("account changed during channel create".to_string());
+    }
+    for c in &chunks {
+        transport.publish_durable(c, &community.relays).await?;
+    }
+    publish_control_edition(transport, community, &session, vsk::CHANNEL_METADATA, &channel_id.0, &content, None).await?;
+    if !session.is_valid() {
+        return Err("account changed during channel create".to_string());
+    }
+    // A leave/delete raced the create: saving would resurrect the community row.
+    if crate::db::community::community_protocol(community.id())?.is_none() {
+        return Err("community removed during channel create".to_string());
+    }
+    let mut updated = community.clone();
+    updated.channels.push(ChannelV2 { id: channel_id, name: name.to_string(), private: true, key: Some(channel_key), epoch });
+    crate::db::community::save_community_v2(&updated)?;
+    // Archive the epoch-1 key so this channel's history stays readable across its
+    // future rotations (CORD-03 §3).
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    crate::db::community::store_epoch_key(&cid_hex, &crate::simd::hex::bytes_to_hex_32(&channel_id.0), epoch.0, &channel_key)?;
+    // Future joiners are handed the key in their (refreshed) bundle, CORD-05 §1.
+    let _ = refresh_public_links(transport, &updated).await;
+    Ok(channel_id)
+}
+
 /// Tombstone a channel (CORD-03 §2, `deleted: true`) + drop it locally. Reader-gated by
 /// `MANAGE_CHANNELS`; the coordinate stays folded as a grave so peers hide it.
 pub async fn delete_channel<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel_id: &ChannelId, name: &str) -> Result<(), String> {
     let session = SessionGuard::capture();
+    // Whole-row save below — serialize with the follow worker (see create_*_channel).
+    let lock = super::realtime::follow_lock(community.id());
+    let _guard = lock.lock().await;
+    let me = local_keys()?;
+    ensure_channel_manager(community, &me.public_key())?;
     let meta = control::ChannelMetadata { name: name.to_string(), private: false, voice: None, deleted: Some(true), custom: None, extra: Default::default() };
     let content = serde_json::to_string(&meta).map_err(|e| e.to_string())?;
     publish_control_edition(transport, community, &session, vsk::CHANNEL_METADATA, &channel_id.0, &content, None).await?;
@@ -2360,9 +2540,9 @@ fn apply_community_metadata(out: &mut CommunityV2, meta: control::CommunityMetad
 }
 
 /// Apply a folded channel-metadata head: delete removes the channel, a rename
-/// updates an existing one, and a brand-new PUBLIC channel is added (a new Private
-/// channel is skipped — its key arrives over the rekey plane). Returns whether
-/// anything changed.
+/// updates an existing one, a brand-new PUBLIC channel is added, and a brand-new
+/// PRIVATE one is recorded KEYLESS (unreadable until its key arrives over the
+/// rekey plane or a fresh bundle). Returns whether anything changed.
 fn apply_channel_metadata(out: &mut CommunityV2, id: ChannelId, meta: control::ChannelMetadata) -> bool {
     let deleted = meta.deleted.unwrap_or(false);
     if deleted {
@@ -2381,7 +2561,10 @@ fn apply_channel_metadata(out: &mut CommunityV2, id: ChannelId, meta: control::C
             // owner marks PUBLIC must derive from the root (key = None) — this heals a
             // bundle-time misclassification where an attacker set a public channel's
             // grant key to their own, silently addressing it at a plane only they read.
-            // (public -> private needs a rekey-delivered key, so it's left to rekey.)
+            // Public → private CONVERSION is DEFERRED: the flip is IGNORED here (the
+            // record stays public) until the convert flow (key mint + cursor rebase
+            // to the conversion's channel epoch) lands — the send side refuses to
+            // publish one, and a foreign client's conversion won't move us.
             if !meta.private && (existing.private || existing.key.is_some()) {
                 existing.private = false;
                 existing.key = None;
@@ -2401,7 +2584,15 @@ fn apply_channel_metadata(out: &mut CommunityV2, id: ChannelId, meta: control::C
             });
             true
         }
-        None => false, // a new Private channel — deferred to rekey key delivery.
+        None => {
+            // A brand-new PRIVATE channel: record it KEYLESS at epoch 0 (the root
+            // generation — CORD-03 §2 numbers the first private key epoch 1). The
+            // epoch then doubles as [`follow_rekeys`]' scan cursor. Until a rotation
+            // delivers a key, every read/send/subscribe path skips the channel; the
+            // root-fallback in `channel_secret` is never taken for it.
+            out.channels.push(ChannelV2 { id, name: meta.name, private: true, key: None, epoch: Epoch(0) });
+            true
+        }
     }
 }
 
@@ -2417,29 +2608,43 @@ pub struct RekeyFollow {
     pub self_removed: bool,
 }
 
+/// The most archived base roots a channel-rekey lookup fans across per step. A
+/// standalone rekey rides the minter's then-current root and a removal's rides the
+/// PRIOR root (CORD-06 §3), so a follower whose base already advanced must look
+/// back. A channel stranded DEEPER than this (its next-epoch crate addressed under
+/// an older root than the fan reaches) only heals via a fresh invite bundle — the
+/// walk is strictly sequential, so a later rotation can't be reached either.
+const MAX_ADDRESSING_ROOTS: usize = 8;
+
 /// Follow rekeys for a held community: advance the base (root) epoch and each
-/// Private channel's epoch as far as owner-authored rotations allow, adopting the
+/// Private channel's epoch as far as authorized rotations allow, adopting the
 /// fresh key we're still a recipient of at each step and dropping a scope we've
 /// been removed from. Persists the result. Called when a rekey wrap arrives in
 /// realtime so a long-running bot keeps decrypting after a rotation instead of
 /// going silent.
 ///
-/// **Authority (first cut): owner-authored rotations only** (`rotator == owner`).
-/// The roster fold that would honour an admin's `BAN`/`MANAGE_CHANNELS` rotation
-/// is deferred — a safe under-approximation (never adopts a non-owner's key, which
-/// a malicious member could otherwise use to fork the follower onto a key only
-/// they know). A legitimate admin-driven channel rekey is simply not followed yet.
+/// **Authority (CORD-06 §Authority):** a BASE rotation is honored from the owner
+/// only — the deliberate mirror of the owner-only Refounding send (a non-owner's
+/// ban silences + strips; the read-cut is the owner's). A CHANNEL rotation is
+/// honored from the owner or a `MANAGE_CHANNELS` holder under the PERSISTED
+/// roster (folded + persisted by `follow_control`), minus the banlist — so an
+/// admin-created private channel keys up on every member.
 ///
-/// **Continuity + fork resolution are spec-strict:** only a rotation whose
-/// `prevcommit` extends the exact `(epoch, key)` I hold advances me, one epoch at
-/// a time; a same-epoch owner fork resolves by the lexicographically lowest new
-/// key ([`rekey::lowest_key_winner`]), so every follower converges. An incomplete
-/// rotation (a missing chunk) never concludes removal — it just waits.
+/// **Addressing fans across held base roots:** each channel step queries its
+/// next-epoch rekey address under the current root AND the archived prior roots,
+/// so a base adopt landing before a Refounding's prior-root-addressed channel
+/// rekeys (or before a creation delivery minted under an older root) can't
+/// strand the channel.
 ///
-/// **First-cut limitation (documented):** no prior-epoch read archive. Adopting a
-/// rotation moves the scope's read coordinate forward; history published under the
-/// old epoch is not re-fetched afterwards (a live follower already received it).
-/// The multi-epoch read archive layers on with the GUI history work.
+/// **Continuity + fork resolution are spec-strict:** a rotation must extend the
+/// exact `(epoch, key)` I hold, one epoch at a time; a same-epoch fork resolves
+/// by the lexicographically lowest new key ([`rekey::lowest_key_winner`]), so
+/// every follower converges. An incomplete rotation (a missing chunk) never
+/// concludes removal — it just waits. A KEYLESS channel (announced by vsk-2, key
+/// not yet delivered) holds no chain, so continuity is vacuous for it (CORD-06
+/// §2: "a convergence check, not a secrecy mechanism") — authority is its
+/// boundary; its epoch is the scan cursor, advancing past complete rotations
+/// that exclude us so the walk converges on the channel's current epoch.
 pub async fn follow_rekeys<T: Transport + ?Sized>(
     transport: &T,
     community: &CommunityV2,
@@ -2447,48 +2652,119 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
 ) -> Result<RekeyFollow, String> {
     // Death wins every race (CORD-02 §9): a dissolved community honors no epoch advance
     // past its tombstone — don't adopt a rotation into a grave.
-    if crate::db::community::get_community_dissolved(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap_or(false) {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    if crate::db::community::get_community_dissolved(&cid_hex).unwrap_or(false) {
         return Ok(RekeyFollow { updated: None, self_removed: false });
     }
     let me = local_keys()?;
     let my_xonly = me.public_key().to_bytes();
     let owner = community.owner()?;
+    let owner_hex = owner.to_hex();
     let mut cur = community.clone();
     let mut changed = false;
 
-    // Bound the catch-up: each real step consumes a valid owner rotation, so a
+    // The channel-rotator gates. Loaded once per follow: a roster change lands via
+    // follow_control (which the worker runs right after this), so at worst an
+    // admin's rotation adopts one pass late — never early.
+    let roster = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+    let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
+    let me_hex = me.public_key().to_hex();
+    let channel_rotator_ok = |rotator: &PublicKey| -> bool {
+        if *rotator == owner {
+            return true;
+        }
+        let rh = rotator.to_hex();
+        !banned.contains(&rh) && roster.is_authorized(&rh, Some(&owner_hex), crate::community::roles::Permissions::MANAGE_CHANNELS)
+    };
+    // Concluding MY removal takes more than the bit: the rotator must strictly
+    // outrank ME (CORD-06 §Authority — "the Rotator must strictly outrank every
+    // removed target"), so an equal-rank admin can never silently evict a peer
+    // (or the owner) by minting a complete rotation that skips their blob.
+    let channel_rotator_outranks_me = |rotator: &PublicKey| -> bool {
+        if *rotator == owner {
+            return true;
+        }
+        let rh = rotator.to_hex();
+        !banned.contains(&rh) && roster.can_act_on_member(&rh, Some(&owner_hex), &me_hex, crate::community::roles::Permissions::MANAGE_CHANNELS)
+    };
+    let base_rotator_ok = |rotator: &PublicKey| -> bool { *rotator == owner };
+
+    // Bound the catch-up: each real step consumes a valid authorized rotation, so a
     // finite chain terminates naturally; the cap defends against a relay feeding a
     // pathological set.
     const MAX_STEPS: usize = 128;
     for _ in 0..MAX_STEPS {
         let mut advanced = false;
 
-        // Private channels first: a removal-forced channel rekey can ride the PRIOR
-        // root (CORD-06 D2), so read channels under the current root before a base
-        // adopt moves it.
+        // The roots a channel rekey may be addressed under, freshest first: the
+        // current root plus the archived priors (re-read each pass — a base adopt
+        // below changes the head, and its predecessor is already archived).
+        let mut addressing_roots: Vec<[u8; 32]> = vec![cur.community_root];
+        let mut archived = crate::db::community::held_epoch_keys(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX).unwrap_or_default();
+        archived.sort_by(|a, b| b.0 .0.cmp(&a.0 .0));
+        for (_, r) in archived {
+            if !addressing_roots.contains(&r) {
+                addressing_roots.push(r);
+            }
+        }
+        addressing_roots.truncate(MAX_ADDRESSING_ROOTS);
+
+        // Private channels first: a removal-forced channel rekey rides the PRIOR
+        // root (CORD-06 D2), so read channels before a base adopt moves it.
         let channel_ids: Vec<ChannelId> = cur.channels.iter().filter(|c| c.private).map(|c| c.id).collect();
         for cid in channel_ids {
             let (held_key, held_epoch) = match cur.channel(&cid) {
-                Some(ch) => match ch.key {
-                    Some(k) => (k, ch.epoch),
-                    None => continue, // a keyless private channel can't be advanced.
-                },
+                Some(ch) => (ch.key, ch.epoch),
                 None => continue,
             };
             let next = Epoch(held_epoch.0.saturating_add(1));
-            let group = channel_rekey_group_key(&cur.community_root, &cid, next);
-            let chunks = fetch_rekey_chunks(transport, &cur.relays, &group).await?;
-            match advance_scope(&chunks, RekeyScope::Channel(cid), &owner, me.secret_key(), &my_xonly, held_epoch, &held_key, next) {
+            let mut batches: Vec<(Vec<rekey::RekeyChunk>, Option<(Epoch, [u8; 32])>)> = Vec::new();
+            for root in &addressing_roots {
+                let group = channel_rekey_group_key(root, &cid, next);
+                let chunks = fetch_rekey_chunks(transport, &cur.relays, &group).await?;
+                if chunks.is_empty() {
+                    continue;
+                }
+                batches.push((chunks, held_key.map(|k| (held_epoch, k))));
+            }
+            // Keyless-adopt residual (documented, deferred hardening): a malicious
+            // AUTHORIZED admin can fork a keyless member onto an orphan low-key
+            // rotation nothing extends (keyed members' continuity filters it out).
+            // Recoverable via a fresh bundle; an insider with MANAGE_CHANNELS can
+            // exclude the member outright anyway, so the marginal harm is the wedge
+            // outliving their demotion.
+            match advance_scope(&batches, RekeyScope::Channel(cid), &channel_rotator_ok, &channel_rotator_outranks_me, me.secret_key(), &my_xonly, next) {
                 Advance::Adopt { new_key } => {
                     if let Some(ch) = cur.channels.iter_mut().find(|c| c.id.0 == cid.0) {
                         ch.key = Some(new_key);
                         ch.epoch = next;
                     }
+                    // The adopter's own multi-epoch archive (the minter archived at
+                    // mint) — this channel's history stays readable across rotations.
+                    // fetch_channel compensates for the CURRENT epoch, so a failed
+                    // archive only bites after the NEXT rotation — surface it.
+                    if let Err(e) = crate::db::community::store_epoch_key(&cid_hex, &crate::simd::hex::bytes_to_hex_32(&cid.0), next.0, &new_key) {
+                        crate::log_warn!("v2: channel epoch-key archive failed (history across this rotation may not read back): {e}");
+                    }
                     advanced = true;
                     changed = true;
                 }
                 Advance::Removed => {
-                    cur.channels.retain(|c| c.id.0 != cid.0);
+                    match held_key {
+                        // A complete rotation dropped my blob — cut from the channel.
+                        Some(_) => {
+                            cur.channels.retain(|c| c.id.0 != cid.0);
+                        }
+                        // Keyless scan: this epoch's rotation completed without me.
+                        // Advance the cursor so the walk converges on the channel's
+                        // CURRENT epoch — my entry point is its next rotation (whose
+                        // recipients are the members at that time) or a fresh bundle.
+                        None => {
+                            if let Some(ch) = cur.channels.iter_mut().find(|c| c.id.0 == cid.0) {
+                                ch.epoch = next;
+                            }
+                        }
+                    }
                     advanced = true;
                     changed = true;
                 }
@@ -2505,10 +2781,17 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
             let next = Epoch(held_epoch.0.saturating_add(1));
             let group = base_rekey_group_key(&cur.community_root, cur.id(), next);
             let chunks = fetch_rekey_chunks(transport, &cur.relays, &group).await?;
-            match advance_scope(&chunks, RekeyScope::Root, &owner, me.secret_key(), &my_xonly, held_epoch, &held_key, next) {
+            let batches = vec![(chunks, Some((held_epoch, held_key)))];
+            match advance_scope(&batches, RekeyScope::Root, &base_rotator_ok, &base_rotator_ok, me.secret_key(), &my_xonly, next) {
                 Advance::Adopt { new_key } => {
                     cur.community_root = new_key;
                     cur.root_epoch = next;
+                    // Archive on adopt: without this, a member who lived through TWO
+                    // Refoundings loses the middle epoch's public history (only the
+                    // minter archived it).
+                    if let Err(e) = crate::db::community::store_epoch_key(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX, next.0, &new_key) {
+                        crate::log_warn!("v2: base epoch-key archive failed (this epoch's history may not read back after the next rotation): {e}");
+                    }
                     advanced = true;
                     changed = true;
                 }
@@ -2577,40 +2860,49 @@ async fn fetch_rekey_chunks<T: Transport + ?Sized>(
     Ok(out)
 }
 
-/// Decide how a scope advances from a batch of rekey chunks (pure). Considers only
-/// owner-authored, complete rotations of this scope that extend the held
-/// `(epoch, key)` and target the immediate `next_epoch` (so a same-epoch fork
-/// resolves among candidates at one continuity point). Among those, a rotation
-/// carrying my blob yields a candidate key; the lexicographically lowest wins
-/// (convergent). If every complete candidate dropped my blob, I'm removed; if none
-/// qualifies, stay.
-#[allow(clippy::too_many_arguments)]
+/// Decide how a scope advances from per-addressing-root chunk batches (pure). Each
+/// batch pairs the chunks fetched under one root with the continuity to demand of
+/// them: a rotation qualifies when it's rotator-authorized (`rotator_ok`),
+/// complete, targets the immediate `next_epoch`, and — when I hold a chain —
+/// extends my exact `(epoch, key)`. A KEYLESS batch (`held` = None) has no chain
+/// to extend, so it qualifies on authority + completeness alone (CORD-06 §2:
+/// continuity is "a convergence check, not a secrecy mechanism"; the rotator's
+/// seal authority is the boundary). Among qualifying rotations carrying my blob
+/// the lexicographically lowest new key wins (convergent). All complete
+/// candidates without my blob conclude Removed for a KEYED holder only when one
+/// came from a rotator who may remove ME (`rotator_may_remove_me`, the CORD-06
+/// strict-outrank rule) — else Stay; for a keyless holder they merely advance the
+/// scan cursor (any bit-holder's real rotation is scan progress, never a loss).
 fn advance_scope(
-    chunks: &[rekey::RekeyChunk],
+    batches: &[(Vec<rekey::RekeyChunk>, Option<(Epoch, [u8; 32])>)],
     scope: RekeyScope,
-    owner: &PublicKey,
+    rotator_ok: &dyn Fn(&PublicKey) -> bool,
+    rotator_may_remove_me: &dyn Fn(&PublicKey) -> bool,
     my_sk: &SecretKey,
     my_xonly: &[u8; 32],
-    held_epoch: Epoch,
-    held_key: &[u8; 32],
     next_epoch: Epoch,
 ) -> Advance {
-    let rotations = rekey::collect_rotations(chunks);
     let mut winners: Vec<[u8; 32]> = Vec::new();
     let mut saw_complete_candidate = false;
-    for r in &rotations {
-        if r.rotator != *owner
-            || r.scope.id32() != scope.id32()
-            || r.new_epoch.0 != next_epoch.0
-            || r.continuity(held_epoch, held_key) != Continuity::Extends
-            || !r.is_complete()
-        {
-            continue;
-        }
-        saw_complete_candidate = true;
-        if let Some(blob) = rekey::find_my_blob(&r.blobs, &r.rotator.to_bytes(), my_xonly, r.scope, r.new_epoch) {
-            if let Ok(k) = rekey::open_blob_local(my_sk, &r.rotator, r.scope, r.new_epoch, blob) {
-                winners.push(k);
+    let mut saw_outranking_candidate = false;
+    let keyed = batches.iter().any(|(_, held)| held.is_some());
+    for (chunks, held) in batches {
+        let rotations = rekey::collect_rotations(chunks);
+        for r in &rotations {
+            if !rotator_ok(&r.rotator) || r.scope.id32() != scope.id32() || r.new_epoch.0 != next_epoch.0 || !r.is_complete() {
+                continue;
+            }
+            if let Some((held_epoch, held_key)) = held {
+                if r.continuity(*held_epoch, held_key) != Continuity::Extends {
+                    continue;
+                }
+            }
+            saw_complete_candidate = true;
+            saw_outranking_candidate |= rotator_may_remove_me(&r.rotator);
+            if let Some(blob) = rekey::find_my_blob(&r.blobs, &r.rotator.to_bytes(), my_xonly, r.scope, r.new_epoch) {
+                if let Ok(k) = rekey::open_blob_local(my_sk, &r.rotator, r.scope, r.new_epoch, blob) {
+                    winners.push(k);
+                }
             }
         }
     }
@@ -2618,13 +2910,14 @@ fn advance_scope(
         // `collect_rotations` correlates on `(rotator, scope, new_epoch, prev_commit)`,
         // so a single rotator's blobs merge into ONE rotation (and a retried Refounding
         // MINT-OR-REUSES its root, so it never emits two distinct roots to fork on).
-        // The lowest-key tiebreak engages only for CONCURRENT DISTINCT refounders (two
-        // rotators racing the same epoch — different `rotator`, so separate rotations):
-        // every follower converges on the same lowest new key.
+        // The lowest-key tiebreak engages only for CONCURRENT DISTINCT rotators racing
+        // the same epoch (separate rotations): every follower converges on the same
+        // lowest new key. A wrap served under two addressing roots can't double-count:
+        // each rekey wrap opens under exactly one root's group key.
         let idx = rekey::lowest_key_winner(&winners).expect("winners is non-empty");
         return Advance::Adopt { new_key: winners[idx] };
     }
-    if saw_complete_candidate {
+    if saw_complete_candidate && (!keyed || saw_outranking_candidate) {
         Advance::Removed
     } else {
         Advance::Stay
@@ -3848,13 +4141,14 @@ mod tests {
         let general = community.channels[0].id;
         println!("[create] community {} · #general {}", crate::simd::hex::bytes_to_hex_32(&community.id().0), crate::simd::hex::bytes_to_hex_32(&general.0));
 
-        // A private channel (native private CREATION needs key distribution — deferred; here
-        // it's constructed then carried to B in the join bundle, exercising the private plane).
-        let priv_key = crate::community::random_32();
-        let priv_id = ChannelId(crate::community::random_32());
-        community.channels.push(ChannelV2 { id: priv_id, name: "mods".into(), private: true, key: Some(priv_key), epoch: community.root_epoch });
-        crate::db::community::save_community_v2(&community).unwrap();
-        println!("[channel] +private #mods {}", crate::simd::hex::bytes_to_hex_32(&priv_id.0));
+        // A PRIVATE channel via the REAL create path: an independent key minted at
+        // channel-epoch 1, delivered over the rekey plane (A is the only member yet),
+        // then announced (vsk 2) — later carried to B in the join bundle.
+        let priv_id = create_private_channel(&bed.relay, &community, "mods").await.unwrap();
+        community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let priv_ch = community.channel(&priv_id).unwrap();
+        assert!(priv_ch.private && priv_ch.key.is_some() && priv_ch.epoch == Epoch(1), "born-private: keyed at epoch 1");
+        println!("[channel] +private #mods {} (native create: key over the rekey plane)", crate::simd::hex::bytes_to_hex_32(&priv_id.0));
 
         // Two more PUBLIC channels via the real create path.
         let announcements = create_public_channel(&bed.relay, &community, "announcements").await.unwrap();
@@ -3886,6 +4180,13 @@ mod tests {
         assert!(b_view.channels.iter().any(|c| c.id.0 == priv_id.0 && c.private && c.key.is_some()), "B holds the private channel key");
         assert!(texts_in(&bed.relay, &b_view, &general).await.contains(&"A: welcome to the deep e2e".to_string()), "B reads A's #general history");
         assert!(texts_in(&bed.relay, &b_view, &priv_id).await.contains(&"A: mods-only channel".to_string()), "B reads the PRIVATE channel with the bundle key");
+        // B folds the control plane (persisting the roster) — the live worker does
+        // this right after any join; B's admin standing gates B's channel ops below.
+        let session_b = SessionGuard::capture();
+        if let Some(fresh) = follow_control(&bed.relay, &b_view, &session_b).await.unwrap() {
+            b_view = fresh;
+        }
+        println!("[follow] B folded control (roster persisted: B is @admin)");
 
         // ── Conversation both ways + persistence (get_messages-level) ──
         send_message(&bed.relay, &b_view, &general, "B: thanks, glad to be here").await.unwrap();
@@ -3923,6 +4224,37 @@ mod tests {
         assert!(community.channels.iter().any(|c| c.id.0 == bugs.0), "A folds in B's authorized new channel");
         println!("[follow] A folded in B's #bug-reports (now {} channels)", community.channels.len());
 
+        // ── A creates a SECOND private channel while B is already a member: B is a
+        // recipient of the creation delivery, so B keys up from the rekey plane
+        // (keyless record → cursor walk → blob) with no bundle involved ──
+        let vault = create_private_channel(&bed.relay, &community, "vault").await.unwrap();
+        community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        send_message(&bed.relay, &community, &vault, "A: vault is open").await.unwrap();
+        println!("[channel] +private #vault {} (B is a live member — delivery via rekey plane)", crate::simd::hex::bytes_to_hex_32(&vault.0));
+        bed.swap_to(&b);
+        let session_b2 = SessionGuard::capture();
+        if let Some(fresh) = follow_control(&bed.relay, &b_view, &session_b2).await.unwrap() {
+            b_view = fresh;
+        }
+        let ch = b_view.channel(&vault).expect("B recorded the announced private channel");
+        assert!(ch.private && ch.key.is_none() && ch.epoch == Epoch(0), "B's record is keyless at cursor 0");
+        let rf = follow_rekeys(&bed.relay, &b_view, &session_b2).await.unwrap();
+        b_view = rf.updated.expect("the rekey walk adopts the creation delivery");
+        let ch = b_view.channel(&vault).expect("still recorded");
+        assert!(ch.key.is_some() && ch.epoch == Epoch(1), "B adopted the epoch-1 key from the creation crate");
+        assert!(
+            texts_in(&bed.relay, &b_view, &vault).await.contains(&"A: vault is open".to_string()),
+            "B reads the private history with the ADOPTED key"
+        );
+        send_message(&bed.relay, &b_view, &vault, "B: in the vault").await.unwrap();
+        bed.swap_to(&a);
+        community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert!(
+            texts_in(&bed.relay, &community, &vault).await.contains(&"B: in the vault".to_string()),
+            "A reads B's reply on the natively-created private channel"
+        );
+        println!("[private] B adopted #vault via rekey plane; two-way private conversation verified");
+
         // ── Members ──
         let members = memberlist(&bed.relay, &community).await.unwrap();
         let member_hexes: std::collections::BTreeSet<String> = members.iter().map(|m| m.to_hex()).collect();
@@ -3937,10 +4269,15 @@ mod tests {
         let post = fold_authority(&refounded, &fetch_control(&bed.relay, &refounded).await, &load_floors(&refounded));
         assert!(post.banned.contains(&b_hex), "the ban survives the refounding");
         assert!(texts_in(&bed.relay, &refounded, &general).await.iter().any(|t| t == "A: welcome to the deep e2e"), "pre-ban history reads across the new epoch");
-        println!("[ban] B banned; root rolled to epoch 1; ban survives; pre-ban history intact");
+        assert!(
+            texts_in(&bed.relay, &refounded, &priv_id).await.iter().any(|t| t == "A: mods-only channel"),
+            "PRIVATE history reads across the channel's own rotation (per-channel multi-epoch archive)"
+        );
+        println!("[ban] B banned; root rolled to epoch 1; ban survives; pre-ban history intact (public + private)");
         // B concludes it's severed.
         bed.swap_to(&b);
-        assert!(follow_rekeys(&bed.relay, &b_view, &session).await.unwrap().self_removed, "B is cryptographically cut by the ban-refound");
+        let session_b3 = SessionGuard::capture();
+        assert!(follow_rekeys(&bed.relay, &b_view, &session_b3).await.unwrap().self_removed, "B is cryptographically cut by the ban-refound");
         println!("[ban] B's rekey-follow: self_removed = true (severed)");
 
         // ── Unban: A lifts the ban ──
@@ -4041,8 +4378,43 @@ mod tests {
         send_message(&transport, &b_view, &general, "B: live reply").await.expect("reply");
         settle().await;
 
-        // A: ban B (three-removal) + dissolve.
+        // A: create a PRIVATE channel while B is already a member — B is a recipient
+        // of the creation delivery, so B keys up from the rekey plane over the real
+        // relay (no bundle involved), then the two converse on it.
         become_acct(&a);
+        community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let vault = create_private_channel(&transport, &community, "vault").await.expect("private channel");
+        community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        send_message(&transport, &community, &vault, "A: vault live").await.expect("vault send");
+        log(format!("[channel] +private #vault {} (key delivered over the rekey plane)", crate::simd::hex::bytes_to_hex_32(&vault.0)));
+        settle().await;
+
+        become_acct(&b);
+        let session_b = SessionGuard::capture();
+        let mut b_view = crate::db::community::load_community_v2(b_view.id()).unwrap().unwrap();
+        if let Some(fresh) = follow_control(&transport, &b_view, &session_b).await.expect("B control follow") {
+            b_view = fresh;
+        }
+        if let Some(fresh) = follow_rekeys(&transport, &b_view, &session_b).await.expect("B rekey follow").updated {
+            b_view = fresh;
+        }
+        let vch = b_view.channel(&vault).expect("B folded the vault");
+        assert!(vch.key.is_some() && vch.epoch == Epoch(1), "B adopted the vault key from the live rekey plane");
+        let vseen = texts_in(&transport, &b_view, &vault).await;
+        log(format!("[read] B sees #vault: {vseen:?}"));
+        assert!(vseen.iter().any(|t| t == "A: vault live"), "B reads the private channel with the ADOPTED key");
+        send_message(&transport, &b_view, &vault, "B: in the live vault").await.expect("vault reply");
+        settle().await;
+
+        become_acct(&a);
+        community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert!(
+            texts_in(&transport, &community, &vault).await.iter().any(|t| t == "B: in the live vault"),
+            "A reads B's private reply"
+        );
+        log("[private] two-way #vault conversation over the live relay".to_string());
+
+        // A: ban B (three-removal) + dissolve.
         set_banlist(&transport, &community, &[b.public_key().to_hex()]).await.expect("banlist");
         grant_roles(&transport, &community, &b.public_key(), vec![]).await.expect("strip");
         let refounded = refound_community(&transport, &community, &[b.public_key()]).await.expect("refound");
@@ -4539,10 +4911,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn follow_control_skips_a_new_private_channel_without_a_key() {
+    async fn follow_control_records_a_new_private_channel_keyless_and_unreadable() {
         // A Private channel's key rides the rekey plane, not the control edition —
-        // control-follow can't key it, so it's deferred (never added keyless, which
-        // would wrongly read the public address).
+        // control-follow records it KEYLESS (epoch 0, the rekey-scan cursor), and
+        // every read/send path refuses it until the key lands (never the root plane).
         let (_tmp, _guard, owner) = init_test_db();
         let relay = MemoryRelay::new();
         let community = create_community(&relay, "Priv", vec!["wss://r".into()], None).await.unwrap();
@@ -4550,9 +4922,32 @@ mod tests {
         publish_channel_edition(&relay, &community, &owner, &priv_id, "mods", true, 1, false).await;
 
         let session = SessionGuard::capture();
+        let updated = follow_control(&relay, &community, &session)
+            .await
+            .unwrap()
+            .expect("the keyless record is a change");
+        let ch = updated.channel(&priv_id).expect("the private channel is recorded");
+        assert!(ch.private && ch.key.is_none(), "recorded keyless");
+        assert_eq!(ch.epoch, Epoch(0), "epoch 0 = the root generation (scan cursor)");
+        assert!(updated.channel_read_coords(ch).is_empty(), "unreadable until keyed");
         assert!(
-            follow_control(&relay, &community, &session).await.unwrap().is_none(),
-            "a new private channel is skipped until its key arrives via rekey"
+            fetch_channel(&relay, &updated, &priv_id, 50).await.unwrap().is_empty(),
+            "a keyless fetch returns empty (and never queries the root plane)"
+        );
+        assert!(
+            send_message(&relay, &updated, &priv_id, "nope").await.is_err(),
+            "a keyless send refuses"
+        );
+        // The keyless record round-trips (the stored placeholder never surfaces
+        // as a real key).
+        let reloaded = crate::db::community::load_community_v2(updated.id()).unwrap().unwrap();
+        let rch = reloaded.channel(&priv_id).unwrap();
+        assert!(rch.private && rch.key.is_none() && rch.epoch == Epoch(0), "keyless survives reload");
+        // And a bundle minted while keyless never carries the placeholder.
+        let bundle = bundle_of(&reloaded, None, None, None);
+        assert!(
+            !bundle.channels.iter().any(|c| c.id == crate::simd::hex::bytes_to_hex_32(&priv_id.0)),
+            "an ungrantable keyless channel stays out of invite bundles"
         );
     }
 
@@ -4723,6 +5118,227 @@ mod tests {
         let follow = follow_rekeys(&bed.relay, &joined, &session).await.unwrap();
         assert!(follow.self_removed, "a complete base rotation dropping the member removes them");
         assert!(follow.updated.is_none(), "a removed member adopts nothing");
+    }
+
+    #[tokio::test]
+    async fn follow_rekeys_finds_a_channel_rekey_under_an_archived_prior_root() {
+        // PROTO-B2 regression: a Refounding's channel rekeys ride the PRIOR root
+        // (CORD-06 §3). A follower who adopted the BASE first (the live window:
+        // the base crate landed and was walked before the channel crates) must
+        // still find them — the lookup fans across the archived roots, not just
+        // the current one.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let mut community = create_community(&relay, "Strand", vec!["wss://r".into()], None).await.unwrap();
+        let root0 = community.community_root;
+        let priv_id = ChannelId([0x33; 32]);
+        let key1 = [0x44; 32];
+        add_private_channel(&mut community, priv_id, key1, Epoch(1));
+
+        // The refounder's channel rekey (1 → 2), sealed + addressed under the PRIOR
+        // root (root0), delivering the fresh key to me.
+        let key2 = [0x55; 32];
+        let prev_commit = super::super::derive::epoch_key_commitment(Epoch(1), &key1);
+        let group = channel_rekey_group_key(&root0, &priv_id, Epoch(2));
+        let blob = rekey::build_blob_local(owner.secret_key(), &owner.public_key().to_bytes(), &owner.public_key(), RekeyScope::Channel(priv_id), Epoch(2), &key2).unwrap();
+        for e in rekey::build_rekey_chunks_local(&owner, &group, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &prev_commit, &[blob], 2_000).unwrap() {
+            relay.publish(&e, &community.relays).await.unwrap();
+        }
+
+        // Simulate the base having ALREADY advanced (the stranding order): the head
+        // moved to a fresh root while root0 sits in the epoch-key archive (where
+        // genesis put it).
+        community.community_root = [0xB7; 32];
+        community.root_epoch = Epoch(1);
+        crate::db::community::save_community_v2(&community).unwrap();
+
+        let session = SessionGuard::capture();
+        let updated = follow_rekeys(&relay, &community, &session).await.unwrap().updated.expect("the prior-root crate is found");
+        let ch = updated.channel(&priv_id).unwrap();
+        assert_eq!(ch.epoch, Epoch(2), "the channel advanced despite the moved base");
+        assert_eq!(ch.key, Some(key2), "adopted the key delivered under the prior root");
+    }
+
+    #[tokio::test]
+    async fn follow_rekeys_keyless_cursor_walks_past_an_excluding_rotation_then_adopts() {
+        // A keyless private channel (announced by vsk-2, key not yet held) has no
+        // chain, so its epoch is a scan cursor: a complete rotation that excludes
+        // us advances the cursor (never a removal — we were never in); a later
+        // rotation that includes us is the entry point.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let mut community = create_community(&relay, "Cursor", vec!["wss://r".into()], None).await.unwrap();
+        let priv_id = ChannelId([0x66; 32]);
+        community.channels.push(ChannelV2 { id: priv_id, name: "vault".into(), private: true, key: None, epoch: Epoch(0) });
+        crate::db::community::save_community_v2(&community).unwrap();
+        let community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert!(community.channel(&priv_id).unwrap().key.is_none(), "keyless survives the round-trip");
+
+        // Epoch 1: the creation delivery went to a stranger only (pre-dates us).
+        let stranger = Keys::generate();
+        let key1 = [0x71; 32];
+        let pc1 = super::super::derive::epoch_key_commitment(Epoch(0), &community.community_root);
+        let g1 = channel_rekey_group_key(&community.community_root, &priv_id, Epoch(1));
+        let b1 = rekey::build_blob_local(owner.secret_key(), &owner.public_key().to_bytes(), &stranger.public_key(), RekeyScope::Channel(priv_id), Epoch(1), &key1).unwrap();
+        for e in rekey::build_rekey_chunks_local(&owner, &g1, RekeyScope::Channel(priv_id), Epoch(1), Epoch(0), &pc1, &[b1], 2_000).unwrap() {
+            relay.publish(&e, &community.relays).await.unwrap();
+        }
+        // Epoch 2: a later rotation includes ME (e.g. a removal-forced re-mint whose
+        // recipient set is the CURRENT members).
+        let key2 = [0x72; 32];
+        let pc2 = super::super::derive::epoch_key_commitment(Epoch(1), &key1);
+        let g2 = channel_rekey_group_key(&community.community_root, &priv_id, Epoch(2));
+        let b2 = rekey::build_blob_local(owner.secret_key(), &owner.public_key().to_bytes(), &owner.public_key(), RekeyScope::Channel(priv_id), Epoch(2), &key2).unwrap();
+        for e in rekey::build_rekey_chunks_local(&owner, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc2, &[b2], 2_100).unwrap() {
+            relay.publish(&e, &community.relays).await.unwrap();
+        }
+
+        // ONE follow: the cursor walks 0→1 (excluded, still keyless) and 1→2 (my
+        // blob — adopt), because each real step re-loops.
+        let session = SessionGuard::capture();
+        let updated = follow_rekeys(&relay, &community, &session).await.unwrap().updated.expect("the walk lands on the included epoch");
+        let ch = updated.channel(&priv_id).unwrap();
+        assert_eq!(ch.epoch, Epoch(2), "cursor walked through the excluding epoch to the included one");
+        assert_eq!(ch.key, Some(key2), "adopted the delivery that includes us");
+    }
+
+    #[tokio::test]
+    async fn follow_rekeys_honors_an_admin_channel_rotation_but_never_a_strangers() {
+        // CORD-06 §Authority: a CHANNEL rekey is honored from the owner or a
+        // MANAGE_CHANNELS holder under the persisted roster — so an admin-run
+        // rotation keys members up; a mere keyholder's forgery never does.
+        use crate::community::roles::{CommunityRoles, MemberGrant, Role};
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let mut community = create_community(&relay, "AdminRot", vec!["wss://r".into()], None).await.unwrap();
+        let priv_id = ChannelId([0x88; 32]);
+        let key1 = [0x91; 32];
+        add_private_channel(&mut community, priv_id, key1, Epoch(1));
+
+        // Persist a roster granting `admin` the Admin role (MANAGE_CHANNELS ⊂ ADMIN_ALL).
+        let admin = Keys::generate();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let role = Role::admin("aa".repeat(32));
+        let roster = CommunityRoles {
+            roles: vec![role.clone()],
+            grants: vec![MemberGrant { member: admin.public_key().to_hex(), role_ids: vec![role.role_id.clone()] }],
+        };
+        crate::db::community::set_community_roles(&cid_hex, &roster, 1_000).unwrap();
+
+        // The ADMIN rotates the channel 1 → 2, delivering to me: adopted.
+        let key2 = [0x92; 32];
+        let pc = super::super::derive::epoch_key_commitment(Epoch(1), &key1);
+        let g2 = channel_rekey_group_key(&community.community_root, &priv_id, Epoch(2));
+        let me_pk = crate::state::MY_SECRET_KEY.to_keys().unwrap().public_key();
+        let blob = rekey::build_blob_local(admin.secret_key(), &admin.public_key().to_bytes(), &me_pk, RekeyScope::Channel(priv_id), Epoch(2), &key2).unwrap();
+        for e in rekey::build_rekey_chunks_local(&admin, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob], 2_000).unwrap() {
+            relay.publish(&e, &community.relays).await.unwrap();
+        }
+        let session = SessionGuard::capture();
+        let updated = follow_rekeys(&relay, &community, &session).await.unwrap().updated.expect("an admin rotation is honored");
+        assert_eq!(updated.channel(&priv_id).unwrap().key, Some(key2), "adopted the admin's key");
+
+        // A STRANGER (keyholder, no roster standing) rotates 2 → 3: refused.
+        let rogue = Keys::generate();
+        let key3 = [0x93; 32];
+        let pc3 = super::super::derive::epoch_key_commitment(Epoch(2), &key2);
+        let g3 = channel_rekey_group_key(&updated.community_root, &priv_id, Epoch(3));
+        let rb = rekey::build_blob_local(rogue.secret_key(), &rogue.public_key().to_bytes(), &me_pk, RekeyScope::Channel(priv_id), Epoch(3), &key3).unwrap();
+        for e in rekey::build_rekey_chunks_local(&rogue, &g3, RekeyScope::Channel(priv_id), Epoch(3), Epoch(2), &pc3, &[rb], 2_100).unwrap() {
+            relay.publish(&e, &updated.relays).await.unwrap();
+        }
+        let follow = follow_rekeys(&relay, &updated, &session).await.unwrap();
+        assert!(follow.updated.is_none(), "a stranger's channel rotation is never adopted");
+    }
+
+    #[tokio::test]
+    async fn a_non_outranking_admins_rotation_never_concludes_my_removal() {
+        // CORD-06 §Authority: the Rotator must strictly OUTRANK every removed
+        // target. An equal-rank bit-holder's complete rotation that skips my blob
+        // must read Stay (my record survives); the OWNER's reads Removed. Needs a
+        // two-account bed: the follower must be a NON-owner admin.
+        use crate::community::roles::{CommunityRoles, MemberGrant, Role};
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Outrank", bed.relays.clone(), None).await.unwrap();
+
+        // The MEMBER's device: holds the community + the private channel, with a
+        // persisted roster granting the member AND a peer the same Admin role.
+        bed.swap_to(&member);
+        let mut held = community.clone();
+        let priv_id = ChannelId([0xAB; 32]);
+        let key1 = [0xA1; 32];
+        add_private_channel(&mut held, priv_id, key1, Epoch(1));
+        let peer = Keys::generate();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let role = Role::admin("bb".repeat(32));
+        let roster = CommunityRoles {
+            roles: vec![role.clone()],
+            grants: vec![
+                MemberGrant { member: peer.public_key().to_hex(), role_ids: vec![role.role_id.clone()] },
+                MemberGrant { member: member.keys.public_key().to_hex(), role_ids: vec![role.role_id.clone()] },
+            ],
+        };
+        crate::db::community::set_community_roles(&cid_hex, &roster, 1_000).unwrap();
+
+        // The equal-rank PEER rotates 1 → 2 delivering only to themselves.
+        let key2 = [0xA2; 32];
+        let pc = super::super::derive::epoch_key_commitment(Epoch(1), &key1);
+        let g2 = channel_rekey_group_key(&held.community_root, &priv_id, Epoch(2));
+        let pb = rekey::build_blob_local(peer.secret_key(), &peer.public_key().to_bytes(), &peer.public_key(), RekeyScope::Channel(priv_id), Epoch(2), &key2).unwrap();
+        for e in rekey::build_rekey_chunks_local(&peer, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[pb], 2_000).unwrap() {
+            bed.relay.publish(&e, &held.relays).await.unwrap();
+        }
+        let session = SessionGuard::capture();
+        let follow = follow_rekeys(&bed.relay, &held, &session).await.unwrap();
+        assert!(follow.updated.is_none(), "an equal-rank rotation excluding me is Stay, never my removal");
+        let reloaded = crate::db::community::load_community_v2(held.id()).unwrap().unwrap();
+        assert!(reloaded.channel(&priv_id).is_some(), "my channel record survives the peer's rotation");
+
+        // The OWNER's rotation excluding me IS a removal (owner outranks everyone).
+        let key3 = [0xA3; 32];
+        let stranger = Keys::generate();
+        let ob = rekey::build_blob_local(owner.keys.secret_key(), &owner.keys.public_key().to_bytes(), &stranger.public_key(), RekeyScope::Channel(priv_id), Epoch(2), &key3).unwrap();
+        for e in rekey::build_rekey_chunks_local(&owner.keys, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[ob], 2_100).unwrap() {
+            bed.relay.publish(&e, &held.relays).await.unwrap();
+        }
+        let follow = follow_rekeys(&bed.relay, &held, &session).await.unwrap();
+        let updated = follow.updated.expect("the owner's removal folds");
+        assert!(updated.channel(&priv_id).is_none(), "the owner's exclusion cuts my channel record");
+    }
+
+    #[tokio::test]
+    async fn converting_a_public_channel_to_private_is_refused() {
+        // The conversion (CORD-03 §2) is a key rotation this build doesn't mint yet:
+        // the producer refuses the flag flip, so no reader is left unkeyable.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "NoConvert", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let meta = control::ChannelMetadata { name: "general".into(), private: true, voice: None, deleted: None, custom: None, extra: Default::default() };
+        let err = edit_channel_metadata(&relay, &community, &general, &meta).await.unwrap_err();
+        assert!(err.contains("not supported"), "conversion is refused at the producer: {err}");
+        // A rename of the same public channel still works.
+        let meta = control::ChannelMetadata { name: "lobby".into(), private: false, voice: None, deleted: None, custom: None, extra: Default::default() };
+        edit_channel_metadata(&relay, &community, &general, &meta).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_private_channel_refuses_a_member_without_manage_channels() {
+        // The local mirror of the reader's gate: an unauthorized member is refused
+        // BEFORE any publish (no floor pollution, no orphan key crate).
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Gate", bed.relays.clone(), None).await.unwrap();
+        send_direct_invite(&bed.relay, &community, &member.keys.public_key(), None, None).await.unwrap();
+
+        bed.swap_to(&member);
+        let invite_wrap = fetch_direct_invite(&bed.relay, &bed.relays, &member.keys.public_key()).await;
+        let joined = accept_direct_invite(&bed.relay, &invite_wrap).await.unwrap();
+        let err = create_private_channel(&bed.relay, &joined, "sneaky").await.unwrap_err();
+        assert!(err.contains("MANAGE_CHANNELS"), "refused with the permission it lacks: {err}");
+        let err = create_public_channel(&bed.relay, &joined, "sneaky-too").await.unwrap_err();
+        assert!(err.contains("MANAGE_CHANNELS"), "public creation gates identically: {err}");
     }
 
     // ── Audit regressions ────────────────────────────────────────────────────

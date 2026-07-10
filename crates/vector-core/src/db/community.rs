@@ -1953,8 +1953,13 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
                 id: ChannelId(hex_id_to_32(&ch_hex)?),
                 name: dec_txt(&name_e),
                 private,
-                // A public channel derives from the root — drop the placeholder.
-                key: private.then_some(key),
+                // A public channel derives from the root — drop the placeholder. A
+                // PRIVATE channel stored with the root value is the KEYLESS placeholder
+                // (key not yet delivered over the rekey plane): a real private key is
+                // independently random (CORD-03 §1), never the root, so reconstruct
+                // None and keep every read/send path behind the keyless guards instead
+                // of silently addressing the public plane.
+                key: (private && key != community_root).then_some(key),
                 epoch: Epoch(epoch as u64),
             });
         }

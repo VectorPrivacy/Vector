@@ -111,6 +111,13 @@ pub fn apply_chat_to_state(state: &mut ChatState, event: &ChatEvent, channel_id:
             added.then(|| state.find_message(&target_id).map(|(_c, m)| ChatPersist::Updated { message: m, edit_event: None }))?
         }
         ChatEvent::Edit { opened, target, new_content } => {
+            // Dedup by the edit's own rumor id (its MESSAGE_EDIT row below): the
+            // in-message `apply_edit` dedups silently, so without this a re-wrapped
+            // duplicate would still return Updated and re-fire the handler — the
+            // replay hole the persist-gated callbacks exist to close.
+            if crate::db::events::event_exists(&opened.rumor_id.to_hex()).unwrap_or(false) {
+                return None;
+            }
             let target_id = crate::simd::hex::bytes_to_hex_32(target);
             // Author-scoped + same-channel: only the original author edits their own message.
             let editor_npub = opened.author.to_bech32().ok()?;
@@ -144,33 +151,37 @@ pub fn apply_chat_to_state(state: &mut ChatState, event: &ChatEvent, channel_id:
     }
 }
 
-/// Open a received wrap under `channel_id`'s plane and persist its chat event to the shared
-/// store — the LIVE counterpart of [`crate::VectorCore::v2_backfill_channel`]'s catch-up
-/// persistence. `channel_id` is the channel the dispatcher already matched. Best-effort: a
-/// non-chat / unopenable wrap is a no-op.
-pub async fn persist_incoming_chat(
-    community: &CommunityV2,
-    wrap: &nostr_sdk::Event,
+/// Apply an already-opened chat event to STATE + the shared store — the LIVE
+/// counterpart of [`crate::VectorCore::v2_backfill_channel`]'s catch-up persistence.
+/// The dispatcher opened the wrap (so nothing decrypts twice); the returned outcome
+/// is what the caller's callbacks fire from — a duplicate, a non-resident target,
+/// or a forged edit/delete yields `None` and nothing re-fires.
+pub async fn persist_chat_event(
+    event: &ChatEvent,
     channel_id: &str,
     my_pubkey: &PublicKey,
     session: &crate::state::SessionGuard,
 ) -> Option<ChatPersist> {
-    let ch = community.channels.iter().find(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0) == channel_id)?;
-    // A keyless private channel is unreadable — never derive it from the root plane.
-    if ch.private && ch.key.is_none() {
-        return None;
-    }
-    let (secret, epoch) = community.channel_secret(ch);
-    let group = super::derive::channel_group_key(&secret, &ch.id, epoch);
-    let event = chat::open_chat_event(wrap, &group, &ch.id, epoch).ok()?;
     let outcome = {
         let mut st = crate::state::STATE.lock().await;
         // A swap can land on the lock await: only mutate THIS account's STATE.
         if !session.is_valid() {
             return None;
         }
-        apply_chat_to_state(&mut st, &event, channel_id, my_pubkey)
+        apply_chat_to_state(&mut st, event, channel_id, my_pubkey)
     }?;
+    // Resolve a reply's preview (content/npub) from the DB before persist + emit
+    // (v1 parity): the parent is often persisted but outside the in-memory window,
+    // and without this the live render shows a reply with no context.
+    let outcome = match outcome {
+        ChatPersist::New(mut m) => {
+            if !m.replied_to.is_empty() {
+                let _ = crate::db::events::populate_reply_context(&mut m).await;
+            }
+            ChatPersist::New(m)
+        }
+        o => o,
+    };
     // …and only persist to THIS account's DB (the save straddles an await).
     if !session.is_valid() {
         return None;
@@ -209,15 +220,15 @@ pub async fn persist_chat(channel_id: &str, outcome: &ChatPersist) {
     }
 }
 
-/// The typed outcome of dispatching one v2 wrap — the callback that fired (if any).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The typed outcome of dispatching one v2 wrap.
+#[derive(Debug, Clone)]
 pub enum DispatchedV2 {
-    /// A new chat message on `channel_id` (hex).
-    Message { channel_id: String, message_id: String },
-    /// A reaction/edit updating `target_id` on `channel_id`.
-    Update { channel_id: String, target_id: String },
-    /// A delete removing `target_id` on `channel_id`.
-    Removed { channel_id: String, target_id: String },
+    /// An OPENED chat event (message/reaction/edit/delete) on `channel_id` (hex),
+    /// NOT yet applied. The realtime layer runs it through [`persist_chat_event`]
+    /// and fires the matching callback from the outcome — so a re-wrapped
+    /// duplicate (any keyholder can re-wrap a signed seal into a fresh 1059) or a
+    /// forged edit/delete never re-fires a handler, exactly v1's model.
+    Chat { channel_id: String, event: Box<ChatEvent> },
     /// A typing indicator from `npub` on `channel_id`.
     Typing { channel_id: String, npub: String },
     /// A Guestbook join/leave for `npub`.
@@ -241,14 +252,15 @@ pub enum DispatchedV2 {
     NotOurs,
 }
 
-/// Dispatch a received kind-1059 wrap for `community`: route it to the right
-/// plane, bridge it, and fire the matching [`InboundEventHandler`] callback.
-/// Returns what fired. Purely in-memory + callback — persistence is the caller's
-/// (the service/realtime layer) so this stays offline-testable.
+/// Dispatch a received kind-1059 wrap for `community`: route it to the plane it
+/// opens under. Chat events are returned OPENED (the realtime layer persists,
+/// then fires callbacks from the outcome); only the non-persisted kinds (typing,
+/// guestbook presence) fire their callback inline here. Purely in-memory — so
+/// this stays offline-testable.
 pub fn dispatch_wrap(
     wrap: &nostr_sdk::Event,
     community: &CommunityV2,
-    my_pubkey: &PublicKey,
+    _my_pubkey: &PublicKey,
     handler: &dyn InboundEventHandler,
 ) -> DispatchedV2 {
     // 1. Chat planes: try each held channel by its group key (author match).
@@ -267,7 +279,7 @@ pub fn dispatch_wrap(
             return DispatchedV2::NotOurs;
         };
         let channel_id = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
-        return dispatch_chat_event(&event, &channel_id, my_pubkey, handler);
+        return dispatch_chat_event(event, &channel_id, handler);
     }
 
     // 2. Guestbook plane: join/leave presence.
@@ -308,40 +320,9 @@ pub fn dispatch_wrap(
     DispatchedV2::NotOurs
 }
 
-fn dispatch_chat_event(
-    event: &ChatEvent,
-    channel_id: &str,
-    my_pubkey: &PublicKey,
-    handler: &dyn InboundEventHandler,
-) -> DispatchedV2 {
+fn dispatch_chat_event(event: ChatEvent, channel_id: &str, handler: &dyn InboundEventHandler) -> DispatchedV2 {
     match event {
-        ChatEvent::Message { opened, reply_to, emoji } => {
-            let msg = chat_message_to_message(opened, reply_to, emoji, my_pubkey);
-            let message_id = msg.id.clone();
-            handler.on_community_message(channel_id, &msg, true);
-            DispatchedV2::Message { channel_id: channel_id.to_string(), message_id }
-        }
-        ChatEvent::Reaction { opened, target, emoji, emoji_url, .. } => {
-            // Surface as an update on the target message; the fold applies it.
-            let target_id = crate::simd::hex::bytes_to_hex_32(target);
-            let mut msg = chat_message_to_message(opened, &None, &[], my_pubkey);
-            msg.content = emoji.clone();
-            if let Some(url) = emoji_url {
-                msg.emoji_tags = vec![EmojiTag { shortcode: emoji.clone(), url: url.clone() }];
-            }
-            handler.on_community_update(channel_id, &target_id, &msg);
-            DispatchedV2::Update { channel_id: channel_id.to_string(), target_id }
-        }
-        // Edit + Delete are AUTHOR-SCOPED (only the original author may edit/delete their
-        // own message). The author check needs the resident target, so its callback is
-        // fired by the realtime layer FROM the persist outcome — never optimistically here,
-        // or a forged edit/delete would grief the live view and then reappear on reload.
-        ChatEvent::Edit { target, .. } => {
-            DispatchedV2::Update { channel_id: channel_id.to_string(), target_id: crate::simd::hex::bytes_to_hex_32(target) }
-        }
-        ChatEvent::Delete { target, .. } => {
-            DispatchedV2::Removed { channel_id: channel_id.to_string(), target_id: crate::simd::hex::bytes_to_hex_32(target) }
-        }
+        // Typing is ephemeral (never persisted) — the one chat kind fired inline.
         ChatEvent::Typing { opened } => {
             let npub = opened.author.to_bech32().unwrap_or_default();
             let until = opened.at_ms / 1000 + 30;
@@ -349,6 +330,9 @@ fn dispatch_chat_event(
             DispatchedV2::Typing { channel_id: channel_id.to_string(), npub }
         }
         ChatEvent::Webxdc { .. } => DispatchedV2::Ignored,
+        // Message/Reaction/Edit/Delete all persist first; their callbacks fire from
+        // the outcome (dedup + author checks), never optimistically.
+        event => DispatchedV2::Chat { channel_id: channel_id.to_string(), event: Box::new(event) },
     }
 }
 
@@ -438,29 +422,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_received_message_wrap_fires_on_community_message() {
+    async fn a_received_message_wrap_opens_then_fires_from_the_persist_outcome() {
+        use nostr_sdk::prelude::Timestamp;
         let (_tmp, _guard, me) = init();
         let relay = MemoryRelay::new();
         let community = service::create_community(&relay, "In", vec!["wss://r".into()], None).await.unwrap();
         let general = community.channels[0].id;
-        service::send_message(&relay, &community, &general, "ping").await.unwrap();
+        let cid = crate::simd::hex::bytes_to_hex_32(&general.0);
 
-        // Fetch the raw wrap the way a live sub would deliver it, and dispatch it.
-        let authors = vec![super::super::derive::channel_group_key(&community.community_root, &general, community.root_epoch).pk_hex()];
-        let q = crate::community::transport::Query { kinds: vec![stream::KIND_WRAP], authors, ..Default::default() };
-        let wraps = relay.fetch(&q, &community.relays).await.unwrap();
+        // ANOTHER member (holds the root) posts — the incoming case, so no local
+        // send echo pre-persisted it.
+        let member = Keys::generate();
+        let group = super::super::derive::channel_group_key(&community.community_root, &general, community.root_epoch);
+        let rumor = chat::build_message_rumor(member.public_key(), &general, community.root_epoch, "ping", None, &[], vec![], 5_000);
+        let (wrap, _) = chat::seal_chat_rumor(&rumor, &group, &member, Timestamp::from_secs(5), false).unwrap();
 
+        // Dispatch OPENS the event but fires no message callback — that belongs to
+        // the persist outcome (dedup + author checks), v1's model.
         let rec = Recorder::default();
-        let mut fired = Vec::new();
-        for w in &wraps {
-            fired.push(dispatch_wrap(w, &community, &me.public_key(), &rec));
-        }
-        let msgs = rec.messages.lock().unwrap();
-        assert_eq!(msgs.len(), 1, "exactly one message dispatched");
-        assert_eq!(msgs[0].1.content, "ping");
-        assert_eq!(msgs[0].0, crate::simd::hex::bytes_to_hex_32(&general.0), "chat_id is the channel hex");
-        assert!(msgs[0].1.mine, "authored by me");
-        assert!(fired.iter().any(|d| matches!(d, DispatchedV2::Message { .. })));
+        let dispatched = dispatch_wrap(&wrap, &community, &me.public_key(), &rec);
+        assert!(rec.messages.lock().unwrap().is_empty(), "no optimistic message callback");
+        let DispatchedV2::Chat { channel_id, event } = dispatched else {
+            panic!("a chat wrap dispatches as Chat");
+        };
+        assert_eq!(channel_id, cid);
+
+        let session = crate::state::SessionGuard::capture();
+        let outcome = persist_chat_event(&event, &channel_id, &me.public_key(), &session).await;
+        let Some(ChatPersist::New(msg)) = outcome else {
+            panic!("the first delivery persists as New");
+        };
+        assert_eq!(msg.content, "ping");
+        assert!(!msg.mine, "authored by the other member");
+
+        // A RE-WRAP of the same signed rumor (any keyholder can mint one) is a
+        // fresh outer event, but the persist dedups on the inner id — no re-fire.
+        let (rewrap, _) = chat::seal_chat_rumor(&rumor, &group, &member, Timestamp::from_secs(6), false).unwrap();
+        assert_ne!(rewrap.id, wrap.id, "a re-wrap is a distinct outer event");
+        let DispatchedV2::Chat { event: dup, .. } = dispatch_wrap(&rewrap, &community, &me.public_key(), &rec) else {
+            panic!("the re-wrap still opens");
+        };
+        assert!(
+            persist_chat_event(&dup, &channel_id, &me.public_key(), &session).await.is_none(),
+            "a re-wrapped duplicate yields no outcome (nothing re-fires)"
+        );
     }
 
     #[tokio::test]
@@ -496,40 +501,29 @@ mod tests {
         let msg_id = service::send_message(&relay, &community, &general, "persist me").await.unwrap();
         service::send_reaction(&relay, &community, &general, &msg_id, &me_hex, "🔥", None).await.unwrap();
 
-        // Open every chat wrap, oldest first (fetch_channel's order — a target must be
-        // resident before its reaction lands).
+        // The SEND ECHO persisted both immediately — send-then-read works with no
+        // listen loop (the INT-W3 contract).
+        assert!(crate::db::events::event_exists(&msg_id).unwrap(), "the send echo persisted the message row");
+        let reacted = {
+            let st = crate::state::STATE.lock().await;
+            st.find_message(&msg_id).map(|(_, m)| m.reactions.iter().any(|r| r.emoji == "🔥")).unwrap_or(false)
+        };
+        assert!(reacted, "the send echo aggregated the reaction onto the stored message");
+
+        // The relay's copies of our own sends then arrive — every one dedups
+        // against the echoed rows (no double rows, no re-fires).
         let q = crate::community::transport::Query { kinds: vec![stream::KIND_WRAP], authors: vec![group.pk_hex()], ..Default::default() };
         let wraps = relay.fetch(&q, &community.relays).await.unwrap();
         let mut events: Vec<ChatEvent> = wraps.iter().filter_map(|w| chat::open_chat_event(w, &group, &general, community.root_epoch).ok()).collect();
         events.sort_by_key(|e| e.opened().at_ms);
-
-        let mut new = 0;
+        assert!(!events.is_empty());
         for ev in &events {
             let outcome = {
                 let mut st = crate::state::STATE.lock().await;
                 apply_chat_to_state(&mut st, ev, &cid, &me.public_key())
             };
-            if let Some(o) = outcome {
-                if matches!(o, ChatPersist::New(_)) {
-                    new += 1;
-                }
-                persist_chat(&cid, &o).await;
-            }
+            assert!(outcome.is_none(), "the relay echo of an already-echoed send dedups");
         }
-        assert_eq!(new, 1, "exactly one new message persisted");
-        assert!(crate::db::events::event_exists(&msg_id).unwrap(), "the message row is in the shared events store");
-        let reacted = {
-            let st = crate::state::STATE.lock().await;
-            st.find_message(&msg_id).map(|(_, m)| m.reactions.iter().any(|r| r.emoji == "🔥")).unwrap_or(false)
-        };
-        assert!(reacted, "the reaction aggregated onto the stored message");
-
-        // Re-applying the same message event dedups against the DB.
-        let dup = {
-            let mut st = crate::state::STATE.lock().await;
-            apply_chat_to_state(&mut st, &events[0], &cid, &me.public_key())
-        };
-        assert!(dup.is_none(), "a known message dedups on re-apply");
     }
 
     #[tokio::test]
@@ -566,6 +560,41 @@ mod tests {
         assert_eq!(content.as_deref(), Some("edited!"), "the edit applied to the stored message");
         let edit_id = events.iter().find_map(|e| matches!(e, ChatEvent::Edit { .. }).then(|| e.opened().rumor_id.to_hex())).unwrap();
         assert!(crate::db::events::event_exists(&edit_id).unwrap(), "the MESSAGE_EDIT event is persisted (folds on reload)");
+    }
+
+    #[tokio::test]
+    async fn an_edit_replay_never_refires() {
+        use nostr_sdk::prelude::Timestamp;
+        let (_tmp, _guard, me) = init();
+        let relay = MemoryRelay::new();
+        let community = service::create_community(&relay, "EditReplay", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let cid = crate::simd::hex::bytes_to_hex_32(&general.0);
+        let group = super::super::derive::channel_group_key(&community.community_root, &general, community.root_epoch);
+        let session = crate::state::SessionGuard::capture();
+
+        // Another member posts, then edits their own message.
+        let member = Keys::generate();
+        let msg = chat::build_message_rumor(member.public_key(), &general, community.root_epoch, "v1 text", None, &[], vec![], 5_000);
+        let msg_id = msg.id.unwrap().to_hex();
+        let (mw, _) = chat::seal_chat_rumor(&msg, &group, &member, Timestamp::from_secs(5), false).unwrap();
+        let edit = chat::build_edit_rumor(member.public_key(), &general, community.root_epoch, &msg_id, "v2 text", 6_000);
+        let (ew, _) = chat::seal_chat_rumor(&edit, &group, &member, Timestamp::from_secs(6), false).unwrap();
+        for w in [&mw, &ew] {
+            if let Ok(ev) = chat::open_chat_event(w, &group, &general, community.root_epoch) {
+                let _ = persist_chat_event(&ev, &cid, &me.public_key(), &session).await;
+            }
+        }
+
+        // A RE-WRAP of the same signed EDIT (fresh outer id) must not re-fire: the
+        // MESSAGE_EDIT row dedups it, exactly like the other three chat kinds.
+        let (replay, _) = chat::seal_chat_rumor(&edit, &group, &member, Timestamp::from_secs(7), false).unwrap();
+        assert_ne!(replay.id, ew.id, "a re-wrap is a distinct outer event");
+        let ev = chat::open_chat_event(&replay, &group, &general, community.root_epoch).unwrap();
+        assert!(
+            persist_chat_event(&ev, &cid, &me.public_key(), &session).await.is_none(),
+            "a replayed edit yields no outcome (no handler re-fire)"
+        );
     }
 
     #[tokio::test]
@@ -620,7 +649,7 @@ mod tests {
         let (wrap, _) = chat::seal_chat_rumor(&rumor, &stranger, &me, nostr_sdk::prelude::Timestamp::from_secs(1), false).unwrap();
 
         let rec = Recorder::default();
-        assert_eq!(dispatch_wrap(&wrap, &community, &me.public_key(), &rec), DispatchedV2::NotOurs);
+        assert!(matches!(dispatch_wrap(&wrap, &community, &me.public_key(), &rec), DispatchedV2::NotOurs));
         assert!(rec.messages.lock().unwrap().is_empty());
     }
 }
