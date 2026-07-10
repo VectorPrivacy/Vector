@@ -264,6 +264,33 @@ pub async fn refresh_subscription(client: &Client) {
     }
 }
 
+/// Re-send the CURRENT v2 subscriptions (same ids) to ONE relay. An AUTH-gating
+/// relay CLOSEs a sub REQ that raced ahead of the stream AUTHs on a fresh
+/// connection, and it never re-challenges once the connection is authenticated —
+/// so the moment the streams finish authenticating is exactly when the subs must
+/// be re-sent. nostr-sdk re-sends them only when ITS OWN auth completes (it
+/// can't see ours), which usually wins by socket ordering; this makes the heal
+/// deterministic and independent of that internal. Same-id REQs are idempotent.
+pub(crate) async fn resubscribe_relay(client: &Client, relay: &RelayUrl) {
+    let targeted = V2_SUB_ID.lock().await.clone();
+    let poolwide = V2_POOLWIDE_SUB_ID.lock().await.clone();
+    if targeted.is_none() && poolwide.is_none() {
+        return; // nothing subscribed yet — the first refresh registers on an authed socket.
+    }
+    let communities = load_held_v2();
+    let authors = plane_authors(&communities);
+    if authors.is_empty() {
+        return;
+    }
+    let filter = Filter::new()
+        .kinds([Kind::Custom(stream::KIND_WRAP), Kind::Custom(stream::KIND_WRAP_EPHEMERAL)])
+        .authors(authors)
+        .limit(0);
+    for id in [targeted, poolwide].into_iter().flatten() {
+        let _ = client.subscribe_with_id_to([relay.clone()], id, filter.clone(), None).await;
+    }
+}
+
 /// Route an arriving v2 wrap: find the held community whose plane it opens under
 /// and fire the matching handler callback (via the shared bridge). Persistence to
 /// the local DB is deferred (bots deliver via the callback; GUI history is v1 for

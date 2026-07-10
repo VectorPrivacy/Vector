@@ -35,6 +35,7 @@ Concordia — a multi-purpose Concord bot:
   !edit      — send a message, then edit it
   !delete    — send a message, then delete it
   !typing    — emit a typing indicator
+  !reconnect — bounce my relay sockets (reconnect drill)
   !file      — send a small text attachment (encrypt → Blossom → imeta)
   !members   — the folded member list
   !channels  — the channels I can see
@@ -145,6 +146,13 @@ async fn main() -> vector_sdk::Result<()> {
                         } else {
                             reply(&msg, "not in a community here").await;
                         }
+                    }
+                    "!reconnect" => {
+                        // Ops/repro tool: bounce this bot's community relay sockets (a
+                        // relay restart or idle drop in miniature) — then a !ping proves
+                        // whether the subscription survived the fresh AUTH gate.
+                        let bounced = bounce_community_relays().await;
+                        reply(&msg, &format!("bounced {bounced} relay socket(s) — send !ping to test the post-reconnect subscription")).await;
                     }
                     "!channels" | "!info" | "!caps" | "!roles" | "!whoami" => diagnostics(&bot, &msg, &text).await,
                     other if other.starts_with('!') => reply(&msg, &format!("unknown command `{other}` — try !help")).await,
@@ -258,6 +266,27 @@ async fn diagnostics(bot: &VectorBot, msg: &vector_sdk::IncomingMessage, which: 
         }
     };
     reply(msg, &out).await;
+}
+
+/// Disconnect every held community's relay sockets, then reconnect the pool —
+/// the miniature of a relay restart / idle drop. Returns how many were bounced.
+async fn bounce_community_relays() -> usize {
+    let Some(client) = vector_core::state::nostr_client() else { return 0 };
+    let mut bounced = 0;
+    for id in vector_core::db::community::list_community_ids().unwrap_or_default() {
+        if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&id) {
+            for r in &c.relays {
+                if let Ok(url) = nostr_sdk::prelude::RelayUrl::parse(r) {
+                    if let Ok(relay) = client.pool().relay(url).await {
+                        relay.disconnect();
+                        bounced += 1;
+                    }
+                }
+            }
+        }
+    }
+    client.connect().await;
+    bounced
 }
 
 /// Write a tiny file and send it as an encrypted attachment.
