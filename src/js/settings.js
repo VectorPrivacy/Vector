@@ -1513,6 +1513,9 @@ async function clearStorage() {
         clearStorageBtn.disabled = true;
         clearStorageBtn.textContent = 'Clearing...';
         await invoke('clear_storage');
+        // Full clear nukes the image cache too; drop the emoji memos so
+        // rendered emojis re-download instead of pointing at deleted files
+        reloadCachedEmojiImgs();
         clearStorageBtn.textContent = strPrevText;
         clearStorageBtn.disabled = false;
         return true;
@@ -1817,6 +1820,9 @@ function renderStorageDonut(typeDistribution) {
         try {
             const res = await invoke('clear_storage_category', { category, exts });
             showToast(`Freed ${res.freed_formatted}`);
+            // The emoji memos and any rendered <img>s point at the deleted
+            // cache files; re-resolve so they re-download on sight
+            if (category === 'cache') reloadCachedEmojiImgs();
         } catch (e) {
             await popupConfirm('Delete Failed', `Could not delete: ${escapeHtml(String(e))}`, true, '', 'vector_warning.svg');
         }
