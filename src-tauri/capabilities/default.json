@@ -206,6 +206,7 @@
     "allow-get-max-account-tier",
     "allow-get-storage-info",
     "allow-clear-storage",
+    "allow-clear-storage-category",
     "allow-export-keys",
     "allow-queue-profile-sync",
     "allow-queue-chat-profiles-sync",

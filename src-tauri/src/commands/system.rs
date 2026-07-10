@@ -108,16 +108,6 @@ pub async fn get_storage_info() -> Result<serde_json::Value, String> {
     // here instead missed Android's real media location, so attachments never counted.
     let vector_dir = vector_core::db::get_download_dir();
 
-    // Check if directory exists
-    if !vector_dir.exists() {
-        return Ok(serde_json::json!({
-            "path": vector_dir.to_string_lossy().to_string(),
-            "total_bytes": 0,
-            "file_count": 0,
-            "type_distribution": {}
-        }));
-    }
-
     // Calculate total size and file count
     let mut total_bytes = 0;
     let mut file_count = 0;
@@ -125,23 +115,41 @@ pub async fn get_storage_info() -> Result<serde_json::Value, String> {
     // Track file type distribution by size
     let mut type_distribution = std::collections::HashMap::new();
 
-    // Walk through all files in the directory
-    if let Ok(entries) = std::fs::read_dir(&vector_dir) {
-        for entry in entries.flatten() {
-            if let Ok(metadata) = entry.metadata() {
-                if metadata.is_file() {
-                    let file_size = metadata.len();
-                    total_bytes += file_size;
-                    file_count += 1;
-
-                    // Get file extension
-                    if let Some(extension) = entry.file_name().to_string_lossy().split('.').last() {
-                        let extension = extension.to_lowercase();
+    // Dotfiles are neither counted nor swept: they're OS/app markers
+    // (.nomedia is the Hide-from-Gallery switch, .{hash}.tmp is a staged
+    // send), not user content
+    let mut walk_dir = |dir: &std::path::Path, only_ext: Option<&str>| {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with('.') {
+                    continue;
+                }
+                let extension = match name.split('.').last() {
+                    Some(ext) => ext.to_lowercase(),
+                    None => continue,
+                };
+                if only_ext.is_some_and(|want| extension != want) {
+                    continue;
+                }
+                if let Ok(metadata) = entry.metadata() {
+                    if metadata.is_file() {
+                        let file_size = metadata.len();
+                        total_bytes += file_size;
+                        file_count += 1;
                         *type_distribution.entry(extension).or_insert(0) += file_size;
                     }
                 }
             }
         }
+    };
+    walk_dir(&vector_dir, None);
+    // Marketplace-installed Mini Apps live in app data rather than the download
+    // dir, but they're user-visible storage all the same (the Apps slice).
+    // Packages only: a crashed update's .xdc.tmp isn't reachable by any sweep
+    if let Ok(app_data) = handle.path().app_data_dir() {
+        walk_dir(&app_data.join("miniapps").join("marketplace"), Some("xdc"));
     }
 
     // Calculate Whisper models size if whisper feature is enabled
@@ -157,8 +165,9 @@ pub async fn get_storage_info() -> Result<serde_json::Value, String> {
         }
 
         if ai_models_size > 0 {
-            // Add AI models to type distribution
-            *type_distribution.entry("ai_models".to_string()).or_insert(0) += ai_models_size;
+            // Synthetic bucket key; the '/' can't occur in a filename-derived
+            // extension, so a real "foo.ai_models" file can never collide
+            *type_distribution.entry("/ai_models".to_string()).or_insert(0) += ai_models_size;
             total_bytes += ai_models_size;
         }
     }
@@ -167,7 +176,7 @@ pub async fn get_storage_info() -> Result<serde_json::Value, String> {
     // Cache is global (not per-account) for deduplication across accounts
     if let Ok(cache_size) = image_cache::get_cache_size(handle) {
         if cache_size > 0 {
-            *type_distribution.entry("cache".to_string()).or_insert(0) += cache_size;
+            *type_distribution.entry("/cache".to_string()).or_insert(0) += cache_size;
             total_bytes += cache_size;
         }
     }
@@ -182,15 +191,23 @@ pub async fn get_storage_info() -> Result<serde_json::Value, String> {
     }))
 }
 
-/// Clear all downloaded attachments from messages and return freed storage space
-#[tauri::command]
-pub async fn clear_storage<R: Runtime>(handle: AppHandle<R>) -> Result<serde_json::Value, String> {
-    // First, get the total storage size before clearing
-    let storage_info_before = get_storage_info().await.map_err(|e| format!("Failed to get storage info before clearing: {}", e))?;
-    let total_bytes_before = storage_info_before["total_bytes"].as_u64().unwrap_or(0);
+/// Delete downloaded attachment files and reset their metadata, optionally
+/// restricted to a set of lowercase file extensions (None = every attachment).
+/// Returns the number of chats that had messages updated.
+async fn clear_attachment_files<R: Runtime>(
+    handle: &AppHandle<R>,
+    exts: Option<&std::collections::HashSet<String>>,
+    session: &vector_core::state::SessionGuard,
+) -> Result<usize, String> {
+    // Deletion is confined to the download dir: a stale or symlinked
+    // attachment path must not be able to reach files elsewhere on disk
+    let download_dir = vector_core::db::get_download_dir().canonicalize().ok();
 
     // Lock the state to access all chats and messages
     let mut state = STATE.lock().await;
+    if !session.is_valid() {
+        return Err("Session changed during storage clear".to_string());
+    }
 
     // Track which chats have been updated to avoid duplicate saves
     let mut updated_chats = std::collections::HashSet::new();
@@ -204,17 +221,45 @@ pub async fn clear_storage<R: Runtime>(handle: AppHandle<R>) -> Result<serde_jso
         for message in state.chats[chat_idx].messages.iter_mut() {
             let mut attachment_updated = false;
 
-            // Iterate through all attachments and reset their properties
+            // Iterate through matching attachments and reset their properties
             for attachment in &mut message.attachments {
-                if attachment.downloaded() || !attachment.path.is_empty() {
-                    // Delete the file (ignore error if it doesn't exist)
-                    let _ = std::fs::remove_file(&*attachment.path);
-                    // Reset attachment properties
-                    attachment.set_downloaded(false);
-                    attachment.set_downloading(false);
-                    attachment.path = String::new().into_boxed_str();
-                    attachment_updated = true;
+                if !attachment.downloaded() && attachment.path.is_empty() {
+                    continue;
                 }
+
+                // Category clears match on the on-disk filename extension — the
+                // same derivation the storage chart buckets by
+                if let Some(set) = exts {
+                    let ext = std::path::Path::new(&*attachment.path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .and_then(|n| n.split('.').last())
+                        .map(|e| e.to_lowercase());
+                    if !ext.is_some_and(|e| set.contains(&e)) {
+                        continue;
+                    }
+                }
+
+                // A path that resolves outside the download dir (user-picked
+                // send, symlink) is left fully intact: it isn't Vector's
+                // storage. A path that no longer resolves is a dangling ref:
+                // nothing to delete, but the metadata still needs the reset
+                match std::path::Path::new(&*attachment.path).canonicalize() {
+                    Ok(real) => {
+                        match &download_dir {
+                            Some(dir) if real.starts_with(dir) => {
+                                let _ = std::fs::remove_file(&real);
+                            }
+                            _ => continue,
+                        }
+                    }
+                    Err(_) => {}
+                }
+                // Reset attachment properties
+                attachment.set_downloaded(false);
+                attachment.set_downloading(false);
+                attachment.path = String::new().into_boxed_str();
+                attachment_updated = true;
             }
 
             // If any attachment was updated, track this message for save/emit
@@ -224,35 +269,48 @@ pub async fn clear_storage<R: Runtime>(handle: AppHandle<R>) -> Result<serde_jso
         }
 
         // If we have messages to update, save them to the database
-        if !updated_msg_ids.is_empty() {
-            let chat_id = state.chats[chat_idx].id().to_string();
-
-            // Convert updated messages to Message format for save and emit
-            let messages_to_update: Vec<crate::Message> = updated_msg_ids.iter()
-                .filter_map(|msg_id| {
-                    let hex_id = crate::util::bytes_to_hex_32(msg_id);
-                    state.chats[chat_idx].messages.find_by_hex_id(&hex_id)
-                        .map(|m| m.to_message(&state.interner))
-                })
-                .collect();
-
-            // Save updated messages to database
-            db::save_chat_messages(&chat_id, &messages_to_update).await
-                .map_err(|e| format!("Failed to save updated messages for chat {}: {}", chat_id, e))?;
-
-            // Emit message_update events for each updated message
-            for message in &messages_to_update {
-                handle.emit("message_update", serde_json::json!({
-                    "old_id": &message.id,
-                    "message": message,
-                    "chat_id": &chat_id
-                })).map_err(|e| format!("Failed to emit message_update for chat {}: {}", chat_id, e))?;
-            }
-
-            updated_chats.insert(chat_id);
+        if updated_msg_ids.is_empty() {
+            continue;
         }
+        let chat_id = state.chats[chat_idx].id().to_string();
+
+        // Convert updated messages to Message format for save and emit
+        let messages_to_update: Vec<crate::Message> = updated_msg_ids.iter()
+            .filter_map(|msg_id| {
+                let hex_id = crate::util::bytes_to_hex_32(msg_id);
+                state.chats[chat_idx].messages.find_by_hex_id(&hex_id)
+                    .map(|m| m.to_message(&state.interner))
+            })
+            .collect();
+
+        if !session.is_valid() {
+            return Err("Session changed during storage clear".to_string());
+        }
+
+        // Save updated messages to database
+        db::save_chat_messages(&chat_id, &messages_to_update).await
+            .map_err(|e| format!("Failed to save updated messages for chat {}: {}", chat_id, e))?;
+
+        // Emit message_update events for each updated message
+        for message in &messages_to_update {
+            handle.emit("message_update", serde_json::json!({
+                "old_id": &message.id,
+                "message": message,
+                "chat_id": &chat_id
+            })).map_err(|e| format!("Failed to emit message_update for chat {}: {}", chat_id, e))?;
+        }
+
+        updated_chats.insert(chat_id);
     }
 
+    Ok(updated_chats.len())
+}
+
+/// Nuke the global image/sound caches and clear cached image paths from profiles
+async fn clear_media_caches<R: Runtime>(
+    handle: &AppHandle<R>,
+    session: &vector_core::state::SessionGuard,
+) -> Result<(), String> {
     // Clear all disk caches (images, sounds, etc.) by nuking the cache directory
     let cache_dir = handle.path().app_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {}", e))?
@@ -266,6 +324,10 @@ pub async fn clear_storage<R: Runtime>(handle: AppHandle<R>) -> Result<serde_jso
     audio::purge_sound_cache();
 
     // Clear cached paths from all profiles in state and database
+    let mut state = STATE.lock().await;
+    if !session.is_valid() {
+        return Err("Session changed during storage clear".to_string());
+    }
     let mut cleared_ids = Vec::new();
     for profile in &mut state.profiles {
         if !profile.avatar_cached.is_empty() || !profile.banner_cached.is_empty() {
@@ -275,14 +337,62 @@ pub async fn clear_storage<R: Runtime>(handle: AppHandle<R>) -> Result<serde_jso
         }
     }
     for id in cleared_ids {
+        // Re-check each iteration: set_profile awaits, and a session swap
+        // mid-loop must not write the remaining profiles into the new account
+        if !session.is_valid() {
+            return Err("Session changed during storage clear".to_string());
+        }
         if let Some(slim) = state.serialize_profile(id) {
             db::set_profile(slim).await.ok();
         }
     }
+    Ok(())
+}
+
+/// Delete files with matching extensions from a directory (top level only,
+/// mirroring the storage chart's walk). Category clears must sweep untracked
+/// files too: the chart counts every file in the folder, not just attachments
+/// referenced by the current account.
+fn sweep_dir_by_ext(dir: &std::path::Path, exts: &std::collections::HashSet<String>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let is_file = entry.metadata().map(|m| m.is_file()).unwrap_or(false);
+            if !is_file {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            // Dotfiles are protected: mirrors the chart walk (.nomedia is the
+            // Hide-from-Gallery switch, .{hash}.tmp is a staged send)
+            if name.starts_with('.') {
+                continue;
+            }
+            let matches = name
+                .split('.')
+                .last()
+                .is_some_and(|e| exts.contains(&e.to_lowercase()));
+            if matches {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+/// Clear all downloaded attachments from messages and return freed storage space
+#[tauri::command]
+pub async fn clear_storage<R: Runtime>(handle: AppHandle<R>) -> Result<serde_json::Value, String> {
+    let session = vector_core::state::SessionGuard::capture();
+
+    // First, get the total storage size before clearing
+    let storage_info_before = get_storage_info().await.map_err(|e| format!("Failed to get storage info before clearing: {}", e))?;
+    let total_bytes_before = storage_info_before["total_bytes"].as_u64().unwrap_or(0);
+
+    let updated_chats = clear_attachment_files(&handle, None, &session).await?;
+    clear_media_caches(&handle, &session).await?;
+    // Attachment deletion can strand Mini App history rows pointing at nothing
+    let _ = crate::db::prune_dangling_miniapp_history();
 
     // Get storage info after clearing to calculate freed space
-    // Need to drop the state lock first since get_storage_info needs it
-    drop(state);
     let storage_info_after = get_storage_info().await.map_err(|e| format!("Failed to get storage info after clearing: {}", e))?;
     let total_bytes_after = storage_info_after["total_bytes"].as_u64().unwrap_or(0);
 
@@ -293,7 +403,63 @@ pub async fn clear_storage<R: Runtime>(handle: AppHandle<R>) -> Result<serde_jso
     Ok(serde_json::json!({
         "freed_bytes": freed_bytes,
         "freed_formatted": format_bytes(freed_bytes),
-        "updated_chats": updated_chats.len()
+        "updated_chats": updated_chats
+    }))
+}
+
+/// Clear a single storage category: "cache" (image/sound caches), "ai"
+/// (downloaded Whisper models), or any other value = attachment/file sweep
+/// restricted to the given extension set.
+#[tauri::command]
+pub async fn clear_storage_category<R: Runtime>(
+    handle: AppHandle<R>,
+    category: String,
+    exts: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    let session = vector_core::state::SessionGuard::capture();
+
+    let storage_info_before = get_storage_info().await.map_err(|e| format!("Failed to get storage info before clearing: {}", e))?;
+    let total_bytes_before = storage_info_before["total_bytes"].as_u64().unwrap_or(0);
+
+    match category.as_str() {
+        "cache" => clear_media_caches(&handle, &session).await?,
+        "ai" => {
+            #[cfg(feature = "whisper")]
+            for model in whisper::MODELS {
+                if whisper::is_model_downloaded(&handle, model.name) {
+                    whisper::delete_whisper_model(handle.clone(), model.name.to_string()).await;
+                }
+            }
+        }
+        _ => {
+            let ext_set: std::collections::HashSet<String> =
+                exts.iter().map(|e| e.to_lowercase()).collect();
+            if ext_set.is_empty() {
+                return Err("No file types to clear".to_string());
+            }
+            clear_attachment_files(&handle, Some(&ext_set), &session).await?;
+            sweep_dir_by_ext(&vector_core::db::get_download_dir(), &ext_set);
+            // Marketplace installs live in app data, not the download dir;
+            // wiping the Apps slice must uninstall them too, or the library
+            // keeps offering "Play" on packages that are gone
+            if ext_set.contains("xdc") {
+                if let Ok(app_data) = handle.path().app_data_dir() {
+                    sweep_dir_by_ext(&app_data.join("miniapps").join("marketplace"), &ext_set);
+                }
+                crate::miniapps::marketplace::sync_install_status_from_disk(&handle).await;
+            }
+            // File deletion can strand Mini App history rows pointing at nothing
+            let _ = crate::db::prune_dangling_miniapp_history();
+        }
+    }
+
+    let storage_info_after = get_storage_info().await.map_err(|e| format!("Failed to get storage info after clearing: {}", e))?;
+    let total_bytes_after = storage_info_after["total_bytes"].as_u64().unwrap_or(0);
+    let freed_bytes = total_bytes_before.saturating_sub(total_bytes_after);
+
+    Ok(serde_json::json!({
+        "freed_bytes": freed_bytes,
+        "freed_formatted": format_bytes(freed_bytes)
     }))
 }
 
@@ -569,6 +735,7 @@ pub async fn get_logs(handle: AppHandle) -> String {
 // - run_maintenance
 // - get_storage_info
 // - clear_storage
+// - clear_storage_category
 // - get_device_memory
 // - get_crash_log
 // - check_battery_optimized

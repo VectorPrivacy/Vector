@@ -1401,9 +1401,15 @@
                     <p id="storage-summary">A breakdown of Vector's storage use.</p>
                   </div>
                   <div class="form-group">
-                    <div id="storage-bar-container" style="height: 20px; width: 100%; background-color: #333; border-radius: 10px; overflow: hidden; margin-top: 8px;">
-                      <div id="storage-bar" style="height: 100%; display: flex;"></div>
+                    <div id="storage-donut-wrap">
+                      <svg id="storage-donut" viewBox="0 0 200 200" aria-hidden="true"></svg>
+                      <div id="storage-donut-center">
+                        <span id="storage-donut-value"></span>
+                        <span id="storage-donut-label"></span>
+                        <button id="storage-donut-delete" style="display: none;">Delete</button>
+                      </div>
                     </div>
+                    <div id="storage-legend"></div>
                   </div>
                   <div class="form-group" style="margin-top: 15px;">
                     <label class="toggle-container">

@@ -7815,6 +7815,137 @@ select {
   pointer-events: none;
 }
 
+/* ===== Storage donut chart ===== */
+#storage-donut-wrap {
+  position: relative;
+  width: 190px;
+  margin: 14px auto 2px;
+}
+
+#storage-donut {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.storage-slice {
+  transform-box: view-box;
+  transform-origin: 50% 50%;
+  /* Dim/undim must feel instant so the chart and legend read as one control;
+     only the pop transform gets a springy ride */
+  transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.08s ease-out, filter 0.08s ease-out;
+  animation: storage-slice-in 0.5s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+.storage-slice.pop {
+  transform: scale(1.05);
+  filter: brightness(1.12);
+}
+
+.storage-slice.dim {
+  opacity: 0.35;
+}
+
+@keyframes storage-slice-in {
+  from {
+    opacity: 0;
+    transform: scale(0.55);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+#storage-donut-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+#storage-donut-value {
+  font-size: 19px;
+  font-weight: 600;
+  color: #fff;
+}
+
+#storage-donut-label {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+  margin-top: 1px;
+  max-width: 100px;
+}
+
+/* Delete button for the selected slice; lives in the donut hole, so it must
+   re-enable pointer events (the center overlay is click-through) */
+#storage-donut-delete {
+  pointer-events: auto;
+  margin-top: 5px;
+  padding: 4px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  background: rgba(224, 97, 110, 0.18);
+  border: 1px solid rgba(224, 97, 110, 0.55);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+#storage-donut-delete:hover {
+  background: rgba(224, 97, 110, 0.4);
+  border-color: #e0616e;
+}
+
+#storage-donut-delete:disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+#storage-legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px 20px;
+  margin-top: 14px;
+}
+
+#storage-legend:empty {
+  display: none;
+}
+
+.storage-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 14px;
+  transition: opacity 0.08s ease-out;
+}
+
+.storage-legend-item.dim {
+  opacity: 0.4;
+}
+
+.storage-legend-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .storage-slice {
+    animation: none;
+  }
+}
+
 /* Notification Content Privacy row: label left, dropdown right (matches the
    toggle rows). Stacks vertically on narrow screens so the label can't squash. */
 #notif-privacy-group {

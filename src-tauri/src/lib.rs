@@ -587,6 +587,7 @@ pub fn run() {
             commands::invites::get_max_account_tier,
             commands::system::get_storage_info,
             commands::system::clear_storage,
+            commands::system::clear_storage_category,
             commands::system::check_battery_optimized,
             commands::system::request_battery_optimization,
             commands::system::get_background_service_enabled,
