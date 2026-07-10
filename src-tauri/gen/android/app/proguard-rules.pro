@@ -29,6 +29,12 @@
     @android.webkit.JavascriptInterface <methods>;
 }
 
+# Keep every @JavascriptInterface method (called from JS, invisible to R8). Covers the
+# Vector overlay bridge (__vectorOverlay), which lives on an anonymous class.
+-keepclassmembers class * {
+    @android.webkit.JavascriptInterface <methods>;
+}
+
 # Keep MiniAppIpc native JNI methods
 -keepclassmembers class io.vectorapp.miniapp.MiniAppIpc {
     native <methods>;
@@ -42,7 +48,7 @@
 # Keep MiniAppManager companion object static methods (called from Rust via JNI)
 -keep class io.vectorapp.miniapp.MiniAppManager {
     public static void initialize(android.app.Activity);
-    public static void openMiniApp(java.lang.String, java.lang.String, java.lang.String, java.lang.String, java.lang.String);
+    public static void openMiniApp(java.lang.String, java.lang.String, java.lang.String, java.lang.String, java.lang.String, java.lang.String);
     public static void closeMiniApp();
     public static void sendToMiniApp(java.lang.String, java.lang.String);
     public static void sendRealtimeData(java.lang.String);

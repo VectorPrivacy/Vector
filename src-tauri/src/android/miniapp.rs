@@ -48,6 +48,11 @@ fn load_class_from_activity<'a>(
     Ok(JClass::from(loaded_class))
 }
 
+/// Vector's overlay UI, rendered above the Mini App. Embedded at compile time so the
+/// canonical source stays a normal frontend file (`src/overlay.html`); when it outgrows a
+/// single self-contained page, serve it through a proper asset origin instead.
+const OVERLAY_HTML: &str = include_str!("../../../src/overlay.html");
+
 /// Open a Mini App in a full-screen overlay WebView.
 ///
 /// This calls MiniAppManager.openMiniApp() on the Kotlin side.
@@ -94,18 +99,24 @@ pub fn open_miniapp_overlay(
             JObject::null()
         };
 
-        // Call MiniAppManager.openMiniApp(miniappId, packagePath, chatId, messageId, href)
+        // Vector overlay markup (exit affordance today; grows into a full overlay later)
+        let j_overlay_html = env
+            .new_string(OVERLAY_HTML)
+            .map_err(|e| format!("Failed to create overlay html string: {:?}", e))?;
+
+        // Call MiniAppManager.openMiniApp(miniappId, packagePath, chatId, messageId, href, overlayHtml)
         // Note: We need to run on UI thread, so we call via the activity
         env.call_static_method(
             manager_class,
             "openMiniApp",
-            "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+            "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
             &[
                 JValue::Object(&j_miniapp_id),
                 JValue::Object(&j_package_path),
                 JValue::Object(&j_chat_id),
                 JValue::Object(&j_message_id),
                 JValue::Object(&j_href),
+                JValue::Object(&j_overlay_html),
             ],
         )
         .map_err(|e| format!("Failed to call MiniAppManager.openMiniApp: {:?}", e))?;

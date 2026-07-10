@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Vector Overlay</title>
+<style>
+  :root { --vo-accent: #59fcb3; }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: transparent; overflow: hidden;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent; /* kill Android's blue tap flash */
+    font-family: -apple-system, system-ui, sans-serif;
+  }
+  /* The chip is the only painted, hit-testable element; the rest of the surface is
+     transparent and passes touches through to the Mini App beneath (see OverlayWebView). */
+  #vo-chip {
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 0px) + 14px);
+    right: 12px;                 /* initial corner; JS switches to left/top once dragged */
+    width: 44px; height: 44px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 50%;
+    background: rgba(14, 14, 16, 0.80);
+    border: 1.5px solid rgba(89, 252, 179, 0.5);
+    color: #fff; font-size: 20px; line-height: 1;
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.45);
+    opacity: 0.55;
+    transition: opacity .25s ease, transform .12s ease;
+    touch-action: none;          /* gestures are handled in JS, not scrolled */
+    -webkit-tap-highlight-color: transparent;
+    -webkit-user-select: none; user-select: none;
+    outline: none;
+    cursor: pointer;
+  }
+  #vo-chip.vo-active { opacity: 1; }
+  #vo-chip:active { transform: scale(0.92); }
+</style>
+</head>
+<body>
+  <div id="vo-chip" role="button" aria-label="Exit Mini App">&#10005;</div>
+  <script>
+    (function () {
+      'use strict';
+      var chip = document.getElementById('vo-chip');
+      var MARGIN = 12;
+
+      // Bridge. Android injects window.__vectorOverlay {close, setHitRect}. Desktop will
+      // reuse this same page in an overlay surface and route through Tauri instead (TODO).
+      var bridge = window.__vectorOverlay || null;
+      function requestClose() {
+        if (bridge && bridge.close) { bridge.close(); return; }
+        // Desktop overlay path — command not wired yet; harmless no-op on Android.
+        if (window.__TAURI__ && window.__TAURI__.core) {
+          try { window.__TAURI__.core.invoke('miniapp_close_active'); } catch (e) {}
+        }
+      }
+      // The native layer passes through every touch that misses the live controls, so it
+      // needs the chip's current rect (CSS px). Report it on every layout/position change.
+      function reportHitRect() {
+        if (!bridge || !bridge.setHitRect) return;
+        var r = chip.getBoundingClientRect();
+        bridge.setHitRect(r.left, r.top, r.width, r.height);
+      }
+
+      function pos() { var r = chip.getBoundingClientRect(); return { x: r.left, y: r.top }; }
+      function clampX(x) {
+        return Math.max(MARGIN, Math.min(x, window.innerWidth - chip.offsetWidth - MARGIN));
+      }
+      function clampY(y) {
+        return Math.max(MARGIN, Math.min(y, window.innerHeight - chip.offsetHeight - MARGIN));
+      }
+      function setPos(x, y) {
+        chip.style.left = clampX(x) + 'px';
+        chip.style.top = clampY(y) + 'px';
+        chip.style.right = 'auto';
+      }
+
+      // Idle dim: brighten on touch, settle back after a beat.
+      var fadeT = null;
+      function wake() {
+        chip.classList.add('vo-active');
+        if (fadeT) clearTimeout(fadeT);
+        fadeT = setTimeout(function () { chip.classList.remove('vo-active'); }, 2500);
+      }
+
+      // On release, glide to whichever of the FOUR edges is nearest (so it can rest along the
+      // top/bottom too, not just the sides). Eased so it lands gracefully instead of snapping.
+      var snapRaf = null;
+      function cancelSnap() { if (snapRaf) { cancelAnimationFrame(snapRaf); snapRaf = null; } }
+      function nearestEdge() {
+        var w = chip.offsetWidth, h = chip.offsetHeight, p = pos();
+        var dL = p.x, dR = window.innerWidth - (p.x + w);
+        var dT = p.y, dB = window.innerHeight - (p.y + h);
+        var m = Math.min(dL, dR, dT, dB), tx = p.x, ty = p.y;
+        if (m === dL) tx = MARGIN;
+        else if (m === dR) tx = window.innerWidth - w - MARGIN;
+        else if (m === dT) ty = MARGIN;
+        else ty = window.innerHeight - h - MARGIN;
+        return { x: tx, y: ty };
+      }
+      function glideTo(tx, ty) {
+        cancelSnap();
+        var s = pos(), sx = s.x, sy = s.y;
+        var dx = clampX(tx) - sx, dy = clampY(ty) - sy;
+        if (dx === 0 && dy === 0) { reportHitRect(); return; }
+        var dur = 240, startTs = null;
+        function ease(t) { return 1 - Math.pow(1 - t, 3); } // easeOutCubic
+        function step(ts) {
+          if (startTs === null) startTs = ts;
+          var t = Math.min(1, (ts - startTs) / dur), e = ease(t);
+          setPos(sx + dx * e, sy + dy * e);
+          reportHitRect(); // keep passthrough glued to the moving chip
+          if (t < 1) { snapRaf = requestAnimationFrame(step); }
+          else { snapRaf = null; reportHitRect(); }
+        }
+        snapRaf = requestAnimationFrame(step);
+      }
+
+      // Chat-head drag with tap discrimination.
+      var down = null, dragging = false, SLOP = 6;
+      chip.addEventListener('pointerdown', function (e) {
+        cancelSnap();
+        try { chip.setPointerCapture(e.pointerId); } catch (_e) {}
+        var p = pos();
+        down = { px: e.clientX, py: e.clientY, ox: p.x, oy: p.y };
+        dragging = false;
+        wake();
+        e.preventDefault();
+      });
+      chip.addEventListener('pointermove', function (e) {
+        if (!down) return;
+        var dx = e.clientX - down.px, dy = e.clientY - down.py;
+        if (!dragging && (dx * dx + dy * dy) > SLOP * SLOP) dragging = true;
+        if (dragging) { setPos(down.ox + dx, down.oy + dy); reportHitRect(); wake(); }
+      });
+      function endDrag() {
+        if (!down) return;
+        var wasDrag = dragging;
+        down = null; dragging = false;
+        if (wasDrag) { var t = nearestEdge(); glideTo(t.x, t.y); }
+        else { requestClose(); }
+      }
+      chip.addEventListener('pointerup', endDrag);
+      chip.addEventListener('pointercancel', function () {
+        if (down && dragging) { var t = nearestEdge(); glideTo(t.x, t.y); }
+        down = null; dragging = false;
+      });
+
+      window.addEventListener('resize', function () {
+        var p = pos(); setPos(p.x, p.y); reportHitRect();
+      });
+
+      // First rect once the initial layout settles.
+      requestAnimationFrame(function () { reportHitRect(); wake(); });
+    })();
+  </script>
+</body>
+</html>
