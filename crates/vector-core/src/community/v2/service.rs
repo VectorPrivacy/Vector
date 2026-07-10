@@ -5627,6 +5627,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_swap_during_create_private_channel_aborts_without_a_write() {
+        // create_private_channel straddles a memberlist fetch (seconds long) then
+        // whole-row-saves. A swap in that window must abort — never mint a channel
+        // into the swapped-in account, and never leave a half-published key crate
+        // adopted locally.
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "SwapCreate", bed.relays.clone(), None).await.unwrap();
+        let before = crate::db::community::load_community_v2(community.id()).unwrap().unwrap().channels.len();
+
+        // The memberlist fetch inside create bumps the generation mid-flight.
+        let swap_relay = SwapMidFetch { inner: MemoryRelay::new() };
+        let err = create_private_channel(&swap_relay, &community, "ghost").await.unwrap_err();
+        assert!(err.contains("account changed"), "a swap mid-create aborts: {err}");
+        let after = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(after.channels.len(), before, "no channel row was written");
+        assert!(!after.channels.iter().any(|c| c.name == "ghost"), "the ghost channel never persisted");
+    }
+
+    #[tokio::test]
+    async fn two_admins_racing_a_channel_rotation_converge_on_one_key() {
+        // CORD-06 §Failure-and-races: two DISTINCT authorized rotators mint the
+        // same channel epoch concurrently (reachable — both hold MANAGE_CHANNELS).
+        // Every follower must converge on the SAME key (the lexicographically
+        // lowest), so the community never permanently forks. (Retaining the losing
+        // fork's key for its race-window messages needs a multi-key-per-epoch
+        // archive — a deferred refinement shared with v1; convergence, the
+        // security-critical property, is what this pins.)
+        use crate::community::roles::{CommunityRoles, MemberGrant, Role};
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let mut community = create_community(&relay, "Race", vec!["wss://r".into()], None).await.unwrap();
+        let priv_id = ChannelId([0xC0; 32]);
+        let key1 = [0xC1; 32];
+        add_private_channel(&mut community, priv_id, key1, Epoch(1));
+
+        // Two admins (a, b) both hold the Admin role; I hold the channel key.
+        let (a, b) = (Keys::generate(), Keys::generate());
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let role = Role::admin("ce".repeat(32));
+        let roster = CommunityRoles {
+            roles: vec![role.clone()],
+            grants: [&a, &b].iter().map(|k| MemberGrant { member: k.public_key().to_hex(), role_ids: vec![role.role_id.clone()] }).collect(),
+        };
+        crate::db::community::set_community_roles(&cid_hex, &roster, 1_000).unwrap();
+
+        // Both rotate 1 → 2, each delivering their OWN fresh key to me, off the
+        // same prevcommit — a genuine same-epoch fork.
+        let me_pk = crate::state::MY_SECRET_KEY.to_keys().unwrap().public_key();
+        let pc = super::super::derive::epoch_key_commitment(Epoch(1), &key1);
+        let group = channel_rekey_group_key(&community.community_root, &priv_id, Epoch(2));
+        let key_a = [0x0A; 32];
+        let key_b = [0xFB; 32]; // higher — a's must win regardless of publish order
+        for (signer, k) in [(&a, &key_a), (&b, &key_b)] {
+            let blob = rekey::build_blob_local(signer.secret_key(), &signer.public_key().to_bytes(), &me_pk, RekeyScope::Channel(priv_id), Epoch(2), k).unwrap();
+            for e in rekey::build_rekey_chunks_local(signer, &group, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob], 2_000).unwrap() {
+                relay.publish(&e, &community.relays).await.unwrap();
+            }
+        }
+
+        let session = SessionGuard::capture();
+        let updated = follow_rekeys(&relay, &community, &session).await.unwrap().updated.expect("adopts a winner");
+        let adopted = updated.channel(&priv_id).unwrap().key.unwrap();
+        assert_eq!(adopted, key_a, "converges on the lexicographically lowest key (deterministic across clients)");
+
+        // A SECOND follower (fresh, holding the same epoch-1 key) converges identically.
+        let mut peer = community.clone();
+        if let Some(c) = peer.channels.iter_mut().find(|c| c.id.0 == priv_id.0) {
+            c.key = Some(key1);
+            c.epoch = Epoch(1);
+        }
+        // Re-run the same fold from the peer's identical starting point → same winner.
+        let updated2 = follow_rekeys(&relay, &peer, &session).await.unwrap().updated.expect("peer adopts");
+        assert_eq!(updated2.channel(&priv_id).unwrap().key.unwrap(), key_a, "every follower lands on the identical key");
+    }
+
+    #[tokio::test]
     async fn create_private_channel_refuses_a_member_without_manage_channels() {
         // The local mirror of the reader's gate: an unauthorized member is refused
         // BEFORE any publish (no floor pollution, no orphan key crate).
