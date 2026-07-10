@@ -34,7 +34,7 @@ Concordia — a multi-purpose Concord bot:
   !react     — react 🔥 to your message
   !edit      — send a message, then edit it
   !delete    — send a message, then delete it
-  !typing    — emit typing signals for ~12s, then confirm
+  !typing    — emit a typing indicator
   !file      — send a small text attachment (encrypt → Blossom → imeta)
   !members   — the folded member list
   !channels  — the channels I can see
@@ -125,16 +125,7 @@ async fn main() -> vector_sdk::Result<()> {
                     "!ping" => reply(&msg, &format!("pong 🏓 ({} ms)", now_ms())).await,
                     "!reply" => reply(&msg, "this is a threaded reply ✅ (I quoted your message)").await,
                     "!react" => log_err("react", msg.react("🔥").await.map(|_| String::new())),
-                    "!typing" => {
-                        // Armada renders a typing signal for only ~8s (avatar + pulsing
-                        // dots above the composer) — burst a few so it can't be missed,
-                        // then confirm in text so the round-trip is observable either way.
-                        for _ in 0..3 {
-                            log_err("typing", ch.typing().await.map(|_| String::new()));
-                            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-                        }
-                        reply(&msg, "sent 3 typing signals over 12s — the pulsing-dots pill should have shown above the composer").await;
-                    }
+                    "!typing" => log_err("typing", ch.typing().await.map(|_| String::new())),
                     "!edit" => {
                         if let Ok(id) = ch.send("editing this in one second…").await {
                             log_err("edit", ch.edit(&id, "edited ✏️ (this text was changed)").await.map(|_| String::new()));
