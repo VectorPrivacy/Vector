@@ -2336,7 +2336,7 @@ class PackCanvasGrid {
                 const idx = this._cellAtEvent(e);
                 if (idx < 0) return;
                 e.stopPropagation();
-                _handlePackEmojiSelect(this.pack, this.emojis[idx]);
+                _handlePackEmojiSelect(this.pack, this.emojis[idx], e.shiftKey);
             });
         }
     }
@@ -4174,7 +4174,7 @@ async function _pcDelete() {
     });
 })();
 
-function _handlePackEmojiSelect(pack, emoji) {
+function _handlePackEmojiSelect(pack, emoji, keepOpen = false) {
     if (!emoji) return;
     // Insert the disambiguated code (`love~2`) so duplicate-name emojis resolve
     // to the exact image the user clicked.
@@ -4188,7 +4188,8 @@ function _handlePackEmojiSelect(pack, emoji) {
         return;
     }
     insertAtCursor(`:${code}:`, true);
-    picker.classList.remove('visible');
+    // Shift-click keeps the panel open for rapid multi-insert (Discord-style).
+    if (!keepOpen) picker.classList.remove('visible');
     if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
         domChatMessageInput.focus();
     }

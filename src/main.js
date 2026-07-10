@@ -1139,9 +1139,6 @@ const domSettingsExportAccountInfo = document.getElementById('export-account-inf
 const domSettingsChangePinInfo = document.getElementById('change-pin-info');
 const domSettingsChangePinLabel = document.getElementById('change-pin-label');
 const domSettingsLogoutInfo = document.getElementById('logout-info');
-const domSettingsDonorsInfo = document.getElementById('donors-info');
-const domDonorPivx = document.getElementById('donor-pivx');
-const domDonorGitcoin = document.getElementById('donor-gitcoin');
 const domSettingsLogout = document.getElementById('logout-btn');
 const domSettingsExport = document.getElementById('export-account-btn');
 const domRemoteSignerReauthBtn = document.getElementById('remote-signer-reauth-btn');
@@ -11746,27 +11743,6 @@ domChatMessageInput.oninput = async () => {
             }
         };
     }
-
-    // Donors & Contributors info button
-    domSettingsDonorsInfo.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        popupConfirm('Donors & Contributors', 'Your support keeps Vector Privacy independent, open-source, and free. If you would be interested in donating, please visit our GitBook to learn more.<br><br>We extend our sincere gratitude to these supporters for helping make Vector possible.', true);
-    };
-
-    // PIVX donor logo click - opens pivx.org
-    domDonorPivx.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        openUrl('https://pivx.org');
-    };
-
-    // Gitcoin donor logo click - opens gitcoin.co
-    domDonorGitcoin.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        openUrl('https://www.gitcoin.co');
-    };
 
     // Footer Hyperlinks
     document.getElementById('footer-donate').onclick = (e) => {
