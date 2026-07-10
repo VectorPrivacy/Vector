@@ -704,7 +704,7 @@ pub async fn fetch_messages<R: Runtime>(
                     PreparedEvent::ErrorSkip { .. } => {
                         error_skips += 1;
                     }
-                    PreparedEvent::CommunityInvite { .. } => {}
+                    PreparedEvent::CommunityInvite { .. } | PreparedEvent::CommunityInviteV2 { .. } => {}
                 }
                 let t = std::time::Instant::now();
                 if crate::services::tauri_commit_prepared_event(prepared, false).await {
