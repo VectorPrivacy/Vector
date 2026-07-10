@@ -30,6 +30,18 @@ use serde::{Deserialize, Serialize};
 /// invite bundle in the registry). One per bot pubkey at an empty `d`.
 pub const KIND_BOT_MANIFEST: u16 = 33304;
 
+/// Optional recipient tag a picker client attaches to an invocation:
+/// `["bot", <bot pubkey hex>]`. Addressing is the ONE piece of a command not
+/// derivable from content — two bots can share a command name — so it rides a
+/// tag while the invocation stays plain text. Semantics: tagged → only the
+/// named bot(s) execute (others skip even on a manifest match); untagged →
+/// broadcast, any matching bot may answer (the legacy-client path — bots never
+/// REQUIRE the tag). Deliberately NOT `p`: chat rumors already carry `p` for
+/// DM recipients and reply parents, and a skip-unless-me rule keyed on `p`
+/// would silently swallow a command sent as a reply to a human. The tag is
+/// routing, not authority — bots authorize by SENDER, never by tag.
+pub const TAG_BOT: &str = "bot";
+
 /// Bounds (validated on BOTH build and parse — a foreign manifest is untrusted
 /// input and must never cost unbounded memory or render work).
 pub const MAX_COMMANDS: usize = 64;

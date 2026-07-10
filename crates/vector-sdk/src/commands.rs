@@ -210,10 +210,12 @@ impl VectorBot {
         tokio::spawn(async move {
             match bot_interface::typed_args(&spec, &parsed) {
                 Ok(args) => {
+                    println!("[CMD] /{} {:?}", parsed.name, parsed.args);
                     let ctx = CommandCtx { bot, msg: incoming, args };
                     handler(ctx).await;
                 }
                 Err(e) => {
+                    println!("[CMD] /{} REJECTED ({e}) raw={:?}", parsed.name, parsed.args);
                     let usage = usage_line(&spec);
                     let _ = incoming.reply(&format!("{e} — usage: {usage}")).await;
                 }
