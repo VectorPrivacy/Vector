@@ -4131,6 +4131,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accepting_the_same_bundle_twice_is_idempotent() {
+        // A bot restart or a duplicate invite delivery: accepting the SAME bundle
+        // again must upsert cleanly — same community_id, no duplicate channels, no
+        // corruption, the keys unchanged.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Idem", bed.relays.clone(), None).await.unwrap();
+        create_public_channel(&bed.relay, &community, "extra").await.unwrap();
+        let community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let bundle = serde_json::to_string(&bundle_of(&community, Some(owner.keys.public_key()), None, None)).unwrap();
+
+        bed.swap_to(&member);
+        let first = accept_parked_invite(&bed.relay, &bundle, None).await.unwrap();
+        let channels_after_first = first.channels.len();
+        let root_after_first = first.community_root;
+
+        // Accept the identical bundle again (restart / redelivery).
+        let second = accept_parked_invite(&bed.relay, &bundle, None).await.unwrap();
+        assert_eq!(second.id().0, first.id().0, "same community_id");
+        assert_eq!(second.channels.len(), channels_after_first, "no duplicate channels on re-accept");
+        assert_eq!(second.community_root, root_after_first, "root unchanged");
+
+        // The persisted state is a single clean community with the expected channels.
+        let reloaded = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(reloaded.channels.len(), channels_after_first, "the DB holds one clean channel set");
+        assert_eq!(crate::db::community::list_community_ids().unwrap().iter().filter(|id| id.0 == community.id().0).count(), 1, "exactly one community row");
+    }
+
+    #[tokio::test]
     async fn a_severed_member_can_be_unbanned_and_re_admitted() {
         // The full moderation HEAL lifecycle: ban (banlist + grant strip + refound)
         // severs a member; the owner then unbans + sends a FRESH invite carrying the

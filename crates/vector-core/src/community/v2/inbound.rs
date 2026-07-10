@@ -840,6 +840,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_forged_edit_from_a_non_author_is_ignored() {
+        // Author-scoping on edits (the counterpart to the forged-delete guard): a
+        // member (holds the channel key) forges an EDIT of someone else's message.
+        // It must not rewrite the content.
+        use nostr_sdk::prelude::Timestamp;
+        let (_tmp, _guard, me) = init();
+        let relay = MemoryRelay::new();
+        let community = service::create_community(&relay, "EditGuard", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let cid = crate::simd::hex::bytes_to_hex_32(&general.0);
+        let group = super::super::derive::channel_group_key(&community.community_root, &general, community.root_epoch);
+        let session = crate::state::SessionGuard::capture();
+
+        // The real author posts a message.
+        let author = Keys::generate();
+        let msg = chat::build_message_rumor(author.public_key(), &general, community.root_epoch, "original", None, &[], vec![], 5_000);
+        let msg_id = msg.id.unwrap().to_hex();
+        let (mw, _) = chat::seal_chat_rumor(&msg, &group, &author, Timestamp::from_secs(5), false).unwrap();
+        let ev = chat::open_chat_event(&mw, &group, &general, community.root_epoch).unwrap();
+        persist_chat_event(&ev, &cid, &me.public_key(), &session).await;
+
+        // A stranger (member, holds the key) forges an edit of the author's message.
+        let stranger = Keys::generate();
+        let edit = chat::build_edit_rumor(stranger.public_key(), &general, community.root_epoch, &msg_id, "TAMPERED", 6_000);
+        let (ew, _) = chat::seal_chat_rumor(&edit, &group, &stranger, Timestamp::from_secs(6), false).unwrap();
+        let ev = chat::open_chat_event(&ew, &group, &general, community.root_epoch).unwrap();
+        assert!(persist_chat_event(&ev, &cid, &me.public_key(), &session).await.is_none(), "a forged edit yields no outcome");
+
+        let content = {
+            let st = crate::state::STATE.lock().await;
+            st.find_message(&msg_id).map(|(_, m)| m.content)
+        };
+        assert_eq!(content.as_deref(), Some("original"), "the message content is unchanged by the forged edit");
+    }
+
+    #[tokio::test]
+    async fn a_reaction_cannot_be_injected_across_channels() {
+        // A member holds BOTH channels' keys, so they can seal a valid reaction in
+        // channel A whose target is a message resident in channel B. The
+        // cross-channel guard (a reaction lands only on a same-channel target) must
+        // drop it — else reactions could be injected onto messages in channels the
+        // reaction was never sealed under.
+        use nostr_sdk::prelude::Timestamp;
+        let (_tmp, _guard, me) = init();
+        let relay = MemoryRelay::new();
+        let mut community = service::create_community(&relay, "TwoChan", vec!["wss://r".into()], None).await.unwrap();
+        let chan_a = community.channels[0].id;
+        let chan_b = service::create_public_channel(&relay, &community, "b").await.unwrap();
+        community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let a_hex = crate::simd::hex::bytes_to_hex_32(&chan_a.0);
+        let session = crate::state::SessionGuard::capture();
+
+        // A message lives in channel B.
+        let author = Keys::generate();
+        let gb = super::super::derive::channel_group_key(&community.community_root, &chan_b, community.root_epoch);
+        let msg = chat::build_message_rumor(author.public_key(), &chan_b, community.root_epoch, "in B", None, &[], vec![], 5_000);
+        let msg_id = msg.id.unwrap().to_hex();
+        let (mw, _) = chat::seal_chat_rumor(&msg, &gb, &author, Timestamp::from_secs(5), false).unwrap();
+        let bev = chat::open_chat_event(&mw, &gb, &chan_b, community.root_epoch).unwrap();
+        persist_chat_event(&bev, &crate::simd::hex::bytes_to_hex_32(&chan_b.0), &me.public_key(), &session).await;
+
+        // A reaction sealed in channel A, targeting the channel-B message.
+        let ga = super::super::derive::channel_group_key(&community.community_root, &chan_a, community.root_epoch);
+        let reaction = chat::build_reaction_rumor(author.public_key(), &chan_a, community.root_epoch, &msg_id, &author.public_key().to_hex(), super::super::kind::MESSAGE, "💥", None, 6_000);
+        let (rw, _) = chat::seal_chat_rumor(&reaction, &ga, &author, Timestamp::from_secs(6), false).unwrap();
+        let aev = chat::open_chat_event(&rw, &ga, &chan_a, community.root_epoch).unwrap();
+        // Applied under channel A (where it was sealed) — the target is in B.
+        let outcome = persist_chat_event(&aev, &a_hex, &me.public_key(), &session).await;
+        assert!(outcome.is_none(), "a cross-channel reaction is dropped");
+        let reacted = {
+            let st = crate::state::STATE.lock().await;
+            st.find_message(&msg_id).map(|(_, m)| !m.reactions.is_empty()).unwrap_or(false)
+        };
+        assert!(!reacted, "the channel-B message gained no reaction from the channel-A injection");
+    }
+
+    #[tokio::test]
     async fn a_forged_delete_from_a_non_author_is_ignored() {
         use nostr_sdk::prelude::Timestamp;
         let (_tmp, _guard, me) = init();
