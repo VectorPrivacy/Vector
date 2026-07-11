@@ -83,6 +83,16 @@ async fn main() -> vector_sdk::Result<()> {
             let answer = ANSWERS[(now_ms() as usize) % ANSWERS.len()];
             let _ = ctx.reply(format!("🎱 {answer}")).await;
         });
+    bot.command("stress", "UI stress test: maximum-length choices")
+        .choice(
+            "pick",
+            "Choose one (two are wire-max 32 chars)",
+            ["abcdefghijklmnopqrstuvwxyz-12345", "this-is-a-very-long-choice-name!", "short"],
+            true,
+        )
+        .run(|ctx| async move {
+            let _ = ctx.reply(format!("you picked: {}", ctx.str("pick").unwrap_or_default())).await;
+        });
     bot.command("about", "What am I?").run(move |ctx| async move {
         let _ = ctx.reply("I'm a slash-command bot built with vector_sdk. My commands come from my published manifest.").await;
     });

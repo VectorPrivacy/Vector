@@ -720,6 +720,7 @@ function initCommandSelector(textarea, io, anchorEl) {
             const label = document.createElement('span');
             label.textContent = options[i].label;
             row.appendChild(label);
+            row.title = options[i].label;
             const opt = options[i];
             row.addEventListener('mousedown', (ev) => {
                 ev.preventDefault();
@@ -729,11 +730,13 @@ function initCommandSelector(textarea, io, anchorEl) {
         }
         const r = el.getBoundingClientRect();
         const margin = 8;
-        const width = Math.max(Math.ceil(r.width), 110);
-        menu.style.left = Math.max(margin, Math.min(r.left, window.innerWidth - width - margin)) + 'px';
+        menu.style.minWidth = Math.max(Math.ceil(r.width), 110) + 'px';
         menu.style.bottom = (window.innerHeight - r.top + 4) + 'px';
-        menu.style.minWidth = width + 'px';
         menu.classList.add('visible');
+        // Clamp with the menu's REAL width — long option labels grow it well
+        // past the trigger, and clamping by trigger width would let the menu
+        // hang off the right edge.
+        menu.style.left = Math.max(margin, Math.min(r.left, window.innerWidth - menu.offsetWidth - margin)) + 'px';
         const act = menu.querySelector('.command-choice-option.active');
         if (act) act.scrollIntoView({ block: 'nearest' });
     }
@@ -747,6 +750,8 @@ function initCommandSelector(textarea, io, anchorEl) {
         el.value = v;
         el.querySelector('span').textContent = v || el.dataset.placeholder;
         el.classList.toggle('placeholder', !v);
+        // A long picked value truncates in the 22ch trigger — hover reveals it.
+        if (v) el.title = v;
         const pill = el.closest('.command-part');
         if (pill) pill.classList.remove('invalid');
     }
