@@ -124,7 +124,10 @@ pub fn apply_chat_to_state(state: &mut ChatState, event: &ChatEvent, channel_id:
             let reaction = Reaction {
                 id: opened.rumor_id.to_hex(),
                 reference_id: target_id.clone(),
-                author_id: opened.author.to_hex(),
+                // npub, not hex: the frontend's whole reaction contract (profile
+                // name resolve + the own-reaction highlight vs strPubkey) keys on
+                // bech32 — exactly what v1 stores.
+                author_id: opened.author.to_bech32().unwrap_or_else(|_| opened.author.to_hex()),
                 emoji: emoji.clone(),
                 emoji_url: emoji_url.clone(),
             };
@@ -631,11 +634,15 @@ mod tests {
         let outcome = persist_chat_event(&rev, &cid, &me.public_key(), &session).await;
         assert!(matches!(outcome, Some(ChatPersist::Updated { .. })), "the cross-epoch reaction updates the target");
 
-        let reacted = {
+        let reaction_author = {
             let st = crate::state::STATE.lock().await;
-            st.find_message(&msg_id).map(|(_, m)| m.reactions.iter().any(|r| r.emoji == "🎉")).unwrap_or(false)
+            st.find_message(&msg_id)
+                .and_then(|(_, m)| m.reactions.iter().find(|r| r.emoji == "🎉").map(|r| r.author_id.clone()))
         };
-        assert!(reacted, "the epoch-1 reaction aggregated onto the epoch-0 message");
+        let author = reaction_author.expect("the epoch-1 reaction aggregated onto the epoch-0 message");
+        // npub, never hex: the frontend resolves the reactor's profile and detects
+        // "my reaction" by comparing against the user's npub.
+        assert_eq!(author, member.public_key().to_bech32().unwrap(), "reaction author is stored as bech32");
     }
 
     #[tokio::test]

@@ -857,6 +857,21 @@ fn extract_tag_from_json(tags_json: &str, key: &str) -> Option<String> {
         .and_then(|tag| tag.into_iter().nth(1))
 }
 
+
+/// A stored reaction author written as 64-char hex (an early v2 ingest) reads
+/// back as the npub the frontend contract expects — self-heals old rows with no
+/// migration; a bech32 or unknown value passes through untouched.
+fn normalize_reaction_author(author: String) -> String {
+    if author.len() == 64 && author.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if let Ok(pk) = nostr_sdk::prelude::PublicKey::from_hex(&author) {
+            use nostr_sdk::prelude::ToBech32;
+            if let Ok(npub) = pk.to_bech32() {
+                return npub;
+            }
+        }
+    }
+    author
+}
 /// Extract the NIP-30 `["emoji", shortcode, url]` URL from a stored
 /// reaction's tags. The reaction's content must be `:shortcode:` form
 /// and the matching tag's shortcode must agree — otherwise we get the
@@ -931,7 +946,7 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
                     reactions_by_msg.entry(ref_id.clone()).or_default().push(Reaction {
                         id: event.id.clone(),
                         reference_id: ref_id.clone(),
-                        author_id: event.npub.clone().unwrap_or_default(),
+                        author_id: normalize_reaction_author(event.npub.clone().unwrap_or_default()),
                         emoji: event.content.clone(),
                         emoji_url,
                     });
@@ -1219,7 +1234,7 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
                     let emoji_url = extract_reaction_emoji_url(&event.tags, &event.content);
                     reactions_by_msg.entry(ref_id.clone()).or_default().push(Reaction {
                         id: event.id.clone(), reference_id: ref_id.clone(),
-                        author_id: event.npub.clone().unwrap_or_default(),
+                        author_id: normalize_reaction_author(event.npub.clone().unwrap_or_default()),
                         emoji: event.content.clone(),
                         emoji_url,
                     });

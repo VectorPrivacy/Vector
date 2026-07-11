@@ -1490,7 +1490,7 @@ function buildReplyPreviewHtml(content, maxLength = 50) {
  * @typedef {Object} Reaction
  * @property {string} id - Unique identifier for the reaction.
  * @property {string} reference_id - The HEX Event ID of the message being reacted to.
- * @property {string} author_id - The HEX ID of the author who reacted.
+ * @property {string} author_id - The npub of the author who reacted.
  * @property {string} emoji - The emoji used for the reaction.
  */
 
