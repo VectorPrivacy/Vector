@@ -81,3 +81,54 @@ mod tests {
         assert_eq!(base32_nopad_encode(b"foobar"), "MZXW6YTBOI");
     }
 }
+
+/// The kind-3310 peer-signal content, shared by every community transport (the
+/// v1 channel plane and the v2 chat plane must stay byte-compatible):
+/// `{"op":"ad","topic":..,"addr":..}` advertises an Iroh node, `{"op":"left",..}`
+/// departs.
+pub fn peer_signal_content(topic_id: &str, node_addr: Option<&str>) -> String {
+    match node_addr {
+        Some(addr) => serde_json::json!({ "op": "ad", "topic": topic_id, "addr": addr }).to_string(),
+        None => serde_json::json!({ "op": "left", "topic": topic_id }).to_string(),
+    }
+}
+
+/// Parse + bound a kind-3310 peer signal: `Some((topic, Some(addr)))` for an
+/// advertisement, `Some((topic, None))` for a departure. Both fields are
+/// author-controlled: the topic must be a 52-char base32 TopicId and the addr is
+/// size-bounded — the realtime layer's decode is the final word.
+pub fn parse_peer_signal(content: &str) -> Option<(String, Option<String>)> {
+    let v: serde_json::Value = serde_json::from_str(content).ok()?;
+    let topic_id = v
+        .get("topic")
+        .and_then(|t| t.as_str())
+        .filter(|t| t.len() == 52 && t.bytes().all(|b| b.is_ascii_uppercase() || (b'2'..=b'7').contains(&b)))?
+        .to_string();
+    let node_addr = match v.get("op").and_then(|o| o.as_str())? {
+        "ad" => Some(v.get("addr").and_then(|a| a.as_str()).filter(|a| !a.is_empty() && a.len() <= 2048)?.to_string()),
+        "left" => None,
+        _ => return None,
+    };
+    Some((topic_id, node_addr))
+}
+
+#[cfg(test)]
+mod peer_signal_tests {
+    use super::*;
+
+    #[test]
+    fn peer_signal_round_trips_and_bounds() {
+        let topic = "A".repeat(52);
+        let ad = peer_signal_content(&topic, Some("iroh:node/abc"));
+        assert_eq!(parse_peer_signal(&ad), Some((topic.clone(), Some("iroh:node/abc".into()))));
+        let left = peer_signal_content(&topic, None);
+        assert_eq!(parse_peer_signal(&left), Some((topic.clone(), None)));
+
+        // Author-controlled fields are bounded: bad topic, oversized addr, junk op.
+        assert_eq!(parse_peer_signal(&peer_signal_content("short", Some("a"))), None);
+        let oversized = "a".repeat(2049);
+        assert_eq!(parse_peer_signal(&peer_signal_content(&topic, Some(&oversized))), None);
+        assert_eq!(parse_peer_signal(&format!("{{\"op\":\"warp\",\"topic\":\"{topic}\"}}")), None);
+        assert_eq!(parse_peer_signal("not json"), None);
+    }
+}

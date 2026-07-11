@@ -1795,6 +1795,27 @@ pub fn community_protocol(id: &CommunityId) -> Result<Option<crate::community::C
     Ok(n.map(crate::community::ConcordProtocol::from_i64))
 }
 
+/// The persisted CORD-02 §6 stash riding a community row: the vsk-0 fields
+/// Vector doesn't drive but must republish verbatim on its own edits.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct CommunityMetaStash {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    custom: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// As [`CommunityMetaStash`], for a channel row (vsk-2: + the voice flag).
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct ChannelMetaStash {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    voice: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    custom: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    extra: serde_json::Map<String, serde_json::Value>,
+}
+
 /// Persist a v2 community + its channels atomically. UPSERT so a metadata
 /// re-save preserves banlist/roles (managed by the fold, not here).
 pub fn save_community_v2(c: &crate::community::v2::community::CommunityV2) -> Result<(), String> {
@@ -1816,21 +1837,25 @@ pub fn save_community_v2(c: &crate::community::v2::community::CommunityV2) -> Re
     let banner_json = c.banner.as_ref().map(|b| serde_json::to_string(b).map_err(|e| e.to_string())).transpose()?;
     let enc_icon = enc_txt_opt(&icon_json)?;
     let enc_banner = enc_txt_opt(&banner_json)?;
+    let stash_json = (c.meta_custom.is_some() || !c.meta_extra.is_empty())
+        .then(|| serde_json::to_string(&CommunityMetaStash { custom: c.meta_custom.clone(), extra: c.meta_extra.clone() }).map_err(|e| e.to_string()))
+        .transpose()?;
+    let enc_stash = enc_txt_opt(&stash_json)?;
 
     let tx = conn.unchecked_transaction().map_err(|e| format!("save v2 community tx: {e}"))?;
     tx.execute(
         "INSERT INTO communities
             (community_id, server_root_key, name, relays, created_at, description,
-             server_root_epoch, dissolved, protocol, owner_pubkey, owner_salt, icon, banner)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 2, ?9, ?10, ?11, ?12)
+             server_root_epoch, dissolved, protocol, owner_pubkey, owner_salt, icon, banner, meta_extra)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 2, ?9, ?10, ?11, ?12, ?13)
          ON CONFLICT(community_id) DO UPDATE SET
             server_root_key=?2, name=?3, relays=?4, description=?6,
             server_root_epoch=?7, dissolved=?8, protocol=2, owner_pubkey=?9, owner_salt=?10,
-            icon=?11, banner=?12",
+            icon=?11, banner=?12, meta_extra=?13",
         params![
             id_hex, enc_root, enc_name, enc_relays, created, enc_desc,
             c.root_epoch.0 as i64, c.dissolved as i64, enc_owner_pk, enc_owner_salt,
-            enc_icon, enc_banner,
+            enc_icon, enc_banner, enc_stash,
         ],
     )
     .map_err(|e| format!("save v2 community: {e}"))?;
@@ -1860,13 +1885,20 @@ pub fn save_community_v2(c: &crate::community::v2::community::CommunityV2) -> Re
         let stored_key = ch.key.unwrap_or(c.community_root);
         let enc_ch_key = enc_key(&stored_key)?;
         let enc_ch_name = enc_txt(&ch.name)?;
+        let ch_stash_json = (ch.voice.is_some() || ch.meta_custom.is_some() || !ch.meta_extra.is_empty())
+            .then(|| {
+                serde_json::to_string(&ChannelMetaStash { voice: ch.voice, custom: ch.meta_custom.clone(), extra: ch.meta_extra.clone() })
+                    .map_err(|e| e.to_string())
+            })
+            .transpose()?;
+        let enc_ch_stash = enc_txt_opt(&ch_stash_json)?;
         tx.execute(
             "INSERT INTO community_channels
-                (channel_id, community_id, channel_key, epoch, name, created_at, private)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                (channel_id, community_id, channel_key, epoch, name, created_at, private, meta_extra)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(channel_id) DO UPDATE SET
-                channel_key=?3, epoch=?4, name=?5, private=?7",
-            params![ch_hex, id_hex, enc_ch_key, ch.epoch.0 as i64, enc_ch_name, created, ch.private as i64],
+                channel_key=?3, epoch=?4, name=?5, private=?7, meta_extra=?8",
+            params![ch_hex, id_hex, enc_ch_key, ch.epoch.0 as i64, enc_ch_name, created, ch.private as i64, enc_ch_stash],
         )
         .map_err(|e| format!("save v2 channel: {e}"))?;
     }
@@ -1904,7 +1936,7 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
         .query_row(
             "SELECT server_root_key, name, relays, created_at, description,
                     server_root_epoch, dissolved, protocol, owner_pubkey, owner_salt,
-                    icon, banner
+                    icon, banner, meta_extra
              FROM communities WHERE community_id = ?1",
             params![id_hex],
             |r| {
@@ -1921,12 +1953,13 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
                     r.get::<_, Option<String>>(9)?,
                     r.get::<_, Option<String>>(10)?,
                     r.get::<_, Option<String>>(11)?,
+                    r.get::<_, Option<String>>(12)?,
                 ))
             },
         )
         .optional()
         .map_err(|e| e.to_string())?;
-    let Some((root_blob, name_e, relays_e, created, desc_e, root_epoch, dissolved, protocol, owner_pk_e, owner_salt_e, icon_e, banner_e)) = row
+    let Some((root_blob, name_e, relays_e, created, desc_e, root_epoch, dissolved, protocol, owner_pk_e, owner_salt_e, icon_e, banner_e, stash_e)) = row
     else {
         return Ok(None);
     };
@@ -1947,7 +1980,7 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
     {
         let mut stmt = conn
             .prepare(
-                "SELECT channel_id, channel_key, epoch, name, private
+                "SELECT channel_id, channel_key, epoch, name, private, meta_extra
                  FROM community_channels WHERE community_id = ?1 ORDER BY created_at",
             )
             .map_err(|e| e.to_string())?;
@@ -1959,13 +1992,20 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
                     r.get::<_, i64>(2)?,
                     r.get::<_, String>(3)?,
                     r.get::<_, i64>(4)?,
+                    r.get::<_, Option<String>>(5)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
         for row in rows {
-            let (ch_hex, key_blob, epoch, name_e, private) = row.map_err(|e| e.to_string())?;
+            let (ch_hex, key_blob, epoch, name_e, private, ch_stash_e) = row.map_err(|e| e.to_string())?;
             let private = private != 0;
             let key = dec_key(&key_blob)?;
+            // Unparseable stash degrades to empty — the fold re-persists the
+            // authoritative value on its next pass.
+            let ch_stash: ChannelMetaStash = ch_stash_e
+                .map(|s| dec_txt(&s))
+                .and_then(|j| serde_json::from_str(&j).ok())
+                .unwrap_or_default();
             channels.push(ChannelV2 {
                 id: ChannelId(hex_id_to_32(&ch_hex)?),
                 name: dec_txt(&name_e),
@@ -1978,6 +2018,9 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
                 // of silently addressing the public plane.
                 key: (private && key != community_root).then_some(key),
                 epoch: Epoch(epoch as u64),
+                voice: ch_stash.voice,
+                meta_custom: ch_stash.custom,
+                meta_extra: ch_stash.extra,
             });
         }
     }
@@ -1990,6 +2033,10 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
     let banner = banner_e
         .map(|s| dec_txt(&s))
         .and_then(|j| serde_json::from_str::<crate::community::v2::control::ImageRef>(&j).ok());
+    let stash: CommunityMetaStash = stash_e
+        .map(|s| dec_txt(&s))
+        .and_then(|j| serde_json::from_str(&j).ok())
+        .unwrap_or_default();
 
     Ok(Some(CommunityV2 {
         identity,
@@ -1999,6 +2046,8 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
         description: desc_e.map(|d| dec_txt(&d)),
         icon,
         banner,
+        meta_custom: stash.custom,
+        meta_extra: stash.extra,
         relays,
         channels,
         dissolved: dissolved != 0,
@@ -2161,12 +2210,23 @@ mod tests {
             hash: "a".repeat(64),
             extra,
         });
+        c.meta_custom = Some({
+            let mut m = serde_json::Map::new();
+            m.insert("k".into(), serde_json::Value::from("v"));
+            m
+        });
+        c.channels[0].voice = Some(true);
+        c.channels[0].meta_extra.insert("vnd".into(), serde_json::Value::from(7));
         save_community_v2(&c).unwrap();
 
         // The v2 loader round-trips the ImageRef exactly (extra included).
         let re = load_community_v2(c.id()).unwrap().unwrap();
         assert_eq!(re.icon, c.icon);
         assert_eq!(re.banner, None);
+        // The CORD-02 §6 stash survives the encrypted envelope columns.
+        assert_eq!(re.meta_custom, c.meta_custom);
+        assert_eq!(re.channels[0].voice, Some(true));
+        assert_eq!(re.channels[0].meta_extra.get("vnd"), Some(&serde_json::Value::from(7)));
 
         // Dual-reader guarantee: the SAME stored JSON parses as a v1 CommunityImage
         // (`ext` from the flattened extra), so cache_community_image serves a v2

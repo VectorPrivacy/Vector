@@ -2072,6 +2072,28 @@ impl VectorCore {
             if !session.is_valid() {
                 break;
             }
+            // A backfilled WebXDC peer ad persists through the shared 30078 row
+            // (recency-gated at read) so a reopening lobby lists peers who
+            // advertised while this device was closed — v1 sync parity. Own
+            // echoes drop; the ad is not a chat row.
+            if let crate::community::v2::chat::ChatEvent::Webxdc { opened } = &f.event {
+                if opened.author != my_pk {
+                    if let Some((topic, addr)) = crate::webxdc::parse_peer_signal(&opened.rumor.content) {
+                        if let Ok(npub) = ToBech32::to_bech32(&opened.author) {
+                            crate::community::service::persist_webxdc_signal(
+                                channel_id,
+                                &npub,
+                                &topic,
+                                addr.as_deref(),
+                                &opened.rumor_id.to_hex(),
+                                opened.at_ms / 1000,
+                            )
+                            .await;
+                        }
+                    }
+                }
+                continue;
+            }
             // STATE mutation under the lock; the async DB persist after it drops.
             let outcome = {
                 let mut st = state::STATE.lock().await;

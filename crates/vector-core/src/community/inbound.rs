@@ -302,19 +302,7 @@ fn apply_webxdc(opened: &OpenedMessage, my_pubkey: &PublicKey) -> Option<Incomin
     if opened.author == *my_pubkey {
         return None;
     }
-    let v: serde_json::Value = serde_json::from_str(&opened.content).ok()?;
-    let topic_id = v.get("topic").and_then(|t| t.as_str())
-        .filter(|t| t.len() == 52 && t.bytes().all(|b| b.is_ascii_uppercase() || (b'2'..=b'7').contains(&b)))?
-        .to_string();
-    let node_addr = match v.get("op").and_then(|o| o.as_str())? {
-        "ad" => Some(
-            v.get("addr").and_then(|a| a.as_str())
-                .filter(|a| !a.is_empty() && a.len() <= 2048)?
-                .to_string(),
-        ),
-        "left" => None,
-        _ => return None,
-    };
+    let (topic_id, node_addr) = crate::webxdc::parse_peer_signal(&opened.content)?;
     Some(IncomingEvent::WebxdcPeer {
         npub: opened.author.to_bech32().ok()?,
         topic_id,

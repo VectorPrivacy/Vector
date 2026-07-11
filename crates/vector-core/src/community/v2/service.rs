@@ -205,6 +205,26 @@ pub async fn send_delete<T: Transport + ?Sized>(
     publish_chat(transport, community, &session, &group, &author, channel_id, epoch, rumor, at_ms, false).await
 }
 
+/// WebXDC realtime peer signal (kind 3310) — the v2 twin of v1's
+/// `publish_webxdc_signal`: the same shared content shape, sealed on the
+/// channel's chat plane, DURABLE (a reopening peer backfills a recent ad).
+/// Signed by the member's real identity — a member can't forge another
+/// player's presence. Failure is non-fatal to callers (the next re-advertise
+/// covers a missed ad).
+pub async fn send_webxdc_signal<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    channel_id: &ChannelId,
+    topic_id: &str,
+    node_addr: Option<&str>,
+) -> Result<(), String> {
+    let (author, group, epoch, session) = chat_send_context(community, channel_id)?;
+    let at_ms = now_ms();
+    let content = crate::webxdc::peer_signal_content(topic_id, node_addr);
+    let rumor = chat::build_webxdc_rumor(author.public_key(), channel_id, epoch, &content, vec![], at_ms);
+    publish_chat(transport, community, &session, &group, &author, channel_id, epoch, rumor, at_ms, false).await.map(|_| ())
+}
+
 /// Ephemeral typing indicator (kind 23311 in a 21059 wrap — relays never store it).
 pub async fn send_typing<T: Transport + ?Sized>(
     transport: &T,
@@ -2227,7 +2247,7 @@ pub async fn create_public_channel<T: Transport + ?Sized>(transport: &T, communi
     }
     // Add locally + persist so the creator can post immediately (peers fold it in).
     let mut updated = community.clone();
-    updated.channels.push(ChannelV2 { id: channel_id, name: name.to_string(), private: false, key: None, epoch: updated.root_epoch });
+    updated.channels.push(ChannelV2 { id: channel_id, name: name.to_string(), private: false, key: None, epoch: updated.root_epoch, voice: None, meta_custom: None, meta_extra: Default::default() });
     crate::db::community::save_community_v2(&updated)?;
     Ok(channel_id)
 }
@@ -2291,7 +2311,7 @@ pub async fn create_private_channel<T: Transport + ?Sized>(transport: &T, commun
         return Err("community removed during channel create".to_string());
     }
     let mut updated = community.clone();
-    updated.channels.push(ChannelV2 { id: channel_id, name: name.to_string(), private: true, key: Some(channel_key), epoch });
+    updated.channels.push(ChannelV2 { id: channel_id, name: name.to_string(), private: true, key: Some(channel_key), epoch, voice: None, meta_custom: None, meta_extra: Default::default() });
     crate::db::community::save_community_v2(&updated)?;
     // Archive the epoch-1 key so this channel's history stays readable across its
     // future rotations (CORD-03 §3).
@@ -2311,7 +2331,13 @@ pub async fn delete_channel<T: Transport + ?Sized>(transport: &T, community: &Co
     let _guard = lock.lock().await;
     let me = local_keys()?;
     ensure_channel_manager(community, &me.public_key())?;
-    let meta = control::ChannelMetadata { name: name.to_string(), private: false, voice: None, deleted: Some(true), custom: None, extra: Default::default() };
+    // The tombstone carries the FULL held document (deleted flag set): a strict
+    // reader treats an edition as the entity, so even a deletion must not strip
+    // fields it didn't touch (CORD-02 §6).
+    let mut meta = community.channel(channel_id).map(|c| c.metadata()).unwrap_or_else(|| control::ChannelMetadata {
+        name: name.to_string(), private: false, voice: None, deleted: None, custom: None, extra: Default::default(),
+    });
+    meta.deleted = Some(true);
     let content = serde_json::to_string(&meta).map_err(|e| e.to_string())?;
     publish_control_edition(transport, community, &session, vsk::CHANNEL_METADATA, &channel_id.0, &content, None).await?;
     if !session.is_valid() {
@@ -2919,6 +2945,16 @@ fn apply_community_metadata(out: &mut CommunityV2, meta: control::CommunityMetad
         out.banner = meta.banner;
         changed = true;
     }
+    // Client-extensible + unknown fields ride the fold verbatim so our own
+    // editions can carry them forward (CORD-02 §6).
+    if out.meta_custom != meta.custom {
+        out.meta_custom = meta.custom;
+        changed = true;
+    }
+    if out.meta_extra != meta.extra {
+        out.meta_extra = meta.extra;
+        changed = true;
+    }
     if !meta.relays.is_empty() && out.relays != meta.relays {
         out.relays = meta.relays;
         changed = true;
@@ -2942,6 +2978,20 @@ fn apply_channel_metadata(out: &mut CommunityV2, id: ChannelId, meta: control::C
             let mut changed = false;
             if existing.name != meta.name {
                 existing.name = meta.name;
+                changed = true;
+            }
+            // vsk-2 fields Vector doesn't drive still fold + persist, so a later
+            // local edit republishes them instead of wiping (CORD-02 §6).
+            if existing.voice != meta.voice {
+                existing.voice = meta.voice;
+                changed = true;
+            }
+            if existing.meta_custom != meta.custom {
+                existing.meta_custom = meta.custom;
+                changed = true;
+            }
+            if existing.meta_extra != meta.extra {
+                existing.meta_extra = meta.extra;
                 changed = true;
             }
             // The owner's edition authoritatively declares visibility. A channel the
@@ -2968,6 +3018,9 @@ fn apply_channel_metadata(out: &mut CommunityV2, id: ChannelId, meta: control::C
                 private: false,
                 key: None,
                 epoch: out.root_epoch,
+                voice: meta.voice,
+                meta_custom: meta.custom,
+                meta_extra: meta.extra,
             });
             true
         }
@@ -2977,7 +3030,16 @@ fn apply_channel_metadata(out: &mut CommunityV2, id: ChannelId, meta: control::C
             // epoch then doubles as [`follow_rekeys`]' scan cursor. Until a rotation
             // delivers a key, every read/send/subscribe path skips the channel; the
             // root-fallback in `channel_secret` is never taken for it.
-            out.channels.push(ChannelV2 { id, name: meta.name, private: true, key: None, epoch: Epoch(0) });
+            out.channels.push(ChannelV2 {
+                id,
+                name: meta.name,
+                private: true,
+                key: None,
+                epoch: Epoch(0),
+                voice: meta.voice,
+                meta_custom: meta.custom,
+                meta_extra: meta.extra,
+            });
             true
         }
     }
@@ -3995,6 +4057,46 @@ mod tests {
         let rumor = control::build_edition_rumor(signer.public_key(), vsk::COMMUNITY_METADATA, &community.id().0, version, prev.as_ref(), &content, at_secs, None);
         let (wrap, _) = control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(at_secs)).unwrap();
         relay.publish(&wrap, &community.relays).await.unwrap();
+    }
+
+    #[test]
+    fn metadata_apply_captures_undriven_fields_for_republish() {
+        let owner = Keys::generate();
+        let g = control::genesis(&owner, control::CommunityMetadata { name: "A".into(), ..Default::default() }, 1_000).unwrap();
+        let mut held = CommunityV2::from_genesis(&g, "A", None, vec!["wss://r".into()], 0);
+        let general = held.channels[0].id;
+
+        // A foreign vsk-0 head carrying custom + unknown fields folds them in…
+        let mut custom = serde_json::Map::new();
+        custom.insert("accent".into(), serde_json::Value::from("#89f0b6"));
+        let mut extra = serde_json::Map::new();
+        extra.insert("vnd_flag".into(), serde_json::Value::Bool(true));
+        let meta = control::CommunityMetadata { name: "A".into(), custom: Some(custom.clone()), extra: extra.clone(), ..Default::default() };
+        assert!(apply_community_metadata(&mut held, meta), "gaining custom/extra is a change");
+        assert_eq!(held.meta_custom, Some(custom.clone()));
+        assert_eq!(held.meta_extra, extra);
+        // …and the next local edit's base document republishes them verbatim.
+        assert_eq!(held.metadata().custom, Some(custom));
+        assert_eq!(held.metadata().extra, held.meta_extra);
+
+        // Same contract for a vsk-2 channel head (voice included).
+        let mut ch_custom = serde_json::Map::new();
+        ch_custom.insert("slowmode".into(), serde_json::Value::from(30));
+        let ch_meta = control::ChannelMetadata {
+            name: "general".into(),
+            private: false,
+            voice: Some(true),
+            deleted: None,
+            custom: Some(ch_custom.clone()),
+            extra: Default::default(),
+        };
+        assert!(apply_channel_metadata(&mut held, general, ch_meta), "gaining voice/custom is a change");
+        let ch = held.channel(&general).unwrap();
+        assert_eq!(ch.voice, Some(true));
+        assert_eq!(ch.meta_custom, Some(ch_custom.clone()));
+        let rename = { let mut d = ch.metadata(); d.name = "lounge".into(); d };
+        assert_eq!(rename.voice, Some(true), "our rename edition carries the foreign voice flag");
+        assert_eq!(rename.custom, Some(ch_custom));
     }
 
     #[test]
@@ -6022,7 +6124,7 @@ mod tests {
 
     /// Attach a Private channel (key + epoch) to a held community and persist it.
     fn add_private_channel(community: &mut CommunityV2, id: ChannelId, key: [u8; 32], epoch: Epoch) {
-        community.channels.push(ChannelV2 { id, name: "mods".into(), private: true, key: Some(key), epoch });
+        community.channels.push(ChannelV2 { id, name: "mods".into(), private: true, key: Some(key), epoch, voice: None, meta_custom: None, meta_extra: Default::default() });
         crate::db::community::save_community_v2(community).unwrap();
     }
 
@@ -6210,7 +6312,7 @@ mod tests {
         let relay = MemoryRelay::new();
         let mut community = create_community(&relay, "Cursor", vec!["wss://r".into()], None).await.unwrap();
         let priv_id = ChannelId([0x66; 32]);
-        community.channels.push(ChannelV2 { id: priv_id, name: "vault".into(), private: true, key: None, epoch: Epoch(0) });
+        community.channels.push(ChannelV2 { id: priv_id, name: "vault".into(), private: true, key: None, epoch: Epoch(0), voice: None, meta_custom: None, meta_extra: Default::default() });
         crate::db::community::save_community_v2(&community).unwrap();
         let community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
         assert!(community.channel(&priv_id).unwrap().key.is_none(), "keyless survives the round-trip");
@@ -6738,7 +6840,7 @@ mod tests {
         let mut b = create_community(&relay, "B", vec!["wss://r".into()], None).await.unwrap();
         let b_channel = b.channels[0].id;
         // B's set includes a phantom whose id collides with A's channel.
-        b.channels.push(ChannelV2 { id: a_channel, name: "phantom".into(), private: false, key: None, epoch: b.root_epoch });
+        b.channels.push(ChannelV2 { id: a_channel, name: "phantom".into(), private: false, key: None, epoch: b.root_epoch, voice: None, meta_custom: None, meta_extra: Default::default() });
 
         crate::db::community::save_community_v2(&b).expect("save succeeds, the phantom is skipped");
         // A's channel row is untouched.
@@ -6913,6 +7015,8 @@ mod tests {
             description: None,
             icon: None,
             banner: None,
+            meta_custom: None,
+            meta_extra: Default::default(),
             relays: vec!["wss://r".into()],
             channels: vec![],
             dissolved: false,

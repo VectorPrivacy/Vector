@@ -831,5 +831,21 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // Migration 68: the CORD-02 §6 preservation stash — vsk fields Vector doesn't
+    // drive (voice, client `custom`, unknown `extra`) persist beside the entity so
+    // our own editions republish the FULL document instead of wiping them.
+    run_atomic_migration(conn, 68, "v2 metadata preservation stash", |tx| {
+        for (table, col) in [("communities", "meta_extra"), ("community_channels", "meta_extra")] {
+            let sql = format!("ALTER TABLE {table} ADD COLUMN {col} TEXT");
+            if let Err(e) = tx.execute(&sql, []) {
+                let msg = e.to_string();
+                if !msg.contains("duplicate column name") {
+                    return Err(format!("add {table}.{col}: {msg}"));
+                }
+            }
+        }
+        Ok(())
+    })?;
+
     Ok(())
 }

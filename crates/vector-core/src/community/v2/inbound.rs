@@ -284,7 +284,7 @@ pub enum DispatchedV2 {
 pub fn dispatch_wrap(
     wrap: &nostr_sdk::Event,
     community: &CommunityV2,
-    _my_pubkey: &PublicKey,
+    my_pubkey: &PublicKey,
     handler: &dyn InboundEventHandler,
 ) -> DispatchedV2 {
     // 1. Chat planes: try each held channel by its group key (author match).
@@ -303,7 +303,7 @@ pub fn dispatch_wrap(
             return DispatchedV2::NotOurs;
         };
         let channel_id = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
-        return dispatch_chat_event(event, &channel_id, handler);
+        return dispatch_chat_event(event, &channel_id, my_pubkey, handler);
     }
 
     // 2. Guestbook plane: join/leave presence.
@@ -344,11 +344,11 @@ pub fn dispatch_wrap(
     DispatchedV2::NotOurs
 }
 
-fn dispatch_chat_event(event: ChatEvent, channel_id: &str, handler: &dyn InboundEventHandler) -> DispatchedV2 {
+fn dispatch_chat_event(event: ChatEvent, channel_id: &str, my_pubkey: &PublicKey, handler: &dyn InboundEventHandler) -> DispatchedV2 {
     match event {
-        // Typing is ephemeral (never persisted) — the one chat kind fired inline,
-        // so it carries its own CORD-04 banned-author drop (the persisted kinds
-        // get theirs in `apply_chat_to_state`).
+        // Typing is ephemeral (never persisted) — fired inline, so it carries its
+        // own CORD-04 banned-author drop (the persisted kinds get theirs in
+        // `apply_chat_to_state`).
         ChatEvent::Typing { opened } => {
             if author_is_banned_here(channel_id, &opened.author) {
                 return DispatchedV2::Ignored;
@@ -358,7 +358,27 @@ fn dispatch_chat_event(event: ChatEvent, channel_id: &str, handler: &dyn Inbound
             handler.on_community_typing(channel_id, &npub, until);
             DispatchedV2::Typing { channel_id: channel_id.to_string(), npub }
         }
-        ChatEvent::Webxdc { .. } => DispatchedV2::Ignored,
+        // A WebXDC peer signal fires the same handler surface v1 uses — the shared
+        // tail (30078 persist + recency gate + Iroh wiring + the lobby emit) does
+        // the rest. Own-device echoes drop: the local realtime layer tracks itself.
+        ChatEvent::Webxdc { opened } => {
+            if opened.author == *my_pubkey || author_is_banned_here(channel_id, &opened.author) {
+                return DispatchedV2::Ignored;
+            }
+            let Some((topic_id, node_addr)) = crate::webxdc::parse_peer_signal(&opened.rumor.content) else {
+                return DispatchedV2::Ignored;
+            };
+            let npub = opened.author.to_bech32().unwrap_or_default();
+            handler.on_community_webxdc(
+                channel_id,
+                &npub,
+                &topic_id,
+                node_addr.as_deref(),
+                &opened.rumor_id.to_hex(),
+                opened.at_ms / 1000,
+            );
+            DispatchedV2::Ignored
+        }
         // Message/Reaction/Edit/Delete all persist first; their callbacks fire from
         // the outcome (dedup + author checks), never optimistically.
         event => DispatchedV2::Chat { channel_id: channel_id.to_string(), event: Box::new(event) },
@@ -643,6 +663,49 @@ mod tests {
         // npub, never hex: the frontend resolves the reactor's profile and detects
         // "my reaction" by comparing against the user's npub.
         assert_eq!(author, member.public_key().to_bech32().unwrap(), "reaction author is stored as bech32");
+    }
+
+    #[tokio::test]
+    async fn a_webxdc_peer_ad_fires_the_shared_handler_and_own_echo_drops() {
+        use nostr_sdk::prelude::Timestamp;
+        use std::sync::Mutex as StdMutex;
+        let (_tmp, _guard, me) = init();
+        let relay = MemoryRelay::new();
+        let community = service::create_community(&relay, "XDC", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+
+        #[derive(Default)]
+        struct Capture(StdMutex<Vec<(String, String, Option<String>)>>);
+        impl InboundEventHandler for Capture {
+            fn on_community_webxdc(&self, _chat_id: &str, npub: &str, topic_id: &str, node_addr: Option<&str>, _event_id: &str, _created_at: u64) {
+                self.0.lock().unwrap().push((npub.into(), topic_id.into(), node_addr.map(String::from)));
+            }
+        }
+
+        let topic = "B".repeat(52);
+        let content = crate::webxdc::peer_signal_content(&topic, Some("iroh:node/xyz"));
+        let (secret, epoch) = community.channel_secret(&community.channels[0]);
+        let group = super::super::derive::channel_group_key(&secret, &general, epoch);
+
+        // A PEER's ad fires the shared v1 handler surface.
+        let peer = Keys::generate();
+        let rumor = chat::build_webxdc_rumor(peer.public_key(), &general, epoch, &content, vec![], 5_000);
+        let (wrap, _) = chat::seal_chat_rumor(&rumor, &group, &peer, Timestamp::from_secs(5), false).unwrap();
+        let cap = Capture::default();
+        let out = dispatch_wrap(&wrap, &community, &me.public_key(), &cap);
+        assert!(matches!(out, DispatchedV2::Ignored), "fired inline, nothing to persist v2-side");
+        let seen = cap.0.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, peer.public_key().to_bech32().unwrap());
+        assert_eq!(seen[0].1, topic);
+        assert_eq!(seen[0].2.as_deref(), Some("iroh:node/xyz"));
+
+        // Our OWN echo never re-fires — the local realtime layer tracks itself.
+        let own = chat::build_webxdc_rumor(me.public_key(), &general, epoch, &content, vec![], 6_000);
+        let (own_wrap, _) = chat::seal_chat_rumor(&own, &group, &me, Timestamp::from_secs(6), false).unwrap();
+        let cap2 = Capture::default();
+        dispatch_wrap(&own_wrap, &community, &me.public_key(), &cap2);
+        assert!(cap2.0.lock().unwrap().is_empty(), "own-device echo drops");
     }
 
     #[tokio::test]

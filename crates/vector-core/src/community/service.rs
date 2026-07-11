@@ -275,10 +275,7 @@ pub async fn publish_webxdc_signal<T: Transport + ?Sized>(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let content = match node_addr {
-        Some(addr) => serde_json::json!({ "op": "ad", "topic": topic_id, "addr": addr }).to_string(),
-        None => serde_json::json!({ "op": "left", "topic": topic_id }).to_string(),
-    };
+    let content = crate::webxdc::peer_signal_content(topic_id, node_addr);
     let unsigned = super::envelope::build_inner_typed(
         author_pk, &channel.id, channel.epoch, event_kind::COMMUNITY_WEBXDC, &content, ms, None, &[],
     );

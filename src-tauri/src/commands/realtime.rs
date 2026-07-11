@@ -122,6 +122,35 @@ async fn send_community_webxdc_signal(
     session: &vector_core::state::SessionGuard,
 ) -> bool {
     use vector_core::community::{service, transport::LiveTransport};
+    // Dual-stack: a v2 channel seals the SAME 3310 content on its chat plane.
+    if let Ok(Some(cid)) = vector_core::db::community::community_id_for_channel(channel_id) {
+        if matches!(
+            vector_core::db::community::community_protocol(&vector_core::community::CommunityId(
+                vector_core::simd::hex::hex_to_bytes_32(&cid)
+            ))
+            .ok()
+            .flatten(),
+            Some(vector_core::community::ConcordProtocol::V2)
+        ) {
+            let Ok(Some(community)) = vector_core::db::community::load_community_v2(
+                &vector_core::community::CommunityId(vector_core::simd::hex::hex_to_bytes_32(&cid)),
+            ) else {
+                return false;
+            };
+            if !session.is_valid() {
+                return false;
+            }
+            let ch = vector_core::community::ChannelId(vector_core::simd::hex::hex_to_bytes_32(channel_id));
+            let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+            return match vector_core::community::v2::service::send_webxdc_signal(&transport, &community, &ch, topic_id, node_addr).await {
+                Ok(()) => true,
+                Err(e) => {
+                    log_warn!("[WEBXDC] v2 peer signal publish failed: {}", e);
+                    false
+                }
+            };
+        }
+    }
     let (community, channel) = match crate::commands::community::resolve_community_channel(channel_id) {
         Ok(rc) => rc,
         Err(e) => {

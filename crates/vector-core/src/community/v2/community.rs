@@ -25,6 +25,27 @@ pub struct ChannelV2 {
     /// the community_root).
     pub key: Option<[u8; 32]>,
     pub epoch: Epoch,
+    /// Folded vsk-2 fields Vector doesn't drive but MUST carry through its own
+    /// editions (CORD-02 §6) — an edition replaces the entity, so dropping these
+    /// on a rename would wipe them for every member.
+    pub voice: Option<bool>,
+    pub meta_custom: Option<serde_json::Map<String, serde_json::Value>>,
+    pub meta_extra: serde_json::Map<String, serde_json::Value>,
+}
+
+impl ChannelV2 {
+    /// The full vsk-2 document rebuilt from held state — the base every local
+    /// channel edit MUST start from (CORD-02 §6 preservation).
+    pub fn metadata(&self) -> super::control::ChannelMetadata {
+        super::control::ChannelMetadata {
+            name: self.name.clone(),
+            private: self.private,
+            voice: self.voice,
+            deleted: None,
+            custom: self.meta_custom.clone(),
+            extra: self.meta_extra.clone(),
+        }
+    }
 }
 
 /// A v2 community in memory: its self-certifying identity, base access key, and
@@ -43,6 +64,10 @@ pub struct CommunityV2 {
     /// doesn't carry these forward wipes them for everyone (CORD-02 §6).
     pub icon: Option<ImageRef>,
     pub banner: Option<ImageRef>,
+    /// Folded vsk-0 client-extensible object + unknown top-level fields —
+    /// carried through our own editions verbatim (CORD-02 §6).
+    pub meta_custom: Option<serde_json::Map<String, serde_json::Value>>,
+    pub meta_extra: serde_json::Map<String, serde_json::Value>,
     pub relays: Vec<String>,
     pub channels: Vec<ChannelV2>,
     pub dissolved: bool,
@@ -62,6 +87,8 @@ impl CommunityV2 {
             description,
             icon: None,
             banner: None,
+            meta_custom: None,
+            meta_extra: Default::default(),
             relays,
             channels: vec![ChannelV2 {
                 id: g.general_channel_id,
@@ -69,6 +96,9 @@ impl CommunityV2 {
                 private: false,
                 key: None,
                 epoch: Epoch(0),
+                voice: None,
+                meta_custom: None,
+                meta_extra: Default::default(),
             }],
             dissolved: false,
             created_at_ms,
@@ -104,6 +134,9 @@ impl CommunityV2 {
                 private,
                 key: private.then_some(key),
                 epoch: Epoch(g.epoch),
+                voice: None,
+                meta_custom: None,
+                meta_extra: Default::default(),
             });
         }
 
@@ -117,6 +150,8 @@ impl CommunityV2 {
             // joined; the Control fold is the authority and overwrites it.
             icon: bundle.icon.clone(),
             banner: None,
+            meta_custom: None,
+            meta_extra: Default::default(),
             relays: bundle.relays.clone(),
             channels,
             dissolved: false,
@@ -131,8 +166,7 @@ impl CommunityV2 {
 
     /// The full vsk-0 metadata document rebuilt from held state — the base every
     /// local edit MUST start from, so changing one field can't wipe the rest
-    /// (CORD-02 §6). `custom`/`extra` aren't held locally yet, so a foreign
-    /// edition's extension fields don't survive our edits — a known cut.
+    /// (CORD-02 §6), foreign clients' `custom`/`extra` fields included.
     pub fn metadata(&self) -> super::control::CommunityMetadata {
         super::control::CommunityMetadata {
             name: self.name.clone(),
@@ -140,8 +174,8 @@ impl CommunityV2 {
             relays: self.relays.clone(),
             icon: self.icon.clone(),
             banner: self.banner.clone(),
-            custom: None,
-            extra: Default::default(),
+            custom: self.meta_custom.clone(),
+            extra: self.meta_extra.clone(),
         }
     }
 
@@ -254,11 +288,11 @@ mod tests {
         // A renamed general → the first READABLE channel wins; a keyless private
         // channel (unreadable) is skipped even when it sits first.
         c.channels[0].name = "lobby".into();
-        c.channels.insert(0, ChannelV2 { id: ChannelId([9u8; 32]), name: "sekrit".into(), private: true, key: None, epoch: Epoch(0) });
+        c.channels.insert(0, ChannelV2 { id: ChannelId([9u8; 32]), name: "sekrit".into(), private: true, key: None, epoch: Epoch(0), voice: None, meta_custom: None, meta_extra: Default::default() });
         assert_eq!(c.primary_channel().unwrap().name, "lobby");
 
         // A readable channel NAMED general beats position.
-        c.channels.push(ChannelV2 { id: ChannelId([8u8; 32]), name: "General".into(), private: false, key: None, epoch: Epoch(0) });
+        c.channels.push(ChannelV2 { id: ChannelId([8u8; 32]), name: "General".into(), private: false, key: None, epoch: Epoch(0), voice: None, meta_custom: None, meta_extra: Default::default() });
         assert_eq!(c.primary_channel().unwrap().name, "General");
     }
 
@@ -280,12 +314,40 @@ mod tests {
 
         // An edition replaces the entity, so the edit base MUST be the full held
         // document — a name-only edit built from it keeps the icon (CORD-02 §6).
+        let mut custom = serde_json::Map::new();
+        custom.insert("theme".into(), serde_json::Value::String("solarpunk".into()));
+        c.meta_custom = Some(custom.clone());
+        c.meta_extra.insert("future_field".into(), serde_json::Value::Bool(true));
         let doc = c.metadata();
         assert_eq!(doc.name, "Test");
         assert_eq!(doc.description.as_deref(), Some("desc"));
         assert_eq!(doc.icon, c.icon);
         assert_eq!(doc.banner, None);
         assert_eq!(doc.relays, c.relays);
+        assert_eq!(doc.custom, Some(custom), "client-extensible custom rides the edit base");
+        assert_eq!(doc.extra.get("future_field"), Some(&serde_json::Value::Bool(true)), "unknown fields ride too");
+    }
+
+    #[test]
+    fn channel_metadata_document_preserves_undriven_fields() {
+        let owner = Keys::generate();
+        let meta = super::super::control::CommunityMetadata { name: "T".into(), ..Default::default() };
+        let g = super::super::control::genesis(&owner, meta, 1_000).unwrap();
+        let mut c = CommunityV2::from_genesis(&g, "T", None, vec!["wss://r".into()], 0);
+        // A foreign client marked #general as a voice channel with custom fields.
+        c.channels[0].voice = Some(true);
+        let mut custom = serde_json::Map::new();
+        custom.insert("bitrate".into(), serde_json::Value::from(64000));
+        c.channels[0].meta_custom = Some(custom.clone());
+        c.channels[0].meta_extra.insert("vnd_field".into(), serde_json::Value::from("x"));
+
+        // Our rename rebuilds from the held document: voice/custom/extra survive.
+        let mut doc = c.channels[0].metadata();
+        doc.name = "lounge".into();
+        assert_eq!(doc.voice, Some(true), "a rename must not wipe the voice flag");
+        assert_eq!(doc.custom, Some(custom));
+        assert_eq!(doc.extra.get("vnd_field"), Some(&serde_json::Value::from("x")));
+        assert_eq!(doc.deleted, None);
     }
 
     #[test]

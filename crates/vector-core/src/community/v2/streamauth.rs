@@ -276,8 +276,8 @@ mod tests {
         let owner = Keys::generate();
         let g = genesis(&owner, CommunityMetadata { name: "auth-test".into(), ..Default::default() }, 1_000).unwrap();
         let mut c = CommunityV2::from_genesis(&g, "auth-test", None, vec!["wss://gated.example".into()], 0);
-        c.channels.push(ChannelV2 { id: ChannelId([2u8; 32]), name: "keyed-private".into(), private: true, key: Some([7u8; 32]), epoch: Epoch(3) });
-        c.channels.push(ChannelV2 { id: ChannelId([3u8; 32]), name: "keyless-private".into(), private: true, key: None, epoch: Epoch(0) });
+        c.channels.push(ChannelV2 { id: ChannelId([2u8; 32]), name: "keyed-private".into(), private: true, key: Some([7u8; 32]), epoch: Epoch(3), voice: None, meta_custom: None, meta_extra: Default::default() });
+        c.channels.push(ChannelV2 { id: ChannelId([3u8; 32]), name: "keyless-private".into(), private: true, key: None, epoch: Epoch(0), voice: None, meta_custom: None, meta_extra: Default::default() });
         c
     }
 

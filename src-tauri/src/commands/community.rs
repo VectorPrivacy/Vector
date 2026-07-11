@@ -662,14 +662,10 @@ pub async fn create_community(
     // Genesis mints the first channel as "general"; honor a custom name.
     if channel_name != "general" {
         if let Some(ch) = community.channels.first().cloned() {
-            let meta = vector_core::community::v2::control::ChannelMetadata {
-                name: channel_name.clone(),
-                private: false,
-                voice: None,
-                deleted: None,
-                custom: None,
-                extra: Default::default(),
-            };
+            // Rebuild from the held document — a rename must never strip vsk-2
+            // fields it didn't touch (CORD-02 §6).
+            let mut meta = ch.metadata();
+            meta.name = channel_name.clone();
             vector_core::community::v2::service::edit_channel_metadata(&transport, &community, &ch.id, &meta).await?;
             if let Ok(Some(fresh)) = vector_core::db::community::load_community_v2(community.id()) {
                 community = fresh;
@@ -3024,10 +3020,11 @@ pub async fn rename_community_channel(
         let community = vector_core::db::community::load_community_v2(&CommunityId(id_bytes))
             .map_err(|e| e)?
             .ok_or("Community not found")?;
-        let private = community.channels.iter().find(|c| c.id == ch_id).map(|c| c.private).unwrap_or(false);
-        let meta = vector_core::community::v2::control::ChannelMetadata {
-            name: name.clone(), private, voice: None, deleted: None, custom: None, extra: Default::default(),
-        };
+        let held = community.channel(&ch_id).ok_or("Channel not found in Community")?;
+        // Rebuild from the held document — a rename must never strip vsk-2
+        // fields it didn't touch (CORD-02 §6).
+        let mut meta = held.metadata();
+        meta.name = name.clone();
         let transport = LiveTransport::with_timeout(Duration::from_secs(12));
         vector_core::community::v2::service::edit_channel_metadata(&transport, &community, &ch_id, &meta).await?;
         if session.is_valid() {

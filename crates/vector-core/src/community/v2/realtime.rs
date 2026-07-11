@@ -757,6 +757,9 @@ mod tests {
             private: true,
             key: Some([0x44; 32]),
             epoch: Epoch(1),
+            voice: None,
+            meta_custom: None,
+            meta_extra: Default::default(),
         });
         let authors = plane_authors(std::slice::from_ref(&c));
         // A private channel is read under its OWN key/epoch (not the root).
