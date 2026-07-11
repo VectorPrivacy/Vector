@@ -813,5 +813,23 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // Migration 67: the persisted v2 Guestbook — the RAW membership events (one
+    // encrypted JSON blob per community; kick/snapshot validity is judged at fold
+    // time against CURRENT authority, so raw events are the correct stored form)
+    // plus the newest-seen cursor, so boot catches the plane up incrementally and
+    // the memberlist becomes a local read.
+    run_atomic_migration(conn, 67, "v2 guestbook store", |tx| {
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS community_guestbook (
+                community_id TEXT PRIMARY KEY,
+                events TEXT NOT NULL,
+                cursor_secs INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )
+        .map_err(|e| format!("create community_guestbook: {e}"))?;
+        Ok(())
+    })?;
+
     Ok(())
 }

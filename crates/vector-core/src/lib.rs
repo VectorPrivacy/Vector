@@ -882,22 +882,48 @@ impl VectorCore {
         let me = state::my_public_key();
         let is_owner = me.is_some_and(|m| community.owner().is_ok_and(|o| o == m));
         let id_hex = crate::simd::hex::bytes_to_hex_32(&community.identity.community_id.0);
-        let mut st = state::STATE.lock().await;
-        if !session.is_valid() {
-            return; // account swapped during the join/create — don't write into the new one.
-        }
-        for ch in &community.channels {
+        // The chat list shows ONE row per community — the primary channel under the
+        // community's metadata (v1-group parity; multi-channel UI is a later cut).
+        let Some(primary) = community.primary_channel() else { return };
+        let primary_hex = crate::simd::hex::bytes_to_hex_32(&primary.id.0);
+        let sibling_ids: Vec<String> = community
+            .channels
+            .iter()
+            .filter(|c| c.id.0 != primary.id.0)
+            .map(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0))
+            .collect();
+        let slim = {
+            let mut st = state::STATE.lock().await;
+            if !session.is_valid() {
+                return; // account swapped during the join/create — don't write into the new one.
+            }
             st.upsert_community_chat(
-                &crate::simd::hex::bytes_to_hex_32(&ch.id.0),
+                &primary_hex,
                 &community.name,
                 community.description.as_deref().unwrap_or(""),
                 &id_hex,
                 is_owner,
-                false,
+                community.icon.is_some(),
                 owner_npub.as_deref(),
                 Some(community.created_at_ms),
                 community.dissolved,
             );
+            // Sibling-channel rows the message persist auto-created are bare
+            // anchors (their DB rows keep the history's FK) — never surfaced.
+            st.chats.retain(|c| !sibling_ids.contains(&c.id));
+            st.chats
+                .iter()
+                .find(|c| c.id == primary_hex)
+                .map(|chat| crate::db::chats::SlimChatDB::from_chat(chat, &st.interner))
+        };
+        // Persist the row so a fresh boot reloads the community's name/metadata
+        // instead of the bare auto-created anchor. Session re-check: don't write
+        // account A's row into a swapped-in account B's DB.
+        if !session.is_valid() {
+            return;
+        }
+        if let Some(slim) = slim {
+            let _ = crate::db::chats::save_slim_chat(&slim);
         }
     }
 
@@ -919,6 +945,23 @@ impl VectorCore {
             if let Some(client) = state::nostr_client() {
                 crate::community::v2::realtime::refresh_subscription(&client).await;
             }
+            // Seed the membership store post-join (background — the join itself is
+            // already the slow path) so the first Group Details open reads locally.
+            let seed_session = state::SessionGuard::capture();
+            let seed_community = community.clone();
+            tokio::spawn(async move {
+                if !seed_session.is_valid() {
+                    return;
+                }
+                let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(20));
+                if matches!(
+                    crate::community::v2::service::sync_guestbook(&transport, &seed_community, &seed_session).await,
+                    Ok(true)
+                ) {
+                    let cid_hex = crate::simd::hex::bytes_to_hex_32(&seed_community.id().0);
+                    emit_event("community_refreshed", &serde_json::json!({ "community_id": cid_hex }));
+                }
+            });
             return Ok(Self::v2_summary(&community));
         }
         let (relays, token) = public_invite::parse_invite_url(invite_url)
@@ -1335,7 +1378,11 @@ impl VectorCore {
                 None => None,
             };
             let reply_ref = reply.as_ref().map(|(id, author)| (id.as_str(), author.as_str()));
-            return crate::community::v2::service::send_chat_message(&transport, &community, &ch, content, reply_ref, &[], vec![])
+            // NIP-30: resolve `:shortcode:` against subscribed packs so the rumor
+            // carries `["emoji", ...]` pairs — parity with the v1 inner event.
+            let emoji_owned = crate::emoji_packs::resolve_outbound_emoji_tags(content);
+            let emoji_pairs: Vec<(&str, &str)> = emoji_owned.iter().map(|t| (t.shortcode.as_str(), t.url.as_str())).collect();
+            return crate::community::v2::service::send_chat_message(&transport, &community, &ch, content, reply_ref, &emoji_pairs, vec![])
                 .await
                 .map_err(VectorError::Other);
         }
@@ -1877,12 +1924,29 @@ impl VectorCore {
     /// a transport failure yields an empty list, never an error.
     pub async fn get_community_members(&self, community_id: &str) -> Vec<serde_json::Value> {
         use nostr_sdk::prelude::ToBech32;
-        // v2: the Complete Memberlist (guestbook fold + observed authors − banlist).
+        // v2: the Complete Memberlist from LOCAL state (persisted guestbook +
+        // observed authors + roster grantees − banlist). The store is seeded
+        // post-join and cursor-caught-up by the follow worker (boot/reconnect) +
+        // live ingest; a cold store (a hold predating the store) seeds in the
+        // background and refreshes the UI when it lands.
         match Self::load_v2_if_v2(community_id) {
             Ok(Some(community)) => {
-                let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-                return crate::community::v2::service::memberlist(&transport, &community)
-                    .await
+                let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+                let (_, cursor) = crate::db::community::get_guestbook(&cid_hex).unwrap_or_default();
+                if cursor == 0 {
+                    let session = state::SessionGuard::capture();
+                    let c2 = community.clone();
+                    tokio::spawn(async move {
+                        if !session.is_valid() {
+                            return;
+                        }
+                        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(20));
+                        if matches!(crate::community::v2::service::sync_guestbook(&transport, &c2, &session).await, Ok(true)) {
+                            emit_event("community_refreshed", &serde_json::json!({ "community_id": cid_hex }));
+                        }
+                    });
+                }
+                return crate::community::v2::service::stored_memberlist(&community)
                     .unwrap_or_default()
                     .into_iter()
                     .filter_map(|pk| pk.to_bech32().ok())
@@ -2235,25 +2299,23 @@ impl VectorCore {
     pub async fn edit_community_metadata(&self, community_id: &str, name: Option<&str>, description: Option<&str>) -> Result<()> {
         use crate::community::{service, transport::LiveTransport, CommunityId};
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-        // Dual-stack: a v2 metadata edit is an authorized vsk-0 control edition. (Full
-        // icon/custom round-trip preservation rides with the GUI wiring; a bot edit
-        // sets name/description/relays from the held community.)
+        // Dual-stack: a v2 metadata edit is an authorized vsk-0 control edition.
+        // Overlay onto the FULL held document (`CommunityV2::metadata()`) — an
+        // edition replaces the entity, so a bare name edit would otherwise wipe
+        // the icon/banner for every member (CORD-02 §6).
         if community_id.len() == 64 {
             let cid = CommunityId(crate::simd::hex::hex_to_bytes_32(community_id));
             if let Some(Some(crate::community::ConcordProtocol::V2)) = crate::db::community::community_protocol(&cid).ok() {
                 let community = crate::db::community::load_community_v2(&cid)
                     .map_err(VectorError::Other)?
                     .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
-                let meta = crate::community::v2::control::CommunityMetadata {
-                    name: name.unwrap_or(&community.name).to_string(),
-                    description: match description {
-                        Some("") => None,
-                        Some(d) => Some(d.to_string()),
-                        None => community.description.clone(),
-                    },
-                    relays: community.relays.clone(),
-                    ..Default::default()
-                };
+                let mut meta = community.metadata();
+                if let Some(n) = name {
+                    meta.name = n.to_string();
+                }
+                if let Some(d) = description {
+                    meta.description = if d.is_empty() { None } else { Some(d.to_string()) };
+                }
                 return crate::community::v2::service::edit_community_metadata(&transport, &community, &meta)
                     .await
                     .map_err(VectorError::Other);

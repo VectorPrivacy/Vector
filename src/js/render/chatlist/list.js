@@ -93,6 +93,11 @@ function renderChatlist() {
         // For DMs, we only show them if they have messages
         if (!chatIsGroup(chat) && chat.messages.length === 0) continue;
 
+        // A Community row without its owning community_id is a bare persistence
+        // anchor (a sibling channel of a multi-channel community) — only the
+        // community's primary row carries metadata and renders.
+        if (chatIsGroup(chat) && !chat.metadata?.custom_fields?.community_id) continue;
+
         // Message-less community: lazy-load its latest membership event so the preview can show
         // "X has joined" instead of "No messages yet" (cached onto chat.lastSystemEvent).
         if (chatIsGroup(chat)) ensureCommunityPreviewActivity(chat);

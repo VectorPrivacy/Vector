@@ -35,7 +35,7 @@ pub const TAG_AUTHORITY_CITATION: &str = "vac";
 /// authorizing edition (their Grant — or a RoleMetadata for a role-position claim) by stable
 /// coordinate + the exact version/hash, so the verifier resolves authority against that frozen point,
 /// not its own possibly-lagging-or-ahead live roster.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AuthorityCitation {
     /// The authorizing edition's entity id (e.g. `grant_locator(community_id, actor)`).
     pub entity_id: [u8; 32],

@@ -243,6 +243,34 @@ pub struct ImageRef {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
+impl ImageRef {
+    /// Bridge to the v1 image-ref shape so the shared download/decrypt/cache
+    /// plumbing serves both protocols. `ext` rides the flattened extras; fall
+    /// back to the URL's extension, else png.
+    pub fn to_community_image(&self) -> crate::community::CommunityImage {
+        let ext = self
+            .extra
+            .get("ext")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                std::path::Path::new(&self.url)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|s| s.to_lowercase())
+            })
+            .unwrap_or_else(|| "png".to_string());
+        crate::community::CommunityImage {
+            url: self.url.clone(),
+            key: self.key.clone(),
+            nonce: self.nonce.clone(),
+            hash: self.hash.clone(),
+            ext,
+        }
+    }
+}
+
 /// Community metadata — the vsk-0 entity content (CORD-02 §6). `eid` = the
 /// community_id itself; gated by `MANAGE_METADATA`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

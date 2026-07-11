@@ -180,7 +180,7 @@ pub fn seal_guestbook_rumor(
 /// tie-break runs on — the INNER rumor id, never the wrap's (a wrap id differs
 /// per re-wrap, and two clients holding different wraps of one rumor would
 /// fork on ties).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GuestbookEvent {
     /// The verified inner rumor id ([`OpenedStream::rumor_id`]).
     pub rumor_id: [u8; 32],
@@ -190,7 +190,7 @@ pub struct GuestbookEvent {
 /// The typed guestbook entries (CORD-02 §5). Authors (`member` / `actor` /
 /// `refounder`) are the seal-verified real keys, proven by
 /// [`stream::open_wrap`] before parsing ever starts.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum GuestbookEntry {
     Join {
         member: PublicKey,

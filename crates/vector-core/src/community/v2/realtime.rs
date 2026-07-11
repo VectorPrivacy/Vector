@@ -360,7 +360,26 @@ pub async fn dispatch_event(session: &SessionGuard, event: Event, handler: Arc<d
                 }
                 return;
             }
-            _ => return, // guestbook/typing handled inline by the dispatcher.
+            inbound::DispatchedV2::Presence { .. } => {
+                // Live membership motion: fold it into the persisted Guestbook so
+                // the memberlist stays a local read (the presence callback already
+                // fired inline). Reopen here — the dispatcher stays pure — and
+                // refresh the overview when it lands.
+                if !session.is_valid() {
+                    return;
+                }
+                let gb = derive::guestbook_group_key(&c.community_root, c.id(), c.root_epoch);
+                if let Ok(opened) = super::stream::open_wrap(&event, &gb) {
+                    if let Ok(ev) = super::guestbook::parse_guestbook_event(&opened) {
+                        let changed = super::service::ingest_guestbook_event(c, ev, event.created_at.as_secs()).unwrap_or(false);
+                        if changed && session.is_valid() {
+                            handler.on_community_refreshed(&crate::simd::hex::bytes_to_hex_32(&c.id().0));
+                        }
+                    }
+                }
+                return;
+            }
+            _ => return, // typing (and non-surfaced guestbook kinds) handled inline by the dispatcher.
         }
     }
 }
@@ -479,6 +498,19 @@ async fn follow_community(session: &SessionGuard, id: &CommunityId, handler: &dy
         // existed. Queue one more pass; it coalesces and converges (an unchanged
         // control fold doesn't re-queue).
         enqueue_follow(id);
+    }
+
+    // Guestbook third: catch the membership store up from its cursor. Boot and
+    // reconnect land here through this same queue, so the memberlist is a local
+    // read by the time any panel asks for it.
+    let Ok(Some(current)) = crate::db::community::load_community_v2(id) else {
+        return;
+    };
+    if matches!(super::service::sync_guestbook(&transport, &current, session).await, Ok(true)) {
+        if !session.is_valid() {
+            return;
+        }
+        handler.on_community_refreshed(&community_id);
     }
 }
 

@@ -10,7 +10,7 @@
 use nostr_sdk::prelude::PublicKey;
 
 use super::super::{ChannelId, CommunityId, Epoch};
-use super::control::{CommunityIdentity, Genesis};
+use super::control::{CommunityIdentity, Genesis, ImageRef};
 use super::invite::CommunityInvite;
 
 /// A channel as the v2 service holds it. A Public channel's secret is the
@@ -38,6 +38,11 @@ pub struct CommunityV2 {
     pub root_epoch: Epoch,
     pub name: String,
     pub description: Option<String>,
+    /// Folded vsk-0 icon/banner. Held so a local edit republishes the FULL
+    /// metadata document — an edition replaces the entity, so an editor that
+    /// doesn't carry these forward wipes them for everyone (CORD-02 §6).
+    pub icon: Option<ImageRef>,
+    pub banner: Option<ImageRef>,
     pub relays: Vec<String>,
     pub channels: Vec<ChannelV2>,
     pub dissolved: bool,
@@ -55,6 +60,8 @@ impl CommunityV2 {
             root_epoch: Epoch(0),
             name: name.to_string(),
             description,
+            icon: None,
+            banner: None,
             relays,
             channels: vec![ChannelV2 {
                 id: g.general_channel_id,
@@ -106,6 +113,10 @@ impl CommunityV2 {
             root_epoch: Epoch(bundle.root_epoch),
             name: bundle.name.clone(),
             description: None,
+            // Mint-time snapshot so the community has an icon the moment it's
+            // joined; the Control fold is the authority and overwrites it.
+            icon: bundle.icon.clone(),
+            banner: None,
             relays: bundle.relays.clone(),
             channels,
             dissolved: false,
@@ -118,6 +129,22 @@ impl CommunityV2 {
         &self.identity.community_id
     }
 
+    /// The full vsk-0 metadata document rebuilt from held state — the base every
+    /// local edit MUST start from, so changing one field can't wipe the rest
+    /// (CORD-02 §6). `custom`/`extra` aren't held locally yet, so a foreign
+    /// edition's extension fields don't survive our edits — a known cut.
+    pub fn metadata(&self) -> super::control::CommunityMetadata {
+        super::control::CommunityMetadata {
+            name: self.name.clone(),
+            description: self.description.clone(),
+            relays: self.relays.clone(),
+            icon: self.icon.clone(),
+            banner: self.banner.clone(),
+            custom: None,
+            extra: Default::default(),
+        }
+    }
+
     /// The proven owner (the identity self-certifies at construction).
     pub fn owner(&self) -> Result<PublicKey, String> {
         self.identity.owner()
@@ -125,6 +152,20 @@ impl CommunityV2 {
 
     pub fn channel(&self, id: &ChannelId) -> Option<&ChannelV2> {
         self.channels.iter().find(|c| c.id.0 == id.0)
+    }
+
+    /// The ONE channel the chat list surfaces for this community (multi-channel
+    /// UI is a later cut, mirroring v1's single-channel groups): a readable
+    /// `#general` when present, else the oldest readable channel, else the first.
+    /// A keyless Private channel is skipped — it can't render a single message.
+    pub fn primary_channel(&self) -> Option<&ChannelV2> {
+        let readable = |c: &&ChannelV2| !(c.private && c.key.is_none());
+        self.channels
+            .iter()
+            .filter(readable)
+            .find(|c| c.name.eq_ignore_ascii_case("general"))
+            .or_else(|| self.channels.iter().find(readable))
+            .or_else(|| self.channels.first())
     }
 
     /// The encryption secret + epoch that address a channel's Chat Plane: the
@@ -199,6 +240,52 @@ mod tests {
         assert_eq!(ch.key, None, "a public channel stores no key");
         // A public channel's secret is the community_root at the root epoch.
         assert_eq!(c.channel_secret(ch), (c.community_root, Epoch(0)));
+    }
+
+    #[test]
+    fn primary_channel_prefers_a_readable_general() {
+        let owner = Keys::generate();
+        let meta = super::super::control::CommunityMetadata { name: "T".into(), ..Default::default() };
+        let g = super::super::control::genesis(&owner, meta, 1_000).unwrap();
+        let mut c = CommunityV2::from_genesis(&g, "T", None, vec!["wss://r".into()], 0);
+        // Genesis mints #general — it is the primary.
+        assert_eq!(c.primary_channel().unwrap().name, "general");
+
+        // A renamed general → the first READABLE channel wins; a keyless private
+        // channel (unreadable) is skipped even when it sits first.
+        c.channels[0].name = "lobby".into();
+        c.channels.insert(0, ChannelV2 { id: ChannelId([9u8; 32]), name: "sekrit".into(), private: true, key: None, epoch: Epoch(0) });
+        assert_eq!(c.primary_channel().unwrap().name, "lobby");
+
+        // A readable channel NAMED general beats position.
+        c.channels.push(ChannelV2 { id: ChannelId([8u8; 32]), name: "General".into(), private: false, key: None, epoch: Epoch(0) });
+        assert_eq!(c.primary_channel().unwrap().name, "General");
+    }
+
+    #[test]
+    fn metadata_document_rebuilds_the_full_entity() {
+        let owner = Keys::generate();
+        let meta = super::super::control::CommunityMetadata { name: "Test".into(), ..Default::default() };
+        let g = super::super::control::genesis(&owner, meta, 1_000).unwrap();
+        let mut c = CommunityV2::from_genesis(&g, "Test", Some("desc".into()), vec!["wss://r".into()], 42);
+        let mut extra = serde_json::Map::new();
+        extra.insert("ext".into(), serde_json::Value::String("png".into()));
+        c.icon = Some(ImageRef {
+            url: "https://blossom.example/i".into(),
+            key: "k".into(),
+            nonce: "n".into(),
+            hash: "h".into(),
+            extra,
+        });
+
+        // An edition replaces the entity, so the edit base MUST be the full held
+        // document — a name-only edit built from it keeps the icon (CORD-02 §6).
+        let doc = c.metadata();
+        assert_eq!(doc.name, "Test");
+        assert_eq!(doc.description.as_deref(), Some("desc"));
+        assert_eq!(doc.icon, c.icon);
+        assert_eq!(doc.banner, None);
+        assert_eq!(doc.relays, c.relays);
     }
 
     #[test]

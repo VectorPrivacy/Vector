@@ -1809,19 +1809,28 @@ pub fn save_community_v2(c: &crate::community::v2::community::CommunityV2) -> Re
     let enc_desc = enc_txt_opt(&c.description)?;
     let enc_owner_pk = enc_txt(&crate::simd::hex::bytes_to_hex_32(&c.identity.owner_xonly))?;
     let enc_owner_salt = enc_txt(&crate::simd::hex::bytes_to_hex_32(&c.identity.owner_salt))?;
+    // ImageRef serializes to v1's CommunityImage JSON shape (`ext` rides the
+    // flattened `extra`), so the shared icon/banner columns serve both protocols
+    // — cache_community_image reads a v2 row's images unchanged.
+    let icon_json = c.icon.as_ref().map(|i| serde_json::to_string(i).map_err(|e| e.to_string())).transpose()?;
+    let banner_json = c.banner.as_ref().map(|b| serde_json::to_string(b).map_err(|e| e.to_string())).transpose()?;
+    let enc_icon = enc_txt_opt(&icon_json)?;
+    let enc_banner = enc_txt_opt(&banner_json)?;
 
     let tx = conn.unchecked_transaction().map_err(|e| format!("save v2 community tx: {e}"))?;
     tx.execute(
         "INSERT INTO communities
             (community_id, server_root_key, name, relays, created_at, description,
-             server_root_epoch, dissolved, protocol, owner_pubkey, owner_salt)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 2, ?9, ?10)
+             server_root_epoch, dissolved, protocol, owner_pubkey, owner_salt, icon, banner)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 2, ?9, ?10, ?11, ?12)
          ON CONFLICT(community_id) DO UPDATE SET
             server_root_key=?2, name=?3, relays=?4, description=?6,
-            server_root_epoch=?7, dissolved=?8, protocol=2, owner_pubkey=?9, owner_salt=?10",
+            server_root_epoch=?7, dissolved=?8, protocol=2, owner_pubkey=?9, owner_salt=?10,
+            icon=?11, banner=?12",
         params![
             id_hex, enc_root, enc_name, enc_relays, created, enc_desc,
             c.root_epoch.0 as i64, c.dissolved as i64, enc_owner_pk, enc_owner_salt,
+            enc_icon, enc_banner,
         ],
     )
     .map_err(|e| format!("save v2 community: {e}"))?;
@@ -1894,7 +1903,8 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
     let row = conn
         .query_row(
             "SELECT server_root_key, name, relays, created_at, description,
-                    server_root_epoch, dissolved, protocol, owner_pubkey, owner_salt
+                    server_root_epoch, dissolved, protocol, owner_pubkey, owner_salt,
+                    icon, banner
              FROM communities WHERE community_id = ?1",
             params![id_hex],
             |r| {
@@ -1909,12 +1919,14 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
                     r.get::<_, i64>(7)?,
                     r.get::<_, Option<String>>(8)?,
                     r.get::<_, Option<String>>(9)?,
+                    r.get::<_, Option<String>>(10)?,
+                    r.get::<_, Option<String>>(11)?,
                 ))
             },
         )
         .optional()
         .map_err(|e| e.to_string())?;
-    let Some((root_blob, name_e, relays_e, created, desc_e, root_epoch, dissolved, protocol, owner_pk_e, owner_salt_e)) = row
+    let Some((root_blob, name_e, relays_e, created, desc_e, root_epoch, dissolved, protocol, owner_pk_e, owner_salt_e, icon_e, banner_e)) = row
     else {
         return Ok(None);
     };
@@ -1970,12 +1982,23 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
         }
     }
 
+    // Unparseable image JSON degrades to no-image rather than failing the load —
+    // the fold re-persists the authoritative value on its next pass.
+    let icon = icon_e
+        .map(|s| dec_txt(&s))
+        .and_then(|j| serde_json::from_str::<crate::community::v2::control::ImageRef>(&j).ok());
+    let banner = banner_e
+        .map(|s| dec_txt(&s))
+        .and_then(|j| serde_json::from_str::<crate::community::v2::control::ImageRef>(&j).ok());
+
     Ok(Some(CommunityV2 {
         identity,
         community_root,
         root_epoch: Epoch(root_epoch as u64),
         name: dec_txt(&name_e),
         description: desc_e.map(|d| dec_txt(&d)),
+        icon,
+        banner,
         relays,
         channels,
         dissolved: dissolved != 0,
@@ -1988,6 +2011,46 @@ fn parse_hex32(hex: &str) -> Result<[u8; 32], String> {
         return Err("stored value is not 32-byte hex".to_string());
     }
     Ok(crate::simd::hex::hex_to_bytes_32(hex))
+}
+
+/// Load a community's persisted Guestbook: the raw membership events + the
+/// newest-seen cursor (relay seconds). `([], 0)` when never synced; unparseable
+/// stored JSON degrades the same way (the next sync re-seeds from zero).
+pub fn get_guestbook(community_id: &str) -> Result<(Vec<crate::community::v2::guestbook::GuestbookEvent>, u64), String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let row = conn
+        .query_row(
+            "SELECT events, cursor_secs FROM community_guestbook WHERE community_id = ?1",
+            params![community_id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("load guestbook: {e}"))?;
+    let Some((events_e, cursor)) = row else {
+        return Ok((Vec::new(), 0));
+    };
+    let events = serde_json::from_str(&dec_txt(&events_e)).unwrap_or_default();
+    Ok((events, cursor.max(0) as u64))
+}
+
+/// Persist a community's Guestbook events + cursor (encrypted at rest, like the
+/// community row itself). The caller owns dedup/merge — this is a plain replace.
+pub fn set_guestbook(
+    community_id: &str,
+    events: &[crate::community::v2::guestbook::GuestbookEvent],
+    cursor_secs: u64,
+) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let json = serde_json::to_string(events).map_err(|e| e.to_string())?;
+    let enc = enc_txt(&json)?;
+    conn.execute(
+        "INSERT INTO community_guestbook (community_id, events, cursor_secs)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(community_id) DO UPDATE SET events=?2, cursor_secs=?3",
+        params![community_id, enc, cursor_secs as i64],
+    )
+    .map_err(|e| format!("save guestbook: {e}"))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2056,6 +2119,63 @@ mod tests {
         // A different entity is tracked independently.
         let other = "b".repeat(64);
         assert_eq!(get_edition_head(&cid, &other).unwrap(), None);
+    }
+
+    #[test]
+    fn guestbook_round_trips_events_and_cursor() {
+        let (_tmp, _guard) = init_test_db();
+        let member = nostr_sdk::prelude::Keys::generate();
+        let ev = crate::community::v2::guestbook::GuestbookEvent {
+            rumor_id: [7u8; 32],
+            entry: crate::community::v2::guestbook::GuestbookEntry::Join {
+                member: member.public_key(),
+                invited_by: Some(("creator".into(), "label".into())),
+                at_ms: 1_000,
+            },
+        };
+        let cid = "d".repeat(64);
+        assert_eq!(get_guestbook(&cid).unwrap(), (Vec::new(), 0), "absent reads as empty at cursor 0");
+        set_guestbook(&cid, std::slice::from_ref(&ev), 42).unwrap();
+        let (events, cursor) = get_guestbook(&cid).unwrap();
+        assert_eq!(events, vec![ev], "events round-trip through the encrypted blob");
+        assert_eq!(cursor, 42);
+    }
+
+    #[test]
+    fn v2_images_round_trip_and_read_as_v1_community_images() {
+        let (_tmp, _guard) = init_test_db();
+        let owner = nostr_sdk::prelude::Keys::generate();
+        let g = crate::community::v2::control::genesis(
+            &owner,
+            crate::community::v2::control::CommunityMetadata { name: "Icons".into(), ..Default::default() },
+            1_000,
+        )
+        .unwrap();
+        let mut c = crate::community::v2::community::CommunityV2::from_genesis(&g, "Icons", None, vec!["wss://r".into()], 1_000);
+        let mut extra = serde_json::Map::new();
+        extra.insert("ext".into(), serde_json::Value::String("webp".into()));
+        c.icon = Some(crate::community::v2::control::ImageRef {
+            url: "https://blossom.example/abc".into(),
+            key: "0".repeat(64),
+            nonce: "1".repeat(32),
+            hash: "a".repeat(64),
+            extra,
+        });
+        save_community_v2(&c).unwrap();
+
+        // The v2 loader round-trips the ImageRef exactly (extra included).
+        let re = load_community_v2(c.id()).unwrap().unwrap();
+        assert_eq!(re.icon, c.icon);
+        assert_eq!(re.banner, None);
+
+        // Dual-reader guarantee: the SAME stored JSON parses as a v1 CommunityImage
+        // (`ext` from the flattened extra), so cache_community_image serves a v2
+        // icon with no v2-awareness.
+        let v1 = load_community(c.id()).unwrap().unwrap();
+        let img = v1.icon.expect("v1 reader sees the v2 icon");
+        assert_eq!(img.url, "https://blossom.example/abc");
+        assert_eq!(img.ext, "webp");
+        assert_eq!(img.hash, "a".repeat(64));
     }
 
     #[test]

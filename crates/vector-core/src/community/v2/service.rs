@@ -128,8 +128,25 @@ pub async fn send_chat_message<T: Transport + ?Sized>(
     emoji: &[(&str, &str)],
     extra_tags: Vec<nostr_sdk::prelude::Tag>,
 ) -> Result<String, String> {
+    send_chat_message_at(transport, community, channel_id, content, reply_to, emoji, extra_tags, now_ms()).await
+}
+
+/// [`send_chat_message`] with an explicit event time. The rumor id is a pure
+/// function of its inputs, so a GUI that picks `at_ms` can precompute the id for
+/// its optimistic pending row — the in-process echo and the finalize then key
+/// the SAME id (the exact v1 pending → sent contract).
+#[allow(clippy::too_many_arguments)]
+pub async fn send_chat_message_at<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    channel_id: &ChannelId,
+    content: &str,
+    reply_to: Option<(&str, &str)>,
+    emoji: &[(&str, &str)],
+    extra_tags: Vec<nostr_sdk::prelude::Tag>,
+    at_ms: u64,
+) -> Result<String, String> {
     let (author, group, epoch, session) = chat_send_context(community, channel_id)?;
-    let at_ms = now_ms();
     let rumor = chat::build_message_rumor(author.public_key(), channel_id, epoch, content, reply_to, emoji, extra_tags, at_ms);
     publish_chat(transport, community, &session, &group, &author, channel_id, epoch, rumor, at_ms, false).await
 }
@@ -769,7 +786,23 @@ async fn accept_bundle<T: Transport + ?Sized>(
     // with an attacker-chosen root and silently partition the joiner onto planes
     // only the attacker controls. Requiring the owner's genesis to open under the
     // delivered root closes that eclipse; also reconciles channel classification.
-    let (community, join_heads) = verify_owner_root_and_reconcile(transport, community).await?;
+    // A preview verified the SAME (id, root) moments ago → reuse its fold instead
+    // of re-walking the plane (the bundle re-fetch above kept the revocation gate).
+    let handoff = VERIFIED_PREVIEW.lock().unwrap().take().filter(|v| {
+        v.session.is_valid()
+            && v.at.elapsed() < VERIFIED_PREVIEW_TTL
+            && v.community_id == community.id().0
+            && v.community_root == community.community_root
+    });
+    let (community, join_heads) = match handoff {
+        Some(v) => {
+            let mut c = v.folded;
+            // The preview holds no acquisition time — stamp the JOIN's.
+            c.created_at_ms = at_ms;
+            (c, v.heads)
+        }
+        None => verify_owner_root_and_reconcile(transport, community).await?,
+    };
 
     // A dissolved community is a grave (CORD-02 §9): refuse to join it.
     if is_dissolved(transport, &community).await {
@@ -953,15 +986,13 @@ pub async fn accept_parked_invite<T: Transport + ?Sized>(
     accept_bundle(transport, &session, &bundle, invited_by).await
 }
 
-/// Accept a public invite link: parse it, fetch every event at `(33301,
-/// link_signer, "")`, and join. **Revocation is authoritative-if-present**: if
+/// Fetch + decrypt the newest Live bundle at a public link's coordinate
+/// (`(33301, link_signer, "")`). **Revocation is authoritative-if-present**: if
 /// ANY signer-valid tombstone is among the fetched events, refuse — never trust
 /// fetch ordering (a cross-relay union has no global newest-first sort, so a
-/// stale Live could otherwise win a partial-propagation race). Otherwise pick the
-/// newest valid Live by `created_at`.
-pub async fn accept_public_link<T: Transport + ?Sized>(transport: &T, url: &str) -> Result<CommunityV2, String> {
-    // Capture BEFORE the network fetch so the join's is_valid() gate straddles it.
-    let session = SessionGuard::capture();
+/// stale Live could otherwise win a partial-propagation race). Otherwise pick
+/// the newest valid Live by `created_at`. Read-only.
+pub async fn fetch_public_bundle<T: Transport + ?Sized>(transport: &T, url: &str) -> Result<CommunityInvite, String> {
     let parsed = invite::parse_invite_link(url).map_err(|e| e.to_string())?;
     let query = Query {
         kinds: vec![super::kind::INVITE_BUNDLE],
@@ -975,9 +1006,6 @@ pub async fn accept_public_link<T: Transport + ?Sized>(transport: &T, url: &str)
         parsed.bootstrap_relays.clone()
     };
     let events = transport.fetch(&query, &relays).await?;
-    if !session.is_valid() {
-        return Err("account changed during join".to_string());
-    }
     let bundle_key = super::derive::invite_bundle_key(&parsed.token);
 
     // Scan EVERY event: a tombstone beats a Live unconditionally (order-independent).
@@ -994,10 +1022,59 @@ pub async fn accept_public_link<T: Transport + ?Sized>(transport: &T, url: &str)
             Err(_) => {} // a foreign/garbage event at the coordinate — ignore.
         }
     }
-    match newest_live {
-        Some((_, bundle)) => accept_bundle(transport, &session, &bundle, None).await,
-        None => Err("invite bundle not found on relays".to_string()),
+    newest_live.map(|(_, b)| b).ok_or_else(|| "invite bundle not found on relays".to_string())
+}
+
+/// The most recent owner-root verification a PREVIEW completed, handed to a join
+/// so accepting seconds later doesn't re-walk the control plane. Single-slot,
+/// short-lived, session-guarded, and keyed on `(community_id, community_root)` —
+/// a different delivered root never matches. The join's own bundle re-fetch is
+/// untouched, so the revocation gate always runs live.
+struct VerifiedPreview {
+    session: SessionGuard,
+    at: std::time::Instant,
+    community_id: [u8; 32],
+    community_root: [u8; 32],
+    folded: CommunityV2,
+    heads: Vec<FoldedHead>,
+}
+static VERIFIED_PREVIEW: std::sync::Mutex<Option<VerifiedPreview>> = std::sync::Mutex::new(None);
+const VERIFIED_PREVIEW_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Read-only rich preview of a public link: the decrypted bundle plus the LATEST
+/// display metadata folded live from the Control Plane (a v2 bundle deliberately
+/// carries no icon — the fold is the authority). Owner-root verification rides
+/// the fold, so a forged-root link can't render a convincing preview; on a
+/// fold/transport failure the bundle snapshot is the fallback. Nothing persists
+/// — the caller hasn't joined.
+pub async fn preview_public_link<T: Transport + ?Sized>(transport: &T, url: &str) -> Result<CommunityV2, String> {
+    let bundle = fetch_public_bundle(transport, url).await?;
+    let community = CommunityV2::from_bundle(&bundle, 0)?;
+    match verify_owner_root_and_reconcile(transport, community.clone()).await {
+        Ok((folded, heads)) => {
+            *VERIFIED_PREVIEW.lock().unwrap() = Some(VerifiedPreview {
+                session: SessionGuard::capture(),
+                at: std::time::Instant::now(),
+                community_id: folded.id().0,
+                community_root: folded.community_root,
+                folded: folded.clone(),
+                heads,
+            });
+            Ok(folded)
+        }
+        Err(_) => Ok(community),
     }
+}
+
+/// Accept a public invite link: fetch its bundle (revocation-aware) and join.
+pub async fn accept_public_link<T: Transport + ?Sized>(transport: &T, url: &str) -> Result<CommunityV2, String> {
+    // Capture BEFORE the network fetch so the join's is_valid() gate straddles it.
+    let session = SessionGuard::capture();
+    let bundle = fetch_public_bundle(transport, url).await?;
+    if !session.is_valid() {
+        return Err("account changed during join".to_string());
+    }
+    accept_bundle(transport, &session, &bundle, None).await
 }
 
 /// Leave a community: publish a Guestbook Leave and tear down the local hold.
@@ -1137,23 +1214,27 @@ pub async fn fetch_authority<T: Transport + ?Sized>(transport: &T, community: &C
     }
 }
 
-/// Fold the Complete Memberlist from the Guestbook plane. The proven owner is
-/// ALWAYS a member (derived from the self-certifying community_id — no network,
-/// so a lost/evicted genesis Join can't drop them). Observed authors — anyone
-/// seen publishing on a channel — are folded in FORWARD-only per CORD-02 §5, so a
-/// member whose Join was lost still counts.
-pub async fn memberlist<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<Vec<PublicKey>, String> {
+/// Page the Guestbook plane newest-to-oldest, stopping once a page's oldest wrap
+/// falls below `since_secs` (everything older is already held) or the plane is
+/// exhausted. Returns the parsed events at/after the window plus the newest wrap
+/// time seen (the caller's next cursor; `since_secs` when nothing newer arrived).
+///
+/// PAGE bound rationale: a single 500-window silently drops a member whose Join
+/// aged out (organic growth, or an insider flooding throwaway Joins), and
+/// `refound_community` consumes the fold as its rekey recipient set — a dropped
+/// member is SEVERED. Beyond this depth a community needs sharding (documented);
+/// the granted-member union in [`fold_members`] is the consensus-complete
+/// backstop regardless of Guestbook depth.
+async fn fetch_guestbook_events<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    since_secs: u64,
+) -> Result<(Vec<guestbook::GuestbookEvent>, u64), String> {
     let gb_group = super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
-    // PAGE the Guestbook (bounded until-walk + wrap-id dedup): a single 500-window
-    // silently drops a member whose Join aged out (organic growth, or an insider
-    // flooding throwaway Joins), and `refound_community` consumes this list as its
-    // rekey recipient set — a dropped member is SEVERED. Beyond this depth a
-    // community needs sharding (documented); the granted-member union below is the
-    // consensus-complete backstop regardless of Guestbook depth.
     const GB_PAGE: usize = 500;
     const GB_MAX_PAGES: usize = 12;
-    let owner = community.owner()?;
     let mut events = Vec::new();
+    let mut newest: u64 = since_secs;
     let mut seen: std::collections::HashSet<nostr_sdk::EventId> = std::collections::HashSet::new();
     let mut until: Option<u64> = None;
     let mut oldest: Option<u64> = None;
@@ -1170,13 +1251,20 @@ pub async fn memberlist<T: Transport + ?Sized>(transport: &T, community: &Commun
             if oldest.is_none_or(|o| at < o) {
                 oldest = Some(at);
             }
+            if at > newest {
+                newest = at;
+            }
+            // Older than the cursor window — already held; skip the decrypt.
+            if at < since_secs {
+                continue;
+            }
             if let Ok(opened) = stream::open_wrap(wrap, &gb_group) {
                 if let Ok(ev) = guestbook::parse_guestbook_event(&opened) {
                     events.push(ev);
                 }
             }
         }
-        if fresh == 0 || wraps.len() < GB_PAGE {
+        if fresh == 0 || wraps.len() < GB_PAGE || oldest.is_some_and(|o| o < since_secs) {
             break;
         }
         match oldest {
@@ -1184,6 +1272,130 @@ pub async fn memberlist<T: Transport + ?Sized>(transport: &T, community: &Commun
             _ => break,
         }
     }
+    Ok((events, newest))
+}
+
+/// The shared membership fold: coalesce Guestbook events under the community's
+/// authority (owner-supreme kicks, refounder snapshots), union observed authors
+/// plus every roster grantee, subtract the banlist, and pin the proven owner.
+/// One implementation, so the live and stored reads can't drift.
+fn fold_members(
+    community: &CommunityV2,
+    events: &[guestbook::GuestbookEvent],
+    mut observed: std::collections::BTreeMap<PublicKey, u64>,
+    roles: &crate::community::roles::CommunityRoles,
+    banlist: &std::collections::BTreeSet<PublicKey>,
+) -> Result<Vec<PublicKey>, String> {
+    let owner = community.owner()?;
+    let owner_hex = owner.to_hex();
+
+    // CONSENSUS-COMPLETE backstop: every member the folded roster GRANTS a role to
+    // is provably a member (a Grant binds member_xonly, CORD-02 A.6) — count them
+    // even if their Join aged out of the Guestbook entirely and they never posted.
+    // This is what keeps a Refounding from severing a lurking admin. `observed`
+    // carries them at ts 0 (presence, not recency); the banlist subtraction below
+    // still removes a banned grantee whose grant wasn't yet stripped.
+    for g in &roles.grants {
+        if let Some(pk) = PublicKey::from_hex(&g.member).ok().filter(|_| !g.role_ids.is_empty()) {
+            observed.entry(pk).or_insert(0);
+        }
+    }
+
+    // Snapshot authority (CORD-02 §5): a refounding rolls `root_epoch` and re-seeds the
+    // new epoch's Guestbook with a 3312 snapshot of the survivors. Refounding is OWNER-only,
+    // so the owner is the refounder whose snapshot is honored — without this, every silent
+    // survivor vanishes from the memberlist until they re-post. A genesis community
+    // (root_epoch 0) has no refounder, hence no snapshot power.
+    let snapshot_authority = (community.root_epoch.0 > 0).then_some(&owner);
+    // Kick authority (CORD-04 §6): the signer must hold KICK AND strictly outrank the
+    // target (the owner is supreme; equal cannot kick equal).
+    let can_kick = |actor: &PublicKey, target: &PublicKey| {
+        roles.can_act_on_member(&actor.to_hex(), Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::KICK)
+    };
+    let coalesced = guestbook::coalesce(events, now_ms(), snapshot_authority, &can_kick);
+    let mut members = guestbook::complete_memberlist(&coalesced, &observed, banlist);
+    // The owner is a member by definition, independent of any fetched Join.
+    if !banlist.contains(&owner) {
+        members.insert(owner);
+    }
+    Ok(members.into_iter().collect())
+}
+
+/// Catch the persisted Guestbook up from its stored cursor (a fresh hold seeds
+/// from zero). The fetch straddles the network, so the session re-checks before
+/// the store writes. Returns whether anything NEW folded in.
+pub async fn sync_guestbook<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    session: &SessionGuard,
+) -> Result<bool, String> {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let (mut events, cursor) = crate::db::community::get_guestbook(&cid_hex)?;
+    // Overlap one second so a same-second boundary event can't slip the cursor;
+    // the rumor-id merge below dedups the re-fetched edge.
+    let since = cursor.saturating_sub(1);
+    let (fresh, newest) = fetch_guestbook_events(transport, community, since).await?;
+    if !session.is_valid() {
+        return Err("account changed during guestbook sync".to_string());
+    }
+    let known: std::collections::HashSet<[u8; 32]> = events.iter().map(|e| e.rumor_id).collect();
+    let mut added = false;
+    for ev in fresh {
+        if !known.contains(&ev.rumor_id) {
+            events.push(ev);
+            added = true;
+        }
+    }
+    if added || newest > cursor {
+        crate::db::community::set_guestbook(&cid_hex, &events, newest.max(cursor))?;
+    }
+    Ok(added)
+}
+
+/// Fold ONE live guestbook event into the store (the realtime path — no fetch).
+/// Returns whether it was new.
+pub fn ingest_guestbook_event(community: &CommunityV2, ev: guestbook::GuestbookEvent, wrap_secs: u64) -> Result<bool, String> {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let (mut events, cursor) = crate::db::community::get_guestbook(&cid_hex)?;
+    if events.iter().any(|e| e.rumor_id == ev.rumor_id) {
+        return Ok(false);
+    }
+    events.push(ev);
+    crate::db::community::set_guestbook(&cid_hex, &events, cursor.max(wrap_secs))?;
+    Ok(true)
+}
+
+/// The memberlist from LOCAL state only: the persisted Guestbook, plus locally
+/// observed authors (the synced events DB), plus roster grantees, minus the
+/// banlist. Instant and offline-correct; [`sync_guestbook`] (post-join, boot,
+/// reconnect, live ingest) keeps the store current. The live [`memberlist`]
+/// remains the authoritative walk — a refounding's rekey recipient set must
+/// never trust a possibly-stale store.
+pub fn stored_memberlist(community: &CommunityV2) -> Result<Vec<PublicKey>, String> {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let (events, _cursor) = crate::db::community::get_guestbook(&cid_hex)?;
+    let mut observed: std::collections::BTreeMap<PublicKey, u64> = std::collections::BTreeMap::new();
+    for (npub, last_active_secs) in crate::db::community::community_member_activity(&cid_hex).unwrap_or_default() {
+        if let Ok(pk) = PublicKey::parse(&npub) {
+            observed.insert(pk, last_active_secs.saturating_mul(1000));
+        }
+    }
+    let roles = crate::db::community::get_community_roles(&cid_hex)?;
+    let banlist: std::collections::BTreeSet<PublicKey> = crate::db::community::get_community_banlist(&cid_hex)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|h| PublicKey::from_hex(h).ok())
+        .collect();
+    fold_members(community, &events, observed, &roles, &banlist)
+}
+
+/// Fold the Complete Memberlist from the Guestbook plane. The proven owner is
+/// ALWAYS a member (derived from the self-certifying community_id — no network,
+/// so a lost/evicted genesis Join can't drop them). Observed authors — anyone
+/// seen publishing on a channel — are folded in FORWARD-only per CORD-02 §5, so a
+/// member whose Join was lost still counts.
+pub async fn memberlist<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<Vec<PublicKey>, String> {
+    let (events, _newest) = fetch_guestbook_events(transport, community, 0).await?;
     // Observed authors: fold each held channel's recent authorship (real author +
     // newest ms), so a member who posted but whose Join was lost is still counted.
     let mut observed: std::collections::BTreeMap<PublicKey, u64> = std::collections::BTreeMap::new();
@@ -1201,43 +1413,10 @@ pub async fn memberlist<T: Transport + ?Sized>(transport: &T, community: &Commun
     // bans (fail-open on availability is safe here: a Kick still needs a real signer,
     // and a missed ban only fails to HIDE, never to wrongly admit authority).
     let authority = fetch_authority(transport, community).await;
-    let owner_hex = owner.to_hex();
-
-    // CONSENSUS-COMPLETE backstop: every member the folded roster GRANTS a role to
-    // is provably a member (a Grant binds member_xonly, CORD-02 A.6) — count them
-    // even if their Join aged out of the Guestbook entirely and they never posted.
-    // This is what keeps a Refounding from severing a lurking admin. `observed`
-    // carries them at ts 0 (presence, not recency); the banlist subtraction below
-    // still removes a banned grantee whose grant wasn't yet stripped.
-    for g in &authority.roles.grants {
-        if let Some(pk) = PublicKey::from_hex(&g.member).ok().filter(|_| !g.role_ids.is_empty()) {
-            observed.entry(pk).or_insert(0);
-        }
-    }
-
-    // Snapshot authority (CORD-02 §5): a refounding rolls `root_epoch` and re-seeds the
-    // new epoch's Guestbook with a 3312 snapshot of the survivors. Refounding is OWNER-only,
-    // so the owner is the refounder whose snapshot is honored — without this, every silent
-    // survivor vanishes from the memberlist until they re-post. A genesis community
-    // (root_epoch 0) has no refounder, hence no snapshot power.
-    let snapshot_authority = (community.root_epoch.0 > 0).then_some(&owner);
-    // Kick authority (CORD-04 §6): the signer must hold KICK AND strictly outrank the
-    // target (the owner is supreme; equal cannot kick equal).
-    let can_kick = |actor: &PublicKey, target: &PublicKey| {
-        authority
-            .roles
-            .can_act_on_member(&actor.to_hex(), Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::KICK)
-    };
-    let coalesced = guestbook::coalesce(&events, now_ms(), snapshot_authority, &can_kick);
     // The authorized banlist, as pubkeys (a malformed hex entry is simply dropped).
     let banlist: std::collections::BTreeSet<PublicKey> =
         authority.banned.iter().filter_map(|h| PublicKey::from_hex(h).ok()).collect();
-    let mut members = guestbook::complete_memberlist(&coalesced, &observed, &banlist);
-    // The owner is a member by definition, independent of any fetched Join.
-    if !banlist.contains(&owner) {
-        members.insert(owner);
-    }
-    Ok(members.into_iter().collect())
+    fold_members(community, &events, observed, &authority.roles, &banlist)
 }
 
 // ── Dissolution (CORD-02 §9) ─────────────────────────────────────────────────
@@ -2729,6 +2908,17 @@ fn apply_community_metadata(out: &mut CommunityV2, meta: control::CommunityMetad
         out.description = meta.description;
         changed = true;
     }
+    // Icon/banner apply verbatim, None included — an edition is the full
+    // document, so an absent image IS a removal (editors preserve via
+    // `CommunityV2::metadata()`).
+    if out.icon != meta.icon {
+        out.icon = meta.icon;
+        changed = true;
+    }
+    if out.banner != meta.banner {
+        out.banner = meta.banner;
+        changed = true;
+    }
     if !meta.relays.is_empty() && out.relays != meta.relays {
         out.relays = meta.relays;
         changed = true;
@@ -3460,6 +3650,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn public_link_preview_shows_live_name_and_icon_without_joining() {
+        let (bed, owner, member) = TestBed::new();
+
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Soapbox", bed.relays.clone(), None).await.unwrap();
+        // The icon lives on the Control Plane, never in the bundle — publish it
+        // as a metadata edition so the preview must FOLD to see it.
+        let icon = control::ImageRef {
+            url: "https://blossom.example/soap".into(),
+            key: "k".into(),
+            nonce: "n".into(),
+            hash: "h".into(),
+            extra: Default::default(),
+        };
+        let mut meta = community.metadata();
+        meta.icon = Some(icon.clone());
+        edit_community_metadata(&bed.relay, &community, &meta).await.unwrap();
+        // An any-host base — the naddr#fragment payload is domain-agnostic.
+        let link = mint_public_link(&bed.relay, &community, "https://armada.buzz", None, None).await.unwrap();
+
+        // A NON-member previews: the real name + the live icon, nothing persisted.
+        bed.swap_to(&member);
+        let preview = preview_public_link(&bed.relay, &link.url).await.unwrap();
+        assert_eq!(preview.name, "Soapbox");
+        assert_eq!(preview.icon, Some(icon), "the icon folds from the live Control Plane, not the bundle");
+        assert!(
+            crate::db::community::load_community_v2(preview.id()).unwrap().is_none(),
+            "previewing must not persist a membership"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_previewed_join_reuses_the_verified_fold() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "FastJoin", bed.relays.clone(), None).await.unwrap();
+        let link = mint_public_link(&bed.relay, &community, "https://vectorapp.io", None, None).await.unwrap();
+
+        bed.swap_to(&member);
+        let _ = preview_public_link(&bed.relay, &link.url).await.unwrap();
+        let joined = accept_public_link(&bed.relay, &link.url).await.unwrap();
+        assert_eq!(joined.id().0, community.id().0);
+        assert!(joined.created_at_ms > 0, "the handoff stamps the JOIN's acquisition time, not the preview's");
+        // The slot was CONSUMED by the join — proving the handoff path ran (a
+        // verify re-walk would have left the preview's entry in place).
+        assert!(VERIFIED_PREVIEW.lock().unwrap().is_none(), "the handoff slot must be consumed by the join");
+    }
+
+    #[tokio::test]
+    async fn guestbook_store_seeds_syncs_incrementally_and_matches_the_live_fold() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "GB", bed.relays.clone(), None).await.unwrap();
+        let link = mint_public_link(&bed.relay, &community, "https://vectorapp.io", None, None).await.unwrap();
+
+        bed.swap_to(&member);
+        let joined = accept_public_link(&bed.relay, &link.url).await.unwrap();
+
+        // Seed from zero: the stored fold equals the authoritative live fold.
+        let session = SessionGuard::capture();
+        assert!(sync_guestbook(&bed.relay, &joined, &session).await.unwrap(), "the seed folds fresh events");
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&joined.id().0);
+        let (_, cursor) = crate::db::community::get_guestbook(&cid_hex).unwrap();
+        assert!(cursor > 0, "the cursor advanced past zero");
+        let stored: std::collections::BTreeSet<_> = stored_memberlist(&joined).unwrap().into_iter().collect();
+        let live: std::collections::BTreeSet<_> = memberlist(&bed.relay, &joined).await.unwrap().into_iter().collect();
+        assert_eq!(stored, live, "stored fold == live fold after the seed");
+        assert!(stored.contains(&member.keys.public_key()));
+
+        // Nothing new on the plane → an idle re-sync folds nothing.
+        assert!(!sync_guestbook(&bed.relay, &joined, &session).await.unwrap());
+
+        // The owner kicks the member; a CURSOR catch-up folds the kick in — no full walk.
+        bed.swap_to(&owner);
+        kick_member(&bed.relay, &community, &member.keys.public_key()).await.unwrap();
+        bed.swap_to(&member);
+        let session = SessionGuard::capture();
+        assert!(sync_guestbook(&bed.relay, &joined, &session).await.unwrap(), "the kick lands incrementally");
+        assert!(
+            !stored_memberlist(&joined).unwrap().contains(&member.keys.public_key()),
+            "an owner kick removes the member from the stored fold"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_preview_then_revoke_still_refuses_the_join() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "RevokeRace", bed.relays.clone(), None).await.unwrap();
+        let link = mint_public_link(&bed.relay, &community, "https://vectorapp.io", None, None).await.unwrap();
+
+        // Member previews (warming the verified handoff), THEN the owner revokes.
+        bed.swap_to(&member);
+        let p = preview_public_link(&bed.relay, &link.url).await.unwrap();
+        assert_eq!(p.name, "RevokeRace");
+        bed.swap_to(&owner);
+        let tombstone = invite::build_revocation(&link.link_signer).unwrap();
+        bed.relay.publish_durable(&tombstone, &bed.relays).await.unwrap();
+
+        // The join MUST refuse: the handoff skips only the root re-verify, never
+        // the bundle re-fetch that carries the revocation gate.
+        bed.swap_to(&member);
+        let err = accept_public_link(&bed.relay, &link.url).await.unwrap_err();
+        assert!(err.contains("revoked"), "got: {err}");
+    }
+
+    #[tokio::test]
     async fn a_revoked_link_refuses_to_join() {
         let (bed, owner, member) = TestBed::new();
         bed.swap_to(&owner);
@@ -3698,6 +3995,29 @@ mod tests {
         let rumor = control::build_edition_rumor(signer.public_key(), vsk::COMMUNITY_METADATA, &community.id().0, version, prev.as_ref(), &content, at_secs, None);
         let (wrap, _) = control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(at_secs)).unwrap();
         relay.publish(&wrap, &community.relays).await.unwrap();
+    }
+
+    #[test]
+    fn community_metadata_apply_sets_and_clears_images() {
+        let owner = Keys::generate();
+        let g = control::genesis(&owner, control::CommunityMetadata { name: "A".into(), ..Default::default() }, 1_000).unwrap();
+        let mut held = CommunityV2::from_genesis(&g, "A", None, vec!["wss://r".into()], 0);
+
+        let icon = control::ImageRef {
+            url: "https://blossom.example/i".into(),
+            key: "k".into(),
+            nonce: "n".into(),
+            hash: "h".into(),
+            extra: Default::default(),
+        };
+        let with_icon = control::CommunityMetadata { name: "A".into(), icon: Some(icon.clone()), ..Default::default() };
+        assert!(apply_community_metadata(&mut held, with_icon), "gaining an icon is a change");
+        assert_eq!(held.icon.as_ref(), Some(&icon));
+
+        // An edition is the FULL document: a head without the icon removes it.
+        let without = control::CommunityMetadata { name: "A".into(), ..Default::default() };
+        assert!(apply_community_metadata(&mut held, without), "losing the icon is a change");
+        assert_eq!(held.icon, None);
     }
 
     /// Publish a Role edition (vsk 1) signed by `signer`, chained to the current head.
@@ -6591,6 +6911,8 @@ mod tests {
             root_epoch: Epoch(0),
             name: "T".into(),
             description: None,
+            icon: None,
+            banner: None,
             relays: vec!["wss://r".into()],
             channels: vec![],
             dissolved: false,
