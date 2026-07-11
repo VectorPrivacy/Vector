@@ -15714,6 +15714,13 @@ textarea.command-part-input {
   min-width: 0;
 }
 
+/* A picked member: the field shows their NAME, mention-styled, while the
+   canonical npub rides in data-npub for the wire. */
+.command-part-input.user-resolved {
+  color: var(--icon-color-primary, #59fcb3);
+  font-weight: 600;
+}
+
 /* --- Emoji Shortcode Selector --- */
 .emoji-shortcode-selector {
   position: fixed;

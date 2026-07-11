@@ -568,7 +568,12 @@ function initCommandSelector(textarea, io, anchorEl) {
             } else if (a.type === 'user') {
                 el.addEventListener('keydown', (e) => onUserKey(e, idx));
                 el.addEventListener('focus', () => openUserMenu(el, idx));
-                el.addEventListener('input', () => openUserMenu(el, idx));
+                el.addEventListener('input', () => {
+                    // Typing dissolves a picked member back to raw text.
+                    delete el.dataset.npub;
+                    el.classList.remove('user-resolved');
+                    openUserMenu(el, idx);
+                });
                 // Instant: row picks preventDefault their mousedown, so blur
                 // only means a REAL focus move (arrow-walking included).
                 el.addEventListener('blur', () => {
@@ -697,10 +702,10 @@ function initCommandSelector(textarea, io, anchorEl) {
             const label = document.createElement('span');
             label.textContent = options[i].label;
             row.appendChild(label);
-            const v = options[i].v;
+            const opt = options[i];
             row.addEventListener('mousedown', (ev) => {
                 ev.preventDefault();
-                pickChoice(v);
+                pickChoice(opt);
             });
             menu.appendChild(row);
         }
@@ -728,14 +733,18 @@ function initCommandSelector(textarea, io, anchorEl) {
         if (pill) pill.classList.remove('invalid');
     }
 
-    function pickChoice(v) {
+    function pickChoice(opt) {
         if (!choiceOpenFor) return;
         const { el, idx } = choiceOpenFor;
         if (el.tagName === 'BUTTON') {
-            setChoiceValue(el, v);
+            setChoiceValue(el, opt.v);
         } else {
-            // A User param: the field carries the canonical npub.
-            el.value = v;
+            // A User param DISPLAYS the member's name; the canonical npub
+            // rides in data-npub and submit prefers it. Any later typing
+            // dissolves the resolution back to raw text.
+            el.value = opt.label;
+            el.dataset.npub = opt.v;
+            el.classList.add('user-resolved');
             const pill = el.closest('.command-part');
             if (pill) pill.classList.remove('invalid');
             const part = composing && composing.parts[idx];
@@ -780,7 +789,7 @@ function initCommandSelector(textarea, io, anchorEl) {
             } else if (e.key === 'Enter') {
                 e.preventDefault();
                 e.stopPropagation();
-                pickChoice(choiceOpenFor.options[choiceOpenFor.active].v);
+                pickChoice(choiceOpenFor.options[choiceOpenFor.active]);
             } else if (e.key === 'Escape') {
                 e.preventDefault();
                 e.stopPropagation();
@@ -809,7 +818,7 @@ function initCommandSelector(textarea, io, anchorEl) {
             } else if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
                 e.stopPropagation();
-                pickChoice(choiceOpenFor.options[choiceOpenFor.active].v);
+                pickChoice(choiceOpenFor.options[choiceOpenFor.active]);
             } else if (e.key === 'Escape') {
                 e.preventDefault();
                 e.stopPropagation();
@@ -862,7 +871,10 @@ function initCommandSelector(textarea, io, anchorEl) {
             return;
         }
         const { cmd, parts } = composing;
-        const values = parts.map((p) => (p.el.value || '').trim());
+        // The wire prefers a picked member's canonical npub over the displayed name.
+        const values = parts.map((p) =>
+            (p.arg.type === 'user' && p.el.dataset.npub ? p.el.dataset.npub : p.el.value || '').trim()
+        );
         let lastFilled = -1;
         values.forEach((v, i) => {
             if (v !== '') lastFilled = i;
