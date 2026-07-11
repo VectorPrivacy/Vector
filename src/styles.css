@@ -15253,6 +15253,54 @@ hr {
   flex-shrink: 0;
 }
 
+/* --- Command invocation capsule (in-chat render of a sent command) --- */
+.dmsg-command {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 11px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-left: 2px solid var(--icon-color-primary, #59fcb3);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.dmsg-command-glyph {
+  color: var(--icon-color-primary, #59fcb3);
+  font-weight: 700;
+}
+
+.dmsg-command-name {
+  font-weight: 600;
+  color: #fff;
+}
+
+.dmsg-command-with {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.45);
+  margin: 0 1px;
+}
+
+.dmsg-command-bot-avatar {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.dmsg-command-bot {
+  color: var(--icon-color-primary, #59fcb3);
+  font-weight: 600;
+  max-width: 22ch;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .command-item-arg {
   font-size: 12px;
   padding: 1px 6px;

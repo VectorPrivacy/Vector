@@ -512,9 +512,64 @@ function _dmsgBuildBlockedPlaceholder(msg) {
     return blockedSpan;
 }
 
+/**
+ * A slash-command invocation renders as a compact capsule — the command and
+ * its target bot, never the params (long values would drown the row; the
+ * content still carries them for bots). Shown ONLY when it provably is an
+ * invocation: the bot routing tag is present, or the message is a bare
+ * /command with nothing after the name — an untagged "/word plus prose"
+ * stays ordinary text so real content can never be hidden by mistake.
+ */
+function _dmsgCommandCapsule(msg, displayContent) {
+    const m = /^\/([a-z0-9_-]{1,32})(\s|$)/.exec((displayContent || '').trim());
+    if (!m) return null;
+    const tagged = msg.addressed_bots && msg.addressed_bots.length;
+    const bare = (displayContent || '').trim() === '/' + m[1];
+    if (!tagged && !bare) return null;
+
+    const wrap = document.createElement('span');
+    wrap.classList.add('dmsg-command');
+    const glyph = document.createElement('span');
+    glyph.classList.add('dmsg-command-glyph');
+    glyph.textContent = '/';
+    wrap.appendChild(glyph);
+    const name = document.createElement('span');
+    name.classList.add('dmsg-command-name');
+    name.textContent = m[1];
+    wrap.appendChild(name);
+
+    if (tagged) {
+        const withEl = document.createElement('span');
+        withEl.classList.add('dmsg-command-with');
+        withEl.textContent = 'with';
+        wrap.appendChild(withEl);
+        const npub = msg.addressed_bots[0];
+        const profile = getProfile(npub);
+        const img = document.createElement('img');
+        img.classList.add('dmsg-command-bot-avatar');
+        img.src = (profile && getProfileAvatarSrc(profile)) || 'icons/user-placeholder.svg';
+        img.alt = '';
+        wrap.appendChild(img);
+        const bot = document.createElement('span');
+        bot.classList.add('dmsg-command-bot');
+        bot.textContent = getName(npub);
+        wrap.appendChild(bot);
+    }
+    return wrap;
+}
+
 function _dmsgBuildText(msg, displayContent, fEmojiOnly, isGroupChat, currentChat, isRevealedBlockedMsg) {
     const span = document.createElement('span');
     span.classList.add('dmsg-text');
+
+    // Command invocations get the capsule treatment instead of raw text.
+    if (!fEmojiOnly) {
+        const capsule = _dmsgCommandCapsule(msg, displayContent);
+        if (capsule) {
+            span.appendChild(capsule);
+            return span;
+        }
+    }
 
     if (fEmojiOnly) {
         span.textContent = displayContent;
