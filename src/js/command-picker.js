@@ -169,6 +169,28 @@ function initCommandSelector(textarea, io, anchorEl) {
         return args;
     }
 
+    /** One value against one arg spec. Returns an error suffix or null. */
+    function argTypeError(a, v) {
+        switch (a.type) {
+            case 'int':
+                if (!/^[+-]?\d+$/.test(v)) return 'must be a whole number';
+                break;
+            case 'number':
+                if (v.trim() === '' || !isFinite(Number(v))) return 'must be a number';
+                break;
+            case 'bool':
+                if (!['true', 'false', 'yes', 'no', '1', '0'].includes(v.toLowerCase())) return 'must be true or false';
+                break;
+            case 'user':
+                if (!v.startsWith('npub1') || v.length > 70) return 'must be a user (npub)';
+                break;
+            case 'choice':
+                if (!(a.choices || []).includes(v)) return 'must be one of: ' + (a.choices || []).join(', ');
+                break;
+        }
+        return null;
+    }
+
     /** Manifest-type validation. Returns an error string or null when valid. */
     function validateArgs(spec, parsed) {
         const have = new Map(parsed.map(a => [a.name, a.value]));
@@ -178,23 +200,8 @@ function initCommandSelector(textarea, io, anchorEl) {
                 if (a.required) return 'Missing required argument "' + a.name + '"';
                 continue;
             }
-            switch (a.type) {
-                case 'int':
-                    if (!/^[+-]?\d+$/.test(v)) return '"' + a.name + '" must be a whole number';
-                    break;
-                case 'number':
-                    if (v.trim() === '' || !isFinite(Number(v))) return '"' + a.name + '" must be a number';
-                    break;
-                case 'bool':
-                    if (!['true', 'false', 'yes', 'no', '1', '0'].includes(v.toLowerCase())) return '"' + a.name + '" must be true or false';
-                    break;
-                case 'user':
-                    if (!v.startsWith('npub1') || v.length > 70) return '"' + a.name + '" must be a user (npub)';
-                    break;
-                case 'choice':
-                    if (!(a.choices || []).includes(v)) return '"' + a.name + '" must be one of: ' + (a.choices || []).join(', ');
-                    break;
-            }
+            const err = argTypeError(a, v);
+            if (err) return '"' + a.name + '" ' + err;
         }
         return null;
     }
@@ -400,15 +407,190 @@ function initCommandSelector(textarea, io, anchorEl) {
         show();
     }
 
-    // --- Selection / insertion ---
+    // --- Selection → the structured command composer ---
+    // Picking a command swaps the textarea for one typed input per argument
+    // (quoting/escaping is code's job, never the user's) with the target bot
+    // pinned as a chip. Typing a command manually stays the plain-text path.
+    let composing = null; // { cmd, chatId, bar, parts: [{arg, el}] }
+
     function selectCommand(cmd) {
-        armedPick = { chatId: io.chatId(), bot: cmd.bot, name: cmd.name };
-        textarea.value = '/' + cmd.name + ' ';
-        textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
-        activeIndex = 0;
         hintSuppressedFor = null;
-        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        activeIndex = 0;
+        hide();
+        enterCommandMode(cmd);
+    }
+
+    function isComposing() {
+        return composing !== null;
+    }
+
+    function exitComposer(keepPick) {
+        if (!composing) return;
+        composing.bar.remove();
+        textarea.style.display = '';
+        composing = null;
+        if (!keepPick) armedPick = null;
+        io.composerToggled(false);
         textarea.focus();
+    }
+
+    function enterCommandMode(cmd) {
+        exitComposer(true);
+        armedPick = { chatId: io.chatId(), bot: cmd.bot, name: cmd.name };
+
+        const bar = document.createElement('div');
+        bar.className = 'command-composer';
+        bar.tabIndex = -1;
+
+        const profile = io.botProfile(cmd.bot) || {};
+        const chip = document.createElement('span');
+        chip.className = 'command-composer-chip';
+        chip.title = 'Composing to ' + (profile.name || cmd.bot.slice(0, 12)) + ' · click to cancel';
+        if (profile.avatarSrc) {
+            const img = document.createElement('img');
+            img.src = profile.avatarSrc;
+            img.alt = '';
+            chip.appendChild(img);
+        }
+        const chipName = document.createElement('span');
+        chipName.textContent = '/' + cmd.name;
+        chip.appendChild(chipName);
+        chip.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            exitComposer();
+        });
+        bar.appendChild(chip);
+
+        const parts = [];
+        for (const a of cmd.args) {
+            const wrap = document.createElement('label');
+            wrap.className = 'command-part' + (a.required ? ' required' : '');
+            const tag = document.createElement('span');
+            tag.className = 'command-part-name';
+            tag.textContent = a.name;
+            wrap.appendChild(tag);
+            let el;
+            if (a.type === 'choice' || a.type === 'bool') {
+                el = document.createElement('select');
+                el.add(new Option(a.required ? 'choose…' : '(skip)', ''));
+                for (const c of (a.type === 'bool' ? ['true', 'false'] : a.choices || [])) {
+                    el.add(new Option(c, c));
+                }
+            } else {
+                el = document.createElement('input');
+                el.type = 'text';
+                if (a.type === 'int' || a.type === 'number') el.inputMode = 'decimal';
+                if (a.type === 'user') el.placeholder = 'npub1…';
+                el.autocomplete = 'off';
+                el.spellcheck = false;
+            }
+            el.className = 'command-part-input';
+            el.title = a.description || '';
+            const idx = parts.length;
+            // A trailing free-text arg (the greedy tail on the wire) gets the
+            // rest of the row; other text inputs grow with their content
+            // (JS-sized: field-sizing isn't in WKWebView).
+            const grows = a.type === 'string' && idx === cmd.args.length - 1;
+            if (grows) wrap.classList.add('grow');
+            el.addEventListener('keydown', (e) => onPartKey(e, idx));
+            el.addEventListener('input', () => {
+                wrap.classList.remove('invalid');
+                if (el.tagName === 'INPUT' && !grows) {
+                    el.style.width = Math.min(34, Math.max(9, el.value.length + 1)) + 'ch';
+                }
+            });
+            el.addEventListener('change', () => wrap.classList.remove('invalid'));
+            wrap.appendChild(el);
+            bar.appendChild(wrap);
+            parts.push({ arg: a, el });
+        }
+        if (!parts.length) {
+            const hint = document.createElement('span');
+            hint.className = 'command-composer-hint';
+            hint.textContent = 'Enter to send · Esc to cancel';
+            bar.appendChild(hint);
+        }
+        // Bare-bar keys (param-less commands hold focus on the bar itself).
+        bar.addEventListener('keydown', (e) => {
+            if (e.target !== bar) return;
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                submitComposer();
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                exitComposer();
+            }
+        });
+
+        textarea.value = '';
+        textarea.style.display = 'none';
+        textarea.parentElement.insertBefore(bar, textarea);
+        composing = { cmd, chatId: io.chatId(), bar, parts };
+        io.composerToggled(true);
+        (parts[0] ? parts[0].el : bar).focus();
+    }
+
+    function onPartKey(e, idx) {
+        const parts = composing ? composing.parts : [];
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            e.stopPropagation();
+            // Enter advances; on the last part (or with Cmd/Ctrl) it sends.
+            if (e.metaKey || e.ctrlKey || idx === parts.length - 1) submitComposer();
+            else parts[idx + 1].el.focus();
+        } else if (e.key === 'Escape') {
+            e.preventDefault();
+            e.stopPropagation();
+            exitComposer();
+        } else if (e.key === 'Backspace' && idx === 0 && !e.target.value) {
+            e.preventDefault();
+            exitComposer();
+        }
+    }
+
+    /** The JS twin of the Rust `command_text` builder: values with spaces or
+     *  quotes are quoted with `\"` escapes, so the assembled text re-parses to
+     *  exactly these arguments on the bot side. */
+    function assembleCommandText(name, values) {
+        let out = '/' + name;
+        for (const v of values) {
+            out += ' ';
+            if (v === '' || /[\s"]/.test(v)) {
+                out += '"' + v.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+            } else {
+                out += v;
+            }
+        }
+        return out;
+    }
+
+    function submitComposer() {
+        if (!composing) return;
+        if (io.chatId() !== composing.chatId) {
+            exitComposer();
+            return;
+        }
+        const { cmd, parts } = composing;
+        const values = parts.map((p) => (p.el.value || '').trim());
+        let lastFilled = -1;
+        values.forEach((v, i) => {
+            if (v !== '') lastFilled = i;
+        });
+        const markInvalid = (i) => {
+            parts[i].el.closest('.command-part').classList.add('invalid');
+            parts[i].el.focus();
+        };
+        // Positional wire format: every required part present, no holes before
+        // the last provided value, every provided value well-typed.
+        for (let i = 0; i < parts.length; i++) {
+            const empty = values[i] === '';
+            if (empty && (parts[i].arg.required || i < lastFilled)) return markInvalid(i);
+            if (!empty && argTypeError(parts[i].arg, values[i])) return markInvalid(i);
+        }
+        const text = assembleCommandText(cmd.name, values.slice(0, lastFilled + 1));
+        armedPick = { chatId: composing.chatId, bot: cmd.bot, name: cmd.name };
+        exitComposer(true); // keep the pick: routeForSend resolves the bot tag from it
+        io.submit(text);
     }
 
     function insertChoice(value) {
@@ -521,9 +703,13 @@ function initCommandSelector(textarea, io, anchorEl) {
 
     return {
         isOpen() { return isVisible() && (mode === 'list' || mode === 'loading'); },
+        isComposing,
+        submitComposer,
+        exitComposer() { exitComposer(false); },
         routeForSend,
         onCommandsUpdated,
         destroy() {
+            exitComposer(false);
             textarea.removeEventListener('input', onInput);
             textarea.removeEventListener('keydown', onKeyDown);
             textarea.removeEventListener('blur', onBlur);

@@ -7565,6 +7565,9 @@ function startEditMessage(messageId, content) {
         cancelEdit();
     }
 
+    // Editing needs the real textarea back — drop any open command composer.
+    if (commandCtrl) commandCtrl.exitComposer();
+
     // Store the edit state
     strCurrentEditMessageId = messageId;
     strCurrentEditOriginalContent = content;
@@ -7877,6 +7880,8 @@ async function openChat(contact) {
     // Safety net: a navigate-away mid-resolve clears this in jumpToUnread's finally,
     // but unfreeze the window on any chat open in case a path slipped through.
     _unreadJumpResolving = false;
+    // A command composer belongs to the chat it was opened in.
+    if (commandCtrl) commandCtrl.exitComposer();
     pushBack('chat', closeChat);
     // Abandon a wallpaper preview staged in a different chat so its edit
     // overlay doesn't leak onto this header.
@@ -11466,6 +11471,19 @@ const commandCtrl = typeof initCommandSelector === 'function' ? initCommandSelec
         botProfile: (npub) => {
             const p = getProfile(npub);
             return { name: getName(npub), avatarSrc: p ? getProfileAvatarSrc(p) : null };
+        },
+        // The structured composer assembles the final "/cmd args" text and
+        // hands it to the ordinary send pipeline (validation + bot tag ride
+        // routeForSend inside sendMessage).
+        submit: (text) => sendMessage(text),
+        composerToggled: (active) => {
+            if (active) {
+                domChatMessageInputVoice.style.display = 'none';
+                domChatMessageInputSend.style.display = '';
+                domChatMessageInputSend.classList.add('active');
+            } else {
+                resetSendMicButtons();
+            }
         }
     },
     document.getElementById('chat-box')
@@ -11535,6 +11553,11 @@ domChatMessageInput.oninput = async () => {
 
     // Hook up the send button click handler (handles both text and voice messages)
     domChatMessageInputSend.onclick = async () => {
+        // Structured command composer open: the button submits the parts.
+        if (commandCtrl && commandCtrl.isComposing()) {
+            commandCtrl.submitComposer();
+            return;
+        }
         // Check if we're in voice preview mode first
         if (recorder.isInPreview) {
             const sent = recorder.send();

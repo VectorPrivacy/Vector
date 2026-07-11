@@ -15358,6 +15358,112 @@ hr {
   color: #0a0a0a;
 }
 
+/* --- Structured command composer (replaces the textarea while filling) --- */
+.command-composer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  padding: 6px 4px;
+  outline: none;
+}
+
+.command-composer-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 10px;
+  background: var(--icon-color-primary, #59fcb3);
+  color: #0a0a0a;
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.command-composer-chip img {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.command-part {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px 3px 9px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  min-width: 0;
+}
+
+.command-part.required .command-part-name::after {
+  content: '*';
+  color: var(--icon-color-primary, #59fcb3);
+}
+
+.command-part.invalid {
+  border-color: #ff5d5d;
+  box-shadow: 0 0 0 1px rgba(255, 93, 93, 0.4);
+}
+
+.command-part-name {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: lowercase;
+  color: rgba(255, 255, 255, 0.55);
+  flex-shrink: 0;
+}
+
+.command-part-input {
+  background: rgba(0, 0, 0, 0.35);
+  border: none;
+  outline: none;
+  border-radius: 7px;
+  color: #fff;
+  font-size: 13px;
+  padding: 3px 8px;
+  width: 9ch;
+  min-width: 6ch;
+}
+
+.command-part-input:focus {
+  box-shadow: 0 0 0 1.5px var(--icon-color-primary, #59fcb3);
+}
+
+/* Free-text values get room; selects size to their options. */
+input.command-part-input {
+  field-sizing: content;
+  max-width: 34ch;
+}
+
+select.command-part-input {
+  width: auto;
+  cursor: pointer;
+}
+
+.command-composer-hint {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.4);
+  user-select: none;
+}
+
+/* The trailing free-text arg (the wire's greedy tail) takes the row's rest. */
+.command-part.grow {
+  flex: 1;
+}
+
+.command-part.grow .command-part-input {
+  width: 100%;
+  max-width: none;
+}
+
 /* --- Emoji Shortcode Selector --- */
 .emoji-shortcode-selector {
   position: fixed;
