@@ -31,33 +31,35 @@ struct Registration {
     handler: CommandHandler,
 }
 
-/// The bot's command table. Shared by every [`VectorBot`] clone.
+/// The bot's command table. Shared by every [`VectorBot`] clone. A Vec, not a
+/// map: the manifest publishes commands in REGISTRATION order — the
+/// arrangement is the bot author's choice and clients render it verbatim.
+/// Registration order is code order, so the published event stays
+/// deterministic across restarts.
 #[derive(Default)]
 pub(crate) struct CommandRegistry {
-    commands: RwLock<HashMap<String, Registration>>,
+    commands: RwLock<Vec<Registration>>,
 }
 
 impl CommandRegistry {
     fn insert(&self, spec: CommandSpec, handler: CommandHandler) -> Result<(), String> {
         let manifest_probe = BotManifest { v: 1, commands: vec![spec.clone()] };
         manifest_probe.validate()?;
-        let mut map = self.commands.write().unwrap_or_else(|e| e.into_inner());
-        if map.len() >= bot_interface::MAX_COMMANDS {
+        let mut list = self.commands.write().unwrap_or_else(|e| e.into_inner());
+        if list.len() >= bot_interface::MAX_COMMANDS {
             return Err(format!("too many commands (max {})", bot_interface::MAX_COMMANDS));
         }
-        if map.insert(spec.name.clone(), Registration { spec, handler }).is_some() {
+        if list.iter().any(|r| r.spec.name == spec.name) {
             return Err("command name already registered".into());
         }
+        list.push(Registration { spec, handler });
         Ok(())
     }
 
-    /// The manifest derived from every registration, commands sorted by name so
-    /// the published event is deterministic across restarts.
+    /// The manifest derived from every registration, in registration order.
     pub(crate) fn manifest(&self) -> BotManifest {
-        let map = self.commands.read().unwrap_or_else(|e| e.into_inner());
-        let mut commands: Vec<CommandSpec> = map.values().map(|r| r.spec.clone()).collect();
-        commands.sort_by(|a, b| a.name.cmp(&b.name));
-        BotManifest { v: 1, commands }
+        let list = self.commands.read().unwrap_or_else(|e| e.into_inner());
+        BotManifest { v: 1, commands: list.iter().map(|r| r.spec.clone()).collect() }
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -206,11 +208,11 @@ impl VectorBot {
             return false; // unknown command → ordinary chat (may be for another bot)
         };
         let registry = self.commands();
-        let map = registry.commands.read().unwrap_or_else(|e| e.into_inner());
-        let Some(reg) = map.get(&parsed.name) else { return false };
+        let list = registry.commands.read().unwrap_or_else(|e| e.into_inner());
+        let Some(reg) = list.iter().find(|r| r.spec.name == parsed.name) else { return false };
         let spec = reg.spec.clone();
         let handler = reg.handler.clone();
-        drop(map);
+        drop(list);
 
         let bot = self.clone();
         let incoming = incoming.clone();
@@ -298,7 +300,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_builds_a_sorted_valid_manifest() {
+    fn registry_builds_the_manifest_in_registration_order() {
         let reg = CommandRegistry::default();
         let noop: CommandHandler = Arc::new(|_| Box::pin(async {}));
         reg.insert(
@@ -322,10 +324,12 @@ mod tests {
         )
         .unwrap();
 
+        // The author registered zeta FIRST — the manifest keeps that arrangement
+        // (clients render it verbatim; ordering is the creator's choice).
         let m = reg.manifest();
         m.validate().unwrap();
-        assert_eq!(m.commands[0].name, "alpha");
-        assert_eq!(m.commands[1].name, "zeta");
+        assert_eq!(m.commands[0].name, "zeta");
+        assert_eq!(m.commands[1].name, "alpha");
 
         // Duplicate name refused.
         assert!(reg
