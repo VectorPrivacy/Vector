@@ -15374,26 +15374,110 @@ hr {
   outline: none;
 }
 
-.command-composer-chip {
+/* The command context bar: the reply bar's tucked-strip design, showing
+   "Using /cmd with Bot" above the composer while the parts are filled. When
+   the reply bar is open too, this strip rides one tier above it. */
+#chat-command-bar {
+  position: absolute;
+  box-sizing: border-box;
+  top: 5px;
+  left: 8px;
+  right: 8px;
+  height: 12px;
+  z-index: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 44px 12px 12px;
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: default;
+  background-color: #0d0d0d;
+  background-color: color-mix(in srgb, var(--accent-color, #59fcb3) 6%, #060606);
+  border-radius: 10px 10px 0 0;
+  overflow: hidden;
+  transition: height 0.22s cubic-bezier(0.33, 1, 0.68, 1),
+              top 0.22s cubic-bezier(0.33, 1, 0.68, 1);
+}
+
+#chat-box.commanding #chat-command-bar {
+  height: 46px;
+}
+
+#chat-box.commanding.replying #chat-command-bar {
+  top: -29px;
+}
+
+#chat-command-bar > * {
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+
+#chat-box.commanding #chat-command-bar > * {
+  opacity: 1;
+}
+
+#chat-command-bar-label {
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 13.5px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+#chat-command-bar-cmd {
+  color: var(--accent-color, #59fcb3);
+  font-weight: 600;
+}
+
+#chat-command-bar-bot {
+  flex: 1;
+  min-width: 0;
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 2px 8px;
-  border-radius: 10px;
-  background: var(--icon-color-primary, #59fcb3);
-  color: #0a0a0a;
-  font-weight: 700;
+  color: var(--accent-color, #59fcb3);
   font-size: 13px;
-  cursor: pointer;
-  flex-shrink: 0;
-  user-select: none;
+  font-weight: 600;
 }
 
-.command-composer-chip img {
+#chat-command-bar-bot span {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#chat-command-bar-bot img {
   width: 16px;
   height: 16px;
   border-radius: 50%;
   object-fit: cover;
+  flex-shrink: 0;
+}
+
+#chat-command-bar-cancel {
+  position: absolute;
+  right: 10.5px;
+  top: calc((100% - 12px) / 2);
+  transform: translateY(-50%);
+  width: 24px;
+  height: 24px;
+  padding: 3px;
+  background: transparent;
+}
+
+#chat-command-bar-cancel .icon-cancel {
+  position: relative;
+  display: block;
+  width: 18px;
+  height: 18px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #chat-command-bar,
+  #chat-command-bar > * {
+    transition: none;
+  }
 }
 
 .command-part {
@@ -15451,12 +15535,6 @@ input.command-part-input {
 select.command-part-input {
   width: auto;
   cursor: pointer;
-}
-
-.command-composer-hint {
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.4);
-  user-select: none;
 }
 
 /* The trailing free-text arg (the wire's greedy tail) takes the row's rest. */

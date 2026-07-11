@@ -408,10 +408,36 @@ function initCommandSelector(textarea, io, anchorEl) {
     }
 
     // --- Selection → the structured command composer ---
-    // Picking a command swaps the textarea for one typed input per argument
-    // (quoting/escaping is code's job, never the user's) with the target bot
-    // pinned as a chip. Typing a command manually stays the plain-text path.
+    // Picking a command with args swaps the textarea for one typed input per
+    // argument (quoting/escaping is code's job, never the user's), while the
+    // reply-bar-style strip above shows "Using /cmd with Bot". Param-less
+    // commands send instantly. Typing manually stays the plain-text path.
     let composing = null; // { cmd, chatId, bar, parts: [{arg, el}] }
+
+    // The context strip (a sibling of the reply bar, same tuck design).
+    const ctxBar = {
+        cmd: document.getElementById('chat-command-bar-cmd'),
+        bot: document.getElementById('chat-command-bar-bot'),
+        cancel: document.getElementById('chat-command-bar-cancel')
+    };
+    if (ctxBar.cancel) ctxBar.cancel.addEventListener('click', () => exitComposer(false));
+
+    function showContextBar(cmd) {
+        if (!ctxBar.cmd) return;
+        ctxBar.cmd.textContent = '/' + cmd.name;
+        ctxBar.bot.innerHTML = '';
+        const profile = io.botProfile(cmd.bot) || {};
+        if (profile.avatarSrc) {
+            const img = document.createElement('img');
+            img.src = profile.avatarSrc;
+            img.alt = '';
+            ctxBar.bot.appendChild(img);
+        }
+        const name = document.createElement('span');
+        name.textContent = profile.name || cmd.bot.slice(0, 12) + '…';
+        ctxBar.bot.appendChild(name);
+        anchorEl.classList.add('commanding');
+    }
 
     function selectCommand(cmd) {
         hintSuppressedFor = null;
@@ -425,6 +451,7 @@ function initCommandSelector(textarea, io, anchorEl) {
     }
 
     function exitComposer(keepPick) {
+        anchorEl.classList.remove('commanding');
         if (!composing) return;
         composing.bar.remove();
         textarea.style.display = '';
@@ -438,28 +465,15 @@ function initCommandSelector(textarea, io, anchorEl) {
         exitComposer(true);
         armedPick = { chatId: io.chatId(), bot: cmd.bot, name: cmd.name };
 
+        // Nothing to fill: the selection IS the send.
+        if (!cmd.args.length) {
+            textarea.value = '';
+            io.submit('/' + cmd.name);
+            return;
+        }
+
         const bar = document.createElement('div');
         bar.className = 'command-composer';
-        bar.tabIndex = -1;
-
-        const profile = io.botProfile(cmd.bot) || {};
-        const chip = document.createElement('span');
-        chip.className = 'command-composer-chip';
-        chip.title = 'Composing to ' + (profile.name || cmd.bot.slice(0, 12)) + ' · click to cancel';
-        if (profile.avatarSrc) {
-            const img = document.createElement('img');
-            img.src = profile.avatarSrc;
-            img.alt = '';
-            chip.appendChild(img);
-        }
-        const chipName = document.createElement('span');
-        chipName.textContent = '/' + cmd.name;
-        chip.appendChild(chipName);
-        chip.addEventListener('mousedown', (e) => {
-            e.preventDefault();
-            exitComposer();
-        });
-        bar.appendChild(chip);
 
         const parts = [];
         for (const a of cmd.args) {
@@ -504,30 +518,13 @@ function initCommandSelector(textarea, io, anchorEl) {
             bar.appendChild(wrap);
             parts.push({ arg: a, el });
         }
-        if (!parts.length) {
-            const hint = document.createElement('span');
-            hint.className = 'command-composer-hint';
-            hint.textContent = 'Enter to send · Esc to cancel';
-            bar.appendChild(hint);
-        }
-        // Bare-bar keys (param-less commands hold focus on the bar itself).
-        bar.addEventListener('keydown', (e) => {
-            if (e.target !== bar) return;
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                submitComposer();
-            } else if (e.key === 'Escape') {
-                e.preventDefault();
-                exitComposer();
-            }
-        });
-
         textarea.value = '';
         textarea.style.display = 'none';
         textarea.parentElement.insertBefore(bar, textarea);
         composing = { cmd, chatId: io.chatId(), bar, parts };
+        showContextBar(cmd);
         io.composerToggled(true);
-        (parts[0] ? parts[0].el : bar).focus();
+        parts[0].el.focus();
     }
 
     function onPartKey(e, idx) {
@@ -542,9 +539,21 @@ function initCommandSelector(textarea, io, anchorEl) {
             e.preventDefault();
             e.stopPropagation();
             exitComposer();
-        } else if (e.key === 'Backspace' && idx === 0 && !e.target.value) {
+        } else if ((e.key === 'Backspace' || e.key === 'Delete') && !e.target.value) {
+            // Deleting through an empty part walks backwards: caret lands at
+            // the END of the prior value, and walking past the first part
+            // cancels the whole command (the keyboard-only escape hatch).
             e.preventDefault();
-            exitComposer();
+            if (idx === 0) {
+                exitComposer();
+                return;
+            }
+            const prev = parts[idx - 1].el;
+            prev.focus();
+            if (prev.setSelectionRange) {
+                const end = prev.value.length;
+                prev.setSelectionRange(end, end);
+            }
         }
     }
 
