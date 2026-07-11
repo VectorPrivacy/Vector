@@ -3537,6 +3537,10 @@ body.chat-bg-disabled .chat-messages::before {
   height: auto;
   min-height: 45px;
   align-items: flex-start;
+  /* An unwrapped command-param's intrinsic width must never become this
+     row's minimum (percentage max-widths don't count in min-content math) —
+     without this the row overflows its side margins over the themed border. */
+  min-width: 0;
 }
 
 .chat-input-container button {
@@ -15360,15 +15364,17 @@ hr {
 
 /* --- Structured command composer (replaces the textarea while filling) --- */
 .command-composer {
-  /* Mimic #chat-input's slot (fill-available, right pad only) and center the
-     parts within the row's 45px band — the pills then sit on the exact same
-     midline as the composer's 45px buttons, no padding arithmetic. */
+  /* flex: 1 pins the bar to EXACTLY the space between the composer buttons
+     (fill-available over-resolves for a div in WKWebView, letting content
+     slide under the emoji/send icons before wrapping). Content that outgrows
+     that width has wrap as its only escape. Centered within the row's 45px
+     band so single-line pills share the buttons' midline. */
   display: flex;
   align-items: center;
   align-content: center;
   flex-wrap: wrap;
   gap: 5px;
-  width: -webkit-fill-available;
+  flex: 1 1 0%;
   min-width: 0;
   box-sizing: border-box;
   min-height: 45px;
@@ -15518,8 +15524,10 @@ hr {
   min-width: 0;
   max-width: 100%;
   /* Never squish beside a growing neighbor — wrap to the next line instead
-     (the pill's own max-width still caps it at the bar's width). */
+     (the pill's own max-width still caps it at the bar's width) — and never
+     paint past the pill's own bounds. */
   flex-shrink: 0;
+  overflow: hidden;
 }
 
 /* A wrapped (multi-line) value: the pill expands downward while the label
@@ -15595,14 +15603,22 @@ select.command-part-input {
   cursor: pointer;
 }
 
-/* The trailing free-text arg (the wire's greedy tail) takes the row's rest. */
+/* The trailing free-text arg (the wire's greedy tail) takes the row's rest.
+   The 150px basis is its usefulness floor: when a growing neighbor leaves
+   less than that on the line, the pill wraps to its OWN line and expands
+   full-width instead of surviving as a sliver (a 0 basis would always
+   "fit" and never wrap). The field flexes into the pill's leftover space
+   beside the label — a width percentage would resolve against the WHOLE
+   pill and overflow it by the label's width. */
 .command-part.grow {
-  flex: 1;
+  flex: 1 0 150px;
 }
 
 .command-part.grow .command-part-input {
-  width: 100%;
+  flex: 1 1 0%;
+  width: auto;
   max-width: none;
+  min-width: 0;
 }
 
 /* --- Emoji Shortcode Selector --- */
