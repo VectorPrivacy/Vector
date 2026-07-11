@@ -311,7 +311,7 @@ pub fn dispatch_wrap(
     if wrap.pubkey == gb.pk() {
         if let Ok(opened) = stream::open_wrap(wrap, &gb) {
             if let Ok(ev) = guestbook::parse_guestbook_event(&opened) {
-                return dispatch_guestbook(&ev.entry, community, handler);
+                return dispatch_guestbook(&ev, community, handler);
             }
         }
         return DispatchedV2::Ignored;
@@ -385,37 +385,40 @@ fn dispatch_chat_event(event: ChatEvent, channel_id: &str, my_pubkey: &PublicKey
     }
 }
 
-fn dispatch_guestbook(ev: &GuestbookEntry, community: &CommunityV2, handler: &dyn InboundEventHandler) -> DispatchedV2 {
+fn dispatch_guestbook(ev: &guestbook::GuestbookEvent, community: &CommunityV2, handler: &dyn InboundEventHandler) -> DispatchedV2 {
     // CORD-04 §4: a banned npub's presence announcements vanish with the rest of
     // their events (the memberlist fold subtracts them separately).
-    if let GuestbookEntry::Join { member, .. } | GuestbookEntry::Leave { member, .. } = ev {
+    if let GuestbookEntry::Join { member, .. } | GuestbookEntry::Leave { member, .. } = &ev.entry {
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
         let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
         if banned.contains(&member.to_hex()) {
             return DispatchedV2::Ignored;
         }
     }
-    // Presence is announced against the community, keyed to `#general` for the
-    // handler's channel-scoped signature (v1's convention).
+    // The REAL rumor id keys the presence line: `save_system_event_at` dedups by
+    // it, so every distinct join/leave inserts exactly once no matter how many
+    // paths (live replay, reconnect, catch-up) deliver it.
+    let event_id = crate::simd::hex::bytes_to_hex_32(&ev.rumor_id);
+    // Presence is announced against the community's SURFACED row (the primary
+    // channel — the one chat the list shows).
     let chat_id = community
-        .channels
-        .first()
+        .primary_channel()
         .map(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0))
         .unwrap_or_default();
-    match ev {
+    match &ev.entry {
         GuestbookEntry::Join { member, at_ms, invited_by } => {
             let npub = member.to_bech32().unwrap_or_default();
             let (by, label) = match invited_by {
                 Some((c, l)) => (Some(c.as_str()), Some(l.as_str())),
                 None => (None, None),
             };
-            handler.on_community_presence(&chat_id, &npub, true, "", at_ms / 1000, by, label);
-            DispatchedV2::Presence { npub, joined: true }
+            handler.on_community_presence(&chat_id, &npub, true, &event_id, at_ms / 1000, by, label);
+            DispatchedV2::Presence { npub: npub.clone(), joined: true }
         }
         GuestbookEntry::Leave { member, at_ms } => {
             let npub = member.to_bech32().unwrap_or_default();
-            handler.on_community_presence(&chat_id, &npub, false, "", at_ms / 1000, None, None);
-            DispatchedV2::Presence { npub, joined: false }
+            handler.on_community_presence(&chat_id, &npub, false, &event_id, at_ms / 1000, None, None);
+            DispatchedV2::Presence { npub: npub.clone(), joined: false }
         }
         // Kicks/snapshots aren't surfaced to the handler in the first cut.
         GuestbookEntry::Kick { .. } | GuestbookEntry::Snapshot { .. } => DispatchedV2::Ignored,
@@ -663,6 +666,39 @@ mod tests {
         // npub, never hex: the frontend resolves the reactor's profile and detects
         // "my reaction" by comparing against the user's npub.
         assert_eq!(author, member.public_key().to_bech32().unwrap(), "reaction author is stored as bech32");
+    }
+
+    #[tokio::test]
+    async fn a_guestbook_join_fires_presence_with_its_real_rumor_id() {
+        use nostr_sdk::prelude::Timestamp;
+        use std::sync::Mutex as StdMutex;
+        let (_tmp, _guard, me) = init();
+        let relay = MemoryRelay::new();
+        let community = service::create_community(&relay, "Pres", vec!["wss://r".into()], None).await.unwrap();
+
+        #[derive(Default)]
+        struct Capture(StdMutex<Vec<(String, bool, String)>>);
+        impl InboundEventHandler for Capture {
+            fn on_community_presence(&self, _chat_id: &str, npub: &str, joined: bool, event_id: &str, _at: u64, _by: Option<&str>, _label: Option<&str>) {
+                self.0.lock().unwrap().push((npub.into(), joined, event_id.into()));
+            }
+        }
+
+        let member = Keys::generate();
+        let gb = super::super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
+        let rumor = guestbook::build_join_rumor(member.public_key(), None, 5_000);
+        let (wrap, _) = super::super::guestbook::seal_guestbook_rumor(&rumor, &gb, &member, Timestamp::from_secs(5)).unwrap();
+        let expected_id = rumor.id.unwrap().to_hex();
+
+        let cap = Capture::default();
+        let out = dispatch_wrap(&wrap, &community, &me.public_key(), &cap);
+        assert!(matches!(out, DispatchedV2::Presence { joined: true, .. }));
+        let seen = cap.0.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, member.public_key().to_bech32().unwrap());
+        // The REAL rumor id keys the line — an empty id would collapse every
+        // distinct join into one dedup slot (first wins, the rest vanish).
+        assert_eq!(seen[0].2, expected_id, "presence carries the join's own rumor id");
     }
 
     #[tokio::test]

@@ -491,7 +491,9 @@ pub fn bundle_of(
         channels,
         relays: community.relays.clone(),
         name: community.name.clone(),
-        icon: None,
+        // Mint-time snapshot so a parked invite renders the real logo before any
+        // fold; the Control Plane stays the authority after joining.
+        icon: community.icon.clone(),
         expires_at: expires_at_ms,
         creator_npub: creator.map(|p| p.to_hex()),
         label,
@@ -1343,12 +1345,13 @@ fn fold_members(
 
 /// Catch the persisted Guestbook up from its stored cursor (a fresh hold seeds
 /// from zero). The fetch straddles the network, so the session re-checks before
-/// the store writes. Returns whether anything NEW folded in.
+/// the store writes. Returns the events that were NEW to the store — the caller
+/// surfaces them (presence lines) and refreshes on non-empty.
 pub async fn sync_guestbook<T: Transport + ?Sized>(
     transport: &T,
     community: &CommunityV2,
     session: &SessionGuard,
-) -> Result<bool, String> {
+) -> Result<Vec<guestbook::GuestbookEvent>, String> {
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let (mut events, cursor) = crate::db::community::get_guestbook(&cid_hex)?;
     // Overlap one second so a same-second boundary event can't slip the cursor;
@@ -1359,14 +1362,14 @@ pub async fn sync_guestbook<T: Transport + ?Sized>(
         return Err("account changed during guestbook sync".to_string());
     }
     let known: std::collections::HashSet<[u8; 32]> = events.iter().map(|e| e.rumor_id).collect();
-    let mut added = false;
+    let mut added = Vec::new();
     for ev in fresh {
         if !known.contains(&ev.rumor_id) {
-            events.push(ev);
-            added = true;
+            events.push(ev.clone());
+            added.push(ev);
         }
     }
-    if added || newest > cursor {
+    if !added.is_empty() || newest > cursor {
         crate::db::community::set_guestbook(&cid_hex, &events, newest.max(cursor))?;
     }
     Ok(added)
@@ -3711,6 +3714,17 @@ mod tests {
         assert_eq!(texts_in(&bed.relay, &joined, &general).await, vec!["come on in"]);
     }
 
+    #[test]
+    fn bundle_of_snapshots_the_held_icon() {
+        let owner = Keys::generate();
+        let g = control::genesis(&owner, control::CommunityMetadata { name: "Logo".into(), ..Default::default() }, 1_000).unwrap();
+        let mut c = CommunityV2::from_genesis(&g, "Logo", None, vec!["wss://r".into()], 0);
+        let icon = control::ImageRef { url: "https://blossom.example/i".into(), key: "k".into(), nonce: "n".into(), hash: "h".into(), extra: Default::default() };
+        c.icon = Some(icon.clone());
+        let bundle = bundle_of(&c, None, None, None);
+        assert_eq!(bundle.icon, Some(icon), "a parked invite renders the real logo from the mint-time snapshot");
+    }
+
     #[tokio::test]
     async fn public_link_preview_shows_live_name_and_icon_without_joining() {
         let (bed, owner, member) = TestBed::new();
@@ -3772,7 +3786,7 @@ mod tests {
 
         // Seed from zero: the stored fold equals the authoritative live fold.
         let session = SessionGuard::capture();
-        assert!(sync_guestbook(&bed.relay, &joined, &session).await.unwrap(), "the seed folds fresh events");
+        assert!(!sync_guestbook(&bed.relay, &joined, &session).await.unwrap().is_empty(), "the seed folds fresh events");
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&joined.id().0);
         let (_, cursor) = crate::db::community::get_guestbook(&cid_hex).unwrap();
         assert!(cursor > 0, "the cursor advanced past zero");
@@ -3782,14 +3796,14 @@ mod tests {
         assert!(stored.contains(&member.keys.public_key()));
 
         // Nothing new on the plane → an idle re-sync folds nothing.
-        assert!(!sync_guestbook(&bed.relay, &joined, &session).await.unwrap());
+        assert!(sync_guestbook(&bed.relay, &joined, &session).await.unwrap().is_empty());
 
         // The owner kicks the member; a CURSOR catch-up folds the kick in — no full walk.
         bed.swap_to(&owner);
         kick_member(&bed.relay, &community, &member.keys.public_key()).await.unwrap();
         bed.swap_to(&member);
         let session = SessionGuard::capture();
-        assert!(sync_guestbook(&bed.relay, &joined, &session).await.unwrap(), "the kick lands incrementally");
+        assert!(!sync_guestbook(&bed.relay, &joined, &session).await.unwrap().is_empty(), "the kick lands incrementally");
         assert!(
             !stored_memberlist(&joined).unwrap().contains(&member.keys.public_key()),
             "an owner kick removes the member from the stored fold"

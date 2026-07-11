@@ -502,15 +502,53 @@ async fn follow_community(session: &SessionGuard, id: &CommunityId, handler: &dy
 
     // Guestbook third: catch the membership store up from its cursor. Boot and
     // reconnect land here through this same queue, so the memberlist is a local
-    // read by the time any panel asks for it.
+    // read by the time any panel asks — and every join/leave the catch-up folds
+    // surfaces as a presence line (real-rumor-id keyed, so a line each path also
+    // saw live inserts exactly once).
     let Ok(Some(current)) = crate::db::community::load_community_v2(id) else {
         return;
     };
-    if matches!(super::service::sync_guestbook(&transport, &current, session).await, Ok(true)) {
-        if !session.is_valid() {
+    if let Ok(fresh) = super::service::sync_guestbook(&transport, &current, session).await {
+        if fresh.is_empty() || !session.is_valid() {
             return;
         }
+        surface_presence(&current, &fresh, handler);
         handler.on_community_refreshed(&community_id);
+    }
+}
+
+/// Fire the presence-line surface for freshly-folded guestbook events — the
+/// catch-up twin of the live dispatch (same handler, same real-id dedup key,
+/// same banned-author drop). Kicks/snapshots shape the memberlist, not the feed.
+fn surface_presence(
+    community: &CommunityV2,
+    fresh: &[super::guestbook::GuestbookEvent],
+    handler: &dyn InboundEventHandler,
+) {
+    use super::guestbook::GuestbookEntry;
+    use nostr_sdk::prelude::ToBech32;
+    let Some(primary) = community.primary_channel() else {
+        return;
+    };
+    let chat_id = crate::simd::hex::bytes_to_hex_32(&primary.id.0);
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
+    for ev in fresh {
+        let (member, joined, at_ms, invited_by) = match &ev.entry {
+            GuestbookEntry::Join { member, at_ms, invited_by } => (member, true, *at_ms, invited_by.clone()),
+            GuestbookEntry::Leave { member, at_ms } => (member, false, *at_ms, None),
+            GuestbookEntry::Kick { .. } | GuestbookEntry::Snapshot { .. } => continue,
+        };
+        if banned.contains(&member.to_hex()) {
+            continue;
+        }
+        let Ok(npub) = member.to_bech32() else { continue };
+        let event_id = crate::simd::hex::bytes_to_hex_32(&ev.rumor_id);
+        let (by, label) = match &invited_by {
+            Some((c, l)) => (Some(c.as_str()), Some(l.as_str())),
+            None => (None, None),
+        };
+        handler.on_community_presence(&chat_id, &npub, joined, &event_id, at_ms / 1000, by, label);
     }
 }
 

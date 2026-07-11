@@ -945,23 +945,29 @@ impl VectorCore {
             if let Some(client) = state::nostr_client() {
                 crate::community::v2::realtime::refresh_subscription(&client).await;
             }
-            // Seed the membership store post-join (background — the join itself is
-            // already the slow path) so the first Group Details open reads locally.
-            let seed_session = state::SessionGuard::capture();
-            let seed_community = community.clone();
-            tokio::spawn(async move {
-                if !seed_session.is_valid() {
-                    return;
-                }
-                let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(20));
-                if matches!(
-                    crate::community::v2::service::sync_guestbook(&transport, &seed_community, &seed_session).await,
-                    Ok(true)
-                ) {
-                    let cid_hex = crate::simd::hex::bytes_to_hex_32(&seed_community.id().0);
-                    emit_event("community_refreshed", &serde_json::json!({ "community_id": cid_hex }));
-                }
-            });
+            // Seed the membership store post-join. With a live listen the follow
+            // worker does it (and SURFACES the folded joins as presence lines —
+            // the joiner sees the room's history, own join included); headless
+            // callers seed directly (membership only, no feed to surface).
+            if crate::community::v2::realtime::follow_worker_running() {
+                crate::community::v2::realtime::enqueue_follow(community.id());
+            } else {
+                let seed_session = state::SessionGuard::capture();
+                let seed_community = community.clone();
+                tokio::spawn(async move {
+                    if !seed_session.is_valid() {
+                        return;
+                    }
+                    let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(20));
+                    if matches!(
+                        crate::community::v2::service::sync_guestbook(&transport, &seed_community, &seed_session).await,
+                        Ok(fresh) if !fresh.is_empty()
+                    ) {
+                        let cid_hex = crate::simd::hex::bytes_to_hex_32(&seed_community.id().0);
+                        emit_event("community_refreshed", &serde_json::json!({ "community_id": cid_hex }));
+                    }
+                });
+            }
             return Ok(Self::v2_summary(&community));
         }
         let (relays, token) = public_invite::parse_invite_url(invite_url)
@@ -1934,17 +1940,21 @@ impl VectorCore {
                 let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
                 let (_, cursor) = crate::db::community::get_guestbook(&cid_hex).unwrap_or_default();
                 if cursor == 0 {
-                    let session = state::SessionGuard::capture();
-                    let c2 = community.clone();
-                    tokio::spawn(async move {
-                        if !session.is_valid() {
-                            return;
-                        }
-                        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(20));
-                        if matches!(crate::community::v2::service::sync_guestbook(&transport, &c2, &session).await, Ok(true)) {
-                            emit_event("community_refreshed", &serde_json::json!({ "community_id": cid_hex }));
-                        }
-                    });
+                    if crate::community::v2::realtime::follow_worker_running() {
+                        crate::community::v2::realtime::enqueue_follow(community.id());
+                    } else {
+                        let session = state::SessionGuard::capture();
+                        let c2 = community.clone();
+                        tokio::spawn(async move {
+                            if !session.is_valid() {
+                                return;
+                            }
+                            let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(20));
+                            if matches!(crate::community::v2::service::sync_guestbook(&transport, &c2, &session).await, Ok(fresh) if !fresh.is_empty()) {
+                                emit_event("community_refreshed", &serde_json::json!({ "community_id": cid_hex }));
+                            }
+                        });
+                    }
                 }
                 return crate::community::v2::service::stored_memberlist(&community)
                     .unwrap_or_default()
