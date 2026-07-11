@@ -6221,6 +6221,12 @@ let strLastMsgID = "";
 let strCurrentReplyReference = "";
 
 /**
+ * The slash-command selector/composer controller. Declared at top level so
+ * openChat/edit/event handlers can reach it; assigned at composer init.
+ */
+let commandCtrl = null;
+
+/**
  * The current Message ID being edited (if in edit mode)
  */
 let strCurrentEditMessageId = "";
@@ -11462,7 +11468,7 @@ const emojiShortcodeCtrl = typeof initEmojiShortcodeSelector === 'function'
     : null;
 
 // --- Slash Command Selector (bot manifests) ---
-const commandCtrl = typeof initCommandSelector === 'function' ? initCommandSelector(
+commandCtrl = typeof initCommandSelector === 'function' ? initCommandSelector(
     domChatMessageInput,
     {
         load: (chatId) => invoke('get_chat_commands', { chatId }),
