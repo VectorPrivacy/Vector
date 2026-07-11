@@ -172,8 +172,9 @@ function initCommandSelector(textarea, io, anchorEl) {
     /** One value against one arg spec. Returns an error suffix or null. */
     function argTypeError(a, v) {
         // Wire cap: the manifest parser drops any longer value, which would
-        // silently demote the whole invocation to ordinary chat on the bot side.
-        if (v.length > 1024) return 'is too long (max 1024 characters)';
+        // silently demote the whole invocation to ordinary chat on the bot
+        // side. The cap is BYTES (multibyte text exceeds it before .length).
+        if (new TextEncoder().encode(v).length > 1024) return 'is too long (max 1024 characters)';
         switch (a.type) {
             case 'int':
                 if (!/^[+-]?\d+$/.test(v)) return 'must be a whole number';
@@ -553,6 +554,7 @@ function initCommandSelector(textarea, io, anchorEl) {
                 // at the pill's top once it goes multi-line.
                 el = document.createElement('textarea');
                 el.rows = 1;
+                el.maxLength = 1024; // the wire's per-value cap
                 el.autocomplete = 'off';
                 el.spellcheck = true;
             } else {
@@ -578,6 +580,7 @@ function initCommandSelector(textarea, io, anchorEl) {
                     });
                 }
                 if (a.type === 'user') el.placeholder = 'npub1…';
+                el.maxLength = a.type === 'user' ? 70 : 1024;
                 el.autocomplete = 'off';
                 el.spellcheck = false;
             }

@@ -15294,7 +15294,10 @@ hr {
     display: -webkit-box;
     -webkit-line-clamp: 2;
     -webkit-box-orient: vertical;
-    margin-top: 2px;
+    /* Tuck tight under the command line: cancel the row-gap so the
+       description reads as the command's subtitle, not a separate row. */
+    margin-top: -1px;
+    line-height: 1.25;
   }
 }
 
@@ -15373,17 +15376,21 @@ hr {
 
 /* --- Structured command composer (replaces the textarea while filling) --- */
 .command-composer {
-  /* flex: 1 pins the bar to EXACTLY the space between the composer buttons
-     (fill-available over-resolves for a div in WKWebView, letting content
-     slide under the emoji/send icons before wrapping). Content that outgrows
-     that width has wrap as its only escape. Centered within the row's 45px
-     band so single-line pills share the buttons' midline. */
+  /* EXACTLY the textarea's width model (fill-available base + shrink), so the
+     row's flex math is byte-identical between modes — the buttons render
+     shrunken (~38px) in normal chat because the textarea's base over-fills
+     the row, and a 0-basis bar would let them spring to 45px on command
+     entry. Content stays contained by the pill-level caps (max-width,
+     overflow hidden, the row's min-width: 0), wrapping when out of room.
+     Centered within the row's 45px band so single-line pills share the
+     buttons' midline. */
   display: flex;
   align-items: center;
   align-content: center;
   flex-wrap: wrap;
   gap: 5px;
-  flex: 1 1 0%;
+  flex: 0 1 auto;
+  width: -webkit-fill-available;
   min-width: 0;
   box-sizing: border-box;
   min-height: 45px;
