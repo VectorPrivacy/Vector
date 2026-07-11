@@ -11494,6 +11494,18 @@ commandCtrl = typeof initCommandSelector === 'function' ? initCommandSelector(
                 domChatMessageInputVoice.style.display = 'none';
                 domChatMessageInputSend.style.display = '';
                 domChatMessageInputSend.classList.add('active');
+                // The command composer grows the input area as it slides in;
+                // keep a bottom-pinned user glued to the live tail frame-by-frame
+                // for the transition, exactly as the reply bar does.
+                if (chatPinnedToBottom && (!CHAT_WINDOW_ENABLED || isAtDataBottom())) {
+                    const start = performance.now();
+                    const followPin = () => {
+                        beginProgrammaticScroll();
+                        domChatMessages.scrollTop = domChatMessages.scrollHeight;
+                        if (performance.now() - start < 280) requestAnimationFrame(followPin);
+                    };
+                    requestAnimationFrame(followPin);
+                }
             } else {
                 resetSendMicButtons();
             }

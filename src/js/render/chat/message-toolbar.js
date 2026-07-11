@@ -760,8 +760,8 @@ function _dmsgInitGestures() {
         if (row.style.opacity === '0') return;
         if (e.target.closest('.reaction')) return;
         // Avatar / username act like a left-click (open the mini-profile), not
-        // the message menu.
-        const profileBtn = e.target.closest('.dmsg-avatar, .dmsg-author');
+        // the message menu. The command line's bot avatar/name join here too.
+        const profileBtn = e.target.closest('.dmsg-avatar, .dmsg-author, .dmsg-command-bot-avatar, .dmsg-command-bot');
         if (profileBtn) {
             if (profileBtn.dataset.npub) {
                 e.preventDefault();
@@ -787,7 +787,7 @@ function _dmsgInitGestures() {
         if (e.target.closest('.reaction')) return;
         // Avatar / username act like a tap (open the mini-profile), never the
         // message menu — captured here so a hold still resolves to the profile.
-        const profileBtn = e.target.closest('.dmsg-avatar, .dmsg-author');
+        const profileBtn = e.target.closest('.dmsg-avatar, .dmsg-author, .dmsg-command-bot-avatar, .dmsg-command-bot');
         _gTouchRow = row;
         const t = e.touches[0];
         _gStartX = t.clientX; _gStartY = t.clientY;

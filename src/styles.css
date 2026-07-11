@@ -15297,6 +15297,14 @@ hr {
   text-overflow: ellipsis;
 }
 
+/* Accent-colored words read as actionable via an underline, not a dim —
+   dimming a green word looks like a glitch. The bot avatar keeps .btn's dim. */
+.dmsg-command-line .dmsg-command-name.btn:hover,
+.dmsg-command-bot.btn:hover {
+  opacity: 1;
+  text-decoration: underline;
+}
+
 .command-item-arg {
   font-size: 12px;
   padding: 1px 6px;

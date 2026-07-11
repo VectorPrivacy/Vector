@@ -330,8 +330,9 @@ document.addEventListener('click', (e) => {
     if (!miniProfileEl) return;
     if (miniProfileEl.contains(e.target)) return;
     // Don't dismiss on the avatar/name that opened it — the click delegate is
-    // about to re-open it on the same chip; let it own the lifecycle.
-    if (e.target.closest('.dmsg-avatar, .dmsg-author')) return;
+    // about to re-open it on the same chip; let it own the lifecycle. The
+    // command line's bot avatar/name are openers too (same delegate).
+    if (e.target.closest('.dmsg-avatar, .dmsg-author, .dmsg-command-bot-avatar, .dmsg-command-bot')) return;
     hideMiniProfile();
 });
 

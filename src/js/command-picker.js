@@ -32,6 +32,7 @@ function initCommandSelector(textarea, io, anchorEl) {
     let panel = null;
     let armedPick = null;       // {chatId, bot, name} — the explicitly chosen row
     let hintSuppressedFor = null; // draft value the user Esc'd the hint away for
+    let blurTimer = null;       // pending blur-hide; cancelled if input re-engages
     const snapshots = new Map(); // chatId → {bots, commands}
     const loading = new Set();   // chatIds with a load() in flight
 
@@ -961,6 +962,10 @@ function initCommandSelector(textarea, io, anchorEl) {
 
     // --- Input-driven state machine ---
     function onInput() {
+        // Any input means focus is present, so a pending blur-hide is stale —
+        // cancel it (a programmatic prefill re-opens right after a blur, and the
+        // 150ms timer would otherwise flash the panel shut).
+        if (blurTimer) { clearTimeout(blurTimer); blurTimer = null; }
         const val = textarea.value;
         if (!val.startsWith('/')) {
             armedPick = null;
@@ -1027,7 +1032,7 @@ function initCommandSelector(textarea, io, anchorEl) {
     }
 
     function onBlur() {
-        setTimeout(() => { if (isVisible()) hide(); }, 150);
+        blurTimer = setTimeout(() => { blurTimer = null; if (isVisible()) hide(); }, 150);
     }
 
     /**

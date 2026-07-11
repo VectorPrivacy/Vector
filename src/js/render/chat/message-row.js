@@ -547,22 +547,28 @@ function _dmsgBuildCommandLine(msg, cmd) {
 
     line.appendChild(document.createTextNode(' ran '));
 
+    // The command name is a one-tap shortcut: clicking it drops `/name` back
+    // into the composer and reopens the picker (routed in the click delegate).
     const name = document.createElement('span');
-    name.classList.add('dmsg-command-name');
+    name.classList.add('dmsg-command-name', 'btn');
     name.textContent = '/' + cmd.name;
     line.appendChild(name);
 
     if (cmd.botNpub) {
         line.appendChild(document.createTextNode(' with '));
         const profile = getProfile(cmd.botNpub);
+        // Avatar + name carry data-npub so the shared profile delegate opens
+        // the bot's mini profile, exactly like a normal author name/avatar.
         const img = document.createElement('img');
-        img.classList.add('dmsg-command-bot-avatar');
+        img.classList.add('dmsg-command-bot-avatar', 'btn');
         img.src = (profile && getProfileAvatarSrc(profile)) || 'icons/user-placeholder.svg';
         img.alt = '';
+        img.dataset.npub = cmd.botNpub;
         line.appendChild(img);
         const bot = document.createElement('span');
-        bot.classList.add('dmsg-command-bot');
+        bot.classList.add('dmsg-command-bot', 'btn');
         bot.textContent = getName(cmd.botNpub);
+        bot.dataset.npub = cmd.botNpub;
         line.appendChild(bot);
     }
     return line;
@@ -1517,9 +1523,23 @@ function _dmsgInjectReaction(rowEl, spanReaction) {
             return;
         }
 
+        // Command name in a passive invocation line → prime the composer with
+        // that command (a one-tap "run it again" shortcut). Reuses the picker's
+        // own input path, so the panel opens and selection flows as if typed.
+        const cmdRerun = target.closest('.dmsg-command-name');
+        if (cmdRerun) {
+            e.stopPropagation();
+            if (commandCtrl && commandCtrl.isComposing && commandCtrl.isComposing()) commandCtrl.exitComposer();
+            domChatMessageInput.value = cmdRerun.textContent || '';
+            domChatMessageInput.focus();
+            domChatMessageInput.dispatchEvent(new Event('input', { bubbles: true }));
+            return;
+        }
+
         // Avatar / author → open the mini profile popup. The popup itself
         // surfaces "View Profile" → openProfile() if the user wants the full screen.
-        const profileBtn = target.closest('.dmsg-avatar, .dmsg-author');
+        // The command line's bot avatar/name join here (same data-npub contract).
+        const profileBtn = target.closest('.dmsg-avatar, .dmsg-author, .dmsg-command-bot-avatar, .dmsg-command-bot');
         if (profileBtn) {
             const npub = profileBtn.dataset.npub;
             if (!npub) return;
