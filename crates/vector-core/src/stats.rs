@@ -256,6 +256,7 @@ impl DeepSize for CompactMessage {
             + self.attachments.iter().map(|a| a.deep_size()).sum::<usize>()
             + self.reactions.iter().map(|r| r.deep_size()).sum::<usize>()
             + self.edit_history.as_ref().map(|h| h.iter().map(|e| e.deep_size()).sum::<usize>()).unwrap_or(0)
+            + self.addressed_bots.as_ref().map(|b| std::mem::size_of_val(&**b) + b.capacity() * 2).unwrap_or(0)
     }
 }
 

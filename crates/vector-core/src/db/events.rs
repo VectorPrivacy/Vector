@@ -65,6 +65,15 @@ pub async fn save_event(event: &StoredEvent) -> Result<(), String> {
     Ok(())
 }
 
+/// Extract persisted `["bot", npub]` routing tags (the write side lives in
+/// `message_to_stored_event`).
+fn extract_bot_tags(tags: &[Vec<String>]) -> Vec<String> {
+    tags.iter()
+        .filter(|t| t.len() >= 2 && t[0] == "bot")
+        .map(|t| t[1].clone())
+        .collect()
+}
+
 /// Check if an event exists in the database.
 pub fn event_exists(event_id: &str) -> Result<bool, String> {
     let conn = super::get_db_connection_guard_static()?;
@@ -192,6 +201,12 @@ fn message_to_stored_event(message: &Message, chat_id: i64, user_id: Option<i64>
     // custom emoji image instead of the literal `:shortcode:`.
     for et in &message.emoji_tags {
         tags.push(vec!["emoji".to_string(), et.shortcode.clone(), et.url.clone()]);
+    }
+
+    // Bot routing targets (npubs) — persist so the passive "ran /cmd with
+    // Bot" render survives a reload.
+    for npub in &message.addressed_bots {
+        tags.push(vec!["bot".to_string(), npub.clone()]);
     }
 
     let preview_metadata = message.preview_metadata.as_ref()
@@ -1044,6 +1059,7 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
         let preview_metadata = event.preview_metadata
             .and_then(|json| serde_json::from_str(&json).ok());
 
+        let addressed_bots = extract_bot_tags(&event.tags);
         messages.push(Message {
             id: event.id, content, replied_to,
             replied_to_content: None, replied_to_npub: None, replied_to_has_attachment: None,
@@ -1053,7 +1069,7 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
             npub: event.npub, wrapper_event_id: event.wrapper_event_id,
             edited, edit_history,
             emoji_tags,
-            addressed_bots: Vec::new(),
+            addressed_bots,
         });
     }
 
@@ -1286,9 +1302,9 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
             String::new()
         };
 
-        let original_emoji = serde_json::from_str::<Vec<Vec<String>>>(&tags_json)
-            .map(|t| crate::types::EmojiTag::extract_from_stored(&t))
-            .unwrap_or_default();
+        let stored_tags = serde_json::from_str::<Vec<Vec<String>>>(&tags_json).unwrap_or_default();
+        let original_emoji = crate::types::EmojiTag::extract_from_stored(&stored_tags);
+        let addressed_bots = extract_bot_tags(&stored_tags);
         // Newest edit's emoji tags win so the latest content renders correctly.
         let (content, edited, edit_history, emoji_tags) = if let Some(edits) = edits_by_msg.remove(&event.id) {
             let (latest, latest_emoji) = edits.last()
@@ -1315,7 +1331,7 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
             npub: event.npub, wrapper_event_id: event.wrapper_event_id,
             edited, edit_history,
             emoji_tags,
-            addressed_bots: Vec::new(),
+            addressed_bots,
         });
     }
 

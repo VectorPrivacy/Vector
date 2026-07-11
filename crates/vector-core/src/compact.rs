@@ -978,6 +978,10 @@ pub struct CompactMessage {
     /// vast majority of messages have none, so the cold path stays cheap.
     #[allow(clippy::box_collection)]
     pub emoji_tags: Option<Box<Vec<crate::types::EmojiTag>>>,
+    /// Bot routing targets as interned npub handles — boxed because only
+    /// command invocations carry any.
+    #[allow(clippy::box_collection)]
+    pub addressed_bots: Option<Box<Vec<u16>>>,
 }
 
 impl CompactMessage {
@@ -1516,6 +1520,11 @@ impl CompactMessage {
             } else {
                 Some(Box::new(msg.emoji_tags.clone()))
             },
+            addressed_bots: if msg.addressed_bots.is_empty() {
+                None
+            } else {
+                Some(Box::new(msg.addressed_bots.iter().map(|n| interner.intern(n)).collect()))
+            },
         }
     }
 
@@ -1561,6 +1570,11 @@ impl CompactMessage {
             } else {
                 Some(Box::new(msg.emoji_tags))
             },
+            addressed_bots: if msg.addressed_bots.is_empty() {
+                None
+            } else {
+                Some(Box::new(msg.addressed_bots.iter().map(|n| interner.intern(n)).collect()))
+            },
         }
     }
 
@@ -1595,7 +1609,11 @@ impl CompactMessage {
             edit_history: self.edit_history.as_ref().map(|b| (**b).clone()),
             preview_metadata: self.preview_metadata.as_ref().map(|b| (**b).clone()),
             emoji_tags: self.emoji_tags.as_ref().map(|b| (**b).clone()).unwrap_or_default(),
-            addressed_bots: Vec::new(),
+            addressed_bots: self
+                .addressed_bots
+                .as_ref()
+                .map(|b| b.iter().filter_map(|&i| interner.resolve(i).map(|s| s.to_string())).collect())
+                .unwrap_or_default(),
         }
     }
 }
@@ -1687,6 +1705,7 @@ mod tests {
             edit_history: None,
             preview_metadata: None,  // Boxed, but None = 8 bytes
             emoji_tags: None,
+            addressed_bots: None,
         };
 
         let msg2 = CompactMessage {
@@ -1704,6 +1723,7 @@ mod tests {
             edit_history: None,
             preview_metadata: None,  // Boxed, but None = 8 bytes
             emoji_tags: None,
+            addressed_bots: None,
         };
 
         assert!(vec.insert(msg1));
@@ -1739,6 +1759,7 @@ mod tests {
             edit_history: None,
             preview_metadata: None,  // Boxed
             emoji_tags: None,
+            addressed_bots: None,
         };
 
         assert!(vec.insert(msg.clone()));
@@ -2697,6 +2718,7 @@ mod tests {
             edit_history: None,
             preview_metadata: None,
             emoji_tags: None,
+            addressed_bots: None,
         }
     }
 
@@ -3074,7 +3096,7 @@ mod tests {
                 EditEntry { content: "Edited".into(), edited_at: 1705320060000 },
             ]),
             emoji_tags: Vec::new(),
-            addressed_bots: Vec::new(),
+            addressed_bots: vec!["npub1botrouting0000000000000000000000000000000000000000000000".into()],
         }
     }
 
@@ -3109,6 +3131,8 @@ mod tests {
         // Reactions
         assert_eq!(restored.reactions.len(), 1, "should have 1 reaction");
         assert_eq!(restored.reactions[0].emoji, msg.reactions[0].emoji);
+        // Bot routing targets round-trip through the interner.
+        assert_eq!(restored.addressed_bots, msg.addressed_bots, "addressed_bots mismatch");
     }
 
     #[test]
