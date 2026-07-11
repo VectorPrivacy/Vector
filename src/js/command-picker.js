@@ -75,8 +75,13 @@ function initCommandSelector(textarea, io, anchorEl) {
     }
 
     // --- Data ---
-    function ensureLoaded(chatId) {
-        if (snapshots.has(chatId) || loading.has(chatId)) return;
+    /** Ask the backend for the chat's snapshot. `force` re-asks even when a
+     *  memoized snapshot exists — every picker OPEN forces, so a bot that
+     *  joined (or got its profile resolved) since the last look is noticed:
+     *  the backend compares the bot set per call and refreshes on any change.
+     *  Cheap when nothing changed (memory/DB answer, no network). */
+    function ensureLoaded(chatId, force) {
+        if (loading.has(chatId) || (!force && snapshots.has(chatId))) return;
         loading.add(chatId);
         Promise.resolve(io.load(chatId)).then((snap) => {
             loading.delete(chatId);
@@ -84,7 +89,7 @@ function initCommandSelector(textarea, io, anchorEl) {
             if (isVisible() && io.chatId() === chatId) render();
         }).catch(() => {
             loading.delete(chatId);
-            snapshots.set(chatId, { bots: 0, commands: [] });
+            if (!snapshots.has(chatId)) snapshots.set(chatId, { bots: 0, commands: [] });
             if (isVisible() && io.chatId() === chatId) render();
         });
     }
@@ -416,7 +421,9 @@ function initCommandSelector(textarea, io, anchorEl) {
         if (armedPick && armedPick.chatId !== io.chatId()) armedPick = null;
         if (hintSuppressedFor !== null && hintSuppressedFor !== val) hintSuppressedFor = null;
 
-        ensureLoaded(io.chatId());
+        // A closed→open transition re-asks the backend (bot set may have grown);
+        // keystrokes while already open render from the memo.
+        ensureLoaded(io.chatId(), !isVisible());
         const nameEnd = val.search(/\s/);
         if (nameEnd === -1) {
             // Still typing the command name.
