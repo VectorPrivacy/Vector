@@ -190,8 +190,8 @@ pub async fn send_edit<T: Transport + ?Sized>(
 }
 
 /// Cooperative in-plane delete (kind 5, NIP-09 semantics): peers stop rendering
-/// `target_id_hex`. The wrap ciphertext on relays needs a separate NIP-09 scrub
-/// by its ephemeral key — not retained in this cut.
+/// `target_id_hex`. The wrap ciphertext on relays is scrubbed separately via the
+/// retained per-message stream key (see `publish_chat`).
 pub async fn send_delete<T: Transport + ?Sized>(
     transport: &T,
     community: &CommunityV2,
@@ -279,12 +279,23 @@ async fn publish_chat<T: Transport + ?Sized>(
     ephemeral: bool,
 ) -> Result<String, String> {
     let rumor_id = rumor.id.ok_or("rumor has no id")?.to_hex();
-    let (wrap, _ephemeral_keys) = chat::seal_chat_rumor(&rumor, group, author, Timestamp::from_secs(at_ms / 1000), ephemeral)
+    let (wrap, _p_tag_keys) = chat::seal_chat_rumor(&rumor, group, author, Timestamp::from_secs(at_ms / 1000), ephemeral)
         .map_err(|e| e.to_string())?;
     if !session.is_valid() {
         return Err("account changed before send".to_string());
     }
     transport.publish(&wrap, &community.relays).await?;
+    // Retain the wrap's signing key (the group stream key) keyed by rumor id so a
+    // full delete can NIP-09 this exact wrap off relays (same-author rule, honored
+    // everywhere — the discarded p-tag pair only works on recipient-delete relays).
+    // Frozen per-message so later rekeys can't strand it. Session-gated: the publish
+    // straddled network I/O.
+    if !ephemeral {
+        if !session.is_valid() {
+            return Ok(rumor_id);
+        }
+        crate::db::community::store_message_key(&rumor_id, &wrap.id.to_hex(), group.keys(), &community.relays)?;
+    }
     // Local echo (v1 parity): open our OWN wrap through the exact inbound path so
     // send-then-read works with no listen loop, and the relay's re-delivery dedups
     // against this row instead of re-firing callbacks. Best-effort — the publish
@@ -315,6 +326,33 @@ async fn publish_chat<T: Transport + ?Sized>(
 pub struct FetchedEvent {
     pub event: ChatEvent,
     pub epoch: Epoch,
+}
+
+/// Self-heal scrub-key retention for an OWN rumor seen during a history open:
+/// pre-retention and other-device sends stay fully deletable, because the wrap's
+/// signing key is the derivable group stream key — only this rumor→wrap mapping
+/// was ever missing locally. No-op for foreign authors, kinds the UI can't
+/// delete, and already-retained rows. Best-effort: a store failure never breaks
+/// the fetch.
+fn heal_own_wrap_key(event: &ChatEvent, group: &GroupKey, relays: &[String]) {
+    if !matches!(event, ChatEvent::Message { .. } | ChatEvent::Reaction { .. }) {
+        return;
+    }
+    let opened = event.opened();
+    if crate::state::my_public_key() != Some(opened.author) {
+        return;
+    }
+    let rumor_hex = opened.rumor_id.to_hex();
+    // Only fill a confirmed gap — never clobber a send-time row, never write
+    // when the store can't be read.
+    if !matches!(crate::db::community::get_message_key(&rumor_hex), Ok(None)) {
+        return;
+    }
+    if crate::db::community::store_message_key(&rumor_hex, &opened.wrapper_id.to_hex(), group.keys(), relays).is_ok() {
+        // The UI caches full-vs-limited delete verdicts per message; tell it this
+        // one just flipped so it re-resolves without an app restart.
+        crate::traits::emit_event("message_delete_meta_changed", &serde_json::json!({ "id": rumor_hex }));
+    }
 }
 
 /// Fetch a channel's newest messages — one page of [`fetch_channel_history`].
@@ -350,6 +388,9 @@ pub async fn fetch_channel_history<T: Transport + ?Sized>(
     max_pages: usize,
     mut keep_paging: impl FnMut(&[FetchedEvent]) -> bool,
 ) -> Result<Vec<FetchedEvent>, String> {
+    // Guards the opportunistic scrub-key heals below — the fetch loop straddles
+    // network I/O, and an account swap must not write into the new account's DB.
+    let session = SessionGuard::capture();
     let ch = community.channel(channel_id).ok_or("no such channel in this community")?;
     // A Public channel reads across EVERY held base-root epoch, and a Private one
     // across its OWN held epochs (CORD-03 §3), so history spanning a rotation stays
@@ -422,6 +463,9 @@ pub async fn fetch_channel_history<T: Transport + ?Sized>(
                 if let Ok(event) = chat::open_chat_event(wrap, &group, channel_id, *epoch) {
                     let id = event.opened().rumor_id;
                     if seen_rumors.insert(id) {
+                        if session.is_valid() {
+                            heal_own_wrap_key(&event, &group, &community.relays);
+                        }
                         page_events.push(FetchedEvent { event, epoch: *epoch });
                     }
                 }
@@ -7176,15 +7220,100 @@ mod tests {
         });
         send_typing(&bed.relay, &community, &general).await.unwrap();
         let wrap = sub.try_recv().expect("the typing wrap streams to a live subscriber");
-        assert!(
-            matches!(chat::open_chat_event(&wrap, &group, &general, community.root_epoch), Ok(ChatEvent::Typing { .. })),
-            "the ephemeral wrap opens as a Typing event"
-        );
+        let opened = match chat::open_chat_event(&wrap, &group, &general, community.root_epoch) {
+            Ok(ChatEvent::Typing { opened }) => opened,
+            other => panic!("the ephemeral wrap must open as a Typing event, got {other:?}"),
+        };
 
         // …while nothing durable is stored (relays never keep the ephemeral tier),
-        // so channel history stays free of typing noise.
+        // so channel history stays free of typing noise…
         let page = fetch_channel(&bed.relay, &community, &general, 50).await.unwrap();
         assert!(page.iter().all(|f| !matches!(f.event, ChatEvent::Typing { .. })));
+
+        // …and no scrub key is retained (there is no durable wrap to ever delete).
+        assert!(
+            crate::db::community::get_message_key(&opened.rumor_id.to_hex()).unwrap().is_none(),
+            "ephemeral sends must not retain scrub keys"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_durable_send_retains_the_wrap_scrub_key_and_full_delete_nukes_the_relay_copy() {
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Nuke", bed.relays.clone(), None).await.unwrap();
+        let general = community.channels[0].id;
+        let group = channel_group_key(&community.community_root, &general, community.root_epoch);
+
+        let id = send_message(&bed.relay, &community, &general, "scrub me").await.unwrap();
+
+        // Retained: the row maps the rumor id to the exact published wrap, holds the
+        // key that SIGNED that wrap (same-author NIP-09), and the relay set.
+        let (keys, outer_hex, relays) =
+            crate::db::community::get_message_key(&id).unwrap().expect("a durable send retains its scrub key");
+        assert_eq!(relays, community.relays);
+        let wrap_query = Query {
+            kinds: vec![stream::KIND_WRAP],
+            authors: vec![group.pk_hex()],
+            ..Default::default()
+        };
+        let wraps = bed.relay.fetch(&wrap_query, &community.relays).await.unwrap();
+        let wrap = wraps.iter().find(|w| w.id.to_hex() == outer_hex).expect("retained outer id is the published wrap");
+        assert_eq!(keys.public_key(), wrap.pubkey, "retained key is the wrap's author");
+
+        // Reactions ride the same retention (revoke_reaction's relay-nuke layer).
+        let me_hex = owner.keys.public_key().to_hex();
+        let rid = send_reaction(&bed.relay, &community, &general, &id, &me_hex, super::super::kind::MESSAGE, "🔥", None)
+            .await
+            .unwrap();
+        assert!(crate::db::community::get_message_key(&rid).unwrap().is_some(), "reaction sends retain too");
+
+        // The shared v1 delete path (Layer 1 of delete_community_message / revoke_reaction)
+        // scrubs the wrap off the relay via the retained key, then consumes the row.
+        crate::community::service::delete_message(&bed.relay, &id).await.unwrap();
+        assert!(crate::db::community::get_message_key(&id).unwrap().is_none(), "key consumed after the scrub");
+        let after = bed.relay.fetch(&wrap_query, &community.relays).await.unwrap();
+        assert!(!after.iter().any(|w| w.id.to_hex() == outer_hex), "wrap scrubbed from the relay");
+    }
+
+    #[tokio::test]
+    async fn backfill_heals_scrub_keys_for_own_pre_retention_messages_only() {
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Heal", bed.relays.clone(), None).await.unwrap();
+        let general = community.channels[0].id;
+        let group = channel_group_key(&community.community_root, &general, community.root_epoch);
+
+        // Simulate a pre-retention / other-device send: our message on the relay,
+        // but no local mapping row.
+        let id = send_message(&bed.relay, &community, &general, "old send").await.unwrap();
+        crate::db::community::delete_message_key(&id).unwrap();
+        assert!(crate::db::community::get_message_key(&id).unwrap().is_none());
+
+        // A stranger member's message rides the same channel.
+        let mkeys = Keys::generate();
+        let rumor = chat::build_message_rumor(mkeys.public_key(), &general, community.root_epoch, "foreign", None, &[], vec![], 6_000);
+        let foreign_id = rumor.id.unwrap().to_hex();
+        let (fw, _) = chat::seal_chat_rumor(&rumor, &group, &mkeys, Timestamp::from_secs(6), false).unwrap();
+        bed.relay.publish(&fw, &community.relays).await.unwrap();
+
+        // One history open re-derives the mapping for the OWN message…
+        fetch_channel(&bed.relay, &community, &general, 50).await.unwrap();
+        let (keys, _outer, relays) =
+            crate::db::community::get_message_key(&id).unwrap().expect("backfill heals own unretained rows");
+        assert_eq!(keys.public_key(), group.pk(), "healed key is the wrap's signing key");
+        assert_eq!(relays, community.relays);
+
+        // …and never manufactures one for a foreign author.
+        assert!(crate::db::community::get_message_key(&foreign_id).unwrap().is_none());
+
+        // The healed row is a working full delete: the shared path scrubs the wrap.
+        crate::community::service::delete_message(&bed.relay, &id).await.unwrap();
+        let left = fetch_channel(&bed.relay, &community, &general, 50).await.unwrap();
+        assert!(
+            !left.iter().any(|f| f.event.opened().rumor_id.to_hex() == id),
+            "healed message scrubbed from the relay"
+        );
     }
 
     #[tokio::test]

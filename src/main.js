@@ -4044,6 +4044,16 @@ async function setupRustListeners() {
         invoke('update_unread_counter');
     });
 
+    // A backend heal flipped a message's full-vs-limited delete verdict (v2 scrub
+    // keys re-derived during backfill) — drop the cached verdict so it re-resolves.
+    _on('message_delete_meta_changed', (evt) => {
+        const id = evt.payload?.id;
+        if (!id) return;
+        dmsgInvalidateDeleteMeta(id);
+        // Row on screen: re-resolve now (a cache fill also refreshes an open toolbar).
+        if (document.getElementById(id)) dmsgQueueDeleteMeta([id]);
+    });
+
     // Listen for headless mark-as-read (e.g., notification "Mark Read" action while app backgrounded)
     _on('chat_mark_read', (evt) => {
         const { chat_id, last_read } = evt.payload;
