@@ -535,7 +535,9 @@ function initCommandSelector(textarea, io, anchorEl) {
                 el.autocomplete = 'off';
                 el.spellcheck = false;
             }
-            el.className = 'command-part-input';
+            // add, don't assign — the choice branch already carries its
+            // trigger class and an assignment would wipe it.
+            el.classList.add('command-part-input');
             el.title = a.description || '';
             const idx = parts.length;
             // The trailing free-text arg (the greedy tail on the wire) starts
