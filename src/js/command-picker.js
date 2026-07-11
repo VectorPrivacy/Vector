@@ -443,10 +443,11 @@ function initCommandSelector(textarea, io, anchorEl) {
     if (ctxBar.cancel) ctxBar.cancel.addEventListener('click', () => exitComposer(false));
 
     /** The focused param's manifest description, shown in the strip (the
-     *  visible twin of the hover tooltip — mobile has no hover). */
+     *  visible twin of the hover tooltip — mobile has no hover). Bare — the
+     *  focused pill's own label already names the param. */
     function setContextHint(arg) {
         if (!ctxBar.hint) return;
-        ctxBar.hint.textContent = arg && arg.description ? arg.name + ': ' + arg.description : '';
+        ctxBar.hint.textContent = (arg && arg.description) || '';
     }
 
     function showContextBar(cmd) {
