@@ -399,6 +399,14 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                         handle_self_sync_event(&session, *event).await;
                     }
                 }
+                RelayPoolNotification::Message { message, .. } => {
+                    // Relay OKs feed the send pipeline: an OK that outlives
+                    // the per-attempt wait still confirms delivery, and can
+                    // rescue a message already marked Failed.
+                    if let nostr_sdk::RelayMessage::Ok { event_id, status, .. } = message {
+                        vector_core::sending::note_relay_ok(&event_id, status);
+                    }
+                }
                 _ => {}
             }
             Ok(false)

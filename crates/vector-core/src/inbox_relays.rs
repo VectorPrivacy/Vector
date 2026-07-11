@@ -74,9 +74,18 @@ impl EventPublishTracker {
     /// When the last in-flight task settles, drops the tracker from
     /// the global registry.
     fn note_settled(&self) {
+        // Registry lock spans the final decrement: idempotent retries
+        // republish the same event id, and a concurrent in_flight bump in
+        // spawn_tracked_publish must not interleave with this removal.
+        let mut trackers = PUBLISH_TRACKERS.lock().unwrap();
         if self.in_flight.fetch_sub(1, Ordering::SeqCst) == 1 {
             self.notify.notify_waiters();
-            PUBLISH_TRACKERS.lock().unwrap().remove(&self.event_id);
+            match trackers.get(&self.event_id) {
+                Some(current) if std::ptr::eq(Arc::as_ptr(current), self) => {
+                    trackers.remove(&self.event_id);
+                }
+                _ => {}
+            }
         }
     }
 
@@ -149,8 +158,23 @@ pub fn spawn_tracked_publish(
     if resolved.is_empty() {
         return Vec::new();
     }
-    let tracker = EventPublishTracker::new(event_id, resolved.len());
-    PUBLISH_TRACKERS.lock().unwrap().insert(event_id, tracker.clone());
+    // Idempotent retries republish the same event id: reuse a still-live
+    // tracker (bump its in_flight) so dependents waiting on it keep seeing
+    // every relay confirmation; register fresh only when none is live.
+    let tracker = {
+        let mut trackers = PUBLISH_TRACKERS.lock().unwrap();
+        match trackers.get(&event_id) {
+            Some(existing) if existing.in_flight.load(Ordering::SeqCst) > 0 => {
+                existing.in_flight.fetch_add(resolved.len(), Ordering::SeqCst);
+                existing.clone()
+            }
+            _ => {
+                let t = EventPublishTracker::new(event_id, resolved.len());
+                trackers.insert(event_id, t.clone());
+                t
+            }
+        }
+    };
 
     let mut handles = Vec::with_capacity(resolved.len());
     for (url, relay) in resolved {
@@ -603,6 +627,48 @@ pub struct GiftWrapSendOutcome {
     pub targeted_relays: Vec<String>,
 }
 
+/// A gift wrap built once and re-publishable verbatim.
+///
+/// Retries MUST republish these exact bytes rather than re-wrapping:
+/// a relay that already stored the wrap answers the resend with
+/// OK-true "duplicate", so a lost OK becomes a delivery confirmation
+/// on the next attempt instead of an unconfirmed extra copy.
+pub struct BuiltGiftWrap {
+    pub event: Event,
+    pub secret: SecretKey,
+}
+
+/// Seal + wrap a rumor with a retained ephemeral key, without publishing.
+pub async fn build_gift_wrap_retained(
+    client: &Client,
+    recipient: &PublicKey,
+    rumor: UnsignedEvent,
+    extra_tags: impl IntoIterator<Item = Tag>,
+) -> Result<BuiltGiftWrap, String> {
+    let signer = client.signer().await.map_err(|e| e.to_string())?;
+    let seal: Event = EventBuilder::seal(&signer, recipient, rumor)
+        .await
+        .map_err(|e| e.to_string())?
+        .sign(&signer)
+        .await
+        .map_err(|e| e.to_string())?;
+    let (event, secret) = wrap_with_retained_key(recipient, &seal, extra_tags)?;
+    Ok(BuiltGiftWrap { event, secret })
+}
+
+/// Resolved publish targets for a gift wrap. Reusable across retry
+/// attempts so transient inbox-relay connections survive the whole
+/// retry window instead of reconnecting per attempt. Callers must
+/// `teardown_gift_wrap_targets` when done — transient inbox relays
+/// belong to the recipient, not our pool.
+pub struct GiftWrapTargets {
+    pub resolved: Vec<(RelayUrl, Relay)>,
+    /// Relay URL set attempted (inbox if known, pool write-relays as
+    /// fallback). Deletion publishes the NIP-09 to this same set.
+    pub targeted_relays: Vec<String>,
+    transient_added: Vec<RelayUrl>,
+}
+
 /// Send a gift-wrapped rumor to a recipient using a retained ephemeral
 /// key. Routes to the recipient's inbox relays (kind 10050) when
 /// available, falling back to pool write-relays otherwise.
@@ -619,18 +685,26 @@ pub async fn send_gift_wrap_retained(
     rumor: UnsignedEvent,
     extra_tags: impl IntoIterator<Item = Tag>,
 ) -> Result<GiftWrapSendOutcome, String> {
-    let signer = client.signer().await.map_err(|e| e.to_string())?;
-    let seal: Event = EventBuilder::seal(&signer, recipient, rumor)
-        .await
-        .map_err(|e| e.to_string())?
-        .sign(&signer)
-        .await
-        .map_err(|e| e.to_string())?;
-    let (event, secret) = wrap_with_retained_key(recipient, &seal, extra_tags)?;
-    let wrap_event_id = event.id;
+    let built = build_gift_wrap_retained(client, recipient, rumor, extra_tags).await?;
+    let targets = resolve_gift_wrap_targets(client, recipient).await;
+    let publish_result = publish_gift_wrap_to_targets(client, &targets, &built.event).await;
+    teardown_gift_wrap_targets(client, &targets).await;
+    Ok(GiftWrapSendOutcome {
+        output: publish_result?,
+        wrap_event_id: built.event.id,
+        wrap_secret: built.secret,
+        targeted_relays: targets.targeted_relays,
+    })
+}
 
-    // Resolve target relays: recipient's inbox relays (NIP-17) if they
-    // advertise any, otherwise our pool's write-relays.
+/// Resolve where a gift wrap for `recipient` should be published:
+/// their kind-10050 inbox relays when advertised (on-demand connecting
+/// any that are not already pooled, as transient members), otherwise
+/// our pool's write-relays.
+pub async fn resolve_gift_wrap_targets(
+    client: &Client,
+    recipient: &PublicKey,
+) -> GiftWrapTargets {
     let inbox_strs = get_or_fetch_inbox_relays(client, recipient).await;
     let targeted_strs: Vec<String> = if !inbox_strs.is_empty() {
         inbox_strs.clone()
@@ -703,23 +777,6 @@ pub async fn send_gift_wrap_retained(
         }
     }
 
-    // `resolved.is_empty()` implies no transient add succeeded (each success
-    // pushes onto `resolved`), so this branch can't leak a transient relay.
-    if resolved.is_empty() {
-        // No matching relays in the pool — last-ditch broadcast via
-        // client.send_event(). No tracker (no per-relay machinery).
-        let output = client
-            .send_event(&event)
-            .await
-            .map_err(|e| e.to_string())?;
-        return Ok(GiftWrapSendOutcome {
-            output,
-            wrap_event_id,
-            wrap_secret: secret,
-            targeted_relays: targeted_strs,
-        });
-    }
-
     if !inbox_strs.is_empty() {
         println!(
             "[InboxRelays] Routing gift-wrap to {} inbox relays for {}",
@@ -728,21 +785,66 @@ pub async fn send_gift_wrap_retained(
         );
     }
 
-    // Spawn tracked per-relay publish tasks. The tracker is keyed by
-    // the wrap event id; the deletion path looks it up via
-    // get_publish_tracker(wrap_event_id) and walks next_success() to
-    // fire NIP-09 only at relays that have actually received the
-    // wrap. The same primitive is used by any other operation whose
-    // dependent event must arrive after the parent on each relay
-    // (rapid edits, self-reactions, replies-to-just-sent).
-    let handles = spawn_tracked_publish(resolved, event.clone());
+    GiftWrapTargets {
+        resolved,
+        targeted_relays: targeted_strs,
+        transient_added,
+    }
+}
+
+/// Nudge any non-connected target relay back up before a retry attempt.
+/// Transient inbox relays are added with `reconnect(false)`, so a drop
+/// mid-retry-window would otherwise leave them dead for every remaining
+/// attempt.
+pub async fn reconnect_gift_wrap_targets(targets: &GiftWrapTargets) {
+    let stale: Vec<&Relay> = targets.resolved.iter()
+        .filter(|(_, r)| r.status() != RelayStatus::Connected)
+        .map(|(_, r)| r)
+        .collect();
+    if stale.is_empty() {
+        return;
+    }
+    futures_util::future::join_all(
+        stale.into_iter()
+            .map(|r| r.try_connect(std::time::Duration::from_secs(6)))
+    ).await;
+}
+
+/// Publish an already-built wrap to resolved targets, racing for the
+/// first relay OK. Safe to call repeatedly with the same event —
+/// relays that already stored it acknowledge the duplicate.
+///
+/// Spawns tracked per-relay publish tasks: the tracker is keyed by
+/// the wrap event id; the deletion path looks it up via
+/// get_publish_tracker(wrap_event_id) and walks next_success() to
+/// fire NIP-09 only at relays that have actually received the
+/// wrap. The same primitive is used by any other operation whose
+/// dependent event must arrive after the parent on each relay
+/// (rapid edits, self-reactions, replies-to-just-sent).
+pub async fn publish_gift_wrap_to_targets(
+    client: &Client,
+    targets: &GiftWrapTargets,
+    event: &Event,
+) -> Result<Output<EventId>, String> {
+    // `resolved.is_empty()` implies no transient add succeeded (each success
+    // pushes onto `resolved`), so this branch can't leak a transient relay.
+    if targets.resolved.is_empty() {
+        // No matching relays in the pool — last-ditch broadcast via
+        // client.send_event(). No tracker (no per-relay machinery).
+        return client
+            .send_event(event)
+            .await
+            .map_err(|e| e.to_string());
+    }
+
+    let handles = spawn_tracked_publish(targets.resolved.clone(), event.clone());
 
     // Race for first-ok so the caller (and UI) sees "Sent" the
     // moment any one relay accepts. Remaining tasks continue in
     // the background, updating the tracker as they settle. The
     // dropped JoinHandles detach but do not cancel the tasks.
     let mut output = Output {
-        val: wrap_event_id,
+        val: event.id,
         success: HashSet::new(),
         failed: HashMap::new(),
     };
@@ -763,21 +865,18 @@ pub async fn send_gift_wrap_retained(
             }
         }
     }
+    Ok(output)
+}
 
-    // Tear down transiently-added inbox relays — they belong to the
-    // recipient, not us. Delivery has already raced to first-ok; one
-    // confirmed inbox relay satisfies NIP-17, so cutting any still-in-flight
-    // background publishes to the others is acceptable.
-    for url in &transient_added {
+/// Tear down transiently-added inbox relays — they belong to the
+/// recipient, not us. Delivery has already raced to first-ok; one
+/// confirmed inbox relay satisfies NIP-17, so cutting any still-in-flight
+/// background publishes to the others is acceptable.
+pub async fn teardown_gift_wrap_targets(client: &Client, targets: &GiftWrapTargets) {
+    let pool = client.pool();
+    for url in &targets.transient_added {
         let _ = pool.remove_relay(url).await;
     }
-
-    Ok(GiftWrapSendOutcome {
-        output,
-        wrap_event_id,
-        wrap_secret: secret,
-        targeted_relays: targeted_strs,
-    })
 }
 
 /// Send a gift-wrapped rumor to a recipient, routing to their inbox relays

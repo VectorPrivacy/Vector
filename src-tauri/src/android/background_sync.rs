@@ -461,6 +461,15 @@ fn run_standalone_sync_loop(data_dir: &str) {
                     return Ok(true); // Stop
                 }
 
+                // Relay OKs feed the send pipeline: an OK that outlives the
+                // per-attempt wait still confirms delivery, and can rescue a
+                // message already marked Failed.
+                if let RelayPoolNotification::Message {
+                    message: nostr_sdk::RelayMessage::Ok { event_id, status, .. }, ..
+                } = &notification {
+                    vector_core::sending::note_relay_ok(event_id, *status);
+                }
+
                 if let RelayPoolNotification::Event { event, subscription_id, .. } = notification {
                     // Route by subscription
                     let is_gift = subscription_id == gift_id;

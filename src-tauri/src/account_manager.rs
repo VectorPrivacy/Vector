@@ -706,6 +706,9 @@ pub async fn reset_session() {
     // account-agnostic, but holds privacy-adjacent metadata about every
     // contact account A messaged. Drop on swap.
     vector_core::inbox_relays::clear_inbox_relay_cache();
+    // In-flight wrap confirmations carry the prior account's chat and
+    // message ids — a late OK must not "rescue" into the new session.
+    vector_core::sending::clear_wrap_confirms();
     // Pack-author NIP-65 cache — same privacy parity as the inbox cache.
     vector_core::emoji_packs::clear_nip65_cache();
 

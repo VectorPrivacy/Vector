@@ -2922,6 +2922,14 @@ impl VectorCore {
             let c = client_for_closure.clone();
             let dm_sid = dm_sub_id.clone();
             async move {
+                // Relay OKs feed the send pipeline: an OK that outlives the
+                // per-attempt wait still confirms delivery, and can rescue a
+                // message already marked Failed.
+                if let RelayPoolNotification::Message {
+                    message: nostr_sdk::RelayMessage::Ok { event_id, status, .. }, ..
+                } = &notification {
+                    sending::note_relay_ok(event_id, *status);
+                }
                 if let RelayPoolNotification::Event { event, subscription_id, .. } = notification {
                     if subscription_id == dm_sid {
                         // DMs, files, reactions
@@ -3004,6 +3012,9 @@ impl VectorCore {
         state::set_active_chat(None);
         crate::profile::sync::clear_profile_sync_queue();
         crate::inbox_relays::clear_inbox_relay_cache();
+        // In-flight wrap confirmations carry the prior account's chat and
+        // message ids — a late OK must not "rescue" into the new session.
+        crate::sending::clear_wrap_confirms();
         crate::emoji_packs::clear_nip65_cache();
         // Chat/user row-id caches are PER-ACCOUNT (row ids belong to the prior account's DB). Not clearing
         // them here let a swapped-in account resolve a channel/npub to the WRONG (prior-account) row id →

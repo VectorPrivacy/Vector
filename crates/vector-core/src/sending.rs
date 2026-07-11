@@ -5,7 +5,7 @@
 //! and a `SendConfig` for retry/cancel behavior.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use nostr_sdk::prelude::*;
 
 use crate::state::{nostr_client, my_public_key, STATE};
@@ -125,16 +125,169 @@ pub struct SendResult {
 }
 
 // ============================================================================
+// Late-OK confirmation registry
+// ============================================================================
+//
+// A relay's OK can outlive the per-attempt wait: slow links push the
+// round-trip past nostr-sdk's OK timeout, and mobile handovers drop the
+// socket after the EVENT frame was already delivered. The wrap is then
+// on the relay while the sender believes it failed — the user re-sends
+// and the recipient sees a double-post.
+//
+// Every wrap publish registers here before its first attempt. Hosts feed
+// relay OKs back via `note_relay_ok` from their notification loop; an
+// accepted OK counts as delivery no matter how late it arrives — it wakes
+// the in-flight retry loop early, or rescues a message already marked
+// Failed back to Sent.
+
+struct WrapConfirm {
+    wrap_id: EventId,
+    chat_id: String,
+    pending_id: String,
+    /// Inner rumor id — the message's final id after finalization.
+    rumor_event_id: String,
+    rumor: UnsignedEvent,
+    callback: Arc<dyn SendCallback>,
+    self_send: bool,
+    confirmed: AtomicBool,
+    /// Claimed by whichever path (retry loop or note_relay_ok) performs
+    /// the failed→sent rescue, so it happens exactly once.
+    rescued: AtomicBool,
+    /// Set once the retry loop has exited after marking the message
+    /// failed — from then on `note_relay_ok` performs the rescue itself.
+    loop_exited: AtomicBool,
+    notify: tokio::sync::Notify,
+    session: crate::state::SessionGuard,
+    registered_at: std::time::Instant,
+}
+
+static WRAP_CONFIRMS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<EventId, Arc<WrapConfirm>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// An OK this long after the last publish attempt is a ghost — drop the
+/// entry rather than resurrect a message the user has moved past.
+const WRAP_CONFIRM_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+fn register_wrap_confirm(entry: Arc<WrapConfirm>) {
+    let mut map = WRAP_CONFIRMS.lock().unwrap();
+    map.retain(|_, e| e.registered_at.elapsed() < WRAP_CONFIRM_TTL);
+    map.insert(entry.wrap_id, entry);
+}
+
+fn remove_wrap_confirm(wrap_id: &EventId) {
+    WRAP_CONFIRMS.lock().unwrap().remove(wrap_id);
+}
+
+/// Clear on session swap — entries carry per-account chat/message ids.
+pub fn clear_wrap_confirms() {
+    WRAP_CONFIRMS.lock().unwrap().clear();
+}
+
+/// Feed a relay `OK` for an outbound event back into the send pipeline.
+///
+/// Hosts call this from their notification loop for every
+/// `RelayMessage::Ok`. Ids that aren't in-flight wraps miss the registry
+/// and return immediately.
+pub fn note_relay_ok(event_id: &EventId, accepted: bool) {
+    if !accepted {
+        return;
+    }
+    let entry = {
+        let map = WRAP_CONFIRMS.lock().unwrap();
+        map.get(event_id).cloned()
+    };
+    let Some(entry) = entry else { return };
+    entry.confirmed.store(true, Ordering::SeqCst);
+    entry.notify.notify_one();
+    if !entry.loop_exited.load(Ordering::SeqCst)
+        || entry.rescued.swap(true, Ordering::SeqCst)
+    {
+        return;
+    }
+    if !entry.session.is_valid() {
+        remove_wrap_confirm(&entry.wrap_id);
+        return;
+    }
+    tokio::spawn(async move {
+        rescue_failed_as_sent(&entry).await;
+        remove_wrap_confirm(&entry.wrap_id);
+    });
+}
+
+/// Flip an already-failed message back to Sent — a late relay OK proved
+/// the wrap was delivered.
+async fn rescue_failed_as_sent(entry: &WrapConfirm) {
+    if !entry.session.is_valid() {
+        return;
+    }
+    let finalized = {
+        let mut state = STATE.lock().await;
+        state.update_message(&entry.pending_id, |msg| {
+            msg.set_failed(false);
+        });
+        state.finalize_pending_message(&entry.chat_id, &entry.pending_id, &entry.rumor_event_id)
+    };
+    let Some((_old_id, ref msg)) = finalized else { return };
+    crate::log_info!(
+        "[Send] late relay OK confirmed wrap {} — message {} rescued to sent",
+        entry.wrap_id,
+        entry.rumor_event_id,
+    );
+    entry.callback.on_sent(&entry.chat_id, &entry.pending_id, msg);
+    entry.callback.on_persist(&entry.chat_id, msg);
+    if entry.self_send {
+        if let (Some(client), Some(my_pk)) = (nostr_client(), my_public_key()) {
+            spawn_self_send(client, my_pk, entry.rumor.clone());
+        }
+    }
+}
+
+/// Fire-and-forget the self-send recovery copy + persist its wrap key.
+/// SessionGuard skips publish + DB write on swap; without it account A's
+/// wrap key would corrupt account B's nip17_keys delete-history.
+fn spawn_self_send(client: Client, my_pk: PublicKey, rumor: UnsignedEvent) {
+    let rid_for_self = rumor.id;
+    let session = crate::state::SessionGuard::capture();
+    tokio::spawn(async move {
+        if !session.is_valid() { return; }
+        match crate::inbox_relays::send_gift_wrap_retained(
+            &client, &my_pk, rumor, [],
+        ).await {
+            Ok(self_outcome) if !self_outcome.output.success.is_empty() => {
+                if !session.is_valid() { return; }
+                if let Some(rid) = rid_for_self {
+                    if let Err(e) = crate::db::nip17_keys::store_wrap_key(
+                        &self_outcome.wrap_event_id,
+                        &rid,
+                        &my_pk,
+                        crate::db::nip17_keys::WrapRole::SelfSend,
+                        &self_outcome.wrap_secret,
+                        &self_outcome.targeted_relays,
+                    ) {
+                        eprintln!("[NIP-17] failed to persist self-wrap key: {}", e);
+                    }
+                }
+            }
+            _ => {}
+        }
+    });
+}
+
+// ============================================================================
 // Internal: retry gift-wrap send
 // ============================================================================
 
 /// Shared tail of send_dm / send_file_dm / send_rumor_dm:
 /// gift-wrap → retry loop → finalize/fail → self-send.
 ///
-/// Each successful wrap is persisted via `db::nip17_keys::store_wrap_key`
-/// so that the user can later issue a NIP-09 deletion against the
-/// kind-1059 wrap event id. Recipient wrap and self-send wrap each
-/// retain their own ephemeral key.
+/// The wrap is built ONCE and the identical event republished on every
+/// attempt: a relay that already stored it answers the resend with
+/// OK-true "duplicate", so a lost OK becomes a delivery confirmation on
+/// the next attempt instead of an unconfirmed extra copy. The wrap's
+/// ephemeral key is persisted via `db::nip17_keys::store_wrap_key`
+/// BEFORE the first publish — a wrap can land without us ever seeing
+/// the OK, and the user must still be able to NIP-09 it later.
 async fn retry_send_gift_wrap(
     client: &Client,
     receiver: &PublicKey,
@@ -148,152 +301,222 @@ async fn retry_send_gift_wrap(
     let my_pk = my_public_key().ok_or("Public key not set")?;
     let inner_rumor_id = rumor.id;
 
-    for attempt in 0..config.max_send_attempts {
-        match crate::inbox_relays::send_gift_wrap_retained(client, receiver, rumor.clone(), []).await {
-            Ok(outcome) if outcome.output.success.is_empty() => {
-                // The publish round-trip succeeded but every targeted relay
-                // rejected the wrap (auth required, kind filter, rate-limit,
-                // timed-out OK, etc.). Surface the per-relay failure reasons
-                // so the user can see WHY their DMs aren't being accepted.
-                let failures: Vec<String> = outcome.output.failed.iter()
+    // Built lazily in-loop so transient signer failures (NIP-46 bunker
+    // round-trips) still get the full retry schedule.
+    let mut built: Option<crate::inbox_relays::BuiltGiftWrap> = None;
+    // Targets resolve once; transient inbox connections live across the
+    // whole retry window rather than reconnecting per attempt.
+    let mut targets: Option<crate::inbox_relays::GiftWrapTargets> = None;
+    let mut confirm: Option<Arc<WrapConfirm>> = None;
+    let mut last_error: Option<String> = None;
+
+    let max_attempts = config.max_send_attempts.max(1);
+
+    for attempt in 0..max_attempts {
+        if built.is_none() {
+            match crate::inbox_relays::build_gift_wrap_retained(
+                client, receiver, rumor.clone(), [],
+            ).await {
+                Ok(b) => built = Some(b),
+                Err(e) => {
+                    crate::log_warn!(
+                        "[Send] attempt {}/{} — building gift-wrap failed: {}",
+                        attempt + 1, max_attempts, e,
+                    );
+                    last_error = Some(e);
+                    if attempt + 1 < max_attempts {
+                        tokio::time::sleep(config.retry_delay).await;
+                    }
+                    continue;
+                }
+            }
+        }
+        let wrap = built.as_ref().unwrap();
+
+        if confirm.is_none() {
+            let entry = Arc::new(WrapConfirm {
+                wrap_id: wrap.event.id,
+                chat_id: receiver_npub.to_string(),
+                pending_id: pending_id.to_string(),
+                rumor_event_id: event_id.to_string(),
+                rumor: rumor.clone(),
+                callback: callback.clone(),
+                self_send: config.self_send,
+                confirmed: AtomicBool::new(false),
+                rescued: AtomicBool::new(false),
+                loop_exited: AtomicBool::new(false),
+                notify: tokio::sync::Notify::new(),
+                session: crate::state::SessionGuard::capture(),
+                registered_at: std::time::Instant::now(),
+            });
+            register_wrap_confirm(entry.clone());
+            confirm = Some(entry);
+        }
+        let confirm_ref = confirm.as_ref().unwrap();
+
+        if targets.is_none() {
+            let t = crate::inbox_relays::resolve_gift_wrap_targets(client, receiver).await;
+            if let Some(rid) = inner_rumor_id {
+                if let Err(e) = crate::db::nip17_keys::store_wrap_key(
+                    &wrap.event.id,
+                    &rid,
+                    receiver,
+                    crate::db::nip17_keys::WrapRole::Recipient,
+                    &wrap.secret,
+                    &t.targeted_relays,
+                ) {
+                    eprintln!("[NIP-17] failed to persist wrap key: {}", e);
+                }
+            }
+            targets = Some(t);
+        } else {
+            crate::inbox_relays::reconnect_gift_wrap_targets(targets.as_ref().unwrap()).await;
+        }
+        let targets_ref = targets.as_ref().unwrap();
+
+        match crate::inbox_relays::publish_gift_wrap_to_targets(
+            client, targets_ref, &wrap.event,
+        ).await {
+            Ok(output) if !output.success.is_empty() => {
+                return Ok(finalize_gift_wrap_sent(
+                    client, my_pk, receiver_npub, pending_id, event_id,
+                    &rumor, config, &callback, confirm_ref, targets_ref,
+                ).await);
+            }
+            Ok(output) => {
+                // The publish round-trip ran but no targeted relay confirmed
+                // (auth required, kind filter, rate-limit, timed-out OK,
+                // etc.). Surface the per-relay failure reasons so the user
+                // can see WHY their DMs aren't being accepted.
+                let failures: Vec<String> = output.failed.iter()
                     .map(|(url, err)| format!("{}: {}", url, err))
                     .collect();
-                let targeted_count = outcome.targeted_relays.len();
                 crate::log_warn!(
                     "[Send] attempt {}/{} — 0 of {} relays accepted (targeted: {}). Per-relay errors: {}",
                     attempt + 1,
-                    config.max_send_attempts,
-                    targeted_count,
-                    outcome.targeted_relays.join(", "),
+                    max_attempts,
+                    targets_ref.targeted_relays.len(),
+                    targets_ref.targeted_relays.join(", "),
                     if failures.is_empty() {
                         "(none reported — likely all timed out before responding)".to_string()
                     } else {
                         failures.join(" | ")
                     },
                 );
-                if attempt + 1 >= config.max_send_attempts {
-                    // All attempts exhausted — mark failed
-                    let failed_msg = {
-                        let mut state = STATE.lock().await;
-                        state.update_message(pending_id, |msg| {
-                            msg.set_failed(true);
-                            msg.set_pending(false);
-                        })
-                    };
-                    if let Some((_chat_id, ref msg)) = failed_msg {
-                        callback.on_failed(receiver_npub, pending_id, msg);
-                        callback.on_persist(receiver_npub, msg);
-                    }
-                    return Err(format!("Failed to send DM after {} attempts (no relays accepted the gift-wrap)", config.max_send_attempts));
-                }
-                tokio::time::sleep(config.retry_delay).await;
-                continue;
-            }
-            Ok(outcome) => {
-                // At least one relay accepted — success.
-                // Persist the retained ephemeral key so the user can
-                // later issue NIP-09 deletion against this wrap.
-                if let Some(rid) = inner_rumor_id {
-                    let role = if attempt == 0 {
-                        crate::db::nip17_keys::WrapRole::Recipient
-                    } else {
-                        crate::db::nip17_keys::WrapRole::Retry
-                    };
-                    if let Err(e) = crate::db::nip17_keys::store_wrap_key(
-                        &outcome.wrap_event_id,
-                        &rid,
-                        receiver,
-                        role,
-                        &outcome.wrap_secret,
-                        &outcome.targeted_relays,
-                    ) {
-                        eprintln!("[NIP-17] failed to persist wrap key: {}", e);
-                    }
-                }
-
-                let finalized = {
-                    let mut state = STATE.lock().await;
-                    state.finalize_pending_message(receiver_npub, pending_id, event_id)
-                };
-
-                if let Some((_old_id, ref finalized_msg)) = finalized {
-                    callback.on_sent(receiver_npub, pending_id, finalized_msg);
-                    callback.on_persist(receiver_npub, finalized_msg);
-                }
-
-                // Self-send for recovery + retain wrap key so the user
-                // can later delete their own copy from inbox relays.
-                // SessionGuard skips publish + DB write on swap; without
-                // it account A's wrap key would corrupt account B's
-                // nip17_keys delete-history.
-                if config.self_send {
-                    let client = client.clone();
-                    let my_pk_clone = my_pk;
-                    let rumor_clone = rumor.clone();
-                    let rid_for_self = inner_rumor_id;
-                    let session = crate::state::SessionGuard::capture();
-                    tokio::spawn(async move {
-                        if !session.is_valid() { return; }
-                        match crate::inbox_relays::send_gift_wrap_retained(
-                            &client, &my_pk_clone, rumor_clone, [],
-                        ).await {
-                            Ok(self_outcome) if !self_outcome.output.success.is_empty() => {
-                                if !session.is_valid() { return; }
-                                if let Some(rid) = rid_for_self {
-                                    if let Err(e) = crate::db::nip17_keys::store_wrap_key(
-                                        &self_outcome.wrap_event_id,
-                                        &rid,
-                                        &my_pk_clone,
-                                        crate::db::nip17_keys::WrapRole::SelfSend,
-                                        &self_outcome.wrap_secret,
-                                        &self_outcome.targeted_relays,
-                                    ) {
-                                        eprintln!("[NIP-17] failed to persist self-wrap key: {}", e);
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    });
-                }
-
-                return Ok(SendResult {
-                    pending_id: pending_id.to_string(),
-                    event_id: Some(event_id.to_string()),
-                    chat_id: receiver_npub.to_string(),
-                });
+                last_error = None;
             }
             Err(e) => {
-                // send_gift_wrap_retained itself errored before even
-                // attempting a publish (seal/wrap failure, signer issue,
-                // pool resolution problem). Log so we can tell this apart
-                // from "publishes ran but all relays rejected".
                 crate::log_warn!(
-                    "[Send] attempt {}/{} — send_gift_wrap_retained errored: {}",
-                    attempt + 1,
-                    config.max_send_attempts,
-                    e,
+                    "[Send] attempt {}/{} — publish errored: {}",
+                    attempt + 1, max_attempts, e,
                 );
-                if attempt + 1 >= config.max_send_attempts {
-                    let failed_msg = {
-                        let mut state = STATE.lock().await;
-                        state.update_message(pending_id, |msg| {
-                            msg.set_failed(true);
-                            msg.set_pending(false);
-                        })
-                    };
-                    if let Some((_chat_id, ref msg)) = failed_msg {
-                        callback.on_failed(receiver_npub, pending_id, msg);
-                        callback.on_persist(receiver_npub, msg);
-                    }
-                    return Err(format!("Failed to send DM after {} attempts: {}", config.max_send_attempts, e));
-                }
-                tokio::time::sleep(config.retry_delay).await;
+                last_error = Some(e);
+            }
+        }
+
+        // A late OK for an earlier attempt may have arrived while this one
+        // was publishing.
+        if confirm_ref.confirmed.load(Ordering::SeqCst) {
+            return Ok(finalize_gift_wrap_sent(
+                client, my_pk, receiver_npub, pending_id, event_id,
+                &rumor, config, &callback, confirm_ref, targets_ref,
+            ).await);
+        }
+
+        if attempt + 1 < max_attempts {
+            // Sleep out the retry delay, waking instantly on a late OK
+            // (notify_one stores a permit, so an OK landing before this
+            // line still wakes us).
+            let _ = tokio::time::timeout(
+                config.retry_delay,
+                confirm_ref.notify.notified(),
+            ).await;
+            if confirm_ref.confirmed.load(Ordering::SeqCst) {
+                return Ok(finalize_gift_wrap_sent(
+                    client, my_pk, receiver_npub, pending_id, event_id,
+                    &rumor, config, &callback, confirm_ref, targets_ref,
+                ).await);
             }
         }
     }
 
-    Err("Send loop exited unexpectedly".to_string())
+    // Exhausted every attempt with no OK observed. Mark failed, but leave
+    // the confirmation entry armed: a straggler OK can still rescue this
+    // message to Sent (see note_relay_ok).
+    if let Some(t) = targets.as_ref() {
+        crate::inbox_relays::teardown_gift_wrap_targets(client, t).await;
+    }
+    let failed_msg = {
+        let mut state = STATE.lock().await;
+        state.update_message(pending_id, |msg| {
+            msg.set_failed(true);
+            msg.set_pending(false);
+        })
+    };
+    if let Some((_chat_id, ref msg)) = failed_msg {
+        callback.on_failed(receiver_npub, pending_id, msg);
+        callback.on_persist(receiver_npub, msg);
+    }
+    if let Some(entry) = confirm.as_ref() {
+        entry.loop_exited.store(true, Ordering::SeqCst);
+        // An OK that landed between the last attempt and loop_exited going
+        // up would see loop_exited=false and skip its rescue — catch it here.
+        if entry.confirmed.load(Ordering::SeqCst)
+            && !entry.rescued.swap(true, Ordering::SeqCst)
+        {
+            rescue_failed_as_sent(entry).await;
+            remove_wrap_confirm(&entry.wrap_id);
+            return Ok(SendResult {
+                pending_id: pending_id.to_string(),
+                event_id: Some(event_id.to_string()),
+                chat_id: receiver_npub.to_string(),
+            });
+        }
+    }
+    match last_error {
+        Some(e) => Err(format!("Failed to send DM after {} attempts: {}", max_attempts, e)),
+        None => Err(format!(
+            "Failed to send DM after {} attempts (no relays accepted the gift-wrap)",
+            max_attempts
+        )),
+    }
+}
+
+/// Success epilogue shared by every confirmed path in the retry loop:
+/// finalize the pending message, notify, persist, fire the self-send.
+async fn finalize_gift_wrap_sent(
+    client: &Client,
+    my_pk: PublicKey,
+    receiver_npub: &str,
+    pending_id: &str,
+    event_id: &str,
+    rumor: &UnsignedEvent,
+    config: &SendConfig,
+    callback: &Arc<dyn SendCallback>,
+    confirm: &Arc<WrapConfirm>,
+    targets: &crate::inbox_relays::GiftWrapTargets,
+) -> SendResult {
+    remove_wrap_confirm(&confirm.wrap_id);
+    crate::inbox_relays::teardown_gift_wrap_targets(client, targets).await;
+
+    let finalized = {
+        let mut state = STATE.lock().await;
+        state.finalize_pending_message(receiver_npub, pending_id, event_id)
+    };
+    if let Some((_old_id, ref finalized_msg)) = finalized {
+        callback.on_sent(receiver_npub, pending_id, finalized_msg);
+        callback.on_persist(receiver_npub, finalized_msg);
+    }
+
+    if config.self_send {
+        spawn_self_send(client.clone(), my_pk, rumor.clone());
+    }
+
+    SendResult {
+        pending_id: pending_id.to_string(),
+        event_id: Some(event_id.to_string()),
+        chat_id: receiver_npub.to_string(),
+    }
 }
 
 // ============================================================================
