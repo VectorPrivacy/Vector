@@ -232,9 +232,21 @@ function initCommandSelector(textarea, io, anchorEl) {
         return { recent, matches };
     }
 
-    function commandRow(cmd, flatIndex) {
+    function commandRow(cmd, flatIndex, showBot) {
         const row = document.createElement('div');
         row.className = 'command-item' + (flatIndex === activeIndex ? ' active' : '');
+        if (showBot) {
+            // Recents mix bots, so each row wears its owner's face — two bots'
+            // /roll entries are distinct commands that would otherwise look
+            // like duplicates.
+            const profile = io.botProfile(cmd.bot) || {};
+            const img = document.createElement('img');
+            img.className = 'command-item-bot';
+            img.src = profile.avatarSrc || 'icons/user-placeholder.svg';
+            img.alt = '';
+            row.appendChild(img);
+            row.title = profile.name || cmd.bot.slice(0, 12) + '…';
+        }
         const name = document.createElement('span');
         name.className = 'command-item-name';
         name.textContent = '/' + cmd.name;
@@ -308,18 +320,18 @@ function initCommandSelector(textarea, io, anchorEl) {
         // panel top while its rows scroll, then get pushed away by the next
         // section's header (sticky is clamped to its own wrapper).
         const flat = [];
-        const section = (headerText, avatarSrc, cmds) => {
+        const section = (headerText, avatarSrc, cmds, showBot) => {
             const wrap = document.createElement('div');
             wrap.className = 'command-section';
             wrap.appendChild(sectionHeader(headerText, avatarSrc));
             for (const cmd of cmds) {
-                wrap.appendChild(commandRow(cmd, flat.length));
+                wrap.appendChild(commandRow(cmd, flat.length, showBot));
                 flat.push(cmd);
             }
             panel.appendChild(wrap);
         };
         if (recent.length) {
-            section('Recently Used', null, recent);
+            section('Recently Used', null, recent, true);
         }
         const byBot = new Map();
         for (const cmd of matches) {

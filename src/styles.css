@@ -15244,6 +15244,15 @@ hr {
   flex-shrink: 0;
 }
 
+/* Recents rows wear their owning bot's face (mixed-bot section). */
+.command-item img.command-item-bot {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
 .command-item-arg {
   font-size: 12px;
   padding: 1px 6px;
