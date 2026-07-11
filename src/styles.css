@@ -15416,9 +15416,12 @@ hr {
   height: 46px;
 }
 
-/* Both open: reply keeps its top dock; the command strip (a later sibling,
-   so it paints over the reply strip's tucked tail) docks onto the composer. */
-#chat-box.commanding.replying #chat-command-bar {
+/* Whenever the reply strip is open the command bar rides at the composer's
+   MOVED position — open (both strips stacked: reply keeps its top dock, the
+   command strip paints over reply's tucked tail) or closed (still tucked
+   behind the composer; at top 5px its closed band would float exposed in
+   the reply strip's zone and clip the reply cancel button). */
+#chat-box.replying #chat-command-bar {
   top: 39px;
 }
 
@@ -15485,6 +15488,13 @@ hr {
   display: block;
   width: 18px;
   height: 18px;
+  margin: 0;
+  background-color: var(--danger-color);
+  transition: filter 0.15s ease;
+}
+
+#chat-command-bar-cancel:hover .icon-cancel {
+  filter: brightness(1.25);
 }
 
 @media (prefers-reduced-motion: reduce) {

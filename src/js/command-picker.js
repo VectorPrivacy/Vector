@@ -453,6 +453,9 @@ function initCommandSelector(textarea, io, anchorEl) {
     function exitComposer(keepPick) {
         anchorEl.classList.remove('commanding');
         if (!composing) return;
+        // Keep the Android back stack in sync when we close via our own paths
+        // (Esc, cancel, send, chat switch); no-op after a hardware back pop.
+        popBack('command-composer');
         composing.bar.remove();
         textarea.style.display = '';
         composing = null;
@@ -524,6 +527,8 @@ function initCommandSelector(textarea, io, anchorEl) {
         composing = { cmd, chatId: io.chatId(), bar, parts };
         showContextBar(cmd);
         io.composerToggled(true);
+        // Android hardware back closes the composer first, like Esc on desktop.
+        pushBack('command-composer', () => exitComposer(false));
         parts[0].el.focus();
     }
 
@@ -548,12 +553,35 @@ function initCommandSelector(textarea, io, anchorEl) {
                 exitComposer();
                 return;
             }
-            const prev = parts[idx - 1].el;
-            prev.focus();
-            if (prev.setSelectionRange) {
-                const end = prev.value.length;
-                prev.setSelectionRange(end, end);
+            focusPart(idx - 1, 'end');
+        } else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+            // Arrowing past a param's edge crosses into the bordering param:
+            // Right at the end lands at the START of the next, Left at the
+            // start lands at the END of the prior. Selects have no caret, so
+            // either arrow crosses from them.
+            const el = e.target;
+            const isSelect = el.tagName === 'SELECT';
+            const caretless = isSelect || el.selectionStart !== el.selectionEnd;
+            if (e.key === 'ArrowRight' && idx < parts.length - 1
+                && (isSelect || (!caretless && el.selectionEnd === el.value.length))) {
+                e.preventDefault();
+                focusPart(idx + 1, 'start');
+            } else if (e.key === 'ArrowLeft' && idx > 0
+                && (isSelect || (!caretless && el.selectionStart === 0))) {
+                e.preventDefault();
+                focusPart(idx - 1, 'end');
             }
+        }
+    }
+
+    /** Focus a part with the caret placed at one end of its value. */
+    function focusPart(idx, where) {
+        const el = composing && composing.parts[idx] ? composing.parts[idx].el : null;
+        if (!el) return;
+        el.focus();
+        if (el.setSelectionRange) {
+            const pos = where === 'end' ? el.value.length : 0;
+            el.setSelectionRange(pos, pos);
         }
     }
 
