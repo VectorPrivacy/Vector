@@ -783,6 +783,7 @@ pub fn run() {
             commands::community::list_communities,
             commands::community::get_community,
             commands::community::get_community_members,
+            commands::community::get_chat_commands,
             commands::community::ban_community_member,
             commands::community::unban_community_member,
             commands::community::delete_community,

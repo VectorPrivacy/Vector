@@ -115,6 +115,7 @@
     "allow-list-communities",
     "allow-get-community",
     "allow-get-community-members",
+    "allow-get-chat-commands",
     "allow-ban-community-member",
     "allow-unban-community-member",
     "allow-delete-community",

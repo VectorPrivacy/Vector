@@ -1924,6 +1924,66 @@ impl VectorCore {
         Ok((new, warnings))
     }
 
+    /// The composer's `/` picker snapshot for `chat_id`, answered INSTANTLY
+    /// from local state: the chat's bot-flagged members (kind-0 `bot: true` —
+    /// the SDK sets it on every bot it builds) and their last-known manifests
+    /// from the persistent store. When the last refresh is older than a minute
+    /// (or the bot set changed), ONE background REQ re-fetches every bot's
+    /// manifest together (5s unification window), persists newer editions, and
+    /// emits `chat_commands_updated` — the UI swaps the list in when it lands.
+    /// A v2 community queries its own relays; a DM queries the connected pool;
+    /// a v1 community has no picker (SDK bots are v2-first).
+    pub async fn get_chat_commands(&self, chat_id: &str) -> crate::bot_interface::ChatCommandsSnapshot {
+        use crate::bot_interface::{self, ChatCommandsSnapshot};
+        use nostr_sdk::prelude::ToBech32;
+
+        let mut bots: Vec<nostr_sdk::prelude::PublicKey> = Vec::new();
+        let mut relays: Vec<String> = Vec::new();
+        let community_hex = crate::db::community::community_id_for_channel(chat_id).ok().flatten();
+        if let Some(cid_hex) = community_hex {
+            if let Ok(Some(community)) = Self::load_v2_if_v2(&cid_hex) {
+                let members = community::v2::service::stored_memberlist(&community).unwrap_or_default();
+                let state = crate::state::STATE.lock().await;
+                for pk in members {
+                    let Ok(npub) = pk.to_bech32() else { continue };
+                    if state.get_profile(&npub).map(|p| p.flags.is_bot()).unwrap_or(false) {
+                        bots.push(pk);
+                    }
+                }
+                relays = community.relays.clone();
+            }
+        } else if chat_id.starts_with("npub1") {
+            if let Ok(pk) = nostr_sdk::prelude::PublicKey::parse(chat_id) {
+                let is_bot = {
+                    let state = crate::state::STATE.lock().await;
+                    state.get_profile(chat_id).map(|p| p.flags.is_bot()).unwrap_or(false)
+                };
+                if is_bot {
+                    bots.push(pk);
+                    // The counterpart published its manifest to its own login
+                    // relays/indexers — our connected pool is the read set.
+                    if let Some(client) = crate::state::nostr_client() {
+                        relays = client.relays().await.keys().map(|u| u.to_string()).collect();
+                    }
+                }
+            }
+        }
+
+        if bots.is_empty() {
+            return ChatCommandsSnapshot { bots: 0, commands: Vec::new(), fresh: true };
+        }
+        // Deterministic order: the freshness check compares the exact bot set,
+        // and picker sections stay stable across refreshes.
+        bots.sort_by_key(|p| p.to_hex());
+        let bot_hexes: Vec<String> = bots.iter().map(|p| p.to_hex()).collect();
+        let commands = bot_interface::assemble_from_store(&bot_hexes);
+        let fresh = bot_interface::commands_fresh(chat_id, &bot_hexes);
+        if !fresh {
+            bot_interface::spawn_commands_refresh(chat_id.to_string(), bots.clone(), relays);
+        }
+        ChatCommandsSnapshot { bots: bots.len(), commands, fresh }
+    }
+
     /// Observed members of a Community (best-effort: those who've posted or announced a join,
     /// minus anyone who's left or is banned). v1 entries are `{npub, last_active}`; a v2 entry
     /// is `{npub}` (the Complete Memberlist carries no activity time). Best-effort throughout:

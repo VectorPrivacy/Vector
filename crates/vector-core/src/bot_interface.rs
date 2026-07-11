@@ -437,6 +437,168 @@ pub fn typed_args(spec: &CommandSpec, parsed: &ParsedCommand) -> Result<HashMap<
     Ok(out)
 }
 
+// ── Picker surface: batch discovery + per-chat cache ─────────────────────────
+
+/// One bot's published commands, shaped for a client's `/` picker. The client
+/// resolves the bot's display name/avatar from its own profile cache.
+#[derive(Serialize, Clone, Debug)]
+pub struct ChatBotCommands {
+    /// The bot's npub.
+    pub bot: String,
+    pub commands: Vec<CommandSpec>,
+}
+
+/// What the composer's `/` picker renders, instantly answerable from local
+/// state. `fresh: false` means a background refetch was spawned — a
+/// `chat_commands_updated` event follows with the converged list.
+#[derive(Serialize, Clone, Debug)]
+pub struct ChatCommandsSnapshot {
+    /// How many bot-flagged members this chat has (spinner copy: "Loading N bots").
+    pub bots: usize,
+    /// Last-known command sets, one entry per bot with a stored manifest,
+    /// commands in MANIFEST order (bots arrange their own list).
+    pub commands: Vec<ChatBotCommands>,
+    /// `true` = served from the fresh-TTL cache; nothing further will arrive.
+    pub fresh: bool,
+}
+
+/// Batch-fetch validated manifests for a set of authors over specific relays —
+/// the picker's ONE REQ (all bots of a room in a single query). Transport-
+/// generic so community relays are queried directly and tests run offline.
+/// Per author: the NEWEST event wins, then must validate (a bot that breaks
+/// its own manifest has no usable interface — parity with [`fetch_manifest`]);
+/// authors the relay volunteers beyond the asked set are dropped, as is
+/// anything failing signature verification. Returns each manifest with its
+/// event timestamp (the store's newest-wins key).
+pub async fn fetch_manifests<T: crate::community::transport::Transport + ?Sized>(
+    transport: &T,
+    authors: &[nostr_sdk::prelude::PublicKey],
+    relays: &[String],
+) -> Result<Vec<(nostr_sdk::prelude::PublicKey, BotManifest, u64)>, String> {
+    use crate::community::transport::Query;
+    if authors.is_empty() {
+        return Ok(Vec::new());
+    }
+    let query = Query {
+        kinds: vec![KIND_BOT_MANIFEST],
+        authors: authors.iter().map(|p| p.to_hex()).collect(),
+        ..Default::default()
+    };
+    let events = transport.fetch(&query, relays).await?;
+    let mut best: HashMap<nostr_sdk::prelude::PublicKey, &Event> = HashMap::new();
+    for ev in &events {
+        if !authors.contains(&ev.pubkey) || ev.verify().is_err() {
+            continue;
+        }
+        match best.get(&ev.pubkey) {
+            Some(b) if b.created_at >= ev.created_at => {}
+            _ => {
+                best.insert(ev.pubkey, ev);
+            }
+        }
+    }
+    let mut out: Vec<(nostr_sdk::prelude::PublicKey, BotManifest, u64)> = best
+        .into_iter()
+        .filter_map(|(pk, ev)| BotManifest::from_event(ev).ok().map(|m| (pk, m, ev.created_at.as_secs())))
+        .collect();
+    out.sort_by_key(|(pk, _, _)| pk.to_hex());
+    Ok(out)
+}
+
+/// Assemble picker entries from the persistent manifest store for a set of bot
+/// pubkeys (hex, pre-sorted order preserved). Bots with no stored manifest are
+/// absent; a stored row that no longer parses/validates is skipped.
+pub fn assemble_from_store(bot_hexes: &[String]) -> Vec<ChatBotCommands> {
+    use nostr_sdk::prelude::ToBech32;
+    let rows = crate::db::bots::get_bot_manifests(bot_hexes).unwrap_or_default();
+    let by_pk: HashMap<&str, &str> = rows.iter().map(|(pk, m)| (pk.as_str(), m.as_str())).collect();
+    bot_hexes
+        .iter()
+        .filter_map(|hex| {
+            let json = by_pk.get(hex.as_str())?;
+            let manifest: BotManifest = serde_json::from_str(json).ok()?;
+            manifest.validate().ok()?;
+            let npub = nostr_sdk::prelude::PublicKey::from_hex(hex).ok()?.to_bech32().ok()?;
+            Some(ChatBotCommands { bot: npub, commands: manifest.commands })
+        })
+        .collect()
+}
+
+/// Freshness memory per chat: (session generation, refreshed-at, the bot set
+/// the refresh covered). One REQ per chat per minute; a CHANGED bot set (a bot
+/// joined/left) counts as stale immediately. The generation tag makes an
+/// account swap a natural invalidation.
+const COMMANDS_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+static COMMANDS_FRESH: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, (u64, std::time::Instant, Vec<String>)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+/// Chats with a refresh REQ in flight (stampede guard for `/` keystrokes).
+static REFRESH_INFLIGHT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+/// `true` while the last completed refresh for this chat is within TTL AND
+/// covered exactly `bot_hexes`.
+pub fn commands_fresh(chat_id: &str, bot_hexes: &[String]) -> bool {
+    let generation = crate::state::SessionGuard::capture().generation();
+    let map = match COMMANDS_FRESH.lock() {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    match map.get(chat_id) {
+        Some((g, at, bots)) => *g == generation && at.elapsed() < COMMANDS_TTL && bots == bot_hexes,
+        None => false,
+    }
+}
+
+fn mark_commands_fresh(chat_id: &str, generation: u64, bot_hexes: &[String]) {
+    if let Ok(mut map) = COMMANDS_FRESH.lock() {
+        if map.len() > 256 {
+            map.clear();
+        }
+        map.insert(chat_id.to_string(), (generation, std::time::Instant::now(), bot_hexes.to_vec()));
+    }
+}
+
+/// Background half of the picker flow: ONE REQ for every bot's manifest (5s
+/// unification window), persist newer editions, mark the chat fresh, and tell
+/// the UI to swap in the converged list. Deduped per chat; session-guarded
+/// before every write.
+pub fn spawn_commands_refresh(chat_id: String, bots: Vec<nostr_sdk::prelude::PublicKey>, relays: Vec<String>) {
+    {
+        let Ok(mut inflight) = REFRESH_INFLIGHT.lock() else { return };
+        if !inflight.insert(chat_id.clone()) {
+            return; // already fetching for this chat
+        }
+    }
+    let session = crate::state::SessionGuard::capture();
+    tokio::spawn(async move {
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(5));
+        let fetched = fetch_manifests(&transport, &bots, &relays).await;
+        if let Ok(mut inflight) = REFRESH_INFLIGHT.lock() {
+            inflight.remove(&chat_id);
+        }
+        let Ok(found) = fetched else { return }; // transient failure: stay stale, next `/` retries
+        if !session.is_valid() {
+            return;
+        }
+        for (pk, manifest, created_at) in &found {
+            if let Ok(json) = serde_json::to_string(manifest) {
+                let _ = crate::db::bots::upsert_bot_manifest(&pk.to_hex(), &json, *created_at);
+            }
+        }
+        let bot_hexes: Vec<String> = bots.iter().map(|p| p.to_hex()).collect();
+        let commands = assemble_from_store(&bot_hexes);
+        if !session.is_valid() {
+            return;
+        }
+        mark_commands_fresh(&chat_id, session.generation(), &bot_hexes);
+        crate::traits::emit_event(
+            "chat_commands_updated",
+            &serde_json::json!({ "chat_id": chat_id, "bots": bots.len(), "commands": commands }),
+        );
+    });
+}
+
 // ── Network: publish + fetch ─────────────────────────────────────────────────
 
 /// Publish `manifest` as the signed addressable event over the given relays
@@ -653,6 +815,75 @@ mod tests {
 
         // Unterminated quote → not a command (ordinary chat).
         assert!(parse_command_text(&m, r#"/announce "dangling"#).is_none());
+    }
+
+    #[tokio::test]
+    async fn batch_fetch_returns_newest_valid_per_author_and_ignores_strangers() {
+        use crate::community::transport::{memory::MemoryRelay, Transport};
+        use nostr_sdk::prelude::Timestamp;
+        let relay = MemoryRelay::new();
+        let relays = vec!["r1".to_string()];
+        let bot_a = Keys::generate();
+        let bot_b = Keys::generate();
+        let stranger = Keys::generate();
+
+        let manifest_event = |m: &BotManifest, keys: &Keys, at: u64| {
+            EventBuilder::new(Kind::Custom(KIND_BOT_MANIFEST), serde_json::to_string(m).unwrap())
+                .tags([Tag::identifier("")])
+                .custom_created_at(Timestamp::from_secs(at))
+                .sign_with_keys(keys)
+                .unwrap()
+        };
+        // A: an old manifest, then a newer edition with a different command set.
+        let old_ev = manifest_event(&price_manifest(), &bot_a, 100);
+        let newer = BotManifest {
+            v: 1,
+            commands: vec![CommandSpec { name: "newer".into(), description: "n".into(), args: vec![] }],
+        };
+        let new_ev = manifest_event(&newer, &bot_a, 200);
+        // B: newest is garbage — B has no usable interface (no fallback to older).
+        let b_garbage = EventBuilder::new(Kind::Custom(KIND_BOT_MANIFEST), "not json")
+            .tags([Tag::identifier("")])
+            .custom_created_at(Timestamp::from_secs(300))
+            .sign_with_keys(&bot_b)
+            .unwrap();
+        // Stranger: a VALID manifest outside the asked author set.
+        let s_ev = price_manifest().to_event(&stranger).unwrap();
+        for ev in [&old_ev, &new_ev, &b_garbage, &s_ev] {
+            relay.publish(ev, &relays).await.unwrap();
+        }
+
+        let found = fetch_manifests(&relay, &[bot_a.public_key(), bot_b.public_key()], &relays)
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1, "only A has a usable newest manifest: {found:?}");
+        assert_eq!(found[0].0, bot_a.public_key());
+        assert!(found[0].1.command("newer").is_some(), "the newest edition won");
+        assert!(found[0].1.command("price").is_none(), "the older edition lost");
+        assert_eq!(found[0].2, 200, "the winning edition's timestamp rides along");
+
+        let none = fetch_manifests(&relay, &[], &relays).await.unwrap();
+        assert!(none.is_empty(), "empty author set short-circuits");
+    }
+
+    #[test]
+    fn command_freshness_is_generation_ttl_and_botset_scoped() {
+        // Serialize with bed tests — they bump the session generation mid-test.
+        let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        let generation = crate::state::SessionGuard::capture().generation();
+        let bots = vec!["aa".to_string(), "bb".to_string()];
+
+        assert!(!commands_fresh("cmd-fresh-a", &bots), "unseen chat is stale");
+        mark_commands_fresh("cmd-fresh-a", generation, &bots);
+        assert!(commands_fresh("cmd-fresh-a", &bots));
+
+        // A CHANGED bot set is immediately stale (a bot joined/left the room).
+        let grown = vec!["aa".to_string(), "bb".to_string(), "cc".to_string()];
+        assert!(!commands_fresh("cmd-fresh-a", &grown));
+
+        // Another generation's entry is invisible — the account-swap invalidation.
+        mark_commands_fresh("cmd-fresh-b", generation.wrapping_add(1), &bots);
+        assert!(!commands_fresh("cmd-fresh-b", &bots));
     }
 
     #[test]

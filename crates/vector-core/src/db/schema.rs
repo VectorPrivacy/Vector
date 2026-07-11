@@ -847,5 +847,23 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // Migration 69: last-known bot manifests (kind 33304) so the `/` command
+    // picker serves instantly from boot; a background refetch replaces a row
+    // only with a newer edition. Manifests are PUBLIC addressable events, so
+    // rows are plaintext (unlike membership/community state).
+    run_atomic_migration(conn, 69, "bot manifest store", |tx| {
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS bot_manifests (
+                pubkey TEXT PRIMARY KEY,
+                manifest TEXT NOT NULL,
+                event_created_at INTEGER NOT NULL,
+                fetched_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .map_err(|e| format!("create bot_manifests: {e}"))?;
+        Ok(())
+    })?;
+
     Ok(())
 }

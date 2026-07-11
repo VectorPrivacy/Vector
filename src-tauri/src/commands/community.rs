@@ -201,6 +201,15 @@ pub async fn get_community_members(community_id: String) -> Result<Vec<Community
         .collect())
 }
 
+/// The `/` picker snapshot for a chat: its bot members' last-known command
+/// manifests, served instantly from local state. When stale, the backend
+/// re-fetches in the background and emits `chat_commands_updated`.
+#[tauri::command]
+pub async fn get_chat_commands(chat_id: String) -> Result<serde_json::Value, String> {
+    let snapshot = vector_core::VectorCore.get_chat_commands(&chat_id).await;
+    serde_json::to_value(snapshot).map_err(|e| e.to_string())
+}
+
 /// Ban a member: add their npub to the Community banlist and republish it. Owner-only (enforced
 /// by `publish_banlist`). Honest clients then drop ALL of that npub's events, presence included.
 #[tauri::command]
@@ -730,10 +739,20 @@ pub async fn send_community_message(
     channel_id: String,
     content: String,
     replied_to: Option<String>,
+    bot: Option<String>,
 ) -> Result<(), String> {
     use vector_core::sending::SendCallback;
     use vector_core::Message;
     let reply = replied_to.filter(|r| !r.is_empty());
+    // A `/` picker send names its chosen bot so only that bot executes when two
+    // bots share a command name (untagged = broadcast). v2-only: the v1 inner
+    // envelope carries no free tags, and v1 bots parse content regardless.
+    let bot_tags: Vec<nostr_sdk::prelude::Tag> = bot
+        .as_deref()
+        .filter(|b| !b.is_empty())
+        .and_then(|b| nostr_sdk::prelude::PublicKey::parse(b).ok())
+        .map(|pk| vec![vector_core::bot_interface::bot_tag(&pk)])
+        .unwrap_or_default();
 
     let session = vector_core::state::SessionGuard::capture();
     let author_pk = vector_core::my_public_key().ok_or("Public key not set")?;
@@ -780,7 +799,7 @@ pub async fn send_community_message(
         };
         let reply_ref = reply_owned.as_ref().map(|(id, a)| (id.as_str(), a.as_str()));
         let rumor = vector_core::community::v2::chat::build_message_rumor(
-            author_pk, &ch, epoch, &content, reply_ref, &emoji_pairs, vec![], ms,
+            author_pk, &ch, epoch, &content, reply_ref, &emoji_pairs, bot_tags.clone(), ms,
         );
         let message_id = rumor.id.ok_or("inner rumor has no id")?.to_hex();
 
@@ -804,8 +823,10 @@ pub async fn send_community_message(
 
         // 2. Seal + publish — the service re-derives the identical rumor from `ms`.
         let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+        // Same tags as the precomputed rumor above — the rumor id is a pure
+        // function of its inputs, so any divergence would fork the optimistic id.
         let sent = vector_core::community::v2::service::send_chat_message_at(
-            &transport, &community, &ch, &content, reply_ref, &emoji_pairs, vec![], ms,
+            &transport, &community, &ch, &content, reply_ref, &emoji_pairs, bot_tags, ms,
         )
         .await;
         return match sent {

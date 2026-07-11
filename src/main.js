@@ -2839,14 +2839,16 @@ function scheduleUnreadRefresh() {
  * @param {string} pubkey - The user's pubkey
  * @param {string} content - The content of the message
  * @param {string?} replied_to - The reference of the message, if any
+ * @param {string?} bot - Command routing: the chosen bot's npub (community sends only;
+ *                        a DM's recipient IS the bot, so no tag is needed)
  */
-async function message(pubkey, content, replied_to) {
+async function message(pubkey, content, replied_to, bot) {
     // Community channels send through their own envelope path (the DM/MLS `message`
     // command can't address a channel id). The backend drives the pending→sent/failed
     // lifecycle (optimistic bubble + finalize), so there's no pending id to finalize here.
     const chat = arrChats.find(c => c.id === pubkey);
     if (chat && chat.chat_type === 'Community') {
-        await invoke('send_community_message', { channelId: pubkey, content, repliedTo: replied_to || '' });
+        await invoke('send_community_message', { channelId: pubkey, content, repliedTo: replied_to || '', bot: bot || null });
         return;
     }
     const result = await invoke("message", { receiver: pubkey, content: content, repliedTo: replied_to });
@@ -4052,6 +4054,13 @@ async function setupRustListeners() {
         dmsgInvalidateDeleteMeta(id);
         // Row on screen: re-resolve now (a cache fill also refreshes an open toolbar).
         if (document.getElementById(id)) dmsgQueueDeleteMeta([id]);
+    });
+
+    // The background bot-manifest refresh converged — swap the `/` picker's list in live.
+    _on('chat_commands_updated', (evt) => {
+        if (commandCtrl && evt.payload?.chat_id) {
+            commandCtrl.onCommandsUpdated(evt.payload.chat_id, evt.payload);
+        }
     });
 
     // Listen for headless mark-as-read (e.g., notification "Mark Read" action while app backgrounded)
@@ -11312,6 +11321,20 @@ async function sendMessage(messageText) {
         return;
     }
 
+    // Slash command routing: a KNOWN bot command with bad arguments blocks the
+    // send (draft preserved, error shown) — sending it would just post a broken
+    // invocation the bot ignores. Valid commands carry their bot's routing tag;
+    // unknown "/words" stay ordinary chat.
+    let commandBot = null;
+    if (commandCtrl) {
+        const route = commandCtrl.routeForSend(cleanedText);
+        if (route && route.error) {
+            showToast(route.error);
+            return;
+        }
+        if (route) commandBot = route.bot || null;
+    }
+
     // Clear input and show sending state
     domChatMessageInput.value = '';
     resetSendMicButtons(); // Immediately reset to mic button (avoids animation race)
@@ -11328,7 +11351,7 @@ async function sendMessage(messageText) {
         bumpEmojiUsageBatch(extractMessageEmojis(cleanedText));
 
         // Send message (unified function handles both DMs and MLS groups)
-        await message(strOpenChat, cleanedText, replyRef);
+        await message(strOpenChat, cleanedText, replyRef, commandBot);
 
         nLastTypingIndicator = 0;
         if (mentionCtrl) mentionCtrl.clearMentions();
@@ -11342,9 +11365,10 @@ async function sendMessage(messageText) {
     // Desktop/iOS - traditional keydown approach (not for Android)
     if (platformFeatures.os !== 'android') {
         domChatMessageInput.addEventListener('keydown', async (evt) => {
-            // Skip send if mention/emoji selector is consuming this keypress
+            // Skip send if mention/emoji/command selector is consuming this keypress
             if (mentionCtrl && mentionCtrl.isOpen && mentionCtrl.isOpen()) return;
             if (emojiShortcodeCtrl && emojiShortcodeCtrl.isOpen && emojiShortcodeCtrl.isOpen()) return;
+            if (commandCtrl && commandCtrl.isOpen && commandCtrl.isOpen()) return;
             if ((evt.key === 'Enter' || evt.keyCode === 13) && !evt.shiftKey) {
                 evt.preventDefault();
                 await sendMessage(domChatMessageInput.value);
@@ -11431,6 +11455,21 @@ const mentionCtrl = typeof initMentionSelector === 'function' ? initMentionSelec
 const emojiShortcodeCtrl = typeof initEmojiShortcodeSelector === 'function'
     ? initEmojiShortcodeSelector(domChatMessageInput, document.getElementById('chat-box'))
     : null;
+
+// --- Slash Command Selector (bot manifests) ---
+const commandCtrl = typeof initCommandSelector === 'function' ? initCommandSelector(
+    domChatMessageInput,
+    {
+        load: (chatId) => invoke('get_chat_commands', { chatId }),
+        chatId: () => strOpenChat,
+        accountNpub: () => strPubkey,
+        botProfile: (npub) => {
+            const p = getProfile(npub);
+            return { name: getName(npub), avatarSrc: p ? getProfileAvatarSrc(p) : null };
+        }
+    },
+    document.getElementById('chat-box')
+) : null;
 
 /**
  * Immediately reset send/mic buttons to mic state (no animation)

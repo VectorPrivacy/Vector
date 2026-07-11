@@ -24,6 +24,7 @@ pub mod chats;
 pub mod wrappers;
 pub mod nip17_keys;
 pub mod community;
+pub mod bots;
 
 pub use settings::{
     get_sql_setting, set_sql_setting, get_pkey, set_pkey, get_seed, set_seed, remove_setting,
