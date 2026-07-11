@@ -171,6 +171,9 @@ function initCommandSelector(textarea, io, anchorEl) {
 
     /** One value against one arg spec. Returns an error suffix or null. */
     function argTypeError(a, v) {
+        // Wire cap: the manifest parser drops any longer value, which would
+        // silently demote the whole invocation to ordinary chat on the bot side.
+        if (v.length > 1024) return 'is too long (max 1024 characters)';
         switch (a.type) {
             case 'int':
                 if (!/^[+-]?\d+$/.test(v)) return 'must be a whole number';
@@ -493,6 +496,15 @@ function initCommandSelector(textarea, io, anchorEl) {
                 for (const c of (a.type === 'bool' ? ['true', 'false'] : a.choices || [])) {
                     el.add(new Option(c, c));
                 }
+            } else if (a.type === 'string') {
+                // Free text can be arbitrarily long: a 1-row textarea grows WIDE
+                // with its content until the composer's width stops it, then
+                // wraps and grows DOWN (scrollHeight) — the label stays pinned
+                // at the pill's top once it goes multi-line.
+                el = document.createElement('textarea');
+                el.rows = 1;
+                el.autocomplete = 'off';
+                el.spellcheck = true;
             } else {
                 el = document.createElement('input');
                 el.type = 'text';
@@ -504,17 +516,25 @@ function initCommandSelector(textarea, io, anchorEl) {
             el.className = 'command-part-input';
             el.title = a.description || '';
             const idx = parts.length;
-            // A trailing free-text arg (the greedy tail on the wire) gets the
-            // rest of the row; other text inputs grow with their content
+            // The trailing free-text arg (the greedy tail on the wire) starts
+            // at the rest of its row; other fields grow with their content
             // (JS-sized: field-sizing isn't in WKWebView).
             const grows = a.type === 'string' && idx === cmd.args.length - 1;
             if (grows) wrap.classList.add('grow');
+            const autoSize = () => {
+                if (el.tagName === 'TEXTAREA') {
+                    if (!grows) el.style.width = Math.max(9, el.value.length + 2) + 'ch';
+                    el.style.height = 'auto';
+                    el.style.height = el.scrollHeight + 'px';
+                    wrap.classList.toggle('multiline', el.offsetHeight > 30);
+                } else if (el.tagName === 'INPUT') {
+                    el.style.width = Math.min(34, Math.max(9, el.value.length + 1)) + 'ch';
+                }
+            };
             el.addEventListener('keydown', (e) => onPartKey(e, idx));
             el.addEventListener('input', () => {
                 wrap.classList.remove('invalid');
-                if (el.tagName === 'INPUT' && !grows) {
-                    el.style.width = Math.min(34, Math.max(9, el.value.length + 1)) + 'ch';
-                }
+                autoSize();
             });
             el.addEventListener('change', () => wrap.classList.remove('invalid'));
             wrap.appendChild(el);
@@ -535,6 +555,9 @@ function initCommandSelector(textarea, io, anchorEl) {
     function onPartKey(e, idx) {
         const parts = composing ? composing.parts : [];
         if (e.key === 'Enter') {
+            // Shift+Enter in a free-text param is a literal newline (the wire
+            // format carries them fine — quoted values span lines).
+            if (e.shiftKey && e.target.tagName === 'TEXTAREA') return;
             e.preventDefault();
             e.stopPropagation();
             // Enter advances; on the last part (or with Cmd/Ctrl) it sends.

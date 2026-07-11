@@ -15360,15 +15360,18 @@ hr {
 
 /* --- Structured command composer (replaces the textarea while filling) --- */
 .command-composer {
-  /* Mimic #chat-input's slot exactly (fill-available, right pad only) and
-     keep a single line under the row's 45px band so the sibling buttons
-     never move or re-center. */
+  /* Mimic #chat-input's slot (fill-available, right pad only) and center the
+     parts within the row's 45px band — the pills then sit on the exact same
+     midline as the composer's 45px buttons, no padding arithmetic. */
   display: flex;
   align-items: center;
+  align-content: center;
   flex-wrap: wrap;
   gap: 5px;
   width: -webkit-fill-available;
   min-width: 0;
+  box-sizing: border-box;
+  min-height: 45px;
   padding: 6px 10px 6px 0;
   margin: 0;
   outline: none;
@@ -15513,6 +15516,17 @@ hr {
   background: rgba(255, 255, 255, 0.07);
   border: 1px solid rgba(255, 255, 255, 0.1);
   min-width: 0;
+  max-width: 100%;
+}
+
+/* A wrapped (multi-line) value: the pill expands downward while the label
+   stays pinned at its top, aligned with the first text line. */
+.command-part.multiline {
+  align-items: flex-start;
+}
+
+.command-part.multiline .command-part-name {
+  padding-top: 4px;
 }
 
 .command-part.required .command-part-name::after {
@@ -15560,6 +15574,17 @@ hr {
 input.command-part-input {
   field-sizing: content;
   max-width: 34ch;
+}
+
+/* String params are 1-row textareas: wide-then-wrap growth. The width comes
+   from JS ch-sizing; the max-width clamp is what turns further growth into
+   line wrapping (height then follows scrollHeight). */
+textarea.command-part-input {
+  resize: none;
+  overflow: hidden;
+  line-height: 1.3;
+  max-width: 100%;
+  flex-shrink: 1;
 }
 
 select.command-part-input {
