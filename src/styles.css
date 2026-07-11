@@ -15602,9 +15602,93 @@ textarea.command-part-input {
   flex-shrink: 1;
 }
 
-select.command-part-input {
+/* Choice trigger: a button that dresses as a field (same 21px box, same bg)
+   with a slim chevron — the drop-up replaces native selects, which render
+   inconsistently per platform (Android opens an OS modal). */
+.command-choice-trigger {
+  display: inline-flex;
+  align-items: center;
+  margin: 0;
+  border: none;
   width: auto;
+  height: 21px;
+  max-width: 22ch;
+  overflow: hidden;
   cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+  padding-right: 20px;
+  background-color: rgba(0, 0, 0, 0.35);
+  background-image:
+    linear-gradient(45deg, transparent 50%, rgba(255, 255, 255, 0.55) 50%),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.55) 50%, transparent 50%);
+  background-position: calc(100% - 12px) calc(50% - 1px), calc(100% - 8px) calc(50% - 1px);
+  background-size: 4px 4px, 4px 4px;
+  background-repeat: no-repeat;
+}
+
+.command-choice-trigger span {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.command-choice-trigger.placeholder span {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+/* The drop-up itself: the picker family's panel language, compact. */
+.command-choice-menu {
+  position: fixed;
+  z-index: 2001;
+  background: #0a0a0a;
+  border: 1px solid var(--icon-color-primary, #59fcb3);
+  border-radius: 10px;
+  box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.5);
+  padding: 4px 0;
+  max-height: 40vh;
+  overflow-y: auto;
+  display: none;
+}
+
+.command-choice-menu.visible {
+  display: block;
+}
+
+.command-choice-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.9);
+  cursor: pointer;
+  max-width: 40ch;
+}
+
+.command-choice-option span {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.command-choice-option img {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.command-choice-option:hover,
+.command-choice-option.active {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.command-choice-option.skip {
+  color: rgba(255, 255, 255, 0.4);
 }
 
 /* The trailing free-text arg (the wire's greedy tail) takes the row's rest.

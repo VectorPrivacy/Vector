@@ -11396,9 +11396,9 @@ async function sendMessage(messageText) {
     }
 
 // --- Mention Selector ---
-const mentionCtrl = typeof initMentionSelector === 'function' ? initMentionSelector(
-    domChatMessageInput,
-    () => {
+// Shared by the @mention selector AND the command composer's User params —
+// one source for "who is taggable in the open chat".
+const getMentionCandidates = () => {
         const chat = arrChats.find(c => c.id === strOpenChat);
         if (!chat) return [];
         const isCommunity = chat.chat_type === 'Community';
@@ -11458,7 +11458,11 @@ const mentionCtrl = typeof initMentionSelector === 'function' ? initMentionSelec
             }
         }
         return candidates;
-    },
+};
+
+const mentionCtrl = typeof initMentionSelector === 'function' ? initMentionSelector(
+    domChatMessageInput,
+    getMentionCandidates,
     document.getElementById('chat-box')
 ) : null;
 
@@ -11478,6 +11482,9 @@ commandCtrl = typeof initCommandSelector === 'function' ? initCommandSelector(
             const p = getProfile(npub);
             return { name: getName(npub), avatarSrc: p ? getProfileAvatarSrc(p) : null };
         },
+        // User params: the same taggable-member pool the @mention selector
+        // uses ('everyone' excluded — a User arg is one real npub).
+        mentionCandidates: () => getMentionCandidates().filter(c => c.npub.startsWith('npub1')),
         // The structured composer assembles the final "/cmd args" text and
         // hands it to the ordinary send pipeline (validation + bot tag ride
         // routeForSend inside sendMessage).

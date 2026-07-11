@@ -455,6 +455,7 @@ function initCommandSelector(textarea, io, anchorEl) {
 
     function exitComposer(keepPick) {
         anchorEl.classList.remove('commanding');
+        closeChoiceMenu();
         if (!composing) return;
         // Keep the Android back stack in sync when we close via our own paths
         // (Esc, cancel, send, chat switch); no-op after a hardware back pop.
@@ -491,11 +492,32 @@ function initCommandSelector(textarea, io, anchorEl) {
             wrap.appendChild(tag);
             let el;
             if (a.type === 'choice' || a.type === 'bool') {
-                el = document.createElement('select');
-                el.add(new Option(a.required ? 'choose…' : '(skip)', ''));
-                for (const c of (a.type === 'bool' ? ['true', 'false'] : a.choices || [])) {
-                    el.add(new Option(c, c));
-                }
+                // A custom trigger + drop-up, NOT a native select: those render
+                // inconsistently per platform (Android opens an OS modal) and
+                // can't match the composer's keyboard flow. The button quacks
+                // like a field (.value, focus, empty-backspace walking).
+                el = document.createElement('button');
+                el.type = 'button';
+                el.classList.add('command-choice-trigger');
+                el.dataset.placeholder = a.required ? 'choose…' : '(skip)';
+                el.value = '';
+                const label = document.createElement('span');
+                label.textContent = el.dataset.placeholder;
+                el.classList.add('placeholder');
+                el.appendChild(label);
+                el.addEventListener('mousedown', (e) => {
+                    e.preventDefault();
+                    el.focus();
+                    // `idx` is this part's slot, declared just below (closure
+                    // runs long after initialization).
+                    if (choiceOpenFor && choiceOpenFor.el === el) closeChoiceMenu();
+                    else openChoiceMenu(el, idx, a);
+                });
+                el.addEventListener('blur', () => {
+                    setTimeout(() => {
+                        if (choiceOpenFor && choiceOpenFor.el === el) closeChoiceMenu();
+                    }, 120);
+                });
             } else if (a.type === 'string') {
                 // Free text can be arbitrarily long: a 1-row textarea grows WIDE
                 // with its content until the composer's width stops it, then
@@ -535,7 +557,20 @@ function initCommandSelector(textarea, io, anchorEl) {
                     el.style.width = Math.min(300, Math.max(72, Math.ceil(measureFieldText(el)) + 26)) + 'px';
                 }
             };
-            el.addEventListener('keydown', (e) => onPartKey(e, idx));
+            if (el.tagName === 'BUTTON') {
+                el.addEventListener('keydown', (e) => onChoiceKey(e, idx, a));
+            } else if (a.type === 'user') {
+                el.addEventListener('keydown', (e) => onUserKey(e, idx));
+                el.addEventListener('focus', () => openUserMenu(el, idx));
+                el.addEventListener('input', () => openUserMenu(el, idx));
+                el.addEventListener('blur', () => {
+                    setTimeout(() => {
+                        if (choiceOpenFor && choiceOpenFor.el === el) closeChoiceMenu();
+                    }, 120);
+                });
+            } else {
+                el.addEventListener('keydown', (e) => onPartKey(e, idx));
+            }
             el.addEventListener('input', () => {
                 wrap.classList.remove('invalid');
                 autoSize();
@@ -587,17 +622,17 @@ function initCommandSelector(textarea, io, anchorEl) {
         } else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
             // Arrowing past a param's edge crosses into the bordering param:
             // Right at the end lands at the START of the next, Left at the
-            // start lands at the END of the prior. Selects have no caret, so
-            // either arrow crosses from them.
+            // start lands at the END of the prior. Choice triggers have no
+            // caret, so either arrow crosses from them.
             const el = e.target;
-            const isSelect = el.tagName === 'SELECT';
-            const caretless = isSelect || el.selectionStart !== el.selectionEnd;
+            const caretFree = el.tagName === 'BUTTON';
+            const hasSelection = !caretFree && el.selectionStart !== el.selectionEnd;
             if (e.key === 'ArrowRight' && idx < parts.length - 1
-                && (isSelect || (!caretless && el.selectionEnd === el.value.length))) {
+                && (caretFree || (!hasSelection && el.selectionEnd === el.value.length))) {
                 e.preventDefault();
                 focusPart(idx + 1, 'start');
             } else if (e.key === 'ArrowLeft' && idx > 0
-                && (isSelect || (!caretless && el.selectionStart === 0))) {
+                && (caretFree || (!hasSelection && el.selectionStart === 0))) {
                 e.preventDefault();
                 focusPart(idx - 1, 'end');
             }
@@ -610,6 +645,179 @@ function initCommandSelector(textarea, io, anchorEl) {
         if (!_measureCtx) _measureCtx = document.createElement('canvas').getContext('2d');
         _measureCtx.font = getComputedStyle(el).font;
         return _measureCtx.measureText(el.value || el.placeholder || '').width;
+    }
+
+    // ── The Choice drop-up (one floating menu, reused per trigger) ──────────
+    let choiceMenu = null;
+    let choiceOpenFor = null; // { el: trigger, idx, options: [{v, label}], active }
+
+    function ensureChoiceMenu() {
+        if (!choiceMenu) {
+            choiceMenu = document.createElement('div');
+            choiceMenu.className = 'command-choice-menu';
+            document.body.appendChild(choiceMenu);
+        }
+        return choiceMenu;
+    }
+
+    function openChoiceMenu(trigger, idx, arg) {
+        const options = [];
+        if (!arg.required) options.push({ v: '', label: '(skip)' });
+        for (const c of (arg.type === 'bool' ? ['true', 'false'] : arg.choices || [])) {
+            options.push({ v: c, label: c });
+        }
+        if (!options.length) return;
+        const active = Math.max(0, options.findIndex(o => o.v === trigger.value));
+        choiceOpenFor = { el: trigger, idx, options, active };
+        renderChoiceMenu();
+    }
+
+    function renderChoiceMenu() {
+        if (!choiceOpenFor) return;
+        const { el, options, active } = choiceOpenFor;
+        const menu = ensureChoiceMenu();
+        menu.innerHTML = '';
+        for (let i = 0; i < options.length; i++) {
+            const row = document.createElement('div');
+            row.className = 'command-choice-option'
+                + (i === active ? ' active' : '')
+                + (options[i].v === '' ? ' skip' : '');
+            if (options[i].avatarSrc) {
+                const img = document.createElement('img');
+                img.src = options[i].avatarSrc;
+                img.alt = '';
+                row.appendChild(img);
+            }
+            const label = document.createElement('span');
+            label.textContent = options[i].label;
+            row.appendChild(label);
+            const v = options[i].v;
+            row.addEventListener('mousedown', (ev) => {
+                ev.preventDefault();
+                pickChoice(v);
+            });
+            menu.appendChild(row);
+        }
+        const r = el.getBoundingClientRect();
+        const margin = 8;
+        const width = Math.max(Math.ceil(r.width), 110);
+        menu.style.left = Math.max(margin, Math.min(r.left, window.innerWidth - width - margin)) + 'px';
+        menu.style.bottom = (window.innerHeight - r.top + 4) + 'px';
+        menu.style.minWidth = width + 'px';
+        menu.classList.add('visible');
+        const act = menu.querySelector('.command-choice-option.active');
+        if (act) act.scrollIntoView({ block: 'nearest' });
+    }
+
+    function closeChoiceMenu() {
+        choiceOpenFor = null;
+        if (choiceMenu) choiceMenu.classList.remove('visible');
+    }
+
+    function setChoiceValue(el, v) {
+        el.value = v;
+        el.querySelector('span').textContent = v || el.dataset.placeholder;
+        el.classList.toggle('placeholder', !v);
+        const pill = el.closest('.command-part');
+        if (pill) pill.classList.remove('invalid');
+    }
+
+    function pickChoice(v) {
+        if (!choiceOpenFor) return;
+        const { el, idx } = choiceOpenFor;
+        if (el.tagName === 'BUTTON') {
+            setChoiceValue(el, v);
+        } else {
+            // A User param: the field carries the canonical npub.
+            el.value = v;
+            const pill = el.closest('.command-part');
+            if (pill) pill.classList.remove('invalid');
+            const part = composing && composing.parts[idx];
+            if (part) part.autoSize();
+        }
+        closeChoiceMenu();
+        // Chosen = filled: flow onward (stay put on the last part).
+        const parts = composing ? composing.parts : [];
+        if (idx < parts.length - 1) focusPart(idx + 1, 'start');
+        else el.focus();
+    }
+
+    /** The User-param member menu: the @mention pool filtered by the typed
+     *  query (name or npub), avatar rows, capped at 6. */
+    function openUserMenu(el, idx) {
+        const q = (el.value || '').toLowerCase();
+        const options = (io.mentionCandidates ? io.mentionCandidates() : [])
+            .filter(c => c.name.toLowerCase().includes(q) || c.npub.toLowerCase().includes(q))
+            .slice(0, 6)
+            .map(c => ({ v: c.npub, label: c.name, avatarSrc: c.avatarSrc || null }));
+        if (!options.length) {
+            if (choiceOpenFor && choiceOpenFor.el === el) closeChoiceMenu();
+            return;
+        }
+        choiceOpenFor = { el, idx, options, active: 0 };
+        renderChoiceMenu();
+    }
+
+    /** User-input keys: menu navigation when open, part-walking otherwise
+     *  (typing itself flows to the input and re-filters via its input event). */
+    function onUserKey(e, idx) {
+        const el = e.currentTarget;
+        if (choiceOpenFor && choiceOpenFor.el === el) {
+            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                e.preventDefault();
+                e.stopPropagation();
+                const n = choiceOpenFor.options.length;
+                choiceOpenFor.active = (choiceOpenFor.active + (e.key === 'ArrowDown' ? 1 : -1) + n) % n;
+                renderChoiceMenu();
+            } else if (e.key === 'Enter') {
+                e.preventDefault();
+                e.stopPropagation();
+                pickChoice(choiceOpenFor.options[choiceOpenFor.active].v);
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                e.stopPropagation();
+                closeChoiceMenu();
+            } else if (e.key === 'Tab') {
+                closeChoiceMenu();
+            } else {
+                onPartKey(e, idx);
+            }
+            return;
+        }
+        onPartKey(e, idx);
+    }
+
+    /** Trigger keys: menu-open handling first, open shortcuts second,
+     *  everything else falls through to the shared part-walking. */
+    function onChoiceKey(e, idx, arg) {
+        const el = e.currentTarget;
+        if (choiceOpenFor && choiceOpenFor.el === el) {
+            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                e.preventDefault();
+                e.stopPropagation();
+                const n = choiceOpenFor.options.length;
+                choiceOpenFor.active = (choiceOpenFor.active + (e.key === 'ArrowDown' ? 1 : -1) + n) % n;
+                renderChoiceMenu();
+            } else if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                e.stopPropagation();
+                pickChoice(choiceOpenFor.options[choiceOpenFor.active].v);
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                e.stopPropagation();
+                closeChoiceMenu();
+            } else if (e.key === 'Tab') {
+                closeChoiceMenu();
+            }
+            return;
+        }
+        if (e.key === ' ' || e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            e.preventDefault();
+            e.stopPropagation();
+            openChoiceMenu(el, idx, arg);
+            return;
+        }
+        onPartKey(e, idx);
     }
 
     /** Focus a part with the caret placed at one end of its value. */
@@ -789,6 +997,7 @@ function initCommandSelector(textarea, io, anchorEl) {
             textarea.removeEventListener('keydown', onKeyDown);
             textarea.removeEventListener('blur', onBlur);
             if (panel.parentNode) panel.parentNode.removeChild(panel);
+            if (choiceMenu && choiceMenu.parentNode) choiceMenu.parentNode.removeChild(choiceMenu);
         }
     };
 }
