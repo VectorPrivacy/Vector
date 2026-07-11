@@ -54,7 +54,8 @@ function initCommandSelector(textarea, io, anchorEl) {
     function position() {
         const rect = anchorEl.getBoundingClientRect();
         const margin = 10;
-        const width = Math.min(rect.width, 420);
+        // Never wider than the viewport itself — small windows and phones.
+        const width = Math.min(rect.width, 420, window.innerWidth - margin * 2);
         const left = Math.max(margin, Math.min(rect.left, window.innerWidth - width - margin));
         panel.style.left = left + 'px';
         panel.style.bottom = (window.innerHeight - rect.top + 6) + 'px';

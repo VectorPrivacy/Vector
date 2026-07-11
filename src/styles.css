@@ -15151,8 +15151,8 @@ hr {
   border-radius: 12px;
   z-index: 2000;
   width: calc(100% - 55px);
-  max-width: 420px;
-  max-height: 320px;
+  max-width: min(420px, calc(100vw - 20px));
+  max-height: min(320px, 45vh);
   overflow-y: auto;
   box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.5);
   backdrop-filter: blur(10px);
@@ -15194,7 +15194,8 @@ hr {
 .command-item {
   display: flex;
   align-items: center;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 2px 8px;
   padding: 8px 12px;
   cursor: pointer;
   font-size: 14px;
@@ -15252,7 +15253,15 @@ hr {
   text-overflow: ellipsis;
   white-space: nowrap;
   flex: 1;
+  min-width: 0;
   text-align: right;
+}
+
+/* Narrow windows/phones: names + arg chips carry the row; descriptions go. */
+@media (max-width: 520px) {
+  .command-item-desc {
+    display: none;
+  }
 }
 
 .command-loading {
