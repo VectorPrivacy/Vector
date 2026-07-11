@@ -517,10 +517,10 @@ function initCommandSelector(textarea, io, anchorEl) {
                     if (choiceOpenFor && choiceOpenFor.el === el) closeChoiceMenu();
                     else openChoiceMenu(el, idx, a);
                 });
+                // Instant: menu rows preventDefault their mousedown (focus never
+                // leaves for a pick), so blur only means a REAL focus move.
                 el.addEventListener('blur', () => {
-                    setTimeout(() => {
-                        if (choiceOpenFor && choiceOpenFor.el === el) closeChoiceMenu();
-                    }, 120);
+                    if (choiceOpenFor && choiceOpenFor.el === el) closeChoiceMenu();
                 });
             } else if (a.type === 'string') {
                 // Free text can be arbitrarily long: a 1-row textarea grows WIDE
@@ -569,10 +569,10 @@ function initCommandSelector(textarea, io, anchorEl) {
                 el.addEventListener('keydown', (e) => onUserKey(e, idx));
                 el.addEventListener('focus', () => openUserMenu(el, idx));
                 el.addEventListener('input', () => openUserMenu(el, idx));
+                // Instant: row picks preventDefault their mousedown, so blur
+                // only means a REAL focus move (arrow-walking included).
                 el.addEventListener('blur', () => {
-                    setTimeout(() => {
-                        if (choiceOpenFor && choiceOpenFor.el === el) closeChoiceMenu();
-                    }, 120);
+                    if (choiceOpenFor && choiceOpenFor.el === el) closeChoiceMenu();
                 });
             } else {
                 el.addEventListener('keydown', (e) => onPartKey(e, idx));
