@@ -32,6 +32,9 @@ Concordia — a multi-purpose Concord bot (type / in a modern client for the pic
   /ping              — pong (send round-trip)
   /roll [sides]      — roll a die
   /announce <t> <b>  — format a two-part announcement
+  /typetest …        — echo back every param type, parsed (the full gauntlet)
+  /greet <who> <style> [times] — greet a member (user + choice + int)
+  /calc <a> <op> <b> — arithmetic (number + choice + number)
   /reply             — a threaded reply to your message (reply context)
   /react [emoji]     — react to your message
   /edit              — send a message, then edit it
@@ -125,6 +128,68 @@ async fn main() -> vector_sdk::Result<()> {
             let body = ctx.str("body").unwrap_or_default().to_string();
             let _ = ctx.reply(format!("📣 {title}\n{body}")).await;
         });
+    // ── Param-type test battery: every ArgType, solo and mixed ──────────────
+    bot.command("typetest", "Echo back every param type, parsed")
+        .string("text", "Any free text", true)
+        .int("count", "A whole number", true)
+        .number("ratio", "A decimal number", true)
+        .flag("loud", "true or false", true)
+        .user("who", "Any user (npub)", true)
+        .choice("color", "Pick a color", ["red", "green", "blue"], true)
+        .run(|ctx| async move {
+            let report = format!(
+                "typetest received:\n\
+                 text   (String) = {:?}\n\
+                 count  (Int)    = {}\n\
+                 ratio  (Number) = {}\n\
+                 loud   (Bool)   = {}\n\
+                 who    (User)   = {}\n\
+                 color  (Choice) = {}",
+                ctx.str("text").unwrap_or_default(),
+                ctx.int("count").unwrap_or_default(),
+                ctx.number("ratio").unwrap_or_default(),
+                ctx.flag("loud").unwrap_or_default(),
+                ctx.str("who").unwrap_or_default(),
+                ctx.str("color").unwrap_or_default(),
+            );
+            let _ = ctx.reply(report).await;
+        });
+    bot.command("greet", "Greet a member in a chosen style")
+        .user("who", "Who to greet", true)
+        .choice("style", "Greeting style", ["formal", "casual", "pirate"], true)
+        .int("times", "Repeat 1-5 times (default 1)", false)
+        .run(|ctx| async move {
+            let who = ctx.str("who").unwrap_or_default().to_string();
+            let line = match ctx.str("style").unwrap_or("casual") {
+                "formal" => format!("Good day to you, {who}."),
+                "pirate" => format!("Ahoy, {who}! 🏴‍☠️"),
+                _ => format!("yo {who} 👋"),
+            };
+            let times = ctx.int("times").unwrap_or(1).clamp(1, 5) as usize;
+            let _ = ctx.reply(vec![line; times].join("\n")).await;
+        });
+    bot.command("calc", "Do some arithmetic")
+        .number("a", "First operand", true)
+        .choice("op", "Operation", ["add", "sub", "mul", "div"], true)
+        .number("b", "Second operand", true)
+        .run(|ctx| async move {
+            let a = ctx.number("a").unwrap_or_default();
+            let b = ctx.number("b").unwrap_or_default();
+            let answer = match ctx.str("op").unwrap_or_default() {
+                "add" => Some(a + b),
+                "sub" => Some(a - b),
+                "mul" => Some(a * b),
+                "div" if b != 0.0 => Some(a / b),
+                _ => None,
+            };
+            let _ = ctx
+                .reply(match answer {
+                    Some(v) => format!("🧮 {v}"),
+                    None => "cannot divide by zero".to_string(),
+                })
+                .await;
+        });
+
     bot.command("reply", "Get a threaded reply to your message").run(|ctx| async move {
         let _ = ctx.reply("this is a threaded reply ✅ (I quoted your message)").await;
     });
