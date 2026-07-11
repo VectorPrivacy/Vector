@@ -15517,6 +15517,9 @@ hr {
   border: 1px solid rgba(255, 255, 255, 0.1);
   min-width: 0;
   max-width: 100%;
+  /* Never squish beside a growing neighbor — wrap to the next line instead
+     (the pill's own max-width still caps it at the bar's width). */
+  flex-shrink: 0;
 }
 
 /* A wrapped (multi-line) value: the pill expands downward while the label

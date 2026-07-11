@@ -539,11 +539,14 @@ function initCommandSelector(textarea, io, anchorEl) {
             el.addEventListener('change', () => wrap.classList.remove('invalid'));
             wrap.appendChild(el);
             bar.appendChild(wrap);
-            parts.push({ arg: a, el });
+            parts.push({ arg: a, el, autoSize });
         }
         textarea.value = '';
         textarea.style.display = 'none';
         textarea.parentElement.insertBefore(bar, textarea);
+        // Size the fields once mounted (scrollHeight needs layout): a fresh
+        // rows=1 textarea is otherwise UA-default tall, floating its text high.
+        for (const p of parts) p.autoSize();
         composing = { cmd, chatId: io.chatId(), bar, parts };
         showContextBar(cmd);
         io.composerToggled(true);
