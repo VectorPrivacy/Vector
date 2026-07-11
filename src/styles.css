@@ -15573,8 +15573,12 @@ hr {
   font-size: 13px;
   line-height: 1.3;
   padding: 2px 8px;
-  width: 9ch;
-  min-width: 6ch;
+  /* border-box so the JS `height = scrollHeight` fit is exact — scrollHeight
+     includes the padding, and writing it as a content-box height left every
+     field 4px too tall with its text riding the top. */
+  box-sizing: border-box;
+  width: 11ch;
+  min-width: 8ch;
 }
 
 .command-part-input:focus {

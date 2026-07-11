@@ -758,6 +758,27 @@ mod tests {
         let content = command_text("announce", &args);
         let p = parse_command_text(&m, &content).unwrap();
         assert_eq!(p.args, args);
+
+        // Adversarial values: no value can escape its quoted slot — every
+        // combination of quotes/backslashes/newlines re-parses to itself.
+        for nasty in [
+            "\"",                        // a lone quote
+            "\\",                        // a lone backslash
+            "ends with backslash \\",    // trailing backslash before the closing quote
+            "\\\" fake close",           // escaped-quote prefix
+            "line one\nline two",        // literal newline inside a value
+            "\" \\\" \\\\ \"\"",         // quote/escape soup
+            " leading and trailing ",    // spaces preserved verbatim
+        ] {
+            let args = vec![
+                ("title".to_string(), nasty.to_string()),
+                ("body".to_string(), format!("after {nasty} end")),
+            ];
+            let content = command_text("announce", &args);
+            let p = parse_command_text(&m, &content)
+                .unwrap_or_else(|| panic!("adversarial value failed to re-parse: {nasty:?}"));
+            assert_eq!(p.args, args, "value must survive the wire byte-exact: {nasty:?}");
+        }
     }
 
     #[test]

@@ -522,13 +522,17 @@ function initCommandSelector(textarea, io, anchorEl) {
             const grows = a.type === 'string' && idx === cmd.args.length - 1;
             if (grows) wrap.classList.add('grow');
             const autoSize = () => {
+                // Width = MEASURED text pixels (ch-guessing undershoots on
+                // wide glyphs like m/w and wraps too early) + padding + caret
+                // slack; border-box, so the CSS max-width still does the
+                // wide-then-wrap clamp.
                 if (el.tagName === 'TEXTAREA') {
-                    if (!grows) el.style.width = Math.max(9, el.value.length + 2) + 'ch';
+                    if (!grows) el.style.width = Math.max(72, Math.ceil(measureFieldText(el)) + 26) + 'px';
                     el.style.height = 'auto';
                     el.style.height = el.scrollHeight + 'px';
                     wrap.classList.toggle('multiline', el.offsetHeight > 30);
                 } else if (el.tagName === 'INPUT') {
-                    el.style.width = Math.min(34, Math.max(9, el.value.length + 1)) + 'ch';
+                    el.style.width = Math.min(300, Math.max(72, Math.ceil(measureFieldText(el)) + 26)) + 'px';
                 }
             };
             el.addEventListener('keydown', (e) => onPartKey(e, idx));
@@ -598,6 +602,14 @@ function initCommandSelector(textarea, io, anchorEl) {
                 focusPart(idx - 1, 'end');
             }
         }
+    }
+
+    /** Measure a field's current text (or placeholder) in its own font. */
+    let _measureCtx = null;
+    function measureFieldText(el) {
+        if (!_measureCtx) _measureCtx = document.createElement('canvas').getContext('2d');
+        _measureCtx.font = getComputedStyle(el).font;
+        return _measureCtx.measureText(el.value || el.placeholder || '').width;
     }
 
     /** Focus a part with the caret placed at one end of its value. */
