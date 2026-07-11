@@ -15223,7 +15223,7 @@ hr {
 
 .command-item-name {
   font-weight: 600;
-  color: var(--icon-color-primary, #59fcb3);
+  color: #fff;
   flex-shrink: 0;
 }
 
