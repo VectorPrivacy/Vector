@@ -24,26 +24,28 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use vector_sdk::{BotEvent, VectorBot};
 
 const NAME: &str = "Concordia";
-const ABOUT: &str = "A multi-purpose Concord community bot. Say !help for commands.";
+const ABOUT: &str = "A multi-purpose Concord community bot. Type / (or !help) for commands.";
 
 const HELP: &str = "\
-Concordia — a multi-purpose Concord bot:
-  !help      — this menu
-  !ping      — pong (send round-trip)
-  !reply     — a threaded reply to your message (reply context)
-  !react     — react 🔥 to your message
-  !edit      — send a message, then edit it
-  !delete    — send a message, then delete it
-  !typing    — emit a typing indicator
-  !reconnect — bounce my relay sockets (reconnect drill)
-  !file      — send a small text attachment (encrypt → Blossom → imeta)
-  !members   — the folded member list
-  !channels  — the channels I can see
-  !caps      — my capabilities here (roles engine)
-  !roles     — the community roster
-  !info      — community id, protocol version, owner, channel count
-  !whoami    — my npub + this channel id
-  (non-command messages are ignored)";
+Concordia — a multi-purpose Concord bot (type / in a modern client for the picker):
+  /help              — this menu
+  /ping              — pong (send round-trip)
+  /roll [sides]      — roll a die
+  /announce <t> <b>  — format a two-part announcement
+  /reply             — a threaded reply to your message (reply context)
+  /react [emoji]     — react to your message
+  /edit              — send a message, then edit it
+  /delete            — send a message, then delete it
+  /typing            — emit a typing indicator
+  /file              — send a small text attachment (encrypt → Blossom → imeta)
+  /members           — the folded member list
+  /channels          — the channels I can see
+  /caps              — my capabilities here (roles engine)
+  /roles             — the community roster
+  /info              — community id, protocol version, owner, channel count
+  /whoami            — my npub + this channel id
+  /reconnect         — bounce my relay sockets (reconnect drill)
+  (legacy !commands still work; non-command messages are ignored)";
 
 #[tokio::main]
 async fn main() -> vector_sdk::Result<()> {
@@ -100,6 +102,11 @@ async fn main() -> vector_sdk::Result<()> {
 
     // Slash commands (Bot Interface Phase 1): registered here, published as the
     // kind-33304 manifest at listen start, invoked by PLAIN TEXT from any client.
+    // Vector's `/` picker renders exactly this registry with argument hints; a
+    // matched invocation is consumed before the legacy !bang console below.
+    bot.command("help", "List everything Concordia can do").run(|ctx| async move {
+        let _ = ctx.reply(HELP).await;
+    });
     bot.command("ping", "Round-trip latency check").run(|ctx| async move {
         let _ = ctx.reply(format!("pong 🏓 ({} ms)", now_ms())).await;
     });
@@ -118,6 +125,61 @@ async fn main() -> vector_sdk::Result<()> {
             let body = ctx.str("body").unwrap_or_default().to_string();
             let _ = ctx.reply(format!("📣 {title}\n{body}")).await;
         });
+    bot.command("reply", "Get a threaded reply to your message").run(|ctx| async move {
+        let _ = ctx.reply("this is a threaded reply ✅ (I quoted your message)").await;
+    });
+    bot.command("react", "React to your message")
+        .choice("emoji", "Which reaction", ["🔥", "👍", "❤️", "😂", "🫡"], false)
+        .run(|ctx| async move {
+            let emoji = ctx.str("emoji").unwrap_or("🔥").to_string();
+            log_err("react", ctx.msg.react(&emoji).await.map(|_| String::new()));
+        });
+    bot.command("edit", "Watch me send then edit a message").run(|ctx| async move {
+        let ch = ctx.msg.channel();
+        if let Ok(id) = ch.send("editing this in one second…").await {
+            log_err("edit", ch.edit(&id, "edited ✏️ (this text was changed)").await.map(|_| String::new()));
+        }
+    });
+    bot.command("delete", "Watch a message self-destruct").run(|ctx| async move {
+        let ch = ctx.msg.channel();
+        if let Ok(id) = ch.send("…this message will self-destruct").await {
+            log_err("delete", ch.delete(&id).await.map(|_| String::new()));
+        }
+    });
+    bot.command("typing", "Emit a typing indicator").run(|ctx| async move {
+        log_err("typing", ctx.msg.channel().typing().await.map(|_| String::new()));
+    });
+    bot.command("file", "Receive a small encrypted attachment").run(|ctx| async move {
+        send_test_file(&ctx.msg.channel()).await;
+    });
+    bot.command("members", "The folded member list").run(|ctx| async move {
+        if let Some(community) = ctx.msg.community() {
+            let members = community.members().await;
+            let list: Vec<String> = members.iter().map(|m| short(m.npub())).collect();
+            let _ = ctx.reply(format!("{} member(s): {}", members.len(), list.join(", "))).await;
+        } else {
+            let _ = ctx.reply("not in a community here").await;
+        }
+    });
+    bot.command("channels", "The channels I can see here").run(|ctx| async move {
+        diagnostics(&ctx.bot, &ctx.msg, "!channels").await;
+    });
+    bot.command("caps", "My capabilities here (roles engine)").run(|ctx| async move {
+        diagnostics(&ctx.bot, &ctx.msg, "!caps").await;
+    });
+    bot.command("roles", "The community roster").run(|ctx| async move {
+        diagnostics(&ctx.bot, &ctx.msg, "!roles").await;
+    });
+    bot.command("info", "Community protocol + ownership summary").run(|ctx| async move {
+        diagnostics(&ctx.bot, &ctx.msg, "!info").await;
+    });
+    bot.command("whoami", "My npub and this channel id").run(|ctx| async move {
+        diagnostics(&ctx.bot, &ctx.msg, "!whoami").await;
+    });
+    bot.command("reconnect", "Bounce my relay sockets (reconnect drill)").run(|ctx| async move {
+        let bounced = bounce_community_relays().await;
+        let _ = ctx.reply(format!("bounced {bounced} relay socket(s) — /ping to test the post-reconnect subscription")).await;
+    });
 
     // The join snapshot folds only owner-authored channels; admin-created ones
     // arrive on the first control follow, so re-print once that has landed.
