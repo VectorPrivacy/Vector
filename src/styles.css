@@ -15375,8 +15375,20 @@ hr {
 }
 
 /* The command context bar: the reply bar's tucked-strip design, showing
-   "Using /cmd with Bot" above the composer while the parts are filled. When
-   the reply bar is open too, this strip rides one tier above it. */
+   "Using /cmd with Bot" above the composer while the parts are filled. The
+   strip is only half the illusion — the box's padding-top grows by the same
+   34px on the same curve (see the reply bar notes above), so the strip slides
+   out from underneath the composer. With BOTH strips open, reply keeps its
+   usual dock and the command strip (closest context to the parts) sits
+   between it and the composer. */
+#chat-box.commanding {
+  padding-top: 39px;   /* base 5px + the strip's 34px visible band */
+}
+
+#chat-box.commanding.replying {
+  padding-top: 73px;   /* both strips: 5px + 34px + 34px */
+}
+
 #chat-command-bar {
   position: absolute;
   box-sizing: border-box;
@@ -15404,8 +15416,10 @@ hr {
   height: 46px;
 }
 
+/* Both open: reply keeps its top dock; the command strip (a later sibling,
+   so it paints over the reply strip's tucked tail) docks onto the composer. */
 #chat-box.commanding.replying #chat-command-bar {
-  top: -29px;
+  top: 39px;
 }
 
 #chat-command-bar > * {
@@ -15493,7 +15507,7 @@ hr {
 
 .command-part.required .command-part-name::after {
   content: '*';
-  color: var(--icon-color-primary, #59fcb3);
+  color: var(--danger-color, #ff5d5d);
 }
 
 .command-part.invalid {
@@ -15507,6 +15521,12 @@ hr {
   text-transform: lowercase;
   color: rgba(255, 255, 255, 0.55);
   flex-shrink: 0;
+  transition: color 0.15s ease;
+}
+
+/* The param being edited announces itself; the rest stay dim. */
+.command-part:focus-within .command-part-name {
+  color: #fff;
 }
 
 .command-part-input {
