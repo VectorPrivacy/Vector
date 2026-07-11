@@ -11523,9 +11523,11 @@ domChatMessageInput.oninput = async () => {
         }
     }
 
-    // Send a Typing Indicator only when content actually changes and setting is enabled
-    // Don't send typing indicators while editing a message (it's not a new message)
-    if (fSendTypingIndicators && !strCurrentEditMessageId && nLastTypingIndicator + 30000 < Date.now()) {
+    // Send a Typing Indicator only when content actually changes and setting is enabled.
+    // Don't send while editing (not a new message) or while the draft is a `/` command —
+    // command composition is an instruction to a bot, not conversation.
+    if (fSendTypingIndicators && !strCurrentEditMessageId && !domChatMessageInput.value.startsWith('/')
+        && nLastTypingIndicator + 30000 < Date.now()) {
         nLastTypingIndicator = Date.now();
         await invoke("start_typing", { receiver: strOpenChat });
     }

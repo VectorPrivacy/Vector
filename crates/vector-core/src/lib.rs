@@ -1931,8 +1931,10 @@ impl VectorCore {
     /// (or the bot set changed), ONE background REQ re-fetches every bot's
     /// manifest together (5s unification window), persists newer editions, and
     /// emits `chat_commands_updated` — the UI swaps the list in when it lands.
-    /// A v2 community queries its own relays; a DM queries the connected pool;
-    /// a v1 community has no picker (SDK bots are v2-first).
+    /// Works for BOTH community protocols (an invocation is plain content; only
+    /// the optional routing tag is v2-only) and DMs. The manifest REQ always
+    /// includes the discovery indexers beside the chat's own relays, so an
+    /// unreachable or stranger-dropping community relay can't blind the picker.
     pub async fn get_chat_commands(&self, chat_id: &str) -> crate::bot_interface::ChatCommandsSnapshot {
         use crate::bot_interface::{self, ChatCommandsSnapshot};
         use nostr_sdk::prelude::ToBech32;
@@ -1941,16 +1943,28 @@ impl VectorCore {
         let mut relays: Vec<String> = Vec::new();
         let community_hex = crate::db::community::community_id_for_channel(chat_id).ok().flatten();
         if let Some(cid_hex) = community_hex {
+            let mut members: Vec<nostr_sdk::prelude::PublicKey> = Vec::new();
             if let Ok(Some(community)) = Self::load_v2_if_v2(&cid_hex) {
-                let members = community::v2::service::stored_memberlist(&community).unwrap_or_default();
-                let state = crate::state::STATE.lock().await;
-                for pk in members {
-                    let Ok(npub) = pk.to_bech32() else { continue };
-                    if state.get_profile(&npub).map(|p| p.flags.is_bot()).unwrap_or(false) {
-                        bots.push(pk);
+                members = community::v2::service::stored_memberlist(&community).unwrap_or_default();
+                relays = community.relays.clone();
+            } else {
+                let id = crate::community::CommunityId(crate::simd::hex::hex_to_bytes_32(&cid_hex));
+                let Ok(Some(community)) = crate::db::community::load_community(&id) else {
+                    return ChatCommandsSnapshot { bots: 0, commands: Vec::new(), fresh: true };
+                };
+                relays = community.relays.clone();
+                for (npub, _) in crate::db::community::community_member_activity(&cid_hex).unwrap_or_default() {
+                    if let Ok(pk) = nostr_sdk::prelude::PublicKey::parse(&npub) {
+                        members.push(pk);
                     }
                 }
-                relays = community.relays.clone();
+            }
+            let state = crate::state::STATE.lock().await;
+            for pk in members {
+                let Ok(npub) = pk.to_bech32() else { continue };
+                if state.get_profile(&npub).map(|p| p.flags.is_bot()).unwrap_or(false) {
+                    bots.push(pk);
+                }
             }
         } else if chat_id.starts_with("npub1") {
             if let Ok(pk) = nostr_sdk::prelude::PublicKey::parse(chat_id) {
@@ -1972,6 +1986,11 @@ impl VectorCore {
         if bots.is_empty() {
             return ChatCommandsSnapshot { bots: 0, commands: Vec::new(), fresh: true };
         }
+        // The chat's own relays PLUS the discovery indexers, one REQ across the
+        // union — a room whose relays refuse kind 33304 still resolves.
+        relays.extend(bot_interface::DISCOVERY_RELAYS.iter().map(|s| s.to_string()));
+        relays.sort();
+        relays.dedup();
         // Deterministic order: the freshness check compares the exact bot set,
         // and picker sections stay stable across refreshes.
         bots.sort_by_key(|p| p.to_hex());

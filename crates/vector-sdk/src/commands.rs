@@ -251,6 +251,10 @@ impl VectorBot {
         for id in vector_core::db::community::list_community_ids().unwrap_or_default() {
             if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&id) {
                 relays.extend(c.relays.clone());
+            } else if let Ok(Some(c)) = vector_core::db::community::load_community(&id) {
+                // v1 community — invocations are plain content there too, so its
+                // members' pickers need the manifest on the same relays.
+                relays.extend(c.relays.clone());
             }
         }
         relays.sort();
@@ -263,8 +267,10 @@ impl VectorBot {
 }
 
 /// Public relays that index addressable/replaceable events network-wide — the
-/// reliable discovery path for a bot's manifest (and profile).
-pub const DISCOVERY_RELAYS: &[&str] = &["wss://purplepag.es", "wss://relay.nostr.band", "wss://relay.damus.io", "wss://nos.lol"];
+/// reliable discovery path for a bot's manifest (and profile). One list shared
+/// with the reader side (clients query these beside a chat's own relays), so
+/// publish reach and lookup reach can't drift apart.
+pub use vector_core::bot_interface::DISCOVERY_RELAYS;
 
 /// "/name <a:int> [b]" — the one-line usage hint for error replies.
 fn usage_line(spec: &CommandSpec) -> String {
