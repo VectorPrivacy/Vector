@@ -211,7 +211,10 @@ function initCommandSelector(textarea, io, anchorEl) {
 
     // --- Rendering ---
     function argSignature(a) {
-        return a.required ? '<' + a.name + '>' : '[' + a.name + ']';
+        // Bare names: required carries full opacity (+ the composer's
+        // asterisk), optional dims via the .optional class — brackets only
+        // spent space.
+        return a.name;
     }
 
     function visibleRows() {

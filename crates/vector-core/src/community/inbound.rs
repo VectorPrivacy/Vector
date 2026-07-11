@@ -773,6 +773,45 @@ mod tests {
     }
 
     #[test]
+    fn bot_routing_tag_rides_the_v1_inner_into_addressed_bots() {
+        use nostr_sdk::prelude::ToBech32;
+        use crate::community::envelope::{build_inner_full, seal_with_signed_inner};
+        let mut state = ChatState::new();
+        let alice = Keys::generate();
+        let bot = Keys::generate();
+        let c = test_channel();
+
+        // A picker send: the `bot` routing tag rides the inner verbatim.
+        let inner = build_inner_full(
+            alice.public_key(),
+            &c.id,
+            c.epoch,
+            crate::stored_event::event_kind::COMMUNITY_MESSAGE,
+            "/roll 20",
+            5,
+            None,
+            &[],
+            &[crate::bot_interface::bot_tag(&bot.public_key())],
+        )
+        .sign_with_keys(&alice)
+        .unwrap();
+        let outer = seal_with_signed_inner(&Keys::generate(), &inner, &c.key, &c.id, c.epoch).unwrap();
+
+        // The real open + ingest path lifts the tag into `addressed_bots` —
+        // the field SDK bots consult to skip commands picked for another bot.
+        let opened = open_message(&outer, &c.key, &c.id, c.epoch).unwrap();
+        let msg = build_message(&opened, &alice.public_key());
+        assert_eq!(msg.addressed_bots, vec![bot.public_key().to_bech32().unwrap()]);
+
+        match process_incoming(&mut state, &outer, &c, &alice.public_key()) {
+            Some(IncomingEvent::NewMessage(m)) => {
+                assert_eq!(m.addressed_bots.len(), 1, "ingest keeps the routing tag");
+            }
+            _ => panic!("expected a new message"),
+        }
+    }
+
+    #[test]
     fn reaction_cross_channel_is_rejected() {
         // A member holding one channel's key must not be able to seal a reaction under THAT channel
         // that lands on a message resident in ANOTHER channel.

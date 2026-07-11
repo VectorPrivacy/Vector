@@ -899,7 +899,9 @@ pub async fn send_community_message(
     // NIP-30: resolve `:shortcode:` in the content against subscribed packs so the inner
     // event carries `["emoji", ...]` tags (custom emoji render for everyone + our echo).
     let emoji_tags = vector_core::emoji_packs::resolve_outbound_emoji_tags(&content);
-    let unsigned = vector_core::community::envelope::build_inner_typed(
+    // The `bot` routing tag rides the inner verbatim (old readers ignore
+    // unknown inner tags), so a picked bot answers alone on v1 too.
+    let unsigned = vector_core::community::envelope::build_inner_full(
         author_pk,
         &channel.id,
         channel.epoch,
@@ -908,6 +910,7 @@ pub async fn send_community_message(
         ms,
         reply.as_deref(),
         &emoji_tags,
+        &bot_tags,
     );
     let message_id = unsigned.id.ok_or("inner event has no id")?.to_hex();
 
