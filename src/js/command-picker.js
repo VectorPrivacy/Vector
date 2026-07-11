@@ -534,7 +534,25 @@ function initCommandSelector(textarea, io, anchorEl) {
             } else {
                 el = document.createElement('input');
                 el.type = 'text';
-                if (a.type === 'int' || a.type === 'number') el.inputMode = 'decimal';
+                if (a.type === 'int' || a.type === 'number') {
+                    // inputMode only picks the MOBILE keypad — desktops can
+                    // type anything, so filter illegal characters live
+                    // (digits, one leading minus, one dot for Number).
+                    el.inputMode = 'decimal';
+                    el.addEventListener('input', () => {
+                        const caret = el.selectionStart;
+                        let s = el.value.replace(a.type === 'int' ? /[^\d-]/g : /[^\d.\-]/g, '')
+                            .replace(/(?!^)-/g, '');
+                        const dot = s.indexOf('.');
+                        if (dot !== -1) s = s.slice(0, dot + 1) + s.slice(dot + 1).replace(/\./g, '');
+                        if (s !== el.value) {
+                            const removed = el.value.length - s.length;
+                            el.value = s;
+                            const pos = Math.max(0, (caret || 0) - removed);
+                            el.setSelectionRange(pos, pos);
+                        }
+                    });
+                }
                 if (a.type === 'user') el.placeholder = 'npub1…';
                 el.autocomplete = 'off';
                 el.spellcheck = false;
