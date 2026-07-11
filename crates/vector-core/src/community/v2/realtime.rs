@@ -355,6 +355,9 @@ pub async fn dispatch_event(session: &SessionGuard, event: Event, handler: Arc<d
                     // A reaction or an edit: the folded TARGET row (its id is the
                     // target's) — the same payload v1 hands this callback.
                     Some(inbound::ChatPersist::Updated { message, .. }) => handler.on_community_update(&channel_id, &message.id, &message),
+                    // An un-react re-renders the PARENT (its chips changed) — the
+                    // same surface a landed reaction drives.
+                    Some(inbound::ChatPersist::ReactionRemoved { message, .. }) => handler.on_community_update(&channel_id, &message.id, &message),
                     Some(inbound::ChatPersist::Removed(target_id)) => handler.on_community_removed(&channel_id, &target_id),
                     None => {}
                 }

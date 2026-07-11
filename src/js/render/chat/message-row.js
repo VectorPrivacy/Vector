@@ -1293,6 +1293,9 @@ function _dmsgReplaceReactions(rowEl, msg) {
     } else if (!existing && fresh) {
         body.appendChild(fresh);
     }
+    // A hover tip anchored to a chip this swap just removed would float forever
+    // (mouseout owns dismissal, and a removed anchor never fires it).
+    if (reactionHoverEl && !reactionHoverEl.isConnected) hideReactionHoverTip();
 }
 
 /**

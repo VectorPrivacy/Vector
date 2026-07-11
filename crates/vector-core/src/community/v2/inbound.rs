@@ -80,6 +80,10 @@ pub enum ChatPersist {
     Updated { message: Message, edit_event: Option<Box<crate::stored_event::StoredEvent>> },
     /// A message removed by its author — drop its row.
     Removed(String),
+    /// A reaction revoked by its reactor — drop the kind-7 row (save is
+    /// additive; a lingering row would resurrect the chip on the next load)
+    /// and re-save the parent so its embedded reactions refresh.
+    ReactionRemoved { reaction_id: String, message: Message },
 }
 
 /// Apply an opened v2 [`ChatEvent`] to STATE (dedup + aggregate onto the SHARED
@@ -166,6 +170,19 @@ pub fn apply_chat_to_state(state: &mut ChatState, event: &ChatEvent, channel_id:
         }
         ChatEvent::Delete { opened, target, .. } => {
             let target_id = crate::simd::hex::bytes_to_hex_32(target);
+            // A delete may target a REACTION (an un-react) rather than a message.
+            // Reactions are author-revocable only: the deleter must be the
+            // reactor. Checked before the message path so a reaction id never
+            // falls through to message-removal logic (v1's exact rule).
+            if let Some((_chat, message_id, author_npub, _)) = state.find_reaction(&target_id) {
+                let reactor_ok = PublicKey::parse(&author_npub).map(|pk| pk == opened.author).unwrap_or(false);
+                if !reactor_ok {
+                    return None;
+                }
+                return state
+                    .remove_reaction_from_message(&message_id, &target_id)
+                    .map(|(_cid, message)| ChatPersist::ReactionRemoved { reaction_id: target_id, message });
+            }
             // Author-scoped: a delete removes its author's OWN message. A moderation-hide
             // (deleting another's message under MANAGE_MESSAGES) is a gated follow-up.
             let own = matches!(state.find_message(&target_id), Some((_, m)) if m.npub.as_deref() == opened.author.to_bech32().ok().as_deref());
@@ -240,6 +257,10 @@ pub async fn persist_chat(channel_id: &str, outcome: &ChatPersist) {
         },
         ChatPersist::Removed(id) => {
             let _ = crate::db::events::delete_event(id).await;
+        }
+        ChatPersist::ReactionRemoved { reaction_id, message } => {
+            let _ = crate::db::events::delete_event(reaction_id).await;
+            let _ = crate::db::events::save_message(channel_id, message).await;
         }
     }
 }
@@ -666,6 +687,57 @@ mod tests {
         // npub, never hex: the frontend resolves the reactor's profile and detects
         // "my reaction" by comparing against the user's npub.
         assert_eq!(author, member.public_key().to_bech32().unwrap(), "reaction author is stored as bech32");
+    }
+
+    #[tokio::test]
+    async fn an_un_react_removes_the_reaction_for_receivers_and_only_for_its_reactor() {
+        use nostr_sdk::prelude::Timestamp;
+        let (_tmp, _guard, me) = init();
+        let relay = MemoryRelay::new();
+        let community = service::create_community(&relay, "UnReact", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let cid = crate::simd::hex::bytes_to_hex_32(&general.0);
+        let session = crate::state::SessionGuard::capture();
+        let (secret, epoch) = community.channel_secret(&community.channels[0]);
+        let group = super::super::derive::channel_group_key(&secret, &general, epoch);
+
+        // A message, then the member's reaction to it.
+        let member = Keys::generate();
+        let msg = chat::build_message_rumor(member.public_key(), &general, epoch, "react to me", None, &[], vec![], 5_000);
+        let msg_id = msg.id.unwrap().to_hex();
+        let (mw, _) = chat::seal_chat_rumor(&msg, &group, &member, Timestamp::from_secs(5), false).unwrap();
+        let ev = chat::open_chat_event(&mw, &group, &general, epoch).unwrap();
+        assert!(matches!(persist_chat_event(&ev, &cid, &me.public_key(), &session).await, Some(ChatPersist::New(_))));
+
+        let reaction = chat::build_reaction_rumor(member.public_key(), &general, epoch, &msg_id, &member.public_key().to_hex(), super::super::kind::MESSAGE, "🔥", None, 6_000);
+        let reaction_id = reaction.id.unwrap().to_hex();
+        let (rw, _) = chat::seal_chat_rumor(&reaction, &group, &member, Timestamp::from_secs(6), false).unwrap();
+        let rev = chat::open_chat_event(&rw, &group, &general, epoch).unwrap();
+        assert!(matches!(persist_chat_event(&rev, &cid, &me.public_key(), &session).await, Some(ChatPersist::Updated { .. })));
+
+        // A NON-reactor's delete targeting the reaction is dropped outright.
+        let outsider = Keys::generate();
+        let forged = chat::build_delete_rumor(outsider.public_key(), &general, epoch, &reaction_id, super::super::kind::MESSAGE, 7_000);
+        let (fw, _) = chat::seal_chat_rumor(&forged, &group, &outsider, Timestamp::from_secs(7), false).unwrap();
+        let fev = chat::open_chat_event(&fw, &group, &general, epoch).unwrap();
+        assert!(persist_chat_event(&fev, &cid, &me.public_key(), &session).await.is_none(), "only the reactor revokes their reaction");
+
+        // The REACTOR's delete removes it: STATE chip gone, kind-7 row gone
+        // (a lingering row would resurrect the chip on the next load), parent intact.
+        let revoke = chat::build_delete_rumor(member.public_key(), &general, epoch, &reaction_id, super::super::kind::MESSAGE, 8_000);
+        let (vw, _) = chat::seal_chat_rumor(&revoke, &group, &member, Timestamp::from_secs(8), false).unwrap();
+        let vev = chat::open_chat_event(&vw, &group, &general, epoch).unwrap();
+        assert!(matches!(persist_chat_event(&vev, &cid, &me.public_key(), &session).await, Some(ChatPersist::ReactionRemoved { .. })));
+        let (has_reaction, parent_alive) = {
+            let st = crate::state::STATE.lock().await;
+            (
+                st.find_reaction(&reaction_id).is_some(),
+                st.find_message(&msg_id).is_some(),
+            )
+        };
+        assert!(!has_reaction, "the chip is gone from STATE");
+        assert!(parent_alive, "the parent message survives an un-react");
+        assert!(!crate::db::events::event_exists(&reaction_id).unwrap(), "the kind-7 row is deleted");
     }
 
     #[tokio::test]
