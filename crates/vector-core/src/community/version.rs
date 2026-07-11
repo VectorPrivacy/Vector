@@ -85,6 +85,11 @@ pub struct FoldResult {
     /// A higher version exists but doesn't link contiguously to the head — withheld prereqs. The
     /// caller fails CLOSED for the entity (suspends its authority) and refetches (H1/M8).
     pub gap: bool,
+    /// The BASE anchor test passed: the lowest ≥-floor edition is a genesis, our exact held floor
+    /// edition, or chains directly to it. When true, `head` is a chain-verified extension of the
+    /// committed floor even if `gap` flags withheld versions ABOVE it — adopting that verified
+    /// prefix is sound (refuse-downgrade holds). When false, `head` is unanchored: do not adopt.
+    pub anchored: bool,
 }
 
 /// Fold a set of editions for **one** entity into its current head.
@@ -128,7 +133,7 @@ pub fn fold(editions: &[Edition], floor: u64, floor_hash: Option<&[u8; 32]>) -> 
     }
     let versions: Vec<u64> = by_version.keys().copied().collect();
     if versions.is_empty() {
-        return FoldResult { head: None, gap: false };
+        return FoldResult { head: None, gap: false, anchored: false };
     }
     // Anchor the lowest edition — the chain must be rooted, not merely internally linked. Without
     // this a lone high-version edition with a forged prev_hash would be trusted as a contiguous head.
@@ -162,7 +167,7 @@ pub fn fold(editions: &[Edition], floor: u64, floor_hash: Option<&[u8; 32]>) -> 
             break;
         }
     }
-    FoldResult { head: Some(head_idx), gap }
+    FoldResult { head: Some(head_idx), gap, anchored }
 }
 
 /// The head a **bootstrapping** client accepts: the per-version winner at the HIGHEST present
@@ -234,7 +239,7 @@ mod tests {
         let e2 = Edition { version: 2, prev_hash: Some(id(1)), self_hash: id(2), created_at: 101, tiebreak_id: id(0xa2) };
         let e3 = Edition { version: 3, prev_hash: Some(id(2)), self_hash: id(3), created_at: 102, tiebreak_id: id(0xa3) };
         let r = fold(&[e1, e2, e3], 0, None);
-        assert_eq!(r, FoldResult { head: Some(2), gap: false });
+        assert_eq!(r, FoldResult { head: Some(2), gap: false, anchored: true });
     }
 
     #[test]
@@ -359,7 +364,7 @@ mod tests {
     #[test]
     fn all_below_floor_is_no_change_not_a_gap() {
         let r = fold(&[linked(1), linked(2)], 5, Some(&id(5)));
-        assert_eq!(r, FoldResult { head: None, gap: false }, "everything below floor → no candidate, no gap");
+        assert_eq!(r, FoldResult { head: None, gap: false, anchored: false }, "everything below floor → no candidate, no gap");
     }
 
     // ===== Weird / absurd / malformed input — fold must degrade gracefully, NEVER panic =====
@@ -435,7 +440,7 @@ mod tests {
         let floor_hash = id(0x55);
         let e6 = Edition { version: 6, prev_hash: Some(floor_hash), self_hash: id(6), created_at: 600, tiebreak_id: id(0xa6) };
         let r = fold(&[e6], 5, Some(&floor_hash));
-        assert_eq!(r, FoldResult { head: Some(0), gap: false }, "v6 linking to the held v5 hash is anchored");
+        assert_eq!(r, FoldResult { head: Some(0), gap: false, anchored: true }, "v6 linking to the held v5 hash is anchored");
 
         // A v6 whose prev_hash does NOT match the held floor is unanchored → gap.
         let e6_bad = Edition { version: 6, prev_hash: Some(id(0xAB)), self_hash: id(6), created_at: 600, tiebreak_id: id(0xa6) };

@@ -18,6 +18,12 @@ pub struct Query {
     /// `d` tag (identifier) values to match (OR). Empty = no `d` constraint. Used to
     /// locate addressable events (e.g. a public-invite bundle by its token locator).
     pub d_tags: Vec<String>,
+    /// `p` tag (recipient pubkey hex) values to match (OR). Empty = no `p` constraint.
+    /// Used to fetch person-addressed giftwraps (direct invites) by recipient.
+    pub p_tags: Vec<String>,
+    /// `k` tag (wrapped-kind) values to match (OR). Empty = no `k` constraint. Narrows
+    /// giftwrap fetches to the inner kind advertised on the wrap.
+    pub k_tags: Vec<String>,
     /// Author pubkeys (hex) to match (OR). Empty = any author.
     pub authors: Vec<String>,
     /// Lower bound on `created_at` (seconds), inclusive.
@@ -57,15 +63,22 @@ impl Query {
         if !self.d_tags.is_empty() && !self.matches_single_letter("d", &self.d_tags, event) {
             return false;
         }
+        if !self.p_tags.is_empty() && !self.matches_single_letter("p", &self.p_tags, event) {
+            return false;
+        }
+        if !self.k_tags.is_empty() && !self.matches_single_letter("k", &self.k_tags, event) {
+            return false;
+        }
         true
     }
 
     fn matches_single_letter(&self, name: &str, wanted: &[String], event: &Event) -> bool {
-        let val = event.tags.iter().find_map(|t| {
+        // ANY occurrence may satisfy the OR-set (an event can carry several `p` tags);
+        // relays match every tag instance, and matches() must agree with to_filter.
+        event.tags.iter().any(|t| {
             let s = t.as_slice();
-            (s.len() >= 2 && s[0] == name).then(|| s[1].clone())
-        });
-        matches!(val, Some(v) if wanted.iter().any(|w| *w == v))
+            s.len() >= 2 && s[0] == name && wanted.iter().any(|w| *w == s[1])
+        })
     }
 
     /// Translate to a Nostr relay `Filter` for the live client.
@@ -80,6 +93,14 @@ impl Query {
         }
         if !self.d_tags.is_empty() {
             filter = filter.identifiers(self.d_tags.clone());
+        }
+        if !self.p_tags.is_empty() {
+            filter = filter
+                .custom_tags(SingleLetterTag::lowercase(Alphabet::P), self.p_tags.clone());
+        }
+        if !self.k_tags.is_empty() {
+            filter = filter
+                .custom_tags(SingleLetterTag::lowercase(Alphabet::K), self.k_tags.clone());
         }
         if !self.authors.is_empty() {
             let authors: Vec<PublicKey> =
@@ -595,25 +616,60 @@ pub(crate) mod memory {
     /// dedups, so a gap on one relay is covered by its siblings.
     pub struct MemoryRelay {
         per_relay: Mutex<HashMap<String, Vec<Event>>>,
+        subscribers: Mutex<Vec<(Query, tokio::sync::mpsc::UnboundedSender<Event>)>>,
+    }
+
+    /// NIP-01 ephemeral range: relays stream these to live subscriptions but never store
+    /// them, so a fetch on a real relay can never return one.
+    fn is_ephemeral(kind: u16) -> bool {
+        (20000..30000).contains(&kind)
     }
 
     impl MemoryRelay {
         pub fn new() -> Self {
-            MemoryRelay { per_relay: Mutex::new(HashMap::new()) }
+            MemoryRelay {
+                per_relay: Mutex::new(HashMap::new()),
+                subscribers: Mutex::new(Vec::new()),
+            }
+        }
+
+        /// Open a live subscription: every subsequent publish/inject matching `query` is
+        /// delivered — ephemerals included, which stream but are never stored.
+        pub fn subscribe(&self, query: Query) -> tokio::sync::mpsc::UnboundedReceiver<Event> {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            self.subscribers.lock().unwrap().push((query, tx));
+            rx
+        }
+
+        /// Push `event` to every live matching subscriber, pruning closed ones.
+        fn deliver(&self, event: &Event) {
+            self.subscribers.lock().unwrap().retain(|(q, tx)| {
+                if q.matches(event) {
+                    tx.send(event.clone()).is_ok()
+                } else {
+                    !tx.is_closed()
+                }
+            });
         }
 
         /// Publish to ONLY a subset of relays — used to simulate a relay missing an
         /// event (e.g. a dropped rekey) for redundancy tests.
         pub fn inject(&self, event: &Event, relays: &[String]) {
-            // Parameterized-replaceable kinds (30000-39999, e.g. a public-invite bundle): a relay keeps only
-            // the latest per (kind, pubkey, d-tag), so a new event at that coordinate REPLACES the old one
-            // (NIP-01). This is what makes a revocation tombstone overwrite the bundle even on relays that
-            // ignore deletions — model it so tests match real relay behavior.
+            self.deliver(event);
+            if is_ephemeral(event.kind.as_u16()) {
+                return; // live-delivered above, never stored
+            }
+            // Replaceable kinds: parameterized (30000-39999, keyed by (kind, pubkey, d-tag)) AND
+            // standard (10000-19999, plus 0/3, keyed by (kind, pubkey) — the d-tag is "") — a relay keeps
+            // only the latest at that coordinate, so a new event REPLACES the old (NIP-01). This is what
+            // makes a revocation tombstone overwrite a bundle, and a fresh 13302 supersede the last one,
+            // even on relays that ignore deletions — model it so tests match real relay behavior.
             let d_tag = |e: &Event| e.tags.iter().find_map(|t| {
                 let s = t.as_slice();
                 (s.len() >= 2 && s[0] == "d").then(|| s[1].clone())
             }).unwrap_or_default();
-            let replaceable = (30000..40000).contains(&event.kind.as_u16());
+            let k = event.kind.as_u16();
+            let replaceable = (30000..40000).contains(&k) || (10000..20000).contains(&k) || k == 0 || k == 3;
             let coord = (event.kind.as_u16(), event.pubkey, d_tag(event));
             let mut map = self.per_relay.lock().unwrap();
             for r in relays {
@@ -674,6 +730,7 @@ pub(crate) mod memory {
             // Honor NIP-09 so the delete→gone cycle is testable offline.
             if event.kind == Kind::EventDeletion {
                 self.apply_deletion(event, relays);
+                self.deliver(event);
             } else {
                 self.inject(event, relays);
             }
@@ -693,6 +750,11 @@ pub(crate) mod memory {
             for r in relays {
                 if let Some(events) = map.get(r) {
                     for ev in events {
+                        // Never stored, but guard the read path too: a real relay never
+                        // serves an ephemeral from a fetch, whatever got in.
+                        if is_ephemeral(ev.kind.as_u16()) {
+                            continue;
+                        }
                         if query.matches(ev) && seen.insert(ev.id) {
                             out.push(ev.clone());
                         }
@@ -815,6 +877,52 @@ mod tests {
         assert!(!filter.match_event(&wrong_kind, MatchEventOptions::new()));
     }
 
+    /// Build an event carrying one arbitrary single-letter tag (recipient `p`, wrapped-kind `k`).
+    fn evt_sl(kind: u16, letter: Alphabet, value: &str) -> Event {
+        EventBuilder::new(Kind::Custom(kind), "x")
+            .tags([Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(letter)),
+                [value.to_string()],
+            )])
+            .sign_with_keys(&Keys::generate())
+            .unwrap()
+    }
+
+    #[test]
+    fn to_filter_and_matches_agree_on_authors() {
+        let keys = Keys::generate();
+        let e = EventBuilder::new(Kind::Custom(1059), "x").sign_with_keys(&keys).unwrap();
+        let q = Query { kinds: vec![1059], authors: vec![keys.public_key().to_hex()], ..Default::default() };
+        assert!(q.matches(&e));
+        assert!(q.to_filter().match_event(&e, MatchEventOptions::new()));
+        let miss = Query { kinds: vec![1059], authors: vec![Keys::generate().public_key().to_hex()], ..Default::default() };
+        assert!(!miss.matches(&e));
+        assert!(!miss.to_filter().match_event(&e, MatchEventOptions::new()));
+    }
+
+    #[test]
+    fn to_filter_and_matches_agree_on_p_tags() {
+        let recipient = Keys::generate().public_key().to_hex();
+        let e = evt_sl(1059, Alphabet::P, &recipient);
+        let q = Query { kinds: vec![1059], p_tags: vec![recipient], ..Default::default() };
+        assert!(q.matches(&e));
+        assert!(q.to_filter().match_event(&e, MatchEventOptions::new()));
+        let miss = Query { kinds: vec![1059], p_tags: vec![Keys::generate().public_key().to_hex()], ..Default::default() };
+        assert!(!miss.matches(&e));
+        assert!(!miss.to_filter().match_event(&e, MatchEventOptions::new()));
+    }
+
+    #[test]
+    fn to_filter_and_matches_agree_on_k_tags() {
+        let e = evt_sl(1059, Alphabet::K, "3311");
+        let q = Query { kinds: vec![1059], k_tags: vec!["3311".into()], ..Default::default() };
+        assert!(q.matches(&e));
+        assert!(q.to_filter().match_event(&e, MatchEventOptions::new()));
+        let miss = Query { kinds: vec![1059], k_tags: vec!["3300".into()], ..Default::default() };
+        assert!(!miss.matches(&e));
+        assert!(!miss.to_filter().match_event(&e, MatchEventOptions::new()));
+    }
+
     #[test]
     fn to_filter_empty_kinds_only_constrains_z_and_since() {
         // Empty kinds = no kind constraint, matching matches()' behavior.
@@ -921,5 +1029,66 @@ mod tests {
         // A fetch across the full set still finds it (redundancy).
         let got = relay.fetch(&Query { kinds: vec![3300], ..Default::default() }, &all).await.unwrap();
         assert_eq!(got.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ephemeral_kind_streams_live_but_is_never_stored_or_fetched() {
+        use super::memory::MemoryRelay;
+        let relay = MemoryRelay::new();
+        let relays = vec!["r1".to_string()];
+        let mut sub = relay.subscribe(Query { kinds: vec![21059], ..Default::default() });
+        let e = evt(21059, "p");
+        relay.publish(&e, &relays).await.unwrap();
+        assert_eq!(relay.count_on("r1"), 0, "ephemeral is never stored");
+        let got = relay
+            .fetch(&Query { kinds: vec![21059], ..Default::default() }, &relays)
+            .await
+            .unwrap();
+        assert!(got.is_empty(), "a real relay never serves an ephemeral from a fetch");
+        assert_eq!(sub.try_recv().unwrap().id, e.id, "but a live subscriber receives it");
+    }
+
+    #[tokio::test]
+    async fn stored_kind_is_fetchable_and_delivered_live() {
+        use super::memory::MemoryRelay;
+        let relay = MemoryRelay::new();
+        let relays = vec!["r1".to_string()];
+        let mut sub = relay.subscribe(Query { kinds: vec![1059], ..Default::default() });
+        let e = evt(1059, "p");
+        relay.publish(&e, &relays).await.unwrap();
+        let got = relay
+            .fetch(&Query { kinds: vec![1059], ..Default::default() }, &relays)
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 1, "stored kind is fetchable");
+        assert_eq!(sub.try_recv().unwrap().id, e.id, "and delivered to the live subscriber");
+    }
+
+    #[tokio::test]
+    async fn p_tags_route_a_giftwrap_to_the_matching_subscriber() {
+        use super::memory::MemoryRelay;
+        let relay = MemoryRelay::new();
+        let relays = vec!["r1".to_string()];
+        let alice = Keys::generate().public_key().to_hex();
+        let bob = Keys::generate().public_key().to_hex();
+        let mut sub_alice =
+            relay.subscribe(Query { kinds: vec![1059], p_tags: vec![alice.clone()], ..Default::default() });
+        let mut sub_bob =
+            relay.subscribe(Query { kinds: vec![1059], p_tags: vec![bob.clone()], ..Default::default() });
+        let wrap = evt_sl(1059, Alphabet::P, &alice);
+        relay.publish(&wrap, &relays).await.unwrap();
+        assert_eq!(sub_alice.try_recv().unwrap().id, wrap.id, "addressed recipient gets it live");
+        assert!(sub_bob.try_recv().is_err(), "a differently-addressed subscriber does not");
+        // Fetch agrees with the live routing.
+        let for_alice = relay
+            .fetch(&Query { kinds: vec![1059], p_tags: vec![alice], ..Default::default() }, &relays)
+            .await
+            .unwrap();
+        assert_eq!(for_alice.len(), 1);
+        let for_bob = relay
+            .fetch(&Query { kinds: vec![1059], p_tags: vec![bob], ..Default::default() }, &relays)
+            .await
+            .unwrap();
+        assert!(for_bob.is_empty());
     }
 }

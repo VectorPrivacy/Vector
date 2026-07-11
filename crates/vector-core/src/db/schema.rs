@@ -786,5 +786,50 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // Migration 66: Concord v2 dual-stack columns. A community is v1 (the shipped
+    // protocol) or v2 (the self-certifying-id CORD stack); the two coexist per
+    // account. Existing rows default to v1. v2 stores the owner commitment inputs
+    // (owner_pubkey + owner_salt reproduce the community_id) in place of v1's
+    // owner_attestation; server_root_key/server_root_epoch carry the v2
+    // community_root/root_epoch (same base-key role, reused columns). A channel's
+    // `private` flag selects v2 keying: public channels derive from the root (no
+    // stored key), private ones carry an independent key.
+    run_atomic_migration(conn, 66, "Concord v2 dual-stack columns", |tx| {
+        for (table, col, ddl) in [
+            ("communities", "protocol", "INTEGER NOT NULL DEFAULT 1"),
+            ("communities", "owner_pubkey", "TEXT"),
+            ("communities", "owner_salt", "TEXT"),
+            ("community_channels", "private", "INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            // ADD COLUMN is not idempotent; tolerate a re-run (duplicate column).
+            let sql = format!("ALTER TABLE {table} ADD COLUMN {col} {ddl}");
+            if let Err(e) = tx.execute(&sql, []) {
+                let msg = e.to_string();
+                if !msg.contains("duplicate column name") {
+                    return Err(format!("add {table}.{col}: {msg}"));
+                }
+            }
+        }
+        Ok(())
+    })?;
+
+    // Migration 67: the persisted v2 Guestbook — the RAW membership events (one
+    // encrypted JSON blob per community; kick/snapshot validity is judged at fold
+    // time against CURRENT authority, so raw events are the correct stored form)
+    // plus the newest-seen cursor, so boot catches the plane up incrementally and
+    // the memberlist becomes a local read.
+    run_atomic_migration(conn, 67, "v2 guestbook store", |tx| {
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS community_guestbook (
+                community_id TEXT PRIMARY KEY,
+                events TEXT NOT NULL,
+                cursor_secs INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )
+        .map_err(|e| format!("create community_guestbook: {e}"))?;
+        Ok(())
+    })?;
+
     Ok(())
 }

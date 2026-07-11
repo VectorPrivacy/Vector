@@ -293,6 +293,7 @@ fn process_text_message(
     let ms_timestamp = extract_millisecond_timestamp(&rumor);
 
     let emoji_tags = crate::types::EmojiTag::extract_from_tags(rumor.tags.iter());
+    let addressed_bots = crate::bot_interface::addressed_bots(rumor.tags.iter());
     // DM → None (1:1, implied by chat); Community → the real author.
     let npub = context.author_npub(&rumor.pubkey);
 
@@ -317,6 +318,7 @@ fn process_text_message(
         edited: false,
         edit_history: None,
         emoji_tags,
+        addressed_bots,
     };
 
     Ok(RumorProcessingResult::TextMessage(msg))
@@ -532,6 +534,7 @@ fn process_file_attachment(
         edited: false,
         edit_history: None,
         emoji_tags,
+        addressed_bots: crate::bot_interface::addressed_bots(rumor.tags.iter()),
     };
 
     Ok(RumorProcessingResult::FileAttachment(msg))

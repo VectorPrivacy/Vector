@@ -947,6 +947,11 @@ impl ChatState {
                         continue;
                     }
                 }
+            } else if !chat.metadata.custom_fields.contains_key("community_id") {
+                // A Community row without its owning community_id is a bare
+                // persistence anchor (a sibling channel the UI doesn't surface) —
+                // its unreads can't be seen or cleared, so they must not badge.
+                continue;
             }
             total += counts.get(&chat.id).copied().unwrap_or(0);
         }
@@ -962,6 +967,9 @@ impl ChatState {
                 if let Some(id) = self.interner.lookup(&chat.id) {
                     if self.get_profile_by_id(id).map_or(false, |p| p.flags.is_blocked()) { continue; }
                 }
+            } else if !chat.metadata.custom_fields.contains_key("community_id") {
+                // Unsurfaced sibling-channel anchor — see `sum_unread_from`.
+                continue;
             }
             let mut unread_count = 0u32;
             for msg in chat.iter_compact().rev() {
@@ -1827,7 +1835,12 @@ mod tests {
         let normal_profile = Profile::new();
         state.insert_or_replace_profile("npub1normal", normal_profile);
 
+        // A SURFACED community row (carries its owning community_id) — a bare
+        // anchor row is excluded from unread totals by design.
         state.ensure_community_chat("grp1");
+        if let Some(chat) = state.chats.iter_mut().find(|c| c.id == "grp1") {
+            chat.metadata.custom_fields.insert("community_id".to_string(), "c".repeat(64));
+        }
 
         // Message from blocked member
         let msg_blocked = make_message_from(1, "blocked says hi", 1700000001000, "npub1blockedmember");

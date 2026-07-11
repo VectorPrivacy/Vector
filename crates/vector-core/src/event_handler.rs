@@ -83,6 +83,10 @@ pub trait InboundEventHandler: Send + Sync {
     /// A Community's control plane was refreshed in realtime (banlist/roles/metadata/mode change,
     /// or a re-founding followed). The platform re-reads display state.
     fn on_community_refreshed(&self, _community_id: &str) {}
+
+    /// A Community was DISSOLVED by its owner (CORD-02 §9): sealed read-only, held keys still open
+    /// history but nothing new is honored. The platform surfaces the grave.
+    fn on_community_dissolved(&self, _community_id: &str) {}
 }
 
 /// No-op handler for CLI/tests.
@@ -109,6 +113,17 @@ pub enum PreparedEvent {
     CommunityInvite {
         invite: crate::community::invite::CommunityInvite,
         /// Inviter's npub (bech32) — shown in the pending-invite UI.
+        inviter: String,
+        is_mine: bool,
+        wrapper_event_id_bytes: [u8; 32],
+        wrapper_created_at: u64,
+    },
+    /// Concord v2 Direct Invite (inner kind 3313) — parked for explicit consent.
+    /// Carries the raw bundle JSON (parked verbatim; the accept path re-parses it).
+    CommunityInviteV2 {
+        bundle_json: String,
+        community_id: String,
+        /// Inviter's npub (hex) — the proven seal signer.
         inviter: String,
         is_mine: bool,
         wrapper_event_id_bytes: [u8; 32],
@@ -184,6 +199,25 @@ pub async fn prepare_event(
         return match crate::community::invite::parse_invite_rumor(rumor.kind, &rumor.content) {
             Some(invite) => PreparedEvent::CommunityInvite {
                 invite, inviter: contact.clone(), is_mine, wrapper_event_id_bytes, wrapper_created_at,
+            },
+            None => PreparedEvent::ErrorSkip { wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at },
+        };
+    }
+
+    // Concord v2 Direct Invite (inner kind 3313) — the v2 join carrier. `from_bundle_json`
+    // validates the owner commitment + bounds; we park the canonical re-serialized bundle.
+    if rumor.kind == Kind::Custom(crate::community::v2::kind::DIRECT_INVITE) {
+        return match crate::community::v2::invite::CommunityInvite::from_bundle_json(&rumor.content)
+            .ok()
+            .and_then(|b| serde_json::to_string(&b).ok().map(|j| (b.community_id, j)))
+        {
+            Some((community_id, bundle_json)) => PreparedEvent::CommunityInviteV2 {
+                community_id,
+                bundle_json,
+                inviter: contact.clone(), // the seal signer's npub (bech32), like the v1 arm
+                is_mine,
+                wrapper_event_id_bytes,
+                wrapper_created_at,
             },
             None => PreparedEvent::ErrorSkip { wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at },
         };
@@ -456,6 +490,43 @@ pub async fn commit_prepared_event(
                 }
                 Ok(false) => {} // raced — already parked
                 Err(e) => log_warn!("[community] invite park failed: {}", e),
+            }
+            false
+        }
+        PreparedEvent::CommunityInviteV2 { bundle_json, community_id, inviter, is_mine, wrapper_event_id_bytes, wrapper_created_at } => {
+            {
+                let mut cache = WRAPPER_ID_CACHE.lock().await;
+                cache.insert(wrapper_event_id_bytes);
+            }
+            let _ = crate::db::wrappers::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at, crate::db::wrappers::TRANSPORT_NIP17);
+
+            // Never park our own echoed invite.
+            if is_mine {
+                return false;
+            }
+            // Idempotency on the INNER community_id (already validated hex), not the
+            // attacker-controlled wrapper id: already held, or already parked → drop.
+            let held = match crate::simd::hex::hex_to_bytes_32_checked(&community_id) {
+                Some(b) => crate::community::CommunityId(b),
+                None => return false,
+            };
+            if crate::db::community::community_exists(&held).unwrap_or(false) {
+                return false;
+            }
+            if crate::db::community::pending_invite_exists(&community_id).unwrap_or(false) {
+                return false;
+            }
+            // Supersession: a decline/leave tombstone (protocol-agnostic, keyed on
+            // community_id) suppresses a re-wrapped invite no newer than the decision,
+            // so a declined/left community can't be re-nagged by a fresh ephemeral wrap.
+            if crate::community::list::tombstone_suppresses(&community_id, wrapper_created_at) {
+                return false;
+            }
+            // Park for explicit consent — do NOT join/subscribe here. Accept via the command layer.
+            match crate::db::community::save_pending_invite(&community_id, &bundle_json, &inviter) {
+                Ok(true) => handler.on_community_invite(&community_id),
+                Ok(false) => {} // raced — already parked
+                Err(e) => log_warn!("[community] v2 invite park failed: {}", e),
             }
             false
         }

@@ -1666,11 +1666,17 @@ function applyDissolvedChatUI(chat) {
  * encrypted logo needs an async cache step, exactly like DM profile avatars: read the
  * `icon` flag + `community_id` from the chat's own metadata and cache lazily.
  */
+const _communityAvatarAttempted = new Set();
 function resolveCommunityAvatars() {
     for (const chat of arrChats) {
         if (chat.chat_type !== 'Community') continue;
         const cf = chat.metadata?.custom_fields || {};
-        if (cf.icon === '1' && cf.community_id && !chat.metadata.avatar_cached) {
+        // Ask the backend directly instead of trusting an `icon` flag on the chat
+        // row — the flag can lag the community's own row (set at register time,
+        // while the icon arrives via the live control fold). The call is a cheap
+        // local read when there's no icon and disk-cached once there is.
+        if (cf.community_id && !chat.metadata.avatar_cached && !_communityAvatarAttempted.has(chat.id)) {
+            _communityAvatarAttempted.add(chat.id);
             invoke('cache_community_image', { communityId: cf.community_id, isBanner: false })
                 .then(path => {
                     if (path) {
@@ -1678,7 +1684,13 @@ function resolveCommunityAvatars() {
                         if (!fInit) renderChatlist();
                     }
                 })
-                .catch(() => {});
+                .catch(() => {})
+                .finally(() => {
+                    // A miss stays retryable on the NEXT resolver pass (a fresh icon
+                    // can land via the live fold at any time); memoizing only the
+                    // in-flight window stops same-pass duplicate invokes.
+                    _communityAvatarAttempted.delete(chat.id);
+                });
         }
     }
 }
@@ -2208,8 +2220,8 @@ async function previewAndJoinCommunityLink(url) {
         }
         const descHtml = preview.description ? `<br><br><span style="opacity:0.8;">${escapeHtml(preview.description)}</span>` : '';
         // Show the community's own logo when it has one, else the same placeholder the chat list
-        // uses for logo-less communities (group-placeholder.svg).
-        let iconSrc = 'icons/group-placeholder.svg';
+        // uses for logo-less communities. Bare filename: popupConfirm prefixes `./icons/` itself.
+        let iconSrc = 'group-placeholder.svg';
         if (preview.icon) {
             try {
                 const path = await invoke('cache_invite_logo', { image: preview.icon });
@@ -2242,9 +2254,18 @@ async function previewAndJoinCommunityLink(url) {
     }
 }
 
-/** Detect a Vector community invite URL (or bare fragment) in pasted/typed text. */
+/** Detect a Vector community invite URL (or bare payload) in pasted/typed text.
+ *  Covers the v1 fragment form (vectorapp.io only), the v2 naddr form on ANY
+ *  host (`…/invite/naddr1…#<frag>` — the naddr+fragment is the whole payload
+ *  and self-authenticates, so armada.buzz links join natively), and the
+ *  bare-payload equivalents of both. */
 function isCommunityInviteUrl(text) {
-    return typeof text === 'string' && /vectorapp\.io\/invite\/?#|^#?[A-Za-z0-9_-]{40,}$/.test(text.trim()) && text.includes('#');
+    if (typeof text !== 'string' || !text.includes('#')) return false;
+    const t = text.trim();
+    return /vectorapp\.io\/invite\/?#/i.test(t)
+        || /\/invite\/naddr1[a-z0-9]{20,}#/i.test(t)
+        || /^(?:nostr:)?naddr1[a-z0-9]{20,}#[A-Za-z0-9_-]{20,}$/i.test(t)
+        || /^#?[A-Za-z0-9_-]{40,}$/.test(t);
 }
 
 // ============================================================================
@@ -2252,9 +2273,20 @@ function isCommunityInviteUrl(text) {
 // ============================================================================
 
 // Matches a shareable Community invite link in either form (https share URL or vector://
-// deep link). The base64url fragment is the entire invite payload — it keys the preview
-// cache and reconstructs a canonical URL for the backend.
-const COMMUNITY_INVITE_URL_REGEX = /(?:https?:\/\/(?:www\.)?vectorapp\.io\/invite\/?|vector:\/\/invite\/?)#([A-Za-z0-9_-]{20,})/gi;
+// deep link), v1 or v2. v1 is fragment-only and vectorapp.io-specific (`/invite#<frag>`);
+// v2 carries the bundle coordinate as an naddr in the path (`/invite/<naddr>#<frag>`) and
+// is accepted from ANY host — the naddr+fragment self-authenticates (the domain is never
+// contacted), so Armada-minted links render + join natively. The invite KEY —
+// `<naddr>#<frag>` for v2, bare `<frag>` for v1 — is the whole payload: it keys the
+// preview cache and reconstructs a canonical URL for the backend.
+const COMMUNITY_INVITE_URL_REGEX = /(?:https?:\/\/(?:www\.)?vectorapp\.io\/invite\/?|vector:\/\/invite\/?|https?:\/\/[^\s#]+?\/invite\/(?=naddr1))(naddr1[a-z0-9]{20,})?#([A-Za-z0-9_-]{20,})/gi;
+
+/** Canonical share URL from an invite key (a v2 key carries its naddr locator). */
+function communityInviteUrlFromKey(inviteKey) {
+    return inviteKey.includes('#')
+        ? `https://vectorapp.io/invite/${inviteKey}`
+        : `https://vectorapp.io/invite#${inviteKey}`;
+}
 
 /** Strip Community invite links from `text` — the invite card carries the affordance. */
 function stripCommunityInviteUrls(text) {
@@ -2275,8 +2307,9 @@ function replaceCommunityInviteUrlsForPreview(text) {
     return text.replace(COMMUNITY_INVITE_URL_REGEX, 'Community Invite');
 }
 
-// Resolved previews keyed by URL fragment: { state: 'ok', info, iconSrc, ts } or
-// { state: 'err', error, ts } or { state: 'loading', promise }. Errors expire so a chat
+// Resolved previews keyed by invite key (v1: fragment; v2: naddr#fragment):
+// { state: 'ok', info, iconSrc, ts } or { state: 'err', error, ts } or
+// { state: 'loading', promise }. Errors expire so a chat
 // reopen after a slow relay retries instead of inheriting a stale "Invite Unavailable".
 // Ok entries expire too (non-members track metadata edits via the backend's live fold) —
 // EXCEPT when the community is joined: then the entry only supplies the immutable
@@ -2300,15 +2333,15 @@ function renderCommunityInvitePreviews(target, text) {
     const seen = new Set();
     let match;
     while ((match = COMMUNITY_INVITE_URL_REGEX.exec(text)) !== null) {
-        const frag = match[1];
-        if (seen.has(frag)) continue;
+        const inviteKey = match[1] ? `${match[1]}#${match[2]}` : match[2];
+        if (seen.has(inviteKey)) continue;
         if (seen.size >= INVITE_CARDS_PER_MSG) break;
-        seen.add(frag);
-        target.appendChild(_buildCommunityInviteCard(frag));
+        seen.add(inviteKey);
+        target.appendChild(_buildCommunityInviteCard(inviteKey));
     }
 }
 
-function _buildCommunityInviteCard(frag) {
+function _buildCommunityInviteCard(inviteKey) {
     const card = document.createElement('div');
     card.className = 'community-invite-card is-loading';
 
@@ -2349,16 +2382,16 @@ function _buildCommunityInviteCard(frag) {
 
     // Re-renders (scroll, reactions landing) hit the settled cache — fill instantly,
     // no pop animation; only a genuinely fresh resolve animates in.
-    const settled = _invitePreviewCache.get(frag);
+    const settled = _invitePreviewCache.get(inviteKey);
     const animate = !(settled && settled.state !== 'loading');
-    _resolveCommunityInvitePreview(frag).then((res) => {
-        _fillCommunityInviteCard(card, frag, res, { icon, name, desc, btn }, animate);
+    _resolveCommunityInvitePreview(inviteKey).then((res) => {
+        _fillCommunityInviteCard(card, inviteKey, res, { icon, name, desc, btn }, animate);
     });
     return card;
 }
 
-function _resolveCommunityInvitePreview(frag) {
-    const cached = _invitePreviewCache.get(frag);
+function _resolveCommunityInvitePreview(inviteKey) {
+    const cached = _invitePreviewCache.get(inviteKey);
     if (cached) {
         if (cached.state === 'loading') return cached.promise;
         if (cached.state === 'ok') {
@@ -2373,7 +2406,7 @@ function _resolveCommunityInvitePreview(frag) {
     const promise = (async () => {
         let entry;
         try {
-            const info = await invoke('preview_public_invite', { url: `https://vectorapp.io/invite#${frag}` });
+            const info = await invoke('preview_public_invite', { url: communityInviteUrlFromKey(inviteKey) });
             // Decrypt + disk-cache the logo up-front; the card binds the local asset path
             // (the frontend never fetches the remote blob itself).
             let iconSrc = '';
@@ -2392,14 +2425,14 @@ function _resolveCommunityInvitePreview(frag) {
             const oldest = _invitePreviewCache.keys().next().value;
             if (oldest !== undefined) _invitePreviewCache.delete(oldest);
         }
-        _invitePreviewCache.set(frag, entry);
+        _invitePreviewCache.set(inviteKey, entry);
         return entry;
     })();
-    _invitePreviewCache.set(frag, { state: 'loading', promise });
+    _invitePreviewCache.set(inviteKey, { state: 'loading', promise });
     return promise;
 }
 
-function _fillCommunityInviteCard(card, frag, res, els, animate) {
+function _fillCommunityInviteCard(card, inviteKey, res, els, animate) {
     card.classList.remove('is-loading');
     if (res.state !== 'ok') {
         card.classList.add('is-invalid');
@@ -2427,12 +2460,12 @@ function _fillCommunityInviteCard(card, frag, res, els, animate) {
     } else if (res.iconSrc) {
         els.icon.src = res.iconSrc;
     }
-    _setInviteCardAction(els.btn, frag, res.info.community_id);
+    _setInviteCardAction(els.btn, inviteKey, res.info.community_id);
     if (animate) card.classList.add('cic-ready');
 }
 
 /** Point the card's button at the right action: Open when already a member, else Join. */
-function _setInviteCardAction(btn, frag, communityId) {
+function _setInviteCardAction(btn, inviteKey, communityId) {
     const joined = communityId && arrChats.find(c => c.metadata?.custom_fields?.community_id === communityId);
     btn.disabled = false;
     if (joined) {
@@ -2442,11 +2475,11 @@ function _setInviteCardAction(btn, frag, communityId) {
     } else {
         btn.textContent = 'Join';
         btn.classList.remove('cic-btn-open');
-        btn.onclick = (e) => { e.stopPropagation(); _joinCommunityFromCard(frag, btn, communityId); };
+        btn.onclick = (e) => { e.stopPropagation(); _joinCommunityFromCard(inviteKey, btn, communityId); };
     }
 }
 
-async function _joinCommunityFromCard(frag, btn, communityId) {
+async function _joinCommunityFromCard(inviteKey, btn, communityId) {
     // Shares the deep-link flow's guard: one join at a time, app-wide.
     if (_communityJoinInFlight) return;
     _communityJoinInFlight = true;
@@ -2454,7 +2487,7 @@ async function _joinCommunityFromCard(frag, btn, communityId) {
     btn.textContent = 'Joining…';
     btn.classList.add('is-joining');
     try {
-        const summary = await invoke('accept_public_invite', { url: `https://vectorapp.io/invite#${frag}` });
+        const summary = await invoke('accept_public_invite', { url: communityInviteUrlFromKey(inviteKey) });
         // Await the first-page sync so the chat lands populated + in the right list slot.
         const channelId = await surfaceCommunitySummary(summary);
         btn.classList.remove('is-joining');
@@ -2466,7 +2499,7 @@ async function _joinCommunityFromCard(frag, btn, communityId) {
             // Joining IS the navigation intent — land in the new community, same as hitting Open.
             openChat(channelId);
         } else {
-            _setInviteCardAction(btn, frag, communityId);
+            _setInviteCardAction(btn, inviteKey, communityId);
         }
     } catch (e) {
         btn.classList.remove('is-joining');
@@ -2655,6 +2688,9 @@ function updateChatBackNotification() {
         if (!chat.messages || chat.messages.length === 0) return false;
         // Skip our own profile (bookmarks/notes)
         if (chat.id === strPubkey) return false;
+        // Skip unsurfaced Community anchor rows (sibling channels the list hides) —
+        // their unreads can't be visited, so they must never light the dot.
+        if (chatIsGroup(chat) && !chat.metadata?.custom_fields?.community_id) return false;
         // Use the SAME badge count as the chatlist rows (computeRowBadgeCount: DB-authoritative
         // chat.unread, muted-aware) so the back dot can't light for a chat whose row shows nothing.
         // The raw countUnreadMessages walk can diverge from chat.unread on a windowed cache.
@@ -8387,17 +8423,23 @@ async function openGroupOverview(chat) {
     // Store which group is being viewed
     domGroupOverview.setAttribute('data-group-id', chat.id);
 
-    // Only Communities are group-like now (chatIsGroup gate above), so render the
-    // Community overview (no member roster; invite by link/npub).
-    await renderCommunityOverview(chat);
-
+    // Show the shell BEFORE rendering: the renderer's header/avatar paint
+    // synchronously and its awaited fetches (members can be network-bound) fill
+    // in while visible. Every other pane is already hidden above, so awaiting
+    // first would leave the app fully black for the whole fetch — and a render
+    // throw would strand it there.
     if (domGroupOverview.style.display !== '') {
-        // Run a subtle fade-in animation
         domGroupOverview.classList.add('fadein-subtle-anim');
         domGroupOverview.addEventListener('animationend', () => domGroupOverview.classList.remove('fadein-subtle-anim'), { once: true });
-
-        // Open the tab
         domGroupOverview.style.display = '';
+    }
+
+    // Only Communities are group-like now (chatIsGroup gate above), so render the
+    // Community overview (no member roster; invite by link/npub).
+    try {
+        await renderCommunityOverview(chat);
+    } catch (e) {
+        console.error('Community overview render failed:', e);
     }
 }
 
@@ -8618,6 +8660,9 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         const searchEl = domGroupMemberSearchInput;
         const myNpub = arrProfiles.find(p => p.mine)?.id;
         const ownerNpub = cf.owner_npub || null; // PROVEN owner (verified attestation), or null
+        // The panel is visible while this fetch runs (it can be network-bound), so
+        // swap any previous community's rows for a loading state up front.
+        membersEl.innerHTML = '<p class="cmt-empty" style="text-align:center;">Loading members…</p>';
         let memberList = [];
         try { memberList = await invoke('get_community_members', { communityId }); } catch (_) {}
         // Cache the count for the header/overview subtext (the overview's own authoritative fetch).

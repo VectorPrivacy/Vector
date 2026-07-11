@@ -202,6 +202,9 @@ pub mod nostr {
 // normalization.
 use nostr_sdk::prelude::{FromBech32 as _, ToBech32 as _};
 
+mod commands;
+pub use commands::{CommandBuilder, CommandCtx, DISCOVERY_RELAYS};
+
 // ============================================================================
 // VectorBot
 // ============================================================================
@@ -243,6 +246,7 @@ pub struct VectorBot {
     core: VectorCore,
     npub: String,
     invite_policy: Arc<InvitePolicy>,
+    commands: Arc<commands::CommandRegistry>,
 }
 
 impl VectorBot {
@@ -268,6 +272,10 @@ impl VectorBot {
     /// ergonomically here (communities, `sync_dms`, custom rumors, etc.).
     pub fn core(&self) -> VectorCore {
         self.core
+    }
+
+    pub(crate) fn commands(&self) -> &commands::CommandRegistry {
+        &self.commands
     }
 
     /// This bot's invite policy (see [`InvitePolicy`]).
@@ -435,10 +443,12 @@ impl VectorBot {
 
     /// Shared listen startup: catch up DMs FIRST so any invite delivered while offline is parked,
     /// THEN apply the invite policy to everything parked (so a restarted private bot still auto-joins
-    /// communities it was invited to). Live invites are handled by the event adapters.
+    /// communities it was invited to). Live invites are handled by the event adapters. Registered
+    /// slash commands publish their interface manifest here so pickers can discover them.
     async fn prepare_listen(&self) {
         let _ = self.core.sync_dms(None, &NoOpEventHandler).await;
         self.process_pending_invites().await;
+        self.publish_interface_manifest().await;
     }
 
     /// Escape hatch: drive the receive loop with a custom
@@ -720,6 +730,7 @@ impl VectorBotBuilder {
             core,
             npub: result.npub,
             invite_policy: Arc::new(self.invite_policy.unwrap_or(InvitePolicy::Manual)),
+            commands: Arc::new(Default::default()),
         })
     }
 }
@@ -1088,6 +1099,11 @@ where
             is_file,
             message: msg.clone(),
         };
+        // A registered slash command consumes the message (its handler runs
+        // instead of the chat handler — commands aren't chat).
+        if bot.try_command(&incoming) {
+            return;
+        }
         tokio::spawn(async move {
             handler(bot, incoming).await;
         });
@@ -1172,12 +1188,18 @@ where
     }
 
     fn message(&self, chat_id: &str, msg: &Message, is_group: bool, is_file: bool) {
-        self.emit(BotEvent::Message(IncomingMessage {
+        let incoming = IncomingMessage {
             chat_id: chat_id.to_string(),
             is_group,
             is_file,
             message: msg.clone(),
-        }));
+        };
+        // A registered slash command consumes the message (its handler runs
+        // instead of the event stream — commands aren't chat).
+        if self.bot.try_command(&incoming) {
+            return;
+        }
+        self.emit(BotEvent::Message(incoming));
     }
 }
 

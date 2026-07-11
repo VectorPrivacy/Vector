@@ -119,14 +119,52 @@ fn summarize(community: &vector_core::community::Community) -> CommunitySummary 
     }
 }
 
+/// The [`CommunitySummary`] for a **v2** community — the owner is the
+/// self-certifying `community_id` commitment (no v1 attestation), and a public
+/// v2 channel has no independent key.
+fn summarize_v2(c: &vector_core::community::v2::community::CommunityV2) -> CommunitySummary {
+    use nostr_sdk::prelude::ToBech32;
+    let me = vector_core::my_public_key();
+    let owner = c.owner().ok();
+    CommunitySummary {
+        community_id: vector_core::simd::hex::bytes_to_hex_32(&c.identity.community_id.0),
+        name: c.name.clone(),
+        description: c.description.clone(),
+        is_owner: matches!((me, owner), (Some(m), Some(o)) if m == o),
+        has_icon: c.icon.is_some(),
+        channels: c
+            .channels
+            .iter()
+            .map(|ch| ChannelSummary {
+                channel_id: vector_core::simd::hex::bytes_to_hex_32(&ch.id.0),
+                name: ch.name.clone(),
+            })
+            .collect(),
+        owner_npub: owner.and_then(|pk| pk.to_bech32().ok()),
+        dissolved: c.dissolved,
+        preloaded: false,
+    }
+}
+
+/// Protocol-aware summary by community id — the shared read path for
+/// list/get/join surfaces.
+fn summarize_any(id: &CommunityId) -> Option<CommunitySummary> {
+    match vector_core::db::community::community_protocol(id).ok().flatten() {
+        Some(vector_core::community::ConcordProtocol::V2) => {
+            vector_core::db::community::load_community_v2(id).ok().flatten().map(|c| summarize_v2(&c))
+        }
+        _ => vector_core::db::community::load_community(id).ok().flatten().map(|c| summarize(&c)),
+    }
+}
+
 /// List every Community the local user holds (owned or joined), for the chat list.
 #[tauri::command]
 pub async fn list_communities() -> Result<Vec<CommunitySummary>, String> {
     let ids = vector_core::db::community::list_community_ids()?;
     let mut out = Vec::with_capacity(ids.len());
     for id in ids {
-        if let Some(c) = vector_core::db::community::load_community(&id)? {
-            out.push(summarize(&c));
+        if let Some(summary) = summarize_any(&id) {
+            out.push(summary);
         }
     }
     Ok(out)
@@ -134,7 +172,7 @@ pub async fn list_communities() -> Result<Vec<CommunitySummary>, String> {
 
 /// A best-effort member entry: an observed participant (someone who has posted) + their
 /// most-recent activity. Membership is not authoritative (§ no roster); see community.rs.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Clone)]
 pub struct CommunityMember {
     pub npub: String,
     pub last_active: u64,
@@ -144,6 +182,18 @@ pub struct CommunityMember {
 /// activity first. The frontend resolves each npub's profile (name/avatar) for display.
 #[tauri::command]
 pub async fn get_community_members(community_id: String) -> Result<Vec<CommunityMember>, String> {
+    if is_v2_community(&community_id) {
+        // v2 memberlist = the persisted guestbook fold ∪ observed authors ∪ granted
+        // roster − banlist, all LOCAL (seeded post-join, cursor-caught-up at boot,
+        // live-ingested) — the facade read is instant.
+        return Ok(vector_core::VectorCore
+            .get_community_members(&community_id)
+            .await
+            .into_iter()
+            .filter_map(|m| m.get("npub").and_then(|n| n.as_str()).map(String::from))
+            .map(|npub| CommunityMember { npub, last_active: 0 })
+            .collect());
+    }
     let activity = vector_core::db::community::community_member_activity(&community_id)?;
     Ok(activity
         .into_iter()
@@ -173,6 +223,23 @@ pub async fn unban_community_member(community_id: String, npub: String) -> Resul
 pub async fn delete_community(community_id: String) -> Result<(), String> {
     let session = vector_core::state::SessionGuard::capture();
     let id_bytes = hex_to_id32(&community_id)?;
+    // v2: dissolve at the community_id-derived plane (CORD-02 §9) via the facade,
+    // then the same local teardown so no sealed husk lingers.
+    if is_v2_community(&community_id) {
+        let channel_ids: Vec<String> = vector_core::db::community::load_community_v2(&CommunityId(id_bytes))
+            .ok()
+            .flatten()
+            .map(|c| c.channels.iter().map(|ch| vector_core::simd::hex::bytes_to_hex_32(&ch.id.0)).collect())
+            .unwrap_or_default();
+        if !vector_core::db::community::get_community_dissolved(&community_id).unwrap_or(false) {
+            vector_core::VectorCore.dissolve_community(&community_id).await.map_err(|e| e.to_string())?;
+        }
+        if !session.is_valid() {
+            return Ok(());
+        }
+        teardown_community_local(&community_id, &channel_ids, true).await;
+        return Ok(());
+    }
     let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
         .ok_or("Community not found")?;
     let channel_ids: Vec<String> = community.channels.iter().map(|ch| ch.id.to_hex()).collect();
@@ -200,6 +267,9 @@ pub async fn delete_community(community_id: String) -> Result<(), String> {
 /// in `publish_kick`, re-verified by peers).
 #[tauri::command]
 pub async fn kick_community_member(community_id: String, npub: String) -> Result<(), String> {
+    if is_v2_community(&community_id) {
+        return vector_core::VectorCore.kick_member(&community_id, &npub).await.map_err(|e| e.to_string());
+    }
     let session = vector_core::state::SessionGuard::capture();
     let hex = nostr_sdk::PublicKey::parse(&npub).map_err(|_| "invalid npub".to_string())?.to_hex();
     let id_bytes = hex_to_id32(&community_id)?;
@@ -237,6 +307,9 @@ pub async fn get_community_banlist(community_id: String) -> Result<Vec<String>, 
 /// to the roster at admin rank so they can sign management actions. Owner/admin-only.
 #[tauri::command]
 pub async fn grant_community_admin(community_id: String, npub: String) -> Result<(), String> {
+    if is_v2_community(&community_id) {
+        return vector_core::VectorCore.grant_admin(&community_id, &npub).await.map_err(|e| e.to_string());
+    }
     let session = vector_core::state::SessionGuard::capture();
     let member = nostr_sdk::PublicKey::parse(&npub).map_err(|_| "invalid npub".to_string())?;
     let id_bytes = hex_to_id32(&community_id)?;
@@ -255,6 +328,9 @@ pub async fn grant_community_admin(community_id: String, npub: String) -> Result
 /// Revoke a member's Admin role (instant-logical revocation). Owner/admin-only.
 #[tauri::command]
 pub async fn revoke_community_admin(community_id: String, npub: String) -> Result<(), String> {
+    if is_v2_community(&community_id) {
+        return vector_core::VectorCore.revoke_admin(&community_id, &npub).await.map_err(|e| e.to_string());
+    }
     let session = vector_core::state::SessionGuard::capture();
     let member = nostr_sdk::PublicKey::parse(&npub).map_err(|_| "invalid npub".to_string())?;
     let id_bytes = hex_to_id32(&community_id)?;
@@ -274,6 +350,14 @@ pub async fn revoke_community_admin(community_id: String, npub: String) -> Resul
 /// crown. (A member holding only a non-management/social role is not an admin.)
 #[tauri::command]
 pub fn get_community_admins(community_id: String) -> Result<Vec<String>, String> {
+    if is_v2_community(&community_id) {
+        let roles = vector_core::VectorCore.community_roles(&community_id).map_err(|e| e.to_string())?;
+        return Ok(roles
+            .get("admins")
+            .and_then(|a| a.as_array())
+            .map(|arr| arr.iter().filter_map(|n| n.as_str().map(String::from)).collect())
+            .unwrap_or_default());
+    }
     let roles = vector_core::db::community::get_community_roles(&community_id)?;
     Ok(roles
         .grants
@@ -288,6 +372,13 @@ pub fn get_community_admins(community_id: String) -> Result<Vec<String>, String>
 /// permission), NOT a hardcoded owner check.
 #[tauri::command]
 pub fn can_manage_community_roles(community_id: String) -> Result<bool, String> {
+    if is_v2_community(&community_id) {
+        return Ok(vector_core::VectorCore
+            .community_capabilities(&community_id)
+            .ok()
+            .and_then(|c| c.get("manage_roles").and_then(|v| v.as_bool()))
+            .unwrap_or(false));
+    }
     let id_bytes = hex_to_id32(&community_id)?;
     let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
         .ok_or("Community not found")?;
@@ -301,6 +392,9 @@ pub fn can_manage_community_roles(community_id: String) -> Result<bool, String> 
 /// computed by the role engine, not hardcoded).
 #[tauri::command]
 pub fn get_community_capabilities(community_id: String) -> Result<serde_json::Value, String> {
+    if is_v2_community(&community_id) {
+        return vector_core::VectorCore.community_capabilities(&community_id).map_err(|e| e.to_string());
+    }
     let id_bytes = hex_to_id32(&community_id)?;
     let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
         .ok_or("Community not found")?;
@@ -354,7 +448,21 @@ fn admin_role_id(community_id: &str) -> Result<String, String> {
         .ok_or_else(|| "Admin role not found (role graph not yet synced?)".to_string())
 }
 
+/// Whether `community_id` (hex) names a locally-held **v2** community.
+fn is_v2_community(community_id: &str) -> bool {
+    hex_to_id32(community_id).ok().is_some_and(|b| {
+        matches!(
+            vector_core::db::community::community_protocol(&CommunityId(b)).ok().flatten(),
+            Some(vector_core::community::ConcordProtocol::V2)
+        )
+    })
+}
+
 async fn set_member_banned(community_id: &str, npub: &str, banned: bool) -> Result<(), String> {
+    // v2: banlist edition + grant-strip + refound (CORD-04 §6), all in the facade.
+    if is_v2_community(community_id) {
+        return vector_core::VectorCore.set_member_banned(community_id, npub, banned).await.map_err(|e| e.to_string());
+    }
     let session = vector_core::state::SessionGuard::capture();
     let hex = nostr_sdk::PublicKey::parse(npub).map_err(|_| "invalid npub".to_string())?.to_hex();
     let id_bytes = hex_to_id32(community_id)?;
@@ -382,9 +490,7 @@ async fn set_member_banned(community_id: &str, npub: &str, banned: bool) -> Resu
 #[tauri::command]
 pub async fn get_community(community_id: String) -> Result<CommunitySummary, String> {
     let id_bytes = hex_to_id32(&community_id)?;
-    let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
-        .ok_or("Community not found")?;
-    Ok(summarize(&community))
+    summarize_any(&CommunityId(id_bytes)).ok_or_else(|| "Community not found".to_string())
 }
 
 /// Leave a Community: drop all local state (keys, channels, invites) and stop
@@ -394,6 +500,20 @@ pub async fn get_community(community_id: String) -> Result<CommunitySummary, Str
 pub async fn leave_community(community_id: String) -> Result<(), String> {
     let session = vector_core::state::SessionGuard::capture();
     let id_bytes = hex_to_id32(&community_id)?;
+    // v2: guestbook Leave announce (facade) + shared local teardown.
+    if is_v2_community(&community_id) {
+        let channel_ids: Vec<String> = vector_core::db::community::load_community_v2(&CommunityId(id_bytes))
+            .ok()
+            .flatten()
+            .map(|c| c.channels.iter().map(|ch| vector_core::simd::hex::bytes_to_hex_32(&ch.id.0)).collect())
+            .unwrap_or_default();
+        let _ = vector_core::VectorCore.leave_community(&community_id).await;
+        if !session.is_valid() {
+            return Ok(());
+        }
+        teardown_community_local(&community_id, &channel_ids, true).await;
+        return Ok(());
+    }
     // Capture the full community first (channel ids for chat-row teardown + a leave announce).
     let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?;
     let channel_ids: Vec<String> = community
@@ -532,27 +652,46 @@ pub async fn create_community(
     }
     let channel_name = channel_name.unwrap_or_else(|| "general".to_string());
 
+    // New communities are Concord v2 (the upstream CORD stack); existing v1
+    // communities keep working through the dual-stack read/send paths.
+    let session = vector_core::state::SessionGuard::capture();
     let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-    let community =
-        service::create_community(&transport, &name, &channel_name, relays).await?;
+    let mut community =
+        vector_core::community::v2::service::create_community(&transport, &name, relays, None).await?;
 
-    let channel_id = community.channels[0].id.to_hex();
-    // Persist the channel chat(s) with display metadata so they load like any DM.
-    sync_community_chats(&community).await;
-    // record the join in the cross-device list so our other devices auto-join silently.
-    vector_core::community::list::add_membership(&community);
-    // Start receiving on the new channel.
-    crate::services::subscription_handler::refresh_community_subscription().await;
+    // Genesis mints the first channel as "general"; honor a custom name.
+    if channel_name != "general" {
+        if let Some(ch) = community.channels.first().cloned() {
+            let meta = vector_core::community::v2::control::ChannelMetadata {
+                name: channel_name.clone(),
+                private: false,
+                voice: None,
+                deleted: None,
+                custom: None,
+                extra: Default::default(),
+            };
+            vector_core::community::v2::service::edit_channel_metadata(&transport, &community, &ch.id, &meta).await?;
+            if let Ok(Some(fresh)) = vector_core::db::community::load_community_v2(community.id()) {
+                community = fresh;
+            }
+        }
+    }
 
-    // Proven owner npub (verified attestation) so the frontend can stamp the crown
-    // immediately, rather than waiting for the next reload to re-derive it.
-    let community_id = community.id.to_hex();
-    let owner_npub = community
-        .owner_attestation
-        .as_ref()
-        .and_then(|att| vector_core::community::owner::verify_owner_attestation(att, &community_id))
-        .and_then(|pk| pk.to_bech32().ok());
+    let community_id = vector_core::simd::hex::bytes_to_hex_32(&community.id().0);
+    let channel_id = community
+        .channels
+        .first()
+        .map(|ch| vector_core::simd::hex::bytes_to_hex_32(&ch.id.0))
+        .ok_or("created community has no channel")?;
+    // Surface the channel chat row(s) like any DM. (The v2 service already
+    // published the cross-device Community List during create.)
+    vector_core::VectorCore.register_v2_chats(&community, &session).await;
+    // Start receiving on the new planes.
+    if let Some(client) = crate::nostr_client() {
+        vector_core::community::v2::realtime::refresh_subscription(&client).await;
+    }
 
+    let owner_npub = community.owner().ok().and_then(|pk| pk.to_bech32().ok());
     Ok(CreatedCommunity { community_id, channel_id, owner_npub })
 }
 
@@ -571,6 +710,9 @@ pub(crate) async fn send_community_typing(channel_id: &str) -> bool {
     let Ok(Some(community_id)) = vector_core::db::community::community_id_for_channel(channel_id) else {
         return false;
     };
+    if is_v2_community(&community_id) {
+        return vector_core::VectorCore.send_community_typing(channel_id).await.is_ok();
+    }
     let Ok(id_bytes) = hex_to_id32(&community_id) else { return false; };
     let Ok(Some(community)) = vector_core::db::community::load_community(&CommunityId(id_bytes)) else {
         return false;
@@ -605,6 +747,117 @@ pub async fn send_community_message(
     let community_id = vector_core::db::community::community_id_for_channel(&channel_id)?
         .ok_or("Unknown Community channel")?;
     let id_bytes = hex_to_id32(&community_id)?;
+
+    // Dual-stack: a v2 channel drives the SAME pending → sent/failed lifecycle
+    // as v1 and DMs. The rumor id is a pure function of its inputs (at_ms
+    // included), so the optimistic row is keyed by its REAL id up front and the
+    // in-process echo dedups onto it — the id never changes.
+    if matches!(
+        vector_core::db::community::community_protocol(&CommunityId(id_bytes)).ok().flatten(),
+        Some(vector_core::community::ConcordProtocol::V2)
+    ) {
+        let community = vector_core::db::community::load_community_v2(&CommunityId(id_bytes))?
+            .ok_or("Community not found")?;
+        let ch = vector_core::community::ChannelId(hex_to_id32(&channel_id)?);
+        let channel = community.channel(&ch).ok_or("Channel not found in Community")?;
+        let (_, epoch) = community.channel_secret(channel);
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let callback = crate::message::sending::TauriSendCallback;
+        // NIP-30 pairs + the NIP-C7 reply author (best-effort from the held parent).
+        let emoji_tags = vector_core::emoji_packs::resolve_outbound_emoji_tags(&content);
+        let emoji_pairs: Vec<(&str, &str)> = emoji_tags.iter().map(|t| (t.shortcode.as_str(), t.url.as_str())).collect();
+        let reply_owned = match reply.as_deref() {
+            Some(parent_id) => {
+                let author_hex = {
+                    let st = vector_core::state::STATE.lock().await;
+                    st.find_message(parent_id)
+                        .and_then(|(_, m)| m.npub.as_deref().and_then(|n| nostr_sdk::prelude::PublicKey::parse(n).ok()))
+                        .map(|pk| pk.to_hex())
+                        .unwrap_or_default()
+                };
+                Some((parent_id.to_string(), author_hex))
+            }
+            None => None,
+        };
+        let reply_ref = reply_owned.as_ref().map(|(id, a)| (id.as_str(), a.as_str()));
+        let rumor = vector_core::community::v2::chat::build_message_rumor(
+            author_pk, &ch, epoch, &content, reply_ref, &emoji_pairs, vec![], ms,
+        );
+        let message_id = rumor.id.ok_or("inner rumor has no id")?.to_hex();
+
+        // 1. Optimistic message — renders instantly, keyed by its real id.
+        let pending_msg = Message {
+            id: message_id.clone(),
+            content: content.clone(),
+            at: ms,
+            pending: true,
+            mine: true,
+            npub: my_npub.clone(),
+            replied_to: reply.clone().unwrap_or_default(),
+            emoji_tags: emoji_tags.clone(),
+            ..Default::default()
+        };
+        {
+            let mut state = vector_core::state::STATE.lock().await;
+            state.add_message_to_chat(&channel_id, pending_msg.clone());
+        }
+        callback.on_pending(&channel_id, &pending_msg);
+
+        // 2. Seal + publish — the service re-derives the identical rumor from `ms`.
+        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+        let sent = vector_core::community::v2::service::send_chat_message_at(
+            &transport, &community, &ch, &content, reply_ref, &emoji_pairs, vec![], ms,
+        )
+        .await;
+        return match sent {
+            Ok(sent_id) if session.is_valid() => {
+                if sent_id != message_id {
+                    // An epoch rolled between the precompute and the seal — the send
+                    // landed under a NEW id. Drop the orphaned pending row and adopt
+                    // the echo (persisted under sent_id).
+                    let adopted = {
+                        let mut state = vector_core::state::STATE.lock().await;
+                        state.remove_message(&message_id);
+                        state.find_message(&sent_id).map(|(_, m)| m.clone())
+                    };
+                    if let Some(ref msg) = adopted {
+                        callback.on_sent(&channel_id, &message_id, msg);
+                        callback.on_persist(&channel_id, msg);
+                    }
+                    return Ok(());
+                }
+                // 3a. Sent — clear the pending flag (the echo deduped onto this row).
+                let sent_row = {
+                    let mut state = vector_core::state::STATE.lock().await;
+                    state.update_message(&message_id, |m| m.set_pending(false))
+                };
+                if let Some((_cid, ref msg)) = sent_row {
+                    callback.on_sent(&channel_id, &message_id, msg);
+                    callback.on_persist(&channel_id, msg);
+                }
+                Ok(())
+            }
+            Ok(_) => Err("account changed during send".to_string()),
+            Err(e) => {
+                // 3b. Failed — mark the optimistic message failed (offers retry in the UI).
+                let failed = {
+                    let mut state = vector_core::state::STATE.lock().await;
+                    state.update_message(&message_id, |m| {
+                        m.set_failed(true);
+                        m.set_pending(false);
+                    })
+                };
+                if let Some((_cid, ref msg)) = failed {
+                    callback.on_failed(&channel_id, &message_id, msg);
+                }
+                Err(e)
+            }
+        };
+    }
+
     let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
         .ok_or("Community not found")?;
     let channel = community
@@ -974,14 +1227,33 @@ async fn dispatch_community_attachment_message(
     let community_id = vector_core::db::community::community_id_for_channel(&channel_id)?
         .ok_or("Unknown Community channel")?;
     let id_bytes = hex_to_id32(&community_id)?;
-    let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
-        .ok_or("Community not found")?;
-    let channel = community
-        .channels
-        .iter()
-        .find(|c| c.id.to_hex() == channel_id)
-        .ok_or("Channel not found in Community")?
-        .clone();
+    // Dual-stack: resolve under the community's OWN protocol before any upload
+    // work — a v2 row read through the v1 loader yields v1-shaped key garbage
+    // that would seal an event no member can decrypt.
+    let v2 = if is_v2_community(&community_id) {
+        let community = vector_core::db::community::load_community_v2(&CommunityId(id_bytes))?
+            .ok_or("Community not found")?;
+        let ch = vector_core::community::ChannelId(hex_to_id32(&channel_id)?);
+        if community.channel(&ch).is_none() {
+            return Err("Channel not found in Community".to_string());
+        }
+        Some((community, ch))
+    } else {
+        None
+    };
+    let v1 = if v2.is_none() {
+        let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
+            .ok_or("Community not found")?;
+        let channel = community
+            .channels
+            .iter()
+            .find(|c| c.id.to_hex() == channel_id)
+            .ok_or("Channel not found in Community")?
+            .clone();
+        Some((community, channel))
+    } else {
+        None
+    };
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1079,6 +1351,57 @@ async fn dispatch_community_attachment_message(
         .iter()
         .map(vector_core::community::attachments::attachment_to_imeta)
         .collect();
+
+    // v2: seal the caption + imeta rumor through the v2 service. The send echoes
+    // the persisted message into STATE/DB (bot-silent), so adopt the echo over
+    // the optimistic bubble — finalizing the temp id would duplicate the row.
+    if let Some((community, ch)) = v2 {
+        let reply_owned = match reply.as_deref() {
+            Some(parent_id) => {
+                // The NIP-C7 q author slot is a SHOULD — best-effort from the held parent.
+                let author_hex = {
+                    let st = vector_core::state::STATE.lock().await;
+                    st.find_message(parent_id)
+                        .and_then(|(_, m)| m.npub.as_deref().and_then(|n| nostr_sdk::prelude::PublicKey::parse(n).ok()))
+                        .map(|pk| pk.to_hex())
+                        .unwrap_or_default()
+                };
+                Some((parent_id.to_string(), author_hex))
+            }
+            None => None,
+        };
+        let reply_ref = reply_owned.as_ref().map(|(id, a)| (id.as_str(), a.as_str()));
+        let emoji_pairs: Vec<(&str, &str)> = emoji_tags.iter().map(|t| (t.shortcode.as_str(), t.url.as_str())).collect();
+        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+        let sent = vector_core::community::v2::service::send_chat_message(
+            &transport, &community, &ch, &content, reply_ref, &emoji_pairs, imeta_tags,
+        )
+        .await;
+        return match sent {
+            Ok(real_id) if session.is_valid() => {
+                let echoed = {
+                    let mut state = vector_core::state::STATE.lock().await;
+                    state.remove_message(&pending_id);
+                    state.find_message(&real_id).map(|(_, m)| m.clone())
+                };
+                if let Some(ref msg) = echoed {
+                    callback.on_sent(&channel_id, &pending_id, msg);
+                    callback.on_persist(&channel_id, msg);
+                } else {
+                    vector_core::log_warn!("[community] v2 sent message {} not in STATE to finalize", real_id);
+                }
+                let webxdc_topic = uploaded.iter().find_map(|a| a.webxdc_topic.clone());
+                Ok(CommunityAttachmentSendResult { message_id: real_id, webxdc_topic })
+            }
+            Ok(_) => Err("account changed during send".to_string()),
+            Err(e) => {
+                let _ = mark_attachment_send_failed(&callback, &channel_id, &pending_id).await;
+                Err(e)
+            }
+        };
+    }
+
+    let (community, channel) = v1.expect("resolved above when not v2");
     let unsigned = vector_core::community::envelope::build_inner_full(
         author_pk,
         &channel.id,
@@ -1236,6 +1559,30 @@ async fn sync_community_channel_inner(
     let community_id = vector_core::db::community::community_id_for_channel(channel_id)?
         .ok_or("Unknown Community channel")?;
     let id_bytes = hex_to_id32(&community_id)?;
+
+    // Dual-stack: a v2 channel catches up through the facade (consensus refold +
+    // chat backfill into the shared events tables). The frontend re-queries
+    // get_messages from those tables, so the page renders identically to v1.
+    if matches!(
+        vector_core::db::community::community_protocol(&CommunityId(id_bytes)).ok().flatten(),
+        Some(vector_core::community::ConcordProtocol::V2)
+    ) {
+        let limit: usize = 50;
+        let new = vector_core::VectorCore
+            .sync_community_channel(channel_id, limit)
+            .await
+            .map(|(n, _warnings)| n)
+            .unwrap_or(0);
+        if !session.is_valid() {
+            return Ok(CommunitySyncResult::default());
+        }
+        // A short page means we reached the channel's start; emit a refresh so the
+        // frontend re-queries the backfilled DB rows.
+        let reached_start = new < limit;
+        vector_core::emit_event("community_channel_synced", &serde_json::json!({ "channel_id": channel_id }));
+        return Ok(CommunitySyncResult { new_messages: new as u32, reached_start, oldest_ms: None });
+    }
+
     let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
         .ok_or("Community not found")?;
     // Epochs the realtime subscription is currently pinned to (it was built from the DB's last-synced
@@ -1849,18 +2196,63 @@ pub async fn sync_communities_boot() -> Result<(), String> {
         return Ok(());
     }
 
+    // v2 cross-device discovery: fold the 13302 Community List (a community joined
+    // on another device auto-appears here) + enqueue a refold per held v2
+    // community. Bootstrapped from the client's connected relays so even a fresh
+    // device holding no v2 community yet can find one.
+    {
+        use vector_core::community::{transport::LiveTransport, v2::service as v2};
+        let bootstrap: Vec<String> = match vector_core::state::nostr_client() {
+            Some(client) => client.relays().await.keys().map(|r| r.to_string()).collect(),
+            None => Vec::new(),
+        };
+        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+        if let Ok(joined) = v2::sync_community_list(&transport, &bootstrap).await {
+            for c in &joined {
+                vector_core::community::v2::realtime::enqueue_follow(c.id());
+            }
+            if !joined.is_empty() {
+                if let Some(client) = vector_core::state::nostr_client() {
+                    vector_core::community::v2::realtime::refresh_subscription(&client).await;
+                }
+            }
+        }
+        for c in vector_core::community::v2::realtime::load_held_v2() {
+            // Re-register every held v2 chat row at boot: restores the community
+            // metadata over any bare persist-anchor row and prunes sibling-channel
+            // rows from STATE (the follow only re-registers when the fold CHANGES).
+            vector_core::VectorCore.register_v2_chats(&c, &session).await;
+            vector_core::community::v2::realtime::enqueue_follow(c.id());
+        }
+    }
+    if !session.is_valid() {
+        return Ok(());
+    }
+
     // Newest-message time per chat, for activity ordering.
     let last_msgs = crate::db::get_all_chats_last_messages().await.unwrap_or_default();
     let activity = |cid: &str| -> u64 {
         last_msgs.get(cid).and_then(|v| v.first().map(|m| m.at)).unwrap_or(0)
     };
 
-    // Flatten every joined Community's channels.
+    // Flatten every joined Community's channels (protocol-agnostic: a v2 community
+    // must load through its own reader, not the v1 one).
     let mut channels: Vec<String> = Vec::new();
     for id in vector_core::db::community::list_community_ids()? {
-        if let Ok(Some(community)) = vector_core::db::community::load_community(&id) {
-            for ch in &community.channels {
-                channels.push(ch.id.to_hex());
+        match vector_core::db::community::community_protocol(&id).ok().flatten() {
+            Some(vector_core::community::ConcordProtocol::V2) => {
+                if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&id) {
+                    for ch in &c.channels {
+                        channels.push(vector_core::simd::hex::bytes_to_hex_32(&ch.id.0));
+                    }
+                }
+            }
+            _ => {
+                if let Ok(Some(community)) = vector_core::db::community::load_community(&id) {
+                    for ch in &community.channels {
+                        channels.push(ch.id.to_hex());
+                    }
+                }
             }
         }
     }
@@ -2053,6 +2445,12 @@ pub async fn hide_community_message(channel_id: String, message_id: String) -> R
     let community_id = vector_core::db::community::community_id_for_channel(&channel_id)?
         .ok_or("Unknown Community channel")?;
     let id_bytes = hex_to_id32(&community_id)?;
+    // v2 owner-hide needs a moderation grammar peers enforce (a follow-up); the
+    // v1 hide event would seal undecryptable garbage onto the v2 plane. Fail
+    // closed rather than pretend it propagated.
+    if is_v2_community(&community_id) {
+        return Err("Hiding messages is not available in this community yet.".to_string());
+    }
     let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
         .ok_or("Community not found")?;
     let channel = community
@@ -2190,6 +2588,51 @@ async fn publish_community_control(
     let community_id = vector_core::db::community::community_id_for_channel(channel_id)?
         .ok_or("Unknown Community channel")?;
     let id_bytes = hex_to_id32(&community_id)?;
+
+    // v2: route the target-op (reaction / edit / delete) to the facade, which
+    // seals + publishes + echoes into STATE/DB. The echo is emit-silent (bot
+    // parity), so surface the update to the frontend via the same events the
+    // live dispatch fires.
+    if matches!(
+        vector_core::db::community::community_protocol(&CommunityId(id_bytes)).ok().flatten(),
+        Some(vector_core::community::ConcordProtocol::V2)
+    ) {
+        use vector_core::stored_event::event_kind;
+        let core = vector_core::VectorCore;
+        match kind {
+            k if k == event_kind::COMMUNITY_REACTION => {
+                let url = emoji_tags.first().map(|t| t.url.as_str());
+                core.send_community_reaction(channel_id, target, content, url).await.map_err(|e| e.to_string())?;
+            }
+            k if k == event_kind::COMMUNITY_EDIT => {
+                core.edit_community_message(channel_id, target, content).await.map_err(|e| e.to_string())?;
+            }
+            k if k == event_kind::COMMUNITY_DELETE => {
+                core.delete_community_message_in(channel_id, target).await.map_err(|e| e.to_string())?;
+                if session.is_valid() {
+                    vector_core::emit_event("message_removed", &serde_json::json!({
+                        "id": target, "chat_id": channel_id, "reason": "deleted",
+                    }));
+                }
+                return Ok(());
+            }
+            _ => return Err("unsupported v2 control op".to_string()),
+        }
+        // React/edit updated the target in STATE — emit the fresh view.
+        if session.is_valid() {
+            let updated = {
+                let st = vector_core::state::STATE.lock().await;
+                st.find_message(target).map(|(_, m)| m.clone())
+            };
+            if let Some(msg) = updated {
+                vector_core::emit_event("message_update", &serde_json::json!({
+                    "old_id": target, "message": msg, "chat_id": channel_id,
+                }));
+            }
+        }
+        return Ok(());
+    }
+
     let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
         .ok_or("Community not found")?;
     let channel = community
@@ -2290,6 +2733,10 @@ pub async fn edit_community_message(
 /// Community relays), since a fresh invitee has no Community pseudonym yet.
 #[tauri::command]
 pub async fn invite_to_community(community_id: String, invitee_npub: String) -> Result<(), String> {
+    if is_v2_community(&community_id) {
+        vector_core::VectorCore.invite_to_community(&community_id, &invitee_npub).await.map_err(|e| e.to_string())?;
+        return Ok(());
+    }
     let session = vector_core::state::SessionGuard::capture();
 
     let my_pk = vector_core::my_public_key().ok_or("Public key not set")?;
@@ -2410,6 +2857,20 @@ pub async fn accept_community_invite(community_id: String) -> Result<CommunitySu
     // rejected accept must leave the invite parked so the user can retry or decline.
     let bundle_json = vector_core::db::community::get_pending_invite(&community_id)?
         .ok_or("No pending invite for that Community")?;
+
+    // Dual-stack: a parked v2 Direct-Invite bundle self-describes (owner_salt +
+    // community_root), so a successful v2 parse routes to the facade accept
+    // (verify + join + subscribe). The v1 parser would misparse it.
+    if vector_core::community::v2::invite::CommunityInvite::from_bundle_json(&bundle_json).is_ok() {
+        let summary = vector_core::VectorCore.accept_pending_invite(&community_id).await.map_err(|e| e.to_string())?;
+        let cid = summary
+            .get("community_id")
+            .or_else(|| summary.get("id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(&community_id);
+        let id_bytes = hex_to_id32(cid)?;
+        return summarize_any(&CommunityId(id_bytes)).ok_or_else(|| "accepted community not found".to_string());
+    }
     let invite = CommunityInvite::from_json(&bundle_json)?;
 
     // Guarded save (caps + owner/authority-collision checks + its own SessionGuard). On
@@ -2514,6 +2975,18 @@ pub async fn update_community_metadata(
 ) -> Result<(), String> {
     let session = vector_core::state::SessionGuard::capture();
     let id_bytes = hex_to_id32(&community_id)?;
+    if is_v2_community(&community_id) {
+        vector_core::VectorCore
+            .edit_community_metadata(&community_id, name.as_deref(), description.as_deref())
+            .await
+            .map_err(|e| e.to_string())?;
+        if session.is_valid() {
+            if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&CommunityId(id_bytes)) {
+                vector_core::VectorCore.register_v2_chats(&c, &session).await;
+            }
+        }
+        return Ok(());
+    }
     let mut community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
         .ok_or("Community not found")?;
     if let Some(n) = name {
@@ -2545,10 +3018,27 @@ pub async fn rename_community_channel(
 ) -> Result<(), String> {
     let session = vector_core::state::SessionGuard::capture();
     let id_bytes = hex_to_id32(&community_id)?;
-    let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
-        .ok_or("Community not found")?;
     let ch_bytes = hex_to_id32(&channel_id)?;
     let ch_id = vector_core::community::ChannelId(ch_bytes);
+    if is_v2_community(&community_id) {
+        let community = vector_core::db::community::load_community_v2(&CommunityId(id_bytes))
+            .map_err(|e| e)?
+            .ok_or("Community not found")?;
+        let private = community.channels.iter().find(|c| c.id == ch_id).map(|c| c.private).unwrap_or(false);
+        let meta = vector_core::community::v2::control::ChannelMetadata {
+            name: name.clone(), private, voice: None, deleted: None, custom: None, extra: Default::default(),
+        };
+        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+        vector_core::community::v2::service::edit_channel_metadata(&transport, &community, &ch_id, &meta).await?;
+        if session.is_valid() {
+            if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&CommunityId(id_bytes)) {
+                vector_core::VectorCore.register_v2_chats(&c, &session).await;
+            }
+        }
+        return Ok(());
+    }
+    let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
+        .ok_or("Community not found")?;
     if !session.is_valid() {
         return Err("account changed during channel rename".to_string());
     }
@@ -2660,8 +3150,24 @@ pub async fn set_community_image(
 
     let session = vector_core::state::SessionGuard::capture();
     let id_bytes = hex_to_id32(&community_id)?;
-    let mut community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
-        .ok_or("Community not found")?;
+    // Dual-stack: existence-check under the community's own protocol BEFORE the
+    // expensive read + encrypt + upload; the v1 loader misreads a v2 row.
+    let v2 = if is_v2_community(&community_id) {
+        Some(
+            vector_core::db::community::load_community_v2(&CommunityId(id_bytes))?
+                .ok_or("Community not found")?,
+        )
+    } else {
+        None
+    };
+    let v1 = if v2.is_none() {
+        Some(
+            vector_core::db::community::load_community(&CommunityId(id_bytes))?
+                .ok_or("Community not found")?,
+        )
+    } else {
+        None
+    };
 
     // Read the picked file. On Android the file dialog returns a content:// URI that std::fs can't
     // open, so route it through the JNI content-resolver (the same path upload_avatar uses); desktop
@@ -2725,6 +3231,43 @@ pub async fn set_community_image(
     if !session.is_valid() {
         return Err("account changed during image upload".to_string());
     }
+
+    // v2: the image is a field of the vsk-0 metadata document. Overlay onto the
+    // FULL held document (`metadata()`) so setting one image can't wipe the
+    // other fields, then persist locally for instant display — the control-fold
+    // echo re-applies the same head idempotently.
+    if let Some(v2) = v2 {
+        let mut extra = serde_json::Map::new();
+        extra.insert("ext".into(), serde_json::Value::String(ext.clone()));
+        let img_ref = vector_core::community::v2::control::ImageRef {
+            url: url.clone(),
+            key: params.key.clone(),
+            nonce: params.nonce.clone(),
+            hash: plaintext_hash.clone(),
+            extra,
+        };
+        let mut meta = v2.metadata();
+        if is_banner {
+            meta.banner = Some(img_ref.clone());
+        } else {
+            meta.icon = Some(img_ref.clone());
+        }
+        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+        vector_core::community::v2::service::edit_community_metadata(&transport, &v2, &meta).await?;
+        if session.is_valid() {
+            let mut updated = v2;
+            if is_banner {
+                updated.banner = Some(img_ref);
+            } else {
+                updated.icon = Some(img_ref);
+            }
+            let _ = vector_core::db::community::save_community_v2(&updated);
+            vector_core::VectorCore.register_v2_chats(&updated, &session).await;
+        }
+        return Ok(());
+    }
+
+    let mut community = v1.expect("resolved above when not v2");
     let image = CommunityImage { url, key: params.key, nonce: params.nonce, hash: plaintext_hash, ext };
     if is_banner {
         community.banner = Some(image);
@@ -2749,6 +3292,11 @@ pub async fn create_public_invite(
     expires_in_secs: Option<u64>,
     label: Option<String>,
 ) -> Result<String, String> {
+    // v2 mints a naddr#fragment link (expiry/label wiring is a follow-up).
+    if is_v2_community(&community_id) {
+        let _ = (expires_in_secs, label);
+        return vector_core::VectorCore.create_public_invite(&community_id).await.map_err(|e| e.to_string());
+    }
     let session = vector_core::state::SessionGuard::capture();
     let id_bytes = hex_to_id32(&community_id)?;
     let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
@@ -2774,6 +3322,35 @@ pub struct PublicInvitePreviewInfo {
 /// Fetch + decrypt the preview for a public-invite URL (shown before joining). Read-only.
 #[tauri::command]
 pub async fn preview_public_invite(url: String) -> Result<PublicInvitePreviewInfo, String> {
+    // v2 link: fetch the (encrypted) bundle and fold the live Control Plane for
+    // the real name/description/icon — a v2 bundle deliberately carries no icon
+    // (the fold is the authority). Read-only; owner-root verification rides the
+    // fold, so a forged link can't render a convincing preview.
+    if vector_core::community::v2::invite::parse_invite_link(&url).is_ok() {
+        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+        let folded = vector_core::community::v2::service::preview_public_link(&transport, &url).await?;
+        let community_id = vector_core::simd::hex::bytes_to_hex_32(&folded.id().0);
+        // Already a member → local state IS the preview (the community's own
+        // sync keeps it fresh): one source of truth, zero divergence.
+        if let Ok(Some(local)) = vector_core::db::community::load_community_v2(folded.id()) {
+            return Ok(PublicInvitePreviewInfo {
+                preview: PublicInvitePreview {
+                    name: local.name.clone(),
+                    description: local.description.clone(),
+                    icon: local.icon.as_ref().map(|i| i.to_community_image()),
+                },
+                community_id,
+            });
+        }
+        return Ok(PublicInvitePreviewInfo {
+            preview: PublicInvitePreview {
+                name: folded.name.clone(),
+                description: folded.description.clone(),
+                icon: folded.icon.as_ref().map(|i| i.to_community_image()),
+            },
+            community_id,
+        });
+    }
     let (relays, token) = parse_invite_url(&url).map_err(|e| e.to_string())?;
     let transport = LiveTransport::with_timeout(Duration::from_secs(12));
     let bundle = service::fetch_public_invite(&transport, &relays, &token).await?;
@@ -2815,6 +3392,19 @@ pub async fn preview_public_invite(url: String) -> Result<PublicInvitePreviewInf
 #[tauri::command]
 pub async fn accept_public_invite(url: String) -> Result<CommunitySummary, String> {
     let session = vector_core::state::SessionGuard::capture();
+    // Dual-stack: a v2 link (`…/invite/<naddr>#<fragment>`) routes through the
+    // facade join, which verifies the owner root, persists, registers chats,
+    // publishes the cross-device join, and starts the v2 planes.
+    if vector_core::community::v2::invite::parse_invite_link(&url).is_ok() {
+        let summary = vector_core::VectorCore.join_community(&url).await.map_err(|e| e.to_string())?;
+        let cid = summary
+            .get("community_id")
+            .or_else(|| summary.get("id"))
+            .and_then(|v| v.as_str())
+            .ok_or("v2 join returned no community id")?;
+        let id_bytes = hex_to_id32(cid)?;
+        return summarize_any(&CommunityId(id_bytes)).ok_or_else(|| "joined community not found".to_string());
+    }
     let (relays, token) = parse_invite_url(&url).map_err(|e| e.to_string())?;
     let transport = LiveTransport::with_timeout(Duration::from_secs(12));
     let bundle = service::fetch_public_invite(&transport, &relays, &token).await?;
@@ -2913,6 +3503,9 @@ pub async fn list_public_invites(
 /// token locally. `token` is the 64-char hex token (from `list_public_invites`).
 #[tauri::command]
 pub async fn revoke_public_invite(community_id: String, token: String) -> Result<(), String> {
+    if is_v2_community(&community_id) {
+        return vector_core::VectorCore.revoke_public_invite(&community_id, &token).await.map_err(|e| e.to_string());
+    }
     let session = vector_core::state::SessionGuard::capture();
     let id_bytes = hex_to_id32(&community_id)?;
     let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?

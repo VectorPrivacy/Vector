@@ -292,11 +292,28 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
         tokio::spawn(async move {
             if !session.is_valid() { return; }
             let id = vector_core::community::CommunityId(vector_core::simd::hex::hex_to_bytes_32(&community_id));
-            if let Ok(Some(c)) = vector_core::db::community::load_community(&id) {
-                crate::commands::community::sync_community_chats(&c).await;
+            match vector_core::db::community::community_protocol(&id).ok().flatten() {
+                Some(vector_core::community::ConcordProtocol::V2) => {
+                    // A control fold may have revealed new channels — surface them as
+                    // chat rows so the list grows without a reboot.
+                    if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&id) {
+                        vector_core::VectorCore.register_v2_chats(&c, &session).await;
+                    }
+                }
+                _ => {
+                    if let Ok(Some(c)) = vector_core::db::community::load_community(&id) {
+                        crate::commands::community::sync_community_chats(&c).await;
+                    }
+                }
             }
             vector_core::emit_event("community_refreshed", &serde_json::json!({ "community_id": community_id }));
         });
+    }
+
+    fn on_community_dissolved(&self, community_id: &str) {
+        // CORD-02 §9: the community is sealed read-only (the row is already
+        // flagged by the fold) — nudge the frontend to re-render it as such.
+        vector_core::emit_event("community_refreshed", &serde_json::json!({ "community_id": community_id }));
     }
 }
 

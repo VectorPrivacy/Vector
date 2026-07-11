@@ -1595,6 +1595,7 @@ impl CompactMessage {
             edit_history: self.edit_history.as_ref().map(|b| (**b).clone()),
             preview_metadata: self.preview_metadata.as_ref().map(|b| (**b).clone()),
             emoji_tags: self.emoji_tags.as_ref().map(|b| (**b).clone()).unwrap_or_default(),
+            addressed_bots: Vec::new(),
         }
     }
 }
@@ -1799,6 +1800,7 @@ mod tests {
                     edit_history: None,
                     preview_metadata: None,
                     emoji_tags: Vec::new(),
+                    addressed_bots: Vec::new(),
                 }
             })
             .collect();
@@ -3072,6 +3074,7 @@ mod tests {
                 EditEntry { content: "Edited".into(), edited_at: 1705320060000 },
             ]),
             emoji_tags: Vec::new(),
+            addressed_bots: Vec::new(),
         }
     }
 

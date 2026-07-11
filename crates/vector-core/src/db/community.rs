@@ -634,6 +634,10 @@ pub fn save_pending_invite(
     let conn = super::get_write_connection_guard_static()?;
     let enc_bundle = enc_txt(bundle_json)?;
     let enc_inviter = enc_txt(inviter_npub)?;
+    // First-wins: a parked invite is never silently overwritten by a later different
+    // bundle (that would let an attacker replace a genuine parked invite). For v2, a
+    // pre-planted forged-root bundle sharing a real community_id is instead cleared on
+    // a failed accept (see `accept_pending_invite`), so a genuine re-invite can re-park.
     let changed = conn
         .execute(
             "INSERT OR IGNORE INTO pending_community_invites
@@ -1261,24 +1265,33 @@ pub fn get_community_roles_at(community_id: &str) -> Result<i64, String> {
 /// the fold uses it as the per-entity refuse-downgrade floor + anchor. Upserts per (community, entity).
 /// `inner_id` is the head edition's deterministic tiebreak key (used only by [`converge_edition_head`]).
 pub fn set_edition_head(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32]) -> Result<(), String> {
-    set_edition_head_inner(community_id, entity_id, version, self_hash, None)
+    set_edition_head_inner(community_id, entity_id, version, self_hash, None, None)
 }
 
 /// As [`set_edition_head`], but also records the head edition's `inner_id` (the deterministic tiebreak
 /// key), so a later same-version convergence can rank against it. A plain advance carries it through.
 pub fn set_edition_head_with_id(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32]) -> Result<(), String> {
-    set_edition_head_inner(community_id, entity_id, version, self_hash, Some(inner_id))
+    set_edition_head_inner(community_id, entity_id, version, self_hash, Some(inner_id), None)
 }
 
-fn set_edition_head_inner(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: Option<&[u8; 32]>) -> Result<(), String> {
+/// As [`set_edition_head_with_id`], stamping an EXPLICIT epoch — the epoch the caller's fold actually
+/// ran under — instead of reading the community row at write time. Closes the TOCTOU where a
+/// concurrent re-founding bumps `server_root_epoch` between a fold and its head persist, which would
+/// stamp an old-plane version as the new epoch's floor and wedge the new epoch's genuine head.
+pub fn set_edition_head_at_epoch(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32], epoch: u64) -> Result<(), String> {
+    set_edition_head_inner(community_id, entity_id, version, self_hash, Some(inner_id), Some(epoch))
+}
+
+fn set_edition_head_inner(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: Option<&[u8; 32]>, epoch: Option<u64>) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
     // MONOTONIC, EPOCH-PRIMARY: the head IS the refuse-downgrade floor. The recorded `epoch` is
-    // the community's current server-root epoch (re-founding bumps it + resets versions to 1). A higher
-    // epoch ALWAYS supersedes (so a re-founding's v1 lands over a held v21); within an epoch, version
-    // still only advances. So a stale/hostile rollback can lower neither the epoch nor the in-epoch version.
+    // the fold's epoch when given explicitly, else the community's current server-root epoch
+    // (re-founding bumps it + resets versions to 1). A higher epoch ALWAYS supersedes (so a
+    // re-founding's v1 lands over a held v21); within an epoch, version still only advances. So a
+    // stale/hostile rollback can lower neither the epoch nor the in-epoch version.
     conn.execute(
         "INSERT INTO community_edition_heads (community_id, entity_id, version, self_hash, inner_id, epoch)
-         VALUES (?1, ?2, ?3, ?4, ?5, COALESCE((SELECT server_root_epoch FROM communities WHERE community_id = ?1), 0))
+         VALUES (?1, ?2, ?3, ?4, ?5, COALESCE(?6, (SELECT server_root_epoch FROM communities WHERE community_id = ?1), 0))
          ON CONFLICT(community_id, entity_id) DO UPDATE SET
             version = excluded.version,
             self_hash = excluded.self_hash,
@@ -1286,7 +1299,7 @@ fn set_edition_head_inner(community_id: &str, entity_id: &str, version: u64, sel
             epoch = excluded.epoch
          WHERE excluded.epoch > community_edition_heads.epoch
             OR (excluded.epoch = community_edition_heads.epoch AND excluded.version > community_edition_heads.version)",
-        params![community_id, entity_id, version as i64, self_hash.as_slice(), inner_id.map(|i| i.as_slice())],
+        params![community_id, entity_id, version as i64, self_hash.as_slice(), inner_id.map(|i| i.as_slice()), epoch.map(|e| e as i64)],
     )
     .map_err(|e| format!("set edition head: {e}"))?;
     Ok(())
@@ -1302,6 +1315,17 @@ fn set_edition_head_inner(community_id: &str, entity_id: &str, version: u64, sel
 /// so it heals to a ranked id). The version-advance path is unchanged and still handled by
 /// [`set_edition_head_with_id`]; callers run BOTH (advance covers v+1, converge covers a same-v fork).
 pub fn converge_edition_head(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32]) -> Result<(), String> {
+    converge_edition_head_inner(community_id, entity_id, version, self_hash, inner_id, None)
+}
+
+/// As [`converge_edition_head`], scoped to an EXPLICIT epoch (the epoch the caller's fold ran under)
+/// rather than the community row's write-time value — same TOCTOU rationale as
+/// [`set_edition_head_at_epoch`].
+pub fn converge_edition_head_at_epoch(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32], epoch: u64) -> Result<(), String> {
+    converge_edition_head_inner(community_id, entity_id, version, self_hash, inner_id, Some(epoch))
+}
+
+fn converge_edition_head_inner(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32], epoch: Option<u64>) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
     // Scoped to the CURRENT epoch's head: a fork is resolved within an epoch, never across one (an epoch
     // bump is a re-founding, handled by the advance path). `epoch` matches the community's current epoch.
@@ -1310,9 +1334,9 @@ pub fn converge_edition_head(community_id: &str, entity_id: &str, version: u64, 
             SET self_hash = ?4, inner_id = ?5
           WHERE community_id = ?1 AND entity_id = ?2
             AND version = ?3
-            AND epoch = COALESCE((SELECT server_root_epoch FROM communities WHERE community_id = ?1), 0)
+            AND epoch = COALESCE(?6, (SELECT server_root_epoch FROM communities WHERE community_id = ?1), 0)
             AND (inner_id IS NULL OR ?5 < inner_id)",
-        params![community_id, entity_id, version as i64, self_hash.as_slice(), inner_id.as_slice()],
+        params![community_id, entity_id, version as i64, self_hash.as_slice(), inner_id.as_slice(), epoch.map(|e| e as i64)],
     )
     .map_err(|e| format!("converge edition head: {e}"))?;
     Ok(())
@@ -1415,6 +1439,38 @@ pub fn get_all_edition_heads(community_id: &str) -> Result<std::collections::Has
 /// The caller seeds the fold with ONLY the entities at the community's CURRENT epoch (a head recorded
 /// at a PRIOR epoch belongs to a superseded founding, so its entity folds fresh from the new epoch's v1
 /// genesis). This is what lets a re-founding's compacted v1 plane land without a version-only downgrade.
+/// Every tracked head as `entity_hex → (epoch, version, self_hash, inner_id)` — the epoch-primary
+/// floor INCLUDING the deterministic tiebreak key, so a fold can resolve a same-version fork at the
+/// floor (converge to the lower inner id) instead of wedging on it.
+pub fn get_all_edition_heads_full(community_id: &str) -> Result<std::collections::HashMap<String, (u64, u64, [u8; 32], Option<[u8; 32]>)>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare("SELECT entity_id, epoch, version, self_hash, inner_id FROM community_edition_heads WHERE community_id = ?1")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![community_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, Vec<u8>>(3)?, r.get::<_, Option<Vec<u8>>>(4)?))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = std::collections::HashMap::new();
+    for row in rows {
+        let (entity, epoch, version, hash, inner) = row.map_err(|e| e.to_string())?;
+        if hash.len() == 32 {
+            let mut h = [0u8; 32];
+            h.copy_from_slice(&hash);
+            let inner_id = inner.and_then(|b| {
+                (b.len() == 32).then(|| {
+                    let mut i = [0u8; 32];
+                    i.copy_from_slice(&b);
+                    i
+                })
+            });
+            out.insert(entity, (epoch as u64, version as u64, h, inner_id));
+        }
+    }
+    Ok(out)
+}
+
 pub fn get_all_edition_heads_epoched(community_id: &str) -> Result<std::collections::HashMap<String, (u64, u64, [u8; 32])>, String> {
     let conn = super::get_db_connection_guard_static()?;
     let mut stmt = conn
@@ -1602,14 +1658,19 @@ pub fn set_read_cut_pending(community_id: &str, pending: bool) -> Result<(), Str
 /// Set the owner-dissolution SEAL on a community — PERMANENT + irreversible (no clear path; there
 /// is no un-dissolve). Idempotent: re-setting an already-dissolved community is a harmless no-op. Once
 /// set, the control fold stops advancing and the inbound path drops every subsequent event.
-pub fn set_community_dissolved(community_id: &str) -> Result<(), String> {
+/// Seal a community as dissolved. Returns whether this call TRANSITIONED it (a
+/// live→dissolved flip) so the caller can fire the one-time death notification
+/// exactly once — a re-wrapped tombstone (fresh outer id, same owner seal) then
+/// can't spam the handler.
+pub fn set_community_dissolved(community_id: &str) -> Result<bool, String> {
     let conn = super::get_write_connection_guard_static()?;
-    conn.execute(
-        "UPDATE communities SET dissolved = 1 WHERE community_id = ?1",
-        params![community_id],
-    )
-    .map_err(|e| format!("set dissolved: {e}"))?;
-    Ok(())
+    let changed = conn
+        .execute(
+            "UPDATE communities SET dissolved = 1 WHERE community_id = ?1 AND dissolved = 0",
+            params![community_id],
+        )
+        .map_err(|e| format!("set dissolved: {e}"))?;
+    Ok(changed > 0)
 }
 
 /// Whether a community has been sealed by a folded + owner-verified GroupDissolved tombstone.
@@ -1715,6 +1776,283 @@ pub fn list_community_ids() -> Result<Vec<CommunityId>, String> {
     Ok(ids)
 }
 
+// ── Concord v2 storage (dual-stack) ──────────────────────────────────────────
+//
+// v2 communities reuse the shared community tables (migration 65 added the
+// `protocol`/`owner_pubkey`/`owner_salt`/`private` columns). The base access key
+// rides `server_root_key`/`server_root_epoch` (same role as v1's server root).
+// A public channel stores the community_root in `channel_key` as a placeholder
+// (its real secret is derived from the root); a private channel stores its own
+// key. At-rest encryption reuses the same `enc_*`/`dec_*` helpers.
+
+/// The protocol a stored community runs, or `None` if it isn't held locally.
+pub fn community_protocol(id: &CommunityId) -> Result<Option<crate::community::ConcordProtocol>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let n: Option<i64> = conn
+        .query_row("SELECT protocol FROM communities WHERE community_id = ?1", params![id.to_hex()], |r| r.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    Ok(n.map(crate::community::ConcordProtocol::from_i64))
+}
+
+/// Persist a v2 community + its channels atomically. UPSERT so a metadata
+/// re-save preserves banlist/roles (managed by the fold, not here).
+pub fn save_community_v2(c: &crate::community::v2::community::CommunityV2) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let id_hex = crate::simd::hex::bytes_to_hex_32(&c.identity.community_id.0);
+    let relays_json = serde_json::to_string(&c.relays).map_err(|e| e.to_string())?;
+    let created = (c.created_at_ms / 1000) as i64;
+
+    let enc_root = enc_key(&c.community_root)?;
+    let enc_name = enc_txt(&c.name)?;
+    let enc_relays = enc_txt(&relays_json)?;
+    let enc_desc = enc_txt_opt(&c.description)?;
+    let enc_owner_pk = enc_txt(&crate::simd::hex::bytes_to_hex_32(&c.identity.owner_xonly))?;
+    let enc_owner_salt = enc_txt(&crate::simd::hex::bytes_to_hex_32(&c.identity.owner_salt))?;
+    // ImageRef serializes to v1's CommunityImage JSON shape (`ext` rides the
+    // flattened `extra`), so the shared icon/banner columns serve both protocols
+    // — cache_community_image reads a v2 row's images unchanged.
+    let icon_json = c.icon.as_ref().map(|i| serde_json::to_string(i).map_err(|e| e.to_string())).transpose()?;
+    let banner_json = c.banner.as_ref().map(|b| serde_json::to_string(b).map_err(|e| e.to_string())).transpose()?;
+    let enc_icon = enc_txt_opt(&icon_json)?;
+    let enc_banner = enc_txt_opt(&banner_json)?;
+
+    let tx = conn.unchecked_transaction().map_err(|e| format!("save v2 community tx: {e}"))?;
+    tx.execute(
+        "INSERT INTO communities
+            (community_id, server_root_key, name, relays, created_at, description,
+             server_root_epoch, dissolved, protocol, owner_pubkey, owner_salt, icon, banner)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 2, ?9, ?10, ?11, ?12)
+         ON CONFLICT(community_id) DO UPDATE SET
+            server_root_key=?2, name=?3, relays=?4, description=?6,
+            server_root_epoch=?7, dissolved=?8, protocol=2, owner_pubkey=?9, owner_salt=?10,
+            icon=?11, banner=?12",
+        params![
+            id_hex, enc_root, enc_name, enc_relays, created, enc_desc,
+            c.root_epoch.0 as i64, c.dissolved as i64, enc_owner_pk, enc_owner_salt,
+            enc_icon, enc_banner,
+        ],
+    )
+    .map_err(|e| format!("save v2 community: {e}"))?;
+
+    for ch in &c.channels {
+        let ch_hex = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
+        // channel_id is the sole PRIMARY KEY, so an UPSERT keyed on it alone would
+        // let a bundle reusing ANOTHER community's channel_id overwrite that row's
+        // key/epoch/private in place (a chat-plane hijack). Channel ids are random-32
+        // (a genuine cross-community collision is negligible), so refuse rather than
+        // clobber a foreign community's row.
+        let owner_of: Option<String> = tx
+            .query_row("SELECT community_id FROM community_channels WHERE channel_id=?1", params![ch_hex], |r| r.get(0))
+            .optional()
+            .map_err(|e| format!("channel ownership check: {e}"))?;
+        if owner_of.is_some_and(|existing| existing != id_hex) {
+            // SKIP the foreign-owned channel rather than fail the whole save: a
+            // single replayed phantom (a same-owner cross-community vsk-2 edition)
+            // would otherwise wedge ALL of this community's control-plane persistence
+            // on every fold. The foreign row stays untouched; this community just
+            // never acquires a row for that id.
+            continue;
+        }
+        // A public channel has no independent key; store the community_root as a
+        // placeholder so the NOT NULL column is satisfied (the real secret is
+        // derived from the root at read time via `channel_secret`).
+        let stored_key = ch.key.unwrap_or(c.community_root);
+        let enc_ch_key = enc_key(&stored_key)?;
+        let enc_ch_name = enc_txt(&ch.name)?;
+        tx.execute(
+            "INSERT INTO community_channels
+                (channel_id, community_id, channel_key, epoch, name, created_at, private)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(channel_id) DO UPDATE SET
+                channel_key=?3, epoch=?4, name=?5, private=?7",
+            params![ch_hex, id_hex, enc_ch_key, ch.epoch.0 as i64, enc_ch_name, created, ch.private as i64],
+        )
+        .map_err(|e| format!("save v2 channel: {e}"))?;
+    }
+
+    // Prune channels no longer in the in-memory set — the persisted set is
+    // authoritative, so a control-follow delete or a rekey removal doesn't
+    // resurrect (with a stale key) on the next reload. No FK references
+    // community_channels, so this cascades to nothing.
+    let keep: Vec<String> = c.channels.iter().map(|ch| crate::simd::hex::bytes_to_hex_32(&ch.id.0)).collect();
+    if keep.is_empty() {
+        tx.execute("DELETE FROM community_channels WHERE community_id=?1", params![id_hex])
+            .map_err(|e| format!("prune v2 channels: {e}"))?;
+    } else {
+        let placeholders = std::iter::repeat("?").take(keep.len()).collect::<Vec<_>>().join(",");
+        let sql = format!("DELETE FROM community_channels WHERE community_id=? AND channel_id NOT IN ({placeholders})");
+        let mut binds: Vec<String> = Vec::with_capacity(keep.len() + 1);
+        binds.push(id_hex.clone());
+        binds.extend(keep);
+        tx.execute(&sql, rusqlite::params_from_iter(binds.iter()))
+            .map_err(|e| format!("prune v2 channels: {e}"))?;
+    }
+
+    tx.commit().map_err(|e| format!("commit v2 community: {e}"))?;
+    Ok(())
+}
+
+/// Load a v2 community by id, or `None` if absent / not a v2 community.
+pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2::community::CommunityV2>, String> {
+    use crate::community::v2::community::{ChannelV2, CommunityV2};
+    use crate::community::v2::control::CommunityIdentity;
+    let conn = super::get_db_connection_guard_static()?;
+    let id_hex = id.to_hex();
+
+    let row = conn
+        .query_row(
+            "SELECT server_root_key, name, relays, created_at, description,
+                    server_root_epoch, dissolved, protocol, owner_pubkey, owner_salt,
+                    icon, banner
+             FROM communities WHERE community_id = ?1",
+            params![id_hex],
+            |r| {
+                Ok((
+                    r.get::<_, Vec<u8>>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, i64>(7)?,
+                    r.get::<_, Option<String>>(8)?,
+                    r.get::<_, Option<String>>(9)?,
+                    r.get::<_, Option<String>>(10)?,
+                    r.get::<_, Option<String>>(11)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some((root_blob, name_e, relays_e, created, desc_e, root_epoch, dissolved, protocol, owner_pk_e, owner_salt_e, icon_e, banner_e)) = row
+    else {
+        return Ok(None);
+    };
+    if crate::community::ConcordProtocol::from_i64(protocol) != crate::community::ConcordProtocol::V2 {
+        return Ok(None);
+    }
+    let (Some(owner_pk_e), Some(owner_salt_e)) = (owner_pk_e, owner_salt_e) else {
+        return Err("v2 community row is missing its owner commitment".to_string());
+    };
+
+    let community_root = dec_key(&root_blob)?;
+    let owner_xonly = parse_hex32(&dec_txt(&owner_pk_e))?;
+    let owner_salt = parse_hex32(&dec_txt(&owner_salt_e))?;
+    let identity = CommunityIdentity { community_id: *id, owner_xonly, owner_salt };
+    let relays: Vec<String> = serde_json::from_str(&dec_txt(&relays_e)).unwrap_or_default();
+
+    let mut channels = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT channel_id, channel_key, epoch, name, private
+                 FROM community_channels WHERE community_id = ?1 ORDER BY created_at",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![id_hex], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, i64>(4)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            let (ch_hex, key_blob, epoch, name_e, private) = row.map_err(|e| e.to_string())?;
+            let private = private != 0;
+            let key = dec_key(&key_blob)?;
+            channels.push(ChannelV2 {
+                id: ChannelId(hex_id_to_32(&ch_hex)?),
+                name: dec_txt(&name_e),
+                private,
+                // A public channel derives from the root — drop the placeholder. A
+                // PRIVATE channel stored with the root value is the KEYLESS placeholder
+                // (key not yet delivered over the rekey plane): a real private key is
+                // independently random (CORD-03 §1), never the root, so reconstruct
+                // None and keep every read/send path behind the keyless guards instead
+                // of silently addressing the public plane.
+                key: (private && key != community_root).then_some(key),
+                epoch: Epoch(epoch as u64),
+            });
+        }
+    }
+
+    // Unparseable image JSON degrades to no-image rather than failing the load —
+    // the fold re-persists the authoritative value on its next pass.
+    let icon = icon_e
+        .map(|s| dec_txt(&s))
+        .and_then(|j| serde_json::from_str::<crate::community::v2::control::ImageRef>(&j).ok());
+    let banner = banner_e
+        .map(|s| dec_txt(&s))
+        .and_then(|j| serde_json::from_str::<crate::community::v2::control::ImageRef>(&j).ok());
+
+    Ok(Some(CommunityV2 {
+        identity,
+        community_root,
+        root_epoch: Epoch(root_epoch as u64),
+        name: dec_txt(&name_e),
+        description: desc_e.map(|d| dec_txt(&d)),
+        icon,
+        banner,
+        relays,
+        channels,
+        dissolved: dissolved != 0,
+        created_at_ms: (created as u64).saturating_mul(1000),
+    }))
+}
+
+fn parse_hex32(hex: &str) -> Result<[u8; 32], String> {
+    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("stored value is not 32-byte hex".to_string());
+    }
+    Ok(crate::simd::hex::hex_to_bytes_32(hex))
+}
+
+/// Load a community's persisted Guestbook: the raw membership events + the
+/// newest-seen cursor (relay seconds). `([], 0)` when never synced; unparseable
+/// stored JSON degrades the same way (the next sync re-seeds from zero).
+pub fn get_guestbook(community_id: &str) -> Result<(Vec<crate::community::v2::guestbook::GuestbookEvent>, u64), String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let row = conn
+        .query_row(
+            "SELECT events, cursor_secs FROM community_guestbook WHERE community_id = ?1",
+            params![community_id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("load guestbook: {e}"))?;
+    let Some((events_e, cursor)) = row else {
+        return Ok((Vec::new(), 0));
+    };
+    let events = serde_json::from_str(&dec_txt(&events_e)).unwrap_or_default();
+    Ok((events, cursor.max(0) as u64))
+}
+
+/// Persist a community's Guestbook events + cursor (encrypted at rest, like the
+/// community row itself). The caller owns dedup/merge — this is a plain replace.
+pub fn set_guestbook(
+    community_id: &str,
+    events: &[crate::community::v2::guestbook::GuestbookEvent],
+    cursor_secs: u64,
+) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let json = serde_json::to_string(events).map_err(|e| e.to_string())?;
+    let enc = enc_txt(&json)?;
+    conn.execute(
+        "INSERT INTO community_guestbook (community_id, events, cursor_secs)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(community_id) DO UPDATE SET events=?2, cursor_secs=?3",
+        params![community_id, enc, cursor_secs as i64],
+    )
+    .map_err(|e| format!("save guestbook: {e}"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1781,6 +2119,63 @@ mod tests {
         // A different entity is tracked independently.
         let other = "b".repeat(64);
         assert_eq!(get_edition_head(&cid, &other).unwrap(), None);
+    }
+
+    #[test]
+    fn guestbook_round_trips_events_and_cursor() {
+        let (_tmp, _guard) = init_test_db();
+        let member = nostr_sdk::prelude::Keys::generate();
+        let ev = crate::community::v2::guestbook::GuestbookEvent {
+            rumor_id: [7u8; 32],
+            entry: crate::community::v2::guestbook::GuestbookEntry::Join {
+                member: member.public_key(),
+                invited_by: Some(("creator".into(), "label".into())),
+                at_ms: 1_000,
+            },
+        };
+        let cid = "d".repeat(64);
+        assert_eq!(get_guestbook(&cid).unwrap(), (Vec::new(), 0), "absent reads as empty at cursor 0");
+        set_guestbook(&cid, std::slice::from_ref(&ev), 42).unwrap();
+        let (events, cursor) = get_guestbook(&cid).unwrap();
+        assert_eq!(events, vec![ev], "events round-trip through the encrypted blob");
+        assert_eq!(cursor, 42);
+    }
+
+    #[test]
+    fn v2_images_round_trip_and_read_as_v1_community_images() {
+        let (_tmp, _guard) = init_test_db();
+        let owner = nostr_sdk::prelude::Keys::generate();
+        let g = crate::community::v2::control::genesis(
+            &owner,
+            crate::community::v2::control::CommunityMetadata { name: "Icons".into(), ..Default::default() },
+            1_000,
+        )
+        .unwrap();
+        let mut c = crate::community::v2::community::CommunityV2::from_genesis(&g, "Icons", None, vec!["wss://r".into()], 1_000);
+        let mut extra = serde_json::Map::new();
+        extra.insert("ext".into(), serde_json::Value::String("webp".into()));
+        c.icon = Some(crate::community::v2::control::ImageRef {
+            url: "https://blossom.example/abc".into(),
+            key: "0".repeat(64),
+            nonce: "1".repeat(32),
+            hash: "a".repeat(64),
+            extra,
+        });
+        save_community_v2(&c).unwrap();
+
+        // The v2 loader round-trips the ImageRef exactly (extra included).
+        let re = load_community_v2(c.id()).unwrap().unwrap();
+        assert_eq!(re.icon, c.icon);
+        assert_eq!(re.banner, None);
+
+        // Dual-reader guarantee: the SAME stored JSON parses as a v1 CommunityImage
+        // (`ext` from the flattened extra), so cache_community_image serves a v2
+        // icon with no v2-awareness.
+        let v1 = load_community(c.id()).unwrap().unwrap();
+        let img = v1.icon.expect("v1 reader sees the v2 icon");
+        assert_eq!(img.url, "https://blossom.example/abc");
+        assert_eq!(img.ext, "webp");
+        assert_eq!(img.hash, "a".repeat(64));
     }
 
     #[test]
