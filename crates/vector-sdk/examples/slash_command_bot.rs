@@ -1,67 +1,102 @@
-//! A slash-command bot: a tiny command router that works in DMs and Communities.
+//! A slash-command bot on the Bot Interface manifest system (Phase 1).
 //!
-//! Message it `/help`, `/ping`, `/echo hello`, `/roll`, or `/roll 20`.
+//! Commands are registered with the builder, so the kind-33304 manifest
+//! publishes automatically at listen start and clients render a `/` picker
+//! with typed argument hints. Invocations arrive as plain message content —
+//! any client can type them.
 //!
-//! Run with:
 //! ```sh
-//! VECTOR_NSEC=nsec1... cargo run -p vector-sdk --example slash_command_bot
+//! # First run prints the bot's npub. Send it a direct invite from Vector
+//! # (public invite policy: it auto-accepts), or pass an invite link as arg 1.
+//! BOT_NAME=Dicey VECTOR_DATA_DIR=~/bots/dicey \
+//!   cargo run -p vector_sdk --example slash_command_bot
 //! ```
+//!
+//! `VECTOR_DATA_DIR` keeps this bot's identity/DB separate from other bots on
+//! the same machine (the default data dir is shared); `VECTOR_NSEC` overrides
+//! the persisted identity.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 use vector_sdk::VectorBot;
 
-const HELP: &str = "\
-Commands:
-  /help        — show this message
-  /ping        — pong, with a timestamp
-  /echo <text> — repeat your text back
-  /roll [N]    — roll a d[N] (default d6)
-  /about       — what am I?";
-
 #[tokio::main]
 async fn main() -> vector_sdk::Result<()> {
-    let nsec = std::env::var("VECTOR_NSEC").expect("set VECTOR_NSEC to your bot's nsec");
+    let name = std::env::var("BOT_NAME").unwrap_or_else(|_| "Dicey".to_string());
+    let about = "A dice-flavoured slash-command bot built with vector_sdk. Type / for commands.";
 
-    let bot = VectorBot::builder().nsec(nsec).build().await?;
-    println!("Slash-command bot online as {}", bot.npub());
+    let mut builder = VectorBot::builder().public();
+    if let Ok(nsec) = std::env::var("VECTOR_NSEC") {
+        builder = builder.nsec(nsec);
+    }
+    if let Ok(dir) = std::env::var("VECTOR_DATA_DIR") {
+        builder = builder.data_dir(dir);
+    }
+    let bot = builder.build().await?;
+    println!("── {name} online as {}", bot.npub());
 
-    // One handler, every conversation — DMs and Community channels alike.
-    bot.on_message(|_bot, msg| async move {
-        if msg.is_mine() {
-            return;
-        }
-        // Ignore anything that isn't a /command.
-        let Some(rest) = msg.text().trim().strip_prefix('/') else { return };
-        let mut parts = rest.splitn(2, char::is_whitespace);
-        let command = parts.next().unwrap_or("").to_lowercase();
-        let args = parts.next().unwrap_or("").trim();
+    // Bot-flagged kind-0 so client pickers gate us in (`bot: true` is what a
+    // `/` picker looks for). Deferred until listen has connected the relays.
+    {
+        let bot = bot.clone();
+        let name = name.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            let ok = bot.core().update_bot_profile(&name, "", "", about).await;
+            println!("── profile publish {}", if ok { "✅" } else { "FAILED" });
+        });
+    }
 
-        let response = match command.as_str() {
-            "help" => HELP.to_string(),
-            "ping" => format!("pong 🏓 ({} ms since epoch)", now_millis()),
-            "echo" if !args.is_empty() => args.to_string(),
-            "echo" => "usage: /echo <text>".to_string(),
-            "roll" => {
-                let sides = args.parse::<u64>().unwrap_or(6).max(1);
-                let value = now_millis() % sides + 1;
-                format!("🎲 d{sides} → {value}")
-            }
-            "about" => "I'm a Vector bot built with the vector-sdk. Try /help.".to_string(),
-            other => format!("unknown command `/{other}` — try /help"),
-        };
+    // Optional invite link on first run; later runs come up with memberships.
+    if let Some(invite) = std::env::args().nth(1) {
+        println!("── joining via link…");
+        let summary = bot.core().join_community(&invite).await?;
+        let cname = summary.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+        println!("── joined \"{cname}\"");
+    }
 
-        // `reply` threads the response to the triggering message, in the same place it arrived.
-        let _ = msg.reply(&response).await;
+    bot.command("echo", "Repeat your text back")
+        .string("text", "What to repeat", true)
+        .run(|ctx| async move {
+            let text = ctx.str("text").unwrap_or_default().to_string();
+            let _ = ctx.reply(text).await;
+        });
+    // Deliberately the same name as other bots' /roll: the picker's recipient
+    // tag routes the invocation to exactly the bot the user chose.
+    bot.command("roll", "Roll a die")
+        .int("sides", "How many sides (default 6)", false)
+        .run(|ctx| async move {
+            let sides = ctx.int("sides").unwrap_or(6).clamp(2, 1_000_000);
+            let roll = (now_ms() as i64 % sides) + 1;
+            let _ = ctx.reply(format!("🎲 rolled {roll} on a d{sides}")).await;
+        });
+    bot.command("flip", "Flip a coin").run(|ctx| async move {
+        let side = if now_ms() % 2 == 0 { "heads" } else { "tails" };
+        let _ = ctx.reply(format!("🪙 {side}!")).await;
+    });
+    bot.command("eightball", "Ask the magic 8-ball")
+        .string("question", "Your question", true)
+        .run(|ctx| async move {
+            const ANSWERS: &[&str] = &[
+                "It is certain.", "Without a doubt.", "Ask again later.",
+                "Better not tell you now.", "Don't count on it.", "Very doubtful.",
+            ];
+            let answer = ANSWERS[(now_ms() as usize) % ANSWERS.len()];
+            let _ = ctx.reply(format!("🎱 {answer}")).await;
+        });
+    bot.command("about", "What am I?").run(move |ctx| async move {
+        let _ = ctx.reply("I'm a slash-command bot built with vector_sdk. My commands come from my published manifest.").await;
+    });
+
+    println!("── listening. Type / in a chat with me.\n");
+    bot.on_message(|_bot, _msg| async move {
+        // Matched commands are consumed before this; ordinary chatter is ignored.
     })
     .await?;
 
     Ok(())
 }
 
-/// Milliseconds since the Unix epoch — doubles as a throwaway source of entropy for `/roll`.
-fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+/// Milliseconds since the Unix epoch — a throwaway entropy source for the toys.
+fn now_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }

@@ -15270,10 +15270,18 @@ hr {
   text-align: right;
 }
 
-/* Narrow windows/phones: names + arg chips carry the row; descriptions go. */
+/* Narrow windows/phones: the command + arg chips form the top line and the
+   description tucks below it (flex-wrap sends a 100%-basis item to its own
+   row), wrapping up to two lines instead of vanishing. */
 @media (max-width: 520px) {
   .command-item-desc {
-    display: none;
+    flex-basis: 100%;
+    text-align: left;
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    margin-top: 2px;
   }
 }
 
