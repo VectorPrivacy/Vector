@@ -745,14 +745,19 @@ pub async fn send_community_message(
     use vector_core::Message;
     let reply = replied_to.filter(|r| !r.is_empty());
     // A `/` picker send names its chosen bot so only that bot executes when two
-    // bots share a command name (untagged = broadcast). v2-only: the v1 inner
-    // envelope carries no free tags, and v1 bots parse content regardless.
-    let bot_tags: Vec<nostr_sdk::prelude::Tag> = bot
+    // bots share a command name (untagged = broadcast). The tag rides the
+    // inner on both stacks, and the sender's own optimistic row carries the
+    // npub too — the passive "ran /cmd with Bot" render can't wait for an echo.
+    let bot_pk = bot
         .as_deref()
         .filter(|b| !b.is_empty())
-        .and_then(|b| nostr_sdk::prelude::PublicKey::parse(b).ok())
-        .map(|pk| vec![vector_core::bot_interface::bot_tag(&pk)])
-        .unwrap_or_default();
+        .and_then(|b| nostr_sdk::prelude::PublicKey::parse(b).ok());
+    let bot_tags: Vec<nostr_sdk::prelude::Tag> =
+        bot_pk.map(|pk| vec![vector_core::bot_interface::bot_tag(&pk)]).unwrap_or_default();
+    let addressed_bots: Vec<String> = bot_pk
+        .and_then(|pk| nostr_sdk::prelude::ToBech32::to_bech32(&pk).ok())
+        .into_iter()
+        .collect();
 
     let session = vector_core::state::SessionGuard::capture();
     let author_pk = vector_core::my_public_key().ok_or("Public key not set")?;
@@ -813,6 +818,7 @@ pub async fn send_community_message(
             npub: my_npub.clone(),
             replied_to: reply.clone().unwrap_or_default(),
             emoji_tags: emoji_tags.clone(),
+            addressed_bots: addressed_bots.clone(),
             ..Default::default()
         };
         {
@@ -924,6 +930,7 @@ pub async fn send_community_message(
         npub: my_npub.clone(),
         replied_to: reply.clone().unwrap_or_default(),
         emoji_tags: emoji_tags.clone(),
+        addressed_bots: addressed_bots.clone(),
         ..Default::default()
     };
     {
