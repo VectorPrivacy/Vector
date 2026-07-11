@@ -74,6 +74,9 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         streakAnchor = domChatMessages?.lastElementChild || null;
     }
     row.dataset.streak = _dmsgComputeStreakAttr(msg, streakAnchor);
+    // Command invocations render as a passive line whose sentence names the
+    // author — the row never needs its own header/avatar.
+    if (_dmsgCommandInfo(msg)) row.dataset.streak = 'continuation';
 
     // ---- Replying-to highlight (CSS uses [data-replying-to] selector) -------
     if (strCurrentReplyReference === msg.id) row.dataset.replyingTo = 'true';
@@ -513,60 +516,67 @@ function _dmsgBuildBlockedPlaceholder(msg) {
 }
 
 /**
- * A slash-command invocation renders as a compact capsule — the command and
- * its target bot, never the params (long values would drown the row; the
- * content still carries them for bots). Shown ONLY when it provably is an
- * invocation: the bot routing tag is present, or the message is a bare
+ * Detect a slash-command invocation worth the passive render. Only when it
+ * provably IS one: the bot routing tag is present, or the message is a bare
  * /command with nothing after the name — an untagged "/word plus prose"
  * stays ordinary text so real content can never be hidden by mistake.
  */
-function _dmsgCommandCapsule(msg, displayContent) {
-    const m = /^\/([a-z0-9_-]{1,32})(\s|$)/.exec((displayContent || '').trim());
+function _dmsgCommandInfo(msg) {
+    const content = (msg.content || '').trim();
+    const m = /^\/([a-z0-9_-]{1,32})(\s|$)/.exec(content);
     if (!m) return null;
     const tagged = msg.addressed_bots && msg.addressed_bots.length;
-    const bare = (displayContent || '').trim() === '/' + m[1];
-    if (!tagged && !bare) return null;
+    if (!tagged && content !== '/' + m[1]) return null;
+    return { name: m[1], botNpub: tagged ? msg.addressed_bots[0] : null };
+}
 
-    const wrap = document.createElement('span');
-    wrap.classList.add('dmsg-command');
-    const glyph = document.createElement('span');
-    glyph.classList.add('dmsg-command-glyph');
-    glyph.textContent = '/';
-    wrap.appendChild(glyph);
+/**
+ * The passive invocation line: "JSKitty ran /roll with ◎ Concordia" — dim
+ * prose, no bubble, the params deliberately absent (long values would drown
+ * the row; the content still carries them for bots). The row renders as a
+ * continuation (no header/avatar) since the sentence names the author.
+ */
+function _dmsgBuildCommandLine(msg, cmd) {
+    const line = document.createElement('span');
+    line.classList.add('dmsg-command-line');
+
+    const author = document.createElement('span');
+    author.classList.add('dmsg-command-author');
+    author.textContent = getName(msg.mine ? strPubkey : (msg.npub || ''));
+    line.appendChild(author);
+
+    line.appendChild(document.createTextNode(' ran '));
+
     const name = document.createElement('span');
     name.classList.add('dmsg-command-name');
-    name.textContent = m[1];
-    wrap.appendChild(name);
+    name.textContent = '/' + cmd.name;
+    line.appendChild(name);
 
-    if (tagged) {
-        const withEl = document.createElement('span');
-        withEl.classList.add('dmsg-command-with');
-        withEl.textContent = 'with';
-        wrap.appendChild(withEl);
-        const npub = msg.addressed_bots[0];
-        const profile = getProfile(npub);
+    if (cmd.botNpub) {
+        line.appendChild(document.createTextNode(' with '));
+        const profile = getProfile(cmd.botNpub);
         const img = document.createElement('img');
         img.classList.add('dmsg-command-bot-avatar');
         img.src = (profile && getProfileAvatarSrc(profile)) || 'icons/user-placeholder.svg';
         img.alt = '';
-        wrap.appendChild(img);
+        line.appendChild(img);
         const bot = document.createElement('span');
         bot.classList.add('dmsg-command-bot');
-        bot.textContent = getName(npub);
-        wrap.appendChild(bot);
+        bot.textContent = getName(cmd.botNpub);
+        line.appendChild(bot);
     }
-    return wrap;
+    return line;
 }
 
 function _dmsgBuildText(msg, displayContent, fEmojiOnly, isGroupChat, currentChat, isRevealedBlockedMsg) {
     const span = document.createElement('span');
     span.classList.add('dmsg-text');
 
-    // Command invocations get the capsule treatment instead of raw text.
+    // Command invocations render as the passive line instead of raw text.
     if (!fEmojiOnly) {
-        const capsule = _dmsgCommandCapsule(msg, displayContent);
-        if (capsule) {
-            span.appendChild(capsule);
+        const cmd = _dmsgCommandInfo(msg);
+        if (cmd) {
+            span.appendChild(_dmsgBuildCommandLine(msg, cmd));
             return span;
         }
     }

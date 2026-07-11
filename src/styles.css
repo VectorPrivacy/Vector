@@ -15253,39 +15253,34 @@ hr {
   flex-shrink: 0;
 }
 
-/* --- Command invocation capsule (in-chat render of a sent command) --- */
-.dmsg-command {
+/* --- Command invocation line (in-chat render of a sent command) ---
+   Passive prose, no bubble: "JSKitty ran /roll with ◎ Concordia". */
+.dmsg-command-line {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 11px;
-  border-radius: 9px;
-  background: rgba(255, 255, 255, 0.045);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-left: 2px solid var(--icon-color-primary, #59fcb3);
+  gap: 4px;
+  font-size: 13px;
+  font-style: italic;
+  color: rgba(255, 255, 255, 0.45);
   -webkit-user-select: none;
   user-select: none;
 }
 
-.dmsg-command-glyph {
-  color: var(--icon-color-primary, #59fcb3);
-  font-weight: 700;
-}
-
-.dmsg-command-name {
+.dmsg-command-author {
+  color: rgba(255, 255, 255, 0.8);
   font-weight: 600;
-  color: #fff;
+  font-style: normal;
 }
 
-.dmsg-command-with {
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.45);
-  margin: 0 1px;
+.dmsg-command-line .dmsg-command-name {
+  color: var(--icon-color-primary, #59fcb3);
+  font-weight: 600;
+  font-style: normal;
 }
 
 .dmsg-command-bot-avatar {
-  width: 16px;
-  height: 16px;
+  width: 15px;
+  height: 15px;
   border-radius: 50%;
   object-fit: cover;
   flex-shrink: 0;
@@ -15294,6 +15289,7 @@ hr {
 .dmsg-command-bot {
   color: var(--icon-color-primary, #59fcb3);
   font-weight: 600;
+  font-style: normal;
   max-width: 22ch;
   min-width: 0;
   white-space: nowrap;
