@@ -421,9 +421,17 @@ function initCommandSelector(textarea, io, anchorEl) {
     const ctxBar = {
         cmd: document.getElementById('chat-command-bar-cmd'),
         bot: document.getElementById('chat-command-bar-bot'),
+        hint: document.getElementById('chat-command-bar-hint'),
         cancel: document.getElementById('chat-command-bar-cancel')
     };
     if (ctxBar.cancel) ctxBar.cancel.addEventListener('click', () => exitComposer(false));
+
+    /** The focused param's manifest description, shown in the strip (the
+     *  visible twin of the hover tooltip — mobile has no hover). */
+    function setContextHint(arg) {
+        if (!ctxBar.hint) return;
+        ctxBar.hint.textContent = arg && arg.description ? arg.name + ': ' + arg.description : '';
+    }
 
     function showContextBar(cmd) {
         if (!ctxBar.cmd) return;
@@ -456,6 +464,7 @@ function initCommandSelector(textarea, io, anchorEl) {
     function exitComposer(keepPick) {
         anchorEl.classList.remove('commanding');
         closeChoiceMenu();
+        setContextHint(null);
         if (!composing) return;
         // Keep the Android back stack in sync when we close via our own paths
         // (Esc, cancel, send, chat switch); no-op after a hardware back pop.
@@ -581,6 +590,7 @@ function initCommandSelector(textarea, io, anchorEl) {
                     el.style.width = Math.min(300, Math.max(72, Math.ceil(measureFieldText(el)) + 26)) + 'px';
                 }
             };
+            el.addEventListener('focus', () => setContextHint(a));
             if (el.tagName === 'BUTTON') {
                 el.addEventListener('keydown', (e) => onChoiceKey(e, idx, a));
             } else if (a.type === 'user') {

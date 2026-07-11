@@ -15456,7 +15456,7 @@ hr {
 }
 
 #chat-command-bar-bot {
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
   display: inline-flex;
   align-items: center;
@@ -15464,6 +15464,19 @@ hr {
   color: var(--accent-color, #59fcb3);
   font-size: 13px;
   font-weight: 600;
+}
+
+/* The focused param's manifest description, right-aligned and truncating —
+   the visible twin of the hover tooltip (mobile has no hover). */
+#chat-command-bar-hint {
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.45);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 #chat-command-bar-bot span {

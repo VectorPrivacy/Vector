@@ -86,8 +86,8 @@ async fn main() -> vector_sdk::Result<()> {
     bot.command("stress", "UI stress test: maximum-length choices")
         .choice(
             "pick",
-            "Choose one (two are wire-max 32 chars)",
-            ["abcdefghijklmnopqrstuvwxyz-12345", "this-is-a-very-long-choice-name!", "short"],
+            "Choose one (wire-max lengths, mixed case, spaces)",
+            ["abcdefghijklmnopqrstuvwxyz-12345", "This Is A Mixed Case Answer 1234", "UPPERCASE", "short"],
             true,
         )
         .run(|ctx| async move {
