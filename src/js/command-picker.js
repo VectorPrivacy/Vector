@@ -286,13 +286,22 @@ function initCommandSelector(textarea, io, anchorEl) {
         mode = 'list';
 
         // Flat keyboard order = exactly the render order (recents, then sections).
+        // Each section wraps its header + rows so the header can STICK to the
+        // panel top while its rows scroll, then get pushed away by the next
+        // section's header (sticky is clamped to its own wrapper).
         const flat = [];
-        if (recent.length) {
-            panel.appendChild(sectionHeader('Recently Used', null));
-            for (const cmd of recent) {
-                panel.appendChild(commandRow(cmd, flat.length));
+        const section = (headerText, avatarSrc, cmds) => {
+            const wrap = document.createElement('div');
+            wrap.className = 'command-section';
+            wrap.appendChild(sectionHeader(headerText, avatarSrc));
+            for (const cmd of cmds) {
+                wrap.appendChild(commandRow(cmd, flat.length));
                 flat.push(cmd);
             }
+            panel.appendChild(wrap);
+        };
+        if (recent.length) {
+            section('Recently Used', null, recent);
         }
         const byBot = new Map();
         for (const cmd of matches) {
@@ -301,16 +310,16 @@ function initCommandSelector(textarea, io, anchorEl) {
         }
         for (const [bot, cmds] of byBot) {
             const profile = io.botProfile(bot) || {};
-            panel.appendChild(sectionHeader(profile.name || (bot.slice(0, 12) + '…'), profile.avatarSrc || null));
-            for (const cmd of cmds) {
-                panel.appendChild(commandRow(cmd, flat.length));
-                flat.push(cmd);
-            }
+            section(profile.name || (bot.slice(0, 12) + '…'), profile.avatarSrc || null, cmds);
         }
         panel._flat = flat;
         if (activeIndex >= flat.length) activeIndex = 0;
         position();
         show();
+        // Rebuilding innerHTML resets scrollTop; bring the keyboard-active row
+        // back into view (scroll-margin keeps it clear of the stuck header).
+        const activeEl = panel.querySelector('.command-item.active');
+        if (activeEl) activeEl.scrollIntoView({ block: 'nearest' });
     }
 
     /** The armed-command hint bar: signature with the CURRENT arg highlighted;
