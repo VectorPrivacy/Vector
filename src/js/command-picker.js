@@ -499,7 +499,11 @@ function initCommandSelector(textarea, io, anchorEl) {
                 el = document.createElement('button');
                 el.type = 'button';
                 el.classList.add('command-choice-trigger');
-                el.dataset.placeholder = a.required ? 'choose…' : '(skip)';
+                // Just an "unset" glyph: the pill's name label carries the
+                // semantics and the chevron says "pick" — text would only
+                // widen the trigger. The menu's "(skip)" row still names the
+                // empty option for optional params.
+                el.dataset.placeholder = '…';
                 el.value = '';
                 const label = document.createElement('span');
                 label.textContent = el.dataset.placeholder;
