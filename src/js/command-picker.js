@@ -749,7 +749,9 @@ function initCommandSelector(textarea, io, anchorEl) {
         const options = (io.mentionCandidates ? io.mentionCandidates() : [])
             .filter(c => c.name.toLowerCase().includes(q) || c.npub.toLowerCase().includes(q))
             .slice(0, 6)
-            .map(c => ({ v: c.npub, label: c.name, avatarSrc: c.avatarSrc || null }));
+            // Same placeholder fallback the @mention selector uses, so
+            // avatarless members still get a face in the row.
+            .map(c => ({ v: c.npub, label: c.name, avatarSrc: c.avatarSrc || 'icons/user-placeholder.svg' }));
         if (!options.length) {
             if (choiceOpenFor && choiceOpenFor.el === el) closeChoiceMenu();
             return;

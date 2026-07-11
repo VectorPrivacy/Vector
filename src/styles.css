@@ -15604,8 +15604,10 @@ textarea.command-part-input {
 
 /* Choice trigger: a button that dresses as a field (same 21px box, same bg)
    with a slim chevron — the drop-up replaces native selects, which render
-   inconsistently per platform (Android opens an OS modal). */
-.command-choice-trigger {
+   inconsistently per platform (Android opens an OS modal). Scoped under
+   .command-part to outrank `.chat-input-container button` (the 45px
+   composer-icon sizing), which otherwise drafts the trigger into icon duty. */
+.command-part button.command-choice-trigger {
   display: inline-flex;
   align-items: center;
   margin: 0;
@@ -15616,8 +15618,11 @@ textarea.command-part-input {
   overflow: hidden;
   cursor: pointer;
   font-family: inherit;
+  font-size: 13px;
+  color: #fff;
   text-align: left;
-  padding-right: 20px;
+  padding: 2px 20px 2px 8px;
+  border-radius: 7px;
   background-color: rgba(0, 0, 0, 0.35);
   background-image:
     linear-gradient(45deg, transparent 50%, rgba(255, 255, 255, 0.55) 50%),
@@ -15627,14 +15632,14 @@ textarea.command-part-input {
   background-repeat: no-repeat;
 }
 
-.command-choice-trigger span {
+.command-part button.command-choice-trigger span {
   min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.command-choice-trigger.placeholder span {
+.command-part button.command-choice-trigger.placeholder span {
   color: rgba(255, 255, 255, 0.4);
 }
 
