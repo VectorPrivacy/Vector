@@ -96,7 +96,7 @@ function initCommandSelector(textarea, io, anchorEl) {
 
     /** Live swap-in: the backend finished its background manifest refresh. */
     function onCommandsUpdated(chatId, snap) {
-        snapshots.set(chatId, { bots: snap.bots || 0, commands: snap.commands || [] });
+        snapshots.set(chatId, { bots: snap.bots || 0, commands: snap.commands || [], fresh: true });
         if (isVisible() && io.chatId() === chatId) render();
     }
 
@@ -316,6 +316,19 @@ function initCommandSelector(textarea, io, anchorEl) {
         for (const [bot, cmds] of byBot) {
             const profile = io.botProfile(bot) || {};
             section(profile.name || (bot.slice(0, 12) + '…'), profile.avatarSrc || null, cmds);
+        }
+        // A stale-served list is still converging (manifest REQ in flight) —
+        // say so, so a bot that pops in seconds later isn't a surprise.
+        if (snap.fresh === false) {
+            const row = document.createElement('div');
+            row.className = 'command-loading command-refreshing';
+            const spin = document.createElement('span');
+            spin.className = 'command-spinner';
+            row.appendChild(spin);
+            const label = document.createElement('span');
+            label.textContent = 'Checking for new commands…';
+            row.appendChild(label);
+            panel.appendChild(row);
         }
         panel._flat = flat;
         if (activeIndex >= flat.length) activeIndex = 0;
