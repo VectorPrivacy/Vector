@@ -91,6 +91,10 @@
   mask-image: url("./icons/folder.svg");
 }
 
+.icon-gamepad {
+  mask-image: url("./icons/gamepad.svg");
+}
+
 .icon-film {
   mask-image: url("./icons/film.svg");
 }
