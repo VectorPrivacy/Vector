@@ -6865,7 +6865,8 @@ select {
   gap: 4px;
   opacity: 0;
   pointer-events: none;
-  z-index: 10;
+  /* Above the message fades (z-index 100), same as the red circle. */
+  z-index: 101;
   /* No transition during drag - opacity is controlled directly by JS */
 }
 
@@ -6969,7 +6970,9 @@ select {
   right: 9.5px;
   top: 50%;
   margin-top: -13px;
-  z-index: 10;
+  /* Above the .fadeout-bottom-msgs message fade (z-index 100) — the dot is
+     dragged up into that band and would otherwise render behind it. */
+  z-index: 101;
 }
 
 /* Smooth return animation when drag ends */
