@@ -3,6 +3,44 @@
  * Shows a preview of files before sending with options like compression for images
  */
 
+// Build the image send-options markup. Compress is offered only when it's worth
+// it (size-gated by the caller); Keep Metadata is offered for any image, since
+// stripping location/camera/date now happens by default regardless of size.
+function filePreviewOptionsHTML(showCompress, showMetadata) {
+    const compress = showCompress ? `
+            <label class="file-preview-option">
+                <div>
+                    <div class="file-preview-option-label">Compress Image</div>
+                    <div class="file-preview-option-sublabel" id="file-preview-compress-info">Compressing...</div>
+                </div>
+                <input type="checkbox" id="file-preview-compress" checked>
+                <span class="neon-toggle"></span>
+            </label>` : '';
+    // Rendered hidden; revealMetadataOptionIfPresent() shows it only when the
+    // image actually carries strip-worthy EXIF (screenshots/memes have none).
+    const metadata = showMetadata ? `
+            <label class="file-preview-option" id="file-preview-metadata-option" style="display: none;">
+                <div>
+                    <div class="file-preview-option-label">Keep Metadata <img class="warning-icon" id="file-preview-metadata-warning" alt="" style="display: none; vertical-align: middle; margin-left: 4px; height: 14px; width: 14px;"></div>
+                    <div class="file-preview-option-sublabel">Includes location, camera & date</div>
+                </div>
+                <input type="checkbox" id="file-preview-metadata">
+                <span class="neon-toggle"></span>
+            </label>` : '';
+    return compress + metadata;
+}
+
+// Reveal the Keep Metadata toggle only when the image carries strip-worthy EXIF.
+// filePath empty => check the JS-cached bytes (clipboard / File-object sends).
+async function revealMetadataOptionIfPresent(filePath) {
+    try {
+        const has = await invoke('file_has_metadata', { filePath: filePath || '' });
+        if (!has) return;
+        const opt = document.getElementById('file-preview-metadata-option');
+        if (opt) opt.style.display = '';
+    } catch (_) { /* leave hidden on error */ }
+}
+
 let filePreviewOverlay = null;
 let filePreviewNameEl = null; // Persistent reference to #file-preview-name (survives hotswap)
 let filePreviewExtEl = null;  // Reference to #file-preview-ext badge
@@ -444,6 +482,15 @@ function createFilePreviewOverlay() {
     document.getElementById('file-preview-cancel').addEventListener('click', closeFilePreview);
     document.getElementById('file-preview-send').addEventListener('click', sendPreviewedFile);
     document.getElementById('file-preview-publish').addEventListener('click', openPublishDialog);
+
+    // Surface the privacy warning while Keep Metadata is on (location/camera/date
+    // leave the device). Delegated because the options markup is re-rendered per file.
+    document.getElementById('file-preview-options').addEventListener('change', (e) => {
+        if (e.target && e.target.id === 'file-preview-metadata') {
+            const warn = document.getElementById('file-preview-metadata-warning');
+            if (warn) warn.style.display = e.target.checked ? 'inline-block' : 'none';
+        }
+    });
     
     // Close on background click
     filePreviewOverlay.addEventListener('click', (e) => {
@@ -680,25 +727,16 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
         compressionPollingInterval = null;
     }
     
-    // Only show compress option for images larger than 25KB (excluding GIFs to preserve animation)
-    // Mini Apps don't get compression option
+    // Keep Metadata shows for any non-GIF image; Compress only above 25KB.
+    // Mini Apps don't get either option.
     const MIN_COMPRESS_SIZE = 25 * 1024; // 25KB
     const isGif = ext === 'gif';
-    if (isImage && !isGif && !isMiniApp && fileSize > MIN_COMPRESS_SIZE) {
-        // Show compress option for images with loading state
-        optionsArea.innerHTML = `
-            <label class="file-preview-option">
-                <div>
-                    <div class="file-preview-option-label">Compress Image</div>
-                    <div class="file-preview-option-sublabel" id="file-preview-compress-info">Compressing...</div>
-                </div>
-                <input type="checkbox" id="file-preview-compress" checked>
-                <span class="neon-toggle"></span>
-            </label>
-        `;
-        
-        // Start pre-compression in background
-        startPrecompression(filepath);
+    if (isImage && !isGif && !isMiniApp) {
+        const showCompress = fileSize > MIN_COMPRESS_SIZE;
+        optionsArea.innerHTML = filePreviewOptionsHTML(showCompress, true);
+        // Start pre-compression in background (only when compression is offered)
+        if (showCompress) startPrecompression(filepath);
+        revealMetadataOptionIfPresent(filepath);
     } else {
         optionsArea.innerHTML = '';
     }
@@ -885,21 +923,13 @@ async function openFilePreviewWithFile(file, fileName, ext, receiver, replyRef =
             </div>
         `;
         
-        // Show compression option for images larger than 25KB (except GIFs)
+        // Compress above 25KB; Keep Metadata for any non-GIF image.
         const MIN_COMPRESS_SIZE = 25 * 1024; // 25KB
         const showCompression = ext !== 'gif' && file.size > MIN_COMPRESS_SIZE;
-        
-        if (showCompression) {
-            optionsArea.innerHTML = `
-                <label class="file-preview-option">
-                    <div>
-                        <div class="file-preview-option-label">Compress Image</div>
-                        <div class="file-preview-option-sublabel" id="file-preview-compress-info">Compressing...</div>
-                    </div>
-                    <input type="checkbox" id="file-preview-compress" checked>
-                    <span class="neon-toggle"></span>
-                </label>
-            `;
+        const showMetadata = ext !== 'gif';
+
+        if (showCompression || showMetadata) {
+            optionsArea.innerHTML = filePreviewOptionsHTML(showCompression, showMetadata);
             optionsArea.style.display = 'flex';
         } else {
             optionsArea.innerHTML = '';
@@ -1071,22 +1101,15 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
             `;
         }
 
-        // Show compress option for images larger than 25KB (excluding GIFs to preserve animation)
+        // Compress above 25KB; Keep Metadata for any non-GIF image.
         const MIN_COMPRESS_SIZE = 25 * 1024; // 25KB
-        if (ext !== 'gif' && fileSize > MIN_COMPRESS_SIZE) {
-            optionsArea.innerHTML = `
-                <label class="file-preview-option">
-                    <div>
-                        <div class="file-preview-option-label">Compress Image</div>
-                        <div class="file-preview-option-sublabel" id="file-preview-compress-info">Compressing...</div>
-                    </div>
-                    <input type="checkbox" id="file-preview-compress" checked>
-                    <span class="neon-toggle"></span>
-                </label>
-            `;
-            
-            // Start pre-compression in background
-            startCachedBytesCompression();
+        if (ext !== 'gif') {
+            const showCompress = fileSize > MIN_COMPRESS_SIZE;
+            optionsArea.innerHTML = filePreviewOptionsHTML(showCompress, true);
+            // Start pre-compression in background (only when compression is offered)
+            if (showCompress) startCachedBytesCompression();
+            // Bytes were cached above via cache_file_bytes.
+            revealMetadataOptionIfPresent('');
         } else {
             optionsArea.innerHTML = '';
         }
@@ -1215,7 +1238,9 @@ async function startFileObjectCacheAndPreview(file, fileName, ext, contentArea, 
             fileName: fileName,
             extension: ext
         });
-        
+        // Cached bytes are now available for the metadata check.
+        revealMetadataOptionIfPresent('');
+
         // Display preview
         const validatedResultPreview = validateImageSrc(result.preview);
         if (validatedResultPreview) {
@@ -1662,6 +1687,10 @@ async function sendPreviewedFile() {
         : isSupportedImage(filePath);
     const compressCheckbox = document.getElementById('file-preview-compress');
     const shouldCompress = !!(isImage && compressCheckbox && compressCheckbox.checked && ext !== 'gif');
+    // Default off = strip EXIF (location, camera, timestamps). When on, metadata
+    // is preserved (re-attached onto compressed images, kept as-is otherwise).
+    const metadataCheckbox = document.getElementById('file-preview-metadata');
+    const keepMetadata = !!(isImage && metadataCheckbox && metadataCheckbox.checked);
     // Check if compression was started (bytes are cached in Rust)
     const compressionWasStarted = compressionInProgress || compressionComplete;
     
@@ -1724,15 +1753,15 @@ async function sendPreviewedFile() {
             if (filePath) {
                 // On-disk source (file picker, drag-drop, voice). nameOverride carries
                 // spoiler/rename (empty = derive from the path) — parity with DM file sends.
-                await invoke('send_community_files', { channelId: chatId, content: '', filePaths: [filePath], nameOverrides: [nameOverride || ''], useCompression: shouldCompress, repliedTo: replyRef });
+                await invoke('send_community_files', { channelId: chatId, content: '', filePaths: [filePath], nameOverrides: [nameOverride || ''], useCompression: shouldCompress, keepMetadata, repliedTo: replyRef });
             } else if (fileObject) {
                 // Android File object — read the real bytes; sendName already folds in nameOverride.
                 const bytes = Array.from(new Uint8Array(await fileObject.arrayBuffer()));
-                await invoke('send_community_file_bytes', { channelId: chatId, content: '', fileBytes: bytes, fileName: sendName, useCompression: shouldCompress, repliedTo: replyRef });
+                await invoke('send_community_file_bytes', { channelId: chatId, content: '', fileBytes: bytes, fileName: sendName, useCompression: shouldCompress, keepMetadata, repliedTo: replyRef });
             } else if (usingBytes) {
                 // Clipboard paste: the bytes live Rust-side (JS only holds a flag), so send
                 // from the cache. nameOverride applies the spoiler/rename to the cached name.
-                await invoke('send_community_cached_file', { channelId: chatId, content: '', nameOverride: nameOverride || null, useCompression: shouldCompress, repliedTo: replyRef });
+                await invoke('send_community_cached_file', { channelId: chatId, content: '', nameOverride: nameOverride || null, useCompression: shouldCompress, keepMetadata, repliedTo: replyRef });
             } else {
                 popupConfirm('Send failed', 'Could not read the attachment to send.', true, '', 'vector_warning.svg');
             }
@@ -1758,6 +1787,7 @@ async function sendPreviewedFile() {
                     receiver: chatId,
                     repliedTo: replyRef,
                     useCompression: shouldCompress,
+                    keepMetadata,
                     nameOverride
                 });
             } else {
@@ -1770,6 +1800,7 @@ async function sendPreviewedFile() {
                     fileBytes: bytes,
                     fileName: fileObject.name,
                     useCompression: false,
+                    keepMetadata,
                     nameOverride
                 });
             }
@@ -1779,6 +1810,7 @@ async function sendPreviewedFile() {
                 receiver: chatId,
                 repliedTo: replyRef,
                 useCompression: shouldCompress,
+                keepMetadata,
                 nameOverride
             });
         } else if (shouldCompress) {
@@ -1787,6 +1819,7 @@ async function sendPreviewedFile() {
                 receiver: chatId,
                 repliedTo: replyRef,
                 filePath: filePath,
+                keepMetadata,
                 nameOverride
             });
         } else {
@@ -1796,6 +1829,7 @@ async function sendPreviewedFile() {
                 receiver: chatId,
                 repliedTo: replyRef,
                 filePath: filePath,
+                keepMetadata,
                 nameOverride
             });
         }

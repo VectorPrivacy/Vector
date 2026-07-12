@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-file-has-metadata"
+description = "Enables the file_has_metadata command without any pre-configured scope."
+commands.allow = ["file_has_metadata"]
+
+[[permission]]
+identifier = "deny-file-has-metadata"
+description = "Denies the file_has_metadata command without any pre-configured scope."
+commands.deny = ["file_has_metadata"]

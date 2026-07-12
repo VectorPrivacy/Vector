@@ -2902,10 +2902,10 @@ async function sendFile(pubkey, replied_to, filepath) {
         // no pending id to finalize here (mirrors send_community_message).
         const chat = arrChats.find(c => c.id === pubkey);
         if (chat && chat.chat_type === 'Community') {
-            await invoke('send_community_files', { channelId: pubkey, content: '', filePaths: [filepath], nameOverrides: [''], useCompression: false, repliedTo: replied_to || '' });
+            await invoke('send_community_files', { channelId: pubkey, content: '', filePaths: [filepath], nameOverrides: [''], useCompression: false, keepMetadata: false, repliedTo: replied_to || '' });
         } else {
             // DMs use the protocol-agnostic file_message command.
-            const result = await invoke("file_message", { receiver: pubkey, repliedTo: replied_to, filePath: filepath, nameOverride: '' });
+            const result = await invoke("file_message", { receiver: pubkey, repliedTo: replied_to, filePath: filepath, keepMetadata: false, nameOverride: '' });
             if (result && result.event_id) {
                 finalizePendingMessage(pubkey, result.pending_id, result.event_id);
             }
@@ -7702,13 +7702,14 @@ async function retryFailedMessage(msg) {
                 // Preserve each attachment's name (incl. SPOILER_ prefix) on resend. The local
                 // files were already compressed on first send, so don't re-compress.
                 const names = msg.attachments.map(a => a.name || '');
-                await invoke('send_community_files', { channelId: chatId, content: msg.content || '', filePaths: paths, nameOverrides: names, useCompression: false, repliedTo: msg.replied_to || '' });
+                await invoke('send_community_files', { channelId: chatId, content: msg.content || '', filePaths: paths, nameOverrides: names, useCompression: false, keepMetadata: false, repliedTo: msg.replied_to || '' });
             } else {
                 const att = msg.attachments[0];
                 await invoke('file_message', {
                     receiver: chatId,
                     repliedTo: msg.replied_to || '',
                     filePath: att.path,
+                    keepMetadata: false,
                     nameOverride: att.name || ''
                 });
             }

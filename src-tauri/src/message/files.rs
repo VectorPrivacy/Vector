@@ -14,7 +14,7 @@ use std::sync::LazyLock;
 use crate::util;
 use crate::shared::image::read_file_checked;
 
-use super::types::{CachedCompressedImage, AttachmentFile, ImageMetadata, COMPRESSION_CACHE, ANDROID_FILE_CACHE};
+use super::types::{CachedCompressedImage, AttachmentFile, COMPRESSION_CACHE, ANDROID_FILE_CACHE};
 use super::compression::{compress_bytes_internal, compress_image_internal};
 use super::sending::{message, MessageSendResult};
 
@@ -134,6 +134,26 @@ pub fn generate_thumbhash_for_preview(file_path: String) -> Result<String, Strin
     Ok(util::decode_thumbhash_to_base64(&thumbhash))
 }
 
+/// Whether the previewed image carries strip-worthy EXIF metadata, so the UI can
+/// hide the "Keep Metadata" toggle for screenshots/memes that have none. An empty
+/// `file_path` checks the JS-cached bytes (clipboard / File-object sends).
+#[tauri::command]
+pub fn file_has_metadata(file_path: String) -> Result<bool, String> {
+    if file_path.is_empty() {
+        let cache = JS_FILE_CACHE.lock().unwrap();
+        Ok(match cache.as_ref() {
+            Some((bytes, _, ext)) => crate::shared::image::image_bytes_have_metadata(bytes.as_slice(), ext),
+            None => false,
+        })
+    } else {
+        let ext = file_path.rsplit('.').next().unwrap_or("").to_lowercase();
+        match read_file_checked(&file_path) {
+            Ok(bytes) => Ok(crate::shared::image::image_bytes_have_metadata(&bytes, &ext)),
+            Err(_) => Ok(false),
+        }
+    }
+}
+
 /// Start compression of cached bytes
 #[tauri::command]
 pub async fn start_cached_bytes_compression() -> Result<(), String> {
@@ -182,98 +202,38 @@ pub async fn get_cached_bytes_compression_status() -> Result<Option<CompressionE
     }
 }
 
-/// Send cached file (with optional compression)
+/// Send cached file (with optional compression and metadata retention)
 #[tauri::command]
-pub async fn send_cached_file(receiver: String, replied_to: String, use_compression: bool, name_override: String) -> Result<MessageSendResult, String> {
-    use super::compression::MIN_SAVINGS_PERCENT;
+pub async fn send_cached_file(receiver: String, replied_to: String, use_compression: bool, keep_metadata: bool, name_override: String) -> Result<MessageSendResult, String> {
+    use super::compression::process_image_for_send;
 
-    if use_compression {
-        // Check if compression is complete - take ownership to avoid clone
-        let mut comp_cache = JS_COMPRESSION_CACHE.lock().await;
-        if let Some(compressed) = comp_cache.take() {
-            // Check if compression provides significant savings
-            let savings_percent = if compressed.original_size > 0 && compressed.compressed_size < compressed.original_size {
-                ((compressed.original_size - compressed.compressed_size) * 100) / compressed.original_size
-            } else {
-                0
-            };
+    // Take the background pre-compression result (stripped + resized), if ready.
+    let precompressed = JS_COMPRESSION_CACHE.lock().await.take();
 
-            if savings_percent >= MIN_SAVINGS_PERCENT {
-                // Use compressed version - no clone needed, we own it
-                drop(comp_cache);
-                // Extract name and clear the cache in one lock
-                let name = {
-                    let mut cache = JS_FILE_CACHE.lock().unwrap();
-                    let n = cache.as_ref().map(|(_, n, _)| n.clone()).unwrap_or_default();
-                    *cache = None;
-                    n
-                };
-
-                let mut attachment_file = AttachmentFile {
-                    bytes: compressed.bytes,
-                    extension: compressed.extension,
-                    img_meta: compressed.img_meta,
-                    name,
-                };
-                if !name_override.is_empty() {
-                    let sanitized = crate::commands::attachments::sanitize_filename(&name_override);
-                    if !sanitized.is_empty() { attachment_file.name = sanitized; }
-                }
-                return message(receiver, String::new(), replied_to, Some(attachment_file)).await;
-            }
-        }
-        drop(comp_cache);
-    }
-    
-    // Use original bytes - compress on-the-fly if use_compression is true
     let (original_bytes, original_name, original_extension) = {
         let mut cache = JS_FILE_CACHE.lock().unwrap();
         cache.take().ok_or("No cached file")?
     };
 
-    // Clear compression cache
-    *JS_COMPRESSION_CACHE.lock().await = None;
-
-    // Check if this is an image type
     let is_image = matches!(original_extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico");
 
-    // Process images: generate metadata and optionally compress
-    let (bytes, extension, img_meta) = if is_image {
-        if let Ok(img) = vector_core::crypto::decode_image_bounded(&original_bytes) {
-            let thumbhash_meta = crate::util::generate_thumbhash_from_image(&img)
-                .map(|thumbhash| ImageMetadata {
-                    thumbhash,
-                    width: img.width(),
-                    height: img.height(),
-                });
-
-            // GIFs: never compress, preserve animation
-            // Other images: compress if requested
-            if original_extension == "gif" || !use_compression {
-                // No compression - just use original bytes with metadata
-                (original_bytes, original_extension, thumbhash_meta)
-            } else {
-                // Compress on-the-fly since pre-compression wasn't ready
-                use crate::shared::image::{encode_rgba_auto, JPEG_QUALITY_STANDARD};
-                let rgba_img = img.to_rgba8();
-                match encode_rgba_auto(rgba_img.as_raw(), img.width(), img.height(), JPEG_QUALITY_STANDARD) {
-                    Ok(encoded) => (Arc::new(encoded.bytes), encoded.extension.to_string(), thumbhash_meta),
-                    Err(_) => (original_bytes, original_extension, thumbhash_meta),
-                }
-            }
-        } else {
-            (original_bytes, original_extension, None)
+    let mut attachment_file = if is_image {
+        let processed = process_image_for_send(
+            original_bytes, &original_extension, use_compression, keep_metadata, precompressed,
+        )?;
+        AttachmentFile {
+            bytes: processed.bytes,
+            extension: processed.extension,
+            img_meta: processed.img_meta,
+            name: original_name,
         }
     } else {
-        // Non-image file
-        (original_bytes, original_extension, None)
-    };
-
-    let mut attachment_file = AttachmentFile {
-        bytes,
-        extension,
-        img_meta,
-        name: original_name,
+        AttachmentFile {
+            bytes: original_bytes,
+            extension: original_extension,
+            img_meta: None,
+            name: original_name,
+        }
     };
     if !name_override.is_empty() {
         let sanitized = crate::commands::attachments::sanitize_filename(&name_override);
@@ -318,9 +278,10 @@ pub async fn send_file_bytes(
     file_bytes: Vec<u8>,
     file_name: String,
     use_compression: bool,
+    keep_metadata: bool,
     name_override: String
 ) -> Result<MessageSendResult, String> {
-    use super::compression::MIN_SAVINGS_PERCENT;
+    use super::compression::process_image_for_send;
 
     // Extract extension from filename
     let extension = file_name
@@ -331,15 +292,9 @@ pub async fn send_file_bytes(
 
     let is_image = matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico");
 
-    // For images: compress if requested, otherwise just generate metadata
+    // For images: process per compress + keep-metadata choice (no pre-compression here).
     let mut attachment_file = if is_image {
-        let min_savings = if use_compression && extension != "gif" {
-            Some(MIN_SAVINGS_PERCENT)
-        } else {
-            None // GIFs or no compression - just get metadata
-        };
-
-        match compress_bytes_internal(Arc::new(file_bytes), &extension, min_savings) {
+        match process_image_for_send(Arc::new(file_bytes), &extension, use_compression, keep_metadata, None) {
             Ok(result) => AttachmentFile {
                 bytes: result.bytes,
                 extension: result.extension,
@@ -369,7 +324,7 @@ pub async fn send_file_bytes(
 }
 
 #[tauri::command]
-pub async fn file_message(receiver: String, replied_to: String, file_path: String, name_override: String) -> Result<MessageSendResult, String> {
+pub async fn file_message(receiver: String, replied_to: String, file_path: String, keep_metadata: bool, name_override: String) -> Result<MessageSendResult, String> {
     // Extract filename from the path
     let file_name = std::path::Path::new(&file_path)
         .file_name()
@@ -436,16 +391,17 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
         }
     };
 
-    // Generate image metadata if the file is an image
+    // Images (no compression here): strip metadata (default) or keep the
+    // original bytes untouched. Either way orientation is baked and preview
+    // metadata is generated.
     if matches!(attachment_file.extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico") {
-        if let Ok(img) = vector_core::crypto::decode_image_bounded(&attachment_file.bytes) {
-            attachment_file.img_meta = util::generate_thumbhash_from_image(&img)
-                .map(|thumbhash| ImageMetadata {
-                    thumbhash,
-                    width: img.width(),
-                    height: img.height(),
-                });
-        }
+        let processed = super::compression::process_image_for_send(
+            attachment_file.bytes.clone(), &attachment_file.extension,
+            /* use_compression */ false, keep_metadata, None,
+        )?;
+        attachment_file.bytes = processed.bytes;
+        attachment_file.extension = processed.extension;
+        attachment_file.img_meta = processed.img_meta;
     }
 
     // Apply user-edited name override (if any)
@@ -666,94 +622,6 @@ pub fn get_image_preview_base64(file_path: String, quality: u32) -> Result<Strin
 
         Ok(encoded.to_data_uri())
     }
-}
-
-/// Send a file with compression (for images)
-#[tauri::command]
-pub async fn file_message_compressed(receiver: String, replied_to: String, file_path: String, name_override: String) -> Result<MessageSendResult, String> {
-    // Extract filename from the path
-    let file_name = std::path::Path::new(&file_path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("")
-        .to_string();
-
-    // Load the file as AttachmentFile
-    let mut attachment_file = {
-        #[cfg(not(target_os = "android"))]
-        {
-            let file_bytes = read_file_checked(&file_path)?;
-
-            let extension = file_path
-                .rsplit('.')
-                .next()
-                .unwrap_or("bin")
-                .to_lowercase();
-
-            AttachmentFile {
-                bytes: Arc::new(file_bytes),
-                img_meta: None,
-                extension,
-                name: file_name.clone(),
-            }
-        }
-        #[cfg(target_os = "android")]
-        {
-            // First check if we have cached bytes for this URI
-            // Take ownership from cache to avoid clone - bytes already Arc
-            let mut cache = ANDROID_FILE_CACHE.lock().unwrap();
-            if let Some((bytes, extension, cached_name, _)) = cache.remove(&file_path) {
-                drop(cache);
-                AttachmentFile {
-                    bytes,
-                    img_meta: None,
-                    extension,
-                    name: cached_name,
-                }
-            } else {
-                drop(cache);
-                // Check if this is a content:// URI or a regular file path
-                if file_path.starts_with("content://") {
-                    // Content URI - use Android ContentResolver
-                    filesystem::read_android_uri(file_path)?
-                } else {
-                    // Regular file path (e.g., marketplace apps) - use standard file I/O
-                    let file_bytes = read_file_checked(&file_path)?;
-
-                    let extension = file_path
-                        .rsplit('.')
-                        .next()
-                        .unwrap_or("bin")
-                        .to_lowercase();
-
-                    AttachmentFile {
-                        bytes: Arc::new(file_bytes),
-                        img_meta: None,
-                        extension,
-                        name: file_name.clone(),
-                    }
-                }
-            }
-        }
-    };
-
-    // Compress the image if it's a supported format
-    if matches!(attachment_file.extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico") {
-        if let Ok(compressed) = compress_bytes_internal(attachment_file.bytes.clone(), &attachment_file.extension, None) {
-            attachment_file.bytes = compressed.bytes;
-            attachment_file.extension = compressed.extension;
-            attachment_file.img_meta = compressed.img_meta;
-        }
-    }
-
-    // Apply user-edited name override (if any)
-    if !name_override.is_empty() {
-        let sanitized = crate::commands::attachments::sanitize_filename(&name_override);
-        if !sanitized.is_empty() { attachment_file.name = sanitized; }
-    }
-
-    // Message the file to the intended user
-    message(receiver, String::new(), replied_to, Some(attachment_file)).await
 }
 
 /// Compression estimate result
@@ -1143,104 +1011,58 @@ pub fn cleanup_zip() -> Result<(), String> {
 
 /// Send a file using the cached compressed version if available
 #[tauri::command]
-pub async fn send_cached_compressed_file(receiver: String, replied_to: String, file_path: String, name_override: String) -> Result<MessageSendResult, String> {
-    use super::compression::MIN_SAVINGS_PERCENT;
+pub async fn send_cached_compressed_file(receiver: String, replied_to: String, file_path: String, keep_metadata: bool, name_override: String) -> Result<MessageSendResult, String> {
+    use super::compression::process_image_for_send;
 
-    // Extract filename from the path
     let file_name = std::path::Path::new(&file_path)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("")
         .to_string();
 
-    // First check if compression is complete or still in progress
-    let status = {
-        let cache = COMPRESSION_CACHE.lock().await;
-        cache.get(&file_path).cloned()
-    };
-    
-    match status {
-        Some(Some(compressed)) => {
-            // Compression complete - remove from cache
-            {
-                let mut cache = COMPRESSION_CACHE.lock().await;
-                cache.remove(&file_path);
-            }
-            
-            // Check if compression provides significant savings
-            let savings_percent = if compressed.original_size > 0 && compressed.compressed_size < compressed.original_size {
-                ((compressed.original_size - compressed.compressed_size) * 100) / compressed.original_size
-            } else {
-                0 // No savings or compression made it bigger
-            };
-            
-            if savings_percent >= MIN_SAVINGS_PERCENT {
-                // Compression provides significant savings - send compressed
-                let mut attachment_file = AttachmentFile {
-                    bytes: compressed.bytes,
-                    extension: compressed.extension,
-                    img_meta: compressed.img_meta,
-                    name: file_name,
-                };
-                if !name_override.is_empty() {
-                    let sanitized = crate::commands::attachments::sanitize_filename(&name_override);
-                    if !sanitized.is_empty() { attachment_file.name = sanitized; }
-                }
-                message(receiver, String::new(), replied_to, Some(attachment_file)).await
-            } else {
-                // No significant savings - send original file
-                file_message(receiver, replied_to, file_path, name_override).await
-            }
-        }
-        Some(None) => {
-            // Still compressing — await the notify instead of polling
-            let notify = {
-                let notifiers = super::types::COMPRESSION_NOTIFY.lock().await;
-                notifiers.get(&file_path).cloned()
-            };
+    // Await the background pre-compression if still running, then take the
+    // (stripped + resized) result out of the cache. The wait is time-bounded:
+    // the notifier fires via notify_waiters() (which stores no permit), so a
+    // completion landing in the gap between the status read and the await would
+    // otherwise hang forever — on timeout we just re-read the cache below and
+    // fall back to a fresh compress if it's genuinely not ready.
+    let precompressed = {
+        let status = { COMPRESSION_CACHE.lock().await.get(&file_path).cloned() };
+        if let Some(None) = status {
+            let notify = { super::types::COMPRESSION_NOTIFY.lock().await.get(&file_path).cloned() };
             if let Some(n) = notify {
-                n.notified().await;
-            }
-
-            // Get the result
-            let cached = {
-                let mut cache = COMPRESSION_CACHE.lock().await;
-                cache.remove(&file_path)
-            };
-
-            match cached {
-                Some(Some(compressed)) => {
-                    let savings_percent = if compressed.original_size > 0 && compressed.compressed_size < compressed.original_size {
-                        ((compressed.original_size - compressed.compressed_size) * 100) / compressed.original_size
-                    } else {
-                        0
-                    };
-
-                    if savings_percent >= MIN_SAVINGS_PERCENT {
-                        let mut attachment_file = AttachmentFile {
-                            bytes: compressed.bytes,
-                            extension: compressed.extension,
-                            img_meta: compressed.img_meta,
-                            name: file_name,
-                        };
-                        if !name_override.is_empty() {
-                            let sanitized = crate::commands::attachments::sanitize_filename(&name_override);
-                            if !sanitized.is_empty() { attachment_file.name = sanitized; }
-                        }
-                        message(receiver, String::new(), replied_to, Some(attachment_file)).await
-                    } else {
-                        file_message(receiver, replied_to, file_path, name_override).await
-                    }
-                }
-                _ => {
-                    // Cache was cleared or missing — fall back to compressing now
-                    file_message_compressed(receiver, replied_to, file_path, name_override).await
-                }
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(30), n.notified()).await;
             }
         }
-        None => {
-            // Not in cache, compress now
-            file_message_compressed(receiver, replied_to, file_path, name_override).await
+        COMPRESSION_CACHE.lock().await.remove(&file_path).flatten()
+    };
+
+    let extension = file_path.rsplit('.').next().unwrap_or("bin").to_lowercase();
+
+    // Default strip+compress reuses the pre-compressed result. Keep-metadata
+    // (needs EXIF re-attach) and cache misses re-derive from the original file.
+    let processed = if !keep_metadata {
+        match precompressed {
+            Some(pc) => pc,
+            None => {
+                let bytes = read_file_checked(&file_path)?;
+                process_image_for_send(Arc::new(bytes), &extension, true, false, None)?
+            }
         }
+    } else {
+        let bytes = read_file_checked(&file_path)?;
+        process_image_for_send(Arc::new(bytes), &extension, true, true, None)?
+    };
+
+    let mut attachment_file = AttachmentFile {
+        bytes: processed.bytes,
+        extension: processed.extension,
+        img_meta: processed.img_meta,
+        name: file_name,
+    };
+    if !name_override.is_empty() {
+        let sanitized = crate::commands::attachments::sanitize_filename(&name_override);
+        if !sanitized.is_empty() { attachment_file.name = sanitized; }
     }
+    message(receiver, String::new(), replied_to, Some(attachment_file)).await
 }

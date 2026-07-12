@@ -926,6 +926,7 @@ async function playMiniAppAndInvite() {
                 filePaths: [app.src_url],
                 nameOverrides: [''],
                 useCompression: false,
+                keepMetadata: false,
                 repliedTo: '',
             });
             if (!result || !result.message_id) {
@@ -940,6 +941,7 @@ async function playMiniAppAndInvite() {
                 receiver: targetChatId,
                 repliedTo: '',
                 filePath: app.src_url,
+                keepMetadata: false,
                 nameOverride: '',
             });
 

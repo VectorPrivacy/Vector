@@ -1014,6 +1014,7 @@ async fn process_outbound_community_attachment(
     file_path: &str,
     name_override: &str,
     use_compression: bool,
+    keep_metadata: bool,
 ) -> Result<PreparedCommunityAttachment, String> {
     let bytes = std::fs::read(file_path).map_err(|e| format!("read attachment: {e}"))?;
     let name = if !name_override.is_empty() {
@@ -1025,7 +1026,7 @@ async fn process_outbound_community_attachment(
             .unwrap_or("")
             .to_string()
     };
-    process_outbound_community_attachment_bytes(bytes, &name, use_compression).await
+    process_outbound_community_attachment_bytes(bytes, &name, use_compression, keep_metadata).await
 }
 
 /// Encrypt a single outbound file (raw bytes + filename) for a Community message.
@@ -1038,8 +1039,9 @@ async fn process_outbound_community_attachment_bytes(
     bytes: Vec<u8>,
     file_name: &str,
     use_compression: bool,
+    keep_metadata: bool,
 ) -> Result<PreparedCommunityAttachment, String> {
-    use vector_core::types::{Attachment, ImageMetadata};
+    use vector_core::types::Attachment;
 
     if bytes.is_empty() {
         return Err("Empty attachment".to_string());
@@ -1056,36 +1058,20 @@ async fn process_outbound_community_attachment_bytes(
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico"
     );
 
-    // Compress non-GIF images before upload — parity with DM sends (same JPEG quality).
-    // GIFs are never compressed (animation). Falls back to the original bytes/extension on
-    // any decode/encode failure. Done BEFORE hashing/preview so they describe what's uploaded.
-    let mut bytes = bytes;
-    if use_compression && is_image && extension != "gif" {
-        if let Ok(img) = vector_core::crypto::decode_image_bounded(&bytes) {
-            let rgba = img.to_rgba8();
-            if let Ok(enc) = crate::shared::image::encode_rgba_auto(
-                rgba.as_raw(), img.width(), img.height(), crate::shared::image::JPEG_QUALITY_STANDARD,
-            ) {
-                bytes = enc.bytes;
-                extension = enc.extension.to_string();
-            }
-        }
-    }
+    // Process image bytes per the compress + keep-metadata choice: strips EXIF
+    // by default, bakes orientation into pixels, and re-attaches metadata when
+    // kept. GIFs and non-images pass through untouched. Parity with DM sends.
+    let (bytes, img_meta) = if is_image {
+        let processed = crate::message::compression::prepare_outbound_image(
+            std::sync::Arc::new(bytes), &extension, use_compression, keep_metadata,
+        )?;
+        extension = processed.extension;
+        (processed.bytes.as_ref().clone(), processed.img_meta)
+    } else {
+        (bytes, None)
+    };
 
     let plaintext_hash = vector_core::crypto::sha256_hex(&bytes);
-
-    // Image metadata (thumbhash + dimensions) for inline rendering, when decodable.
-    let img_meta = if is_image {
-        vector_core::crypto::decode_image_bounded(&bytes).ok().and_then(|img| {
-            crate::util::generate_thumbhash_from_image(&img).map(|thumbhash| ImageMetadata {
-                thumbhash,
-                width: img.width(),
-                height: img.height(),
-            })
-        })
-    } else {
-        None
-    };
 
     // Save the plaintext locally (keyed by hash, matching the inbound path convention) so
     // the sender's optimistic bubble renders immediately as a downloaded file.
@@ -1145,6 +1131,7 @@ pub async fn send_community_files(
     file_paths: Vec<String>,
     name_overrides: Vec<String>,
     use_compression: bool,
+    keep_metadata: bool,
     replied_to: Option<String>,
 ) -> Result<CommunityAttachmentSendResult, String> {
     if file_paths.is_empty() {
@@ -1155,7 +1142,7 @@ pub async fn send_community_files(
     let mut prepared = Vec::with_capacity(file_paths.len());
     for (i, fp) in file_paths.iter().enumerate() {
         let name_override = name_overrides.get(i).map(String::as_str).unwrap_or("");
-        prepared.push(process_outbound_community_attachment(fp, name_override, use_compression).await?);
+        prepared.push(process_outbound_community_attachment(fp, name_override, use_compression, keep_metadata).await?);
     }
     dispatch_community_attachment_message(channel_id, content, replied_to, session, prepared).await
 }
@@ -1170,10 +1157,11 @@ pub async fn send_community_file_bytes(
     file_bytes: Vec<u8>,
     file_name: String,
     use_compression: bool,
+    keep_metadata: bool,
     replied_to: Option<String>,
 ) -> Result<CommunityAttachmentSendResult, String> {
     let session = vector_core::state::SessionGuard::capture();
-    let prepared = vec![process_outbound_community_attachment_bytes(file_bytes, &file_name, use_compression).await?];
+    let prepared = vec![process_outbound_community_attachment_bytes(file_bytes, &file_name, use_compression, keep_metadata).await?];
     dispatch_community_attachment_message(channel_id, content, replied_to, session, prepared).await
 }
 
@@ -1187,7 +1175,7 @@ pub(crate) async fn send_community_voice_bytes(
     replied_to: Option<String>,
 ) -> Result<(), String> {
     let session = vector_core::state::SessionGuard::capture();
-    let mut prepared = process_outbound_community_attachment_bytes(bytes, "voice-message.wav", false).await?;
+    let mut prepared = process_outbound_community_attachment_bytes(bytes, "voice-message.wav", false, false).await?;
     prepared.attachment.name = String::new();
     dispatch_community_attachment_message(channel_id, String::new(), replied_to, session, vec![prepared]).await.map(|_| ())
 }
@@ -1201,20 +1189,27 @@ pub async fn send_community_cached_file(
     content: String,
     name_override: Option<String>,
     use_compression: bool,
+    keep_metadata: bool,
     replied_to: Option<String>,
 ) -> Result<(), String> {
     let session = vector_core::state::SessionGuard::capture();
-    // Take ownership of the cached bytes + name, clearing the cache in one lock.
-    let (bytes, cache_name) = {
+    // Take ownership of the cached bytes + name + extension, clearing in one lock.
+    let (bytes, cache_name, cache_ext) = {
         let mut cache = crate::message::files::JS_FILE_CACHE.lock().unwrap();
         match cache.take() {
-            Some((b, n, _ext)) => ((*b).clone(), n),
+            Some((b, n, e)) => ((*b).clone(), n, e),
             None => return Err("No cached file to send".to_string()),
         }
     };
     // A non-empty override (spoiler / rename) wins over the cached source name.
-    let name = name_override.filter(|s| !s.is_empty()).unwrap_or(cache_name);
-    let prepared = vec![process_outbound_community_attachment_bytes(bytes, &name, use_compression).await?];
+    let mut name = name_override.filter(|s| !s.is_empty()).unwrap_or(cache_name);
+    // Ensure the name carries the cached extension: format detection (is_image,
+    // EXIF strip) keys off the name here, and a clipboard name can lack one —
+    // parity with the DM cached path, which uses the cached extension directly.
+    if std::path::Path::new(&name).extension().is_none() && !cache_ext.is_empty() {
+        name = format!("{}.{}", name, cache_ext);
+    }
+    let prepared = vec![process_outbound_community_attachment_bytes(bytes, &name, use_compression, keep_metadata).await?];
     dispatch_community_attachment_message(channel_id, content, replied_to, session, prepared).await.map(|_| ())
 }
 

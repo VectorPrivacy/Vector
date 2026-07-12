@@ -14,6 +14,9 @@ pub const MAX_DIMENSION: u32 = 1920;
 
 /// Default JPEG quality for standard compression (0-100)
 pub const JPEG_QUALITY_STANDARD: u8 = 85;
+/// JPEG quality for full-resolution re-encodes (metadata strip without the
+/// user asking to compress) — near-visually-lossless.
+pub const JPEG_QUALITY_HIGH: u8 = 95;
 /// JPEG quality for higher compression (smaller files)
 pub const JPEG_QUALITY_COMPRESSED: u8 = 70;
 /// JPEG quality for UI previews (fast encoding, small size)
@@ -229,6 +232,171 @@ pub fn encode_rgba_auto(pixels: &[u8], width: u32, height: u32, jpeg_quality: u8
     }
 }
 
+/// Map a file extension to the `little_exif` reader for that container. Covers
+/// the EXIF-bearing formats Android/desktop actually send (JPEG, TIFF, WebP,
+/// PNG); GIF/ICO and unknowns return None (no EXIF to read).
+fn little_exif_filetype(extension: &str) -> Option<little_exif::filetype::FileExtension> {
+    use little_exif::filetype::FileExtension;
+    match extension.to_ascii_lowercase().as_str() {
+        "jpg" | "jpeg" => Some(FileExtension::JPEG),
+        "tiff" | "tif" => Some(FileExtension::TIFF),
+        "webp" => Some(FileExtension::WEBP),
+        "png" => Some(FileExtension::PNG { as_zTXt_chunk: false }),
+        _ => None,
+    }
+}
+
+/// Scan a JPEG's marker segments for non-EXIF metadata, returning
+/// `(has_metadata, has_unclearable)`:
+/// - `has_metadata`: any XMP (APP1 without the `Exif\0\0` header), IPTC/Photoshop
+///   (APP13), Ducky (APP12), comment (COM), or other non-standard APPn is present.
+/// - `has_unclearable`: at least one of those can't be removed losslessly by
+///   little_exif (XMP, COM, and misc APP3-11/15) — so a strip must re-encode.
+///   APP12/APP13 are clearable in place, so they count as metadata but not as
+///   unclearable. JFIF (APP0), ICC (APP2), and Adobe (APP14) are benign structure
+///   and ignored entirely.
+fn jpeg_metadata_scan(bytes: &[u8]) -> (bool, bool) {
+    if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
+        return (false, false); // not a JPEG
+    }
+    let (mut has_metadata, mut has_unclearable) = (false, false);
+    let mut i = 2;
+    while i + 4 <= bytes.len() {
+        if bytes[i] != 0xFF {
+            break; // left the marker section
+        }
+        let marker = bytes[i + 1];
+        // Standalone markers (RSTn/SOI/EOI/TEM) carry no length field.
+        if marker == 0x01 || (0xD0..=0xD9).contains(&marker) {
+            i += 2;
+            continue;
+        }
+        if marker == 0xDA {
+            break; // Start of Scan — compressed pixel data follows.
+        }
+        let len = ((bytes[i + 2] as usize) << 8) | (bytes[i + 3] as usize);
+        if len < 2 || i + 2 + len > bytes.len() {
+            break; // malformed
+        }
+        let payload = &bytes[i + 4..i + 2 + len];
+        match marker {
+            0xE1 => if !payload.starts_with(b"Exif\0\0") { has_metadata = true; has_unclearable = true; }, // XMP
+            0xEC | 0xED => has_metadata = true, // APP12 / APP13 (IPTC): clearable in place
+            0xFE => { has_metadata = true; has_unclearable = true; } // COM
+            0xE0 | 0xE2 | 0xEE => {} // JFIF / ICC / Adobe: benign structure
+            0xE3..=0xEF => { has_metadata = true; has_unclearable = true; } // other APPn
+            _ => {} // DQT/DHT/SOF/... structural
+        }
+        i += 2 + len;
+    }
+    (has_metadata, has_unclearable)
+}
+
+/// Whether an image carries strip-worthy metadata — EXIF tags beyond Orientation
+/// (which we bake into pixels regardless), or JPEG XMP/IPTC/comment/APPn segments.
+/// Screenshots, memes, and our own re-encoded sends have none, so the "Keep
+/// Metadata" affordance can be hidden for them.
+pub fn image_bytes_have_metadata(bytes: &[u8], extension: &str) -> bool {
+    use little_exif::metadata::Metadata;
+    use little_exif::exif_tag::ExifTag;
+
+    // little_exif only reads EXIF; JPEG can also carry GPS in XMP/IPTC/APPn.
+    if matches!(extension.to_ascii_lowercase().as_str(), "jpg" | "jpeg")
+        && jpeg_metadata_scan(bytes).0
+    {
+        return true;
+    }
+
+    let Some(filetype) = little_exif_filetype(extension) else { return false; };
+    match Metadata::new_from_vec(&bytes.to_vec(), filetype) {
+        Ok(md) => (&md).into_iter().any(|tag| !matches!(tag, ExifTag::Orientation(_))),
+        Err(_) => false,
+    }
+}
+
+/// Losslessly strip a JPEG's EXIF while keeping its Orientation tag.
+///
+/// The orientation tag reveals nothing (just which way is up), so keeping it lets
+/// us drop the privacy-relevant tags (GPS, camera, timestamps) without re-encoding
+/// the pixels — no quality loss and no file growth. The receiver's `<img>` still
+/// renders upright from the surviving tag.
+///
+/// Restricted to JPEG: clears the EXIF (APP1), IPTC (APP13), and Ducky (APP12)
+/// segments in place — which covers iPhone/Android camera output and their
+/// Photoshop-IRB screenshots — then re-attaches only the orientation. Returns
+/// `None` (caller falls back to a re-encode that rebuilds from pixels, dropping
+/// every metadata segment) for non-JPEG containers or JPEGs carrying metadata
+/// little_exif can't remove in place (XMP, comments, misc APPn), keeping the
+/// privacy guarantee intact.
+pub fn strip_metadata_keep_orientation(bytes: &[u8], extension: &str) -> Option<Vec<u8>> {
+    use little_exif::metadata::Metadata;
+    use little_exif::exif_tag::ExifTag;
+    use little_exif::filetype::FileExtension;
+
+    if !matches!(extension.to_ascii_lowercase().as_str(), "jpg" | "jpeg") {
+        return None;
+    }
+    if jpeg_metadata_scan(bytes).1 {
+        return None; // unclearable metadata present — re-encode drops everything
+    }
+
+    let orientation: Option<u16> = Metadata::new_from_vec(&bytes.to_vec(), FileExtension::JPEG)
+        .ok()
+        .and_then(|md| (&md).into_iter().find_map(|t| match t {
+            ExifTag::Orientation(v) => v.first().copied(),
+            _ => None,
+        }));
+
+    let mut out = bytes.to_vec();
+    // Any failure here means we can't guarantee a clean strip — bail to re-encode.
+    Metadata::clear_metadata(&mut out, FileExtension::JPEG).ok()?;       // EXIF (APP1)
+    Metadata::clear_app13_segment(&mut out, FileExtension::JPEG).ok()?;  // IPTC / Photoshop IRB
+    Metadata::clear_app12_segment(&mut out, FileExtension::JPEG).ok()?;  // Ducky
+
+    if matches!(orientation, Some(o) if o != 1) {
+        let mut md = Metadata::new();
+        md.set_tag(ExifTag::Orientation(vec![orientation.unwrap()]));
+        md.write_to_vec(&mut out, FileExtension::JPEG).ok()?;
+    }
+    Some(out)
+}
+
+/// Re-attach the original photo's EXIF metadata (GPS, camera, timestamps) onto
+/// freshly re-encoded JPEG bytes, with Orientation forced to 1.
+///
+/// Used when the user opts to keep metadata on a *compressed* send: compression
+/// re-encodes to a clean JPEG, so without this the GPS/camera/date tags are
+/// lost. The orientation tag is normalised because the pixels were already
+/// rotated upright during decode; carrying the original rotate value would make
+/// the receiver's `<img>` rotate an already-upright image.
+///
+/// The original is read as `original_extension`'s container (JPEG/TIFF/WebP/PNG),
+/// so an Android TIFF or WebP photo keeps its GPS/camera tags through a compress.
+///
+/// Best-effort: returns `compressed_jpeg` unchanged if the original carries no
+/// readable EXIF or the write fails. Only meaningful for JPEG output — callers
+/// should gate on the encoded extension.
+pub fn reattach_exif_jpeg(compressed_jpeg: Vec<u8>, original: &[u8], original_extension: &str) -> Vec<u8> {
+    use little_exif::metadata::Metadata;
+    use little_exif::exif_tag::ExifTag;
+    use little_exif::filetype::FileExtension;
+
+    let Some(src_filetype) = little_exif_filetype(original_extension) else { return compressed_jpeg; };
+    let original_vec = original.to_vec();
+    let mut md = match Metadata::new_from_vec(&original_vec, src_filetype) {
+        Ok(m) => m,
+        Err(_) => return compressed_jpeg,
+    };
+    md.set_tag(ExifTag::Orientation(vec![1u16]));
+
+    // Write into a clone so a mid-write failure can't hand back a corrupt image.
+    let mut out = compressed_jpeg.clone();
+    match md.write_to_vec(&mut out, FileExtension::JPEG) {
+        Ok(()) => out,
+        Err(_) => compressed_jpeg,
+    }
+}
+
 /// Calculate target dimensions to fit within max_dimension while preserving aspect ratio.
 ///
 /// Returns the original dimensions if both are already within the limit.
@@ -330,3 +498,50 @@ pub fn read_file_checked(path: &str) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("Failed to read file: {}", e))?;
     Ok(bytes)
 }
+
+#[cfg(test)]
+mod metadata_scan_tests {
+    use super::jpeg_metadata_scan;
+
+    // A JPEG marker segment: FF <marker> <len:u16 including these 2 bytes> <payload>.
+    fn seg(marker: u8, payload: &[u8]) -> Vec<u8> {
+        let len = (payload.len() + 2) as u16;
+        let mut v = vec![0xFF, marker, (len >> 8) as u8, (len & 0xFF) as u8];
+        v.extend_from_slice(payload);
+        v
+    }
+    fn jpeg(segments: &[Vec<u8>]) -> Vec<u8> {
+        let mut v = vec![0xFF, 0xD8]; // SOI
+        for s in segments { v.extend_from_slice(s); }
+        v.extend_from_slice(&[0xFF, 0xDA]); // SOS (stop)
+        v
+    }
+
+    #[test]
+    fn exif_and_iptc_are_clearable_not_unclearable() {
+        // EXIF (APP1 "Exif") + IPTC (APP13) — like an iOS screenshot.
+        let j = jpeg(&[seg(0xE1, b"Exif\0\0MM"), seg(0xED, b"Photoshop")]);
+        assert_eq!(jpeg_metadata_scan(&j), (true, false));
+    }
+
+    #[test]
+    fn xmp_and_comment_are_unclearable() {
+        let xmp = jpeg(&[seg(0xE1, b"http://ns.adobe.com/xap/1.0/\0")]);
+        assert_eq!(jpeg_metadata_scan(&xmp), (true, true));
+        let com = jpeg(&[seg(0xFE, b"a private note")]);
+        assert_eq!(jpeg_metadata_scan(&com), (true, true));
+    }
+
+    #[test]
+    fn benign_structure_is_ignored() {
+        // JFIF (APP0) + ICC (APP2) + Adobe (APP14) carry no privacy data.
+        let j = jpeg(&[seg(0xE0, b"JFIF\0"), seg(0xE2, b"ICC_PROFILE\0"), seg(0xEE, b"Adobe")]);
+        assert_eq!(jpeg_metadata_scan(&j), (false, false));
+    }
+
+    #[test]
+    fn non_jpeg_scans_clean() {
+        assert_eq!(jpeg_metadata_scan(b"\x89PNG\r\n\x1a\n...."), (false, false));
+    }
+}
+
