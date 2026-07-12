@@ -44,6 +44,32 @@ where
     f(&mut env, &activity)
 }
 
+/// Execute a function with the Android **Activity** JNI context specifically.
+///
+/// Unlike `with_android_context`, this never substitutes the background
+/// service's Application context — it always resolves the live Activity via
+/// `ndk_context`. Activity-only APIs (`requestPermissions`,
+/// `startActivityForResult`, ...) throw `NoSuchMethodError` on an Application
+/// context, so those callers MUST use this. Only valid while an Activity
+/// exists (any foreground, user-driven action qualifies); `android_context()`
+/// panics in the Activity-less service-only process, so never call this from a
+/// background path.
+pub fn with_android_activity<F, R>(f: F) -> Result<R, String>
+where
+    F: for<'a> FnOnce(&mut JNIEnv<'a>, &JObject<'a>) -> Result<R, String>,
+{
+    let ctx = android_context();
+    let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) }
+        .map_err(|e| format!("Failed to get JavaVM: {:?}", e))?;
+
+    let mut env = vm.attach_current_thread()
+        .map_err(|e| format!("Failed to attach thread: {:?}", e))?;
+
+    let activity = unsafe { JObject::from_raw(ctx.context().cast()) };
+
+    f(&mut env, &activity)
+}
+
 /// Get a system service by name
 pub fn get_system_service<'a>(env: &mut JNIEnv<'a>, activity: &JObject<'a>, service_name: &str) -> Result<JObject<'a>, String> {
     let service_str = env.new_string(service_name)

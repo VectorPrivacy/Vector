@@ -316,5 +316,10 @@ class MainActivity : TauriActivity() {
 
         // Forward to MiniAppManager for Mini App permission requests
         MiniAppManager.handlePermissionResult(requestCode, grantResults)
+
+        // Wake the native blocking waiter for RECORD_AUDIO (voice recording).
+        // Without this the Rust condvar in request_audio_permission_blocking
+        // never resolves and the send times out after 60s.
+        PermissionHandler.handlePermissionResult(requestCode, grantResults)
     }
 }

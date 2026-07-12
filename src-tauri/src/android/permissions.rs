@@ -4,9 +4,8 @@ use std::time::Duration;
 use jni::objects::{JClass, JObject, JValue};
 use jni::sys::{jboolean, jint, JNI_TRUE};
 use jni::JNIEnv;
-use std::sync::OnceLock;
 
-use super::utils::with_android_context;
+use super::utils::{with_android_activity, with_android_context};
 
 pub fn check_audio_permission() -> Result<bool, String> {
     with_android_context(|env, activity| {
@@ -28,28 +27,32 @@ pub fn check_audio_permission() -> Result<bool, String> {
     })
 }
 
-static PERMISSION_CALLBACK: OnceLock<Arc<(Mutex<Option<bool>>, Condvar)>> = OnceLock::new();
+// Replaceable (not OnceLock): a denied request must be retryable — each call
+// installs its own fresh waiter, so the JNI result always reaches the request
+// currently in flight rather than a stale one.
+static PERMISSION_CALLBACK: Mutex<Option<Arc<(Mutex<Option<bool>>, Condvar)>>> = Mutex::new(None);
 
 #[cfg(target_os = "android")]
 pub fn request_audio_permission_blocking() -> Result<bool, String> {
     const AUDIO_PERMISSION_REQUEST_CODE: i32 = 9876;
-    
+
     // Initialize the callback state
     let callback_state = Arc::new((Mutex::new(None), Condvar::new()));
-    PERMISSION_CALLBACK.set(callback_state.clone()).ok();
+    *PERMISSION_CALLBACK.lock().unwrap() = Some(callback_state.clone());
     
-    // Request permission using our helper
-    with_android_context(|env, activity| {
+    // Must run against the ACTIVITY: requestPermissions is Activity-only and
+    // throws NoSuchMethodError on the background service's Application context.
+    with_android_activity(|env, activity| {
         // Create permission array
         let permission_str = env.new_string("android.permission.RECORD_AUDIO")
             .map_err(|e| format!("Failed to create permission string: {:?}", e))?;
-        
+
         let permission_array = env.new_object_array(
             1,
             "java/lang/String",
             JObject::from(permission_str),
         ).map_err(|e| format!("Failed to create permission array: {:?}", e))?;
-        
+
         // Request permissions
         env.call_method(
             activity,
@@ -108,8 +111,9 @@ pub extern "system" fn Java_io_vectorapp_PermissionHandler_onPermissionResult(
     const AUDIO_PERMISSION_REQUEST_CODE: i32 = 9876;
     
     if request_code == AUDIO_PERMISSION_REQUEST_CODE {
-        if let Some(callback_state) = PERMISSION_CALLBACK.get() {
-            let (lock, cvar) = &**callback_state;
+        let callback_state = PERMISSION_CALLBACK.lock().unwrap().clone();
+        if let Some(callback_state) = callback_state {
+            let (lock, cvar) = &*callback_state;
             let mut result = lock.lock().unwrap();
             *result = Some(granted == JNI_TRUE);
             cvar.notify_all();
