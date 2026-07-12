@@ -1083,6 +1083,7 @@ const domAttachmentPanelMain = document.getElementById('attachment-panel-main');
 const domAttachmentPanelFile = document.getElementById('attachment-panel-file');
 const domAttachmentPanelFolder = document.getElementById('attachment-panel-folder');
 const domAttachmentPanelMiniApps = document.getElementById('attachment-panel-miniapps');
+const domAttachmentPanelCommands = document.getElementById('attachment-panel-commands');
 const domAttachmentPanelMiniAppsView = document.getElementById('attachment-panel-miniapps-view');
 const domMiniAppsGrid = document.getElementById('miniapps-grid');
 const domMiniAppsSearch = document.getElementById('miniapps-search');
@@ -1242,6 +1243,15 @@ function toggleAttachmentPanel() {
             domAttachmentPanel.style.bottom = (chatBoxHeight + 10) + 'px';
         }
         
+        // Commands: only in chats with known bots; grayed while a draft exists.
+        if (domAttachmentPanelCommands) {
+            const showCmds = !!(commandCtrl && commandCtrl.hasBots && commandCtrl.hasBots());
+            domAttachmentPanelCommands.style.display = showCmds ? '' : 'none';
+            if (showCmds) {
+                domAttachmentPanelCommands.classList.toggle('disabled', domChatMessageInput.value.trim().length > 0);
+            }
+        }
+
         // Animate items when panel opens
         animateAttachmentPanelItems(domAttachmentPanelMain);
     } else {
@@ -8142,6 +8152,9 @@ async function openChat(contact) {
     const profile = !isGroup ? getProfile(contact) : null;
     strOpenChat = contact;
     updateSelfDestructIndicator(contact);
+    // Warm the command-bot snapshot so the attachment menu's Commands item
+    // (bot-chats only) is ready by the time the panel opens.
+    if (commandCtrl && commandCtrl.hasBots) commandCtrl.hasBots(contact);
     // Snapshot last_read BEFORE the open-time markAsRead — the divider needs
     // the stale value to find the boundary, but we still want to advance
     // chat.last_read so the OS badge clears immediately on entering the chat.
@@ -11274,6 +11287,22 @@ window.addEventListener("DOMContentLoaded", async () => {
             };
         }
     }
+
+    // Commands button — bot-chats only. Drops a `/` into the composer and opens
+    // the command list. Grayed (with a tooltip) while a draft is present.
+    domAttachmentPanelCommands.onclick = () => {
+        if (domAttachmentPanelCommands.classList.contains('disabled')) return;
+        closeAttachmentPanel();
+        domChatMessageInput.value = '/';
+        domChatMessageInput.focus();
+        domChatMessageInput.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    domAttachmentPanelCommands.addEventListener('mouseenter', () => {
+        if (domAttachmentPanelCommands.classList.contains('disabled')) {
+            showGlobalTooltip('Clear your draft to use commands', domAttachmentPanelCommands);
+        }
+    });
+    domAttachmentPanelCommands.addEventListener('mouseleave', hideGlobalTooltip);
 
     // Handle Mini Apps button in attachment panel - shows the Mini Apps list view
     domAttachmentPanelMiniApps.onclick = async () => {

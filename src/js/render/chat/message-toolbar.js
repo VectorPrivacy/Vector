@@ -286,8 +286,9 @@ function showMessageToolbar(rowEl) {
     reactBtn.hidden = dissolved || uniqueEmojiCount >= 8;
     replyBtn.hidden = dissolved;
 
-    // Edit: own text-only messages (parity with legacy edit gate).
-    editBtn.hidden = dissolved || !(mine && hasContent && !hasAttachments);
+    // Edit: own text-only messages (parity with legacy edit gate). A command
+    // invocation is a passive render line, not editable text.
+    editBtn.hidden = dissolved || !!_dmsgCommandInfo(msg) || !(mine && hasContent && !hasAttachments);
 
     // Reveal-file: any message with at least one downloaded attachment.
     // Mirrors legacy behavior — the reveal button isn't restricted to own
@@ -900,7 +901,7 @@ async function _dmsgOpenMessageMenu(rowEl, x, y) {
             items.push({ label: 'React', icon: 'smile-face', onClick: () => _dmsgOpenReactionPicker(targetId) });
         }
         items.push({ label: 'Reply', icon: 'reply', onClick: () => _dmsgSelectReply(targetId) });
-        if (mine && hasContent && !hasAttachments) {
+        if (mine && hasContent && !hasAttachments && !_dmsgCommandInfo(msg)) {
             items.push({ label: 'Edit', icon: 'edit', onClick: () => { if (msg) startEditMessage(targetId, msg.content); } });
         }
     }

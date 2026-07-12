@@ -291,12 +291,14 @@ function initCommandSelector(textarea, io, anchorEl) {
         const chatId = io.chatId();
         const snap = snapshots.get(chatId);
         panel.innerHTML = '';
+        panel.classList.remove('command-selector--message');
 
         // Still fetching and nothing known: the loading state ("Loading N bots").
         if (!snap || (loading.has(chatId) && !allCommands().length)) {
             const n = snap ? snap.bots : 0;
             if (snap && n === 0) { hide(); return; } // known: no bots here
             mode = 'loading';
+            panel.classList.add('command-selector--message');
             const row = document.createElement('div');
             row.className = 'command-loading';
             const spin = document.createElement('span');
@@ -311,7 +313,33 @@ function initCommandSelector(textarea, io, anchorEl) {
             return;
         }
 
-        if (snap.bots === 0 || !allCommands().length) { hide(); return; }
+        if (snap.bots === 0) { hide(); return; } // no bots here — nothing to offer
+        if (!allCommands().length) {
+            // Bots ARE present but none publish a command manifest. Say so
+            // rather than silently hiding a deliberately-opened picker; if a
+            // manifest is still converging, show that instead of a false empty.
+            mode = 'list';
+            panel._flat = [];
+            activeIndex = 0;
+            panel.classList.add('command-selector--message');
+            const row = document.createElement('div');
+            if (snap.fresh === false) {
+                row.className = 'command-loading command-refreshing';
+                const spin = document.createElement('span');
+                spin.className = 'command-spinner';
+                row.appendChild(spin);
+                const label = document.createElement('span');
+                label.textContent = 'Checking for commands…';
+                row.appendChild(label);
+            } else {
+                row.className = 'command-empty';
+                row.textContent = 'No commands available';
+            }
+            panel.appendChild(row);
+            position();
+            show();
+            return;
+        }
 
         const { recent, matches } = visibleRows();
         if (!matches.length) { hide(); return; }
@@ -372,6 +400,7 @@ function initCommandSelector(textarea, io, anchorEl) {
     function renderHint(cmd, typedRest) {
         mode = 'hint';
         panel.innerHTML = '';
+        panel.classList.remove('command-selector--message');
 
         // Which arg is the caret conceptually on: completed tokens = args filled.
         let filled = 0;
@@ -1063,6 +1092,16 @@ function initCommandSelector(textarea, io, anchorEl) {
 
     return {
         isOpen() { return isVisible() && (mode === 'list' || mode === 'loading'); },
+        /** Whether `chatId` (default: the open chat) has any known bots. Also
+         *  warms the snapshot, so a later caller (e.g. the attachment menu) sees
+         *  it even on the first look at a chat. */
+        hasBots(chatId) {
+            const id = chatId || io.chatId();
+            if (!id) return false;
+            ensureLoaded(id, false);
+            const snap = snapshots.get(id);
+            return !!(snap && snap.bots > 0);
+        },
         isComposing,
         submitComposer,
         exitComposer() { exitComposer(false); },

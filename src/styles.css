@@ -6141,6 +6141,25 @@ img.emoji-img-loading {
   height: 65%;
 }
 
+.attachment-panel-svg {
+  width: 23px;
+  height: 23px;
+  color: rgba(255, 255, 255, 0.7);
+  pointer-events: none;
+}
+
+.attachment-panel-item.disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.attachment-panel-item.disabled:active {
+  transform: none;
+}
+.attachment-panel-item.disabled:hover .attachment-panel-btn {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: transparent;
+}
+
 .attachment-panel-label {
   position: relative;
   font-size: 11px;
@@ -15360,6 +15379,26 @@ hr {
   padding: 10px 12px;
   font-size: 13px;
   color: rgba(255, 255, 255, 0.65);
+}
+
+/* Single informational states (loading / checking / empty): center the one
+   row in the panel instead of letting it hug the top — the panel's own padding
+   is bottom-only, so a top-anchored row reads as off-center. */
+.command-selector.command-selector--message {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 56px;
+  /* padding:0 (not the base's bottom-only 6px) — horizontal padding would add
+     to position()'s inline width and overflow the right edge. */
+  padding: 0;
+}
+
+/* Bots present but no command manifest — a terminal empty state, dimmer. */
+.command-empty {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.5);
+  text-align: center;
 }
 
 /* The converging-list footer: quieter than the initial loading state. */
