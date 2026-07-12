@@ -52,9 +52,8 @@ pub(super) fn compress_bytes_internal(
         });
     }
 
-    // Load and decode the image
-    let img = ::image::load_from_memory(&bytes)
-        .map_err(|e| format!("Failed to decode image: {}", e))?;
+    // Load and decode the image (EXIF orientation baked into pixels)
+    let img = vector_core::crypto::decode_image_bounded(&bytes)?;
 
     // Determine target dimensions (max 1920px on longest side)
     use crate::shared::image::{calculate_resize_dimensions, MAX_DIMENSION};
@@ -163,9 +162,8 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
             });
         }
 
-        // Try to load and decode the image
-        let img = ::image::load_from_memory(&file_data)
-            .map_err(|e| format!("Failed to decode image: {}", e))?;
+        // Try to load and decode the image (EXIF orientation baked into pixels)
+        let img = vector_core::crypto::decode_image_bounded(&file_data)?;
 
         // Determine target dimensions (max 1920px on longest side)
         use crate::shared::image::{calculate_resize_dimensions, MAX_DIMENSION, encode_rgba_auto, JPEG_QUALITY_STANDARD};
@@ -243,9 +241,8 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
             });
         }
 
-        // Try to load and decode the image
-        let img = ::image::load_from_memory(&bytes)
-            .map_err(|e| format!("Failed to decode image: {}", e))?;
+        // Try to load and decode the image (EXIF orientation baked into pixels)
+        let img = vector_core::crypto::decode_image_bounded(&bytes)?;
 
         // Determine target dimensions (max 1920px on longest side)
         use crate::shared::image::{calculate_resize_dimensions, MAX_DIMENSION, encode_rgba_auto, JPEG_QUALITY_STANDARD};

@@ -948,12 +948,25 @@ pub fn generate_thumbhash_from_rgba(pixels: &[u8], width: u32, height: u32) -> O
 /// Decode an image with allocation limits. A tiny file declaring 60000×60000
 /// would otherwise allocate ~14 GB before a single pixel decodes — every
 /// decode of bytes we didn't author must go through this.
+///
+/// Applies EXIF orientation to the pixels. Camera photos store their pixels in
+/// the sensor's native axis plus an orientation tag; `<img>` honours that tag,
+/// but our re-encode strips all metadata, so an un-baked decode would ship the
+/// sensor pixels with no tag and the receiver sees the photo rotated. Baking it
+/// in here keeps every downstream path (compress, thumbhash, dimensions) upright.
 pub fn decode_image_bounded(bytes: &[u8]) -> Result<image::DynamicImage, String> {
+    use image::ImageDecoder;
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| format!("image format: {e}"))?;
     reader.limits(bounded_image_limits());
-    reader.decode().map_err(|e| format!("image decode: {e}"))
+    let mut decoder = reader.into_decoder().map_err(|e| format!("image decode: {e}"))?;
+    // Read the tag before consuming the decoder; formats without one report NoTransforms.
+    let orientation = decoder.orientation().map_err(|e| format!("image orientation: {e}"))?;
+    let mut img = image::DynamicImage::from_decoder(decoder)
+        .map_err(|e| format!("image decode: {e}"))?;
+    img.apply_orientation(orientation);
+    Ok(img)
 }
 
 /// Shared decode limits for [`decode_image_bounded`] and call sites that need
