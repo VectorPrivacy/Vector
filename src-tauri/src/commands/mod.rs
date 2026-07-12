@@ -22,6 +22,7 @@ pub mod system;
 pub mod invites;
 pub mod media;
 pub mod messaging;
+pub mod self_destruct;
 pub mod realtime;
 pub mod encryption;
 pub mod audio;

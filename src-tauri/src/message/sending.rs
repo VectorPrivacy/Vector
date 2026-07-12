@@ -606,7 +606,10 @@ pub async fn cancel_upload(pending_id: String) -> Result<(), String> {
 /// Used by Android notification inline-reply (JNI).
 #[allow(dead_code)]
 pub async fn send_text_reply_headless(chat_id: &str, content: &str) -> Result<String, String> {
-    let config = SendConfig::headless();
+    let config = SendConfig {
+        expiration: vector_core::self_destruct::resolve_send_expiry(chat_id),
+        ..SendConfig::headless()
+    };
     let callback: Arc<dyn SendCallback> = Arc::new(TauriSendCallback);
     let result = vector_core::sending::send_dm(
         chat_id, content, None, &config, callback,
@@ -631,7 +634,12 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
     // DM: delegate entirely to vector-core
     if !is_group_chat {
-        let config = SendConfig::gui();
+        // Self-Destruct Timer: resolve the chat's lifespan to an absolute NIP-40
+        // expiry so every DM here (text or file) self-destructs on schedule.
+        let config = SendConfig {
+            expiration: vector_core::self_destruct::resolve_send_expiry(&receiver),
+            ..SendConfig::gui()
+        };
         let callback: Arc<dyn SendCallback> = Arc::new(TauriSendCallback);
 
         return if let Some(ref attached_file) = file {

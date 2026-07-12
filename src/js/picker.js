@@ -152,19 +152,25 @@ function openEmojiPanel(e) {
             _rearmVisiblePackCanvases();
         }));
     } else {
-        // Hide and reset the UI - use class instead of inline style
-        emojiSearch.value = '';
-        // Auto-save any in-progress pack edit before the panel disappears.
-        if (_pc.open) closeEmojiPackCreator();
-        picker.classList.remove('visible');
-        picker.style.bottom = ''; // Reset to CSS default
-        strCurrentReactionReference = '';
-        // Drop the canvas rAF so we don't tick under opacity:0.
-        _stopPackCanvasLoop();
-
-        // Change the emoji button to the regular face
-        domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
+        closeEmojiPanel();
     }
+}
+
+/** Hide + reset the emoji/reaction panel. Extracted from the toggle so other
+ *  flows (e.g. a reacted-to message being removed) can dismiss it too. */
+function closeEmojiPanel() {
+    // Hide and reset the UI - use class instead of inline style
+    emojiSearch.value = '';
+    // Auto-save any in-progress pack edit before the panel disappears.
+    if (_pc.open) closeEmojiPackCreator();
+    picker.classList.remove('visible');
+    picker.style.bottom = ''; // Reset to CSS default
+    strCurrentReactionReference = '';
+    // Drop the canvas rAF so we don't tick under opacity:0.
+    _stopPackCanvasLoop();
+
+    // Change the emoji button to the regular face
+    domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
 }
 
 let emojiLazyLoadObserver = null;

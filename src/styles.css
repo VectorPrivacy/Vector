@@ -16034,6 +16034,55 @@ textarea.command-part-input {
 .dmsg[data-streak="continuation"] .dmsg-header { display: none; }
 .dmsg[data-streak="continuation"]:hover .dmsg-time-hover { visibility: visible; }
 
+/* ---- Self-Destruct Timer -------------------------------------------------
+   A subtle accent clock on messages carrying a NIP-40 expiry, and the "derez"
+   dissolve played when one hits zero. Lives in .dmsg-content so it shows on
+   every row (the header/avatar collapse on streak continuations). */
+.dmsg-selfdestruct {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+  margin-left: 6px;
+  vertical-align: middle;
+  opacity: 0.4;
+  color: var(--accent-color, #59fcb3);
+  cursor: default;
+  transition: opacity 0.15s ease;
+}
+.dmsg-selfdestruct:hover { opacity: 1; }
+.dmsg-selfdestruct svg { display: block; }
+.dmsg-selfdestruct-time {
+  font-size: 0.82em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+/* "Temporary send" badge: a small accent clock at the top-right corner of the
+   Send / voice button while the chat has an active Self-Destruct Timer. Drawn
+   as an inline SVG (not an .icon) so the composer's icon-sizing rules can't
+   inflate it, and the button is made position:relative to anchor it. */
+.self-destruct-badge {
+  position: absolute;
+  top: 7px;
+  right: 6px;
+  width: 11px;
+  height: 11px;
+  color: var(--accent-color, #59fcb3);
+  line-height: 0;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease-out;
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.7));
+  z-index: 3;
+}
+.self-destruct-badge.is-visible { opacity: 1; }
+.self-destruct-badge svg { display: block; }
+
+/* Derez: a short Tron-style dissolve, accent-lit. */
+/* Self-destruct dissolve is a JS-driven squash + fade (max-height + opacity in
+   _derezRowDom) — renders identically on WebKit and Chromium, no keyframes. */
+
 /* Body: header + content + reactions */
 .dmsg-body {
   min-width: 0;

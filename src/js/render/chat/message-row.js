@@ -280,6 +280,11 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         content.appendChild(_dmsgBuildStatus(msg));
     }
 
+    // ---- Self-Destruct Timer glyph (per-message NIP-40 expiry) --------------
+    if (msg.expiration) {
+        content.appendChild(_dmsgBuildSelfDestruct(msg));
+    }
+
     body.appendChild(content);
 
     // ---- Reactions row ------------------------------------------------------
@@ -386,6 +391,57 @@ function _dmsgBuildHeader(authorFullId, authorProfile, msg, isGroupChat, current
     header.appendChild(time);
 
     return header;
+}
+
+/** Build the subtle clock glyph on a self-destruct (NIP-40) message. Hovering
+ *  surfaces a live-ticking "dissolves in mm:ss" tooltip. */
+function _dmsgBuildSelfDestruct(msg) {
+    const el = document.createElement('span');
+    el.className = 'dmsg-selfdestruct';
+    el.dataset.expiration = String(msg.expiration); // unix seconds
+    // Inline SVG (not an .icon): .icon is position:absolute;inset:0 and would
+    // escape this unsized span, rendering nothing in the message row.
+    el.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3 2"/></svg>';
+    if (typeof platformFeatures !== 'undefined' && platformFeatures.os === 'android') {
+        // Touch has no hover — show the countdown inline beside the clock. The
+        // parent is nowrap inline-flex, so clock + time never split across lines.
+        const t = document.createElement('span');
+        t.className = 'dmsg-selfdestruct-time';
+        const remaining = msg.expiration - Math.floor(Date.now() / 1000);
+        t.textContent = remaining > 0 ? _fmtCountdown(remaining) : '';
+        el.appendChild(t);
+    } else {
+        el.addEventListener('mouseenter', () => _selfDestructTooltip(el));
+        el.addEventListener('mouseleave', _selfDestructTooltipEnd);
+    }
+    return el;
+}
+
+let _sdTooltipTimer = null;
+function _selfDestructTooltip(el) {
+    const exp = parseInt(el.dataset.expiration, 10);
+    if (!exp) return;
+    const tick = () => {
+        const remaining = exp - Math.floor(Date.now() / 1000);
+        showGlobalTooltip(remaining > 0
+            ? 'Message dissolves in ' + _fmtCountdown(remaining)
+            : 'Dissolving...', el);
+    };
+    tick();
+    if (_sdTooltipTimer) clearInterval(_sdTooltipTimer);
+    _sdTooltipTimer = setInterval(tick, 1000);
+}
+function _selfDestructTooltipEnd() {
+    if (_sdTooltipTimer) { clearInterval(_sdTooltipTimer); _sdTooltipTimer = null; }
+    hideGlobalTooltip();
+}
+
+/** Format a countdown: mm:ss under an hour, else Hh Mm / Dd Hh. */
+function _fmtCountdown(secs) {
+    if (secs >= 86400) { const d = Math.floor(secs / 86400); const h = Math.floor((secs % 86400) / 3600); return d + 'd ' + h + 'h'; }
+    if (secs >= 3600)  { const h = Math.floor(secs / 3600);  const m = Math.floor((secs % 3600) / 60);   return h + 'h ' + m + 'm'; }
+    const m = Math.floor(secs / 60), s = secs % 60;
+    return m + ':' + String(s).padStart(2, '0');
 }
 
 function _dmsgBuildReplyContext(msg, sender) {

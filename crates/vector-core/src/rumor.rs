@@ -298,7 +298,9 @@ fn process_text_message(
     let npub = context.author_npub(&rumor.pubkey);
 
     // Create the message
+    let expiration = extract_nip40_expiration(&rumor);
     let msg = Message {
+        expiration,
         id: rumor.id.to_hex(),
         content: rumor.content,
         replied_to,
@@ -514,7 +516,9 @@ fn process_file_attachment(
     let npub = context.author_npub(&rumor.pubkey);
 
     // Create the message with attachment
+    let expiration = extract_nip40_expiration(&rumor);
     let msg = Message {
+        expiration,
         id: rumor.id.to_hex(),
         content: String::new(),
         replied_to,
@@ -556,6 +560,19 @@ fn unique_event_ref(rumor: &RumorEvent) -> Option<String> {
         return None;
     }
     first.content().map(|s| s.to_string())
+}
+
+/// Parse the NIP-40 `["expiration", <unix secs>]` tag off an inbound rumor.
+/// Present on Self-Destruct Timer messages; drives the local countdown + purge.
+fn extract_nip40_expiration(rumor: &RumorEvent) -> Option<u64> {
+    rumor.tags.iter().find_map(|tag| {
+        let s = tag.as_slice();
+        if s.len() >= 2 && s[0] == "expiration" {
+            s[1].parse::<u64>().ok()
+        } else {
+            None
+        }
+    })
 }
 
 fn process_deletion(

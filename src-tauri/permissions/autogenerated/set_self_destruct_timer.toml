@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-self-destruct-timer"
+description = "Enables the set_self_destruct_timer command without any pre-configured scope."
+commands.allow = ["set_self_destruct_timer"]
+
+[[permission]]
+identifier = "deny-set-self-destruct-timer"
+description = "Denies the set_self_destruct_timer command without any pre-configured scope."
+commands.deny = ["set_self_destruct_timer"]

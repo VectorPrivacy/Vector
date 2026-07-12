@@ -3964,6 +3964,9 @@ async function setupRustListeners() {
     // Listen for message removal (e.g., cancelled upload, deleted failed message)
     _on('message_removed', (evt) => {
         const { id, chat_id, reason } = evt.payload;
+        // A message vanishing (deletion or self-destruct) must not leave you
+        // stuck replying to / reacting to it.
+        _exitModesForRemovedMessage(id);
         // Drop any buffered upload progress + speed tracker (e.g. on cancel)
         pendingUploadProgress.delete(id);
         const stUp = uploadSpeedState.get(id);
@@ -3999,29 +4002,34 @@ async function setupRustListeners() {
                     ? _dmsgWalkForwardToRow(domMsg.nextElementSibling)
                     : null;
 
-                domMsg.style.transition = 'opacity 0.2s ease, max-height 0.3s ease';
-                domMsg.style.opacity = '0';
-                domMsg.style.maxHeight = domMsg.offsetHeight + 'px';
-                domMsg.style.overflow = 'hidden';
-                requestAnimationFrame(() => {
-                    domMsg.style.maxHeight = '0';
-                    domMsg.style.marginBottom = '0';
-                    domMsg.style.paddingTop = '0';
-                    domMsg.style.paddingBottom = '0';
-                });
-                setTimeout(() => {
-                    domMsg.remove();
-                    // Remove trailing timestamp if it's now the last element in the chat
-                    const lastChild = domChatMessages.lastElementChild;
-                    if (lastChild && lastChild.classList.contains('msg-inline-timestamp')) {
-                        lastChild.remove();
-                    }
-                    // Re-evaluate streak on the row that now succeeds the gap.
-                    if (followingRow) {
-                        const msg = _dmsgLookupMessage(followingRow);
-                        if (msg) followingRow.dataset.streak = _dmsgComputeStreakAttr(msg, followingRow.previousElementSibling);
-                    }
-                }, 100);
+                if (reason === 'self-destruct') {
+                    // Self-Destruct expiry → Tron "derez" dissolve, not the plain fade.
+                    _derezRowDom(domMsg, followingRow);
+                } else {
+                    domMsg.style.transition = 'opacity 0.2s ease, max-height 0.3s ease';
+                    domMsg.style.opacity = '0';
+                    domMsg.style.maxHeight = domMsg.offsetHeight + 'px';
+                    domMsg.style.overflow = 'hidden';
+                    requestAnimationFrame(() => {
+                        domMsg.style.maxHeight = '0';
+                        domMsg.style.marginBottom = '0';
+                        domMsg.style.paddingTop = '0';
+                        domMsg.style.paddingBottom = '0';
+                    });
+                    setTimeout(() => {
+                        domMsg.remove();
+                        // Remove trailing timestamp if it's now the last element in the chat
+                        const lastChild = domChatMessages.lastElementChild;
+                        if (lastChild && lastChild.classList.contains('msg-inline-timestamp')) {
+                            lastChild.remove();
+                        }
+                        // Re-evaluate streak on the row that now succeeds the gap.
+                        if (followingRow) {
+                            const msg = _dmsgLookupMessage(followingRow);
+                            if (msg) followingRow.dataset.streak = _dmsgComputeStreakAttr(msg, followingRow.previousElementSibling);
+                        }
+                    }, 100);
+                }
             }
         }
 
@@ -6254,6 +6262,190 @@ let strCurrentEditOriginalContent = "";
  * @param {boolean} isGroup
  * @param {boolean} fNotes - Self-DM "Notes" mode
  */
+// ============================================================================
+// Self-Destruct Timer — per-chat NIP-40 message expiry ("disappearing messages")
+// ============================================================================
+
+const SELF_DESTRUCT_OPTIONS = [
+    { label: 'Permanent',  secs: null },
+    { label: '1 Week',     secs: 604800 },
+    { label: '1 Day',      secs: 86400 },
+    { label: '6 Hours',    secs: 21600 },
+    { label: '1 Hour',     secs: 3600 },
+    { label: '5 Minutes',  secs: 300 },
+    { label: '60 Seconds', secs: 60 },
+    { label: '10 Seconds', secs: 10 },
+];
+
+/** Open the duration picker for a chat's Self-Destruct Timer, anchored to a
+ *  rect. Marks the current value; writes apply immediately to future sends. */
+async function openSelfDestructPicker(chatId, anchor) {
+    if (!chatId || !chatId.startsWith('npub1')) return;
+    let current = null;
+    try { current = await invoke('get_self_destruct_timer', { chatId }); } catch (_) {}
+    const items = SELF_DESTRUCT_OPTIONS.map(o => ({
+        label: o.label,
+        hint: ((o.secs || null) === (current || null)) ? '✓' : undefined,
+        onClick: async () => {
+            try { await invoke('set_self_destruct_timer', { chatId, secs: o.secs }); }
+            catch (_) { return; }
+            updateSelfDestructIndicator(chatId);
+        },
+    }));
+    const rect = anchor || { right: window.innerWidth / 2, bottom: window.innerHeight / 2 };
+    showContextMenu({ x: rect.right, y: rect.bottom + 4, items });
+}
+
+/** Reflect the open chat's timer as a "temporary send" badge on the send +
+ *  voice buttons (whichever is visible shows it). */
+async function updateSelfDestructIndicator(chatId) {
+    const sendBtn = document.getElementById('chat-input-send');
+    if (!sendBtn) return;
+    const apply = (secs) => {
+        if (secs) { sendBtn.dataset.sdSecs = String(secs); sendBtn.classList.add('has-self-destruct'); }
+        else { delete sendBtn.dataset.sdSecs; sendBtn.classList.remove('has-self-destruct'); }
+    };
+    if (!chatId || !chatId.startsWith('npub1')) { apply(null); return; }
+    let secs = null;
+    try { secs = await invoke('get_self_destruct_timer', { chatId }); } catch (_) {}
+    apply(secs && chatId === strOpenChat ? secs : null);
+}
+
+/** Wire the composer: a "temporary send" clock badge on the send + voice
+ *  buttons, and right-click / long-press on Send to open the timer picker.
+ *  Runs once. */
+function setupSelfDestructComposer() {
+    const sendBtn = document.getElementById('chat-input-send');
+    if (!sendBtn || sendBtn.dataset.sdWired) return;
+    sendBtn.dataset.sdWired = '1';
+
+    _ensureSelfDestructBadge();
+
+    const openFromBtn = () => {
+        if (strOpenChat && strOpenChat.startsWith('npub1')) {
+            openSelfDestructPicker(strOpenChat, sendBtn.getBoundingClientRect());
+        }
+    };
+    sendBtn.addEventListener('contextmenu', (e) => { e.preventDefault(); openFromBtn(); });
+    // Right-clicking the mic does nothing on desktop (suppress the native menu).
+    const voiceBtn = document.getElementById('chat-input-voice');
+    if (voiceBtn) voiceBtn.addEventListener('contextmenu', (e) => e.preventDefault());
+    let pressTimer = null;
+    sendBtn.addEventListener('touchstart', () => { pressTimer = setTimeout(openFromBtn, 500); }, { passive: true });
+    const cancelPress = () => { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } };
+    sendBtn.addEventListener('touchend', cancelPress);
+    sendBtn.addEventListener('touchmove', cancelPress);
+    sendBtn.addEventListener('touchcancel', cancelPress);
+}
+
+/** Inject the "temporary send" badge into the composer CONTAINER (not the send
+ *  button — so it never inherits the mic<->send swap rotation) and mirror the
+ *  send button's visibility onto it via `.is-visible`, so it fades with the
+ *  swap. Inline SVG so nothing inflates it; pointer-events:none so it never
+ *  swallows a send tap. */
+function _ensureSelfDestructBadge() {
+    const send = document.getElementById('chat-input-send');
+    const container = send && send.closest('.chat-input-container');
+    if (!container || container.dataset.sdBadge) return;
+    container.dataset.sdBadge = '1';
+    const badge = document.createElement('span');
+    badge.className = 'self-destruct-badge';
+    badge.innerHTML = '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3 2"/></svg>';
+    container.appendChild(badge);
+
+    // Recompute the badge's visibility whenever the send button's state flips
+    // (swap in/out, shown/hidden, timer toggled) — one observer, no swap-logic edits.
+    new MutationObserver(_syncSelfDestructBadge)
+        .observe(send, { attributes: true, attributeFilter: ['class', 'style'] });
+    _syncSelfDestructBadge();
+}
+
+/** Show the badge only while the send button is present, timer-active, and not
+ *  mid swap-out — so it fades in/out with the button rather than spinning. */
+function _syncSelfDestructBadge() {
+    const send = document.getElementById('chat-input-send');
+    const badge = document.querySelector('.self-destruct-badge');
+    if (!send || !badge) return;
+    const show = send.classList.contains('has-self-destruct')
+        && send.style.display !== 'none'
+        && !send.classList.contains('button-swap-out');
+    badge.classList.toggle('is-visible', show);
+}
+
+/** Play the Tron "derez" dissolve on a message row, then remove it. Idempotent. */
+function _derezRowDom(domMsg, followingRow) {
+    if (!domMsg || domMsg.dataset.derezzing) return;
+    domMsg.dataset.derezzing = '1';
+    if (_dmsgToolbarTarget === domMsg) hideMessageToolbar();
+    if (followingRow === undefined) {
+        followingRow = domMsg.classList.contains('dmsg')
+            ? _dmsgWalkForwardToRow(domMsg.nextElementSibling)
+            : null;
+    }
+    // Promote the next row to its post-removal streak state NOW (anchored on the
+    // dissolving row's predecessor, i.e. its future previous sibling) so a
+    // top-of-streak dissolve hands its avatar to the next message instead of
+    // blinking it out for a frame while the row fades.
+    if (followingRow) {
+        const nmsg = _dmsgLookupMessage(followingRow);
+        if (nmsg) followingRow.dataset.streak = _dmsgComputeStreakAttr(nmsg, domMsg.previousElementSibling);
+    }
+    // No animation for now — remove instantly, then heal date dividers so an
+    // orphan left by this removal is dropped (and nothing left misplaced).
+    domMsg.remove();
+    _dedupeAdjacentDaySeparators();
+}
+
+/** A message just vanished (deletion or self-destruct) — bail out of any UI
+ *  mode still pointed at it: reply mode and the reaction emoji panel. */
+function _exitModesForRemovedMessage(id) {
+    if (id && strCurrentReplyReference === id) cancelReply();
+    if (id && strCurrentReactionReference === id) closeEmojiPanel();
+}
+
+/** Client-side self-destruct: derez a visible expired message now (precise
+ *  visual) and drop it from the frontend caches. The backend sweep purges
+ *  STATE/DB + own-blobs on its own interval. */
+function derezMessageLocally(id, chatId) {
+    _exitModesForRemovedMessage(id);
+    const cChat = getChat(chatId);
+    if (cChat) {
+        const mi = cChat.messages.findIndex(m => m.id === id);
+        if (mi !== -1) cChat.messages.splice(mi, 1);
+        if (eventCache.has(chatId)) {
+            const ce = eventCache.getEvents(chatId);
+            if (ce) { const ci = ce.findIndex(m => m.id === id); if (ci !== -1) ce.splice(ci, 1); }
+        }
+    }
+    if (strOpenChat === chatId) {
+        const domMsg = document.getElementById(id);
+        if (domMsg) _derezRowDom(domMsg);
+    }
+    renderChatlist();
+    scheduleUnreadRefresh();
+}
+
+// Drive the per-message countdown + derez for the OPEN chat. Off-screen and
+// closed-chat expiries fall to the backend sweep. One cheap DOM scan per second.
+setInterval(() => {
+    const glyphs = document.querySelectorAll('.dmsg-selfdestruct[data-expiration]');
+    if (!glyphs.length) return;
+    const now = Math.floor(Date.now() / 1000);
+    glyphs.forEach(el => {
+        const exp = parseInt(el.dataset.expiration, 10);
+        // Keep the inline countdown (Android) ticking.
+        const timeEl = el.querySelector('.dmsg-selfdestruct-time');
+        if (timeEl) {
+            const remaining = exp - now;
+            timeEl.textContent = remaining > 0 ? _fmtCountdown(remaining) : '';
+        }
+        if (!exp || exp > now || el.dataset.fired) return;
+        el.dataset.fired = '1';
+        const row = el.closest('.dmsg');
+        if (row && row.id && strOpenChat) derezMessageLocally(row.id, strOpenChat);
+    });
+}, 1000);
+
 /** Build the chat-header overflow ("hamburger") menu items for a chat.
  *  Single source of truth for both the click handler and the button's
  *  visibility — when this returns empty (e.g. group chats, which have no
@@ -6262,6 +6454,15 @@ let strCurrentEditOriginalContent = "";
 function buildChatMenuItems(chat) {
     const items = [];
     if (chat?.chat_type === 'DirectMessage') {
+        items.push({
+            label: 'Self-Destruct Timer',
+            icon: 'clock',
+            onClick: () => {
+                const btn = document.getElementById('chat-menu-btn');
+                const rect = btn ? btn.getBoundingClientRect() : null;
+                requestAnimationFrame(() => openSelfDestructPicker(strOpenChat, rect));
+            },
+        });
         items.push({
             label: 'Change Wallpaper',
             icon: 'image',
@@ -7940,6 +8141,7 @@ async function openChat(contact) {
     const isGroup = chatIsGroup(chat);
     const profile = !isGroup ? getProfile(contact) : null;
     strOpenChat = contact;
+    updateSelfDestructIndicator(contact);
     // Snapshot last_read BEFORE the open-time markAsRead — the divider needs
     // the stale value to find the boundary, but we still want to advance
     // chat.last_read so the OS badge clears immediately on entering the chat.
@@ -10874,6 +11076,10 @@ window.addEventListener("DOMContentLoaded", async () => {
             showContextMenu({ x: rect.right, y: rect.bottom + 4, items });
         });
     }
+
+    // Self-Destruct Timer: right-click / long-press the Send button, plus the
+    // active-timer clock indicator injected next to the composer.
+    setupSelfDestructComposer();
 
     // Wallpaper edit UI — header Cancel/Save overlay, bottom sliders.
     const wallpaperEditSave = document.getElementById('wallpaper-edit-save-btn');

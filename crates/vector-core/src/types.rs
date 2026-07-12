@@ -29,6 +29,10 @@ pub struct Message {
     pub attachments: Vec<Attachment>,
     pub reactions: Vec<Reaction>,
     pub at: u64,
+    /// NIP-40 expiry (unix seconds). None = permanent. Set on Self-Destruct
+    /// Timer messages; drives the live countdown and the local purge sweep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expiration: Option<u64>,
     pub pending: bool,
     pub failed: bool,
     pub mine: bool,
@@ -73,6 +77,7 @@ impl Default for Message {
             attachments: Vec::new(),
             reactions: Vec::new(),
             at: 0,
+            expiration: None,
             pending: false,
             failed: false,
             mine: false,
@@ -606,6 +611,7 @@ mod tests {
     #[test]
     fn message_serde_roundtrip() {
         let msg = Message {
+            expiration: Some(1893456000),
             id: "abc123".to_string(),
             content: "Hello world".to_string(),
             replied_to: "def456".to_string(),

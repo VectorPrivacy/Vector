@@ -74,6 +74,14 @@ fn extract_bot_tags(tags: &[Vec<String>]) -> Vec<String> {
         .collect()
 }
 
+/// Parse the NIP-40 `["expiration", <unix secs>]` tag, if present. Drives the
+/// self-destruct countdown + purge for messages rehydrated from the DB.
+fn extract_expiration_tag(tags: &[Vec<String>]) -> Option<u64> {
+    tags.iter()
+        .find(|t| t.len() >= 2 && t[0] == "expiration")
+        .and_then(|t| t[1].parse::<u64>().ok())
+}
+
 /// Check if an event exists in the database.
 pub fn event_exists(event_id: &str) -> Result<bool, String> {
     let conn = super::get_db_connection_guard_static()?;
@@ -207,6 +215,12 @@ fn message_to_stored_event(message: &Message, chat_id: i64, user_id: Option<i64>
     // Bot" render survives a reload.
     for npub in &message.addressed_bots {
         tags.push(vec!["bot".to_string(), npub.clone()]);
+    }
+
+    // NIP-40 self-destruct expiry — persist so the countdown + purge survive a
+    // reload. Rides the same tags column as every other message-shaped tag.
+    if let Some(exp) = message.expiration {
+        tags.push(vec!["expiration".to_string(), exp.to_string()]);
     }
 
     let preview_metadata = message.preview_metadata.as_ref()
@@ -1060,7 +1074,9 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
             .and_then(|json| serde_json::from_str(&json).ok());
 
         let addressed_bots = extract_bot_tags(&event.tags);
+        let expiration = extract_expiration_tag(&event.tags);
         messages.push(Message {
+            expiration,
             id: event.id, content, replied_to,
             replied_to_content: None, replied_to_npub: None, replied_to_has_attachment: None,
             replied_to_attachment_extension: None,
@@ -1305,6 +1321,7 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
         let stored_tags = serde_json::from_str::<Vec<Vec<String>>>(&tags_json).unwrap_or_default();
         let original_emoji = crate::types::EmojiTag::extract_from_stored(&stored_tags);
         let addressed_bots = extract_bot_tags(&stored_tags);
+        let expiration = extract_expiration_tag(&stored_tags);
         // Newest edit's emoji tags win so the latest content renders correctly.
         let (content, edited, edit_history, emoji_tags) = if let Some(edits) = edits_by_msg.remove(&event.id) {
             let (latest, latest_emoji) = edits.last()
@@ -1323,6 +1340,7 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
             .and_then(|json| serde_json::from_str(&json).ok());
 
         result.entry(chat_identifier).or_default().push(Message {
+            expiration,
             id: event.id, content, replied_to,
             replied_to_content: None, replied_to_npub: None, replied_to_has_attachment: None,
             replied_to_attachment_extension: None,

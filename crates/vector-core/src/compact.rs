@@ -949,6 +949,10 @@ pub struct CompactMessage {
     pub id: [u8; 32],
     /// Timestamp in milliseconds (full precision for sub-second ordering)
     pub at: u64,
+    /// NIP-40 expiry as unix SECONDS (0 = permanent). u32 holds it until 2106
+    /// and costs 4 bytes inline — self-destruct messages are rare and short-
+    /// lived, so a boxed Option would only add heap churn on the purge path.
+    pub expiration_secs: u32,
     /// Packed boolean flags (mine, pending, failed, replied_to_has_attachment)
     pub flags: MessageFlags,
     /// Index into NpubInterner for sender's npub (NO_NPUB if none)
@@ -1497,6 +1501,7 @@ impl CompactMessage {
             replied_to_npub_idx: interner.intern_opt(msg.replied_to_npub.as_deref()),
             // Box wrapper_id (saves 25 bytes when None)
             wrapper_id: msg.wrapper_event_id.as_ref().map(|s| Box::new(hex_to_bytes_32(s))),
+            expiration_secs: msg.expiration.map(|e| e as u32).unwrap_or(0),
             // Box<str> for content (saves 8 bytes per field)
             content: msg.content.clone().into_boxed_str(),
             replied_to_content: msg.replied_to_content.as_ref().map(|s| s.clone().into_boxed_str()),
@@ -1547,6 +1552,7 @@ impl CompactMessage {
             replied_to_npub_idx: interner.intern_opt(msg.replied_to_npub.as_deref()),
             // Box wrapper_id (saves 25 bytes when None)
             wrapper_id: msg.wrapper_event_id.as_ref().map(|s| Box::new(hex_to_bytes_32(s))),
+            expiration_secs: msg.expiration.map(|e| e as u32).unwrap_or(0),
             // Zero-copy: into_boxed_str() reuses the String's buffer!
             content: msg.content.into_boxed_str(),
             replied_to_content: msg.replied_to_content.map(|s| s.into_boxed_str()),
@@ -1583,6 +1589,7 @@ impl CompactMessage {
         Message {
             id: self.id_hex(),
             at: self.timestamp_ms(), // Convert compact back to ms
+            expiration: if self.expiration_secs == 0 { None } else { Some(self.expiration_secs as u64) },
             mine: self.flags.is_mine(),
             pending: self.flags.is_pending(),
             failed: self.flags.is_failed(),
@@ -1693,6 +1700,7 @@ mod tests {
         let msg1 = CompactMessage {
             id: hex_to_bytes_32("0000000000000000000000000000000000000000000000000000000000000001"),
             at: 1000,
+            expiration_secs: 0,
             flags: MessageFlags::NONE,
             npub_idx: interner.intern("npub1test"),
             replied_to: None,
@@ -1711,6 +1719,7 @@ mod tests {
         let msg2 = CompactMessage {
             id: hex_to_bytes_32("0000000000000000000000000000000000000000000000000000000000000002"),
             at: 2000,
+            expiration_secs: 0,
             flags: MessageFlags::MINE,
             npub_idx: interner.intern("npub1me"),
             replied_to: None,
@@ -1747,6 +1756,7 @@ mod tests {
         let msg = CompactMessage {
             id: hex_to_bytes_32("abcd000000000000000000000000000000000000000000000000000000000000"),
             at: 1000,
+            expiration_secs: 0,
             flags: MessageFlags::NONE,
             npub_idx: NO_NPUB,
             replied_to: None,
@@ -1790,6 +1800,7 @@ mod tests {
             .map(|i| {
                 let user_idx = i % NUM_UNIQUE_USERS;
                 Message {
+                    expiration: None,
                     id: format!("{:0>64x}", i),
                     at: 1700000000000 + (i as u64 * 1000),
                     mine: user_idx == 0,
@@ -2706,6 +2717,7 @@ mod tests {
         CompactMessage {
             id: encode_message_id(hex_id),
             at: timestamp,
+            expiration_secs: 0,
             flags: MessageFlags::NONE,
             npub_idx: NO_NPUB,
             replied_to: None,
@@ -3037,6 +3049,7 @@ mod tests {
     /// Helper to create a full Message with all fields populated
     fn make_full_message() -> Message {
         Message {
+            expiration: Some(1893456000),
             id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".into(),
             content: "Hello, world!".into(),
             replied_to: "1111111111111111111111111111111111111111111111111111111111111111".into(),

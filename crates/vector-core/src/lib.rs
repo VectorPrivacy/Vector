@@ -178,6 +178,7 @@ pub mod wallpaper;
 
 // === Message Deletion (NIP-09 against retained gift-wraps) ===
 pub mod deletion;
+pub mod self_destruct;
 
 // === SIMD Operations ===
 pub mod simd;

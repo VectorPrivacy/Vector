@@ -74,6 +74,10 @@ pub struct SendConfig {
     pub upload_retries: u32,
     /// Delay between upload retries (default: 2 seconds).
     pub upload_retry_delay: std::time::Duration,
+    /// NIP-40 self-destruct expiry (unix secs) to stamp on the outgoing rumor
+    /// and mirror onto the outer wrap. None = permanent. Resolved per-chat by
+    /// the caller (the "Self-Destruct Timer" setting).
+    pub expiration: Option<u64>,
 }
 
 impl Default for SendConfig {
@@ -85,6 +89,7 @@ impl Default for SendConfig {
             cancel_token: None,
             upload_retries: 3,
             upload_retry_delay: std::time::Duration::from_secs(2),
+            expiration: None,
         }
     }
 }
@@ -314,8 +319,15 @@ async fn retry_send_gift_wrap(
 
     for attempt in 0..max_attempts {
         if built.is_none() {
+            // Mirror any NIP-40 expiry from the rumor onto the outer wrap so
+            // relays drop the gift-wrap on schedule (the inner tag is encrypted).
+            let wrap_extra: Vec<Tag> = rumor.tags.iter()
+                .find(|t| t.as_slice().first().map(|k| k.as_str() == "expiration").unwrap_or(false))
+                .cloned()
+                .into_iter()
+                .collect();
             match crate::inbox_relays::build_gift_wrap_retained(
-                client, receiver, rumor.clone(), [],
+                client, receiver, rumor.clone(), wrap_extra,
             ).await {
                 Ok(b) => built = Some(b),
                 Err(e) => {
@@ -560,6 +572,7 @@ pub async fn send_dm(
         mine: true,
         npub: my_pk.to_bech32().ok(),
         emoji_tags: emoji_tags.clone(),
+        expiration: config.expiration,
         ..Default::default()
     };
 
@@ -589,6 +602,11 @@ pub async fn send_dm(
             TagKind::custom("emoji"),
             [et.shortcode.clone(), et.url.clone()],
         ));
+    }
+    // NIP-40 self-destruct: stamp the rumor so compliant receivers honor the
+    // expiry; retry_send_gift_wrap mirrors it onto the outer wrap for relays.
+    if let Some(exp) = config.expiration {
+        rumor = rumor.tag(Tag::expiration(Timestamp::from_secs(exp)));
     }
     let built_rumor = rumor.build(my_pk);
     let event_id = built_rumor.id.ok_or("Rumor has no id")?.to_hex();
@@ -712,6 +730,7 @@ pub async fn send_file_dm(
         id: pending_id.clone(), content: content.unwrap_or("").to_string(),
         at: now.as_millis() as u64, pending: true, mine: true,
         npub: my_pk.to_bech32().ok(), attachments: vec![attachment],
+        expiration: config.expiration,
         ..Default::default()
     };
     {
@@ -791,6 +810,9 @@ pub async fn send_file_dm(
         file_rumor = file_rumor.tag(Tag::custom(TagKind::custom("dim"), [format!("{}x{}", meta.width, meta.height)]));
     }
     file_rumor = file_rumor.tag(Tag::custom(TagKind::custom("ms"), [milliseconds.to_string()]));
+    if let Some(exp) = config.expiration {
+        file_rumor = file_rumor.tag(Tag::expiration(Timestamp::from_secs(exp)));
+    }
 
     let built_rumor = file_rumor.build(my_pk);
     let event_id = built_rumor.id.ok_or("Rumor has no id")?.to_hex();

@@ -451,6 +451,12 @@ pub fn run() {
                 profile_sync::start_tauri_profile_sync_processor().await;
             });
 
+            // Start the Self-Destruct Timer sweep (purges expired NIP-40 DMs
+            // locally on a short interval; the first tick catches offline expiries).
+            tauri::async_runtime::spawn(async {
+                vector_core::self_destruct::run_sweeper_loop().await;
+            });
+
             
             // Setup deep link listener for macOS/iOS/Android
             // On these platforms, deep links are received as events rather than CLI args
@@ -559,6 +565,8 @@ pub fn run() {
             commands::messaging::get_system_events,
             commands::messaging::get_chat_message_count,
             commands::messaging::evict_chat_messages,
+            commands::self_destruct::get_self_destruct_timer,
+            commands::self_destruct::set_self_destruct_timer,
             // Realtime signaling commands (commands/realtime.rs)
             commands::realtime::notifs,
             commands::realtime::start_typing,

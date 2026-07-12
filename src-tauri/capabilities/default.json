@@ -22,6 +22,8 @@
     "allow-get-sql-setting",
     "allow-set-sql-setting",
     "allow-remove-setting",
+    "allow-get-self-destruct-timer",
+    "allow-set-self-destruct-timer",
     "allow-load-profile",
     "allow-update-profile",
     "allow-update-status",
