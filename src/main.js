@@ -6290,7 +6290,7 @@ const SELF_DESTRUCT_OPTIONS = [
 /** Open the duration picker for a chat's Self-Destruct Timer, anchored to a
  *  rect. Marks the current value; writes apply immediately to future sends. */
 async function openSelfDestructPicker(chatId, anchor) {
-    if (!chatId || !chatId.startsWith('npub1')) return;
+    if (!chatId || !chatSupportsSelfDestruct(getChat(chatId))) return;
     let current = null;
     try { current = await invoke('get_self_destruct_timer', { chatId }); } catch (_) {}
     const items = SELF_DESTRUCT_OPTIONS.map(o => ({
@@ -6315,7 +6315,7 @@ async function updateSelfDestructIndicator(chatId) {
         if (secs) { sendBtn.dataset.sdSecs = String(secs); sendBtn.classList.add('has-self-destruct'); }
         else { delete sendBtn.dataset.sdSecs; sendBtn.classList.remove('has-self-destruct'); }
     };
-    if (!chatId || !chatId.startsWith('npub1')) { apply(null); return; }
+    if (!chatId || !chatSupportsSelfDestruct(getChat(chatId))) { apply(null); return; }
     let secs = null;
     try { secs = await invoke('get_self_destruct_timer', { chatId }); } catch (_) {}
     apply(secs && chatId === strOpenChat ? secs : null);
@@ -6332,7 +6332,7 @@ function setupSelfDestructComposer() {
     _ensureSelfDestructBadge();
 
     const openFromBtn = () => {
-        if (strOpenChat && strOpenChat.startsWith('npub1')) {
+        if (strOpenChat && chatSupportsSelfDestruct(getChat(strOpenChat))) {
             openSelfDestructPicker(strOpenChat, sendBtn.getBoundingClientRect());
         }
     };
@@ -6461,9 +6461,18 @@ setInterval(() => {
  *  visibility — when this returns empty (e.g. group chats, which have no
  *  per-chat options yet), the button is hidden rather than opening an
  *  empty menu. */
+/** DMs and Concord v2 community channels support the Self-Destruct Timer
+ *  (sender-controlled NIP-40 TTL). A v1 community's send path ignores the tag,
+ *  so it's gated out here to avoid an indicator that would lie. */
+function chatSupportsSelfDestruct(chat) {
+    if (!chat) return false;
+    if (chat.chat_type === 'DirectMessage') return true;
+    return chat.chat_type === 'Community' && chat.metadata?.custom_fields?.proto_version === '2';
+}
+
 function buildChatMenuItems(chat) {
     const items = [];
-    if (chat?.chat_type === 'DirectMessage') {
+    if (chatSupportsSelfDestruct(chat)) {
         items.push({
             label: 'Self-Destruct Timer',
             icon: 'clock',
@@ -6473,6 +6482,8 @@ function buildChatMenuItems(chat) {
                 requestAnimationFrame(() => openSelfDestructPicker(strOpenChat, rect));
             },
         });
+    }
+    if (chat?.chat_type === 'DirectMessage') {
         items.push({
             label: 'Change Wallpaper',
             icon: 'image',

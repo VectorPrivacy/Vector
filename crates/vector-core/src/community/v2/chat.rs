@@ -129,6 +129,21 @@ pub fn build_message_rumor(
     stream::build_rumor_ms(kind::MESSAGE, author, content, tags, at_ms)
 }
 
+/// Parse the NIP-40 `["expiration", <unix secs>]` tag off a chat rumor
+/// (Self-Destruct Timer). The inner twin of the wrap tag relays act on: this is
+/// what drives a receiver's local countdown + purge, and the only copy that
+/// survives a restart (the wrap is a discarded transport artifact).
+pub(crate) fn message_expiration(rumor: &UnsignedEvent) -> Option<u64> {
+    rumor.tags.iter().find_map(|tag| {
+        let s = tag.as_slice();
+        if s.len() >= 2 && s[0] == "expiration" {
+            s[1].parse::<u64>().ok()
+        } else {
+            None
+        }
+    })
+}
+
 /// Build a kind-1111 threaded-reply rumor (NIP-22, CORD-03 §3). Uppercase
 /// `K`/`E`/`P` pin the immutable thread ROOT, lowercase `k`/`e`/`p` the
 /// immediate PARENT — all rumor ids. `parent_root` names the parent's own root
@@ -278,7 +293,16 @@ pub fn seal_chat_rumor(
     }
     let seal = stream::build_seal(rumor, SealForm::Encrypted, group, author_keys)?;
     let wrap_kind = if ephemeral { stream::KIND_WRAP_EPHEMERAL } else { stream::KIND_WRAP };
-    Ok(stream::wrap_seal(&seal, group, wrap_kind, wrap_at)?)
+    // Mirror a NIP-40 expiration (Self-Destruct Timer) from the inner rumor onto
+    // the outer wrap so relays drop the stored event on schedule; the inner copy
+    // drives each client's local purge. Only chat messages ever carry one.
+    let wrap_extra: Vec<Tag> = rumor
+        .tags
+        .iter()
+        .filter(|t| t.as_slice().first().map(|k| k.as_str() == "expiration").unwrap_or(false))
+        .cloned()
+        .collect();
+    Ok(stream::wrap_seal_with_tags(&seal, group, wrap_kind, wrap_at, &wrap_extra)?)
 }
 
 /// A parsed reply reference — the NIP-C7 `q` tag's parent rumor id and (when
@@ -582,6 +606,59 @@ mod tests {
         assert_eq!(emoji, vec![("catJAM".to_string(), "https://x/cat.gif".to_string())]);
         // The imeta tag rides the signed rumor byte-verbatim.
         assert!(opened.rumor.tags.iter().any(|t| t.as_slice() == imeta.as_slice()));
+    }
+
+    #[test]
+    fn self_destruct_expiration_mirrors_onto_the_wrap_and_round_trips_into_the_message() {
+        // NIP-40 Self-Destruct Timer: the expiry rides the inner rumor (drives
+        // every client's local purge + survives restart) AND is mirrored onto the
+        // outer wrap (so relays drop the stored event). Without a timer, neither
+        // layer carries a tag.
+        const EXP: u64 = 1_700_000_500;
+        let author = Keys::generate();
+        let me = author.public_key();
+
+        // Sender stamps the expiry as an extra tag (exactly how the send command does).
+        let rumor = build_message_rumor(
+            me,
+            &chan(),
+            Epoch(0),
+            "poof",
+            None,
+            &[],
+            vec![Tag::expiration(Timestamp::from_secs(EXP))],
+            AT,
+        );
+        assert_eq!(message_expiration(&rumor), Some(EXP), "inner rumor carries the expiry");
+
+        let wrap = seal(&rumor, &author);
+        // Relay-drop half: the outer wrap mirrors the expiration tag.
+        let mirrored = wrap.tags.iter().any(|t| {
+            let s = t.as_slice();
+            s.len() >= 2 && s[0] == "expiration" && s[1] == EXP.to_string()
+        });
+        assert!(mirrored, "the outer wrap mirrors the NIP-40 expiration for relays");
+
+        // Local-purge half: the receiver's opened Message carries the expiry.
+        let ChatEvent::Message { opened, reply_to, emoji } = open(&wrap).unwrap() else {
+            panic!("expected a Message");
+        };
+        let msg = crate::community::v2::inbound::chat_message_to_message(&opened, &reply_to, &emoji, &me);
+        assert_eq!(msg.expiration, Some(EXP), "the receiver's Message carries the expiry");
+
+        // Control: no timer → clean rumor, clean wrap, no Message expiry.
+        let plain = build_message_rumor(me, &chan(), Epoch(0), "forever", None, &[], vec![], AT);
+        assert_eq!(message_expiration(&plain), None);
+        let plain_wrap = seal(&plain, &author);
+        assert!(!plain_wrap
+            .tags
+            .iter()
+            .any(|t| t.as_slice().first().map(|k| k.as_str() == "expiration").unwrap_or(false)));
+        let ChatEvent::Message { opened, reply_to, emoji } = open(&plain_wrap).unwrap() else {
+            panic!("expected a Message");
+        };
+        let plain_msg = crate::community::v2::inbound::chat_message_to_message(&opened, &reply_to, &emoji, &me);
+        assert_eq!(plain_msg.expiration, None);
     }
 
     #[test]

@@ -663,6 +663,7 @@ impl ChatState {
         owner_npub: Option<&str>,
         created_at_ms: Option<u64>,
         dissolved: bool,
+        protocol: crate::community::ConcordProtocol,
     ) {
         self.ensure_community_chat(channel_id);
         if let Some(chat) = self.chats.iter_mut().find(|c| c.id == channel_id) {
@@ -671,6 +672,15 @@ impl ChatState {
             cf.insert("description".to_string(), description.to_string());
             cf.insert("community_id".to_string(), community_id.to_string());
             cf.insert("is_owner".to_string(), is_owner.to_string());
+            // Protocol stack (1 = v1, 2 = v2) — the GUI gates v2-only affordances
+            // (e.g. the Self-Destruct Timer) on this so a v1 community never shows
+            // a control the v1 send path would silently ignore. Never DOWNGRADE:
+            // a dual-stack community identified as v2 by register_v2_chats stays v2
+            // even if a v1-typed sync path (sync_community_chats / finalize_member_join)
+            // re-registers its chat afterwards. Protocol only ever advances.
+            let new_proto = protocol.as_i64();
+            let cur_proto = cf.get("proto_version").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+            cf.insert("proto_version".to_string(), new_proto.max(cur_proto).to_string());
             // Owner-dissolution seal — the GUI reads this to lock the composer + show the end divider.
             cf.insert("dissolved".to_string(), dissolved.to_string());
             // Join time — sorts a not-yet-active community by when we joined, not to the bottom.

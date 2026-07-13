@@ -271,6 +271,20 @@ pub fn build_seal(rumor: &UnsignedEvent, form: SealForm, group: &GroupKey, autho
 /// wrap's `created_at` (untweaked wall clock — CORD-01 forbids NIP-59's
 /// timestamp tweak on stream events).
 pub fn wrap_seal(seal: &Event, group: &GroupKey, wrap_kind: u16, wrap_at: Timestamp) -> Result<(Event, Keys), StreamError> {
+    wrap_seal_with_tags(seal, group, wrap_kind, wrap_at, &[])
+}
+
+/// [`wrap_seal`] plus caller-supplied `extra_tags` on the outer wrap. The chat
+/// plane uses this to mirror a message's NIP-40 `expiration` (Self-Destruct
+/// Timer) onto the wrap so relays drop the stored event on schedule; every other
+/// plane wraps with none.
+pub fn wrap_seal_with_tags(
+    seal: &Event,
+    group: &GroupKey,
+    wrap_kind: u16,
+    wrap_at: Timestamp,
+    extra_tags: &[Tag],
+) -> Result<(Event, Keys), StreamError> {
     if wrap_kind != KIND_WRAP && wrap_kind != KIND_WRAP_EPHEMERAL {
         return Err(StreamError::BadWrapKind(wrap_kind));
     }
@@ -278,8 +292,10 @@ pub fn wrap_seal(seal: &Event, group: &GroupKey, wrap_kind: u16, wrap_at: Timest
     cap(seal_json.len())?;
     let ct = encrypt_to_bytes(group.conv_key(), seal_json.as_bytes()).map_err(|e| StreamError::Encrypt(e.to_string()))?;
     let ephemeral = Keys::generate();
+    let mut tags = vec![Tag::public_key(ephemeral.public_key())];
+    tags.extend_from_slice(extra_tags);
     let wrap = EventBuilder::new(Kind::Custom(wrap_kind), base64_simd::STANDARD.encode_to_string(&ct))
-        .tags([Tag::public_key(ephemeral.public_key())])
+        .tags(tags)
         .custom_created_at(wrap_at)
         .sign_with_keys(group.keys())
         .map_err(|e| StreamError::Sign(e.to_string()))?;

@@ -908,6 +908,7 @@ impl VectorCore {
                 owner_npub.as_deref(),
                 Some(community.created_at_ms),
                 community.dissolved,
+                crate::community::ConcordProtocol::V2,
             );
             // Sibling-channel rows the message persist auto-created are bare
             // anchors (their DB rows keep the history's FK) — never surfaced.
@@ -1121,6 +1122,7 @@ impl VectorCore {
                     owner_npub.as_deref(),
                     created_at_ms,
                     community.dissolved,
+                    crate::community::ConcordProtocol::V1,
                 );
             }
         }
@@ -1175,6 +1177,7 @@ impl VectorCore {
                     owner_npub.as_deref(),
                     created_at_ms,
                     community.dissolved,
+                    crate::community::ConcordProtocol::V1,
                 );
             }
         }

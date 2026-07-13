@@ -42,6 +42,10 @@ function generateChatlistStateHash() {
             chat.id,
             nUnread,
             activeTypers.length,
+            // Message count so a REMOVAL re-renders even when the raw last array
+            // element is unchanged — a self-destruct purges the preview message
+            // while a later system event (presence/join) stays the last element.
+            chat.messages.length,
             cLastMsg?.id,
             cLastMsg?.pending,
             profile?.nickname || profile?.name || profile?.display_name,

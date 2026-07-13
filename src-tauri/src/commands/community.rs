@@ -45,7 +45,7 @@ pub(crate) async fn sync_community_chats(community: &vector_core::community::Com
         let mut slims = Vec::new();
         for ch in &community.channels {
             let channel_id = ch.id.to_hex();
-            state.upsert_community_chat(&channel_id, &name, &description, &community_id, is_owner, has_icon, owner_npub.as_deref(), created_at_ms, community.dissolved);
+            state.upsert_community_chat(&channel_id, &name, &description, &community_id, is_owner, has_icon, owner_npub.as_deref(), created_at_ms, community.dissolved, vector_core::community::ConcordProtocol::V1);
             if let Some(chat) = state.chats.iter().find(|c| c.id == channel_id) {
                 slims.push(vector_core::db::chats::SlimChatDB::from_chat(chat, &state.interner));
             }
@@ -803,8 +803,20 @@ pub async fn send_community_message(
             None => None,
         };
         let reply_ref = reply_owned.as_ref().map(|(id, a)| (id.as_str(), a.as_str()));
+        // Self-Destruct Timer: stamp the sender's per-channel NIP-40 expiry (if
+        // set) so relays drop the wrap and every member's client purges on
+        // schedule. Resolved ONCE and passed to both the precompute and the send
+        // so the pure-function rumor id can't fork.
+        let mut extra_tags = bot_tags;
+        // Resolve the Self-Destruct expiry ONCE: it stamps both the outgoing
+        // rumor (so recipients + relays honour NIP-40) AND the optimistic message
+        // below, so the sender's own echo self-destructs like everyone else's.
+        let expiry = vector_core::self_destruct::resolve_send_expiry(&channel_id);
+        if let Some(exp) = expiry {
+            extra_tags.push(nostr_sdk::prelude::Tag::expiration(nostr_sdk::prelude::Timestamp::from_secs(exp)));
+        }
         let rumor = vector_core::community::v2::chat::build_message_rumor(
-            author_pk, &ch, epoch, &content, reply_ref, &emoji_pairs, bot_tags.clone(), ms,
+            author_pk, &ch, epoch, &content, reply_ref, &emoji_pairs, extra_tags.clone(), ms,
         );
         let message_id = rumor.id.ok_or("inner rumor has no id")?.to_hex();
 
@@ -819,6 +831,7 @@ pub async fn send_community_message(
             replied_to: reply.clone().unwrap_or_default(),
             emoji_tags: emoji_tags.clone(),
             addressed_bots: addressed_bots.clone(),
+            expiration: expiry,
             ..Default::default()
         };
         {
@@ -832,7 +845,7 @@ pub async fn send_community_message(
         // Same tags as the precomputed rumor above — the rumor id is a pure
         // function of its inputs, so any divergence would fork the optimistic id.
         let sent = vector_core::community::v2::service::send_chat_message_at(
-            &transport, &community, &ch, &content, reply_ref, &emoji_pairs, bot_tags, ms,
+            &transport, &community, &ch, &content, reply_ref, &emoji_pairs, extra_tags, ms,
         )
         .await;
         return match sent {
@@ -1287,6 +1300,10 @@ async fn dispatch_community_attachment_message(
     let callback = crate::message::sending::TauriSendCallback;
     let emoji_tags = vector_core::emoji_packs::resolve_outbound_emoji_tags(&content);
 
+    // Resolve the Self-Destruct expiry ONCE, before the upload, so the optimistic
+    // bubble and the post-upload imeta stamp carry the identical NIP-40 expiry —
+    // the sender's own echo self-destructs, not just the recipients'.
+    let expiry = vector_core::self_destruct::resolve_send_expiry(&channel_id);
     // Optimistic bubble — attachments carry empty URLs (plaintext is already on disk for the
     // sender's preview); the upload fills them in.
     let optimistic_attachments: Vec<_> = prepared.iter().map(|p| p.attachment.clone()).collect();
@@ -1300,6 +1317,7 @@ async fn dispatch_community_attachment_message(
         replied_to: reply.clone().unwrap_or_default(),
         emoji_tags: emoji_tags.clone(),
         attachments: optimistic_attachments,
+        expiration: expiry,
         ..Default::default()
     };
     {
@@ -1369,7 +1387,7 @@ async fn dispatch_community_attachment_message(
     }
 
     // Build the real inner now that every imeta carries its uploaded URL.
-    let imeta_tags: Vec<_> = uploaded
+    let mut imeta_tags: Vec<_> = uploaded
         .iter()
         .map(vector_core::community::attachments::attachment_to_imeta)
         .collect();
@@ -1394,6 +1412,12 @@ async fn dispatch_community_attachment_message(
         };
         let reply_ref = reply_owned.as_ref().map(|(id, a)| (id.as_str(), a.as_str()));
         let emoji_pairs: Vec<(&str, &str)> = emoji_tags.iter().map(|t| (t.shortcode.as_str(), t.url.as_str())).collect();
+        // Self-Destruct Timer: reuse the expiry resolved before the upload so the
+        // imeta and the sender's optimistic bubble carry the identical NIP-40 stamp
+        // (v2-only; the v1 file path below leaves imeta untouched).
+        if let Some(exp) = expiry {
+            imeta_tags.push(nostr_sdk::prelude::Tag::expiration(nostr_sdk::prelude::Timestamp::from_secs(exp)));
+        }
         let transport = LiveTransport::with_timeout(Duration::from_secs(12));
         let sent = vector_core::community::v2::service::send_chat_message(
             &transport, &community, &ch, &content, reply_ref, &emoji_pairs, imeta_tags,
