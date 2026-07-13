@@ -159,7 +159,11 @@ pub async fn sync_to_active_account() -> Result<(), String> {
             {
                 Ok(Ok(_svc)) => {}
                 Ok(Err(e)) => return Err(e),
-                Err(_) => return Err("Tor bootstrap timed out (120s) during account switch".to_string()),
+                Err(_) => {
+                    let msg = "Tor bootstrap timed out (120s) during account switch".to_string();
+                    vector_core::tor::set_last_bootstrap_error(msg.clone());
+                    return Err(msg);
+                }
             }
         }
         vector_core::net::rebuild_shared_http_client()?;
@@ -188,7 +192,14 @@ fn current_status_string() -> String {
         return format!("bootstrapping {}%", vector_core::tor::bootstrap_progress());
     }
     match vector_core::tor::current().map(|s| s.status()) {
-        None => "disabled".to_string(),
+        // Empty slot means either "never started" (disabled) or "the last
+        // start attempt failed". Surface the failure so the toggle unlocks
+        // instead of looping on "Starting…" (enabled + !running is otherwise
+        // indistinguishable from mid-spawn).
+        None => match vector_core::tor::last_bootstrap_error() {
+            Some(e) => format!("failed: {e}"),
+            None => "disabled".to_string(),
+        },
         Some(TorStatus::Disabled) => "disabled".to_string(),
         Some(TorStatus::Bootstrapping(p)) => format!("bootstrapping {p}%"),
         Some(TorStatus::Connected) => "connected".to_string(),
@@ -449,9 +460,12 @@ pub async fn tor_set_enabled(enabled: bool) -> Result<TorState, String> {
                     Ok(Ok(_svc)) => {}
                     Ok(Err(e)) => return Err(e),
                     Err(_) => {
-                        return Err(
-                            "Tor bootstrap timed out (120s) — connections stay blocked until Tor connects or is disabled".to_string(),
-                        )
+                        // The timeout cancels start()'s future, so its own
+                        // error-recording never runs — record it here so the
+                        // toggle surfaces "failed" and unlocks.
+                        let msg = "Tor bootstrap timed out (120s) — connections stay blocked until Tor connects or is disabled".to_string();
+                        vector_core::tor::set_last_bootstrap_error(msg.clone());
+                        return Err(msg);
                     }
                 }
             }
@@ -462,6 +476,9 @@ pub async fn tor_set_enabled(enabled: bool) -> Result<TorState, String> {
             if let Some(svc) = vector_core::tor::current() {
                 svc.stop();
             }
+            // A prior failed attempt's error must not survive an off-toggle —
+            // else the card would read "failed" while the pref is now off.
+            vector_core::tor::clear_last_bootstrap_error();
             write_setting_enabled(false)?;
         }
         vector_core::net::rebuild_shared_http_client()?;

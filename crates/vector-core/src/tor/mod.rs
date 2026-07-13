@@ -51,6 +51,28 @@ static TOR_BOOTSTRAPPING: AtomicBool = AtomicBool::new(false);
 /// `bootstrap_events()` stream while `TOR_BOOTSTRAPPING` is true.
 static TOR_BOOTSTRAP_PROGRESS: AtomicU8 = AtomicU8::new(0);
 
+/// Last start/bootstrap failure. A failed `start()` puts nothing in the slot
+/// and clears the bootstrapping flag, so without this the state is byte-identical
+/// to "still spawning" — the UI would loop on "Starting…" with a locked toggle.
+/// Cleared on a fresh start attempt and when Tor is turned off.
+static TOR_LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+/// The last recorded start/bootstrap failure, if any (see [`TOR_LAST_ERROR`]).
+pub fn last_bootstrap_error() -> Option<String> {
+    TOR_LAST_ERROR.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Record a start/bootstrap failure so status surfaces can report "failed"
+/// rather than an indistinguishable "starting".
+pub fn set_last_bootstrap_error(msg: impl Into<String>) {
+    *TOR_LAST_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = Some(msg.into());
+}
+
+/// Clear the recorded failure (a new attempt is starting, or Tor was disabled).
+pub fn clear_last_bootstrap_error() {
+    *TOR_LAST_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
 /// Returns true while `TorService::start()` is mid-execution. Useful for
 /// status surfaces that would otherwise see `is_active() == false` and
 /// mistakenly report "off" during the 5–15s bootstrap window.
@@ -106,7 +128,25 @@ impl TorService {
     /// Each line is parsed individually; invalid lines are logged and skipped.
     /// If at least one valid bridge is supplied, Arti will use bridges
     /// instead of public guards. Pass an empty slice for normal direct Tor.
+    ///
+    /// Records any failure into [`TOR_LAST_ERROR`] so the toggle UI can show
+    /// "failed" instead of looping on "Starting…"; clears it on a fresh attempt.
     pub async fn start(
+        state_dir: PathBuf,
+        cache_dir: PathBuf,
+        bridges: &[String],
+    ) -> Result<Arc<Self>, String> {
+        clear_last_bootstrap_error();
+        match Self::start_inner(state_dir, cache_dir, bridges).await {
+            Ok(svc) => Ok(svc),
+            Err(e) => {
+                set_last_bootstrap_error(e.clone());
+                Err(e)
+            }
+        }
+    }
+
+    async fn start_inner(
         state_dir: PathBuf,
         cache_dir: PathBuf,
         bridges: &[String],
