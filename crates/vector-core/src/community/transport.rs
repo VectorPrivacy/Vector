@@ -245,6 +245,39 @@ pub fn forget_warmed_relay(url: &str) {
     WARMED_RELAYS.lock().unwrap_or_else(|e| e.into_inner()).1.remove(url);
 }
 
+/// Max time a community network op holds while Tor is enabled-but-not-yet-
+/// bootstrapped. Generous enough for a circuit to land on a normal connection,
+/// bounded so a Tor that never comes up can't hang the op forever.
+#[cfg(feature = "tor")]
+const TOR_READY_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Poll `is_blocked` until it clears or `max_wait` elapses.
+///
+/// When Tor is enabled but its SOCKS proxy isn't up yet, `transport_state()` is
+/// `RequiredButInactive` and every relay is routed to the blackhole proxy, so a
+/// send fails at the TCP layer INSTANTLY — surfacing as a misleading "no relay
+/// accepted the event" with zero network wait. Holding here turns that into
+/// either success (once the circuit lands) or an honest "Tor is still
+/// connecting" error. Generic over the predicate so it is testable without a
+/// live Tor.
+#[allow(dead_code)]
+async fn wait_until_tor_ready<F: Fn() -> bool>(
+    is_blocked: F,
+    max_wait: std::time::Duration,
+) -> Result<(), String> {
+    if !is_blocked() {
+        return Ok(());
+    }
+    let deadline = std::time::Instant::now() + max_wait;
+    while is_blocked() {
+        if std::time::Instant::now() >= deadline {
+            return Err("Tor is still connecting. Wait a moment and try again.".to_string());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    Ok(())
+}
+
 /// Shed pooled Community relays from `candidates` that no JOINED community still needs. Used by both
 /// the leave path (relays of a community we left) and the invite-preload TTL cleanup (relays an
 /// unsolicited/declined invite warmed but never became a join, #297). Keep rules: a relay is kept if
@@ -322,6 +355,16 @@ impl LiveTransport {
         if relays.is_empty() {
             return Err("community has no relays configured".to_string());
         }
+        // Tor gate — runs BEFORE the warmed-cache fast path so a relay warmed
+        // before Tor was toggled on still waits. While Tor is enabled but not yet
+        // bootstrapped, every relay points at the blackhole proxy and a send
+        // fails instantly; hold for the circuit, then fail honestly if it never
+        // comes up (see `wait_until_tor_ready`).
+        #[cfg(feature = "tor")]
+        wait_until_tor_ready(
+            || matches!(crate::tor::transport_state(), crate::tor::TorTransportState::RequiredButInactive),
+            TOR_READY_WAIT,
+        ).await?;
         let client = crate::state::nostr_client().ok_or_else(|| "nostr client not initialized".to_string())?;
 
         // Fast path: every one of these relays was already warmed this session → the pool holds and
@@ -775,6 +818,38 @@ pub(crate) mod memory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Tor gate (community publish over a not-yet-bootstrapped Tor) ──────────
+    // Hermetic: drives `wait_until_tor_ready` with an injected predicate, so no
+    // live Tor is needed and the result is deterministic.
+
+    #[tokio::test]
+    async fn tor_gate_passes_immediately_when_not_blocked() {
+        let start = std::time::Instant::now();
+        let res = wait_until_tor_ready(|| false, std::time::Duration::from_secs(30)).await;
+        assert!(res.is_ok());
+        assert!(start.elapsed() < std::time::Duration::from_secs(1), "must not wait when Tor is ready");
+    }
+
+    #[tokio::test]
+    async fn tor_gate_errors_honestly_after_timeout_when_perpetually_blocked() {
+        // The bug: without this gate the send failed INSTANTLY with a misleading
+        // "no relay accepted". Now it waits the window, then names the real cause.
+        let res = wait_until_tor_ready(|| true, std::time::Duration::from_millis(300)).await;
+        let err = res.expect_err("should error when Tor never activates");
+        assert!(err.to_lowercase().contains("tor"), "error must name Tor, got: {err}");
+    }
+
+    #[tokio::test]
+    async fn tor_gate_passes_once_circuit_comes_up_mid_wait() {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        // Blocked for the first 3 polls, then Tor becomes ready.
+        let res = wait_until_tor_ready(
+            || calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 3,
+            std::time::Duration::from_secs(5),
+        ).await;
+        assert!(res.is_ok(), "should succeed once Tor activates within the window");
+    }
 
     fn evt(kind: u16, z: &str) -> Event {
         EventBuilder::new(Kind::Custom(kind), "x")

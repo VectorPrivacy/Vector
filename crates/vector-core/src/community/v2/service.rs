@@ -88,15 +88,20 @@ pub async fn create_community<T: Transport + ?Sized>(
     let _ = crate::db::community::store_epoch_key(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX, community.root_epoch.0, &community.community_root);
 
     // Publish the two genesis control editions at the epoch-0 control plane.
+    // Durable, not single-shot: over a slow transport (Tor) one attempt is a coin
+    // flip, and a lost genesis leaves a community that exists only locally. Durable
+    // races every relay, returns on the first ACK, then heals stragglers in the bg.
     for wrap in &genesis.wraps {
-        transport.publish(wrap, &community.relays).await?;
+        transport.publish_durable(wrap, &community.relays).await?;
     }
 
-    // Announce the owner's Guestbook Join so they appear in the memberlist.
+    // Announce the owner's Guestbook Join so they appear in the memberlist. Relays are
+    // proven-alive by the genesis ACK above, so durable here just guarantees the owner's
+    // own join lands (member count) without a real block risk.
     let gb_group = super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
     let join_rumor = guestbook::build_join_rumor(owner.public_key(), None, at_ms);
     if let Ok((join_wrap, _)) = guestbook::seal_guestbook_rumor(&join_rumor, &gb_group, &owner, Timestamp::from_secs(at_ms / 1000)) {
-        let _ = transport.publish(&join_wrap, &community.relays).await;
+        let _ = transport.publish_durable(&join_wrap, &community.relays).await;
     }
 
     // Sync the new membership across devices (CORD-02 §8) — best-effort.
