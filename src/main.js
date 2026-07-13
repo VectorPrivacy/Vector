@@ -12193,6 +12193,18 @@ function anchorShowsItsDestination(anchor) {
     return !!label && label === rawHref;
 }
 
+/**
+ * App-chrome anchors (e.g. the Tor attribution logo) use a placeholder `#` or a
+ * relative href that resolves to Vector's own origin and open via their own
+ * click handler. The phishing tooltip + open-confirm are for EXTERNAL links in
+ * untrusted message content only — markdown strips raw <a>, so genuine message
+ * links are always cross-origin. Same-origin therefore means "our own UI".
+ */
+function isAppChromeAnchor(anchor) {
+    try { return new URL(anchor.href).origin === location.origin; }
+    catch { return true; }
+}
+
 // Hover tooltip: the honest counterpart to the open-confirm. Surfaces a
 // labeled web link's true destination centered above it, since the visible
 // text may say anything. Desktop only: touch has no hover, and the synthetic
@@ -12201,6 +12213,7 @@ document.addEventListener('mouseover', (e) => {
     if (platformFeatures?.is_mobile) return;
     const anchor = e.target.closest?.('a[href]');
     if (!anchor || !/^https?:/i.test(anchor.href)) return;
+    if (isAppChromeAnchor(anchor)) return;
     if (anchorShowsItsDestination(anchor)) return;
     // Tail-truncate only, so the security-relevant scheme + host stay visible;
     // the tooltip wraps up to a few lines.
@@ -12221,7 +12234,7 @@ document.addEventListener('click', (e) => {
     // text already IS the destination. UI anchors with their own handlers
     // stopPropagation before reaching here.
     const anchor = e.target.closest?.('a');
-    if (anchor && anchor.href) {
+    if (anchor && anchor.href && !isAppChromeAnchor(anchor)) {
         e.preventDefault();
         if (anchorShowsItsDestination(anchor)) return openUrl(anchor.href);
         return confirmAndOpenUrl(anchor.href);
