@@ -243,16 +243,32 @@ pub fn strip_content_for_preview(text: &str) -> String {
     collapsed.trim().to_string()
 }
 
-/// Replace `@npub1...` mentions in message content with `@DisplayName`.
-/// Prioritises nickname > name > leaves raw npub unchanged.
+/// Replace mention tokens in message content with `@DisplayName`, matching what
+/// the in-app renderer treats as a mention so the notification preview reads the
+/// same as the chat. Recognises all three forms Vector emits: `@npub1…`,
+/// `nostr:npub1…` (NIP-21), and a bare `npub1…`. Prioritises nickname > name;
+/// an unknown npub (no name found) is left verbatim.
+pub fn resolve_mention_display_names(content: &str, state: &crate::state::ChatState) -> String {
+    resolve_mentions_with(content, |npub| {
+        let p = state.get_profile(npub)?;
+        if !p.nickname.is_empty() {
+            Some(p.nickname.to_string())
+        } else if !p.name.is_empty() {
+            Some(p.name.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+/// The pure scanner behind [`resolve_mention_display_names`]. `lookup` maps a
+/// bare npub to its display name (`None` = unknown, leave the token untouched).
 ///
 /// Operates on `&str` slices to stay UTF-8 safe — npub1 + 58 bech32 chars are
 /// always ASCII, so we anchor on byte offsets only within the ASCII portion and
 /// copy surrounding text (which may contain emoji / multibyte) via `&content[..]`.
-pub fn resolve_mention_display_names(content: &str, state: &crate::state::ChatState) -> String {
-    // npub = "npub1" (5) + 58 bech32 chars = 63 ASCII bytes; with '@' prefix = 64
-    const MENTION_LEN: usize = 64; // '@' + 63
-    const NPUB_LEN: usize = 63;
+fn resolve_mentions_with<F: Fn(&str) -> Option<String>>(content: &str, lookup: F) -> String {
+    const NPUB_LEN: usize = 63; // "npub1" (5) + 58 bech32 chars
     const BECH32: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
 
     let bytes = content.as_bytes();
@@ -260,38 +276,33 @@ pub fn resolve_mention_display_names(content: &str, state: &crate::state::ChatSt
     let mut result = String::with_capacity(len);
     let mut cursor = 0; // byte offset of uncopied content
 
-    // Scan for '@npub1' anchors
+    // Anchor on the npub itself, then swallow whatever mention prefix precedes it
+    // (`@` or `nostr:`) so the whole token collapses to a single @name.
     let mut i = 0;
-    while i + MENTION_LEN <= len {
-        if bytes[i] == b'@' && &bytes[i + 1..i + 6] == b"npub1" {
-            // Validate 58 bech32 chars after 'npub1'
-            let npub_start = i + 1;
-            let npub_end = npub_start + NPUB_LEN;
-            let valid = bytes[npub_start + 5..npub_end]
+    while i + NPUB_LEN <= len {
+        let is_npub = &bytes[i..i + 5] == b"npub1"
+            && bytes[i + 5..i + NPUB_LEN]
                 .iter()
                 .all(|b| BECH32.contains(&b.to_ascii_lowercase()));
-            if valid {
-                // Copy any text before this mention verbatim (UTF-8 safe)
-                result.push_str(&content[cursor..i]);
-
-                let npub = &content[npub_start..npub_end];
-                if let Some(profile) = state.get_profile(npub) {
-                    let name = if !profile.nickname.is_empty() {
-                        &profile.nickname
-                    } else if !profile.name.is_empty() {
-                        &profile.name
-                    } else {
-                        npub
-                    };
-                    result.push('@');
-                    result.push_str(name);
+        if is_npub {
+            let npub_end = i + NPUB_LEN;
+            if let Some(name) = lookup(&content[i..npub_end]) {
+                let mstart = if i >= 1 && bytes[i - 1] == b'@' {
+                    i - 1
+                } else if i >= 6 && &bytes[i - 6..i] == b"nostr:" {
+                    i - 6
                 } else {
-                    result.push_str(&content[i..npub_end]);
-                }
+                    i
+                };
+                result.push_str(&content[cursor..mstart]);
+                result.push('@');
+                result.push_str(&name);
                 cursor = npub_end;
-                i = npub_end;
-                continue;
             }
+            // Unknown npub: leave the token (and its prefix) verbatim — it stays
+            // in `content[cursor..]` and is copied by a later match or the tail.
+            i = npub_end;
+            continue;
         }
         i += 1;
     }
@@ -299,6 +310,39 @@ pub fn resolve_mention_display_names(content: &str, state: &crate::state::ChatSt
     // Append remaining content after last match (or entire string if no matches)
     result.push_str(&content[cursor..]);
     result
+}
+
+#[cfg(test)]
+mod mention_tests {
+    use super::resolve_mentions_with;
+
+    #[test]
+    fn resolves_at_nostr_and_bare_npub_forms() {
+        let npub = format!("npub1{}", "q".repeat(58));
+        let unknown = format!("npub1{}", "p".repeat(58));
+        let known: &str = &npub;
+        let lookup = |n: &str| (n == known).then(|| "Alice".to_string());
+
+        // All three mention forms collapse to @DisplayName.
+        assert_eq!(resolve_mentions_with(&format!("hey @{npub}!"), lookup), "hey @Alice!");
+        assert_eq!(resolve_mentions_with(&format!("hey nostr:{npub}!"), lookup), "hey @Alice!");
+        assert_eq!(resolve_mentions_with(&format!("hey {npub}!"), lookup), "hey @Alice!");
+
+        // No name found → the raw token (prefix included) is left verbatim.
+        assert_eq!(
+            resolve_mentions_with(&format!("hi nostr:{unknown}"), lookup),
+            format!("hi nostr:{unknown}")
+        );
+
+        // Mixed forms, multiple mentions, surrounding text preserved.
+        assert_eq!(
+            resolve_mentions_with(&format!("{npub} and nostr:{npub} done"), lookup),
+            "@Alice and @Alice done"
+        );
+
+        // No mentions at all: content passes through unchanged.
+        assert_eq!(resolve_mentions_with("just a normal line", lookup), "just a normal line");
+    }
 }
 
 /// Revoke the OS notification for a chat once it's been read (opened in-app) or answered on
