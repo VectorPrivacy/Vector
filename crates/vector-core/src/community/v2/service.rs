@@ -1065,10 +1065,13 @@ pub async fn accept_parked_invite<T: Transport + ?Sized>(
 /// the newest valid Live by `created_at`. Read-only.
 pub async fn fetch_public_bundle<T: Transport + ?Sized>(transport: &T, url: &str) -> Result<CommunityInvite, String> {
     let parsed = invite::parse_invite_link(url).map_err(|e| e.to_string())?;
+    // NO `#d` filter, even though the coordinate's `d` is empty (CORD-05 §2). Relays disagree on
+    // indexing an empty tag value: some answer the REQ and then never EOSE, so the fetch burns its
+    // whole union grace on every invite. The per-link signer pins the coordinate on its own (it
+    // signs nothing else), and `parse_bundle_event` re-checks the empty `d` locally.
     let query = Query {
         kinds: vec![super::kind::INVITE_BUNDLE],
         authors: vec![parsed.link_signer.to_hex()],
-        d_tags: vec![String::new()],
         ..Default::default()
     };
     let relays = if parsed.bootstrap_relays.is_empty() {

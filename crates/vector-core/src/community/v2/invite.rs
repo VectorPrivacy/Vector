@@ -257,6 +257,11 @@ pub fn parse_bundle_event(
     if event.pubkey != *expected_signer {
         return Err(InviteError::BadEvent("author is not the link signer"));
     }
+    // The coordinate is `(33301, link_signer, "")`. The fetch filters on the author alone (relays
+    // handle an empty `#d` filter inconsistently), so pin the empty `d` here instead.
+    if !first_tag(event, "d").unwrap_or_default().is_empty() {
+        return Err(InviteError::BadEvent("bundle is not at the link's coordinate"));
+    }
     event.verify().map_err(|_| InviteError::BadEvent("signature invalid"))?;
 
     match first_tag(event, "vsk").as_deref() {
@@ -945,6 +950,26 @@ mod tests {
         assert!(matches!(
             parse_bundle_event(&event, &real.public_key(), &key),
             Err(InviteError::BadEvent("author is not the link signer"))
+        ));
+    }
+
+    /// The fetch filters on the author alone (an empty `#d` filter is answered inconsistently by
+    /// relays), so the empty `d` MUST be pinned here — otherwise the same signer's event at any
+    /// other `d` would be accepted as the bundle.
+    #[test]
+    fn bundle_event_at_a_non_empty_d_is_rejected() {
+        let (_owner, bundle) = valid_bundle();
+        let link = Keys::generate();
+        let key = invite_bundle_key(&[9u8; TOKEN_LEN]);
+        let json = serde_json::to_string(&bundle).unwrap();
+        let content = seal_bundle(&key, &json).unwrap();
+        let event = EventBuilder::new(Kind::Custom(kind::INVITE_BUNDLE), content)
+            .tags([Tag::identifier("elsewhere"), vsk_tag(vsk::INVITE_LIVE)])
+            .sign_with_keys(&link)
+            .unwrap();
+        assert!(matches!(
+            parse_bundle_event(&event, &link.public_key(), &key),
+            Err(InviteError::BadEvent("bundle is not at the link's coordinate"))
         ));
     }
 
