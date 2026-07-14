@@ -323,8 +323,14 @@ fn next_token(s: &str, mut i: usize) -> Option<(String, usize)> {
 pub fn parse_command_text(manifest: &BotManifest, content: &str) -> Option<ParsedCommand> {
     let content = content.trim();
     let rest = content.strip_prefix('/')?;
+    // The grammar is `"/" name`: a quoted first token is ordinary chat, not a
+    // command word. Test the RAW input — `next_token` hands back a quoted span
+    // with its quotes already stripped, so inspecting the token can never see one.
+    if rest.starts_with('"') {
+        return None;
+    }
     let (raw_name, mut cursor) = next_token(rest, 0)?;
-    if raw_name.starts_with('"') || raw_name.is_empty() {
+    if raw_name.is_empty() {
         return None;
     }
     // Manifest names are lowercase slugs, so fold the invocation's command word:
@@ -714,6 +720,21 @@ mod tests {
         let back = BotManifest::from_event(&ev).unwrap();
         assert_eq!(back.commands.len(), 2);
         assert_eq!(back.command("price").unwrap().args[0].choices.len(), 3);
+    }
+
+    #[test]
+    fn a_quoted_command_word_is_ordinary_chat() {
+        // The grammar is `"/" name`, so a quoted first token is not a command.
+        // The guard has to read the RAW input: `next_token` returns a quoted span
+        // with its quotes stripped, so a check on the token can never fire — and
+        // this parsed as a valid `/price` until it did. A message another client
+        // sends as chat must not execute here.
+        let m = price_manifest();
+        assert!(parse_command_text(&m, r#"/"price" btc"#).is_none());
+        assert!(parse_command_text(&m, r#"/"" btc"#).is_none());
+
+        // The unquoted form still parses, so the guard is narrow.
+        assert!(parse_command_text(&m, "/price btc").is_some());
     }
 
     #[test]
