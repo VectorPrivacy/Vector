@@ -7758,6 +7758,22 @@ async function deleteFailedMessage(msgId) {
 
 
 /**
+ * Center the message `targetMsgId` in the chat and flash-highlight it. If the
+ * row isn't in the current window, load its surrounding messages and scroll
+ * there. Shared by the inline reply-quote tap and the composer's reply bar.
+ */
+function jumpToMessage(targetMsgId) {
+    if (!targetMsgId) return;
+    const domMsg = document.getElementById(targetMsgId);
+    if (domMsg) {
+        centerInView(domMsg);
+        applyHighlight(domMsg, 'jumped');
+    } else {
+        loadAndScrollToMessage(targetMsgId);
+    }
+}
+
+/**
  * Cancel any ongoing replies and reset the messaging interface
  */
 function cancelReply() {
@@ -11216,6 +11232,16 @@ window.addEventListener("DOMContentLoaded", async () => {
 
     domChatReplyBarCancel.onclick = () => cancelReply();
 
+    // Tapping the reply bar's content jumps to the message being replied to,
+    // like tapping an inline reply quote. The cancel button keeps its own handler.
+    const domChatReplyBar = document.getElementById('chat-reply-bar');
+    if (domChatReplyBar) {
+        domChatReplyBar.addEventListener('click', (e) => {
+            if (e.target.closest('#chat-reply-bar-cancel')) return;
+            jumpToMessage(strCurrentReplyReference);
+        });
+    }
+
     // Hook up a scroll handler in the chat to display UI elements at certain scroll depths
     createScrollHandler(domChatMessages, domChatMessagesScrollReturnBtn, {
         threshold: 500,
@@ -12304,15 +12330,7 @@ document.addEventListener('click', (e) => {
         const replyEl = e.target.closest('.dmsg-reply');
         if (replyEl) {
             // The `substring(2)` removes the `r-` prefix
-            const targetMsgId = replyEl.id.substring(2);
-            const domMsg = document.getElementById(targetMsgId);
-            if (domMsg) {
-                centerInView(domMsg);
-                applyHighlight(domMsg, 'jumped');
-            } else {
-                // Message not rendered yet, load it and surrounding messages
-                loadAndScrollToMessage(targetMsgId);
-            }
+            jumpToMessage(replyEl.id.substring(2));
             return;
         }
     }

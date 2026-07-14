@@ -3413,7 +3413,7 @@ body.chat-bg-disabled .chat-messages::before {
                                  clears the absolutely-anchored cancel button */
   -webkit-user-select: none;
   user-select: none;
-  cursor: default;
+  cursor: pointer;   /* the bar taps through to the replied-to message */
   background-color: #0d0d0d;
   background-color: color-mix(in srgb, var(--accent-color, #59fcb3) 6%, #060606);
   border-radius: 10px 10px 0 0;
