@@ -15492,7 +15492,9 @@ hr {
   min-width: 0;
   box-sizing: border-box;
   min-height: 45px;
-  padding: 6px 10px 6px 0;
+  /* Left inset stands in for the hidden "+" button, which used to supply it;
+     the send button still frames the right, so the row stays balanced. */
+  padding: 6px 10px 6px 12px;
   margin: 0;
   outline: none;
 }
@@ -15510,6 +15512,13 @@ hr {
 
 #chat-box.commanding.replying {
   padding-top: 73px;   /* both strips: 5px + 34px + 34px */
+}
+
+/* The structured command IS the whole message: attaching a file or inserting
+   an emoji doesn't apply, so hide those buttons while the composer is open. */
+#chat-box.commanding #chat-input-file,
+#chat-box.commanding #chat-input-emoji {
+  display: none;
 }
 
 #chat-command-bar {
