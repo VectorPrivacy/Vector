@@ -1,6 +1,6 @@
 //! A slash-command bot on the Bot Interface manifest system (Phase 1).
 //!
-//! Commands are registered with the builder, so the kind-33304 manifest
+//! Commands are registered with the builder, so the kind-10304 manifest
 //! publishes automatically at listen start and clients render a `/` picker
 //! with typed argument hints. Invocations arrive as plain message content —
 //! any client can type them.

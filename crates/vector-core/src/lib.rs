@@ -1991,7 +1991,7 @@ impl VectorCore {
             return ChatCommandsSnapshot { bots: 0, commands: Vec::new(), fresh: true };
         }
         // The chat's own relays PLUS the discovery indexers, one REQ across the
-        // union — a room whose relays refuse kind 33304 still resolves.
+        // union — a room whose relays refuse kind 10304 still resolves.
         relays.extend(bot_interface::DISCOVERY_RELAYS.iter().map(|s| s.to_string()));
         relays.sort();
         relays.dedup();

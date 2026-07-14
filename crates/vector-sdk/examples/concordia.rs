@@ -104,7 +104,7 @@ async fn main() -> vector_sdk::Result<()> {
     }
 
     // Slash commands (Bot Interface Phase 1): registered here, published as the
-    // kind-33304 manifest at listen start, invoked by PLAIN TEXT from any client.
+    // kind-10304 manifest at listen start, invoked by PLAIN TEXT from any client.
     // Vector's `/` picker renders exactly this registry with argument hints; a
     // matched invocation is consumed before the legacy !bang console below.
     bot.command("help", "List everything Concordia can do").run(|ctx| async move {

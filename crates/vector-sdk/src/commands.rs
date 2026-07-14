@@ -226,7 +226,10 @@ impl VectorBot {
                 Err(e) => {
                     println!("[CMD] /{} REJECTED ({e}) raw={:?}", parsed.name, parsed.args);
                     let usage = usage_line(&spec);
-                    let _ = incoming.reply(&format!("{e} — usage: {usage}")).await;
+                    // Canonical two-line error: `{arg}: {reason}` then `usage: {line}`.
+                    // ASCII-only and split-on-first-newline parsable, so every
+                    // implementation emits byte-identical text.
+                    let _ = incoming.reply(&format!("{e}\nusage: {usage}")).await;
                 }
             }
         });

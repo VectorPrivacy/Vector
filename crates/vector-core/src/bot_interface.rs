@@ -1,13 +1,13 @@
 //! Bot Interface — manifests + slash commands (Phase 1 of the bot-UI layer).
 //!
 //! Transport-agnostic by design: everything here is CONTENT-level (structured
-//! tags on ordinary chat rumors, plus one plain addressable discovery event),
+//! tags on ordinary chat rumors, plus one plain replaceable discovery event),
 //! so the same commands work in NIP-17 DMs and Concord v1/v2 channels — the
 //! envelope is whatever the conversation already uses.
 //!
 //! Two pieces:
 //!
-//! 1. **Manifest** ([`BotManifest`], kind [`KIND_BOT_MANIFEST`]): an addressable
+//! 1. **Manifest** ([`BotManifest`], kind [`KIND_BOT_MANIFEST`]): a replaceable
 //!    event signed by the bot's key describing every command with typed args.
 //!    Clients fetch it by pubkey to render a `/` picker with argument hints and
 //!    validate input before anything hits the wire.
@@ -26,9 +26,9 @@ use std::collections::HashMap;
 use nostr_sdk::prelude::{Event, EventBuilder, Keys, Kind, Tag};
 use serde::{Deserialize, Serialize};
 
-/// Addressable bot-interface manifest (outside any wrap; sibling of the public
-/// invite bundle in the registry). One per bot pubkey at an empty `d`.
-pub const KIND_BOT_MANIFEST: u16 = 33304;
+/// Replaceable bot-interface manifest (outside any wrap): one authoritative
+/// command catalog per bot pubkey, the same shape as a profile or relay list.
+pub const KIND_BOT_MANIFEST: u16 = 10304;
 
 /// Optional recipient tag a picker client attaches to an invocation:
 /// `["bot", <bot pubkey hex>]`. Addressing is the ONE piece of a command not
@@ -230,13 +230,12 @@ impl BotManifest {
         Ok(m)
     }
 
-    /// Build the signed addressable manifest event (empty `d`: one manifest per
-    /// bot identity).
+    /// Build the signed replaceable manifest event (one manifest per bot
+    /// identity, keyed by `(kind, pubkey)` with no `d` tag).
     pub fn to_event(&self, keys: &Keys) -> Result<Event, String> {
         self.validate()?;
         let content = serde_json::to_string(self).map_err(|e| e.to_string())?;
         EventBuilder::new(Kind::Custom(KIND_BOT_MANIFEST), content)
-            .tags([Tag::identifier("")])
             .sign_with_keys(keys)
             .map_err(|e| e.to_string())
     }
@@ -324,10 +323,13 @@ fn next_token(s: &str, mut i: usize) -> Option<(String, usize)> {
 pub fn parse_command_text(manifest: &BotManifest, content: &str) -> Option<ParsedCommand> {
     let content = content.trim();
     let rest = content.strip_prefix('/')?;
-    let (name, mut cursor) = next_token(rest, 0)?;
-    if name.starts_with('"') || name.is_empty() {
+    let (raw_name, mut cursor) = next_token(rest, 0)?;
+    if raw_name.starts_with('"') || raw_name.is_empty() {
         return None;
     }
+    // Manifest names are lowercase slugs, so fold the invocation's command word:
+    // `/Help` and `/HELP` resolve like `/help`. Argument VALUES keep their case.
+    let name = raw_name.to_ascii_lowercase();
     let spec = manifest.command(&name)?;
     let mut args: Vec<(String, String)> = Vec::new();
     for (i, a) in spec.args.iter().enumerate() {
@@ -399,6 +401,11 @@ impl ArgValue {
 /// parses as its declared type, choices are members, required args are present.
 /// Unknown arg names are DROPPED (a newer client may know newer args; the bot's
 /// manifest is authoritative for what it consumes).
+///
+/// Errors are CANONICAL and machine-parsable — always `{arg}: {reason}`, so any
+/// implementation (in any language) emits byte-identical text and a client can
+/// split on the first `": "`. Reasons: `not an integer`, `not a number`,
+/// `not a boolean`, `not an npub`, `not one of a, b, c`, `required`.
 pub fn typed_args(spec: &CommandSpec, parsed: &ParsedCommand) -> Result<HashMap<String, ArgValue>, String> {
     let mut out = HashMap::new();
     for (k, v) in &parsed.args {
@@ -415,14 +422,20 @@ pub fn typed_args(spec: &CommandSpec, parsed: &ParsedCommand) -> Result<HashMap<
                 _ => return Err(format!("{k}: not a boolean")),
             },
             ArgType::User => {
-                if !v.starts_with("npub1") || v.len() > 70 {
+                // Canonical wire form is the bare npub, but clients commonly insert a
+                // mention as the NIP-21 `nostr:npub1…` URI — accept it and normalize
+                // back to the bare npub. Parsing also rejects a bad bech32 checksum.
+                let raw = v.strip_prefix("nostr:").unwrap_or(v);
+                if !raw.starts_with("npub1") {
                     return Err(format!("{k}: not an npub"));
                 }
-                ArgValue::User(v.clone())
+                let pk = nostr_sdk::prelude::PublicKey::parse(raw).map_err(|_| format!("{k}: not an npub"))?;
+                let npub = nostr_sdk::prelude::ToBech32::to_bech32(&pk).map_err(|_| format!("{k}: not an npub"))?;
+                ArgValue::User(npub)
             }
             ArgType::Choice => {
                 if !a.choices.iter().any(|c| c == v) {
-                    return Err(format!("{k}: not one of {:?}", a.choices));
+                    return Err(format!("{k}: not one of {}", a.choices.join(", ")));
                 }
                 ArgValue::Choice(v.clone())
             }
@@ -431,7 +444,7 @@ pub fn typed_args(spec: &CommandSpec, parsed: &ParsedCommand) -> Result<HashMap<
     }
     for a in &spec.args {
         if a.required && !out.contains_key(&a.name) {
-            return Err(format!("missing required arg {:?}", a.name));
+            return Err(format!("{}: required", a.name));
         }
     }
     Ok(out)
@@ -448,7 +461,7 @@ pub struct ChatBotCommands {
     pub commands: Vec<CommandSpec>,
 }
 
-/// Public relays that index addressable events network-wide — the reliable
+/// Public relays that index replaceable events network-wide — the reliable
 /// discovery path for bot manifests. Read side: always queried ALONGSIDE a
 /// chat's own relays, so a manifest resolves even when a community relay is
 /// unreachable or drops stranger events (Ditto does). Write side: the SDK
@@ -609,7 +622,7 @@ pub fn spawn_commands_refresh(chat_id: String, bots: Vec<nostr_sdk::prelude::Pub
 
 // ── Network: publish + fetch ─────────────────────────────────────────────────
 
-/// Publish `manifest` as the signed addressable event over the given relays
+/// Publish `manifest` as the signed replaceable event over the given relays
 /// (targeted send — the caller decides the reach: login relays, communities,
 /// indexers). Returns how many relays accepted it.
 pub async fn publish_manifest(manifest: &BotManifest, keys: &Keys, relays: &[String]) -> Result<usize, String> {
@@ -701,6 +714,68 @@ mod tests {
         let back = BotManifest::from_event(&ev).unwrap();
         assert_eq!(back.commands.len(), 2);
         assert_eq!(back.command("price").unwrap().args[0].choices.len(), 3);
+    }
+
+    #[test]
+    fn the_command_word_is_case_folded() {
+        // Manifest names are lowercase slugs, so `/PRICE` and `/Say` still resolve.
+        let m = price_manifest();
+        let p = parse_command_text(&m, "/PRICE btc").expect("an uppercase command resolves");
+        assert_eq!(p.name, "price");
+        assert_eq!(p.args, vec![("asset".to_string(), "btc".to_string())]);
+
+        // Only the command WORD folds — argument values keep their case.
+        let p = parse_command_text(&m, "/Say 2 Hello There").expect("a mixed-case command resolves");
+        assert_eq!(p.name, "say");
+        assert_eq!(p.args[1], ("text".to_string(), "Hello There".to_string()));
+    }
+
+    #[test]
+    fn user_args_accept_the_nip21_uri_and_normalize_to_a_bare_npub() {
+        use nostr_sdk::prelude::ToBech32;
+        let npub = Keys::generate().public_key().to_bech32().unwrap();
+        let spec = CommandSpec {
+            name: "greet".into(),
+            description: String::new(),
+            args: vec![ArgSpec {
+                name: "who".into(),
+                arg_type: ArgType::User,
+                description: String::new(),
+                required: true,
+                choices: vec![],
+            }],
+        };
+        let m = BotManifest { v: 1, commands: vec![spec.clone()] };
+
+        // The bare npub — what a compliant picker emits.
+        let p = parse_command_text(&m, &format!("/greet {npub}")).unwrap();
+        assert_eq!(typed_args(&spec, &p).unwrap()["who"], ArgValue::User(npub.clone()));
+
+        // A NIP-21 `nostr:` mention URI: accepted, normalized back to the bare npub.
+        let p = parse_command_text(&m, &format!("/greet nostr:{npub}")).unwrap();
+        assert_eq!(typed_args(&spec, &p).unwrap()["who"], ArgValue::User(npub.clone()));
+
+        // A malformed npub is still refused (the bech32 checksum is verified).
+        let p = parse_command_text(&m, "/greet npub1nope").unwrap();
+        assert!(typed_args(&spec, &p).is_err());
+    }
+
+    #[test]
+    fn typing_errors_are_canonical_and_parsable() {
+        // Every error is `{arg}: {reason}` — byte-identical in any implementation,
+        // so a client splits on the first ": " to recover which arg failed and why.
+        let m = price_manifest();
+        let price = m.command("price").unwrap().clone();
+        let say = m.command("say").unwrap().clone();
+
+        let p = parse_command_text(&m, "/price doge").unwrap();
+        assert_eq!(typed_args(&price, &p).unwrap_err(), "asset: not one of btc, xmr, pivx");
+
+        let p = parse_command_text(&m, "/price").unwrap();
+        assert_eq!(typed_args(&price, &p).unwrap_err(), "asset: required");
+
+        let p = parse_command_text(&m, "/say notanint hi").unwrap();
+        assert_eq!(typed_args(&say, &p).unwrap_err(), "count: not an integer");
     }
 
     #[test]
@@ -858,7 +933,6 @@ mod tests {
 
         let manifest_event = |m: &BotManifest, keys: &Keys, at: u64| {
             EventBuilder::new(Kind::Custom(KIND_BOT_MANIFEST), serde_json::to_string(m).unwrap())
-                .tags([Tag::identifier("")])
                 .custom_created_at(Timestamp::from_secs(at))
                 .sign_with_keys(keys)
                 .unwrap()
@@ -872,7 +946,6 @@ mod tests {
         let new_ev = manifest_event(&newer, &bot_a, 200);
         // B: newest is garbage — B has no usable interface (no fallback to older).
         let b_garbage = EventBuilder::new(Kind::Custom(KIND_BOT_MANIFEST), "not json")
-            .tags([Tag::identifier("")])
             .custom_created_at(Timestamp::from_secs(300))
             .sign_with_keys(&bot_b)
             .unwrap();

@@ -1,7 +1,7 @@
-//! Last-known bot manifests (kind 33304) — the `/` command picker's persistent
+//! Last-known bot manifests (kind 10304) — the `/` command picker's persistent
 //! layer. One row per bot pubkey, replaced only by a NEWER manifest edition, so
 //! the picker serves instantly from boot while a background refetch converges.
-//! Manifests are PUBLIC addressable events: rows are plaintext by design.
+//! Manifests are PUBLIC replaceable events: rows are plaintext by design.
 
 use rusqlite::{params, OptionalExtension};
 
