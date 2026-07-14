@@ -1123,7 +1123,15 @@ const VERIFIED_PREVIEW_TTL: std::time::Duration = std::time::Duration::from_secs
 /// — the caller hasn't joined.
 pub async fn preview_public_link<T: Transport + ?Sized>(transport: &T, url: &str) -> Result<CommunityV2, String> {
     let bundle = fetch_public_bundle(transport, url).await?;
-    let community = CommunityV2::from_bundle(&bundle, 0)?;
+    preview_bundle(transport, &bundle).await
+}
+
+/// The fold half of [`preview_public_link`], over an already-fetched bundle. Split out so a caller
+/// that only needs the community's IDENTITY can read it off the bundle (it is self-certifying) and
+/// skip the Control-Plane walk entirely — the walk is the join gate, and `accept_public_link` runs
+/// it again regardless.
+pub async fn preview_bundle<T: Transport + ?Sized>(transport: &T, bundle: &CommunityInvite) -> Result<CommunityV2, String> {
+    let community = CommunityV2::from_bundle(bundle, 0)?;
     match verify_owner_root_and_reconcile(transport, community.clone()).await {
         Ok((folded, heads)) => {
             *VERIFIED_PREVIEW.lock().unwrap() = Some(VerifiedPreview {

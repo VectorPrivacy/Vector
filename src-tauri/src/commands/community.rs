@@ -3375,20 +3375,28 @@ pub async fn preview_public_invite(url: String) -> Result<PublicInvitePreviewInf
     // fold, so a forged link can't render a convincing preview.
     if vector_core::community::v2::invite::parse_invite_link(&url).is_ok() {
         let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-        let folded = vector_core::community::v2::service::preview_public_link(&transport, &url).await?;
-        let community_id = vector_core::simd::hex::bytes_to_hex_32(&folded.id().0);
-        // Already a member → local state IS the preview (the community's own
-        // sync keeps it fresh): one source of truth, zero divergence.
-        if let Ok(Some(local)) = vector_core::db::community::load_community_v2(folded.id()) {
-            return Ok(PublicInvitePreviewInfo {
-                preview: PublicInvitePreview {
-                    name: local.name.clone(),
-                    description: local.description.clone(),
-                    icon: local.icon.as_ref().map(|i| i.to_community_image()),
-                },
-                community_id,
-            });
+        let bundle = vector_core::community::v2::service::fetch_public_bundle(&transport, &url).await?;
+        // The bundle's `community_id` is self-certifying (sha256 over owner+salt, verified as the
+        // bundle is decrypted), so it names the community without folding anything.
+        let community_id = bundle.community_id.clone();
+        // Already a member → local state IS the preview (the community's own sync keeps it fresh):
+        // one source of truth, zero divergence. Short-circuit BEFORE the fold — that walk is the
+        // join gate (`accept_public_link` runs it again anyway) and no join is coming, so paying
+        // for it here only to discard it is what made an already-joined v2 link preview slower
+        // than v1, which short-circuits at this same point.
+        if let Ok(id_bytes) = hex_to_id32(&community_id) {
+            if let Ok(Some(local)) = vector_core::db::community::load_community_v2(&CommunityId(id_bytes)) {
+                return Ok(PublicInvitePreviewInfo {
+                    preview: PublicInvitePreview {
+                        name: local.name.clone(),
+                        description: local.description.clone(),
+                        icon: local.icon.as_ref().map(|i| i.to_community_image()),
+                    },
+                    community_id,
+                });
+            }
         }
+        let folded = vector_core::community::v2::service::preview_bundle(&transport, &bundle).await?;
         return Ok(PublicInvitePreviewInfo {
             preview: PublicInvitePreview {
                 name: folded.name.clone(),
