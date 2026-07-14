@@ -2228,6 +2228,14 @@ async function previewAndJoinCommunityLink(url) {
             popupConfirm('Invalid Invite', 'This invite link could not be loaded.<br><br>' + escapeHtml(String(e)), true, '', 'vector_warning.svg');
             return;
         }
+        // Already a member: opening an invite is a navigation intent, not a join request — take them
+        // to the community instead of asking them to join a room they're standing in.
+        const joined = findCommunityChat(preview.community_id);
+        if (joined) {
+            hideToast();
+            openChat(joined.id);
+            return;
+        }
         const descHtml = preview.description ? `<br><br><span style="opacity:0.8;">${escapeHtml(preview.description)}</span>` : '';
         // Show the community's own logo when it has one, else the same placeholder the chat list
         // uses for logo-less communities. Bare filename: popupConfirm prefixes `./icons/` itself.
@@ -2474,9 +2482,15 @@ function _fillCommunityInviteCard(card, inviteKey, res, els, animate) {
     if (animate) card.classList.add('cic-ready');
 }
 
+/** The chat row of a community we're already in, or undefined. */
+function findCommunityChat(communityId) {
+    if (!communityId) return undefined;
+    return arrChats.find(c => c.chat_type === 'Community' && c.metadata?.custom_fields?.community_id === communityId);
+}
+
 /** Point the card's button at the right action: Open when already a member, else Join. */
 function _setInviteCardAction(btn, inviteKey, communityId) {
-    const joined = communityId && arrChats.find(c => c.metadata?.custom_fields?.community_id === communityId);
+    const joined = findCommunityChat(communityId);
     btn.disabled = false;
     if (joined) {
         btn.textContent = 'Open';
