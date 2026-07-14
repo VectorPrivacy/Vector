@@ -37,12 +37,10 @@ pub fn parse_deep_link(url_str: &str) -> Option<DeepLinkAction> {
     // Normalize the URL for parsing
     let url_str = url_str.trim();
 
-    // Community invites carry their payload in the URL FRAGMENT (#…), which the path parsers
-    // below strip. Catch them first and pass the whole URL through — the join flow re-parses the
-    // fragment. Covers `vector://invite#…` ("//invite" ends with "/invite") and
-    // `https://vectorapp.io/invite#…`.
+    // Community invites carry secrets in the URL FRAGMENT (#…), which the path parsers below
+    // strip. Catch them first and pass the whole URL through — the join flow re-parses it.
     if let Some((before, frag)) = url_str.split_once('#') {
-        if !frag.is_empty() && before.ends_with("/invite") {
+        if !frag.is_empty() && is_invite_locator(before) {
             return Some(DeepLinkAction {
                 action_type: "community_invite".to_string(),
                 target: url_str.to_string(),
@@ -144,6 +142,23 @@ fn validate_naddr(naddr: &str) -> bool {
     naddr.starts_with("naddr1") && naddr.len() >= 30
 }
 
+/// The locator half of an invite link (everything before the `#`).
+///
+/// A v1 link keeps its whole payload in the fragment, so the path just ends at `/invite`.
+/// A v2 link carries the bundle coordinate as an naddr path segment (`/invite/<naddr>`) and is
+/// honoured from ANY host: the naddr+fragment self-authenticates and the domain is never
+/// contacted, so an Armada-minted link joins natively. Mirrors the frontend's
+/// `isCommunityInviteUrl`.
+fn is_invite_locator(before: &str) -> bool {
+    if before.ends_with("/invite") {
+        return true;
+    }
+    match before.rsplit_once("/invite/") {
+        Some((_, naddr)) => validate_naddr(strip_html_suffix(naddr.trim_end_matches('/'))),
+        None => false,
+    }
+}
+
 /// Some link expanders / mobile launchers append `.html` to a URL that
 /// looks like a file path. Strip it so the naddr decodes cleanly.
 fn strip_html_suffix(s: &str) -> &str {
@@ -218,8 +233,8 @@ pub fn get_pending_deep_link() -> Option<DeepLinkAction> {
 mod tests {
     use super::*;
 
-    // The community-invite catch matches `ends_with("/invite")` BEFORE the
-    // path parsers strip the fragment — both URL shapes must survive intact.
+    // The community-invite catch runs BEFORE the path parsers strip the
+    // fragment — every URL shape must survive intact.
     #[test]
     fn invite_fragment_parses_from_both_url_shapes() {
         for url in [
@@ -232,10 +247,35 @@ mod tests {
         }
     }
 
+    // A v2 link puts the bundle coordinate in the PATH (`/invite/<naddr>#<frag>`), so it never
+    // ends with "/invite". Any host counts: the naddr+fragment self-authenticates.
+    const NADDR: &str = "naddr1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
+
+    #[test]
+    fn v2_naddr_invite_parses_from_every_host() {
+        for url in [
+            format!("vector://invite/{NADDR}#BAHs3q1MZz0aBcDeF"),
+            format!("https://vectorapp.io/invite/{NADDR}#BAHs3q1MZz0aBcDeF"),
+            format!("https://armada.buzz/invite/{NADDR}#BAHs3q1MZz0aBcDeF"),
+        ] {
+            let action = parse_deep_link(&url).unwrap_or_else(|| panic!("{url}"));
+            assert_eq!(action.action_type, "community_invite");
+            assert_eq!(action.target, url, "join flow re-parses the full URL");
+        }
+    }
+
     #[test]
     fn invite_without_fragment_is_not_an_invite() {
         assert!(parse_deep_link("vector://invite").is_none());
         assert!(parse_deep_link("vector://invite#").is_none());
+        assert!(parse_deep_link(&format!("https://vectorapp.io/invite/{NADDR}")).is_none());
+    }
+
+    // A path segment that isn't an naddr must not be mistaken for a v2 coordinate.
+    #[test]
+    fn invite_path_that_is_not_an_naddr_is_not_an_invite() {
+        assert!(parse_deep_link("https://vectorapp.io/invite/npub1abc#frag").is_none());
+        assert!(parse_deep_link("https://evil.example/invite/naddr1#frag").is_none());
     }
 
     #[test]
