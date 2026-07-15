@@ -933,6 +933,15 @@ function _showPackTabMenu(pack, x, y) {
             onClick: () => _sharePackToClipboard(pack),
         },
     ];
+    // Own packs get an Edit entry (same target as the section-header pencil),
+    // above the soft Remove.
+    if (pack.is_own) {
+        items.push({
+            label: 'Edit Pack',
+            icon: 'edit',
+            onClick: () => openEmojiPackCreator(pack.id),
+        });
+    }
     // Theme packs are pinned by the active theme, not user subscriptions —
     // there's nothing to "remove". Sharing still applies (real pack + naddr).
     if (!pack.is_theme) {
