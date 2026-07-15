@@ -1,0 +1,93 @@
+name: 'android-release'
+
+# Builds the split Android APKs (arm64-v8a, armeabi-v7a, universal) and attaches
+# them to the release draft. Runs alongside publish.yaml on a push to `release`,
+# so a release gets its Android artifacts without a manual build.
+#
+# REQUIRED repo secrets (Settings > Secrets and variables > Actions), needed so
+# the APKs are signed with Vector's real release cert:
+#   ANDROID_KEYSTORE_BASE64    base64 of the release keystore file
+#                              (`base64 -i your.keystore | pbcopy`)
+#   ANDROID_KEY_ALIAS          the signing key alias
+#   ANDROID_KEYSTORE_PASSWORD  the keystore/key password (Vector uses one for both)
+
+on:
+  push:
+    branches:
+      - release
+
+jobs:
+  android:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      NDK_VERSION: '29.0.14206865'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read app version
+        id: version
+        run: echo "version=$(grep -m1 '^version' src-tauri/Cargo.toml | cut -d'\"' -f2)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK ${{ env.NDK_VERSION }}
+        run: |
+          sdkmanager "ndk;${NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Install Rust + Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+
+      # OpenSSL is built from source (the libs are gitignored, not committed).
+      # Cache by the builder script so it only recompiles when that changes.
+      - name: Cache Android OpenSSL
+        id: openssl-cache
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/android-deps/openssl
+          key: android-openssl-${{ hashFiles('scripts/build-openssl-android.sh') }}
+
+      - name: Build Android OpenSSL
+        if: steps.openssl-cache.outputs.cache-hit != 'true'
+        run: bash scripts/build-openssl-android.sh
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Restore signing keystore
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > "${GITHUB_WORKSPACE}/src-tauri/gen/android/vector-release.keystore"
+          cat > "${GITHUB_WORKSPACE}/src-tauri/gen/android/keystore.properties" <<EOF
+          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
+          password=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          storeFile=${GITHUB_WORKSPACE}/src-tauri/gen/android/vector-release.keystore
+          EOF
+
+      - name: Build split APKs (arm64-v8a, armeabi-v7a, universal)
+        run: bash scripts/android-build.sh
+
+      # tauri-action (publish.yaml) creates the vX.Y.Z draft near the start of its
+      # run, so by the time this long Android build finishes the draft exists and
+      # this appends the APKs to it. draft:true keeps it a draft to publish by hand.
+      - name: Attach APKs to the release draft
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          draft: true
+          files: dist-android/*.apk
