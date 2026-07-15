@@ -583,6 +583,33 @@ fn process_deletion(
     Ok(RumorProcessingResult::DeletionRequest { target_event_id })
 }
 
+/// Whether a reaction's content is something Vector can render as a clean chip.
+/// Everything else (a `:code:URL`, prose, a jammed-in URL, anything long or with
+/// whitespace) is dropped at ingest instead of shown as an overflowing/garbled
+/// reaction — the wrapper is still recorded, but no reaction is stored.
+fn is_renderable_reaction(content: &str) -> bool {
+    // NIP-25 like / dislike / implicit-like.
+    if content.is_empty() || content == "+" || content == "-" {
+        return true;
+    }
+    // A clean NIP-30 custom-emoji shortcode `:name:` (resolves to an image, or is
+    // shown verbatim). Bounded so a giant shortcode can't slip through either.
+    if let Some(inner) = content.strip_prefix(':').and_then(|s| s.strip_suffix(':')) {
+        if !inner.is_empty()
+            && inner.len() <= 48
+            && inner.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '~' | '-' | '+'))
+        {
+            return true;
+        }
+    }
+    // Otherwise keep only a short, single-token glyph. Reject anything that would
+    // stretch or break the row: long content, whitespace/newlines, or an embedded
+    // URL (the `:code:https://…` fuzz). Short odd content is harmless.
+    content.chars().count() <= 12
+        && !content.chars().any(char::is_whitespace)
+        && !content.contains("://")
+}
+
 /// Process a reaction rumor
 ///
 /// Extracts emoji reactions to messages.
@@ -592,6 +619,12 @@ fn process_reaction(
 ) -> Result<RumorProcessingResult, String> {
     let reference_id = unique_event_ref(&rumor)
         .ok_or("Reaction reference tag missing or ambiguous")?;
+
+    // Unrenderable / junk content: record the wrapper (Ignored) so it isn't
+    // re-synced, but store nothing — as if the reaction never arrived.
+    if !is_renderable_reaction(&rumor.content) {
+        return Ok(RumorProcessingResult::Ignored);
+    }
 
     // NIP-30: pull the first `["emoji", shortcode, url]` tag whose
     // shortcode matches the reaction content (`:shortcode:` form).
@@ -1180,6 +1213,30 @@ mod tests {
         let ctx = dm_context(&keys);
         let result = process_rumor(rumor, ctx, &temp_dir());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn junk_reaction_content_is_dropped_clean_ones_kept() {
+        // Renderable glyphs / shortcodes survive.
+        for ok in ["👍", "+", "-", "", "👨\u{200d}👩\u{200d}👧\u{200d}👦", ":thugamy:"] {
+            assert!(is_renderable_reaction(ok), "{ok:?} should be renderable");
+        }
+        // Junk (a shortcode+URL, a bare URL, prose, anything long) is dropped.
+        for junk in [
+            ":thugamy:https://image.nostr.build/ccc22.png",
+            "https://example.com/x.png",
+            "lorem ipsum dolor",
+        ] {
+            assert!(!is_renderable_reaction(junk), "{junk:?} should be dropped");
+        }
+        assert!(!is_renderable_reaction(&"x".repeat(64)));
+
+        // End-to-end: the reported junk reaction resolves to Ignored, not Reaction.
+        let keys = test_keypair();
+        let t = tags(vec![custom_tag("e", &["target"])]);
+        let rumor = make_rumor(&keys, Kind::Reaction, ":thugamy:https://image.nostr.build/ccc22.png", t);
+        let result = process_rumor(rumor, dm_context(&keys), &temp_dir()).unwrap();
+        assert!(matches!(result, RumorProcessingResult::Ignored), "junk reaction should be Ignored");
     }
 
     // ========================================================================

@@ -573,16 +573,21 @@ function _dmsgBuildBlockedPlaceholder(msg) {
 
 /**
  * Detect a slash-command invocation worth the passive render. Only when it
- * provably IS one: the bot routing tag is present, or the message is a bare
- * /command with nothing after the name — an untagged "/word plus prose"
- * stays ordinary text so real content can never be hidden by mistake.
+ * provably IS one: the bot routing tag is present, the message is a bare
+ * /command with nothing after the name, or a bot in this chat declares that
+ * command. An untagged "/word plus prose" whose word no bot declares stays
+ * ordinary text, so real content can never be hidden by mistake. The declared
+ * set is how a 1:1 DM, which sends invocations untagged, recognises its bot's.
  */
 function _dmsgCommandInfo(msg) {
     const content = (msg.content || '').trim();
     const m = /^\/([a-z0-9_-]{1,32})(\s|$)/.exec(content);
     if (!m) return null;
     const tagged = msg.addressed_bots && msg.addressed_bots.length;
-    if (!tagged && content !== '/' + m[1]) return null;
+    if (!tagged && content !== '/' + m[1]) {
+        const known = commandCtrl ? commandCtrl.commandNames(strOpenChat) : null;
+        if (!known || !known.has(m[1])) return null;
+    }
     return { name: m[1], botNpub: tagged ? msg.addressed_bots[0] : null };
 }
 
@@ -1375,7 +1380,18 @@ function _dmsgBuildReactions(msg) {
                 img.src = customUrl;
             }
         } else {
-            span.textContent = `${emoji} ${count}`;
+            // Fuzz defence: any reaction glyph that isn't a resolvable custom
+            // emoji gets ONE uniform hard cap by code point (surrogate-safe, so a
+            // multi-char emoji is never split into a lone surrogate). A `:code:URL`,
+            // random junk, a novel of text — all bound identically, so no malformed
+            // reaction can blow out the row. data-emoji keeps the full value for the
+            // toggle handler; only the DISPLAY is capped.
+            const REACTION_GLYPH_CAP = 16;
+            const cps = Array.from(emoji);
+            const shown = cps.length > REACTION_GLYPH_CAP
+                ? cps.slice(0, REACTION_GLYPH_CAP).join('') + '…'
+                : emoji;
+            span.textContent = `${shown} ${count}`;
             twemojify(span);
         }
         reactionsRow.appendChild(span);

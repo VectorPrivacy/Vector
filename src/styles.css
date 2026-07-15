@@ -16614,6 +16614,11 @@ textarea.command-part-input {
   line-height: 1;
   opacity: 0.9;
   transition: opacity 0.12s ease, background-color 0.12s ease;
+  /* Backstop for a malformed reaction glyph (the JS cap is the primary guard):
+     never let one chip stretch the row or run off-screen. */
+  max-width: 220px;
+  overflow: hidden;
+  white-space: nowrap;
 }
 .dmsg-reactions .reaction:hover { opacity: 1; }
 /* Neutral chips (we haven't reacted) lift their fill on hover. */
