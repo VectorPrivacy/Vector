@@ -683,7 +683,7 @@ function initCommandSelector(textarea, io, anchorEl) {
         io.composerToggled(true);
         // Android hardware back closes the composer first, like Esc on desktop.
         pushBack('command-composer', () => exitComposer(false));
-        parts[0].el.focus();
+        focusPart(0);
     }
 
     function onPartKey(e, idx) {
@@ -696,7 +696,7 @@ function initCommandSelector(textarea, io, anchorEl) {
             e.stopPropagation();
             // Enter advances; on the last part (or with Cmd/Ctrl) it sends.
             if (e.metaKey || e.ctrlKey || idx === parts.length - 1) submitComposer();
-            else parts[idx + 1].el.focus();
+            else focusPart(idx + 1);
         } else if (e.key === 'Escape') {
             e.preventDefault();
             e.stopPropagation();
@@ -932,6 +932,10 @@ function initCommandSelector(textarea, io, anchorEl) {
             const pos = where === 'end' ? el.value.length : 0;
             el.setSelectionRange(pos, pos);
         }
+        // Landing on a Choice/Bool trigger opens its drop-up, so advancing between
+        // args flows straight into the picker (User params open on their own focus).
+        const arg = composing.parts[idx].arg;
+        if (arg.type === 'choice' || arg.type === 'bool') openChoiceMenu(el, idx, arg);
     }
 
     /** The JS twin of the Rust `command_text` builder: values with spaces or
