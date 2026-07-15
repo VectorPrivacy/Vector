@@ -272,7 +272,7 @@ function initCommandSelector(textarea, io, anchorEl) {
         return row;
     }
 
-    function sectionHeader(text, avatarSrc) {
+    function sectionHeader(text, avatarSrc, refreshing) {
         const header = document.createElement('div');
         header.className = 'command-section-header';
         if (avatarSrc) {
@@ -284,6 +284,19 @@ function initCommandSelector(textarea, io, anchorEl) {
         const label = document.createElement('span');
         label.textContent = text;
         header.appendChild(label);
+        // Manifest REQ still in flight for this list: show the status inline on
+        // the header's right instead of a footer row that shifts the whole panel.
+        if (refreshing) {
+            const status = document.createElement('span');
+            status.className = 'command-section-refresh';
+            const spin = document.createElement('span');
+            spin.className = 'command-spinner';
+            status.appendChild(spin);
+            const txt = document.createElement('span');
+            txt.textContent = 'Checking for Updates';
+            status.appendChild(txt);
+            header.appendChild(status);
+        }
         return header;
     }
 
@@ -350,10 +363,14 @@ function initCommandSelector(textarea, io, anchorEl) {
         // panel top while its rows scroll, then get pushed away by the next
         // section's header (sticky is clamped to its own wrapper).
         const flat = [];
-        const section = (headerText, avatarSrc, cmds, showBot) => {
+        // A stale-served list is still converging (manifest REQ in flight). Rather
+        // than a footer that shifts layout, each bot header carries the status
+        // inline (see sectionHeader) so a bot that pops in later isn't a surprise.
+        const refreshing = snap.fresh === false;
+        const section = (headerText, avatarSrc, cmds, showBot, refresh) => {
             const wrap = document.createElement('div');
             wrap.className = 'command-section';
-            wrap.appendChild(sectionHeader(headerText, avatarSrc));
+            wrap.appendChild(sectionHeader(headerText, avatarSrc, refresh));
             for (const cmd of cmds) {
                 wrap.appendChild(commandRow(cmd, flat.length, showBot));
                 flat.push(cmd);
@@ -361,7 +378,7 @@ function initCommandSelector(textarea, io, anchorEl) {
             panel.appendChild(wrap);
         };
         if (recent.length) {
-            section('Recently Used', null, recent, true);
+            section('Recently Used', null, recent, true, false);
         }
         const byBot = new Map();
         for (const cmd of matches) {
@@ -370,20 +387,7 @@ function initCommandSelector(textarea, io, anchorEl) {
         }
         for (const [bot, cmds] of byBot) {
             const profile = io.botProfile(bot) || {};
-            section(profile.name || (bot.slice(0, 12) + '…'), profile.avatarSrc || null, cmds);
-        }
-        // A stale-served list is still converging (manifest REQ in flight) —
-        // say so, so a bot that pops in seconds later isn't a surprise.
-        if (snap.fresh === false) {
-            const row = document.createElement('div');
-            row.className = 'command-loading command-refreshing';
-            const spin = document.createElement('span');
-            spin.className = 'command-spinner';
-            row.appendChild(spin);
-            const label = document.createElement('span');
-            label.textContent = 'Checking for new commands…';
-            row.appendChild(label);
-            panel.appendChild(row);
+            section(profile.name || (bot.slice(0, 12) + '…'), profile.avatarSrc || null, cmds, false, refreshing);
         }
         panel._flat = flat;
         if (activeIndex >= flat.length) activeIndex = 0;

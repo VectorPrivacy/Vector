@@ -15223,6 +15223,10 @@ hr {
 
 .command-section-header > span {
   opacity: 0.7;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .command-section-header img {
@@ -15230,6 +15234,28 @@ hr {
   height: 16px;
   border-radius: 50%;
   object-fit: cover;
+}
+
+/* Inline "Checking for Updates" on the header's right — replaces the footer that
+   shifted the panel's layout while a bot's manifest REQ was in flight. */
+.command-section-header .command-section-refresh {
+  margin-left: auto;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  opacity: 1;
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.command-section-header .command-section-refresh .command-spinner {
+  width: 9px;
+  height: 9px;
+  border-width: 1.5px;
 }
 
 .command-item {
