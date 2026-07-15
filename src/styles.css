@@ -15813,7 +15813,9 @@ textarea.command-part-input {
   border: 1px solid var(--icon-color-primary, #59fcb3);
   border-radius: 10px;
   box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.5);
-  padding: 4px 0;
+  /* No inner padding: options run edge-to-edge (clipped to the radius by
+     overflow), matching every other Vector dropdown. */
+  padding: 0;
   max-height: 40vh;
   max-width: calc(100vw - 16px);
   overflow-y: auto;
