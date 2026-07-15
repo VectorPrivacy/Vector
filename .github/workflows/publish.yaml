@@ -203,17 +203,23 @@ jobs:
           VERSION=$(grep -m1 '^version' src-tauri/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
 
-      - name: Rename APK
+      - name: Collect split APKs
         run: |
-          mv src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk \
-             src-tauri/gen/android/app/build/outputs/apk/universal/release/Vector.apk
+          OUT=src-tauri/gen/android/app/build/outputs/apk/universal/release
+          # The abi-splits config emits one APK per ABI plus a universal fallback.
+          mv "$OUT/app-universal-arm64-v8a-release.apk"   "$OUT/Vector-arm64-v8a.apk"
+          mv "$OUT/app-universal-armeabi-v7a-release.apk" "$OUT/Vector-armeabi-v7a.apk"
+          mv "$OUT/app-universal-universal-release.apk"   "$OUT/Vector.apk"
+          ls -lh "$OUT"/Vector*.apk
 
-      - name: Upload APK to Release
+      - name: Upload APKs to Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.get_version.outputs.VERSION }}
           files: |
             src-tauri/gen/android/app/build/outputs/apk/universal/release/Vector.apk
+            src-tauri/gen/android/app/build/outputs/apk/universal/release/Vector-arm64-v8a.apk
+            src-tauri/gen/android/app/build/outputs/apk/universal/release/Vector-armeabi-v7a.apk
           draft: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
