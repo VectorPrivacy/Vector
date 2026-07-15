@@ -88,6 +88,9 @@ function initCommandSelector(textarea, io, anchorEl) {
             loading.delete(chatId);
             snapshots.set(chatId, snap || { bots: 0, commands: [] });
             if (isVisible() && io.chatId() === chatId) render();
+            // The timeline may have painted before this resolved; let it upgrade
+            // any untagged `/cmd args` rows now that the command set is known.
+            if (io.commandsReady) io.commandsReady(chatId);
         }).catch(() => {
             loading.delete(chatId);
             if (!snapshots.has(chatId)) snapshots.set(chatId, { bots: 0, commands: [] });
@@ -99,6 +102,7 @@ function initCommandSelector(textarea, io, anchorEl) {
     function onCommandsUpdated(chatId, snap) {
         snapshots.set(chatId, { bots: snap.bots || 0, commands: snap.commands || [], fresh: true });
         if (isVisible() && io.chatId() === chatId) render();
+        if (io.commandsReady) io.commandsReady(chatId);
     }
 
     /** Every known command of the open chat: [{bot, name, description, args}]. */
@@ -686,6 +690,20 @@ function initCommandSelector(textarea, io, anchorEl) {
         focusPart(0);
     }
 
+    // Advancing INTO a picker (choice/bool/user) via Enter auto-opens its menu,
+    // and the SAME keypress trails onto the newly focused trigger — which would
+    // instantly pick the highlighted option and skip the picker entirely. Guard
+    // from the advance until the key releases so that trailing edge is swallowed;
+    // a fresh press still picks. keyup clears it on desktop; the timeout is the
+    // fallback for soft keyboards that don't emit keyup (touch picks a row via
+    // pointer, so they're unaffected either way).
+    let advanceKeyGuard = false;
+    function guardAdvanceKey() {
+        advanceKeyGuard = true;
+        window.addEventListener('keyup', () => { advanceKeyGuard = false; }, { once: true });
+        setTimeout(() => { advanceKeyGuard = false; }, 400);
+    }
+
     function onPartKey(e, idx) {
         const parts = composing ? composing.parts : [];
         if (e.key === 'Enter') {
@@ -696,7 +714,7 @@ function initCommandSelector(textarea, io, anchorEl) {
             e.stopPropagation();
             // Enter advances; on the last part (or with Cmd/Ctrl) it sends.
             if (e.metaKey || e.ctrlKey || idx === parts.length - 1) submitComposer();
-            else focusPart(idx + 1);
+            else { guardAdvanceKey(); focusPart(idx + 1); }
         } else if (e.key === 'Escape') {
             e.preventDefault();
             e.stopPropagation();
@@ -865,6 +883,11 @@ function initCommandSelector(textarea, io, anchorEl) {
      *  (typing itself flows to the input and re-filters via its input event). */
     function onUserKey(e, idx) {
         const el = e.currentTarget;
+        if (advanceKeyGuard && e.key === 'Enter') {
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+        }
         if (choiceOpenFor && choiceOpenFor.el === el) {
             if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
                 e.preventDefault();
@@ -875,6 +898,7 @@ function initCommandSelector(textarea, io, anchorEl) {
             } else if (e.key === 'Enter') {
                 e.preventDefault();
                 e.stopPropagation();
+                guardAdvanceKey();
                 pickChoice(choiceOpenFor.options[choiceOpenFor.active]);
             } else if (e.key === 'Escape') {
                 e.preventDefault();
@@ -894,6 +918,13 @@ function initCommandSelector(textarea, io, anchorEl) {
      *  everything else falls through to the shared part-walking. */
     function onChoiceKey(e, idx, arg) {
         const el = e.currentTarget;
+        // Swallow the trailing edge of the Enter/Space that advanced us onto this
+        // trigger, so the auto-opened menu stays put instead of instant-picking.
+        if (advanceKeyGuard && (e.key === 'Enter' || e.key === ' ')) {
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+        }
         if (choiceOpenFor && choiceOpenFor.el === el) {
             if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
                 e.preventDefault();
@@ -904,6 +935,7 @@ function initCommandSelector(textarea, io, anchorEl) {
             } else if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
                 e.stopPropagation();
+                guardAdvanceKey();
                 pickChoice(choiceOpenFor.options[choiceOpenFor.active]);
             } else if (e.key === 'Escape') {
                 e.preventDefault();
@@ -1109,6 +1141,18 @@ function initCommandSelector(textarea, io, anchorEl) {
             ensureLoaded(id, false);
             const snap = snapshots.get(id);
             return !!(snap && snap.bots > 0);
+        },
+        /** The declared command names for a chat, so the timeline can recognise
+         *  an untagged `/name args` invocation (a 1:1 DM sends them untagged).
+         *  Null when the snapshot is cold — the caller then promotes nothing. */
+        commandNames(chatId) {
+            const snap = snapshots.get(chatId || io.chatId());
+            if (!snap || !snap.commands) return null;
+            const names = new Set();
+            for (const b of snap.commands) {
+                for (const c of b.commands || []) names.add(c.name);
+            }
+            return names;
         },
         isComposing,
         submitComposer,

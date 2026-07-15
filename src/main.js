@@ -11758,6 +11758,30 @@ const emojiShortcodeCtrl = typeof initEmojiShortcodeSelector === 'function'
     ? initEmojiShortcodeSelector(domChatMessageInput, document.getElementById('chat-box'))
     : null;
 
+/**
+ * Re-render the open chat's untagged `/cmd args` rows after its bot-command
+ * manifest finishes loading. The manifest is fetched asynchronously on chat
+ * open, usually after the timeline has already painted, so a DM invocation
+ * first renders as plain text; once the command set is known it can flip to its
+ * action line. Only untagged rows with arguments can change verdict — a bare
+ * `/cmd` and a tagged invocation already render correctly without the manifest.
+ */
+function _upgradeCommandRows(chatId) {
+    if (chatId !== strOpenChat) return;
+    // No bot commands in this chat → no untagged row can become an action line.
+    const known = commandCtrl && commandCtrl.commandNames(strOpenChat);
+    if (!known || !known.size) return;
+    const chat = arrChats.find(c => c.id === strOpenChat);
+    if (!chat?.messages) return;
+    const profile = getProfile(strOpenChat);
+    for (const msg of chat.messages) {
+        if (msg.addressed_bots && msg.addressed_bots.length) continue;
+        if (!/^\s*\/[a-z0-9_-]{1,32}\s+\S/.test(msg.content || '')) continue;
+        const domMsg = document.getElementById(msg.id);
+        if (domMsg) domMsg.replaceWith(renderMessage(msg, profile, msg.id));
+    }
+}
+
 // --- Slash Command Selector (bot manifests) ---
 commandCtrl = typeof initCommandSelector === 'function' ? initCommandSelector(
     domChatMessageInput,
@@ -11796,7 +11820,10 @@ commandCtrl = typeof initCommandSelector === 'function' ? initCommandSelector(
             } else {
                 resetSendMicButtons();
             }
-        }
+        },
+        // The command manifest loads async, often after the timeline painted;
+        // upgrade any untagged `/cmd args` rows once it is known (DM invocations).
+        commandsReady: (chatId) => _upgradeCommandRows(chatId)
     },
     document.getElementById('chat-box')
 ) : null;
