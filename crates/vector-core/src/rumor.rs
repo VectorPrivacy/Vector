@@ -382,14 +382,13 @@ fn process_file_attachment(
 
     // Extract image metadata if provided
     let img_meta: Option<ImageMetadata> = {
-        // The sender emits the thumbhash under the `thumb` tag (see
-        // sending.rs); accept `thumbhash` too for forward-compat. These names
-        // had diverged (send `thumb` / receive `thumbhash`), which silently
-        // dropped img_meta on every received image — so they rendered as
-        // generic file boxes with no thumbhash preview.
+        // Read BOTH tag names: current senders emit `thumbhash` (see sending.rs),
+        // while older ones emit `thumb`. The two must never diverge or img_meta
+        // silently drops and the image renders as a generic file box with no
+        // preview — the bug this belt-and-braces read exists to prevent.
         let thumbhash_opt = rumor.tags
-            .find(TagKind::Custom(Cow::Borrowed("thumb")))
-            .or_else(|| rumor.tags.find(TagKind::Custom(Cow::Borrowed("thumbhash"))))
+            .find(TagKind::Custom(Cow::Borrowed("thumbhash")))
+            .or_else(|| rumor.tags.find(TagKind::Custom(Cow::Borrowed("thumb"))))
             .and_then(|tag| tag.content())
             .map(|s| s.to_string());
 

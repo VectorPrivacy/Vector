@@ -805,7 +805,9 @@ pub async fn send_file_dm(
     // Include image preview metadata for compatible rendering across all clients
     if let Some(ref meta) = img_meta {
         if !meta.thumbhash.is_empty() {
-            file_rumor = file_rumor.tag(Tag::custom(TagKind::custom("thumb"), [meta.thumbhash.as_str()]));
+            // `thumbhash` names the value accurately; receivers read `thumb` too
+            // (legacy), so this stays backward-compatible in both directions.
+            file_rumor = file_rumor.tag(Tag::custom(TagKind::custom("thumbhash"), [meta.thumbhash.as_str()]));
         }
         file_rumor = file_rumor.tag(Tag::custom(TagKind::custom("dim"), [format!("{}x{}", meta.width, meta.height)]));
     }
