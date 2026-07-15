@@ -497,7 +497,14 @@ pub fn decrypt_and_save_attachment(
     name: &str,
     extension: &str,
 ) -> Result<(std::path::PathBuf, String), String> {
-    let decrypted = decrypt_data(encrypted_data, key, nonce)?;
+    // Unencrypted foreign media (NIP-92 carries no decryption keys — those are
+    // Vector's own extension): the downloaded bytes ARE the plaintext, so skip
+    // AES-GCM and render best-effort. Hash/dedup/save below are identical either way.
+    let decrypted = if key.is_empty() || nonce.is_empty() {
+        encrypted_data.to_vec()
+    } else {
+        decrypt_data(encrypted_data, key, nonce)?
+    };
     let file_hash = sha256_hex(&decrypted);
 
     let dir = crate::db::get_download_dir();

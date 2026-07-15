@@ -68,8 +68,16 @@ pub fn attachment_from_imeta(tag: &Tag, download_dir: &Path) -> Option<Attachmen
     if url.is_empty() {
         return None;
     }
-    let key = field(body, "decryption-key")?.to_string();
-    let nonce = field(body, "decryption-nonce")?.to_string();
+    // Foreign NIP-92 media is UNENCRYPTED — the decryption params are Vector's own
+    // extension and simply absent. Empty key+nonce marks a plaintext attachment;
+    // the download path then skips AES-GCM and saves the bytes verbatim.
+    let key = field(body, "decryption-key").unwrap_or("").to_string();
+    let nonce = field(body, "decryption-nonce").unwrap_or("").to_string();
+    // Half-specified encryption (exactly one of the pair present) is malformed.
+    if key.is_empty() != nonce.is_empty() {
+        return None;
+    }
+    let encrypted = !key.is_empty();
 
     let mime = field(body, "m").unwrap_or("application/octet-stream");
     let name = field(body, "name").map(crate::crypto::sanitize_filename).unwrap_or_default();
@@ -83,7 +91,10 @@ pub fn attachment_from_imeta(tag: &Tag, download_dir: &Path) -> Option<Attachmen
         .unwrap_or_else(|| crate::crypto::extension_from_mime(mime));
 
     let size = field(body, "size").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-    let original_hash = field(body, "ox").map(|s| s.to_string()).filter(|s| !s.is_empty());
+    // Vector stamps the plaintext sha256 as `ox`; NIP-92 uses `x`. Either serves
+    // as the dedup / identity basis (content-addressed, so best for foreign media).
+    let original_hash = field(body, "ox").or_else(|| field(body, "x"))
+        .map(|s| s.to_string()).filter(|s| !s.is_empty());
 
     let img_meta = {
         let thumb = field(body, "thumb").map(|s| s.to_string());
@@ -97,9 +108,10 @@ pub fn attachment_from_imeta(tag: &Tag, download_dir: &Path) -> Option<Attachmen
         }
     };
 
-    // The nonce is author-controlled, feeds the identity digest, and must be
-    // hex for decryption anyway — reject garbage outright.
-    if nonce.is_empty() || nonce.len() > 128 || !nonce.bytes().all(|b| b.is_ascii_hexdigit()) {
+    // An ENCRYPTED nonce is author-controlled, feeds the identity digest, and must
+    // be hex for decryption — reject garbage. A plaintext attachment has no nonce;
+    // its identity falls back to the content hash (`ox`/`x`) or `sha256(url)`.
+    if encrypted && (nonce.len() > 128 || !nonce.bytes().all(|b| b.is_ascii_hexdigit())) {
         return None;
     }
 
@@ -303,9 +315,12 @@ mod tests {
         let dir = std::env::temp_dir();
         let not_imeta = Tag::custom(TagKind::Custom("e".into()), ["abc"]);
         assert!(attachment_from_imeta(&not_imeta, &dir).is_none());
-        // imeta missing decryption fields → None.
-        let bad = Tag::custom(TagKind::Custom("imeta".into()), ["url https://x/y"]);
-        assert!(attachment_from_imeta(&bad, &dir).is_none());
+        // No `url` at all → None (NIP-92 requires a url).
+        let no_url = Tag::custom(TagKind::Custom("imeta".into()), ["m image/png"]);
+        assert!(attachment_from_imeta(&no_url, &dir).is_none());
+        // A url-only imeta is valid now — an unencrypted (plaintext) attachment.
+        let plain = Tag::custom(TagKind::Custom("imeta".into()), ["url https://x/y"]);
+        assert!(attachment_from_imeta(&plain, &dir).is_some(), "url-only imeta = plaintext attachment");
     }
 
     #[test]
@@ -376,6 +391,30 @@ mod tests {
     }
 
     #[test]
+    fn unencrypted_nip92_imeta_parses_as_plaintext() {
+        let dir = std::env::temp_dir();
+        // A foreign client's plain NIP-92 imeta: url + m + dim + `x` (sha256), and
+        // NO decryption params. It must parse (empty key/nonce = plaintext) so we can
+        // best-effort render it, identity keyed by the `x` content hash.
+        let x = "b".repeat(64);
+        let tag = Tag::custom(TagKind::Custom("imeta".into()), [
+            "url https://blossom.ditto.pub/abc.png".to_string(),
+            "m image/png".to_string(),
+            "dim 640x480".to_string(),
+            format!("x {x}"),
+        ]);
+        let att = attachment_from_imeta(&tag, &dir).expect("unencrypted imeta parses");
+        assert!(att.key.is_empty() && att.nonce.is_empty(), "plaintext: no keys");
+        assert_eq!(att.url, "https://blossom.ditto.pub/abc.png");
+        assert_eq!(att.id, x, "identity is the NIP-92 `x` content hash");
+        assert_eq!(att.extension, "png");
+
+        // Half-specified encryption (key without a nonce) is still refused.
+        let half = Tag::custom(TagKind::Custom("imeta".into()), ["url https://x/y", "decryption-key 00"]);
+        assert!(attachment_from_imeta(&half, &dir).is_none(), "key without nonce dropped");
+    }
+
+    #[test]
     fn webxdc_topic_round_trips_imeta_and_garbage_is_dropped() {
         let dir = std::env::temp_dir();
         let topic = crate::webxdc::mint_topic_id("hash", "sender");
@@ -398,14 +437,20 @@ mod tests {
         let dir = std::env::temp_dir();
         // Garbage entries, duplicate keys, value-less keys, weird spacing — must not panic.
         let junk = Tag::custom(TagKind::Custom("imeta".into()), [
-            "url",                 // no value
+            "url",                 // no value (skipped: `field` needs `key<space>`)
             "decryption-key",      // no value
             "random noise here",
             "  ",
             "url https://x/legit", // a later valid url
         ]);
-        // Missing decryption-key/nonce → None (not a panic).
-        assert!(attachment_from_imeta(&junk, &dir).is_none());
+        // The valid url is recovered (no decryption fields → plaintext); no panic.
+        let att = attachment_from_imeta(&junk, &dir).expect("recovers the valid url as plaintext");
+        assert_eq!(att.url, "https://x/legit");
+        assert!(att.key.is_empty() && att.nonce.is_empty());
+
+        // No url anywhere → None (not a panic).
+        let no_url = Tag::custom(TagKind::Custom("imeta".into()), ["m image/png", "random"]);
+        assert!(attachment_from_imeta(&no_url, &dir).is_none());
 
         // Empty imeta (just the tag name) → None.
         let empty = Tag::custom(TagKind::Custom("imeta".into()), Vec::<String>::new());
