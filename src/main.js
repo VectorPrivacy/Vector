@@ -11815,7 +11815,7 @@ function resetSendMicButtons() {
 }
 
     // Hook up an 'input' listener on the Message Box for typing indicators
-domChatMessageInput.oninput = async () => {
+domChatMessageInput.oninput = async (e) => {
     // Auto-resize the textarea based on content
     autoResizeChatInput();
     
@@ -11854,9 +11854,13 @@ domChatMessageInput.oninput = async () => {
     }
 
     // Send a Typing Indicator only when content actually changes and setting is enabled.
-    // Don't send while editing (not a new message) or while the draft is a `/` command —
-    // command composition is an instruction to a bot, not conversation.
-    if (fSendTypingIndicators && !strCurrentEditMessageId && !domChatMessageInput.value.startsWith('/')
+    // Don't send while editing (not a new message), while the draft is a `/` command
+    // (an instruction to a bot, not conversation), or on a DELETION — removing text,
+    // including backspacing a leading `/`, isn't composing and must not slip past the
+    // slash exclusion.
+    const isDeletion = e?.inputType?.startsWith('delete');
+    if (fSendTypingIndicators && !strCurrentEditMessageId && !isDeletion
+        && !domChatMessageInput.value.startsWith('/')
         && nLastTypingIndicator + 30000 < Date.now()) {
         nLastTypingIndicator = Date.now();
         await invoke("start_typing", { receiver: strOpenChat });
