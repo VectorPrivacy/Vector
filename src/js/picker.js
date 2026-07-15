@@ -4266,6 +4266,24 @@ function _sendCustomEmojiReaction(shortcode, url) {
     }
 }
 
+// Header-chrome height (padding + logo/title row) of a pack section, above its
+// canvas grid. Seeded from CSS (4px×2 padding + 18px logo) and recalibrated
+// from a real rendered header each render so the intrinsic-size estimates below
+// are pixel-accurate. Constant across packs — the header is structurally
+// identical regardless of emoji count.
+let _packSectionChromePx = 26;
+
+// True rendered height of a pack section: header chrome + a 6-column canvas
+// grid (PACK_CANVAS_CELL_PX per row). Excludes emoji already known-unavailable
+// so the row count matches what the grid actually draws.
+function _packSectionHeightPx(pack) {
+    const usable = Array.isArray(pack.emojis)
+        ? pack.emojis.filter(e => !_emojiFailReason.has(e.url)).length
+        : 0;
+    const rows = Math.max(1, Math.ceil(usable / 6));
+    return _packSectionChromePx + PACK_CANVAS_CELL_PX * rows;
+}
+
 function renderEmojiPackSections() {
     const main = document.querySelector('.emoji-main');
     if (!main) return;
@@ -4280,6 +4298,11 @@ function renderEmojiPackSections() {
         const section = document.createElement('div');
         section.className = 'emoji-section emoji-pack-section';
         section.dataset.packId = pack.id;
+        // Exact intrinsic size (vs the CSS flat 200px) so a jump-scroll lands
+        // on target first try: with a true estimate the intervening cv:auto
+        // sections don't resize as they render mid-scroll, so nothing shoves
+        // the target down under the animation.
+        section.style.containIntrinsicSize = `0 ${_packSectionHeightPx(pack)}px`;
 
         const header = document.createElement('div');
         header.className = 'emoji-section-header';
@@ -4379,6 +4402,21 @@ function renderEmojiPackSections() {
     // Arm the on-screen packs deterministically rather than waiting on the
     // IO's first callback (unreliable when this runs mid-open-transition).
     _rearmVisiblePackCanvases();
+
+    // Calibrate the header-chrome constant from a real rendered header, then
+    // restamp every section's intrinsic size — keeps the jump-scroll estimate
+    // pixel-accurate across themes/fonts without hardcoding a header height.
+    requestAnimationFrame(() => {
+        const header = main.querySelector('.emoji-pack-section .emoji-section-header');
+        const measured = header ? header.offsetHeight : 0;
+        if (measured <= 0 || measured === _packSectionChromePx) return;
+        _packSectionChromePx = measured;
+        main.querySelectorAll('.emoji-pack-section').forEach(sec => {
+            const grid = _packCanvasGrids.get(sec.dataset.packId);
+            const rows = grid ? Math.max(1, grid.rows) : 1;
+            sec.style.containIntrinsicSize = `0 ${_packSectionChromePx + PACK_CANVAS_CELL_PX * rows}px`;
+        });
+    });
 }
 
 /**
@@ -4668,6 +4706,9 @@ document.querySelector('.emoji-sidebar').addEventListener('click', async (e) => 
             `.emoji-pack-section[data-pack-id="${CSS.escape(btn.dataset.packId)}"]`,
         );
     }
+    // Pixel-accurate contain-intrinsic-size on every pack section (see
+    // renderEmojiPackSections) means nothing resizes under the scroll, so a
+    // single smooth scroll lands on target — no post-jump correction needed.
     if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
 });
 
