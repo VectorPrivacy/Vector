@@ -83,6 +83,20 @@ android {
             )
         }
     }
+    // Per-ABI APK splits: each device downloads only its architecture's native
+    // libs (~half the size of the all-ABI universal). universalApk keeps one
+    // works-everywhere fallback for manual sideloading. All splits share the
+    // Cargo-derived versionCode — fine for direct/store distribution (a device
+    // only installs the ABI that matches it; updates come from the next
+    // release's higher code). Google Play would additionally need per-ABI codes.
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("armeabi-v7a", "arm64-v8a")
+            isUniversalApk = true
+        }
+    }
     kotlinOptions {
         jvmTarget = "1.8"
     }

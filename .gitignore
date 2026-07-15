@@ -35,3 +35,4 @@ scripts/.emoji-cache/
 crates/target/
 patches/mdk/target/
 patches/mdk/Cargo.lock
+dist-android/

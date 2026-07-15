@@ -66,9 +66,28 @@ else
     npx tauri android build --apk true --target aarch64 --target armv7 "$@"
 fi
 
-# Show output location
-APK_PATH="$TAURI_DIR/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk"
-if [ -f "$APK_PATH" ]; then
-    echo ""
-    echo "APK built successfully: $APK_PATH"
+# Collect the per-ABI + universal split APKs under clean, store-friendly names.
+# The abi-splits config emits app-universal-<abi>-release.apk; stores distribute
+# the per-ABI slims (~46/61MB) and the universal (~104MB) is the sideload fallback.
+APK_DIR="$TAURI_DIR/gen/android/app/build/outputs/apk/universal/release"
+DIST_DIR="$PROJECT_ROOT/dist-android"
+mkdir -p "$DIST_DIR"
+
+# bash 3.2 (stock macOS) has no associative arrays — keep it to a plain helper.
+collect() {  # $1 = built basename, $2 = distribution name
+    if [ -f "$APK_DIR/$1" ]; then
+        cp "$APK_DIR/$1" "$DIST_DIR/$2"
+        echo "  $(du -h "$DIST_DIR/$2" | cut -f1)	$2"
+    fi
+}
+
+echo ""
+echo "Collecting APKs into $DIST_DIR:"
+collect "app-universal-arm64-v8a-release.apk"   "Vector-arm64-v8a.apk"
+collect "app-universal-armeabi-v7a-release.apk" "Vector-armeabi-v7a.apk"
+collect "app-universal-universal-release.apk"   "Vector.apk"
+
+if ! ls "$DIST_DIR"/*.apk >/dev/null 2>&1; then
+    echo "Error: no release APKs found in $APK_DIR"
+    exit 1
 fi
