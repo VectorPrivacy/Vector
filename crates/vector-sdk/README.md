@@ -98,6 +98,29 @@ By default, invites wait for you to handle them (`bot.pending_invites()` /
 `bot.accept_invite(id)`). Auto-accept also picks up invites that arrived while the bot
 was offline, so a restarted bot still joins.
 
+**Commands** — don't parse message text by hand. Declare a slash command with typed
+arguments and the SDK publishes a manifest for it, so every Vector client renders a `/`
+picker with your command and a field per argument — a dropdown for a choice, a member
+picker for a user, a number field for an int — and validates the input *before* it's sent.
+Your handler gets the arguments already parsed and type-checked:
+
+```rust
+bot.command("weather", "Current conditions for a city")
+    .string("city", "Which city", true)              // required free text
+    .choice("units", "Temperature units", ["c", "f"], false)  // optional dropdown
+    .run(|ctx| async move {
+        let city = ctx.str("city").unwrap_or_default();
+        let units = ctx.str("units").unwrap_or("c");
+        ctx.reply(format!("Weather in {city} (°{})…", units.to_uppercase())).await.ok();
+    });
+```
+
+Argument types: `.string()`, `.int()`, `.number()`, `.flag()` (bool), `.user()` (an npub),
+and `.choice(name, desc, options, required)`; read them off `ctx` with `ctx.str/int/number/flag(name)`.
+A matched command runs its handler and never reaches `on_message`, so commands and free-form
+chat live side by side. The manifest publishes automatically when the bot starts listening.
+See [`slash_command_bot`](examples/slash_command_bot.rs) for a full example.
+
 **Receiving** — `bot.on_message(handler)` runs your handler for every incoming message
 (DM or community); a slow handler won't hold up the others.
 

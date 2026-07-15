@@ -57,6 +57,7 @@
 //! | React (emoji or custom image) | [`Channel::react`] · [`react_custom`](Channel::react_custom) |
 //! | Send & receive files | [`Channel::send_file`] · [`VectorBot::download_attachment`] / [`save_attachment`](VectorBot::save_attachment) |
 //! | Receive messages | [`VectorBot::on_message`] |
+//! | Answer typed slash commands (with a `/` picker) | [`VectorBot::command`] → [`CommandBuilder`] |
 //! | Receive *everything* (joins, reactions, invites…) | [`VectorBot::on_event`] → match on [`BotEvent`] |
 //! | Moderate a community | [`IncomingMessage::member`] → [`Member::kick`] · [`ban`](Member::ban) · [`grant_admin`](Member::grant_admin) |
 //! | Manage a community | [`IncomingMessage::community`] / [`VectorBot::community`] → [`Community`] |
@@ -68,6 +69,8 @@
 //!
 //! [`on_message`](VectorBot::on_message) is the fast path — one async handler per
 //! inbound message, DMs and Community channels alike; a slow handler won't hold up the others.
+//! (For slash commands, reach for [`command`](VectorBot::command) rather than matching on
+//! `msg.text()` here — see [Commands](#commands) below.)
 //!
 //! For everything beyond messages, [`on_event`](VectorBot::on_event) delivers the
 //! full stream as a [`BotEvent`] you `match` on — `Message`, `MessageUpdate` (a
@@ -88,6 +91,39 @@
 //! }).await?;
 //! # Ok(()) }
 //! ```
+//!
+//! ## Commands
+//!
+//! Don't parse `msg.text()` by hand. Declare a **command** instead: give it a name, a
+//! description, and typed arguments, and the SDK publishes a machine-readable manifest for
+//! it. Every Vector client then renders a `/` picker listing your command, and offers a
+//! typed field per argument — a dropdown for a [`choice`](CommandBuilder::choice), a member
+//! picker for a [`user`](CommandBuilder::user), a number field for an [`int`](CommandBuilder::int)
+//! — and validates the input *before* the invocation is ever sent. Your handler receives the
+//! arguments already parsed and type-checked.
+//!
+//! ```no_run
+//! # use vector_sdk::VectorBot;
+//! # async fn run(bot: VectorBot) {
+//! bot.command("weather", "Current conditions for a city")
+//!     .string("city", "Which city", true)             // required free text
+//!     .choice("units", "Temperature units", ["c", "f"], false) // optional dropdown
+//!     .run(|ctx| async move {
+//!         let city = ctx.str("city").unwrap_or_default();
+//!         let units = ctx.str("units").unwrap_or("c");
+//!         let _ = ctx.reply(format!("Weather in {city} in °{}…", units.to_uppercase())).await;
+//!     });
+//! # }
+//! ```
+//!
+//! Argument types: [`string`](CommandBuilder::string), [`int`](CommandBuilder::int),
+//! [`number`](CommandBuilder::number), [`flag`](CommandBuilder::flag) (bool),
+//! [`user`](CommandBuilder::user) (an npub), and [`choice`](CommandBuilder::choice). Read them
+//! back off the [`CommandCtx`] with `ctx.str/int/number/flag(name)`. A matched command runs its
+//! handler and never reaches [`on_message`](VectorBot::on_message), so commands and free-form
+//! chat coexist; the manifest publishes automatically once the bot starts listening. See the
+//! [`slash_command_bot`](https://github.com/VectorPrivacy/Vector/blob/master/crates/vector-sdk/examples/slash_command_bot.rs)
+//! example for a full bot.
 //!
 //! ## Communities
 //!
