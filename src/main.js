@@ -12450,13 +12450,9 @@ document.addEventListener('click', (e) => {
                     invoke('revoke_reaction', { reactionId: mine.id })
                         .catch(err => console.error('revoke_reaction failed:', err));
                 } else {
-                    // Not yet reacted → add. Mark + optimistic count bump to debounce double-clicks.
+                    // Not yet reacted → add. Mark + optimistic count roll to debounce double-clicks.
                     clickedReaction.setAttribute('data-reacted', 'true');
-                    const countNode = [...clickedReaction.childNodes].find(n => n.nodeType === Node.TEXT_NODE);
-                    if (countNode) {
-                        const count = parseInt(countNode.textContent.trim()) || 1;
-                        countNode.textContent = ` ${count + 1}`;
-                    }
+                    _dmsgRollReactionCount(clickedReaction, _dmsgReactionCount(clickedReaction) + 1);
                     reactToMessageRouted(msgId, cChat.id, emoji);
                 }
                 break;

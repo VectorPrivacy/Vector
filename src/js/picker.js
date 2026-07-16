@@ -4243,23 +4243,7 @@ function _sendCustomEmojiReaction(shortcode, url) {
         // Local decoy chip — shows the image right away. The renderer
         // for inbound reactions picks up the `emoji` tag and replaces
         // the `:shortcode:` text similarly.
-        const spanReaction = document.createElement('span');
-        spanReaction.classList.add('reaction');
-        spanReaction.dataset.emoji = `:${shortcode}:`;
-        spanReaction.dataset.emojiUrl = url;
-        spanReaction.dataset.msgId = strCurrentReactionReference;
-        spanReaction.dataset.reacted = 'true';
-        const img = document.createElement('img');
-        img.alt = `:${shortcode}:`;
-        img.className = 'reaction-custom-emoji';
-        spanReaction.appendChild(img);
-        spanReaction.appendChild(document.createTextNode(' 1'));
-        // Deleted/404 custom emoji → fall back to a twemoji'd question mark
-        // so the reaction chip stays a recognisable glyph, not a gap.
-        bindCachedEmojiImg(img, url, 'emoji', (el) => {
-            el.replaceWith(document.createTextNode('❓'));
-            twemojify(spanReaction);
-        });
+        const spanReaction = _dmsgBuildReactionChip(`:${shortcode}:`, { count: 1, mine: true, url }, strCurrentReactionReference);
 
         const divMessage = document.getElementById(cMsg.id);
         _dmsgInjectReaction(divMessage, spanReaction);
@@ -4797,13 +4781,7 @@ picker.addEventListener('click', (e) => {
                         if (!cMsg) continue;
 
                         const strReceiverPubkey = cChat.id;
-                        const spanReaction = document.createElement('span');
-                        spanReaction.classList.add('reaction');
-                        spanReaction.dataset.emoji = cEmoji.emoji;
-                        spanReaction.dataset.msgId = strCurrentReactionReference;
-                        spanReaction.dataset.reacted = 'true';
-                        spanReaction.textContent = `${cEmoji.emoji} 1`;
-                        twemojify(spanReaction);
+                        const spanReaction = _dmsgBuildReactionChip(cEmoji.emoji, { count: 1, mine: true, url: null }, strCurrentReactionReference);
 
                         const divMessage = document.getElementById(cMsg.id);
                         _dmsgInjectReaction(divMessage, spanReaction);
@@ -4893,14 +4871,8 @@ emojiSearch.onkeydown = async (e) => {
                 // Found the message!
                 const strReceiverPubkey = cChat.id;
 
-                // Add a 'decoy' reaction for good UX (no waiting for the network to register the reaction)
-                const spanReaction = document.createElement('span');
-                spanReaction.classList.add('reaction');
-                spanReaction.dataset.emoji = cEmoji.emoji;
-                spanReaction.dataset.msgId = strCurrentReactionReference;
-                spanReaction.dataset.reacted = 'true';
-                spanReaction.textContent = `${cEmoji.emoji} 1`;
-                twemojify(spanReaction);
+                // Decoy chip for instant feedback (no wait for the network echo).
+                const spanReaction = _dmsgBuildReactionChip(cEmoji.emoji, { count: 1, mine: true, url: null }, strCurrentReactionReference);
 
                 // Inject the decoy chip into .dmsg-reactions, bumping count if the emoji
                 // already exists or appending a new chip otherwise.
@@ -4972,14 +4944,8 @@ picker.addEventListener('click', (e) => {
                 // Found the message!
                 const strReceiverPubkey = cChat.id;
 
-                // Add a 'decoy' reaction for good UX (no waiting for the network to register the reaction)
-                const spanReaction = document.createElement('span');
-                spanReaction.classList.add('reaction');
-                spanReaction.dataset.emoji = cEmoji.emoji;
-                spanReaction.dataset.msgId = strCurrentReactionReference;
-                spanReaction.dataset.reacted = 'true';
-                spanReaction.textContent = `${cEmoji.emoji} 1`;
-                twemojify(spanReaction);
+                // Decoy chip for instant feedback (no wait for the network echo).
+                const spanReaction = _dmsgBuildReactionChip(cEmoji.emoji, { count: 1, mine: true, url: null }, strCurrentReactionReference);
 
                 // Inject the decoy chip into .dmsg-reactions, bumping count if the emoji
                 // already exists or appending a new chip otherwise.

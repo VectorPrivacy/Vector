@@ -1318,114 +1318,234 @@ function _dmsgBuildStatus(msg) {
     return statusEl;
 }
 
-function _dmsgBuildReactions(msg) {
-    if (!msg.reactions || !msg.reactions.length) return null;
-
-    // Aggregate reactions by emoji, preserving the order of first
-    // occurrence. Carry through the first non-null `emoji_url` we see
-    // for each emoji so custom-pack reactions render their image even
-    // when the user no longer has the originating pack subscribed.
+// Aggregate a message's flat reaction list into per-emoji groups, preserving
+// first-occurrence order. Carries the first non-null `emoji_url` so custom-pack
+// reactions render their image even when the originating pack is unsubscribed.
+function _dmsgAggregateReactions(msg) {
     const groups = new Map();  // emoji → { count, mine, url }
-    for (const r of msg.reactions) {
+    for (const r of (msg.reactions || [])) {
         const g = groups.get(r.emoji) || { count: 0, mine: false, url: null };
         g.count += 1;
         if (r.author_id === strPubkey) g.mine = true;
         if (!g.url && r.emoji_url) g.url = r.emoji_url;
         groups.set(r.emoji, g);
     }
+    return groups;
+}
 
+// The count is its own clipped roller (`.reaction-count > .rc-value`) so a
+// change can slide the old number out and the new one in — see
+// _dmsgRollReactionCount.
+function _dmsgBuildReactionCountEl(count) {
+    const countEl = document.createElement('span');
+    countEl.className = 'reaction-count';
+    const valEl = document.createElement('span');
+    valEl.className = 'rc-value';
+    valEl.textContent = String(count);
+    countEl.appendChild(valEl);
+    return countEl;
+}
+
+// Build a single reaction chip. Shared by the initial render, the reconcile,
+// and the picker's optimistic decoys so the DOM shape can never drift.
+function _dmsgBuildReactionChip(emoji, group, msgId) {
+    const { count, mine, url } = group;
+    const span = document.createElement('span');
+    span.classList.add('reaction');  // Kept for the global '.reaction' click delegate (toggle-reaction handler in main.js).
+    span.setAttribute('data-emoji', emoji);
+    span.setAttribute('data-msg-id', msgId);
+    if (mine) {
+        span.setAttribute('data-reacted', 'true');
+        span.title = 'Click to remove your reaction';
+    }
+
+    // NIP-30 custom-emoji rendering — prefer the URL persisted on the reaction
+    // itself (survives reload + unsubscribe), fall back to a live lookup against
+    // subscribed packs, then to the literal `:shortcode:` text if neither knows it.
+    let customUrl = url || null;
+    if (!customUrl) {
+        const m = /^:([a-zA-Z0-9_~-]+):$/.exec(emoji);
+        if (m && typeof arrEmojiPacks !== 'undefined' && Array.isArray(arrEmojiPacks)) {
+            const sc = m[1];
+            for (const pack of arrEmojiPacks) {
+                if (!pack.emojis) continue;
+                // Match the disambiguated code first (`love~2`), then the bare one.
+                const found = pack.emojis.find(e => (e.dispCode || e.shortcode) === sc);
+                if (found) { customUrl = found.url; break; }
+            }
+        }
+    }
+
+    if (customUrl) {
+        const img = document.createElement('img');
+        img.alt = emoji;
+        img.className = 'reaction-custom-emoji';
+        span.appendChild(img);
+        // Route reaction emoji bytes through the Rust cache — raw Blossom URL
+        // never lands on <img src>, so Tor traffic stays contained and repeat
+        // renders skip the network entirely.
+        if (typeof bindCachedEmojiImg === 'function') {
+            // Deleted/404 emoji → twemoji'd question mark so the chip stays a
+            // recognisable glyph instead of an empty box.
+            bindCachedEmojiImg(img, customUrl, 'emoji', (el) => {
+                el.replaceWith(document.createTextNode('❓'));
+                twemojify(span);
+            });
+        } else {
+            img.src = customUrl;
+        }
+    } else {
+        // Fuzz defence: any reaction glyph that isn't a resolvable custom emoji
+        // gets ONE uniform hard cap by code point (surrogate-safe, so a multi-char
+        // emoji is never split into a lone surrogate). data-emoji keeps the full
+        // value for the toggle handler; only the DISPLAY is capped.
+        const REACTION_GLYPH_CAP = 16;
+        const cps = Array.from(emoji);
+        const shown = cps.length > REACTION_GLYPH_CAP
+            ? cps.slice(0, REACTION_GLYPH_CAP).join('') + '…'
+            : emoji;
+        const glyph = document.createElement('span');
+        glyph.className = 'reaction-glyph';
+        glyph.textContent = shown;
+        span.appendChild(glyph);
+        twemojify(glyph);
+    }
+    span.appendChild(_dmsgBuildReactionCountEl(count));
+    return span;
+}
+
+// Inline "add reaction" shortcut chip (Discord-style + at end of the row).
+function _dmsgBuildReactionsAddButton(msgId) {
+    const addBtn = document.createElement('button');
+    addBtn.type = 'button';
+    addBtn.classList.add('dmsg-reactions-add');
+    addBtn.setAttribute('data-msg-id', msgId);
+    addBtn.setAttribute('aria-label', 'Add reaction');
+    addBtn.title = 'Add reaction';
+    addBtn.innerHTML = '<span class="icon icon-smile-face"></span>';
+    // onclick handled by the delegated listener at the bottom of this file.
+    return addBtn;
+}
+
+function _dmsgBuildReactions(msg) {
+    if (!msg.reactions || !msg.reactions.length) return null;
+    const groups = _dmsgAggregateReactions(msg);
     const reactionsRow = document.createElement('div');
     reactionsRow.classList.add('dmsg-reactions');
-
-    for (const [emoji, { count, mine, url }] of groups) {
-        const span = document.createElement('span');
-        span.classList.add('reaction');  // Kept for the global '.reaction' click delegate (toggle-reaction handler in main.js).
-        span.setAttribute('data-emoji', emoji);
-        span.setAttribute('data-msg-id', msg.id);
-        if (mine) {
-            span.setAttribute('data-reacted', 'true');
-            span.title = 'Click to remove your reaction';
-        }
-
-        // NIP-30 custom-emoji rendering — prefer the URL persisted on the
-        // reaction itself (survives reload + unsubscribe), fall back to a
-        // live lookup against subscribed packs, then to the literal
-        // `:shortcode:` text if neither knows the emoji.
-        let customUrl = url || null;
-        if (!customUrl) {
-            const m = /^:([a-zA-Z0-9_~-]+):$/.exec(emoji);
-            if (m && typeof arrEmojiPacks !== 'undefined' && Array.isArray(arrEmojiPacks)) {
-                const sc = m[1];
-                for (const pack of arrEmojiPacks) {
-                    if (!pack.emojis) continue;
-                    // Match the disambiguated code first (`love~2`), then the bare one.
-                    const found = pack.emojis.find(e => (e.dispCode || e.shortcode) === sc);
-                    if (found) { customUrl = found.url; break; }
-                }
-            }
-        }
-
-        if (customUrl) {
-            const img = document.createElement('img');
-            img.alt = emoji;
-            img.className = 'reaction-custom-emoji';
-            span.appendChild(img);
-            span.appendChild(document.createTextNode(` ${count}`));
-            // Route reaction emoji bytes through the Rust cache — raw
-            // Blossom URL never lands on <img src>, so Tor traffic stays
-            // contained and repeat renders skip the network entirely.
-            if (typeof bindCachedEmojiImg === 'function') {
-                // Deleted/404 emoji → twemoji'd question mark so the chip
-                // stays a recognisable glyph instead of an empty box.
-                bindCachedEmojiImg(img, customUrl, 'emoji', (el) => {
-                    el.replaceWith(document.createTextNode('❓'));
-                    twemojify(span);
-                });
-            } else {
-                img.src = customUrl;
-            }
-        } else {
-            // Fuzz defence: any reaction glyph that isn't a resolvable custom
-            // emoji gets ONE uniform hard cap by code point (surrogate-safe, so a
-            // multi-char emoji is never split into a lone surrogate). A `:code:URL`,
-            // random junk, a novel of text — all bound identically, so no malformed
-            // reaction can blow out the row. data-emoji keeps the full value for the
-            // toggle handler; only the DISPLAY is capped.
-            const REACTION_GLYPH_CAP = 16;
-            const cps = Array.from(emoji);
-            const shown = cps.length > REACTION_GLYPH_CAP
-                ? cps.slice(0, REACTION_GLYPH_CAP).join('') + '…'
-                : emoji;
-            span.textContent = `${shown} ${count}`;
-            twemojify(span);
-        }
-        reactionsRow.appendChild(span);
+    for (const [emoji, g] of groups) {
+        reactionsRow.appendChild(_dmsgBuildReactionChip(emoji, g, msg.id));
     }
-
-    // Inline "add reaction" shortcut at end (Discord-style). Only renders when
-    // there's already at least one reaction and we haven't hit the unique-emoji
-    // ceiling — keeps the row clean on un-reacted messages (where the floating
-    // toolbar's 😀 button is the canonical way to start a reaction thread).
-    if (groups.size > 0 && groups.size < 8) {
-        const addBtn = document.createElement('button');
-        addBtn.type = 'button';
-        addBtn.classList.add('dmsg-reactions-add');
-        addBtn.setAttribute('data-msg-id', msg.id);
-        addBtn.setAttribute('aria-label', 'Add reaction');
-        addBtn.title = 'Add reaction';
-        addBtn.innerHTML = '<span class="icon icon-smile-face"></span>';
-        // onclick handled by the delegated listener at the bottom of this file.
-        reactionsRow.appendChild(addBtn);
+    // The "+" only shows while there's at least one reaction and we're below the
+    // unique-emoji ceiling — the floating toolbar's 😀 starts the first thread.
+    if (groups.size > 0 && groups.size < MAX_DISPLAYED_REACTIONS) {
+        reactionsRow.appendChild(_dmsgBuildReactionsAddButton(msg.id));
     }
-
     return reactionsRow;
+}
+
+/** Current displayed count of a reaction chip (from its `.rc-value` roller). */
+function _dmsgReactionCount(chip) {
+    const v = chip && chip.querySelector('.rc-value');
+    const n = v ? parseInt(v.textContent, 10) : NaN;
+    return Number.isFinite(n) ? n : 1;
+}
+
+function _dmsgReducedMotion() {
+    return typeof window !== 'undefined' && window.matchMedia
+        && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+/** Roll a reaction chip's count to `toCount`: the old number slides out (up on
+ *  an increment, down on a decrement) while the new slides in from the opposite
+ *  edge. Transform + opacity only, so it composites on the GPU at 60fps. */
+function _dmsgRollReactionCount(chip, toCount) {
+    const countEl = chip && chip.querySelector('.reaction-count');
+    const valEl = countEl && countEl.querySelector('.rc-value');
+    if (!valEl) return;
+    const from = parseInt(valEl.textContent, 10);
+    // Drop any still-animating leftover so rapid updates can't pile up ghosts.
+    countEl.querySelectorAll('.rc-old').forEach(o => o.remove());
+    if (!Number.isFinite(from) || from === toCount || _dmsgReducedMotion() || !valEl.animate) {
+        valEl.textContent = String(toCount);
+        return;
+    }
+    const up = toCount > from;
+    const old = valEl.cloneNode(true);
+    old.classList.add('rc-old');
+    countEl.appendChild(old);
+    valEl.textContent = String(toCount);
+    // Slightly leisurely (Discord-ish) so the roll is clearly readable, not a blink.
+    const duration = 340;
+    const easing = 'cubic-bezier(0.22, 1, 0.36, 1)';
+    const outY = up ? '-100%' : '100%';
+    const inY = up ? '100%' : '-100%';
+    const outAnim = old.animate(
+        [{ transform: 'translateY(0)', opacity: 1 }, { transform: `translateY(${outY})`, opacity: 0 }],
+        { duration, easing });
+    outAnim.onfinish = outAnim.oncancel = () => old.remove();
+    valEl.animate(
+        [{ transform: `translateY(${inY})`, opacity: 0 }, { transform: 'translateY(0)', opacity: 1 }],
+        { duration, easing });
+}
+
+// Ensure the "+" shortcut exists (and sits last) below the unique-emoji ceiling,
+// and is gone at/above it.
+function _dmsgSyncReactionsAddButton(row, msgId, uniqueCount) {
+    let addBtn = row.querySelector(':scope > .dmsg-reactions-add');
+    const wantBtn = uniqueCount > 0 && uniqueCount < MAX_DISPLAYED_REACTIONS;
+    if (wantBtn) {
+        if (!addBtn) addBtn = _dmsgBuildReactionsAddButton(msgId);
+        row.appendChild(addBtn);  // append = keep it last (moves it if it existed)
+    } else if (addBtn) {
+        addBtn.remove();
+    }
+}
+
+// Reconcile an existing reactions row against `msg` in place (keyed by emoji)
+// rather than rebuilding it: count deltas roll, new chips pop in, gone chips
+// drop. This is what gives the counter continuity for inbound + revoke updates,
+// and it stops re-fetching every custom-emoji image on each reaction event.
+function _dmsgReconcileReactions(row, msg) {
+    const groups = _dmsgAggregateReactions(msg);
+    const chips = new Map();
+    for (const ch of row.querySelectorAll(':scope > .reaction')) {
+        chips.set(ch.getAttribute('data-emoji'), ch);
+    }
+    // Drop chips whose emoji is gone.
+    for (const [emoji, ch] of chips) {
+        if (!groups.has(emoji)) { ch.remove(); chips.delete(emoji); }
+    }
+    const addBtn = row.querySelector(':scope > .dmsg-reactions-add');
+    // Upsert in desired order — inserting each before the "+" appends it in
+    // iteration order (and moves an existing chip into place).
+    for (const [emoji, g] of groups) {
+        let ch = chips.get(emoji);
+        if (ch) {
+            if (g.mine) {
+                ch.setAttribute('data-reacted', 'true');
+                ch.title = 'Click to remove your reaction';
+            } else {
+                ch.removeAttribute('data-reacted');
+                ch.removeAttribute('title');
+            }
+            _dmsgRollReactionCount(ch, g.count);
+            row.insertBefore(ch, addBtn);
+        } else {
+            ch = _dmsgBuildReactionChip(emoji, g, msg.id);
+            ch.classList.add('reaction-enter');
+            ch.addEventListener('animationend', () => ch.classList.remove('reaction-enter'), { once: true });
+            row.insertBefore(ch, addBtn);
+        }
+    }
+    _dmsgSyncReactionsAddButton(row, msg.id, groups.size);
 }
 
 /**
  * Surgically swap the reactions row of a message without touching the rest of
  * the DOM. Preserves transient state on the body — video playback position,
  * audio playhead, spoiler reveal, image load — which a full row re-render
- * would otherwise reset.
+ * would otherwise reset. Reconciles in place when a row already exists so
+ * counts animate and custom-emoji images aren't re-fetched.
  */
 function _dmsgReplaceReactions(rowEl, msg) {
     if (!rowEl) return;
@@ -1433,13 +1553,13 @@ function _dmsgReplaceReactions(rowEl, msg) {
     const body = rowEl.querySelector('.dmsg-body');
     if (!body) return;
     const existing = body.querySelector(':scope > .dmsg-reactions');
-    const fresh = _dmsgBuildReactions(msg);
-    if (existing && fresh) {
-        existing.replaceWith(fresh);
-    } else if (existing && !fresh) {
+    const hasReactions = !!(msg.reactions && msg.reactions.length);
+    if (!existing) {
+        if (hasReactions) body.appendChild(_dmsgBuildReactions(msg));
+    } else if (!hasReactions) {
         existing.remove();
-    } else if (!existing && fresh) {
-        body.appendChild(fresh);
+    } else {
+        _dmsgReconcileReactions(existing, msg);
     }
     // A hover tip anchored to a chip this swap just removed would float forever
     // (mouseout owns dismissal, and a removed anchor never fires it).
@@ -1533,11 +1653,9 @@ function _dmsgInjectReaction(rowEl, spanReaction) {
             ? reactionsRow.querySelector(`.reaction[data-emoji="${CSS.escape(emoji)}"]`)
             : null;
         if (existing) {
-            const countNode = [...existing.childNodes].find(n => n.nodeType === Node.TEXT_NODE);
-            if (countNode) {
-                const count = parseInt(countNode.textContent.trim()) || 1;
-                countNode.textContent = ` ${count + 1}`;
-            }
+            // Roll the count up (don't replace — replacing with the decoy's count
+            // of 1 would lose any prior count from other users' reactions).
+            _dmsgRollReactionCount(existing, _dmsgReactionCount(existing) + 1);
             existing.setAttribute('data-reacted', 'true');
         } else {
             // New emoji — insert BEFORE the trailing "+" add-reaction shortcut so the
@@ -1546,6 +1664,8 @@ function _dmsgInjectReaction(rowEl, spanReaction) {
             const addBtn = reactionsRow.querySelector('.dmsg-reactions-add');
             if (addBtn) reactionsRow.insertBefore(spanReaction, addBtn);
             else reactionsRow.appendChild(spanReaction);
+            spanReaction.classList.add('reaction-enter');
+            spanReaction.addEventListener('animationend', () => spanReaction.classList.remove('reaction-enter'), { once: true });
             // If this insert pushed us to the unique-emoji ceiling, drop the "+"
             // shortcut now so it doesn't linger until message_update re-renders.
             if (addBtn && reactionsRow.querySelectorAll('.reaction').length >= MAX_DISPLAYED_REACTIONS) {

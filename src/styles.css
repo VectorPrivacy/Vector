@@ -16636,6 +16636,36 @@ textarea.command-part-input {
   margin: 0 !important;
   vertical-align: middle;
 }
+/* Rolling reaction counter — the count lives in a clipped box so a change can
+   slide the old number out (up on +, down on −) while the new slides in. */
+.dmsg-reactions .reaction-count {
+  position: relative;
+  display: inline-block;
+  overflow: hidden;
+  line-height: 1;
+}
+.dmsg-reactions .rc-value {
+  display: block;
+  line-height: 1;
+  will-change: transform;
+}
+.dmsg-reactions .rc-old {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+/* New chip pops in on arrival (reconcile / optimistic decoy). Ends at the
+   chip's resting opacity so there's no settle flash. */
+@keyframes reaction-pop-in {
+  from { transform: scale(0.6); opacity: 0; }
+  to   { transform: scale(1); opacity: 0.9; }
+}
+.dmsg-reactions .reaction.reaction-enter {
+  animation: reaction-pop-in 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@media (prefers-reduced-motion: reduce) {
+  .dmsg-reactions .reaction.reaction-enter { animation: none; }
+}
 /* Inline "add reaction" shortcut chip (Discord-style + at end of reactions row). */
 .dmsg-reactions-add {
   cursor: pointer;
