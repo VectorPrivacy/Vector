@@ -2065,6 +2065,13 @@ async function surfaceCommunitySummary(summary) {
         chat.metadata.custom_fields.community_id = summary.community_id;
         chat.metadata.custom_fields.is_owner = summary.is_owner ? 'true' : 'false';
         chat.metadata.custom_fields.dissolved = summary.dissolved ? 'true' : 'false';
+        // Protocol stack (1 = v1, 2 = v2) gates v2-only affordances (e.g. the
+        // Self-Destruct Timer). Never downgrade — mirrors upsert_community_chat:
+        // a dual-stack community identified as v2 stays v2.
+        const curProto = parseInt(chat.metadata.custom_fields.proto_version, 10) || 0;
+        if ((summary.proto_version || 0) > curProto) {
+            chat.metadata.custom_fields.proto_version = String(summary.proto_version);
+        }
         // Stamp the join moment so an empty community sorts to the top right away. Reloads
         // re-source this from the persisted DB created_at via upsert_community_chat.
         if (!chat.metadata.custom_fields.created_at) {

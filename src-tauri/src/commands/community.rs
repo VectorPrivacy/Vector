@@ -84,6 +84,10 @@ pub struct CommunitySummary {
     /// the accept path.
     #[serde(default)]
     pub preloaded: bool,
+    /// Protocol stack (1 = v1, 2 = v2). The frontend stamps this into the chat's
+    /// custom_fields at join/surface time, so v2-only affordances (e.g. the
+    /// Self-Destruct Timer) work immediately instead of after the next reload.
+    pub proto_version: i64,
 }
 
 #[derive(serde::Serialize)]
@@ -116,6 +120,7 @@ fn summarize(community: &vector_core::community::Community) -> CommunitySummary 
         owner_npub,
         dissolved: community.dissolved,
         preloaded: false,
+        proto_version: vector_core::community::ConcordProtocol::V1.as_i64(),
     }
 }
 
@@ -143,6 +148,7 @@ fn summarize_v2(c: &vector_core::community::v2::community::CommunityV2) -> Commu
         owner_npub: owner.and_then(|pk| pk.to_bech32().ok()),
         dissolved: c.dissolved,
         preloaded: false,
+        proto_version: vector_core::community::ConcordProtocol::V2.as_i64(),
     }
 }
 
