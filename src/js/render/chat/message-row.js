@@ -625,17 +625,22 @@ function _dmsgBuildCommandLine(msg, cmd) {
         const profile = getProfile(cmd.botNpub);
         // Avatar + name carry data-npub so the shared profile delegate opens
         // the bot's mini profile, exactly like a normal author name/avatar.
+        // The nowrap unit keeps them on the same line when the sentence wraps
+        // (WebKit breaks around images even with no whitespace between).
+        const unit = document.createElement('span');
+        unit.classList.add('dmsg-command-bot-unit');
         const img = document.createElement('img');
         img.classList.add('dmsg-command-bot-avatar', 'btn');
         img.src = (profile && getProfileAvatarSrc(profile)) || 'icons/user-placeholder.svg';
         img.alt = '';
         img.dataset.npub = cmd.botNpub;
-        line.appendChild(img);
+        unit.appendChild(img);
         const bot = document.createElement('span');
         bot.classList.add('dmsg-command-bot', 'btn');
         bot.textContent = getName(cmd.botNpub);
         bot.dataset.npub = cmd.botNpub;
-        line.appendChild(bot);
+        unit.appendChild(bot);
+        line.appendChild(unit);
     }
     return line;
 }

@@ -15306,14 +15306,15 @@ hr {
 }
 
 /* --- Command invocation line (in-chat render of a sent command) ---
-   Passive prose, no bubble: "JSKitty ran /roll with ◎ Concordia". */
+   Passive prose, no bubble: "JSKitty ran /roll with ◎ Concordia".
+   Inline flow, not flex: the sentence must wrap at word boundaries on narrow
+   widths (flex + the content slot's overflow-wrap:anywhere squishes each word
+   into a vertical column). break-word overrides `anywhere` so words stay whole. */
 .dmsg-command-line {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
   font-size: 13px;
   font-style: italic;
   color: rgba(255, 255, 255, 0.45);
+  overflow-wrap: break-word;
   -webkit-user-select: none;
   user-select: none;
 }
@@ -15330,20 +15331,28 @@ hr {
   font-style: normal;
 }
 
+/* Avatar + name wrap as one unit: no-whitespace alone doesn't glue them,
+   since WebKit allows soft breaks around replaced elements. */
+.dmsg-command-bot-unit {
+  white-space: nowrap;
+}
+
 .dmsg-command-bot-avatar {
   width: 15px;
   height: 15px;
   border-radius: 50%;
   object-fit: cover;
-  flex-shrink: 0;
+  vertical-align: text-bottom;
+  margin-right: 4px;
 }
 
 .dmsg-command-bot {
   color: var(--icon-color-primary, #59fcb3);
   font-weight: 600;
   font-style: normal;
+  display: inline-block;
+  vertical-align: bottom;
   max-width: 22ch;
-  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
