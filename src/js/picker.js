@@ -4199,7 +4199,9 @@ function _handlePackEmojiSelect(pack, emoji, keepOpen = false) {
         if (!_userAlreadyReacted(literal)) {
             _sendCustomEmojiReaction(code, emoji.url);
         }
-        picker.classList.remove('visible');
+        // Shift keeps the panel open for rapid multi-react (mirrors compose
+        // multi-insert), until the message hits its reaction display ceiling.
+        if (!keepOpen || _reactionRowAtCapacity(strCurrentReactionReference)) picker.classList.remove('visible');
         return;
     }
     insertAtCursor(`:${code}:`, true);
@@ -4763,7 +4765,9 @@ picker.addEventListener('click', (e) => {
         if (!_userAlreadyReacted(literal)) {
             _sendCustomEmojiReaction(shortcode, url);
         }
-        picker.classList.remove('visible');
+        // Shift keeps the panel open for rapid multi-react (mirrors compose
+        // multi-insert), until the message hits its reaction display ceiling.
+        if (!e.shiftKey || _reactionRowAtCapacity(strCurrentReactionReference)) picker.classList.remove('visible');
         return;
     }
     insertAtCursor(`:${shortcode}:`, true);
@@ -4811,9 +4815,10 @@ picker.addEventListener('click', (e) => {
                 insertAtCursor(cEmoji.emoji, true);
             }
 
-            // Shift-click (message compose, not reactions) keeps the panel open
-            // for rapid multi-insert (Discord-style).
-            if (!(e.shiftKey && !strCurrentReactionReference)) {
+            // Shift keeps the panel open for rapid multi-insert AND multi-react
+            // (Discord-style); release shift, Escape, or click away to dismiss.
+            // A reaction that fills the display ceiling also closes.
+            if (!e.shiftKey || (strCurrentReactionReference && _reactionRowAtCapacity(strCurrentReactionReference))) {
                 picker.classList.remove('visible');
             }
             // Focus chat input (desktop only - mobile keyboards are disruptive)

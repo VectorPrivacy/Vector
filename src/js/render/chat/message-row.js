@@ -14,6 +14,11 @@
 // the set is allowed to grow across chats (an msg id is unique to its event).
 const _dmsgPreviewFetchedIds = new Set();
 
+// Unique-emoji ceiling for a message's reaction row. At this count the "+"
+// add-reaction shortcut is dropped (no more can be shown), and the reaction
+// picker's shift multi-react auto-closes.
+const MAX_DISPLAYED_REACTIONS = 8;
+
 /**
  * Build a complete `.dmsg` row DOM element for a Message.
  *
@@ -1543,7 +1548,7 @@ function _dmsgInjectReaction(rowEl, spanReaction) {
             else reactionsRow.appendChild(spanReaction);
             // If this insert pushed us to the unique-emoji ceiling, drop the "+"
             // shortcut now so it doesn't linger until message_update re-renders.
-            if (addBtn && reactionsRow.querySelectorAll('.reaction').length >= 8) {
+            if (addBtn && reactionsRow.querySelectorAll('.reaction').length >= MAX_DISPLAYED_REACTIONS) {
                 addBtn.remove();
             }
         }
@@ -1553,6 +1558,17 @@ function _dmsgInjectReaction(rowEl, spanReaction) {
     // pinned-to-bottom state — softChatScroll no-ops if they've scrolled
     // up so this can't snatch focus from someone reading history.
     if (typeof softChatScroll === 'function') softChatScroll();
+}
+
+/** True once a message's reaction row holds the max unique emojis it can show
+ *  (the "+" is gone). The reaction picker uses this to auto-close a shift
+ *  multi-react when there's no more room to add. */
+function _reactionRowAtCapacity(msgId) {
+    if (!msgId) return false;
+    const chips = document.getElementById(msgId)
+        ?.querySelector('.dmsg-reactions')
+        ?.querySelectorAll('.reaction');
+    return !!chips && chips.length >= MAX_DISPLAYED_REACTIONS;
 }
 
 // Delegated click handler — replaces per-row inline onclick closures for
