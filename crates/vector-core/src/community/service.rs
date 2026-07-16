@@ -14,7 +14,7 @@ use super::public_invite::{
     self, build_public_invite_event, locator_hex, parse_public_invite_event, PublicInviteBundle,
 };
 use super::send::{delete_own_message, publish_signed_message};
-use super::transport::{Query, Transport};
+use super::transport::{Evidence, Query, Transport};
 use super::{Channel, Community};
 use crate::state::SessionGuard;
 use crate::stored_event::event_kind;
@@ -625,15 +625,24 @@ async fn fetch_control_folded<T: Transport + ?Sized>(
     transport: &T,
     community: &Community,
 ) -> Result<super::roster::FoldedRoster, String> {
+    fetch_control_folded_with(transport, community, Evidence::Quorum).await
+}
+
+async fn fetch_control_folded_with<T: Transport + ?Sized>(
+    transport: &T,
+    community: &Community,
+    evidence: Evidence,
+) -> Result<super::roster::FoldedRoster, String> {
     // The control plane lives at the CURRENT server-root epoch — a rotation re-anchors it there, and all
     // live publishes (grants/banlist/metadata/invite-links) seal at the same epoch. Fetch exactly that one
     // (NOT a 0..=epoch range — a post-rotation joiner can't derive prior-epoch pseudonyms; the re-anchor
     // guarantees the complete current plane is reachable here).
     let z_tags = vec![super::roster::control_pseudonym(&community.server_root_key, &community.id, community.server_root_epoch)];
-    // The fold is fail-closed on version-chain gaps; the live transport unions all relays
-    // (a single fast-but-partial relay would otherwise gap-quarantine the head and wedge
-    // this seat on a stale plane forever).
-    let query = Query { kinds: vec![event_kind::COMMUNITY_CONTROL], z_tags, ..Default::default() };
+    // The fold is fail-closed on version-chain gaps and seeds from refuse-downgrade
+    // floors; Quorum coverage defeats a single fast-but-partial relay (which would
+    // otherwise gap-quarantine the head and wedge this seat on a stale plane).
+    // Callers whose result gates a DESTRUCTIVE write pass Evidence::Full.
+    let query = Query { kinds: vec![event_kind::COMMUNITY_CONTROL], z_tags, evidence, ..Default::default() };
     let raw = transport.fetch(&query, &community.relays).await?;
     // Bound the AEAD work too (fold_roster re-caps the verify/fold): a relay
     // flooding the coordinate must not buy unbounded decrypt attempts.
@@ -673,6 +682,25 @@ pub async fn fetch_and_apply_control<T: Transport + ?Sized>(
     transport: &T,
     community: &Community,
 ) -> Result<usize, String> {
+    fetch_and_apply_control_with(transport, community, Evidence::Quorum).await
+}
+
+/// [`fetch_and_apply_control`] at Full evidence — for callers whose folded view
+/// gates a DESTRUCTIVE decision (the pre-admin-write sync: its `is_public` read
+/// routes a ban through the member-severing read-cut path, so it must see the
+/// completest control plane the reachable relays allow).
+pub async fn fetch_and_apply_control_full<T: Transport + ?Sized>(
+    transport: &T,
+    community: &Community,
+) -> Result<usize, String> {
+    fetch_and_apply_control_with(transport, community, Evidence::Full).await
+}
+
+async fn fetch_and_apply_control_with<T: Transport + ?Sized>(
+    transport: &T,
+    community: &Community,
+    evidence: Evidence,
+) -> Result<usize, String> {
     let session = SessionGuard::capture();
     let cid = community.id.to_hex();
     // binary seal: once dissolved, the control fold STOPS advancing — no further editions apply (the
@@ -680,7 +708,7 @@ pub async fn fetch_and_apply_control<T: Transport + ?Sized>(
     if crate::db::community::get_community_dissolved(&cid)? {
         return Ok(0);
     }
-    let folded = fetch_control_folded(transport, community).await?;
+    let folded = fetch_control_folded_with(transport, community, evidence).await?;
     if !session.is_valid() {
         return Err("account changed during control fetch".to_string());
     }
@@ -1907,7 +1935,36 @@ async fn fetch_and_apply_invite_links_inner<T: Transport + ?Sized>(
             locators: set.locators.clone(),
         });
     }
+    // Retain-on-absence: a creator whose set we PERSISTED (proof a prior fold
+    // verified their authorized edition) but whose edition THIS fold did not
+    // return keeps their stored locators — absence is relay coverage, not
+    // revocation (a real revocation is a NEWER edition, which folds above).
+    // Without this, a partial control view writes an empty registry and
+    // `is_public` misreads Private — which routes a public ban through the
+    // read-cut path and severs link-joined members.
+    //
+    // Presence is judged BEFORE the authority gate: an edition that was fetched
+    // but rejected as unauthorized is POSITIVE evidence the creator was demoted,
+    // so their stored row drops now (keying on the authorized set instead would
+    // retain a demoted creator forever — a permanent Public ratchet whose
+    // skipped read-cuts leave banned members holding live keys). Only a truly
+    // ABSENT edition retains; editions are durable at their locator, so the
+    // next fold reaching a relay that holds one converges either way.
+    {
+        let present_creators: std::collections::HashSet<String> =
+            folded.invite_link_sets.iter().map(|s| s.creator.to_hex()).collect();
+        for row in crate::db::community::get_invite_link_sets(&cid)? {
+            if present_creators.contains(&row.creator_hex) {
+                continue;
+            }
+            aggregate.extend(row.locators.iter().cloned());
+            per_creator.push(row);
+        }
+    }
     let aggregate: Vec<String> = aggregate.into_iter().collect();
+    if !session.is_valid() {
+        return Err("account changed during invite-links fold".to_string());
+    }
     crate::db::community::set_community_invite_registry(&cid, &aggregate)?;
     crate::db::community::replace_invite_link_sets(&cid, &per_creator)?;
     Ok(aggregate)
@@ -2156,7 +2213,9 @@ pub async fn sync_before_admin_write<T: Transport + ?Sized>(
     // "can't confirm latest" — only on true ISOLATION: if we KNOW a control plane exists (we hold edition
     // heads) but NO relay returned ANY control event, an admin decision made blind (and unpublishable) must
     // not happen. A community with no published plane (no local heads) has nothing to confirm → proceed.
-    let responded = fetch_and_apply_control(transport, &community).await.map(|n| n > 0).unwrap_or(false);
+    // Full evidence: this fold's `is_public` read decides ban-vs-read-cut — a
+    // partial view misreading "Private" would sever link-joined members.
+    let responded = fetch_and_apply_control_full(transport, &community).await.map(|n| n > 0).unwrap_or(false);
     let hold_local_heads = !crate::db::community::get_all_edition_heads_epoched(&cid)?.is_empty();
     if hold_local_heads && !responded {
         return Err("can't reach any relay to confirm this community's current state — administrative actions are blocked while offline (try again when connected)".to_string());
@@ -2700,7 +2759,10 @@ pub(crate) async fn prepare_reanchor_control_plane<T: Transport + ?Sized>(
     // + re-addresses, never re-authors. Only the HEADS are needed (the freshest, most-retained editions),
     // so this sidesteps the unfetchable-old-version wall that broke the full-history re-anchor.
     let z = super::roster::control_pseudonym(&community.server_root_key, &community.id, community.server_root_epoch);
-    let query = Query { kinds: vec![event_kind::COMMUNITY_CONTROL], z_tags: vec![z], ..Default::default() };
+    // Full evidence: this is the re-founding's acquire-before-commit coverage
+    // gate — a floored head missing from the union ABORTS, so the union must be
+    // the completest the reachable relays allow (a partial view = spurious abort).
+    let query = Query { kinds: vec![event_kind::COMMUNITY_CONTROL], z_tags: vec![z], evidence: Evidence::Full, ..Default::default() };
     let outers = transport.fetch(&query, &community.relays).await?;
     if !session.is_valid() {
         return Err("session changed during re-founding fetch".to_string());
@@ -3363,6 +3425,7 @@ mod tests {
     struct FailingRelay;
     #[async_trait::async_trait]
     impl Transport for FailingRelay {
+        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> { self.fetch(query, relays).await }
         async fn publish(&self, _event: &Event, _relays: &[String]) -> Result<(), String> {
             Err("relay unreachable".to_string())
         }
@@ -3395,6 +3458,7 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl Transport for RekeyFailingRelay {
+        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> { self.fetch(query, relays).await }
         async fn publish(&self, event: &Event, relays: &[String]) -> Result<(), String> {
             if self.blocks(event) { return Err("rekey relay down".to_string()); }
             self.inner.publish(event, relays).await
@@ -4923,6 +4987,7 @@ mod tests {
         }
         #[async_trait::async_trait]
         impl Transport for ChannelRekeyFails {
+            async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> { self.fetch(query, relays).await }
             async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> { self.inner.publish(e, r).await }
             async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> {
                 if e.kind.as_u16() == event_kind::COMMUNITY_REKEY {
@@ -4979,6 +5044,7 @@ mod tests {
         struct ControlPublishFails { inner: MemoryRelay, fail: std::sync::atomic::AtomicBool }
         #[async_trait::async_trait]
         impl Transport for ControlPublishFails {
+            async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> { self.fetch(query, relays).await }
             async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> { self.inner.publish(e, r).await }
             async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> {
                 if self.fail.load(std::sync::atomic::Ordering::Relaxed) && e.kind.as_u16() == event_kind::COMMUNITY_CONTROL {
@@ -5012,6 +5078,7 @@ mod tests {
         struct ReanchorFetchEmpty { inner: MemoryRelay, drop_control: AtomicBool, base_rekeys: AtomicUsize }
         #[async_trait::async_trait]
         impl Transport for ReanchorFetchEmpty {
+            async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> { self.fetch(query, relays).await }
             async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> { self.inner.publish(e, r).await }
             async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> {
                 if e.kind.as_u16() == event_kind::COMMUNITY_REKEY {
@@ -6681,6 +6748,7 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl Transport for SwapDuringPublishRelay {
+        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> { self.fetch(query, relays).await }
         async fn publish(&self, event: &Event, relays: &[String]) -> Result<(), String> {
             crate::state::bump_session_generation();
             self.inner.publish(event, relays).await
@@ -7027,6 +7095,59 @@ mod tests {
         let c = crate::db::community::load_community(&community.id).unwrap().unwrap();
         assert_eq!(c.server_root_epoch, crate::community::Epoch(0), "another creator's link remains → no privatize rekey");
         assert!(is_public(&c).unwrap(), "still Public (admin's link is live)");
+    }
+
+    #[tokio::test]
+    async fn invite_registry_retains_a_persisted_creator_on_a_partial_fold() {
+        // Retain-on-absence: a fold served a PARTIAL control view (a relay
+        // missing the link edition) must not wipe the persisted registry —
+        // an empty registry misreads Private and routes a public ban through
+        // the member-severing read-cut.
+        let (_tmp, _guard) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "HQ", "general", vec!["r1".into()]).await.unwrap();
+        let cid = community.id.to_hex();
+
+        create_public_invite(&relay, &community, None, None).await.unwrap();
+        let owner_loc = public_invite::locator_hex(&crate::simd::hex::hex_to_bytes_32(
+            &crate::db::community::list_public_invites(&cid).unwrap()[0].token));
+        let agg = fetch_and_apply_invite_links(&relay, &community).await.unwrap();
+        assert!(agg.contains(&owner_loc), "the mint folds + persists normally");
+
+        // A partial view: an (empty) relay set that never saw the edition.
+        let partial = MemoryRelay::new();
+        let agg = fetch_and_apply_invite_links(&partial, &community).await.unwrap();
+        assert!(agg.contains(&owner_loc), "an absent edition retains the persisted locators");
+        assert!(is_public(&community).unwrap(), "mode survives the partial view");
+    }
+
+    #[tokio::test]
+    async fn invite_registry_drops_a_demoted_creator_whose_edition_is_present() {
+        // The inverse guard: presence-but-unauthorized is POSITIVE evidence of
+        // demotion, so the stored row drops — retention keyed on the authorized
+        // set instead would keep a demoted creator's links forever (a permanent
+        // Public ratchet whose skipped read-cuts leave banned members reading).
+        let (_tmp, _guard) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "HQ", "general", vec!["r1".into()]).await.unwrap();
+        let cid = community.id.to_hex();
+
+        let admin = Keys::generate();
+        let admin_role_id = crate::db::community::get_community_roles(&cid).unwrap().roles[0].role_id.clone();
+        set_member_grant(&relay, &community, &admin.public_key().to_hex(), vec![admin_role_id]).await.unwrap();
+        let admin_loc = "ab".repeat(32);
+        let inner = crate::community::roster::build_invite_links_edition(&admin, &community.id, &[admin_loc.clone()], 1, None, 2000, None).unwrap();
+        let outer = crate::community::roster::seal_control_edition(&Keys::generate(), &inner, &community.server_root_key, &community.id, crate::community::Epoch(0)).unwrap();
+        relay.inject(&outer, &community.relays);
+        let agg = fetch_and_apply_invite_links(&relay, &community).await.unwrap();
+        assert!(agg.contains(&admin_loc), "the granted admin's link folds + persists");
+
+        // Demote the admin. Their link edition is STILL on the relay, but the
+        // fold now rejects it — and must not fall back to the stored row.
+        set_member_grant(&relay, &community, &admin.public_key().to_hex(), vec![]).await.unwrap();
+        let agg = fetch_and_apply_invite_links(&relay, &community).await.unwrap();
+        assert!(!agg.contains(&admin_loc), "a present-but-unauthorized edition drops the persisted row");
+        assert!(!is_public(&community).unwrap(), "no live authorized link → Private");
     }
 
     #[tokio::test]
@@ -7418,6 +7539,7 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl Transport for RekeyCountingRelay {
+        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> { self.fetch(query, relays).await }
         async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> { self.count(e); self.inner.publish(e, r).await }
         async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> { self.count(e); self.inner.publish_durable(e, r).await }
         async fn fetch(&self, q: &Query, r: &[String]) -> Result<Vec<Event>, String> { self.inner.fetch(q, r).await }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-debug-v2-probe-rekey-planes"
+description = "Enables the debug_v2_probe_rekey_planes command without any pre-configured scope."
+commands.allow = ["debug_v2_probe_rekey_planes"]
+
+[[permission]]
+identifier = "deny-debug-v2-probe-rekey-planes"
+description = "Denies the debug_v2_probe_rekey_planes command without any pre-configured scope."
+commands.deny = ["debug_v2_probe_rekey_planes"]

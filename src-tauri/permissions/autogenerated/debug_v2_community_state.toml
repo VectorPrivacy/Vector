@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-debug-v2-community-state"
+description = "Enables the debug_v2_community_state command without any pre-configured scope."
+commands.allow = ["debug_v2_community_state"]
+
+[[permission]]
+identifier = "deny-debug-v2-community-state"
+description = "Denies the debug_v2_community_state command without any pre-configured scope."
+commands.deny = ["debug_v2_community_state"]

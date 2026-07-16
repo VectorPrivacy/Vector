@@ -137,6 +137,50 @@ pub async fn rebuild_routes() -> (Vec<String>, HashSet<String>) {
     (pseudonyms, relays)
 }
 
+/// The coalesced control-probe coordinate set: every held v1 community's
+/// control pseudonym + next-base-rekey + next-channel-rekey `z` coordinate,
+/// mapped back to its community id. A single change-detector fetch over these
+/// (kinds 3308/3303) tells the boot sweep which communities actually have new
+/// control/rotation editions, so the rest skip the per-community catch-up chain.
+/// Returns `(coordinates, coordinate → community_id_hex, relay_union)`.
+pub async fn control_probe_coordinates() -> (Vec<String>, HashMap<String, String>, HashSet<String>) {
+    let mut coords: Vec<String> = Vec::new();
+    let mut map: HashMap<String, String> = HashMap::new();
+    let mut relays: HashSet<String> = HashSet::new();
+    let Ok(ids) = crate::db::community::list_community_ids() else {
+        return (coords, map, relays);
+    };
+    for id in ids {
+        // v1 only — v2 control/rekey planes are author-addressed giftwraps (a
+        // separate, auth-gated probe; see B1b).
+        if matches!(
+            crate::db::community::community_protocol(&id).ok().flatten(),
+            Some(crate::community::ConcordProtocol::V2)
+        ) {
+            continue;
+        }
+        let Ok(Some(community)) = crate::db::community::load_community(&id) else {
+            continue;
+        };
+        let cid = community.id.to_hex();
+        for r in &community.relays {
+            relays.insert(r.clone());
+        }
+        let mut add = |coord: String| {
+            if !map.contains_key(&coord) {
+                coords.push(coord.clone());
+                map.insert(coord, cid.clone());
+            }
+        };
+        add(roster::control_pseudonym(&community.server_root_key, &community.id, community.server_root_epoch));
+        add(derive::base_rekey_pseudonym(&community.server_root_key, &community.id, Epoch(community.server_root_epoch.0 + 1)).to_hex());
+        for ch in &community.channels {
+            add(derive::rekey_pseudonym(&community.server_root_key, &ch.id, Epoch(ch.epoch.0 + 1)).to_hex());
+        }
+    }
+    (coords, map, relays)
+}
+
 /// (Re)build the Community subscription: rebuild the route maps, then open TWO subscriptions over the
 /// same filter — a targeted `subscribe_to` (streams on desktop) and a pool-wide `subscribe` (streams on
 /// Android). `process_incoming` dedups by outer-event id, so overlap folds exactly once.

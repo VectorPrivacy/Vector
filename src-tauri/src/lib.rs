@@ -806,6 +806,14 @@ pub fn run() {
             commands::community::send_community_cached_file,
             commands::community::sync_community_channel,
             commands::community::sync_communities_boot,
+            #[cfg(debug_assertions)]
+            commands::community::debug_v2_community_state,
+            #[cfg(debug_assertions)]
+            commands::community::debug_v2_probe_rekey_planes,
+            #[cfg(debug_assertions)]
+            commands::community::debug_v2_follow_trace,
+            #[cfg(debug_assertions)]
+            commands::community::debug_v2_explain_base_rekey,
             commands::community::delete_community_message,
             commands::community::revoke_reaction,
             commands::community::react_to_community_message,

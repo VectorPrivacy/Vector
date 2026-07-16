@@ -3032,6 +3032,8 @@ impl VectorCore {
         // drop it so a swapped-in account can't listen on the prior account's pseudonyms.
         crate::community::realtime::clear().await;
         crate::community::v2::realtime::clear().await;
+        // Pooled plane connections are authed as the prior account's plane secret keys.
+        crate::community::transport::clear_plane_pool();
         // Theme-pack emoji tags are account-scoped; leaving the prior account's set active would tag the
         // next account's outbound messages with A's theme shortcodes (leaking A's pack Blossom URLs). The
         // frontend re-registers the new account's theme, but only if it HAS one — clear to be safe.

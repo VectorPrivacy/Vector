@@ -1642,14 +1642,19 @@ async fn sync_community_channel_inner(
     // the OLD epoch's pseudonyms until the next sync (the rekey realtime gap).
     let pre_server_epoch = community.server_root_epoch.0;
     let pre_channel_epoch = community.channels.iter().find(|c| c.id.to_hex() == channel_id).map(|c| c.epoch.0);
-    // On the latest-page sync, run the control catch-up UNCONDITIONALLY — no liveness/freshness gate
-    // ever decides whether to detect authority changes. `catch_up_server_root` /
-    // `catch_up_channel_rekeys` are themselves cheap probes (one racing-fast fetch that breaks when
-    // nothing rotated), and the channel walk MUST run every sync to converge: a re-founding's channel
-    // rekey can lag the base rekey's propagation and is addressed under the PRIOR root, so a one-shot
-    // "did it rotate?" probe would false-negative and strand the new channel key. Skipped only on
-    // older-page scroll-back (the plane is already current).
-    let community = if !is_older {
+    // The control catch-up runs on every latest-page sync UNLESS the boot's coalesced
+    // probe covered this community and found NO control/rekey edition since the
+    // cursor — then its whole chain (server-root + control fold + channel rekeys) is
+    // redundant and skipped, dropping the sync to a single message-page fetch. The
+    // probe watches the exact coordinates a change would land on (control pseudonym,
+    // next-base-rekey, next-channel-rekey), so "clean" is authoritative; a stale or
+    // absent probe falls through to the full chain (the safe default). Older-page
+    // scroll-back never folds.
+    let skip_control = community_probe_clean(&community_id);
+    if skip_control {
+        vector_core::log_debug!("[Sync] control chain SKIPPED (probe-clean) for {}", &community_id[..8.min(community_id.len())]);
+    }
+    let community = if !is_older && !skip_control {
         // Longer than the 12s op-norm: catch-up + the whole-control-plane fold ride this one transport, and
         // boot is REQ-heavy (relays contended + ratelimited), so a short cap returns the plane partial →
         // convergence/authority silently fail closed. (See refresh_community_control for the rationale.)
@@ -1930,6 +1935,226 @@ async fn sync_community_channel_inner(
     Ok(CommunitySyncResult { new_messages, reached_start, oldest_ms })
 }
 
+/// Read-only v2 diagnostic snapshot: epochs, the channel-rekey addressing fan,
+/// per-channel key state, derived plane authors, edition floors, and the
+/// guestbook cursor. NO secret material crosses this boundary — roots and keys
+/// are reported as epoch numbers, counts, and PUBLIC keys only. Pairs with the
+/// dev debug bridge for live epoch-wedge forensics.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn debug_v2_community_state(community_id: String) -> Result<serde_json::Value, String> {
+    let id = CommunityId(hex_to_id32(&community_id)?);
+    let c = vector_core::db::community::load_community_v2(&id)?.ok_or("not a held v2 community")?;
+    let cid_hex = c.id().to_hex();
+
+    let archived_root_epochs: Vec<u64> =
+        vector_core::db::community::held_epoch_keys(&cid_hex, vector_core::community::SERVER_ROOT_SCOPE_HEX)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(e, _)| e.0)
+            .collect();
+    let channels: Vec<serde_json::Value> = c
+        .channels
+        .iter()
+        .map(|ch| {
+            let ch_hex = vector_core::simd::hex::bytes_to_hex_32(&ch.id.0);
+            let held_epochs: Vec<u64> = vector_core::db::community::held_epoch_keys(&cid_hex, &ch_hex)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(e, _)| e.0)
+                .collect();
+            serde_json::json!({
+                "channel_id": ch_hex,
+                "private": ch.private,
+                "epoch": ch.epoch.0,
+                "key_held": ch.key.is_some(),
+                "held_epoch_keys": held_epochs,
+            })
+        })
+        .collect();
+    let plane_authors: Vec<String> = vector_core::community::v2::realtime::plane_authors(&[c.clone()])
+        .into_iter()
+        .map(|p| p.to_hex())
+        .collect();
+    let floors: Vec<serde_json::Value> = vector_core::db::community::get_all_edition_heads_epoched(&cid_hex)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(entity, (epoch, version, _hash))| {
+            serde_json::json!({ "entity": entity, "epoch": epoch, "version": version })
+        })
+        .collect();
+    let (guestbook_events, guestbook_cursor) =
+        vector_core::db::community::get_guestbook(&cid_hex).unwrap_or_default();
+
+    Ok(serde_json::json!({
+        "community_id": cid_hex,
+        "root_epoch": c.root_epoch.0,
+        "archived_root_epochs": archived_root_epochs,
+        "dissolved": vector_core::db::community::get_community_dissolved(&cid_hex).unwrap_or(false),
+        "relays": c.relays,
+        "channels": channels,
+        "plane_authors": plane_authors,
+        "edition_floors": floors,
+        "guestbook": { "events": guestbook_events.len(), "cursor": guestbook_cursor },
+    }))
+}
+
+/// Run one v2 follow inline and report EVERY stage as JSON — the headless twin
+/// of the follow worker for wedge forensics: is the community even visible to
+/// the v2 realtime layer (protocol row, held-v2 set, worker state), are its
+/// relays connected, and what does each follow stage actually return.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn debug_v2_follow_trace(community_id: String) -> Result<serde_json::Value, String> {
+    let id = CommunityId(hex_to_id32(&community_id)?);
+    let session = vector_core::state::SessionGuard::capture();
+
+    let protocol = format!("{:?}", vector_core::db::community::community_protocol(&id));
+    let in_held_v2 = vector_core::community::v2::realtime::load_held_v2()
+        .iter()
+        .any(|c| c.id().to_hex() == community_id);
+    let worker_running = vector_core::community::v2::realtime::follow_worker_running();
+
+    let c = vector_core::db::community::load_community_v2(&id)?.ok_or("not a held v2 community")?;
+
+    // Relay pool status for the community's relays.
+    let mut relay_status = Vec::new();
+    if let Some(client) = vector_core::state::nostr_client() {
+        let pool = client.pool().all_relays().await;
+        for r in &c.relays {
+            let status = nostr_sdk::RelayUrl::parse(r)
+                .ok()
+                .and_then(|u| pool.get(&u).map(|rel| format!("{:?}", rel.status())))
+                .unwrap_or_else(|| "NOT IN POOL".into());
+            relay_status.push(serde_json::json!({ "relay": r, "status": status }));
+        }
+    }
+
+    // Run the three stages UNDER the follow lock so this can't race the live
+    // worker into a whole-row clobber (the stages persist — this is a mutating
+    // diagnostic, serialized against the worker by the shared lock).
+    let (rekeys, control, guestbook) =
+        vector_core::community::v2::realtime::debug_run_follow_stages(&id, &session).await;
+    let c = vector_core::db::community::load_community_v2(&id)?.ok_or("community gone mid-trace")?;
+
+    Ok(serde_json::json!({
+        "community_id": community_id,
+        "protocol_row": protocol,
+        "in_held_v2": in_held_v2,
+        "follow_worker_running": worker_running,
+        "relay_status": relay_status,
+        "root_epoch_before_after": c.root_epoch.0,
+        "follow_rekeys": rekeys,
+        "follow_control": control,
+        "sync_guestbook": guestbook,
+    }))
+}
+
+/// Explain WHY a wedged v2 community isn't adopting its next base rotation:
+/// runs the real fetch+parse+authority+continuity pipeline and reports the gate
+/// each rotation trips. Read-only (public keys only).
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn debug_v2_explain_base_rekey(community_id: String) -> Result<serde_json::Value, String> {
+    use vector_core::community::transport::LiveTransport;
+    let id = CommunityId(hex_to_id32(&community_id)?);
+    let c = vector_core::db::community::load_community_v2(&id)?.ok_or("not a held v2 community")?;
+    let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+    vector_core::community::v2::service::debug_explain_base_rekey(&transport, &c).await
+}
+
+/// Wire-level probe for a v2 community's rotation planes. For each candidate
+/// derivation (the spec next-epoch base plane, archived-root variants, and the
+/// guestbook/control planes as positive controls), open a FRESH connection to
+/// the community's relays authenticated AS that plane key — a gating relay
+/// serves an author's plane only to a connection authed as it, and challenges
+/// once per connection, so the app's live pool can't re-auth for ad-hoc keys.
+/// Every verdict is EOSE-verified (empty is proven, never assumed from a
+/// timeout or CLOSED). Read-only; nothing persists.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn debug_v2_probe_rekey_planes(community_id: String) -> Result<serde_json::Value, String> {
+    use vector_core::community::v2::{derive, stream};
+    use vector_core::community::Epoch;
+    let id = CommunityId(hex_to_id32(&community_id)?);
+    let c = vector_core::db::community::load_community_v2(&id)?.ok_or("not a held v2 community")?;
+    let cid_hex = c.id().to_hex();
+
+    let next = Epoch(c.root_epoch.0.saturating_add(1));
+    let mut candidates: Vec<(String, vector_core::community::v2::derive::GroupKey)> = vec![
+        (format!("base-rekey e{} @ current root [SPEC address]", next.0),
+         derive::base_rekey_group_key(&c.community_root, c.id(), next)),
+        (format!("base-rekey e{} @ current root [skipped-epoch check]", next.0 + 1),
+         derive::base_rekey_group_key(&c.community_root, c.id(), Epoch(next.0 + 1))),
+    ];
+    let archived = vector_core::db::community::held_epoch_keys(&cid_hex, vector_core::community::SERVER_ROOT_SCOPE_HEX)
+        .unwrap_or_default();
+    for (epoch, root) in &archived {
+        if *root != c.community_root {
+            candidates.push((
+                format!("base-rekey e{} @ archived root e{} [divergent-derivation check]", next.0, epoch.0),
+                derive::base_rekey_group_key(root, c.id(), next),
+            ));
+        }
+    }
+    candidates.push(("guestbook @ current epoch [positive control]".into(),
+        derive::guestbook_group_key(&c.community_root, c.id(), c.root_epoch)));
+    candidates.push(("control @ current epoch [positive control]".into(),
+        derive::control_group_key(&c.community_root, c.id(), c.root_epoch)));
+
+    let mut report = Vec::new();
+    for (label, group) in candidates {
+        let pk_hex = group.pk_hex();
+        // Tor-aware options (probe traffic must obey the user's transport) +
+        // auto NIP-42 so the fresh connection auths as the plane key.
+        let opts = vector_core::nostr_client_options().automatic_authentication(true);
+        let client = nostr_sdk::Client::builder().signer(group.keys().clone()).opts(opts).build();
+        for r in &c.relays {
+            let _ = client.add_relay(r.clone()).await;
+        }
+        client.connect().await;
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        let filter = nostr_sdk::Filter::new()
+            .kinds([
+                nostr_sdk::Kind::Custom(stream::KIND_WRAP),
+                nostr_sdk::Kind::Custom(stream::KIND_WRAP_EPHEMERAL),
+            ])
+            .author(group.pk());
+        let mut per_relay = Vec::new();
+        for r in &c.relays {
+            // Warmup REQ with the GATED filter shape: Ditto's policy ("all
+            // authors must be authenticated") only challenges author-filtered
+            // REQs, and nostr-sdk's auto-auth completes + resubscribes inside
+            // this fetch — so the EOSE-verified probe after it rides an
+            // already-authenticated connection instead of dying on the first
+            // CLOSED. (An ungated warmup never triggers auth at all.)
+            let _ = client
+                .fetch_events_from(vec![r.clone()], filter.clone(), Duration::from_secs(6))
+                .await;
+            tokio::time::sleep(Duration::from_millis(800)).await;
+            let entry = match vector_core::community::transport::fetch_relay_eose(&client, r, filter.clone(), Duration::from_secs(8)).await {
+                Ok(events) => {
+                    let detail: Vec<serde_json::Value> = events
+                        .iter()
+                        .map(|e| serde_json::json!({
+                            "id": e.id.to_hex(),
+                            "kind": e.kind.as_u16(),
+                            "created_at": e.created_at.as_secs(),
+                            "tags": e.tags.iter().map(|t| t.as_slice().to_vec()).collect::<Vec<_>>(),
+                        }))
+                        .collect();
+                    serde_json::json!({ "relay": r, "eose": true, "events": detail.len(), "detail": detail })
+                }
+                Err(_) => serde_json::json!({ "relay": r, "eose": false, "outcome": "CLOSED / timeout / no answer" }),
+            };
+            per_relay.push(entry);
+        }
+        client.disconnect().await;
+        report.push(serde_json::json!({ "plane": label, "pk": pk_hex, "relays": per_relay }));
+    }
+    Ok(serde_json::json!({ "community_id": cid_hex, "root_epoch": c.root_epoch.0, "probe": report }))
+}
+
 /// Coalesce a burst of relay reconnections into a single Community re-sync. `sync_communities_boot`
 /// already fans every fetch to each Community's full relay set, so one sweep re-syncs everything a
 /// just-reconnected relay might hold — N concurrent reconnects need exactly ONE sweep, not N. An
@@ -2029,9 +2254,10 @@ pub(crate) async fn reconcile_community_list_boot() {
     if list.is_ahead_of(&relay) {
         vector_core::community::list::republish_community_list_debounced();
     }
-    // page_messages = false: the boot channel sweep (sync_communities_boot) pages every community right after
-    // this, so paging here too would double-fetch the latest page (anti-stampede only dedups CONCURRENT syncs).
-    rehydrate_listed_communities(&list, &session, false).await;
+    // page_messages = true: the boot sweep runs CONCURRENTLY with this reconcile and flattens its channel
+    // list at its own start — a community rehydrated after that flatten would be paged by NEITHER path and
+    // render empty until the next sync. The per-channel anti-stampede coalesces any overlap with the sweep.
+    rehydrate_listed_communities(&list, &session, true).await;
     if session.is_valid() {
         purge_stale_pending_invites(&list.tombstones);
     }
@@ -2236,46 +2462,183 @@ async fn rehydrate_listed_communities(
 /// overwhelming the relays/bandwidth. ONE IPC call drives the whole sweep — no per-channel
 /// frontend round-trips. Each page emits `message_new` as it lands, so the chat list fills in
 /// progressively. Per-channel anti-stampede makes this safe to overlap with reconnect re-syncs.
+// ── Coalesced control-plane probe (change detector) ─────────────────────────
+// One Quorum fetch over every held v1 community's control/rekey coordinates tells
+// the boot sweep which communities actually changed, so the unchanged majority
+// skip the per-community catch-up chain (server-root probe + control fold +
+// channel-rekey walk) and page messages only.
+
+/// (probe_time_secs, set of community_id_hex that had a fresh control/rekey edition).
+static CONTROL_PROBE: std::sync::LazyLock<std::sync::Mutex<(u64, std::collections::HashSet<String>)>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new((0, std::collections::HashSet::new())));
+
+/// A probe result is trusted this long into the sweep (so every channel of a
+/// clean community skips within one boot).
+const CONTROL_PROBE_TTL_SECS: u64 = 180;
+/// A cursor older than this is treated as absent — reseed via a full sweep.
+const CONTROL_PROBE_CURSOR_MAX_AGE: u64 = 24 * 3600;
+/// `since` overlap so an edition on a same-second boundary can't slip the cursor.
+const CONTROL_PROBE_OVERLAP: u64 = 300;
+/// Defensive `#z` cap per REQ (50-community × 3 coords ≈ 150; stay under filter limits).
+const CONTROL_PROBE_CHUNK: usize = 120;
+
+fn probe_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// True when a FRESH coalesced probe covered this community and found NO
+/// control/rekey change — the per-community catch-up chain can be skipped this
+/// sweep. False (run the full chain) whenever no probe ran, it's stale, or the
+/// community was dirty — the safe default is always "fold".
+fn community_probe_clean(community_id: &str) -> bool {
+    let guard = CONTROL_PROBE.lock().unwrap_or_else(|e| e.into_inner());
+    let (probe_secs, dirty) = &*guard;
+    *probe_secs != 0
+        && probe_now_secs().saturating_sub(*probe_secs) < CONTROL_PROBE_TTL_SECS
+        && !dirty.contains(community_id)
+}
+
+/// Run the coalesced control probe: publishes the dirty set into `CONTROL_PROBE`
+/// and advances the cursor on full coverage. A stale/absent cursor skips the
+/// probe (the sweep runs full chains) and reseeds the cursor — so the NEXT boot
+/// can probe. Idempotent, best-effort; any failure leaves the safe default.
+async fn run_control_probe(session: &vector_core::state::SessionGuard) {
+    let now = probe_now_secs();
+    let cursor = vector_core::db::settings::get_sql_setting("concord_control_probe_cursor".into())
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse::<u64>().ok());
+    // Stale/absent cursor → don't trust a skip this boot; leave CONTROL_PROBE
+    // untouched (community_probe_clean stays false → full chains run) and reseed
+    // the cursor so the next boot probes against a fresh floor.
+    let Some(since_base) = cursor.filter(|c| now.saturating_sub(*c) <= CONTROL_PROBE_CURSOR_MAX_AGE) else {
+        let _ = vector_core::db::settings::set_sql_setting("concord_control_probe_cursor".into(), now.to_string());
+        return;
+    };
+    let since = since_base.saturating_sub(CONTROL_PROBE_OVERLAP);
+
+    let (coords, map, relays) = vector_core::community::realtime::control_probe_coordinates().await;
+    if coords.is_empty() || relays.is_empty() {
+        return;
+    }
+    let relays_vec: Vec<String> = relays.into_iter().collect();
+    let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+
+    let mut dirty: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut full_coverage = true;
+    for chunk in coords.chunks(CONTROL_PROBE_CHUNK) {
+        let query = vector_core::community::transport::Query {
+            kinds: vec![
+                vector_core::stored_event::event_kind::COMMUNITY_CONTROL,
+                vector_core::stored_event::event_kind::COMMUNITY_REKEY,
+            ],
+            z_tags: chunk.to_vec(),
+            since: Some(since),
+            ..Default::default() // evidence defaults to Quorum
+        };
+        match transport.fetch_counted(&query, &relays_vec).await {
+            Ok((events, successes, attempted)) => {
+                if successes < attempted {
+                    full_coverage = false;
+                }
+                for e in &events {
+                    for t in e.tags.iter() {
+                        let s = t.as_slice();
+                        if s.len() >= 2 && s[0] == "z" {
+                            if let Some(cid) = map.get(&s[1]) {
+                                dirty.insert(cid.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            Err(_) => full_coverage = false,
+        }
+    }
+    if !session.is_valid() {
+        return;
+    }
+    let dirty_count = dirty.len();
+    {
+        let mut guard = CONTROL_PROBE.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = (now, dirty);
+    }
+    // Advance the cursor ONLY on full coverage: a partial probe re-covers next
+    // boot, so an edition on a relay that was down is never skipped forever.
+    if full_coverage {
+        let _ = vector_core::db::settings::set_sql_setting(
+            "concord_control_probe_cursor".into(),
+            now.saturating_sub(CONTROL_PROBE_OVERLAP).to_string(),
+        );
+    }
+    vector_core::log_info!(
+        "[Boot] control probe: {} dirty community(ies), full_coverage={}",
+        dirty_count, full_coverage
+    );
+}
+
 #[tauri::command]
 pub async fn sync_communities_boot() -> Result<(), String> {
     let session = vector_core::state::SessionGuard::capture();
+    let boot_start = std::time::Instant::now();
 
-    // pull the cross-device Community List + rehydrate any community this device hasn't joined yet,
-    // BEFORE flattening channels — so a freshly-rehydrated community gets its messages paged in this same
-    // boot pass instead of waiting for the next sync.
-    reconcile_community_list_boot().await;
+    // One coalesced control probe BEFORE the channel sweep — the unchanged
+    // majority of communities then skip their per-community control chain.
+    run_control_probe(&session).await;
     if !session.is_valid() {
         return Ok(());
     }
 
-    // v2 cross-device discovery: fold the 13302 Community List (a community joined
-    // on another device auto-appears here) + enqueue a refold per held v2
-    // community. Bootstrapped from the client's connected relays so even a fresh
-    // device holding no v2 community yet can find one.
+    // Cross-device discovery runs CONCURRENTLY with the channel sweep — the v1
+    // 30078 reconcile rides the raw pool-wide fetch (a 20s timeout a single
+    // dead relay can pin) and the v2 13302 fetch adds seconds more; neither may
+    // gate already-held communities' pages. A community either path rehydrates
+    // pages itself on arrival (page_messages=true below), and the per-channel
+    // anti-stampede coalesces any overlap with the sweep.
     {
-        use vector_core::community::{transport::LiveTransport, v2::service as v2};
-        let bootstrap: Vec<String> = match vector_core::state::nostr_client() {
-            Some(client) => client.relays().await.keys().map(|r| r.to_string()).collect(),
-            None => Vec::new(),
-        };
-        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-        if let Ok(joined) = v2::sync_community_list(&transport, &bootstrap).await {
-            for c in &joined {
-                vector_core::community::v2::realtime::enqueue_follow(c.id());
+        let discovery_session = vector_core::state::SessionGuard::capture();
+        tokio::spawn(async move {
+            if !discovery_session.is_valid() {
+                return;
             }
-            if !joined.is_empty() {
-                if let Some(client) = vector_core::state::nostr_client() {
-                    vector_core::community::v2::realtime::refresh_subscription(&client).await;
+            let t = std::time::Instant::now();
+            reconcile_community_list_boot().await;
+            if !discovery_session.is_valid() {
+                return;
+            }
+            use vector_core::community::{transport::LiveTransport, v2::service as v2};
+            let bootstrap: Vec<String> = match vector_core::state::nostr_client() {
+                Some(client) => client.relays().await.keys().map(|r| r.to_string()).collect(),
+                None => Vec::new(),
+            };
+            let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+            if let Ok(joined) = v2::sync_community_list(&transport, &bootstrap).await {
+                // The 12s+ fetch straddled a possible swap — a stale enqueue would
+                // park account A's community ids into account B's follow queue.
+                if !discovery_session.is_valid() {
+                    return;
+                }
+                for c in &joined {
+                    vector_core::community::v2::realtime::enqueue_follow(c.id());
+                }
+                if !joined.is_empty() {
+                    if let Some(client) = vector_core::state::nostr_client() {
+                        vector_core::community::v2::realtime::refresh_subscription(&client).await;
+                    }
                 }
             }
-        }
-        for c in vector_core::community::v2::realtime::load_held_v2() {
-            // Re-register every held v2 chat row at boot: restores the community
-            // metadata over any bare persist-anchor row and prunes sibling-channel
-            // rows from STATE (the follow only re-registers when the fold CHANGES).
-            vector_core::VectorCore.register_v2_chats(&c, &session).await;
-            vector_core::community::v2::realtime::enqueue_follow(c.id());
-        }
+            vector_core::log_info!("[Boot] community list reconcile (background) in {:?}", t.elapsed());
+        });
+    }
+
+    // Held v2 communities: re-register chat rows (cheap, DB-only — restores the
+    // community metadata over any bare persist-anchor row) + queue their follows.
+    for c in vector_core::community::v2::realtime::load_held_v2() {
+        vector_core::VectorCore.register_v2_chats(&c, &session).await;
+        vector_core::community::v2::realtime::enqueue_follow(c.id());
     }
     if !session.is_valid() {
         return Ok(());
@@ -2317,8 +2680,14 @@ pub async fn sync_communities_boot() -> Result<(), String> {
     // instead of waiting on the slowest of a chunk. Each sync is ~4 REQs (server-root probe +
     // control fold + rekey probe + page), so the window caps concurrent REQ pressure at window×4.
     // MVP is single-channel Communities, so a channel here is 1:1 with a Community.
-    const BOOT_SYNC_WINDOW: usize = 3;
+    // An unchanged v1 sync is ~1 REQ (control chain skipped by the probe) and v2
+    // backfills reuse warm pooled connections, so the per-channel REQ pressure that
+    // once capped this at 3 is gone — more channels in flight hides slow-relay
+    // latency across fewer sequential slots. The plane pool (cap 24) and per-relay
+    // breaker bound the concurrent load.
+    const BOOT_SYNC_WINDOW: usize = 6;
     use futures_util::stream::StreamExt;
+    let channel_count = channels.len();
     futures_util::stream::iter(channels)
         .map(|cid| async move {
             if session.is_valid() {
@@ -2328,6 +2697,11 @@ pub async fn sync_communities_boot() -> Result<(), String> {
         .buffer_unordered(BOOT_SYNC_WINDOW)
         .collect::<Vec<()>>()
         .await;
+    vector_core::log_info!(
+        "[Boot] community channel sweep: {} channel(s) in {:?}",
+        channel_count,
+        boot_start.elapsed()
+    );
     Ok(())
 }
 

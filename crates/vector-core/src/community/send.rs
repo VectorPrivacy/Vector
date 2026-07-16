@@ -13,7 +13,7 @@ use super::derive::channel_pseudonym;
 use super::envelope::{open_message_multi, seal_message_with_ephemeral, seal_with_signed_inner, OpenedMessage};
 #[cfg(test)]
 use super::envelope::open_message;
-use super::transport::{Query, Transport};
+use super::transport::{Evidence, Query, Transport};
 use super::{Channel, Community};
 use crate::stored_event::event_kind;
 
@@ -103,6 +103,9 @@ pub async fn fetch_channel_messages<T: Transport + ?Sized>(
         kinds: vec![event_kind::COMMUNITY_MESSAGE],
         z_tags: channel_read_pseudonyms(channel),
         since: None,
+        // Positive-data read: signed messages from any relay are safe, gaps
+        // heal via the straggler sink + live sub. No verdict drawn from absence.
+        evidence: Evidence::Fast,
         ..Default::default()
     };
     let events = transport.fetch(&query, &community.relays).await?;
@@ -169,6 +172,8 @@ pub async fn fetch_channel_events<T: Transport + ?Sized>(
         ],
         z_tags: channel_read_pseudonyms(channel),
         since: None,
+        // Positive-data read (see fetch_channel_messages).
+        evidence: Evidence::Fast,
         ..Default::default()
     };
     transport.fetch(&query, &community.relays).await
@@ -209,6 +214,10 @@ pub async fn fetch_channel_page<T: Transport + ?Sized>(
         // z_tags, above), and back-pagination passes `None` here.
         since,
         limit: Some(limit),
+        // Latest pages are positive-data reads. Older pages (`until` set) are
+        // force-promoted to Full by the transport — the history-start latch
+        // needs the completest union the reachable relays allow.
+        evidence: Evidence::Fast,
         ..Default::default()
     };
     transport.fetch(&query, &community.relays).await

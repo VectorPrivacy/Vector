@@ -68,6 +68,45 @@ pub(crate) fn follow_lock(id: &CommunityId) -> Arc<Mutex<()>> {
     V2_FOLLOW_LOCKS.lock().unwrap().entry(id.0).or_default().clone()
 }
 
+/// Diagnostics: run the three follow stages once for `id` UNDER the follow lock
+/// (so it can't race the worker into a whole-row clobber) and return each
+/// stage's outcome as a display string. Reloads freshly-persisted state between
+/// stages, exactly like [`follow_community`]. Mutating — same writes a live
+/// follow makes; the lock serializes it against the worker.
+#[cfg(debug_assertions)]
+pub async fn debug_run_follow_stages(id: &CommunityId, session: &SessionGuard) -> (String, String, String) {
+    let lock = follow_lock(id);
+    let _guard = lock.lock().await;
+    let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+
+    let Ok(Some(c)) = crate::db::community::load_community_v2(id) else {
+        return ("community gone".into(), "-".into(), "-".into());
+    };
+    let rekeys = match super::service::follow_rekeys(&transport, &c, session).await {
+        Ok(f) => format!(
+            "Ok(updated={} self_removed={} dissolved={})",
+            f.updated.as_ref().map(|u| format!("root_e{}", u.root_epoch.0)).unwrap_or_else(|| "no".into()),
+            f.self_removed, f.dissolved
+        ),
+        Err(e) => format!("ERR: {e}"),
+    };
+    let Ok(Some(c)) = crate::db::community::load_community_v2(id) else {
+        return (rekeys, "community gone".into(), "-".into());
+    };
+    let control = match super::service::follow_control(&transport, &c, session).await {
+        Ok(v) => format!("Ok(changed={})", v.is_some()),
+        Err(e) => format!("ERR: {e}"),
+    };
+    let Ok(Some(c)) = crate::db::community::load_community_v2(id) else {
+        return (rekeys, control, "community gone".into());
+    };
+    let guestbook = match super::service::sync_guestbook(&transport, &c, session).await {
+        Ok(fresh) => format!("Ok(fresh={})", fresh.len()),
+        Err(e) => format!("ERR: {e}"),
+    };
+    (rekeys, control, guestbook)
+}
+
 pub async fn subscription_id() -> Option<SubscriptionId> {
     V2_SUB_ID.lock().await.clone()
 }
@@ -407,7 +446,13 @@ pub fn enqueue_follow(id: &CommunityId) {
     match V2_FOLLOW_TX.lock().unwrap().as_ref() {
         Some(tx) if tx.send(*id).is_ok() => {}
         _ => {
-            pending.remove(&id.0); // no worker / channel closed — nothing queued.
+            // No worker yet — PARK the id in the pending set instead of
+            // dropping it; spawn_follow_worker drains parked ids into its
+            // fresh queue. The boot sweep's enqueues race notifs' worker
+            // spawn (they fire the moment init completes), so a pre-worker
+            // enqueue must defer, never silently vanish — a dropped boot
+            // refold leaves an offline-rotated community wedged at its old
+            // epoch until some live event happens to trigger a dispatch.
         }
     }
 }
@@ -418,8 +463,17 @@ pub fn enqueue_follow(id: &CommunityId) {
 /// worker exits; the captured `SessionGuard` also stops it. Idempotent per session.
 pub fn spawn_follow_worker(handler: Arc<dyn InboundEventHandler>) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CommunityId>();
+    // Re-send every pending id into the fresh queue: parked pre-worker
+    // enqueues AND anything a replaced worker's dropped channel still owed.
+    // Entries stay in the set — the worker removes each as it starts
+    // processing, preserving the coalescing invariant.
+    {
+        let pending = V2_FOLLOW_PENDING.lock().unwrap();
+        for id in pending.iter() {
+            let _ = tx.send(CommunityId(*id));
+        }
+    }
     *V2_FOLLOW_TX.lock().unwrap() = Some(tx);
-    V2_FOLLOW_PENDING.lock().unwrap().clear();
     let session = SessionGuard::capture();
     tokio::spawn(async move {
         while let Some(id) = rx.recv().await {
@@ -482,7 +536,13 @@ async fn follow_community(session: &SessionGuard, id: &CommunityId, handler: &dy
             handler.on_community_refreshed(&community_id);
         }
         Ok(_) => {}
-        Err(_) => return,
+        Err(e) => {
+            // Surfaced, not swallowed: with EOSE-verified fetches an AUTH-gated
+            // or dead rekey plane now reports here instead of masquerading as
+            // "no rotation" — the exact signature of an epoch wedge.
+            crate::log_warn!("[v2:follow {}] rekey follow failed (will retry on next trigger): {}", &community_id[..8.min(community_id.len())], e);
+            return;
+        }
     }
 
     // Control second, on the (possibly new-root) freshly-reloaded state.

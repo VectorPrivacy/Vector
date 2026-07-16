@@ -653,6 +653,13 @@ pub async fn reset_session() {
     // pseudonyms, so they MUST be cleared on swap or account A's keys/routes leak into B's session.
     // The state now lives in vector-core; the new account rebuilds it via refresh_community_subscription().
     vector_core::community::realtime::clear().await;
+    // v2 twin: the follow queue holds account A's community ids and the stream-key registry holds A's
+    // derived plane SECRET keys — carried into B, B's responder would authenticate (NIP-42) as A's
+    // community planes to relays. Cascades to streamauth::clear(). The facade swap_session clears this;
+    // the app swaps through reset_session, so it must clear it too.
+    vector_core::community::v2::realtime::clear().await;
+    // Pooled plane connections are authed as account A's plane secret keys — close them on swap.
+    vector_core::community::transport::clear_plane_pool();
     // Community per-channel sync state (account-scoped) — drop so account B doesn't inherit
     // A's history-start flags, paging cursors, or any stale in-flight claims. (Access-time
     // generation checks self-reset too; this is the explicit teardown.)

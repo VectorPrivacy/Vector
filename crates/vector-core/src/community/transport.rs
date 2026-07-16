@@ -7,6 +7,37 @@
 
 use nostr_sdk::prelude::*;
 
+/// How much relay coverage a fetch waits to witness before returning.
+///
+/// The community planes distinguish POSITIVE DATA (signed events, hash-chained
+/// editions — safe to act on from any relay; refuse-downgrade floors make stale
+/// or replayed data harmless) from NEGATIVE VERDICTS (conclusions from absence:
+/// "no rotation happened", "history ends here", "coverage complete"). A partial
+/// relay view can only ever STALL consensus — and every stall heals via the
+/// straggler sink, the live subscription, or the next sync — but a written
+/// negative verdict has no healer. Pick the tier by what the caller CONCLUDES
+/// from the result, not by how fast it wants to be.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Evidence {
+    /// Return at the FIRST successful relay EOSE (+ the residual merge window).
+    /// For positive-data consumers only: never conclude absence from a Fast
+    /// result.
+    Fast,
+    /// Wait for a MAJORITY of attempted relays — time-bounded to
+    /// [`QUORUM_GRACE_MS`] past the first success, so one dead relay can't
+    /// gate a degraded set. A single fast-lying relay can't force an early
+    /// return while its honest peers answer within the window. Note: for a
+    /// 2-relay set the majority is BOTH, so a degraded pair always rides the
+    /// grace bound (first success + 2s), never a dead relay's full timeout.
+    #[default]
+    Quorum,
+    /// Wait for EVERY relay to resolve (EOSE or its per-relay timeout). For
+    /// presence-latches and coverage gates whose correctness depends on the
+    /// union being as complete as the reachable set allows. Forced whenever
+    /// `Query::until` is set (back-page verdicts).
+    Full,
+}
+
 /// The slice of a relay query the Community protocol needs: event kinds, the `z`
 /// pseudonym tag values, and an optional `since` floor. Production translates
 /// this into a Nostr `Filter`; the in-memory relay matches it directly.
@@ -33,6 +64,10 @@ pub struct Query {
     pub until: Option<u64>,
     /// Max events to return (newest-first), the relay-side page cap. `None` = no limit.
     pub limit: Option<usize>,
+    /// Relay-coverage requirement before the fetch may return. Defaults to
+    /// [`Evidence::Quorum`]; opt into [`Evidence::Fast`] only for positive-data
+    /// reads. Ignored by the in-memory test relay (inherently full-coverage).
+    pub evidence: Evidence,
 }
 
 impl Query {
@@ -132,6 +167,16 @@ pub trait Transport {
     /// Fetch events matching `query` across `relays`, unioned and deduped by id.
     async fn fetch(&self, query: &Query, relays: &[String]) -> Result<Vec<Event>, String>;
 
+    /// Fetch a group PLANE (events authored by `plane`'s pubkey), authenticating
+    /// to AUTH-gating relays AS that plane key. On a relay that requires "the
+    /// author you query must be authenticated" (Ditto), the shared client — authed
+    /// as the USER — can't fetch a plane, so its catch-up REQ is CLOSED and the
+    /// rotation/control is never folded (an offline member wedges at the old
+    /// epoch). This fetches over a connection authed as the plane itself. Required
+    /// (not defaulted — a default async-trait method forces a Sync bound on every
+    /// generic caller); the in-memory test relay just fetches (no auth).
+    async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String>;
+
     /// DURABLE publish for security-critical control events (rekeys, bans, the invite registry, deletes):
     /// retry **each relay independently** until it ACKs, up to [`MAX_PUBLISH_ATTEMPTS`] times, re-sending
     /// only the relays that have NOT yet accepted. The already-signed `event` is broadcast as-is — the
@@ -146,10 +191,29 @@ pub trait Transport {
 /// NIP-17 deletable-DM durability). High enough to ride out a transient relay/local-network blip.
 pub const MAX_PUBLISH_ATTEMPTS: usize = 30;
 
-/// Union grace window: how long past the FIRST response the live transport keeps unioning
-/// slower relays before returning. Long enough for a healthy-but-slower relay on a
-/// high-latency link; short enough that a dead relay doesn't stall every sync.
-pub const FETCH_UNION_GRACE_MS: u64 = 3500;
+/// Residual union window past the moment a fetch's evidence requirement is met:
+/// relays finishing within it still merge synchronously; slower ones background-
+/// merge via the straggler sink.
+pub const RESIDUAL_GRACE_MS: u64 = 400;
+
+/// Time-bound on the Quorum majority wait, measured from the FIRST successful
+/// EOSE. Without it a 2-relay set with one dead relay would ride the dead
+/// relay's full timeout on every fetch; with it a degraded set costs
+/// first-success + this bound, and a healthy set returns at majority
+/// (typically far sooner).
+pub const QUORUM_GRACE_MS: u64 = 2000;
+
+/// Consecutive FULL-BUDGET failures before a relay trips.
+const BREAKER_TRIP_THRESHOLD: u8 = 2;
+
+/// How long a tripped relay stays demoted/skipped before its next fetch becomes
+/// the full-budget half-open probe.
+const BREAKER_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Demoted per-relay timeout for tripped relays on Full drains (N ≥ 2, non-Tor
+/// only) — halves a Full drain's dead-relay tail without shrinking the evidence
+/// denominator.
+const TRIPPED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
 
 /// Hard ceiling on the initial confirmation: at least one relay must ACK within this window or the publish
 /// is a failure (we throw rather than spin on a dead/unreachable relay set forever). Once ONE relay accepts,
@@ -243,6 +307,313 @@ static WARMED_RELAYS: std::sync::LazyLock<std::sync::Mutex<(u64, std::collection
 /// is pure optimization state, so a poisoned lock is recovered rather than propagated.
 pub fn forget_warmed_relay(url: &str) {
     WARMED_RELAYS.lock().unwrap_or_else(|e| e.into_inner()).1.remove(url);
+}
+
+/// Per-relay failure tracker behind the fetch circuit breaker. Generation-keyed
+/// like [`WARMED_RELAYS`] (an account swap invalidates every entry). A trip is
+/// driven ONLY by consecutive failures at the relay's FULL timeout budget:
+/// failures at a demoted budget never count (a slow-but-honest relay must be
+/// able to recover via the post-cooldown full-budget probe), and a late EOSE
+/// surfacing in the background drain resets the entry (slow ≠ dead).
+#[derive(Default)]
+struct BreakerEntry {
+    consecutive_failures: u8,
+    tripped_until: Option<std::time::Instant>,
+}
+
+static RELAY_BREAKER: std::sync::LazyLock<
+    std::sync::Mutex<(u64, std::collections::HashMap<String, BreakerEntry>)>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new((0, std::collections::HashMap::new())));
+
+/// Run `f` over the breaker map for `generation`, resetting the map if the
+/// generation advanced (pure optimization state — poison-tolerant). Generation
+/// is injected so tests pin a fixed one — other tests bump the REAL session
+/// generation concurrently, and a mid-test bump would wipe the map under us.
+fn with_breaker_at<R>(
+    generation: u64,
+    f: impl FnOnce(&mut std::collections::HashMap<String, BreakerEntry>) -> R,
+) -> R {
+    let mut guard = RELAY_BREAKER.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.0 != generation {
+        guard.0 = generation;
+        guard.1.clear();
+    }
+    f(&mut guard.1)
+}
+
+/// Is `url` inside a trip cooldown right now?
+fn breaker_tripped(url: &str) -> bool {
+    breaker_tripped_at(crate::state::current_session_generation(), url)
+}
+
+fn breaker_tripped_at(generation: u64, url: &str) -> bool {
+    with_breaker_at(generation, |map| {
+        map.get(url)
+            .and_then(|e| e.tripped_until)
+            .map_or(false, |t| std::time::Instant::now() < t)
+    })
+}
+
+/// Record a per-relay fetch outcome. Success resets the entry; a failure counts
+/// toward a trip only when the relay had its full timeout budget.
+fn breaker_record(url: &str, success: bool, full_budget: bool) {
+    breaker_record_at(crate::state::current_session_generation(), url, success, full_budget)
+}
+
+fn breaker_record_at(generation: u64, url: &str, success: bool, full_budget: bool) {
+    with_breaker_at(generation, |map| {
+        if success {
+            map.remove(url);
+            return;
+        }
+        if !full_budget {
+            return;
+        }
+        let e = map.entry(url.to_string()).or_default();
+        e.consecutive_failures = e.consecutive_failures.saturating_add(1);
+        if e.consecutive_failures >= BREAKER_TRIP_THRESHOLD {
+            e.tripped_until = Some(std::time::Instant::now() + BREAKER_COOLDOWN);
+        }
+    })
+}
+
+/// `until` forces Full — a back-page verdict (the history-start latch) trusts
+/// "nothing older than the cursor" only against the completest union the
+/// reachable relay set allows. A floor in the transport, not trust in callers.
+fn effective_evidence(query: &Query) -> Evidence {
+    if query.until.is_some() {
+        Evidence::Full
+    } else {
+        query.evidence
+    }
+}
+
+// ── Plane connection pool (fetch_plane) ─────────────────────────────────────
+// A plane fetch on an AUTH-gating relay needs a connection authed AS the plane
+// key. Re-connecting + re-NIP-42-authing on EVERY page/epoch dominates TTFB on
+// slow relays, so keep the authed connection warm and reuse it. Keyed by (plane
+// pubkey, relay set). Generation-scoped: an account swap holds account A's plane
+// SECRET keys, so the pool MUST clear (also freed by `clear_plane_pool`).
+
+struct PooledPlane {
+    client: Client,
+    last_used: std::time::Instant,
+}
+
+static PLANE_POOL: std::sync::LazyLock<std::sync::Mutex<(u64, std::collections::HashMap<String, PooledPlane>)>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new((0, std::collections::HashMap::new())));
+
+/// A pooled connection unused for this long is closed on the next sweep — long
+/// enough to span a community's whole backfill, short enough not to hoard sockets.
+const PLANE_POOL_IDLE_TTL: std::time::Duration = std::time::Duration::from_secs(90);
+/// Hard cap on simultaneously-pooled plane connections (LRU-evicted).
+const PLANE_POOL_MAX: usize = 24;
+
+fn plane_pool_key(plane_pk: &str, relays: &[String]) -> String {
+    let mut rs: Vec<&str> = relays.iter().map(|s| s.as_str()).collect();
+    rs.sort_unstable();
+    let mut k = String::with_capacity(plane_pk.len() + 1 + rs.iter().map(|r| r.len() + 1).sum::<usize>());
+    k.push_str(plane_pk);
+    k.push('|');
+    k.push_str(&rs.join(","));
+    k
+}
+
+/// Disconnect the given clients off the hot path (never awaited under the lock).
+fn disconnect_clients(clients: Vec<Client>) {
+    for c in clients {
+        tokio::spawn(async move {
+            let _ = c.disconnect();
+        });
+    }
+}
+
+/// Close + drop every pooled plane connection. Call on account swap — the pooled
+/// clients are authenticated as the swapped-out account's community plane keys.
+pub fn clear_plane_pool() {
+    let drained: Vec<Client> = {
+        let mut g = PLANE_POOL.lock().unwrap_or_else(|e| e.into_inner());
+        g.1.drain().map(|(_, p)| p.client).collect()
+    };
+    disconnect_clients(drained);
+}
+
+/// Take a warm pooled client for `key` if one is fresh; also drops entries whose
+/// idle TTL expired and resets the whole pool if the session generation advanced
+/// (a swap). Returns `(Some(client_if_hit), clients_to_disconnect)`.
+fn plane_pool_take(generation: u64, key: &str) -> (Option<Client>, Vec<Client>) {
+    let mut g = PLANE_POOL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut evicted: Vec<Client> = Vec::new();
+    if g.0 != generation {
+        evicted.extend(g.1.drain().map(|(_, p)| p.client));
+        g.0 = generation;
+    }
+    // Sweep idle-expired entries.
+    let now = std::time::Instant::now();
+    let expired: Vec<String> = g.1.iter()
+        .filter(|(_, p)| now.duration_since(p.last_used) >= PLANE_POOL_IDLE_TTL)
+        .map(|(k, _)| k.clone())
+        .collect();
+    for k in expired {
+        if let Some(p) = g.1.remove(&k) {
+            evicted.push(p.client);
+        }
+    }
+    let hit = g.1.get_mut(key).map(|p| {
+        p.last_used = now;
+        p.client.clone()
+    });
+    (hit, evicted)
+}
+
+/// Insert a freshly-built client for `key`, LRU-evicting if over the cap. Returns
+/// clients to disconnect (a raced sibling insert, or the LRU victim).
+fn plane_pool_insert(generation: u64, key: String, client: Client) -> Vec<Client> {
+    let mut g = PLANE_POOL.lock().unwrap_or_else(|e| e.into_inner());
+    if g.0 != generation {
+        // Swapped mid-build — don't pool into the new generation; caller still uses it once.
+        return vec![client];
+    }
+    let mut evicted: Vec<Client> = Vec::new();
+    // A concurrent miss for the same key already inserted — keep theirs, drop ours.
+    if g.1.contains_key(&key) {
+        return vec![client];
+    }
+    if g.1.len() >= PLANE_POOL_MAX {
+        if let Some(lru_key) = g.1.iter().min_by_key(|(_, p)| p.last_used).map(|(k, _)| k.clone()) {
+            if let Some(p) = g.1.remove(&lru_key) {
+                evicted.push(p.client);
+            }
+        }
+    }
+    g.1.insert(key, PooledPlane { client, last_used: std::time::Instant::now() });
+    evicted
+}
+
+/// Whether Full-drain timeout demotion may apply. Under Tor EVERY relay is
+/// legitimately slow — a first congested pass must not cascade into pool-wide
+/// starvation, so demotion is disabled entirely.
+fn demotion_allowed() -> bool {
+    #[cfg(feature = "tor")]
+    {
+        matches!(crate::tor::transport_state(), crate::tor::TorTransportState::Disabled)
+    }
+    #[cfg(not(feature = "tor"))]
+    {
+        true
+    }
+}
+
+/// Fetch one relay to GENUINE EOSE, or fail. `Client::fetch_events_from` (and
+/// the whole nostr-sdk 0.44 fetch stack) returns `Ok(collected)` on timeout,
+/// disconnect, and relay-CLOSED alike — success does NOT mean EOSE, which would
+/// let a dead relay count as quorum evidence and return confident empties. So
+/// the verdict is read from the relay's own notification stream instead: EOSE =
+/// success (empty included — a quiet coordinate is a legitimate answer);
+/// CLOSED / shutdown / deadline = failure.
+///
+/// Public for diagnostics (the v2 plane probe); production fetches go through
+/// [`Transport::fetch`], which layers the evidence tiers on top.
+pub async fn fetch_relay_eose(
+    client: &Client,
+    url: &str,
+    filter: Filter,
+    timeout: std::time::Duration,
+) -> Result<Vec<Event>, ()> {
+    let relay = client.pool().relay(url).await.map_err(|_| ())?;
+    // Subscribe to notifications BEFORE the REQ so the EOSE can't slip past.
+    let mut notifications = relay.notifications();
+    let sub_id = SubscriptionId::generate();
+    let auto_close = SubscribeAutoCloseOptions::default()
+        .exit_policy(ReqExitPolicy::ExitOnEOSE)
+        .timeout(Some(timeout));
+    relay
+        .subscribe_with_id(sub_id.clone(), filter, SubscribeOptions::default().close_on(Some(auto_close)))
+        .await
+        .map_err(|_| ())?;
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut events: Vec<Event> = Vec::new();
+    let mut seen: std::collections::HashSet<EventId> = std::collections::HashSet::new();
+    loop {
+        let notification = match tokio::time::timeout_at(deadline, notifications.recv()).await {
+            Ok(Ok(n)) => n,
+            // Lagged: the broadcast skipped messages under a flood — keep
+            // draining; a missed EOSE degrades to the deadline (a failure,
+            // never a false success).
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return Err(()),
+            Err(_) => return Err(()), // deadline: timeout is NOT EOSE
+        };
+        match notification {
+            RelayNotification::Event { subscription_id, event } if subscription_id == sub_id => {
+                if seen.insert(event.id) {
+                    events.push(*event);
+                }
+            }
+            RelayNotification::Message { message } => match message {
+                RelayMessage::Event { subscription_id, event } if *subscription_id == sub_id => {
+                    if seen.insert(event.id) {
+                        events.push(event.into_owned());
+                    }
+                }
+                RelayMessage::EndOfStoredEvents(id) if *id == sub_id => return Ok(events),
+                RelayMessage::Closed { subscription_id, .. } if *subscription_id == sub_id => {
+                    return Err(()); // relay refused the REQ (incl. auth-required)
+                }
+                _ => {}
+            },
+            RelayNotification::Shutdown => return Err(()),
+            _ => {}
+        }
+    }
+}
+
+/// Return-timing state machine for a multi-relay fetch: feed it per-relay
+/// outcomes and ask whether the query's [`Evidence`] requirement is met. Pure
+/// sync logic so the quorum math is unit-testable without a client.
+pub(crate) struct UnionPlan {
+    attempted: usize,
+    successes: usize,
+    resolved: usize,
+    evidence: Evidence,
+}
+
+impl UnionPlan {
+    pub(crate) fn new(evidence: Evidence, attempted: usize) -> Self {
+        Self { attempted, successes: 0, resolved: 0, evidence }
+    }
+
+    pub(crate) fn record(&mut self, success: bool) {
+        self.resolved += 1;
+        if success {
+            self.successes += 1;
+        }
+    }
+
+    /// The tier's coverage requirement is met — the fetch may return after the
+    /// residual merge window. Note Full's requirement is all-RESOLVED (a dead
+    /// relay's timeout is a resolution); the zero-success case errors at the
+    /// call site regardless of tier.
+    pub(crate) fn satisfied(&self) -> bool {
+        match self.evidence {
+            Evidence::Fast => self.successes >= 1,
+            Evidence::Quorum => self.successes >= (self.attempted / 2) + 1,
+            Evidence::Full => self.resolved >= self.attempted,
+        }
+    }
+
+    /// Every relay resolved — nothing left to wait for.
+    pub(crate) fn exhausted(&self) -> bool {
+        self.resolved >= self.attempted
+    }
+
+    pub(crate) fn successes(&self) -> usize {
+        self.successes
+    }
+
+    pub(crate) fn attempted(&self) -> usize {
+        self.attempted
+    }
 }
 
 /// Max time a community network op holds while Tor is enabled-but-not-yet-
@@ -420,6 +791,197 @@ impl LiveTransport {
         }
         Ok(client)
     }
+
+    /// Coverage-reporting fetch — same engine as [`Transport::fetch`], returning
+    /// `(events, relays_that_EOSEd, relays_attempted)`. The boot control probe
+    /// reads the counts to decide whether its cursor may advance (full coverage
+    /// only — a majority return must not skip a down relay's pending editions).
+    pub async fn fetch_counted(&self, query: &Query, relays: &[String]) -> Result<(Vec<Event>, usize, usize), String> {
+        let client = Self::warm_client(relays, self.timeout).await?;
+        let base_timeout = self.timeout;
+        let filter = query.to_filter();
+
+        let evidence = effective_evidence(query);
+
+        let mut targets: Vec<String> = Vec::new();
+        for r in relays {
+            if !targets.contains(r) {
+                targets.push(r.clone());
+            }
+        }
+
+        // Fast tier: skip tripped relays outright (pure bandwidth save — the
+        // evidence bar is ≥1 success either way, and the union self-heals).
+        // Never skip down to an empty set. Quorum/Full always attempt every
+        // relay so a trip can't shrink their evidence denominator.
+        if evidence == Evidence::Fast && targets.len() >= 2 {
+            let alive: Vec<String> =
+                targets.iter().filter(|r| !breaker_tripped(r)).cloned().collect();
+            if !alive.is_empty() {
+                targets = alive;
+            }
+        }
+
+        // One relay → nothing to race; the sole relay always gets the full
+        // budget (there is nothing to union around).
+        if targets.len() <= 1 {
+            let Some(url) = targets.first() else {
+                return Err("no valid relay to fetch from".to_string());
+            };
+            let res = fetch_relay_eose(&client, url, filter, base_timeout)
+                .await
+                .map_err(|_| format!("relay did not answer the fetch: {url}"));
+            breaker_record(url, res.is_ok(), true);
+            return res.map(|evs| (evs, 1, 1));
+        }
+
+        fn merge_events(
+            evs: Vec<Event>,
+            result: &mut Vec<Event>,
+            seen: &mut std::collections::HashSet<EventId>,
+        ) {
+            for e in evs {
+                if seen.insert(e.id) {
+                    result.push(e);
+                }
+            }
+        }
+
+        // RACE per-relay (mirrors the publish first-ACK race) and union per the
+        // evidence tier. Every relay's outcome is tracked — genuine EOSE vs
+        // error/timeout — so an all-dead pool surfaces as Err, never as a
+        // confident empty answer. Tripped relays keep their place in the
+        // denominator; on Full drains (non-Tor) they run on a demoted budget so
+        // a dead relay's tail shrinks without weakening the union.
+        let demote = evidence == Evidence::Full && demotion_allowed();
+        use futures_util::stream::{FuturesUnordered, StreamExt};
+        let mut fetches: FuturesUnordered<_> = targets
+            .iter()
+            .map(|r| {
+                let client = client.clone();
+                let filter = filter.clone();
+                let r = r.clone();
+                let timeout = if demote && breaker_tripped(&r) {
+                    TRIPPED_TIMEOUT.min(base_timeout)
+                } else {
+                    base_timeout
+                };
+                let full_budget = timeout >= base_timeout;
+                tokio::spawn(async move {
+                    let out = fetch_relay_eose(&client, &r, filter, timeout).await;
+                    (r, full_budget, out)
+                })
+            })
+            .collect();
+
+        let mut plan = UnionPlan::new(evidence, targets.len());
+        let mut result: Vec<Event> = Vec::new();
+        let mut union_ids: std::collections::HashSet<EventId> = std::collections::HashSet::new();
+
+        // Phase 1 — wait for the tier's coverage requirement. Quorum's majority
+        // wait is TIME-BOUNDED from the first success so a dead relay can't
+        // gate a degraded set (a 2-relay community with one relay down must not
+        // ride that relay's timeout on every fetch).
+        let mut quorum_deadline: Option<tokio::time::Instant> = None;
+        let mut quorum_window_closed = false;
+        while !plan.satisfied() && !plan.exhausted() {
+            let next = match quorum_deadline {
+                Some(deadline) => match tokio::time::timeout_at(deadline, fetches.next()).await {
+                    Ok(n) => n,
+                    Err(_) => {
+                        quorum_window_closed = true;
+                        break; // window closed — return with what we hold (≥1 success)
+                    }
+                },
+                None => fetches.next().await,
+            };
+            let Some(joined) = next else { break };
+            match joined {
+                Ok((url, full_budget, Ok(evs))) => {
+                    breaker_record(&url, true, full_budget);
+                    merge_events(evs, &mut result, &mut union_ids);
+                    plan.record(true);
+                    if evidence == Evidence::Quorum && quorum_deadline.is_none() {
+                        quorum_deadline = Some(
+                            tokio::time::Instant::now()
+                                + std::time::Duration::from_millis(QUORUM_GRACE_MS),
+                        );
+                    }
+                }
+                Ok((url, full_budget, Err(()))) => {
+                    breaker_record(&url, false, full_budget);
+                    plan.record(false);
+                }
+                Err(_) => plan.record(false), // task join error — a resolved failure
+            }
+        }
+
+        if plan.successes() == 0 {
+            return Err(format!(
+                "no relay answered the fetch (0/{} attempted)",
+                plan.attempted()
+            ));
+        }
+
+        // Phase 2 — residual union window: relays finishing just behind the
+        // requirement still merge synchronously. Skipped when the quorum window
+        // already expired (that wait subsumes this one).
+        if !fetches.is_empty() && !quorum_window_closed {
+            let grace = tokio::time::sleep(std::time::Duration::from_millis(RESIDUAL_GRACE_MS));
+            tokio::pin!(grace);
+            loop {
+                tokio::select! {
+                    _ = &mut grace => break,
+                    next = fetches.next() => match next {
+                        Some(Ok((url, full_budget, Ok(evs)))) => {
+                            breaker_record(&url, true, full_budget);
+                            merge_events(evs, &mut result, &mut union_ids);
+                        }
+                        Some(Ok((url, full_budget, Err(())))) => {
+                            breaker_record(&url, false, full_budget);
+                        }
+                        Some(Err(_)) => continue,
+                        None => break,
+                    }
+                }
+            }
+        }
+
+        // Background-merge the relays that haven't finished: dedup by event id ONLY (identical bytes)
+        // against what we returned, then hand the rest to the ingester. Conflicting editions carry
+        // distinct ids, so the protocol's convergence engine resolves them — not the transport.
+        if !fetches.is_empty() {
+            let seen: std::collections::HashSet<EventId> = result.iter().map(|e| e.id).collect();
+            // Captured BEFORE the drain spawn: the drain can outlive an account swap, and
+            // stragglers fetched under the prior session must not feed the new one's ingest.
+            let session = crate::state::SessionGuard::capture();
+            tokio::spawn(async move {
+                let mut extra: Vec<Event> = Vec::new();
+                let mut extra_ids: std::collections::HashSet<EventId> = std::collections::HashSet::new();
+                while let Some(joined) = fetches.next().await {
+                    if let Ok((url, full_budget, out)) = joined {
+                        // A late EOSE is still a SUCCESS — slow ≠ dead; without
+                        // this a relay slower than the residual window could
+                        // never un-trip.
+                        breaker_record(&url, out.is_ok(), full_budget);
+                        if let Ok(evs) = out {
+                            for e in evs {
+                                if !seen.contains(&e.id) && extra_ids.insert(e.id) {
+                                    extra.push(e);
+                                }
+                            }
+                        }
+                    }
+                }
+                if !session.is_valid() {
+                    return;
+                }
+                submit_stragglers(extra);
+            });
+        }
+
+        Ok((result, plan.successes(), plan.attempted()))
+    }
 }
 
 #[async_trait::async_trait]
@@ -457,123 +1019,73 @@ impl Transport for LiveTransport {
     }
 
     async fn fetch(&self, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
-        let client = Self::warm_client(relays, self.timeout).await?;
-        let timeout = self.timeout;
+        self.fetch_counted(query, relays).await.map(|(events, _successes, _attempted)| events)
+    }
+
+    async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+        if relays.is_empty() {
+            return Ok(Vec::new());
+        }
+        #[cfg(feature = "tor")]
+        wait_until_tor_ready(
+            || matches!(crate::tor::transport_state(), crate::tor::TorTransportState::RequiredButInactive),
+            TOR_READY_WAIT,
+        ).await?;
+        // Skip relays the shared breaker already knows are dead — don't even pay
+        // their connect handshake + warmup + timeout (the v1 sweep / DM negentropy
+        // trip them early, so by the time a v2 backfill runs they're usually
+        // marked). Keep all if that would leave none — a slow fetch beats no fetch.
+        let mut targets: Vec<String> = relays.iter().filter(|r| !breaker_tripped(r)).cloned().collect();
+        if targets.is_empty() {
+            targets = relays.to_vec();
+        }
         let filter = query.to_filter();
+        let generation = crate::state::current_session_generation();
+        let key = plane_pool_key(&plane.public_key().to_hex(), &targets);
 
-        let mut targets: Vec<String> = Vec::new();
-        for r in relays {
-            if !targets.contains(r) {
-                targets.push(r.clone());
+        // Reuse a warm, already-authed pooled connection if one exists — this is
+        // the win: the NIP-42 handshake happens ONCE, not per page/epoch.
+        let (hit, evicted) = plane_pool_take(generation, &key);
+        disconnect_clients(evicted);
+        let client = if let Some(c) = hit {
+            c
+        } else {
+            // Cold: a dedicated connection authed AS the plane key (a NIP-42
+            // connection holds ONE identity; the shared client's is the user's).
+            let opts = crate::nostr_client_options().automatic_authentication(true);
+            let client = nostr_sdk::Client::builder().signer(plane.clone()).opts(opts).build();
+            for r in &targets {
+                let _ = client.add_relay(r.clone()).await;
             }
-        }
+            client.connect().await;
+            // Warmup with the gated filter shape triggers each relay's NIP-42
+            // challenge so auto-auth completes ONCE here; pooled reuses skip it.
+            for r in &targets {
+                let _ = client
+                    .fetch_events_from(vec![r.clone()], filter.clone(), std::time::Duration::from_secs(5))
+                    .await;
+            }
+            let ev = plane_pool_insert(generation, key, client.clone());
+            disconnect_clients(ev);
+            client
+        };
 
-        // One relay → nothing to race.
-        if targets.len() <= 1 {
-            return client
-                .fetch_events_from(targets, filter, timeout)
-                .await
-                .map(|evs| evs.into_iter().collect())
-                .map_err(|e| e.to_string());
-        }
-
-        // RACE per-relay (mirrors the publish first-ACK race): hand the caller the FIRST relay's
-        // batch the instant it completes, then keep the slower relays running in the BACKGROUND and
-        // feed any events they alone hold back through the ingester. Never wait for the slowest relay.
-        use futures_util::stream::{FuturesUnordered, StreamExt};
-        let mut fetches: FuturesUnordered<_> = targets
-            .into_iter()
-            .map(|r| {
-                let client = client.clone();
-                let filter = filter.clone();
-                tokio::spawn(async move {
-                    client
-                        .fetch_events_from(vec![r], filter, timeout)
-                        .await
-                        .map(|evs| evs.into_iter().collect::<Vec<Event>>())
-                        .unwrap_or_default()
-                })
-            })
-            .collect();
-
-        // UNION every relay that answers — ALWAYS. A single fast-but-shallow relay must never be
-        // the sole input to what comes back: fail-closed folds gap-quarantine on a partial plane
-        // (seats wedge on stale names/roles), the re-founding coverage gate aborts on a missing
-        // head, and the history-start verdict latches scroll-back dead. All three happened live
-        // off the same first-relay-wins race. Back-paging (`until`) drains to completion (its
-        // verdict must be authoritative; bounded by the per-relay timeout); everything else
-        // drains up to a grace window past the FIRST response — so one dead relay costs the
-        // grace, not the full timeout. Relays slower than the grace still background-merge below.
         let mut result: Vec<Event> = Vec::new();
-        loop {
-            match fetches.next().await {
-                Some(Ok(evs)) => {
-                    result = evs;
-                    break;
-                }
-                Some(Err(_)) => continue, // task join error — try the next relay
-                None => break,            // every relay failed
-            }
-        }
-        let mut union_ids: std::collections::HashSet<EventId> = result.iter().map(|e| e.id).collect();
-        if query.until.is_some() {
-            while let Some(joined) = fetches.next().await {
-                if let Ok(evs) = joined {
-                    for e in evs {
-                        if union_ids.insert(e.id) {
-                            result.push(e);
-                        }
-                    }
-                }
-            }
-        } else if !fetches.is_empty() {
-            let grace = tokio::time::sleep(std::time::Duration::from_millis(FETCH_UNION_GRACE_MS));
-            tokio::pin!(grace);
-            loop {
-                tokio::select! {
-                    _ = &mut grace => break,
-                    next = fetches.next() => match next {
-                        Some(Ok(evs)) => {
-                            for e in evs {
-                                if union_ids.insert(e.id) {
-                                    result.push(e);
-                                }
-                            }
-                        }
-                        Some(Err(_)) => continue,
-                        None => break,
+        let mut seen: std::collections::HashSet<EventId> = std::collections::HashSet::new();
+        for r in &targets {
+            let res = fetch_relay_eose(&client, r, filter.clone(), self.timeout).await;
+            // Feed the shared breaker so this auth path both benefits from AND
+            // contributes to the pool-wide dead-relay knowledge.
+            breaker_record(r, res.is_ok(), true);
+            if let Ok(events) = res {
+                for e in events {
+                    if seen.insert(e.id) {
+                        result.push(e);
                     }
                 }
             }
         }
-
-        // Background-merge the relays that haven't finished: dedup by event id ONLY (identical bytes)
-        // against what we returned, then hand the rest to the ingester. Conflicting editions carry
-        // distinct ids, so the protocol's convergence engine resolves them — not the transport.
-        if !fetches.is_empty() {
-            let seen: std::collections::HashSet<EventId> = result.iter().map(|e| e.id).collect();
-            // Captured BEFORE the drain spawn: the drain can outlive an account swap, and
-            // stragglers fetched under the prior session must not feed the new one's ingest.
-            let session = crate::state::SessionGuard::capture();
-            tokio::spawn(async move {
-                let mut extra: Vec<Event> = Vec::new();
-                let mut extra_ids: std::collections::HashSet<EventId> = std::collections::HashSet::new();
-                while let Some(joined) = fetches.next().await {
-                    if let Ok(evs) = joined {
-                        for e in evs {
-                            if !seen.contains(&e.id) && extra_ids.insert(e.id) {
-                                extra.push(e);
-                            }
-                        }
-                    }
-                }
-                if !session.is_valid() {
-                    return;
-                }
-                submit_stragglers(extra);
-            });
-        }
-
+        // The client stays POOLED (not disconnected) for the next page/epoch/community.
         Ok(result)
     }
 
@@ -811,6 +1323,11 @@ pub(crate) mod memory {
                 out.truncate(limit);
             }
             Ok(out)
+        }
+
+        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+            // No auth in the in-memory relay — a plane fetch is just a fetch.
+            self.fetch(query, relays).await
         }
     }
 }
@@ -1165,5 +1682,120 @@ mod tests {
             .await
             .unwrap();
         assert!(for_bob.is_empty());
+    }
+
+    // ── UnionPlan: the evidence tiers' return-timing math ────────────────────
+
+    #[test]
+    fn union_plan_fast_satisfied_on_first_success() {
+        let mut p = UnionPlan::new(Evidence::Fast, 4);
+        p.record(false);
+        assert!(!p.satisfied(), "a failure is not evidence");
+        p.record(true);
+        assert!(p.satisfied(), "one genuine EOSE satisfies Fast");
+        assert!(!p.exhausted());
+    }
+
+    #[test]
+    fn union_plan_quorum_majority_math() {
+        // (attempted, successes needed): majority = attempted/2 + 1
+        for (n, need) in [(2usize, 2usize), (3, 2), (4, 3), (5, 3)] {
+            let mut p = UnionPlan::new(Evidence::Quorum, n);
+            for _ in 0..need - 1 {
+                p.record(true);
+            }
+            assert!(!p.satisfied(), "{}/{} must not satisfy quorum", need - 1, n);
+            p.record(true);
+            assert!(p.satisfied(), "{}/{} satisfies quorum", need, n);
+        }
+    }
+
+    #[test]
+    fn union_plan_quorum_failures_never_substitute_for_successes() {
+        let mut p = UnionPlan::new(Evidence::Quorum, 3);
+        p.record(true);
+        p.record(false);
+        p.record(false);
+        assert!(!p.satisfied(), "1 success + 2 failures is not a majority");
+        assert!(p.exhausted(), "all resolved — the degraded path returns best-effort");
+        assert_eq!(p.successes(), 1);
+    }
+
+    #[test]
+    fn union_plan_full_requires_every_relay_resolved() {
+        let mut p = UnionPlan::new(Evidence::Full, 3);
+        p.record(true);
+        p.record(true);
+        assert!(!p.satisfied(), "Full waits for the last relay even after 2 EOSEs");
+        p.record(false);
+        assert!(p.satisfied(), "a timeout is a resolution — Full is done");
+        assert!(p.exhausted());
+    }
+
+    #[test]
+    fn union_plan_all_dead_is_reportable_not_a_confident_empty() {
+        let mut p = UnionPlan::new(Evidence::Quorum, 2);
+        p.record(false);
+        p.record(false);
+        assert!(p.exhausted());
+        assert_eq!(p.successes(), 0, "the caller must map this to Err, never Ok(vec![])");
+    }
+
+    // ── Circuit breaker: trip/reset rules ────────────────────────────────────
+    // Pinned generation + unique urls per test: the breaker is one global map,
+    // and other tests bump the REAL session generation concurrently (which
+    // would wipe it mid-assertion via the production accessors).
+
+    const BREAKER_TEST_GEN: u64 = u64::MAX;
+
+    #[test]
+    fn breaker_trips_only_after_consecutive_full_budget_failures() {
+        let url = "wss://breaker-test-full-budget.example";
+        breaker_record_at(BREAKER_TEST_GEN, url, false, true);
+        assert!(!breaker_tripped_at(BREAKER_TEST_GEN, url), "one failure is below the threshold");
+        breaker_record_at(BREAKER_TEST_GEN, url, false, true);
+        assert!(breaker_tripped_at(BREAKER_TEST_GEN, url), "two consecutive full-budget failures trip");
+    }
+
+    #[test]
+    fn breaker_demoted_budget_failures_never_count() {
+        let url = "wss://breaker-test-demoted.example";
+        breaker_record_at(BREAKER_TEST_GEN, url, false, false);
+        breaker_record_at(BREAKER_TEST_GEN, url, false, false);
+        breaker_record_at(BREAKER_TEST_GEN, url, false, false);
+        assert!(
+            !breaker_tripped_at(BREAKER_TEST_GEN, url),
+            "demoted-budget failures must not trip (anti-starvation: the post-cooldown probe must stay reachable)"
+        );
+    }
+
+    #[test]
+    fn breaker_success_resets_the_entry() {
+        let url = "wss://breaker-test-reset.example";
+        breaker_record_at(BREAKER_TEST_GEN, url, false, true);
+        breaker_record_at(BREAKER_TEST_GEN, url, false, true);
+        assert!(breaker_tripped_at(BREAKER_TEST_GEN, url));
+        // A late EOSE (e.g. via the background drain) proves slow ≠ dead.
+        breaker_record_at(BREAKER_TEST_GEN, url, true, false);
+        assert!(!breaker_tripped_at(BREAKER_TEST_GEN, url), "any success unconditionally resets");
+        breaker_record_at(BREAKER_TEST_GEN, url, false, true);
+        assert!(!breaker_tripped_at(BREAKER_TEST_GEN, url), "and the failure count restarted from zero");
+    }
+
+    // ── The evidence floor ───────────────────────────────────────────────────
+
+    #[test]
+    fn until_forces_full_evidence_and_default_is_quorum() {
+        assert_eq!(Query::default().evidence, Evidence::Quorum, "unclassified sites get Quorum");
+        assert_eq!(
+            effective_evidence(&Query { until: Some(1), evidence: Evidence::Fast, ..Default::default() }),
+            Evidence::Full,
+            "a back-page can never ride Fast — the history-start latch needs the full union"
+        );
+        assert_eq!(
+            effective_evidence(&Query { evidence: Evidence::Fast, ..Default::default() }),
+            Evidence::Fast,
+            "without `until` the declared tier stands"
+        );
     }
 }

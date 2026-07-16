@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-debug-v2-explain-base-rekey"
+description = "Enables the debug_v2_explain_base_rekey command without any pre-configured scope."
+commands.allow = ["debug_v2_explain_base_rekey"]
+
+[[permission]]
+identifier = "deny-debug-v2-explain-base-rekey"
+description = "Denies the debug_v2_explain_base_rekey command without any pre-configured scope."
+commands.deny = ["debug_v2_explain_base_rekey"]

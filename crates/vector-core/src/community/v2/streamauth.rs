@@ -79,12 +79,24 @@ pub fn register_community(c: &CommunityV2) -> usize {
 /// The rekey-plane Keys a community watches (base next-epoch + each private
 /// channel's next-epoch), mirroring `realtime::rekey_authors` so an AUTH-gating
 /// relay serves the rotation crates too.
+///
+/// Channel planes fan across the SAME addressing roots `follow_rekeys` queries
+/// (current + archived priors, CORD-06 D2 — a removal-forced channel rekey
+/// rides the PRIOR root). Registration must be UPFRONT and complete: a gating
+/// relay issues its NIP-42 challenge once per connection, so a key registered
+/// after the connection authed can never authenticate — a current-root-only
+/// registration left the prior-root crate plane CLOSED and wedged the channel
+/// at its old epoch while the base advanced.
 fn rekey_plane_keys(c: &CommunityV2) -> Vec<Keys> {
     use crate::community::Epoch;
     let mut out = vec![super::derive::base_rekey_group_key(&c.community_root, c.id(), Epoch(c.root_epoch.0.saturating_add(1))).keys().clone()];
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&c.id().0);
+    let roots = super::service::channel_rekey_addressing_roots(c.community_root, &cid_hex);
     for ch in &c.channels {
         if ch.private {
-            out.push(super::derive::channel_rekey_group_key(&c.community_root, &ch.id, Epoch(ch.epoch.0.saturating_add(1))).keys().clone());
+            for root in &roots {
+                out.push(super::derive::channel_rekey_group_key(root, &ch.id, Epoch(ch.epoch.0.saturating_add(1))).keys().clone());
+            }
         }
     }
     out

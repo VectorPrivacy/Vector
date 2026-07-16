@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-debug-v2-follow-trace"
+description = "Enables the debug_v2_follow_trace command without any pre-configured scope."
+commands.allow = ["debug_v2_follow_trace"]
+
+[[permission]]
+identifier = "deny-debug-v2-follow-trace"
+description = "Denies the debug_v2_follow_trace command without any pre-configured scope."
+commands.deny = ["debug_v2_follow_trace"]
