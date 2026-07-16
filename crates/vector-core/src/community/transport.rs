@@ -420,11 +420,22 @@ fn plane_pool_key(plane_pk: &str, relays: &[String]) -> String {
 }
 
 /// Disconnect the given clients off the hot path (never awaited under the lock).
+/// Runtime-guarded: `clear_plane_pool` is public and a bot author may call it from
+/// a non-tokio thread — `disconnect` off a live handle if there is one, else drop
+/// the client (its background task ends on drop).
 fn disconnect_clients(clients: Vec<Client>) {
-    for c in clients {
-        tokio::spawn(async move {
-            let _ = c.disconnect();
-        });
+    if clients.is_empty() {
+        return;
+    }
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            for c in clients {
+                handle.spawn(async move {
+                    let _ = c.disconnect();
+                });
+            }
+        }
+        Err(_) => drop(clients),
     }
 }
 
@@ -433,6 +444,11 @@ fn disconnect_clients(clients: Vec<Client>) {
 pub fn clear_plane_pool() {
     let drained: Vec<Client> = {
         let mut g = PLANE_POOL.lock().unwrap_or_else(|e| e.into_inner());
+        // Stamp the LIVE generation so an insert still in flight from the prior
+        // generation (a fetch_plane that captured the old value before the swap)
+        // sees the mismatch and disconnects its client instead of re-pooling one
+        // still authed as the swapped-out account's plane key.
+        g.0 = crate::state::current_session_generation();
         g.1.drain().map(|(_, p)| p.client).collect()
     };
     disconnect_clients(drained);
@@ -467,18 +483,19 @@ fn plane_pool_take(generation: u64, key: &str) -> (Option<Client>, Vec<Client>) 
 }
 
 /// Insert a freshly-built client for `key`, LRU-evicting if over the cap. Returns
-/// clients to disconnect (a raced sibling insert, or the LRU victim).
+/// ONLY the displaced LRU victim(s) to disconnect — NEVER the just-built `client`.
+/// If we don't pool it (swapped mid-build, or a concurrent miss already pooled
+/// this key), we return nothing: the caller still uses the client for this one
+/// fetch and it closes on drop, so we must not disconnect the connection it's
+/// about to run on.
 fn plane_pool_insert(generation: u64, key: String, client: Client) -> Vec<Client> {
     let mut g = PLANE_POOL.lock().unwrap_or_else(|e| e.into_inner());
-    if g.0 != generation {
-        // Swapped mid-build — don't pool into the new generation; caller still uses it once.
-        return vec![client];
+    // Swapped mid-build, or a concurrent miss already pooled this key — don't pool
+    // ours (the caller uses it once, then it drops).
+    if g.0 != generation || g.1.contains_key(&key) {
+        return Vec::new();
     }
     let mut evicted: Vec<Client> = Vec::new();
-    // A concurrent miss for the same key already inserted — keep theirs, drop ours.
-    if g.1.contains_key(&key) {
-        return vec![client];
-    }
     if g.1.len() >= PLANE_POOL_MAX {
         if let Some(lru_key) = g.1.iter().min_by_key(|(_, p)| p.last_used).map(|(k, _)| k.clone()) {
             if let Some(p) = g.1.remove(&lru_key) {
@@ -1054,8 +1071,12 @@ impl Transport for LiveTransport {
             // connection holds ONE identity; the shared client's is the user's).
             let opts = crate::nostr_client_options().automatic_authentication(true);
             let client = nostr_sdk::Client::builder().signer(plane.clone()).opts(opts).build();
+            // Community relay options (GOSSIP|PING + Tor-aware ConnectionMode): a
+            // bare add_relay leaves ConnectionMode::Direct, so under active Tor the
+            // plane fetch — and the NIP-42 auth AS the plane key — would connect
+            // direct and tie the user's IP to community membership.
             for r in &targets {
-                let _ = client.add_relay(r.clone()).await;
+                let _ = client.pool().add_relay(r.clone(), crate::community_relay_options()).await;
             }
             client.connect().await;
             // Warmup with the gated filter shape triggers each relay's NIP-42
@@ -1072,18 +1093,27 @@ impl Transport for LiveTransport {
 
         let mut result: Vec<Event> = Vec::new();
         let mut seen: std::collections::HashSet<EventId> = std::collections::HashSet::new();
+        let mut successes = 0usize;
         for r in &targets {
             let res = fetch_relay_eose(&client, r, filter.clone(), self.timeout).await;
             // Feed the shared breaker so this auth path both benefits from AND
             // contributes to the pool-wide dead-relay knowledge.
             breaker_record(r, res.is_ok(), true);
             if let Ok(events) = res {
+                successes += 1;
                 for e in events {
                     if seen.insert(e.id) {
                         result.push(e);
                     }
                 }
             }
+        }
+        // Zero EOSE = every relay refused/timed out — an honest transient failure,
+        // NOT a "the plane is empty" verdict (a genuine empty plane EOSEs with no
+        // events, which counts as a success). A confident-empty here could mask a
+        // rotation from a caller that concludes absence.
+        if successes == 0 {
+            return Err(format!("no relay answered the plane fetch (0/{} attempted)", targets.len()));
         }
         // The client stays POOLED (not disconnected) for the next page/epoch/community.
         Ok(result)

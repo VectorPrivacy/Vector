@@ -3340,9 +3340,17 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
     let mut cur = community.clone();
     let mut changed = false;
 
-    // The channel-rotator gates. Loaded once per follow: a roster change lands via
-    // follow_control (which the worker runs right after this), so at worst an
-    // admin's rotation adopts one pass late — never early.
+    // The rotator/admissibility gates read the PERSISTED roster (folded by a prior
+    // follow_control; the worker folds control right after this rekey pass). This
+    // is "one pass late" for the rotator-AUTHORIZATION direction (a newly-granted
+    // admin's rotation adopts a pass late, never early — safe). It is fail-OPEN for
+    // the base-admissibility protected-set: a superior whose grant this receiver
+    // has not yet folded is not in `roster.grants`, so a non-owner Refounding
+    // excluding them can be adopted within that propagation window. Bounded — the
+    // owner is ALWAYS hard-protected below (independent of the roster) and can
+    // counter-refound; and it is inherent to eventual consistency (one cannot gate
+    // on a grant never seen). Tightening this (fold control before the first rekey,
+    // or gate non-owner adoption on roster freshness) is a follow-on.
     let roster = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
     let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
     let me_hex = me.public_key().to_hex();
