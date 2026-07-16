@@ -3442,7 +3442,7 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
             // Recoverable via a fresh bundle; an insider with MANAGE_CHANNELS can
             // exclude the member outright anyway, so the marginal harm is the wedge
             // outliving their demotion.
-            match advance_scope(&batches, RekeyScope::Channel(cid), &channel_rotator_ok, &channel_rotator_outranks_me, me.secret_key(), &my_xonly, next) {
+            match advance_scope(&batches, RekeyScope::Channel(cid), &channel_rotator_ok, &channel_rotator_outranks_me, &|_r: &rekey::Rotation| true, me.secret_key(), &my_xonly, next) {
                 Advance::Adopt { new_key } => {
                     if let Some(ch) = cur.channels.iter_mut().find(|c| c.id.0 == cid.0) {
                         ch.key = Some(new_key);
@@ -3492,7 +3492,40 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
             let group = base_rekey_group_key(&cur.community_root, cur.id(), next);
             let chunks = fetch_rekey_chunks(transport, &cur.relays, &group).await?;
             let batches = vec![(chunks, Some((held_epoch, held_key)))];
-            match advance_scope(&batches, RekeyScope::Root, &base_rotator_ok, &base_rotator_outranks_me, me.secret_key(), &my_xonly, next) {
+            // A non-owner Refounding may only remove members the rotator strictly
+            // OUTRANKS. The protected set is the owner plus every grant-holder the
+            // rotator can't act on with BAN (a peer or superior) — excluding one is
+            // an authority-escalation takeover, so its rotation is inadmissible.
+            // Plain members hold no grant and are always outranked by a BAN-holder,
+            // so removing them is legitimate and needs no memberlist.
+            let base_admissible = |r: &rekey::Rotation| -> bool {
+                if r.rotator == owner {
+                    return true; // the owner is supreme.
+                }
+                let rotator_hex = r.rotator.to_hex();
+                let has_blob = |xonly: &[u8; 32]| {
+                    rekey::find_my_blob(&r.blobs, &r.rotator.to_bytes(), xonly, r.scope, r.new_epoch).is_some()
+                };
+                // The owner is never a valid removed target.
+                if !has_blob(&owner.to_bytes()) {
+                    return false;
+                }
+                for g in &roster.grants {
+                    if g.member == rotator_hex || g.member == owner_hex || banned.contains(&g.member) {
+                        continue; // self, owner (checked), or an already-authorized removal.
+                    }
+                    // A grant-holder the rotator can't act on is a peer/superior.
+                    if !roster.can_act_on_member(&rotator_hex, Some(&owner_hex), &g.member, crate::community::roles::Permissions::BAN) {
+                        if let Ok(pk) = PublicKey::from_hex(&g.member) {
+                            if !has_blob(&pk.to_bytes()) {
+                                return false; // a peer/superior was excluded.
+                            }
+                        }
+                    }
+                }
+                true
+            };
+            match advance_scope(&batches, RekeyScope::Root, &base_rotator_ok, &base_rotator_outranks_me, &base_admissible, me.secret_key(), &my_xonly, next) {
                 Advance::Adopt { new_key } => {
                     cur.community_root = new_key;
                     cur.root_epoch = next;
@@ -3625,6 +3658,7 @@ fn advance_scope(
     scope: RekeyScope,
     rotator_ok: &dyn Fn(&PublicKey) -> bool,
     rotator_may_remove_me: &dyn Fn(&PublicKey) -> bool,
+    admissible: &dyn Fn(&rekey::Rotation) -> bool,
     my_sk: &SecretKey,
     my_xonly: &[u8; 32],
     next_epoch: Epoch,
@@ -3643,6 +3677,14 @@ fn advance_scope(
                 if r.continuity(*held_epoch, held_key) != Continuity::Extends {
                     continue;
                 }
+            }
+            // CORD-06 §Authority: a rotator must strictly OUTRANK every removed
+            // target. An authorized-but-inadmissible rotation (one that excludes
+            // the owner or a peer/superior the rotator can't act on) is a takeover
+            // attempt — skip it entirely, so it neither adopts nor concludes a
+            // removal (it forks; the honest chain wins).
+            if !admissible(r) {
+                continue;
             }
             saw_complete_candidate = true;
             saw_outranking_candidate |= rotator_may_remove_me(&r.rotator);
@@ -5102,29 +5144,87 @@ mod tests {
         // follow it — owner-only receive silently strands members whose community
         // was refounded by an admin (CORD-06 §Authority: "a Refounding requires
         // BAN", checked against the folded Roster).
-        let (bed, owner, admin) = TestBed::new();
+        let (bed, owner, me) = TestBed::new();
+        let admin = Keys::generate();
         bed.swap_to(&owner);
         let community = create_community(&bed.relay, "AdminRefound", bed.relays.clone(), None).await.unwrap();
         let rid = "b0".repeat(32);
         publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
-        publish_grant(&bed.relay, &community, &owner.keys, &admin.keys.public_key(), vec![rid], 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &admin.public_key(), vec![rid], 1).await;
 
         // I (a plain member) join, then fold the roster so I know the admin holds BAN.
         let bundle = bundle_of(&community, Some(owner.keys.public_key()), None, None);
         let bundle_json = serde_json::to_string(&bundle).unwrap();
-        let (_tmp2, _g2, me) = init_test_db();
+        bed.swap_to(&me);
         let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
         let _ = follow_control(&bed.relay, &joined, &SessionGuard::capture()).await;
         let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
 
-        // The admin re-founds (keeping me), delivering the new root to me.
+        // The admin re-founds keeping the owner + me — the owner must always be a
+        // recipient of a non-owner Refounding.
         let new_root = [0xC7; 32];
-        publish_base_rotation(&bed.relay, &joined, &admin.keys, &[me.public_key()], &new_root, &joined.community_root).await;
+        publish_base_rotation(&bed.relay, &joined, &admin, &[owner.keys.public_key(), me.keys.public_key()], &new_root, &joined.community_root).await;
 
         let updated = follow_rekeys(&bed.relay, &joined, &SessionGuard::capture()).await.unwrap().updated
             .expect("an authorized admin's Refounding is adopted");
         assert_eq!(updated.root_epoch, Epoch(1), "advanced past the admin's rotation");
         assert_eq!(updated.community_root, new_root, "adopted the admin's fresh root");
+    }
+
+    #[tokio::test]
+    async fn follow_rekeys_refuses_a_refounding_that_excludes_the_owner() {
+        // Authority escalation: a BAN-admin can't use a Refounding to evict the
+        // OWNER (no one outranks the owner). Excluding them makes the rotation
+        // inadmissible — members fork-reject it rather than migrate to the coup.
+        let (bed, owner, me) = TestBed::new();
+        let admin = Keys::generate();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "NoCoup", bed.relays.clone(), None).await.unwrap();
+        let rid = "b0".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &admin.public_key(), vec![rid], 1).await;
+
+        let bundle = bundle_of(&community, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined, &SessionGuard::capture()).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+
+        // The admin re-founds delivering to me but NOT the owner — a takeover.
+        publish_base_rotation(&bed.relay, &joined, &admin, &[me.keys.public_key()], &[0xEE; 32], &joined.community_root).await;
+        let follow = follow_rekeys(&bed.relay, &joined, &SessionGuard::capture()).await.unwrap();
+        assert!(follow.updated.is_none() && !follow.self_removed, "an owner-excluding Refounding is not adopted");
+    }
+
+    #[tokio::test]
+    async fn follow_rekeys_refuses_a_refounding_that_excludes_a_peer_admin() {
+        // Authority escalation: two equal-rank BAN-admins — neither strictly
+        // outranks the other, so one can't Refound the other out. Excluding a
+        // peer makes the rotation inadmissible.
+        let (bed, owner, me) = TestBed::new();
+        let admin_a = Keys::generate();
+        let admin_b = Keys::generate(); // the peer admin the rotation excludes.
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Peers", bed.relays.clone(), None).await.unwrap();
+        let rid = "b0".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        // Both A and B hold the SAME role (same position 1) → peers.
+        publish_grant(&bed.relay, &community, &owner.keys, &admin_a.public_key(), vec![rid.clone()], 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &admin_b.public_key(), vec![rid], 1).await;
+
+        let bundle = bundle_of(&community, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined, &SessionGuard::capture()).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+
+        // Admin A re-founds keeping the owner + me but EXCLUDING peer admin B.
+        publish_base_rotation(&bed.relay, &joined, &admin_a, &[owner.keys.public_key(), me.keys.public_key()], &[0xDD; 32], &joined.community_root).await;
+
+        let follow = follow_rekeys(&bed.relay, &joined, &SessionGuard::capture()).await.unwrap();
+        assert!(follow.updated.is_none() && !follow.self_removed, "excluding an equal-rank peer admin is inadmissible");
     }
 
     #[tokio::test]
