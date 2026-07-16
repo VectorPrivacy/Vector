@@ -36,3 +36,7 @@ crates/target/
 patches/mdk/target/
 patches/mdk/Cargo.lock
 dist-android/
+
+# Local-only design/planning docs (never publish)
+CONCORD_V2_IMPL_PLAN.md
+TODO-v0.4.0.md
