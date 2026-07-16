@@ -5487,6 +5487,15 @@ function renderProfileTab(cProfile) {
     const strNamePlaceholder = cProfile.mine ? 'Anonymous' : (cProfile?.id ? cProfile.id.substring(0, 10) + '…' : '');
     domProfileNameSecondary.textContent = cProfile?.nickname || cProfile?.name || cProfile?.display_name || strNamePlaceholder;
     if (cProfile?.nickname || cProfile?.name) twemojify(domProfileNameSecondary);
+    // Bot marker beside the name — same iconography as the chat list and
+    // message header so bot identity stays consistent everywhere.
+    if (cProfile?.bot) {
+        const botIcon = document.createElement('span');
+        botIcon.className = 'icon icon-bot profile-name-bot-icon';
+        botIcon.addEventListener('mouseenter', () => showGlobalTooltip('Bot', botIcon));
+        botIcon.addEventListener('mouseleave', hideGlobalTooltip);
+        domProfileNameSecondary.appendChild(botIcon);
+    }
 
     // Secondary Status (innerHTML copy is safe: source was built from a text
     // node, so serialization is escaped; only twemoji markup carries over)

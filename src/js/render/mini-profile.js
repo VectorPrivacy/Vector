@@ -233,6 +233,15 @@ function _populateMiniProfile(popup, npub, profile, opts) {
         name.classList.add('mini-profile-name-loading');
         name.textContent = 'Loading…';
     }
+    // Bot marker beside the name — same iconography as the chat list and
+    // message header so bot identity stays consistent everywhere.
+    if (profile?.bot) {
+        const botIcon = document.createElement('span');
+        botIcon.className = 'icon icon-bot mini-profile-bot-icon';
+        botIcon.addEventListener('mouseenter', () => showGlobalTooltip('Bot', botIcon));
+        botIcon.addEventListener('mouseleave', hideGlobalTooltip);
+        name.appendChild(botIcon);
+    }
     body.appendChild(name);
 
     // Sub-line: nickname OR truncated npub fingerprint

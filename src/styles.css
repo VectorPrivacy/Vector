@@ -2120,6 +2120,18 @@ html, body {
   margin-right: unset;
 }
 
+/* Bot indicator beside the profile-page name — inline so it flows with
+   the text. Reset the base `.icon` absolute position + margin:auto. */
+.profile-name-bot-icon {
+  position: relative;
+  width: 15px;
+  height: 15px;
+  margin: 0 0 0 6px;
+  display: inline-block;
+  vertical-align: -2px;
+  background-color: var(--icon-color-primary, #59fcb3);
+}
+
 /* Larger profile-page status: allow wrap up to 3 lines, then ellipsize.
    Overrides the global .cutoff rule (nowrap + single-line ellipsis) which
    makes long statuses unreadable on narrow viewports. */
@@ -3078,6 +3090,17 @@ body.chat-bg-disabled .chat-messages::before {
   width: 18px;
   height: 18px;
   vertical-align: -3px;
+}
+/* Bot indicator beside the name — inline so it flows with the text.
+   Reset the base `.icon` absolute position + margin:auto. */
+.mini-profile-bot-icon {
+  position: relative;
+  width: 14px;
+  height: 14px;
+  margin: 0 0 0 5px;
+  display: inline-block;
+  vertical-align: -2px;
+  background-color: var(--icon-color-primary, #59fcb3);
 }
 .mini-profile-about img.emoji {
   width: 14px;
