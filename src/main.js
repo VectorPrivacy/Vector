@@ -7185,6 +7185,30 @@ function writeWallpaperSliders(blur, dim) {
  * chat into preview mode. Animated sources are converted to a static
  * first-frame server-side; we surface a friendly notice when that happens.
  */
+/** Full-screen "processing" overlay with a dimmed, blurred backdrop that blocks
+ *  interaction while a short CPU-bound task (image decode/resize/re-encode) runs
+ *  in the backend. Idempotent; pair with hideProcessingOverlay(). */
+function showProcessingOverlay(message = 'Processing image...') {
+    let overlay = document.getElementById('processing-overlay');
+    if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = 'processing-overlay';
+        overlay.className = 'processing-overlay';
+        overlay.innerHTML =
+            '<div class="processing-overlay-card">' +
+            '<div class="processing-overlay-spinner"></div>' +
+            '<div class="processing-overlay-text"></div></div>';
+        document.body.appendChild(overlay);
+    }
+    overlay.querySelector('.processing-overlay-text').textContent = message;
+    void overlay.offsetWidth; // reflow so the fade-in runs on first show
+    overlay.classList.add('visible');
+}
+
+function hideProcessingOverlay() {
+    document.getElementById('processing-overlay')?.classList.remove('visible');
+}
+
 async function startWallpaperChange(chatId) {
     if (!chatId) return;
     const chat = getChat(chatId);
@@ -7207,12 +7231,18 @@ async function startWallpaperChange(chatId) {
             ],
         });
         if (!filePath) return;
-        const previewResult = await invoke('preview_wallpaper', {
-            chatId,
-            filePath,
-            bytes: null,
-            filename: null,
-        });
+        showProcessingOverlay();
+        let previewResult;
+        try {
+            previewResult = await invoke('preview_wallpaper', {
+                chatId,
+                filePath,
+                bytes: null,
+                filename: null,
+            });
+        } finally {
+            hideProcessingOverlay();
+        }
         await applyWallpaperPreview(chatId, previewResult);
     } catch (err) {
         popupConfirm('Couldn’t use that image', String(err), true);
@@ -11228,11 +11258,17 @@ window.addEventListener("DOMContentLoaded", async () => {
         if (!file || !strOpenChat) return;
         try {
             const buf = new Uint8Array(await file.arrayBuffer());
-            const result = await invoke('preview_wallpaper', {
-                chatId: strOpenChat,
-                bytes: Array.from(buf),
-                filename: file.name,
-            });
+            showProcessingOverlay();
+            let result;
+            try {
+                result = await invoke('preview_wallpaper', {
+                    chatId: strOpenChat,
+                    bytes: Array.from(buf),
+                    filename: file.name,
+                });
+            } finally {
+                hideProcessingOverlay();
+            }
             await applyWallpaperPreview(strOpenChat, result);
         } catch (err) {
             popupConfirm('Couldn’t use that image', String(err), true);

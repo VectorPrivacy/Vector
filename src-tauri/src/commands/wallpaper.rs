@@ -21,9 +21,16 @@ pub async fn preview_wallpaper(
     bytes: Option<Vec<u8>>,
     filename: Option<String>,
 ) -> Result<WallpaperPreviewResult, String> {
+    // The decode + resize + re-encode is CPU-bound (hundreds of ms on a slow
+    // device), so run it on a blocking thread to keep the async runtime and the
+    // UI free — the frontend paints a "Processing Image" overlay meanwhile.
     let preview = if let Some(path) = file_path {
-        wallpaper::prepare_wallpaper_preview(&chat_id, &path)?
+        let cid = chat_id.clone();
+        tokio::task::spawn_blocking(move || wallpaper::prepare_wallpaper_preview(&cid, &path))
+            .await
+            .map_err(|e| format!("Image processing task failed: {e}"))??
     } else if let Some(buf) = bytes {
+        let cid = chat_id.clone();
         // Stage bytes into a temp file the validator can mmap. The temp file
         // is unlinked immediately after — only the preview slot under
         // wallpapers/ lives on past this call.
@@ -31,12 +38,16 @@ pub async fn preview_wallpaper(
             .as_deref()
             .unwrap_or("wallpaper-pick")
             .replace(['/', '\\', '\0'], "_");
-        let tmp = std::env::temp_dir().join(format!("vector-wallpaper-{}", safe_name));
-        std::fs::write(&tmp, &buf)
-            .map_err(|e| format!("Failed to stage wallpaper bytes: {}", e))?;
-        let result = wallpaper::prepare_wallpaper_preview(&chat_id, &tmp.to_string_lossy());
-        let _ = std::fs::remove_file(&tmp);
-        result?
+        tokio::task::spawn_blocking(move || {
+            let tmp = std::env::temp_dir().join(format!("vector-wallpaper-{}", safe_name));
+            std::fs::write(&tmp, &buf)
+                .map_err(|e| format!("Failed to stage wallpaper bytes: {}", e))?;
+            let result = wallpaper::prepare_wallpaper_preview(&cid, &tmp.to_string_lossy());
+            let _ = std::fs::remove_file(&tmp);
+            result
+        })
+        .await
+        .map_err(|e| format!("Image processing task failed: {e}"))??
     } else {
         return Err("preview_wallpaper needs either file_path or bytes".to_string());
     };

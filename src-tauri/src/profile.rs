@@ -238,9 +238,20 @@ pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Res
         }
     };
 
-    // Format a Mime Type from the file extension
-    let mime_type = crate::util::mime_from_extension_safe(&attachment_file.extension, true)
+    // Only images are permitted (the picker filters, but a renamed file could slip through).
+    crate::util::mime_from_extension_safe(&attachment_file.extension, true)
         .map_err(|_| "File type is not allowed for avatars (only images are permitted)")?;
+
+    // Compress + resize + strip metadata before upload: a public avatar/banner
+    // uploads fast and stays small, and the byte budget is enforced post-compression.
+    let kind = if upload_type == "banner" {
+        crate::shared::image::UploadImageKind::Banner
+    } else {
+        crate::shared::image::UploadImageKind::Avatar
+    };
+    let prepared = crate::shared::image::prepare_upload_image(&attachment_file.bytes, kind)?;
+    let mime_type = crate::shared::image::upload_mime_for(prepared.extension);
+    let upload_bytes = Arc::new(prepared.bytes);
 
     // Upload the file to the server using Blossom with automatic failover
     // and progress. Routes through the active client signer (local vault
@@ -265,14 +276,14 @@ pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Res
     });
 
     // Keep a copy of bytes for pre-caching
-    let bytes_for_cache = attachment_file.bytes.clone();
+    let bytes_for_cache = upload_bytes.clone();
 
     // Upload using Blossom with progress tracking and failover
     let upload_url = crate::blossom::upload_blob_with_progress_and_failover(
         signer.clone(),
         servers,
-        attachment_file.bytes,
-        Some(mime_type.as_str()),
+        upload_bytes,
+        Some(mime_type),
         /* is_encrypted */ false, // avatars / banners are public plaintext
         progress_callback,
         None, // No retries per server

@@ -46,6 +46,10 @@ const MAX_WALLPAPER_DOWNLOAD_BYTES: u64 = 10 * 1024 * 1024;
 /// facing cap; enforced both at preview prep and at the picker UI.
 pub const MAX_WALLPAPER_BYTES: usize = 5 * 1024 * 1024;
 
+/// Longest-side cap for the re-encoded wallpaper — ample for any display, and
+/// keeps a huge source from bloating every gift-wrapped send.
+const MAX_WALLPAPER_DIMENSION: u32 = 2560;
+
 /// Per-account directory for cached wallpaper files. One active file per
 /// chat + at most one preview-staging file per chat.
 fn wallpapers_dir() -> Result<PathBuf, String> {
@@ -95,14 +99,10 @@ pub fn prepare_wallpaper_preview(
         return Err("Wallpapers must be image files.".to_string());
     }
 
-    let (final_bytes, final_extension, was_animated) =
-        extract_first_frame_if_animated(&bytes, &mime)?;
-
-    // Sample luma so the slider lands somewhere readable instead of the
-    // fixed 50% default. Cheap (downsamples first); failures fall back
-    // to the static default so a weird-encoded image never blocks the
-    // preview flow.
-    let recommended_dim = estimate_brightness_for_white_text(&final_bytes).unwrap_or(50);
+    // Single decode: normalize (strip + resize + re-encode) and the brightness
+    // estimate share the same decoded pixels — no second decode.
+    let (final_bytes, final_extension, was_animated, recommended_dim) =
+        normalize_wallpaper_image(&bytes, &mime)?;
 
     // Clear any prior preview for this chat (different format or stale).
     clean_chat_files(chat_npub, FileKind::Preview, None)?;
@@ -124,22 +124,17 @@ pub fn prepare_wallpaper_preview(
 /// Pick a starting brightness percent such that white chat text stays
 /// readable against the image. Down-samples to 64×64 for speed, averages
 /// the Rec. 709 luma, then maps `(avg_luma 0..=255)` to a brightness
-/// percent in the `[25, 95]` range — bright images get dimmer defaults,
-/// dark images stay bright. Returns `None` if the bytes can't be decoded.
-fn estimate_brightness_for_white_text(bytes: &[u8]) -> Option<u8> {
-    use ::image::{GenericImageView, ImageReader};
-    use std::io::Cursor;
+/// percent — bright images get dimmer defaults, dark images stay bright.
+/// Operates on the already-decoded wallpaper (no re-decode); falls back to
+/// the 50% default for a degenerate (zero-size) image.
+fn estimate_brightness_for_white_text(img: &::image::DynamicImage) -> u8 {
+    use ::image::GenericImageView;
 
-    let mut reader = ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .ok()?;
-    reader.limits(crate::crypto::bounded_image_limits());
-    let img = reader.decode().ok()?;
     let thumb = img.thumbnail(64, 64);
     let rgb = thumb.to_rgb8();
     let (w, h) = thumb.dimensions();
     if w == 0 || h == 0 {
-        return None;
+        return 50;
     }
     let mut sum: u64 = 0;
     let mut count: u64 = 0;
@@ -152,7 +147,7 @@ fn estimate_brightness_for_white_text(bytes: &[u8]) -> Option<u8> {
         count += 1;
     }
     if count == 0 {
-        return None;
+        return 50;
     }
     let avg = (sum / count) as f32; // 0..=255
     // Map luma → brightness with an aggressive curve, then halve to land
@@ -164,7 +159,7 @@ fn estimate_brightness_for_white_text(bytes: &[u8]) -> Option<u8> {
     //   dark   ( 60) → ~38
     //   black  (  0) → ~47
     let brightness = (95.0 - (avg / 255.0) * 70.0) / 2.0;
-    Some(brightness.clamp(10.0, 50.0) as u8)
+    brightness.clamp(10.0, 50.0) as u8
 }
 
 /// Delete the preview file (user cancelled before publishing).
@@ -172,40 +167,58 @@ pub fn cancel_wallpaper_preview(chat_npub: &str) -> Result<(), String> {
     clean_chat_files(chat_npub, FileKind::Preview, None)
 }
 
-/// Returns `(bytes, extension, was_animated)`. For non-animated formats,
-/// passes the source through unchanged. For GIF / WebP the first frame is
-/// re-encoded as PNG so it can be rendered in `background-image` without
-/// animation.
-fn extract_first_frame_if_animated(
+/// Returns `(bytes, extension, was_animated, recommended_dim)`. Every wallpaper
+/// is decoded ONCE (baking EXIF orientation into pixels) and re-encoded to a
+/// still: this both flattens any animation (wallpapers never animate) AND drops
+/// all metadata. The wallpaper is gift-wrapped to the other participant, so
+/// their copy must not carry our EXIF/GPS. Opaque images become JPEG (small);
+/// images with real transparency stay PNG. The brightness estimate reuses the
+/// same decoded pixels rather than decoding again.
+///
+/// Downscaling uses Triangle (bilinear): a wallpaper is shown behind blur + dim,
+/// so the extra sharpness of a wide-kernel filter is invisible and not worth the
+/// cost on slow devices.
+fn normalize_wallpaper_image(
     src: &[u8],
     mime: &str,
-) -> Result<(Vec<u8>, String, bool), String> {
-    use ::image::{ImageFormat, ImageReader};
-    use std::io::Cursor;
+) -> Result<(Vec<u8>, String, bool, u8), String> {
+    let was_animated = mime == "image/gif" || mime == "image/webp";
 
-    let is_gif = mime == "image/gif";
-    let is_webp = mime == "image/webp";
-
-    if !is_gif && !is_webp {
-        let ext = crypto::extension_from_mime(mime);
-        return Ok((src.to_vec(), ext, false));
+    let mut img = crate::crypto::decode_image_bounded(src)?;
+    if img.width() > MAX_WALLPAPER_DIMENSION || img.height() > MAX_WALLPAPER_DIMENSION {
+        img = img.resize(
+            MAX_WALLPAPER_DIMENSION,
+            MAX_WALLPAPER_DIMENSION,
+            ::image::imageops::FilterType::Triangle,
+        );
     }
 
-    // `image::ImageReader::decode()` yields frame 0 for animated GIF / WebP.
-    let mut reader = ImageReader::with_format(
-        Cursor::new(src),
-        if is_gif { ImageFormat::Gif } else { ImageFormat::WebP },
-    );
-    reader.limits(crate::crypto::bounded_image_limits());
-    let img = reader
-        .decode()
-        .map_err(|e| format!("Failed to decode image: {}", e))?;
+    let recommended_dim = estimate_brightness_for_white_text(&img);
+    let (bytes, ext) = encode_wallpaper_still(&img)?;
+    Ok((bytes, ext, was_animated, recommended_dim))
+}
 
-    let mut out: Vec<u8> = Vec::new();
-    img.write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
-        .map_err(|e| format!("Failed to re-encode wallpaper: {}", e))?;
+/// Re-encode a decoded wallpaper as a metadata-free still: PNG when real
+/// transparency is present, otherwise JPEG (much smaller for photos).
+fn encode_wallpaper_still(img: &::image::DynamicImage) -> Result<(Vec<u8>, String), String> {
+    use ::image::{ExtendedColorType, ImageEncoder};
+    use std::io::Cursor;
 
-    Ok((out, "png".to_string(), true))
+    let mut out = Vec::new();
+    if img.color().has_alpha() {
+        let rgba = img.to_rgba8();
+        if rgba.pixels().any(|p| p.0[3] != 255) {
+            ::image::codecs::png::PngEncoder::new(Cursor::new(&mut out))
+                .write_image(rgba.as_raw(), rgba.width(), rgba.height(), ExtendedColorType::Rgba8)
+                .map_err(|e| format!("Failed to encode wallpaper: {}", e))?;
+            return Ok((out, "png".to_string()));
+        }
+    }
+    let rgb = img.to_rgb8();
+    ::image::codecs::jpeg::JpegEncoder::new_with_quality(Cursor::new(&mut out), 88)
+        .write_image(rgb.as_raw(), rgb.width(), rgb.height(), ExtendedColorType::Rgb8)
+        .map_err(|e| format!("Failed to encode wallpaper: {}", e))?;
+    Ok((out, "jpg".to_string()))
 }
 
 #[derive(Copy, Clone)]
@@ -925,4 +938,51 @@ pub async fn remove_wallpaper(chat_npub: &str) -> Result<(), String> {
     emit_wallpaper_removed(chat_npub, &me_npub, created_at, &event_id).await;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod wallpaper_strip_tests {
+    use super::*;
+    use ::image::{DynamicImage, ImageFormat, Rgb, RgbImage, Rgba, RgbaImage};
+    use std::io::Cursor;
+
+    fn png_bytes(img: &DynamicImage) -> Vec<u8> {
+        let mut out = Vec::new();
+        img.write_to(&mut Cursor::new(&mut out), ImageFormat::Png).unwrap();
+        out
+    }
+
+    #[test]
+    fn opaque_wallpaper_becomes_jpeg_and_is_capped() {
+        let img = DynamicImage::ImageRgb8(RgbImage::from_fn(3000, 1000, |x, y| {
+            Rgb([(x % 256) as u8, (y % 256) as u8, 128])
+        }));
+        let (bytes, ext, was_animated, dim) =
+            normalize_wallpaper_image(&png_bytes(&img), "image/png").unwrap();
+        assert_eq!(ext, "jpg");
+        assert!(!was_animated);
+        assert!((10..=50).contains(&dim), "brightness out of range: {dim}");
+        let dec = ::image::load_from_memory(&bytes).unwrap();
+        assert!(dec.width() <= MAX_WALLPAPER_DIMENSION && dec.height() <= MAX_WALLPAPER_DIMENSION);
+    }
+
+    #[test]
+    fn transparent_wallpaper_stays_png() {
+        let img = DynamicImage::ImageRgba8(RgbaImage::from_fn(64, 64, |x, _| {
+            Rgba([10, 20, 30, if x < 32 { 0 } else { 255 }])
+        }));
+        let (bytes, ext, _, _) =
+            normalize_wallpaper_image(&png_bytes(&img), "image/png").unwrap();
+        assert_eq!(ext, "png");
+        assert!(::image::load_from_memory(&bytes).unwrap().color().has_alpha());
+    }
+
+    #[test]
+    fn animated_mime_flags_was_animated_but_flattens_to_a_still() {
+        let img = DynamicImage::ImageRgb8(RgbImage::from_fn(10, 10, |_, _| Rgb([1, 2, 3])));
+        let (_bytes, ext, was_animated, _dim) =
+            normalize_wallpaper_image(&png_bytes(&img), "image/gif").unwrap();
+        assert!(was_animated);
+        assert_eq!(ext, "jpg");
+    }
 }

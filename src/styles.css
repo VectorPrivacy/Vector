@@ -17751,3 +17751,50 @@ body.profile-switcher-editing .profile-switcher-add {
 .cmt-invite-btn { width: 100%; }
 .cmt-invite-btn:disabled { opacity: 0.45; }
 .group-placeholder { opacity: 0.5; font-style: italic; }
+
+/* Processing overlay: dimmed + blurred backdrop that blocks input while a short
+   CPU task (image decode/resize/re-encode) runs in the backend. */
+.processing-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+.processing-overlay.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+.processing-overlay-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 28px 36px;
+  border-radius: 16px;
+  background: rgba(20, 22, 26, 0.92);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.processing-overlay-spinner {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.15);
+  border-top-color: var(--accent-color, #59fcb3);
+  animation: processing-overlay-spin 0.8s linear infinite;
+}
+@keyframes processing-overlay-spin {
+  to { transform: rotate(360deg); }
+}
+.processing-overlay-text {
+  color: #e8e8ea;
+  font-size: 0.95rem;
+  letter-spacing: 0.2px;
+}

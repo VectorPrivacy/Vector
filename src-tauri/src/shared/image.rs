@@ -194,6 +194,186 @@ pub fn compress_image(img: &DynamicImage, max_dimension: u32, jpeg_quality: u8) 
     }
 }
 
+/// Downscale `img` to fit within `max_dim` using `filter`, borrowing it
+/// unchanged when it's already small enough (never upscales, never clones needlessly).
+fn fit_within<'a>(
+    img: &'a DynamicImage,
+    max_dim: u32,
+    filter: ::image::imageops::FilterType,
+) -> std::borrow::Cow<'a, DynamicImage> {
+    if img.width() > max_dim || img.height() > max_dim {
+        std::borrow::Cow::Owned(img.resize(max_dim, max_dim, filter))
+    } else {
+        std::borrow::Cow::Borrowed(img)
+    }
+}
+
+/// Escalate compression until `img` fits within both `max_dimension` and
+/// `byte_budget`, returning the smallest encoding that fits. Opaque images step
+/// JPEG quality down first (re-encoding the *same* resized pixels, no resample),
+/// then shrink the canvas; images with alpha (PNG output, where quality is a
+/// no-op) shrink the canvas only. Errors if even the most aggressive step can't
+/// get under budget (a pathological input).
+pub fn compress_image_within_budget(
+    img: &DynamicImage,
+    max_dimension: u32,
+    byte_budget: usize,
+    filter: ::image::imageops::FilterType,
+) -> Result<EncodedImage, String> {
+    // Resample ONCE. The quality ladder below re-encodes these pixels rather
+    // than resizing again per attempt (resampling is the dominant cost).
+    let base = fit_within(img, max_dimension, filter);
+    let first = encode_image_auto(&base, JPEG_QUALITY_STANDARD)?;
+    if first.bytes.len() <= byte_budget {
+        return Ok(first);
+    }
+
+    // JPEG output shrinks with quality alone (no resample); PNG output (alpha)
+    // ignores quality, so for it only a smaller canvas helps.
+    if first.extension == "jpg" {
+        for quality in [JPEG_QUALITY_COMPRESSED, 55] {
+            let enc = encode_image_auto(&base, quality)?;
+            if enc.bytes.len() <= byte_budget {
+                return Ok(enc);
+            }
+        }
+    }
+
+    // Still over budget: shrink the canvas. Resample from the ORIGINAL (not the
+    // already-shrunk base) so each smaller size keeps maximum detail.
+    let mut best = first;
+    for dim in [max_dimension * 3 / 4, max_dimension / 2] {
+        let smaller = fit_within(img, dim.max(1), filter);
+        let quality = if best.extension == "png" { JPEG_QUALITY_STANDARD } else { 60 };
+        let enc = encode_image_auto(&smaller, quality)?;
+        if enc.bytes.len() <= byte_budget {
+            return Ok(enc);
+        }
+        if enc.bytes.len() < best.bytes.len() {
+            best = enc;
+        }
+    }
+
+    Err(format!(
+        "Image is too detailed to fit under {} KB even after compression (smallest was {} KB); please pick a simpler or smaller image",
+        byte_budget / 1024,
+        best.bytes.len() / 1024,
+    ))
+}
+
+/// The non-message image being uploaded — selects the resize + byte budgets.
+/// Every kind strips metadata by re-encoding (privacy by default); message
+/// attachments are NOT here (they honour the per-send keep-metadata choice).
+#[derive(Clone, Copy, Debug)]
+pub enum UploadImageKind {
+    /// Profile or community icon — rendered small.
+    Avatar,
+    /// Profile or community banner — a wide hero image.
+    Banner,
+    /// Custom emoji or emoji-pack icon — rendered tiny.
+    Emoji,
+}
+
+impl UploadImageKind {
+    /// `(max_dimension_px, static_byte_budget, animated_byte_budget)`.
+    const fn budgets(self) -> (u32, usize, usize) {
+        match self {
+            UploadImageKind::Avatar => (512, 256 * 1024, 2 * 1024 * 1024),
+            UploadImageKind::Banner => (1500, 600 * 1024, 3 * 1024 * 1024),
+            UploadImageKind::Emoji => (256, 256 * 1024, 256 * 1024),
+        }
+    }
+
+    /// Downscale filter. Avatars/banners are shown sharp, so they get CatmullRom
+    /// (bicubic, ~2x faster than Lanczos3 with near-identical quality). Emoji are
+    /// tiny, so Triangle (bilinear, fastest) is imperceptible and best for slow devices.
+    const fn resample_filter(self) -> ::image::imageops::FilterType {
+        match self {
+            UploadImageKind::Avatar | UploadImageKind::Banner => ::image::imageops::FilterType::CatmullRom,
+            UploadImageKind::Emoji => ::image::imageops::FilterType::Triangle,
+        }
+    }
+}
+
+/// Prepare a non-message image for upload: strip metadata (re-encode, keeping
+/// only orientation), resize to fit, and cap the byte size, per `kind`.
+///
+/// Animated images (GIF / animated WebP / APNG) pass through untouched to keep
+/// their animation — they can't be re-encoded without flattening to a still, and
+/// in practice never carry camera EXIF — but are still size-capped. Everything
+/// else is decoded and re-encoded, which drops every metadata segment.
+pub fn prepare_upload_image(bytes: &[u8], kind: UploadImageKind) -> Result<EncodedImage, String> {
+    let (max_dimension, byte_budget, animated_budget) = kind.budgets();
+
+    if let Some(extension) = animated_format(bytes) {
+        if bytes.len() > animated_budget {
+            return Err(format!(
+                "Animated image is too large ({} KB, max {} KB); please use a smaller one or a static image",
+                bytes.len() / 1024,
+                animated_budget / 1024,
+            ));
+        }
+        return Ok(EncodedImage { bytes: bytes.to_vec(), extension });
+    }
+
+    // decode_image_bounded rejects decode-bombs and bakes EXIF orientation into
+    // pixels; the re-encode then drops all remaining metadata.
+    let img = vector_core::crypto::decode_image_bounded(bytes)
+        .map_err(|_| "Image couldn't be read (unsupported or corrupt file)".to_string())?;
+    compress_image_within_budget(&img, max_dimension, byte_budget, kind.resample_filter())
+}
+
+/// If `bytes` is an animated image we must not re-encode, return its extension
+/// (`"gif"`/`"webp"`/`"png"`); otherwise `None`. Biased toward detecting
+/// animation: a false positive only skips stripping/compression, whereas a false
+/// negative would flatten the animation to a still.
+fn animated_format(bytes: &[u8]) -> Option<&'static str> {
+    // GIF: any GIF may hold multiple frames.
+    if bytes.len() >= 6 && (&bytes[..6] == b"GIF87a" || &bytes[..6] == b"GIF89a") {
+        return Some("gif");
+    }
+    // Animated WebP: RIFF....WEBP with a VP8X chunk whose animation flag (0x02)
+    // is set, or an explicit ANIM chunk near the header.
+    if bytes.len() >= 16 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        let vp8x_anim = bytes.len() >= 21 && &bytes[12..16] == b"VP8X" && bytes[20] & 0x02 != 0;
+        let anim_chunk = bytes[..bytes.len().min(64)].windows(4).any(|w| w == b"ANIM");
+        if vp8x_anim || anim_chunk {
+            return Some("webp");
+        }
+    }
+    // APNG: a PNG with an acTL chunk before the first IDAT.
+    if bytes.len() >= 8 && &bytes[..8] == b"\x89PNG\r\n\x1a\n" && png_has_actl(bytes) {
+        return Some("png");
+    }
+    None
+}
+
+/// Walk PNG chunks looking for `acTL` (animation control) before the first
+/// `IDAT` — the marker that distinguishes an APNG from a plain PNG.
+fn png_has_actl(bytes: &[u8]) -> bool {
+    let mut off = 8; // past the 8-byte PNG signature
+    while off + 8 <= bytes.len() {
+        let len = u32::from_be_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]) as usize;
+        match &bytes[off + 4..off + 8] {
+            b"acTL" => return true,
+            b"IDAT" => return false,
+            _ => {}
+        }
+        off = off.saturating_add(12).saturating_add(len); // len(4) + type(4) + data + crc(4)
+    }
+    false
+}
+
+/// Mime type for an upload-prepared image extension.
+pub fn upload_mime_for(extension: &str) -> &'static str {
+    match extension {
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => "image/jpeg",
+    }
+}
+
 /// Encode RGBA image data from raw components, choosing format based on alpha and size.
 ///
 /// Uses PNG for:
@@ -542,6 +722,104 @@ mod metadata_scan_tests {
     #[test]
     fn non_jpeg_scans_clean() {
         assert_eq!(jpeg_metadata_scan(b"\x89PNG\r\n\x1a\n...."), (false, false));
+    }
+}
+
+#[cfg(test)]
+mod budget_compression_tests {
+    use super::{
+        animated_format, compress_image_within_budget, prepare_upload_image, upload_mime_for,
+        UploadImageKind,
+    };
+
+    // Structured (not random) pixels: high-frequency enough to be a real encode,
+    // but with DCT structure JPEG can actually compress.
+    fn structured(w: u32, h: u32) -> image::DynamicImage {
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(w, h, |x, y| {
+            image::Rgb([
+                ((x.wrapping_mul(37) ^ y.wrapping_mul(101)) & 0xFF) as u8,
+                ((x.wrapping_mul(59) ^ y.wrapping_mul(17)) & 0xFF) as u8,
+                ((x.wrapping_mul(83) ^ y.wrapping_mul(7)) & 0xFF) as u8,
+            ])
+        }))
+    }
+
+    // Minimal container headers just large enough for the sniffers.
+    fn animated_webp() -> Vec<u8> {
+        // RIFF <size> WEBP VP8X <chunklen> <flags with anim bit> ...
+        let mut v = b"RIFF\0\0\0\0WEBPVP8X".to_vec();
+        v.extend_from_slice(&[10, 0, 0, 0]); // VP8X chunk length
+        v.push(0x02); // flags: animation bit set
+        v.extend_from_slice(&[0u8; 9]);
+        v
+    }
+    fn apng() -> Vec<u8> {
+        let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
+        // IHDR chunk (len 13) then an acTL chunk before any IDAT.
+        v.extend_from_slice(&[0, 0, 0, 13]);
+        v.extend_from_slice(b"IHDR");
+        v.extend_from_slice(&[0u8; 13 + 4]); // data + crc
+        v.extend_from_slice(&[0, 0, 0, 8]);
+        v.extend_from_slice(b"acTL");
+        v.extend_from_slice(&[0u8; 8 + 4]);
+        v
+    }
+
+    #[test]
+    fn detects_every_animated_format_and_leaves_static_alone() {
+        assert_eq!(animated_format(b"GIF89a...."), Some("gif"));
+        assert_eq!(animated_format(b"GIF87a...."), Some("gif"));
+        assert_eq!(animated_format(&animated_webp()), Some("webp"));
+        assert_eq!(animated_format(&apng()), Some("png"));
+        assert_eq!(animated_format(b"\x89PNG\r\n\x1a\n-plain-png"), None);
+        assert_eq!(animated_format(b"\xFF\xD8\xFF-jpeg"), None);
+    }
+
+    #[test]
+    fn downscales_a_large_image_under_budget() {
+        let img = structured(2000, 2000);
+        let out = compress_image_within_budget(&img, 512, 256 * 1024, ::image::imageops::FilterType::CatmullRom).expect("fits");
+        assert!(out.bytes.len() <= 256 * 1024, "over budget: {}", out.bytes.len());
+        assert_eq!(out.extension, "jpg"); // opaque source -> JPEG
+        let dec = image::load_from_memory(&out.bytes).unwrap();
+        assert!(dec.width() <= 512 && dec.height() <= 512, "not resized to fit 512");
+    }
+
+    #[test]
+    fn an_impossible_budget_is_rejected_not_silently_oversized() {
+        let img = structured(1000, 1000);
+        assert!(compress_image_within_budget(&img, 512, 1, ::image::imageops::FilterType::Triangle).is_err());
+    }
+
+    #[test]
+    fn static_image_is_stripped_and_capped_via_the_kind_api() {
+        // Encode a real opaque PNG, then confirm the avatar path re-encodes it
+        // under budget (a re-encode inherently drops any metadata).
+        let png = super::encode_png(&structured(1200, 1200).to_rgba8(), 1200, 1200).unwrap();
+        let out = prepare_upload_image(&png, UploadImageKind::Avatar).expect("prepared");
+        assert!(out.bytes.len() <= 256 * 1024);
+        let dec = image::load_from_memory(&out.bytes).unwrap();
+        assert!(dec.width() <= 512 && dec.height() <= 512);
+    }
+
+    #[test]
+    fn animated_passes_through_under_budget_and_is_rejected_over() {
+        let gif = b"GIF89a-pretend-frames".to_vec();
+        let ok = prepare_upload_image(&gif, UploadImageKind::Avatar).expect("passes");
+        assert_eq!(ok.extension, "gif");
+        assert_eq!(ok.bytes, gif); // untouched, animation preserved
+        // Emoji animated budget is 256 KB; a larger fake GIF is rejected.
+        let mut big = b"GIF89a".to_vec();
+        big.resize(300 * 1024, 0);
+        assert!(prepare_upload_image(&big, UploadImageKind::Emoji).is_err());
+    }
+
+    #[test]
+    fn upload_mime_matches_extension() {
+        assert_eq!(upload_mime_for("png"), "image/png");
+        assert_eq!(upload_mime_for("gif"), "image/gif");
+        assert_eq!(upload_mime_for("webp"), "image/webp");
+        assert_eq!(upload_mime_for("jpg"), "image/jpeg");
     }
 }
 

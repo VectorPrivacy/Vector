@@ -3602,7 +3602,7 @@ pub async fn set_community_image(
     // reads the real path directly. Without this, picking an image on Android failed instantly at the
     // read ("read image: ...") and surfaced as the generic "Failed to update the image" toast — for
     // the owner too, not just admins.
-    let (bytes, ext): (Vec<u8>, String) = {
+    let (raw_bytes, _raw_ext): (Vec<u8>, String) = {
         #[cfg(not(target_os = "android"))]
         {
             let bytes = std::fs::read(&filepath).map_err(|e| format!("read image: {e}"))?;
@@ -3619,6 +3619,21 @@ pub async fn set_community_image(
             ((*af.bytes).clone(), af.extension)
         }
     };
+
+    // Strip metadata + resize + cap before encrypting (parity with profile images).
+    // Members, and anyone the community key reaches, must not receive the owner's
+    // camera EXIF; the re-encode also shrinks the blob every member downloads.
+    let prepared = crate::shared::image::prepare_upload_image(
+        &raw_bytes,
+        if is_banner {
+            crate::shared::image::UploadImageKind::Banner
+        } else {
+            crate::shared::image::UploadImageKind::Avatar
+        },
+    )?;
+    let bytes = prepared.bytes;
+    let ext = prepared.extension.to_string();
+
     let plaintext_hash = vector_core::crypto::sha256_hex(&bytes);
 
     // Encrypt with a fresh random key+nonce (same as file attachments); the key rides in

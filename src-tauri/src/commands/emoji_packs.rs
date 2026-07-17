@@ -273,11 +273,20 @@ pub async fn emoji_pack_upload_image<R: tauri::Runtime>(
         return Err("No Blossom servers configured.".to_string());
     }
 
-    let mime_ref = if mime.is_empty() { "application/octet-stream" } else { mime.as_str() };
+    // Strip metadata (+ resize/cap) before upload: static emojis are re-encoded
+    // (dropping any EXIF), animated emotes (GIF / animated WebP / APNG) pass
+    // through to keep their animation. The processed output drives the mime, so
+    // the caller's `mime` hint is no longer consulted.
+    let _ = mime;
+    let prepared = crate::shared::image::prepare_upload_image(
+        &bytes,
+        crate::shared::image::UploadImageKind::Emoji,
+    )?;
+    let mime_ref = crate::shared::image::upload_mime_for(prepared.extension);
     // Wrap once + clone the Arc — upload moves ownership of the inner
     // Vec onto its task, we keep a reference for the post-upload
     // pre-cache write.
-    let bytes_arc = std::sync::Arc::new(bytes);
+    let bytes_arc = std::sync::Arc::new(prepared.bytes);
     let upload_bytes = bytes_arc.clone();
     let url = vector_core::blossom::upload_blob_with_failover(
         signer,
