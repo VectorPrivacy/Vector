@@ -284,7 +284,7 @@ async fn download_with_ranges(
             return Ok(result);
         }
         if status != 206 {
-            vector_core::log_warn!("[AttachmentDownload] HTTP {} (expected 206) for {}", status, url);
+            vector_core::log_debug!("[AttachmentDownload] HTTP {} (expected 206) for {}", status, url);
             return Err("Server did not honor range request");
         }
 
@@ -354,7 +354,9 @@ async fn download_with_streaming(
     // still returns Ok from send() and would otherwise stream the error page,
     // surfacing later as a misleading "file too small" / "decryption failed".
     if !res.status().is_success() {
-        vector_core::log_warn!("[AttachmentDownload] HTTP {} for {}", res.status().as_u16(), url);
+        // A 404/expired blob is a normal outcome (favicons, missing previews, GC'd
+        // media) — debug, not a warning, so the default log isn't flooded.
+        vector_core::log_debug!("[AttachmentDownload] HTTP {} for {}", res.status().as_u16(), url);
         return Err("Media server returned an error status");
     }
 

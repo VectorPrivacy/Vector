@@ -267,7 +267,7 @@ pub fn precache_image_bytes<R: Runtime>(
     let extension = match validate_image(bytes) {
         Some(ext) => ext,
         None => {
-            log_warn!("[ImageCache] Invalid image data for precache: {}", url);
+            log_debug!("[ImageCache] Invalid image data for precache: {}", url);
             return CacheResult::Failed("Invalid image format".to_string());
         }
     };
@@ -330,7 +330,9 @@ pub async fn cache_image<R: Runtime>(
     let mut response = match http_client().get(url).send().await {
         Ok(resp) => resp,
         Err(e) => {
-            log_warn!("[ImageCache] Failed to download {}: {}", url, e);
+            // Dead link / expired blob / timeout — expected for remote media, not
+            // a warning (the UI shows the broken image regardless).
+            log_debug!("[ImageCache] Failed to download {}: {}", url, e);
             return CacheResult::Failed(format!("Download failed: {}", e));
         }
     };
@@ -372,7 +374,9 @@ pub async fn cache_image<R: Runtime>(
     let extension = match validate_image(&bytes) {
         Some(ext) => ext,
         None => {
-            log_warn!("[ImageCache] Invalid image data from {}", url);
+            // Unsupported format (e.g. AVIF, absent from our image build) or a
+            // non-image response — an expected outcome, not a warning.
+            log_debug!("[ImageCache] Invalid image data from {}", url);
             return CacheResult::Failed("Invalid or corrupted image".to_string());
         }
     };
@@ -509,7 +513,7 @@ pub async fn get_or_cache_image<R: Runtime>(
     match cache_image(&handle, &url, img_type).await {
         CacheResult::Cached(path) | CacheResult::AlreadyCached(path) => Ok(Some(path)),
         CacheResult::Failed(e) => {
-            log_warn!("[ImageCache] Failed to cache {}: {}", url, e);
+            log_debug!("[ImageCache] Failed to cache {}: {}", url, e);
             // Propagate the reason (404 / too-large / etc.) so the frontend can explain WHY, rather
             // than silently swallowing it as Ok(None) and showing a generic message.
             Err(e)
@@ -633,7 +637,7 @@ pub async fn cleanup_stale_downloads() {
     let mut in_progress = DOWNLOADS_IN_PROGRESS.lock().await;
     if in_progress.len() > MAX_IN_PROGRESS_ENTRIES {
         // If we have too many entries, something is wrong - clear them all
-        log_warn!("[ImageCache] Clearing {} stale in-progress entries", in_progress.len());
+        log_debug!("[ImageCache] Clearing {} stale in-progress entries", in_progress.len());
         in_progress.clear();
     }
 }
@@ -707,12 +711,14 @@ pub async fn cache_url_image<R: Runtime>(
     };
 
     // Download with progress reporting (10s timeout)
-    log_debug!("[ImageCache] Downloading inline image with progress: {}", url);
+    log_trace!("[ImageCache] Downloading inline image with progress: {}", url);
     let bytes = match download_with_reporter(&url, &reporter, Some(Duration::from_secs(10))).await {
         Ok(b) => b,
         Err(e) => {
             cleanup().await;
-            log_warn!("[ImageCache] Failed to download inline image {}: {}", url, e);
+            // Expected for sites without full preview metadata (missing favicon,
+            // og:image, etc.) — debug, not a warning.
+            log_debug!("[ImageCache] Failed to download inline image {}: {}", url, e);
             emit_failure(&handle, &url);
             return Ok(None);
         }
@@ -723,7 +729,9 @@ pub async fn cache_url_image<R: Runtime>(
         Some(ext) => ext,
         None => {
             cleanup().await;
-            log_warn!("[ImageCache] Invalid image data from {}", url);
+            // Unsupported format (e.g. AVIF, absent from our image build) or a
+            // non-image response — an expected outcome, not a warning.
+            log_debug!("[ImageCache] Invalid image data from {}", url);
             emit_failure(&handle, &url);
             return Ok(None);
         }
