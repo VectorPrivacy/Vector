@@ -171,6 +171,36 @@ pub fn attachments_from_tags<'a>(
         .collect()
 }
 
+/// Strip attachment blob URLs that some clients (e.g. Armada) inline into the
+/// message content IN ADDITION to the `imeta` tag. Vector renders the file from
+/// the imeta, so the inline copy is pure redundancy: it wastes storage and makes
+/// the frontend try to web-preview a raw (often encrypted) blob URL — which can't
+/// decode, so it just errors. Display-only: the wire event and message id are
+/// untouched (we never re-sign), so this can't affect dedup or authority.
+pub fn strip_attachment_urls(content: &str, attachments: &[Attachment]) -> String {
+    if content.is_empty() || attachments.is_empty() {
+        return content.to_string();
+    }
+    let mut out = content.to_string();
+    for att in attachments {
+        if !att.url.is_empty() {
+            out = out.replace(&att.url, "");
+        }
+    }
+    if out == content {
+        return content.to_string(); // nothing matched — leave it byte-identical
+    }
+    // Removing a URL that sat on its own line leaves dangling whitespace / a
+    // trailing blank line — tidy per-line trailing space and trim the ends,
+    // keeping the surviving caption's own newlines.
+    out.lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,6 +224,22 @@ mod tests {
             scheme_version: None,
             mls_filename: None,
         }
+    }
+
+    #[test]
+    fn strip_attachment_urls_removes_inlined_blob_url() {
+        let att = sample("pic.jpeg", "jpeg", false); // url = https://blossom.example/abc
+        // Trailing URL on its own line (the Armada shape) → caption survives clean.
+        assert_eq!(
+            strip_attachment_urls("Check this out\nhttps://blossom.example/abc", &[att.clone()]),
+            "Check this out"
+        );
+        // Content that is ONLY the URL collapses to empty.
+        assert_eq!(strip_attachment_urls("https://blossom.example/abc", &[att.clone()]), "");
+        // A caption that doesn't contain the URL is returned byte-identical.
+        assert_eq!(strip_attachment_urls("just a caption", &[att.clone()]), "just a caption");
+        // No attachments → untouched.
+        assert_eq!(strip_attachment_urls("hello", &[]), "hello");
     }
 
     #[test]

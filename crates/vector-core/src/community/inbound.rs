@@ -66,6 +66,8 @@ pub fn build_message(opened: &OpenedMessage, my_pubkey: &PublicKey) -> Message {
     // Transport-specific: Concord attachments are NIP-92 imeta (already parsed). Link the outer wire
     // id for the shared dedup. The shared parser already set content/reply/emoji/ms/npub.
     msg.attachments = opened.attachments.clone();
+    // Drop any blob URL a foreign client (e.g. Armada) also inlined into the caption.
+    msg.content = super::attachments::strip_attachment_urls(&msg.content, &msg.attachments);
     msg.wrapper_event_id = Some(opened.wrapper_id.to_hex());
     msg
 }

@@ -37,15 +37,17 @@ pub fn chat_message_to_message(
         ),
         None => (String::new(), None),
     };
+    let attachments = attachments_from_tags(opened.rumor.tags.iter(), &crate::db::get_download_dir());
     Message {
         id: opened.rumor_id.to_hex(),
-        content: opened.rumor.content.clone(),
+        // Drop any blob URL a foreign client (e.g. Armada) also inlined into the caption.
+        content: super::super::attachments::strip_attachment_urls(&opened.rumor.content, &attachments),
         replied_to,
         replied_to_npub,
         at: opened.at_ms,
         mine: opened.author == *my_pubkey,
         npub: opened.author.to_bech32().ok(),
-        attachments: attachments_from_tags(opened.rumor.tags.iter(), &crate::db::get_download_dir()),
+        attachments,
         emoji_tags: emoji
             .iter()
             .map(|(shortcode, url)| EmojiTag { shortcode: shortcode.clone(), url: url.clone() })
