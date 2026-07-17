@@ -117,6 +117,10 @@ pub enum PreparedEvent {
         is_mine: bool,
         wrapper_event_id_bytes: [u8; 32],
         wrapper_created_at: u64,
+        /// Inner rumor `created_at` (seconds) — the real send time. Unlike the outer
+        /// wrapper, which NIP-59 backdates up to 2 days, this is honest; the tombstone
+        /// supersession test needs it so a re-invite isn't misread as older than a decline.
+        rumor_created_at: u64,
     },
     /// Concord v2 Direct Invite (inner kind 3313) — parked for explicit consent.
     /// Carries the raw bundle JSON (parked verbatim; the accept path re-parses it).
@@ -128,6 +132,8 @@ pub enum PreparedEvent {
         is_mine: bool,
         wrapper_event_id_bytes: [u8; 32],
         wrapper_created_at: u64,
+        /// Inner rumor `created_at` (seconds) — the real send time (see the v1 variant).
+        rumor_created_at: u64,
     },
     /// Duplicate event — just persist wrapper for negentropy.
     DedupSkip {
@@ -177,6 +183,10 @@ pub async fn prepare_event(
 
     let unwrap_ns = unwrap_start.elapsed().as_nanos() as u64;
 
+    // Inner rumor send time (seconds). The outer wrapper's `created_at` is NIP-59
+    // backdated up to 2 days, so it can't order an invite against a decline tombstone.
+    let rumor_created_at = rumor.created_at.as_secs();
+
     let is_mine = sender == my_public_key;
     let contact = if is_mine {
         rumor.tags.public_keys().next()
@@ -198,7 +208,7 @@ pub async fn prepare_event(
     if rumor.kind == Kind::Custom(crate::stored_event::event_kind::COMMUNITY_INVITE_BUNDLE) {
         return match crate::community::invite::parse_invite_rumor(rumor.kind, &rumor.content) {
             Some(invite) => PreparedEvent::CommunityInvite {
-                invite, inviter: contact.clone(), is_mine, wrapper_event_id_bytes, wrapper_created_at,
+                invite, inviter: contact.clone(), is_mine, wrapper_event_id_bytes, wrapper_created_at, rumor_created_at,
             },
             None => PreparedEvent::ErrorSkip { wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at },
         };
@@ -218,6 +228,7 @@ pub async fn prepare_event(
                 is_mine,
                 wrapper_event_id_bytes,
                 wrapper_created_at,
+                rumor_created_at,
             },
             None => PreparedEvent::ErrorSkip { wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at },
         };
@@ -418,7 +429,7 @@ pub async fn commit_prepared_event(
                 RumorProcessingResult::Ignored => false,
             }
         }
-        PreparedEvent::CommunityInvite { invite, inviter, is_mine, wrapper_event_id_bytes, wrapper_created_at } => {
+        PreparedEvent::CommunityInvite { invite, inviter, is_mine, wrapper_event_id_bytes, wrapper_created_at, rumor_created_at } => {
             // Negentropy bookkeeping regardless of outcome (the outer wrapper id is
             // attacker-controlled, so it can't be the join-idempotency key — see below).
             {
@@ -462,8 +473,9 @@ pub async fn commit_prepared_event(
             // Supersession: a decline/leave tombstone suppresses any invite no newer than the
             // decision (so the un-deletable 3304 can't re-nag, and a sibling's decline propagated via
             // the synced list silences this device too). A STRICTLY-newer invite falls through and
-            // parks — a deliberate re-invite resurfaces. `wrapper_created_at` is outer-send seconds.
-            if crate::community::list::tombstone_suppresses(&community_id, wrapper_created_at) {
+            // parks — a deliberate re-invite resurfaces. Ordered on the inner rumor time, not the
+            // NIP-59-backdated wrapper (which would make a fresh re-invite look older than the decline).
+            if crate::community::list::tombstone_suppresses(&community_id, rumor_created_at) {
                 return false;
             }
 
@@ -493,7 +505,7 @@ pub async fn commit_prepared_event(
             }
             false
         }
-        PreparedEvent::CommunityInviteV2 { bundle_json, community_id, inviter, is_mine, wrapper_event_id_bytes, wrapper_created_at } => {
+        PreparedEvent::CommunityInviteV2 { bundle_json, community_id, inviter, is_mine, wrapper_event_id_bytes, wrapper_created_at, rumor_created_at } => {
             {
                 let mut cache = WRAPPER_ID_CACHE.lock().await;
                 cache.insert(wrapper_event_id_bytes);
@@ -519,7 +531,8 @@ pub async fn commit_prepared_event(
             // Supersession: a decline/leave tombstone (protocol-agnostic, keyed on
             // community_id) suppresses a re-wrapped invite no newer than the decision,
             // so a declined/left community can't be re-nagged by a fresh ephemeral wrap.
-            if crate::community::list::tombstone_suppresses(&community_id, wrapper_created_at) {
+            // Ordered on the inner rumor time, not the NIP-59-backdated wrapper.
+            if crate::community::list::tombstone_suppresses(&community_id, rumor_created_at) {
                 return false;
             }
             // Park for explicit consent — do NOT join/subscribe here. Accept via the command layer.

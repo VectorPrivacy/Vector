@@ -333,6 +333,23 @@ mod tests {
     }
 
     #[test]
+    fn invite_rumor_stamps_real_send_time_not_backdated() {
+        // The decline-tombstone supersession orders re-invites by the inner rumor's
+        // `created_at`. That only works if the rumor carries the true send time; a
+        // NIP-59-style backdate here would make a fresh re-invite look older than a
+        // decline and get silently dropped (the "can't re-invite after decline" bug).
+        let owner = Community::create("HQ", "general", vec![]);
+        let author = Keys::generate();
+        let now = nostr_sdk::prelude::Timestamp::now().as_secs();
+        let rumor = build_invite_rumor(&owner, author.public_key()).unwrap();
+        let stamped = rumor.created_at.as_secs();
+        assert!(
+            stamped + 5 >= now && stamped <= now + 5,
+            "rumor created_at {stamped} must track now {now}, not be backdated"
+        );
+    }
+
+    #[test]
     fn parse_invite_rumor_rejects_wrong_kind() {
         // A normal text DM (kind 14) must never parse as an invite, even if its content
         // happened to be valid bundle JSON.

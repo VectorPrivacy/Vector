@@ -181,9 +181,10 @@ impl CommunityList {
     }
 
     /// Timestamp-supersession test (pure): is a decline/leave tombstone for `community_id` at least as
-    /// new as an invite whose outer `created_at` is `invite_created_at_secs`? `true` = suppress (the
+    /// new as an invite whose real send time is `invite_created_at_secs`? `true` = suppress (the
     /// invite is a re-delivery or older); a strictly-newer invite returns `false` and resurfaces.
-    /// `removed_at` is ms, invite `created_at` is seconds — compared in ms.
+    /// `removed_at` is ms, invite `created_at` is seconds — compared in ms. Callers MUST pass the inner
+    /// rumor `created_at` (the honest send time), never the NIP-59-backdated outer wrapper time.
     pub fn tombstone_suppresses_at(&self, community_id: &str, invite_created_at_secs: u64) -> bool {
         let invite_ms = invite_created_at_secs.saturating_mul(1000);
         self.tombstones
