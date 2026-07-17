@@ -1628,10 +1628,11 @@ async fn sync_community_channel_inner(
         if !session.is_valid() {
             return Ok(CommunitySyncResult::default());
         }
-        // A short page means we reached the channel's start; emit a refresh so the
-        // frontend re-queries the backfilled DB rows.
+        // Each backfilled message already surfaced to the live UI via `message_new`
+        // (emitted per-outcome inside the facade backfill), so the chat list preview,
+        // unread badge, and sort order update without opening the channel. A short page
+        // means we reached the channel's start.
         let reached_start = new < limit;
-        vector_core::emit_event("community_channel_synced", &serde_json::json!({ "channel_id": channel_id }));
         return Ok(CommunitySyncResult { new_messages: new as u32, reached_start, oldest_ms: None });
     }
 

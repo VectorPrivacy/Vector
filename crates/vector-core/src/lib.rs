@@ -2197,6 +2197,26 @@ impl VectorCore {
                     new += 1;
                 }
                 persist_chat(channel_id, &outcome).await;
+                // Surface to the live UI, mirroring v1's sweep + the live dispatch handler:
+                // a silent DB-only backfill left the chat-list preview, unread badge, and
+                // sort order stale until the channel was opened. Raw emits (no notification
+                // ping) — a boot catch-up must not fire an OS ping per message. Headless
+                // consumers register no emitter, so these are a no-op there.
+                match &outcome {
+                    ChatPersist::New(msg) => crate::traits::emit_event(
+                        "message_new",
+                        &serde_json::json!({ "message": msg, "chat_id": channel_id }),
+                    ),
+                    ChatPersist::Updated { message, .. }
+                    | ChatPersist::ReactionRemoved { message, .. } => crate::traits::emit_event(
+                        "message_update",
+                        &serde_json::json!({ "old_id": message.id, "message": message, "chat_id": channel_id }),
+                    ),
+                    ChatPersist::Removed(target_id) => crate::traits::emit_event(
+                        "message_removed",
+                        &serde_json::json!({ "id": target_id, "chat_id": channel_id, "reason": "deleted" }),
+                    ),
+                }
             }
         }
         new
