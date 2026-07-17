@@ -1661,7 +1661,7 @@ const STORAGE_CATEGORIES = [
 
 // Slice colors rank by size rather than category identity: the largest slice
 // is always purple, descending through the ramp to gray.
-const STORAGE_SLICE_RAMP = ['#9D5DF9', '#5EC4F7', '#4AD99D', '#FBA35B', '#FBC85B', '#B2B2B2'];
+const STORAGE_SLICE_RAMP = ['#9D5DF9', '#5EC4F7', '#4AD99D', '#FBA35B', '#FBC85B', '#FC595C', '#B2B2B2'];
 
 /** Category-aware confirmation for a storage delete; returns the user's choice. */
 async function confirmStorageDelete(cat, sizeText) {
