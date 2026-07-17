@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-retry-failed-dm"
+description = "Enables the retry_failed_dm command without any pre-configured scope."
+commands.allow = ["retry_failed_dm"]
+
+[[permission]]
+identifier = "deny-retry-failed-dm"
+description = "Denies the retry_failed_dm command without any pre-configured scope."
+commands.deny = ["retry_failed_dm"]

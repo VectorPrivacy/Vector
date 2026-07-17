@@ -521,6 +521,7 @@ pub fn run() {
             profile::get_blocked_users,
             message::message,
             message::delete_failed_message,
+            message::retry_failed_dm,
             message::delete_own_message,
             message::is_message_deletable,
             message::get_message_delete_options,

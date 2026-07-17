@@ -38,6 +38,7 @@
     "allow-message",
     "allow-cancel-upload",
     "allow-delete-failed-message",
+    "allow-retry-failed-dm",
     "allow-delete-own-message",
     "allow-is-message-deletable",
     "allow-get-message-delete-options",

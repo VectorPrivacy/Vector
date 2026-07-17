@@ -865,5 +865,25 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // =========================================================================
+    // Migration 70: Retained gift-wrap body for idempotent manual retry
+    // =========================================================================
+    // A failed (red) DM whose wrap silently landed would double-post on manual
+    // Retry, because Retry rebuilt a fresh wrap with a new outer id. Retaining
+    // the exact recipient wrap event (+ its rumor, + the local pending id to
+    // look it up by) lets Retry republish the byte-identical event: relays
+    // no-op the duplicate, so duplication is impossible regardless of client.
+    // The body columns are nulled the instant the send is confirmed (a relay
+    // OK), so steady-state they are NULL — only unsent messages carry a body.
+    run_atomic_migration(conn, 70, "Retained gift-wrap body for idempotent retry", |tx| {
+        tx.execute_batch(
+            "ALTER TABLE nip17_wrap_keys ADD COLUMN wrap_json  TEXT;
+             ALTER TABLE nip17_wrap_keys ADD COLUMN rumor_json TEXT;
+             ALTER TABLE nip17_wrap_keys ADD COLUMN pending_id TEXT;
+             CREATE INDEX IF NOT EXISTS idx_nip17_wrap_keys_pending ON nip17_wrap_keys(pending_id);"
+        ).map_err(|e| format!("Failed to add resend-payload columns: {}", e))?;
+        Ok(())
+    })?;
+
     Ok(())
 }

@@ -241,6 +241,10 @@ async fn rescue_failed_as_sent(entry: &WrapConfirm) {
     );
     entry.callback.on_sent(&entry.chat_id, &entry.pending_id, msg);
     entry.callback.on_persist(&entry.chat_id, msg);
+    // A late OK proved delivery — drop the retained resend body.
+    if let Some(rid) = entry.rumor.id {
+        let _ = crate::db::nip17_keys::clear_resend_payload(&rid);
+    }
     if entry.self_send {
         if let (Some(client), Some(my_pk)) = (nostr_client(), my_public_key()) {
             spawn_self_send(client, my_pk, entry.rumor.clone());
@@ -302,13 +306,20 @@ async fn retry_send_gift_wrap(
     event_id: &str,
     config: &SendConfig,
     callback: Arc<dyn SendCallback>,
+    // Manual retry injects the retained wrap so the EXACT same event
+    // republishes (relay dedups the duplicate). `None` = a fresh send that
+    // builds + retains the wrap in-loop.
+    prebuilt: Option<crate::inbox_relays::BuiltGiftWrap>,
 ) -> Result<SendResult, String> {
     let my_pk = my_public_key().ok_or("Public key not set")?;
     let inner_rumor_id = rumor.id;
 
+    // A resend already holds a persisted wrap key + retained body — don't
+    // re-store either (that would reset the row's clock and re-stash bytes).
+    let is_resend = prebuilt.is_some();
     // Built lazily in-loop so transient signer failures (NIP-46 bunker
-    // round-trips) still get the full retry schedule.
-    let mut built: Option<crate::inbox_relays::BuiltGiftWrap> = None;
+    // round-trips) still get the full retry schedule; a resend seeds it.
+    let mut built: Option<crate::inbox_relays::BuiltGiftWrap> = prebuilt;
     // Targets resolve once; transient inbox connections live across the
     // whole retry window rather than reconnecting per attempt.
     let mut targets: Option<crate::inbox_relays::GiftWrapTargets> = None;
@@ -368,16 +379,26 @@ async fn retry_send_gift_wrap(
 
         if targets.is_none() {
             let t = crate::inbox_relays::resolve_gift_wrap_targets(client, receiver).await;
-            if let Some(rid) = inner_rumor_id {
-                if let Err(e) = crate::db::nip17_keys::store_wrap_key(
-                    &wrap.event.id,
-                    &rid,
-                    receiver,
-                    crate::db::nip17_keys::WrapRole::Recipient,
-                    &wrap.secret,
-                    &t.targeted_relays,
-                ) {
-                    eprintln!("[NIP-17] failed to persist wrap key: {}", e);
+            // First send only: persist the wrap key (NIP-09 delete) AND retain
+            // the exact wrap event + rumor (byte-identical resend on manual
+            // retry). A resend already holds both.
+            if !is_resend {
+                if let Some(rid) = inner_rumor_id {
+                    if let Err(e) = crate::db::nip17_keys::store_wrap_key(
+                        &wrap.event.id,
+                        &rid,
+                        receiver,
+                        crate::db::nip17_keys::WrapRole::Recipient,
+                        &wrap.secret,
+                        &t.targeted_relays,
+                    ) {
+                        eprintln!("[NIP-17] failed to persist wrap key: {}", e);
+                    }
+                    if let Err(e) = crate::db::nip17_keys::stash_resend_payload(
+                        &wrap.event.id, pending_id, &wrap.event, &rumor,
+                    ) {
+                        eprintln!("[NIP-17] failed to retain resend payload: {}", e);
+                    }
                 }
             }
             targets = Some(t);
@@ -520,6 +541,12 @@ async fn finalize_gift_wrap_sent(
         callback.on_persist(receiver_npub, finalized_msg);
     }
 
+    // Delivery confirmed — drop the retained resend body (the key row stays for
+    // NIP-09). Steady-state, only genuinely-unsent messages carry a body.
+    if let Some(rid) = rumor.id {
+        let _ = crate::db::nip17_keys::clear_resend_payload(&rid);
+    }
+
     if config.self_send {
         spawn_self_send(client.clone(), my_pk, rumor.clone());
     }
@@ -614,7 +641,7 @@ pub async fn send_dm(
     // Send via gift-wrap with retry
     retry_send_gift_wrap(
         &client, &receiver, receiver_npub, &pending_id,
-        built_rumor, &event_id, config, callback,
+        built_rumor, &event_id, config, callback, None,
     ).await
 }
 
@@ -641,8 +668,75 @@ pub async fn send_rumor_dm(
 
     retry_send_gift_wrap(
         &client, &receiver, receiver_npub, pending_id,
-        rumor, &event_id, config, callback,
+        rumor, &event_id, config, callback, None,
     ).await
+}
+
+/// Manually retry a failed DM by republishing the EXACT retained recipient
+/// wrap. Same outer event id → relays no-op the duplicate, so a first send
+/// that silently landed can never double-post, regardless of the recipient's
+/// client.
+///
+/// `Ok(true)`  — a retained wrap was found and the resend went through the
+///               normal retry loop (message ends sent, or red again ready to
+///               retry). The caller must NOT fall back.
+/// `Ok(false)` — nothing retained (old/pruned message, or the first send
+///               failed before a wrap was ever built, e.g. an upload error).
+///               The caller falls back to a fresh send — safe, since no wrap
+///               reached a relay in that case.
+pub async fn resend_failed_dm(
+    receiver_npub: &str,
+    failed_msg_id: &str,
+    config: &SendConfig,
+    callback: Arc<dyn SendCallback>,
+) -> Result<bool, String> {
+    // Guard the read→flip→republish against a mid-tap account swap: the payload
+    // is this account's; a swap before the STATE flip must abort (returning
+    // "handled" so the caller never falls back to a fresh send in the WRONG
+    // account). retry_send_gift_wrap re-guards its own STATE/DB writes.
+    let session = crate::state::SessionGuard::capture();
+    let payload = match crate::db::nip17_keys::get_resend_payload_by_pending(failed_msg_id)? {
+        Some(p) => p,
+        None => return Ok(false),
+    };
+    let client = nostr_client().ok_or("Not logged in")?;
+    let receiver = PublicKey::from_bech32(receiver_npub)
+        .map_err(|e| format!("Invalid npub: {}", e))?;
+    if !session.is_valid() {
+        return Ok(true);
+    }
+
+    // Flip the red row back to "sending"; the retry loop's own fail/finalize
+    // path returns it to red or promotes it to sent.
+    let repending = {
+        let mut state = STATE.lock().await;
+        state.update_message(failed_msg_id, |msg| {
+            msg.set_failed(false);
+            msg.set_pending(true);
+        })
+    };
+    if let Some((_chat_id, ref msg)) = repending {
+        callback.on_pending(receiver_npub, msg);
+    }
+
+    let event_id = payload.rumor.id.ok_or("Retained rumor has no id")?.to_hex();
+    let built = crate::inbox_relays::BuiltGiftWrap {
+        event: payload.wrap_event,
+        secret: payload.secret,
+    };
+    // Inject the retained wrap: the loop republishes these exact bytes.
+    if let Err(e) = retry_send_gift_wrap(
+        &client, &receiver, receiver_npub, failed_msg_id,
+        payload.rumor, &event_id, config, callback, Some(built),
+    )
+    .await
+    {
+        // The resend was attempted — the loop already marked the row red again.
+        // Still "handled": the caller must not fall back to a fresh wrap, or the
+        // retained wrap that may yet be sitting on a relay would double-post.
+        crate::log_warn!("[Send] idempotent resend of {} did not land: {}", failed_msg_id, e);
+    }
+    Ok(true)
 }
 
 // ============================================================================
@@ -821,7 +915,7 @@ pub async fn send_file_dm(
 
     retry_send_gift_wrap(
         &client, &receiver, receiver_npub, &pending_id,
-        built_rumor, &event_id, config, callback,
+        built_rumor, &event_id, config, callback, None,
     ).await
 }
 

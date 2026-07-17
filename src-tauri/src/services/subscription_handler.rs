@@ -309,6 +309,12 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
     // account B's DB.
     let session = vector_core::state::SessionGuard::capture();
 
+    // Backstop: reap retained resend bodies for messages left red and untouched
+    // past a week, so a pile of never-retried failures can't grow unbounded (the
+    // NIP-09 key row survives; only the ~1-2 KB republish blob is nulled).
+    const RESEND_BODY_TTL_SECS: i64 = 7 * 24 * 60 * 60;
+    let _ = vector_core::db::nip17_keys::prune_stale_resend_payloads(RESEND_BODY_TTL_SECS);
+
     // v2 stream-AUTH responder BEFORE any subscription: a gating relay issues ONE
     // NIP-42 challenge per connection and the DM subscribe below consumes it via
     // the user auto-auth — the responder must witness (and remember) it, or

@@ -502,6 +502,28 @@ pub async fn delete_failed_message(message_id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Idempotently retry a failed DM by republishing the EXACT retained gift wrap
+/// (same outer id → relays no-op the duplicate, so a first send that silently
+/// landed can't double-post). Returns `true` when a retained wrap was found and
+/// the resend was attempted (the caller must NOT fall back), `false` when
+/// nothing was retained — an old/pruned message, or one whose upload failed
+/// before a wrap existed — in which case the caller falls back to a fresh send
+/// (safe: no wrap ever reached a relay).
+#[tauri::command]
+pub async fn retry_failed_dm(receiver: String, message_id: String) -> Result<bool, String> {
+    // Security guard: only a genuinely-failed message may be retried.
+    let is_failed = {
+        let state = STATE.lock().await;
+        state.find_message(&message_id).map(|(_, m)| m.failed).unwrap_or(false)
+    };
+    if !is_failed {
+        return Err("Message is not failed or does not exist".to_string());
+    }
+    let config = SendConfig::gui();
+    let callback: Arc<dyn SendCallback> = Arc::new(TauriSendCallback);
+    vector_core::sending::resend_failed_dm(&receiver, &message_id, &config, callback).await
+}
+
 /// Cancel an in-progress file upload by setting its cancel flag.
 /// Removes the pending message from state and emits `message_removed`.
 #[tauri::command]
