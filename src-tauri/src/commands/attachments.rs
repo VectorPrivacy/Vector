@@ -368,60 +368,15 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
         }
 
         if let Some(att) = found_attachment {
-            if refilled {
-                // The refill fixed it: the DB HAD the message, STATE didn't. That
-                // confirms a STATE-hydration gap (not data loss or an id divergence).
-                log_error!(
-                    "✅ ATTACHMENT STATE-MISS self-healed via DB refill — att={} msg={}. Root cause is a STATE hydration gap (the message reached the UI without being loaded into STATE).",
-                    attachment_id, msg_id
-                );
-            }
             break att;
         }
         drop(state);
 
         if !refilled {
             refilled = true;
-            // Classify WHY STATE missed (rare path — a brief re-lock is fine), so a
-            // single occurrence tells us the ROOT class, not just that it happened:
-            //  - CHAT absent            → the whole chat never hydrated into STATE
-            //  - MESSAGE absent         → per-message hydration gap (STATE window)
-            //  - ATTACHMENT id mismatch → the message is in STATE but its attachment
-            //                             ids differ from the requested one (a data
-            //                             divergence — dumps what IS present to compare)
-            let (chat_present, msg_count, msg_present, present_att_ids) = {
-                let state = STATE.lock().await;
-                let chat = state.chats.iter().find(|c| match &c.chat_type {
-                    ChatType::Community => c.id == npub,
-                    ChatType::DirectMessage => c.has_participant(&npub, &state.interner),
-                });
-                match chat {
-                    None => (false, 0usize, false, String::new()),
-                    Some(c) => match c.messages.find_by_hex_id(&msg_id) {
-                        None => (true, c.messages.len(), false, String::new()),
-                        Some(m) => (
-                            true,
-                            c.messages.len(),
-                            true,
-                            m.attachments.iter().map(|a| a.id_hex()).collect::<Vec<_>>().join(","),
-                        ),
-                    },
-                }
-            };
-            let class = if !chat_present {
-                "CHAT absent from STATE"
-            } else if !msg_present {
-                "MESSAGE absent from STATE"
-            } else {
-                "ATTACHMENT id mismatch (message IS in STATE)"
-            };
-            // LOUD: a message reached the UI without being resident in STATE. Self-heal
-            // by pulling it (+ neighbours) into STATE from the DB, then retry once.
-            log_error!(
-                "🚨🚨🚨 ATTACHMENT STATE-MISS [{}] — att={} msg={} chat={} | chat_msgs_in_STATE={} present_att_ids=[{}] — refilling from DB + retrying. Note the msg id.",
-                class, attachment_id, msg_id, npub, msg_count, present_att_ids
-            );
-            // Guard the DB-read → STATE-write against a mid-download account swap.
+            // STATE missed: refill this chat's window from the DB (STATE is authoritative,
+            // the message is durable there) and retry. Guard the DB-read → STATE-write
+            // against a mid-download account swap.
             let session = vector_core::state::SessionGuard::capture();
             if let Ok(msgs) = db::get_messages_around(&npub, &msg_id, 8, 8).await {
                 if !msgs.is_empty() && session.is_valid() {
@@ -434,7 +389,6 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
 
         // Missed even after a DB refill: the message genuinely isn't in the DB, or
         // its attachment id doesn't match — nothing to download either way.
-        eprintln!("Attachment not found for download: {} in message {} (even after DB refill)", attachment_id, msg_id);
         return false;
         }
     };
