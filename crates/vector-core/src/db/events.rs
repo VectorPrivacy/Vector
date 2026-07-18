@@ -1353,6 +1353,27 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
         });
     }
 
+    // Step 5: Reply context — the openChat pre-paint renders this boot last-message
+    // synchronously (before the richer get_message_views load lands), so without
+    // context here a reply shows its quote only on the second open.
+    let reply_ids: Vec<String> = result.values()
+        .flatten()
+        .filter(|m| !m.replied_to.is_empty())
+        .map(|m| m.replied_to.clone())
+        .collect();
+
+    if !reply_ids.is_empty() {
+        let contexts = get_reply_contexts(&reply_ids).await?;
+        for msg in result.values_mut().flatten() {
+            if let Some(ctx) = contexts.get(&msg.replied_to) {
+                msg.replied_to_content = Some(ctx.content.clone());
+                msg.replied_to_npub = ctx.npub.clone();
+                msg.replied_to_has_attachment = Some(ctx.has_attachment);
+                msg.replied_to_attachment_extension = ctx.extension.clone();
+            }
+        }
+    }
+
     Ok(result)
 }
 
