@@ -30,7 +30,9 @@ async fn encrypt_event_content(event: &StoredEvent) -> String {
 /// rowid. get_messages_around's (created_at, received_at, rowid) cursor needs a stable final
 /// tiebreak to page through same-timestamp bursts; INSERT OR REPLACE churns the rowid and drops rows.
 fn insert_event_row(conn: &rusqlite::Connection, event: &StoredEvent, content: &str, tags_json: &str) -> Result<(), String> {
-    conn.execute(
+    // prepare_cached: this is the hottest write statement in the app — the cache lives on the
+    // connection, so bulk-sync batches and every realtime save skip the SQL re-parse.
+    let mut stmt = conn.prepare_cached(
         r#"
         INSERT INTO events (
             id, kind, chat_id, user_id, content, tags, reference_id,
@@ -44,6 +46,8 @@ fn insert_event_row(conn: &rusqlite::Connection, event: &StoredEvent, content: &
             wrapper_event_id = COALESCE(excluded.wrapper_event_id, events.wrapper_event_id),
             npub = excluded.npub, preview_metadata = excluded.preview_metadata
         "#,
+    ).map_err(|e| format!("prepare save event: {}", e))?;
+    stmt.execute(
         rusqlite::params![
             event.id, event.kind as i32, event.chat_id, event.user_id, content, tags_json,
             event.reference_id, event.created_at as i64, event.received_at as i64,
@@ -81,21 +85,26 @@ fn extract_expiration_tag(tags: &[Vec<String>]) -> Option<u64> {
 /// Check if an event exists in the database.
 pub fn event_exists(event_id: &str) -> Result<bool, String> {
     let conn = super::get_db_connection_guard_static()?;
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM events WHERE id = ?1)",
-        rusqlite::params![event_id],
-        |row| row.get(0),
-    ).map_err(|e| format!("Failed to check event existence: {}", e))
+    event_exists_on(&conn, event_id)
 }
 
-/// Save a reaction as a kind=7 event referencing the message.
-pub async fn save_reaction_event(
+/// `event_exists` against a caller-held connection or transaction — an in-transaction check
+/// sees the batch's own uncommitted rows, which the pooled read connection cannot.
+fn event_exists_on(conn: &rusqlite::Connection, event_id: &str) -> Result<bool, String> {
+    let mut stmt = conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM events WHERE id = ?1)")
+        .map_err(|e| format!("prepare event existence: {}", e))?;
+    stmt.query_row(rusqlite::params![event_id], |row| row.get(0))
+        .map_err(|e| format!("Failed to check event existence: {}", e))
+}
+
+/// Build the kind=7 StoredEvent for a reaction (shared by the single-save and batch paths).
+fn reaction_to_stored_event(
     reaction: &Reaction,
     chat_id: i64,
     user_id: Option<i64>,
     mine: bool,
     wrapper_event_id: Option<String>,
-) -> Result<(), String> {
+) -> StoredEvent {
     // Persist the NIP-30 emoji tag alongside the `e` reference so the
     // image URL survives reload — pure `arrEmojiPacks` lookup would
     // fail when the user hasn't yet opened the picker or unsubscribed.
@@ -110,7 +119,7 @@ pub async fn save_reaction_event(
             }
         }
     }
-    let event = StoredEvent {
+    StoredEvent {
         id: reaction.id.clone(),
         kind: event_kind::REACTION,
         chat_id,
@@ -130,7 +139,18 @@ pub async fn save_reaction_event(
         wrapper_event_id,
         npub: Some(reaction.author_id.clone()),
         preview_metadata: None,
-    };
+    }
+}
+
+/// Save a reaction as a kind=7 event referencing the message.
+pub async fn save_reaction_event(
+    reaction: &Reaction,
+    chat_id: i64,
+    user_id: Option<i64>,
+    mine: bool,
+    wrapper_event_id: Option<String>,
+) -> Result<(), String> {
+    let event = reaction_to_stored_event(reaction, chat_id, user_id, mine, wrapper_event_id);
     save_event(&event).await
 }
 
@@ -179,6 +199,154 @@ pub async fn save_message(chat_id: &str, message: &Message) -> Result<(), String
     }
 
     Ok(())
+}
+
+/// One fully-prepared batch row: the message, its encrypted event row, its prepared
+/// reaction rows, and (DM stream only) the gift-wrap ledger entry that must commit in the
+/// SAME transaction — everything phase 2 needs with zero async work and zero id_cache calls.
+struct BatchRow<'a> {
+    message: &'a Message,
+    event: StoredEvent,
+    content: String,
+    tags_json: String,
+    reactions: Vec<(StoredEvent, String)>,
+    /// `(wrapper_id_bytes, wrapper_created_at)` — written to `processed_wrappers` only
+    /// AFTER this row lands. The ledger is the negentropy fingerprint set: a wrapper
+    /// ledgered before its row commits marks the message "have" forever if the row is lost.
+    wrapper: Option<([u8; 32], u64)>,
+}
+
+/// Phase 1 of a batched save (async): resolve ids, build StoredEvents, encrypt contents.
+/// ALL id_cache lookups happen here — get_or_create can write a fresh chat/user row, so it
+/// must never run while phase 2 holds the write-connection guard.
+async fn prepare_batch_rows<'a>(
+    chat_id: &str,
+    messages: &[(&'a Message, Option<([u8; 32], u64)>)],
+    rows: &mut Vec<BatchRow<'a>>,
+) -> Result<(), String> {
+    let chat_int_id = super::id_cache::get_or_create_chat_id(chat_id)?;
+    let my_npub = super::get_current_account();
+    for (message, wrapper) in messages {
+        let user_int_id = match &message.npub {
+            Some(npub_str) => super::id_cache::get_or_create_user_id(npub_str)?,
+            None => None,
+        };
+        let event = message_to_stored_event(message, chat_int_id, user_int_id);
+        let tags_json = serde_json::to_string(&event.tags).unwrap_or_else(|_| "[]".to_string());
+        let content = encrypt_event_content(&event).await;
+        let mut reactions: Vec<(StoredEvent, String)> = Vec::with_capacity(message.reactions.len());
+        for reaction in &message.reactions {
+            let user_id = super::id_cache::get_or_create_user_id(&reaction.author_id)?;
+            let is_mine = my_npub.as_deref().map(|n| reaction.author_id == n).unwrap_or(false);
+            let rev = reaction_to_stored_event(reaction, chat_int_id, user_id, is_mine, None);
+            let rtags = serde_json::to_string(&rev.tags).unwrap_or_else(|_| "[]".to_string());
+            reactions.push((rev, rtags));
+        }
+        rows.push(BatchRow { message, event, content, tags_json, reactions, wrapper: *wrapper });
+    }
+    Ok(())
+}
+
+/// Phase 2 of a batched save (sync): ONE transaction for every event + attachment + reaction
+/// + wrapper-ledger row. Insert order follows slice order, preserving the rowid tiebreak
+/// that same-timestamp pagination depends on. A poison message SKIPS (logged) rather than
+/// aborting the batch — one bad row must not lose the other 49. Returns how many messages
+/// were written.
+fn write_batch_rows(rows: &[BatchRow<'_>]) -> Result<usize, String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let tx = conn.unchecked_transaction().map_err(|e| format!("batch tx: {e}"))?;
+    let mut saved = 0usize;
+    for row in rows {
+        // Per-row savepoint = save_message's per-message atomicity inside the batch: a
+        // failed event/attachment write unwinds THIS row completely — including partial
+        // attachment upserts onto a pre-existing row, which a bare DELETE would destroy
+        // (a re-saved old file message must keep its download record on a transient error).
+        tx.execute_batch("SAVEPOINT batch_row").map_err(|e| format!("batch savepoint: {e}"))?;
+        let row_written = insert_event_row(&tx, &row.event, &row.content, &row.tags_json)
+            .and_then(|_| super::attachments::insert_attachment_rows(&tx, &row.message.id, &row.message.attachments));
+        if let Err(e) = row_written {
+            crate::log_warn!("[DB] batch skip {}: {}", &row.message.id[..8.min(row.message.id.len())], e);
+            let _ = tx.execute_batch("ROLLBACK TO batch_row; RELEASE batch_row");
+            continue;
+        }
+        saved += 1;
+        for (rev, rtags) in &row.reactions {
+            // Exists-check ON the tx so a reaction already inserted earlier in this batch dedups
+            // (a fresh reaction row must not clobber one that arrived with a wrapper id).
+            if event_exists_on(&tx, &rev.id).unwrap_or(true) {
+                continue;
+            }
+            if let Err(e) = insert_event_row(&tx, rev, &rev.content, rtags) {
+                crate::log_warn!("[DB] batch reaction {}: {}", &rev.id[..8.min(rev.id.len())], e);
+            }
+        }
+        // Ledger the gift-wrap only now that its row is in the tx — commit lands both or neither.
+        if let Some((wrapper_id, wrapper_created_at)) = &row.wrapper {
+            let mut stmt = tx.prepare_cached(
+                "INSERT OR IGNORE INTO processed_wrappers (wrapper_id, wrapper_created_at, transport) VALUES (?1, ?2, ?3)",
+            ).map_err(|e| format!("prepare wrapper ledger: {e}"))?;
+            if let Err(e) = stmt.execute(rusqlite::params![
+                &wrapper_id[..], *wrapper_created_at as i64, super::wrappers::TRANSPORT_NIP17,
+            ]) {
+                crate::log_warn!("[DB] batch wrapper ledger {}: {}", &row.message.id[..8.min(row.message.id.len())], e);
+            }
+        }
+        tx.execute_batch("RELEASE batch_row").map_err(|e| format!("batch release: {e}"))?;
+    }
+    tx.commit().map_err(|e| format!("batch commit: {e}"))?;
+    Ok(saved)
+}
+
+/// Save many messages for one chat in a SINGLE transaction — the bulk-sync persist path
+/// (community backfill pages, negentropy catch-up). One commit amortizes the per-transaction
+/// WAL overhead across the whole page instead of paying it per message.
+///
+/// Structure mirrors `save_message` exactly: contents are encrypted FIRST (encryption is
+/// async and can't run inside the sync transaction), then one transaction writes every event
+/// row + its attachment rows + its reaction rows (kind-7 content is never encrypted at rest,
+/// so reactions are tx-safe).
+///
+/// `session`: phase 1 awaits through encryption + id resolution, so a swap can land inside
+/// it — when provided, the guard is re-checked between the phases and a stale batch is
+/// dropped before it can write into the next account's DB.
+pub async fn save_messages_batch(
+    chat_id: &str,
+    messages: &[&Message],
+    session: Option<&crate::state::SessionGuard>,
+) -> Result<usize, String> {
+    if messages.is_empty() {
+        return Ok(0);
+    }
+    let with_wrappers: Vec<(&Message, Option<([u8; 32], u64)>)> =
+        messages.iter().map(|m| (*m, None)).collect();
+    let mut rows = Vec::with_capacity(messages.len());
+    prepare_batch_rows(chat_id, &with_wrappers, &mut rows).await?;
+    if session.is_some_and(|s| !s.is_valid()) {
+        return Ok(0);
+    }
+    write_batch_rows(&rows)
+}
+
+/// Multi-chat variant for the DM sync stream: gift-wrapped messages span many contacts, and
+/// splitting per chat would give back most of the batching win. Each message may carry its
+/// gift-wrap ledger entry, committed in the SAME transaction right after its row (see
+/// `BatchRow::wrapper`). Groups keep their slice order; everything lands in ONE transaction.
+pub async fn save_messages_batch_multi(
+    groups: &[(String, Vec<(&Message, Option<([u8; 32], u64)>)>)],
+    session: Option<&crate::state::SessionGuard>,
+) -> Result<usize, String> {
+    let total: usize = groups.iter().map(|(_, m)| m.len()).sum();
+    if total == 0 {
+        return Ok(0);
+    }
+    let mut rows = Vec::with_capacity(total);
+    for (chat_id, messages) in groups {
+        prepare_batch_rows(chat_id, messages, &mut rows).await?;
+    }
+    if session.is_some_and(|s| !s.is_valid()) {
+        return Ok(0);
+    }
+    write_batch_rows(&rows)
 }
 
 /// Convert a Message to a StoredEvent.
@@ -1508,17 +1676,37 @@ pub async fn compute_unread_anchor(chat_identifier: &str) -> Result<UnreadMark, 
     })
 }
 
-/// Batch save messages for a chat.
+/// Drain a sync loop's pending message batch into one transaction. The shared flush for the
+/// segment-flush pattern: bulk loops COLLECT message saves and call this at delete barriers +
+/// loop end (a batched save committing AFTER a delete it originally preceded would resurrect
+/// the deleted row — flushing first preserves wire order). Session-guarded HERE so every bulk
+/// path gets the same swap-safety: on a stale session the batch is DROPPED, never written
+/// into the next account's DB (the caller's loop is about to bail anyway).
+pub async fn flush_message_batch(
+    chat_id: &str,
+    pending: &mut Vec<&Message>,
+    session: &crate::state::SessionGuard,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    if !session.is_valid() {
+        pending.clear();
+        return;
+    }
+    if let Err(e) = save_messages_batch(chat_id, pending, Some(session)).await {
+        crate::log_warn!("[DB] batch flush failed for {}: {}", chat_id, e);
+    }
+    pending.clear();
+}
+
+/// Batch save messages for a chat — one transaction for the whole slice.
 pub async fn save_chat_messages(chat_id: &str, messages: &[Message]) -> Result<(), String> {
     if messages.is_empty() {
         return Ok(());
     }
-    for message in messages {
-        if let Err(e) = save_message(chat_id, message).await {
-            eprintln!("Failed to save message {}: {}", &message.id[..8.min(message.id.len())], e);
-        }
-    }
-    Ok(())
+    let refs: Vec<&Message> = messages.iter().collect();
+    save_messages_batch(chat_id, &refs, None).await.map(|_| ())
 }
 
 #[cfg(test)]
@@ -2019,5 +2207,218 @@ mod tests {
         assert_eq!(m.content, "edited :wave:", "latest revision is the displayed content");
         assert_eq!(m.emoji_tags.len(), 1, "the edit's own emoji folds onto the message");
         assert_eq!(m.emoji_tags[0].shortcode, "wave");
+    }
+
+    // The bulk-sync persist path: one transaction must land events + attachments + reactions
+    // with the same shape save_message produces, and slice order must set rowid order (the
+    // same-timestamp pagination tiebreak).
+    #[tokio::test]
+    async fn batched_save_matches_single_save_shape() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "channel_batch1";
+        let att = crate::types::Attachment {
+            id: "atthash1".into(), extension: "png".into(), name: "a.png".into(),
+            url: "https://x/att".into(), downloaded: false, ..Default::default()
+        };
+        let reaction = Reaction {
+            id: "react_b1".into(), reference_id: "b1".into(),
+            author_id: "npub1reactor".into(), emoji: "👍".into(), emoji_url: None,
+        };
+        // Same `at` second across the batch — rowid is the only orderer.
+        let msgs: Vec<Message> = (0..5u64).map(|i| Message {
+            id: format!("b{i}"), content: format!("c{i}"), at: 7_000_000,
+            npub: Some("npub1sender".into()),
+            attachments: if i == 2 { vec![att.clone()] } else { Vec::new() },
+            reactions: if i == 1 { vec![reaction.clone()] } else { Vec::new() },
+            ..Default::default()
+        }).collect();
+        let refs: Vec<&Message> = msgs.iter().collect();
+
+        let saved = save_messages_batch(chat, &refs, None).await.unwrap();
+        assert_eq!(saved, 5, "every message written");
+
+        for i in 0..5u64 {
+            assert!(event_exists(&format!("b{i}")).unwrap(), "b{i} row exists");
+        }
+        assert!(event_exists("react_b1").unwrap(), "reaction landed as its own kind-7 row");
+        let atts = crate::db::attachments::get_attachments_for_event("b2").unwrap();
+        assert_eq!(atts.len(), 1, "attachment row committed with its event");
+        assert_eq!(atts[0].id, "atthash1");
+
+        // rowid order == slice order despite identical timestamps.
+        let conn = crate::db::get_db_connection_guard_static().unwrap();
+        let ids: Vec<String> = conn
+            .prepare("SELECT id FROM events WHERE id IN ('b0','b1','b2','b3','b4') ORDER BY rowid")
+            .unwrap()
+            .query_map([], |r| r.get(0)).unwrap()
+            .flatten().collect();
+        assert_eq!(ids, vec!["b0", "b1", "b2", "b3", "b4"], "insert order preserves the rowid tiebreak");
+    }
+
+    // A batched re-save must keep save_message's upsert semantics: wrapper_event_id is
+    // COALESCE-preserved, and a duplicate reaction in the batch never doubles its row.
+    #[tokio::test]
+    async fn batched_resave_preserves_wrapper_and_dedups_reactions() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "channel_batch2";
+        let reaction = Reaction {
+            id: "react_rs".into(), reference_id: "rs1".into(),
+            author_id: "npub1reactor".into(), emoji: "🔥".into(), emoji_url: None,
+        };
+        let mut msg = Message {
+            id: "rs1".into(), content: "hello".into(), at: 8_000_000,
+            npub: Some("npub1sender".into()),
+            wrapper_event_id: Some("wrap_original".into()),
+            reactions: vec![reaction],
+            ..Default::default()
+        };
+        save_message(chat, &msg).await.unwrap();
+
+        // Re-delivery re-save without a wrapper id, reaction still attached.
+        msg.wrapper_event_id = None;
+        let saved = save_messages_batch(chat, &[&msg], None).await.unwrap();
+        assert_eq!(saved, 1);
+
+        let conn = crate::db::get_db_connection_guard_static().unwrap();
+        let wrapper: Option<String> = conn.query_row(
+            "SELECT wrapper_event_id FROM events WHERE id = 'rs1'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(wrapper.as_deref(), Some("wrap_original"), "COALESCE keeps the known wrapper");
+        let reaction_rows: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM events WHERE id = 'react_rs'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(reaction_rows, 1, "reaction row not duplicated by the re-save");
+    }
+
+    // The DM stream's multi-chat flush: one call, one transaction, rows land under their own
+    // chats with their gift-wrap ledger entries; a flush against a stale session drops the
+    // buffer AND leaves the wrappers unledgered (that's what makes the drop recoverable).
+    #[tokio::test]
+    async fn batching_persist_flushes_multi_chat_and_drops_on_stale_session() {
+        let (_tmp, _guard) = init_test_db();
+        let handler = crate::event_handler::NoOpEventHandler;
+        let batcher = crate::event_handler::BatchingPersist::new(&handler);
+
+        let mk = |id: &str, npub: &str| Message {
+            id: id.into(), content: "x".into(), at: 9_000_000,
+            npub: Some(npub.into()), ..Default::default()
+        };
+        // Mirror the commit path: buffering only ever happens AFTER the STATE add (the
+        // flush drops anything not STATE-resident as deletion protection).
+        let seed = |chat: &str, m: &Message| {
+            let m = m.clone();
+            let chat = chat.to_string();
+            async move {
+                let mut st = crate::state::STATE.lock().await;
+                st.add_message_to_participant(&chat, m);
+            }
+        };
+        let wrap_a1 = ([0xA1u8; 32], 111u64);
+        let wrap_b1 = ([0xB1u8; 32], 222u64);
+        let a1 = mk("bp_a1", "npub1chata");
+        let b1 = mk("bp_b1", "npub1chatb");
+        let a2 = mk("bp_a2", "npub1chata");
+        seed("npub1chata", &a1).await;
+        seed("npub1chatb", &b1).await;
+        seed("npub1chata", &a2).await;
+
+        use crate::event_handler::InboundEventHandler;
+        assert!(batcher.buffer_persist("npub1chata", &a1, Some(wrap_a1)), "batcher owns the persist");
+        assert!(batcher.buffer_persist("npub1chatb", &b1, Some(wrap_b1)));
+        assert!(batcher.buffer_persist("npub1chata", &a2, None));
+        assert_eq!(batcher.buffered(), 3);
+
+        let ledgered = |bytes: [u8; 32]| {
+            let id = nostr_sdk::prelude::EventId::from_byte_array(bytes);
+            crate::db::wrappers::load_negentropy_items().unwrap().iter().any(|(e, _)| *e == id)
+        };
+        assert!(!ledgered(wrap_a1.0), "wrapper unledgered while its message sits buffered");
+
+        let session = crate::state::SessionGuard::capture();
+        assert_eq!(batcher.flush(&session).await, 3, "all buffered messages written");
+        assert_eq!(batcher.buffered(), 0);
+        assert!(event_exists("bp_a1").unwrap() && event_exists("bp_b1").unwrap() && event_exists("bp_a2").unwrap());
+        assert!(ledgered(wrap_a1.0) && ledgered(wrap_b1.0), "wrappers ledgered with the flush");
+        let a = crate::db::id_cache::get_chat_id_by_identifier("npub1chata").unwrap();
+        let b = crate::db::id_cache::get_chat_id_by_identifier("npub1chatb").unwrap();
+        assert_ne!(a, b, "rows grouped under their own chats");
+
+        // Stale session: buffered messages are dropped, never written — and the wrapper
+        // stays out of the negentropy fingerprint set, so the message re-delivers.
+        let stale = mk("bp_stale", "npub1chata");
+        seed("npub1chata", &stale).await;
+        let wrap_stale = ([0x5Eu8; 32], 333u64);
+        batcher.buffer_persist("npub1chata", &stale, Some(wrap_stale));
+        crate::state::bump_session_generation();
+        assert_eq!(batcher.flush(&session).await, 0, "stale flush writes nothing");
+        assert!(!event_exists("bp_stale").unwrap(), "stale message never reached the DB");
+        assert!(!ledgered(wrap_stale.0), "dropped message's wrapper NOT ledgered — negentropy will re-deliver it");
+        assert_eq!(batcher.buffered(), 0, "stale buffer drained, not retried into the next account");
+    }
+
+    // A deletion landing while its target sits buffered must not resurrect the message:
+    // the same-task path purges via on_message_deleted, and the cross-task path (live
+    // subscription, different handler) is caught by the flush's deletion-tombstone filter.
+    // The filter keys on the POSITIVE tombstone, never STATE absence — an LRU-evicted (but
+    // not deleted) message MUST still persist and ledger, or archive sync could silently
+    // drop the exact history it exists to persist.
+    #[tokio::test]
+    async fn buffered_message_deleted_before_flush_never_persists() {
+        let (_tmp, _guard) = init_test_db();
+        let handler = crate::event_handler::NoOpEventHandler;
+        let batcher = crate::event_handler::BatchingPersist::new(&handler);
+        use crate::event_handler::InboundEventHandler;
+
+        let chat = "npub1delchat";
+        let mk = |id: &str| Message {
+            id: id.into(), content: "x".into(), at: 9_500_000,
+            npub: Some(chat.into()), ..Default::default()
+        };
+        let ledgered = |bytes: [u8; 32]| {
+            let id = nostr_sdk::prelude::EventId::from_byte_array(bytes);
+            crate::db::wrappers::load_negentropy_items().unwrap().iter().any(|(e, _)| *e == id)
+        };
+
+        // Same-task deletion (sync stream): commit_deletion fires on_message_deleted on
+        // the batching handler → the buffered entry purges immediately.
+        let m1 = mk("del_sametask");
+        {
+            let mut st = crate::state::STATE.lock().await;
+            st.add_message_to_participant(chat, m1.clone());
+        }
+        batcher.buffer_persist(chat, &m1, Some(([0xD1u8; 32], 444)));
+        {
+            let mut st = crate::state::STATE.lock().await;
+            st.remove_message("del_sametask");
+        }
+        batcher.on_message_deleted(chat, "del_sametask");
+        assert_eq!(batcher.buffered(), 0, "deletion purges the buffered target");
+
+        // Cross-task deletion (live subscription, plain handler): no purge call — the
+        // deletion tombstone (recorded by commit_deletion) drops it at flush time.
+        let m2 = mk("del_crosstask");
+        {
+            let mut st = crate::state::STATE.lock().await;
+            st.add_message_to_participant(chat, m2.clone());
+        }
+        batcher.buffer_persist(chat, &m2, Some(([0xD2u8; 32], 555)));
+        crate::state::note_message_deleted("del_crosstask");
+
+        // LRU eviction is NOT deletion: gone from STATE, no tombstone → must persist.
+        let m3 = mk("evicted_ok");
+        let wrap_evicted = ([0xE0u8; 32], 666u64);
+        {
+            let mut st = crate::state::STATE.lock().await;
+            st.add_message_to_participant(chat, m3.clone());
+            st.remove_message("evicted_ok");
+        }
+        batcher.buffer_persist(chat, &m3, Some(wrap_evicted));
+
+        let session = crate::state::SessionGuard::capture();
+        assert_eq!(batcher.flush(&session).await, 1, "tombstoned target dropped, evicted message written");
+        assert!(!event_exists("del_sametask").unwrap(), "purged message never persisted");
+        assert!(!event_exists("del_crosstask").unwrap(), "tombstoned message never persisted");
+        assert!(event_exists("evicted_ok").unwrap(), "evicted-but-not-deleted message persisted");
+        assert!(ledgered(wrap_evicted.0), "evicted message's wrapper ledgered with it");
     }
 }

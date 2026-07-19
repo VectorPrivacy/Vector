@@ -346,6 +346,26 @@ pub static NOTIFIED_WELCOMES: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|
 
 static SESSION_GENERATION: AtomicU64 = AtomicU64::new(0);
 
+/// Session-scoped tombstones for NIP-09-deleted DM messages. The batching flush consults
+/// this POSITIVE deletion signal — never STATE absence, which also means LRU-evicted or
+/// expired (an evicted archive message must still persist). A deletion whose target sat
+/// unflushed in a batch buffer no-ops its `delete_event`; the tombstone stops the flush
+/// from resurrecting the row. Cleared on session bump — ids are meaningless across accounts.
+static DELETED_MESSAGE_TOMBSTONES: LazyLock<std::sync::Mutex<HashSet<String>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
+
+/// Record that `message_id` was deleted this session (called where the deletion is decided).
+pub fn note_message_deleted(message_id: &str) {
+    if let Ok(mut set) = DELETED_MESSAGE_TOMBSTONES.lock() {
+        set.insert(message_id.to_string());
+    }
+}
+
+/// Whether `message_id` was deleted this session.
+pub fn was_message_deleted(message_id: &str) -> bool {
+    DELETED_MESSAGE_TOMBSTONES.lock().map(|s| s.contains(message_id)).unwrap_or(false)
+}
+
 /// Snapshot of the current session generation.
 #[inline]
 pub fn current_session_generation() -> u64 {
@@ -357,6 +377,9 @@ pub fn current_session_generation() -> u64 {
 /// it and short-circuit before writing to the new account's state.
 #[inline]
 pub fn bump_session_generation() -> u64 {
+    if let Ok(mut set) = DELETED_MESSAGE_TOMBSTONES.lock() {
+        set.clear();
+    }
     SESSION_GENERATION.fetch_add(1, Ordering::AcqRel).wrapping_add(1)
 }
 

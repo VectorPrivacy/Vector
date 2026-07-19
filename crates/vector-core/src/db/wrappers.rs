@@ -33,14 +33,17 @@ pub fn processed_wrapper_exists(wrapper_id_bytes: &[u8; 32]) -> bool {
     ).unwrap_or(false)
 }
 
-/// Upsert a wrapper timestamp (backfill for pre-migration-17 wrappers).
+/// Backfill a wrapper timestamp onto an EXISTING ledger row (pre-migration-17 rows hold 0).
+/// UPDATE-only by design: the ledger is the negentropy fingerprint set, and message wrappers
+/// may be deferred (batch-buffered) — an INSERT here could ledger a message before its row
+/// lands, marking it "have" forever. Inserting belongs to the save paths, never this backfill.
 pub fn update_wrapper_timestamp(wrapper_id_bytes: &[u8; 32], wrapper_created_at: u64) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
     conn.execute(
-        "INSERT INTO processed_wrappers (wrapper_id, wrapper_created_at) VALUES (?1, ?2) \
-         ON CONFLICT(wrapper_id) DO UPDATE SET wrapper_created_at = ?2 WHERE wrapper_created_at = 0",
+        "UPDATE processed_wrappers SET wrapper_created_at = ?2 \
+         WHERE wrapper_id = ?1 AND wrapper_created_at = 0",
         rusqlite::params![&wrapper_id_bytes[..], wrapper_created_at as i64],
-    ).map_err(|e| format!("Failed to upsert wrapper timestamp: {}", e))?;
+    ).map_err(|e| format!("Failed to backfill wrapper timestamp: {}", e))?;
     Ok(())
 }
 

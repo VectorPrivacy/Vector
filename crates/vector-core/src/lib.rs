@@ -1867,6 +1867,8 @@ impl VectorCore {
         }
         let (community, channel) = self.resolve_channel(channel_id)?;
 
+        // Guard straddles the fetch: the persist walk below writes this account's DB.
+        let session = state::SessionGuard::capture();
         let events = send::fetch_channel_page(&transport, &community, &channel, None, None, limit.max(1))
             .await
             .map_err(VectorError::Other)?;
@@ -1875,21 +1877,32 @@ impl VectorCore {
             inbound::process_channel_batch(&mut st, &events, &channel, &my_pk)
         };
         let mut new = 0usize;
+        // Message saves COLLECT into one batched transaction; deletes are flush barriers
+        // (see flush_message_batch — a save committing after a delete it preceded on the
+        // wire would resurrect the deleted row).
+        let mut pending: Vec<&crate::types::Message> = Vec::new();
         for o in &outcomes {
+            // Every arm below writes this account's DB — a swap can land between them.
+            if !session.is_valid() {
+                pending.clear();
+                break;
+            }
             match o {
                 inbound::IncomingEvent::NewMessage(m) => {
-                    let _ = crate::db::events::save_message(channel_id, m).await;
+                    pending.push(m);
                     new += 1;
                 }
                 inbound::IncomingEvent::Updated { message, .. } => {
-                    let _ = crate::db::events::save_message(channel_id, message).await;
+                    pending.push(message);
                 }
                 inbound::IncomingEvent::Removed { target_id } => {
+                    crate::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
                     let _ = crate::db::events::delete_event(target_id).await;
                 }
                 inbound::IncomingEvent::ReactionRemoved { reaction_id, .. } => {
                     // save_message is additive, so a revoked reaction's kind-7 row must be
                     // dropped explicitly or it resurrects on reload.
+                    crate::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
                     let _ = crate::db::events::delete_event(reaction_id).await;
                 }
                 inbound::IncomingEvent::Presence { npub, joined, event_id, created_at, invited_by, invited_label } => {
@@ -1918,6 +1931,7 @@ impl VectorCore {
                     // community's local state but RETAIN the held epoch keys (later self-scrub). The core-level
                     // half of leaving; a client shell layers on subscription-refresh + chat-row teardown + UI.
                     // Stop the batch — the community is gone, so later same-batch writes would orphan rows.
+                    crate::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
                     let _ = crate::db::community::delete_community_retain_keys(community_id);
                     break;
                 }
@@ -1926,6 +1940,7 @@ impl VectorCore {
                 }
             }
         }
+        crate::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
         Ok((new, warnings))
     }
 
@@ -2116,7 +2131,7 @@ impl VectorCore {
     /// inbound bridge (dedup + STATE aggregate) + the v1 save path. Returns the count of
     /// brand-new messages applied. Best-effort: a fetch failure is 0.
     async fn v2_backfill_channel(id: &crate::community::CommunityId, channel_id: &str, limit: usize) -> usize {
-        use crate::community::v2::inbound::{apply_chat_to_state, persist_chat, ChatPersist};
+        use crate::community::v2::inbound::{apply_chat_to_state, ChatPersist};
         /// Deepest catch-up walk: pages × page-size bounds one reconnect's fetch.
         const MAX_BACKFILL_PAGES: usize = 8;
         // Guard straddles the fetch: a swap mid-fetch must not persist account A's chat
@@ -2160,9 +2175,10 @@ impl VectorCore {
             return 0;
         };
         let mut new = 0usize;
+        // Pass 1 — apply to STATE (per-item lock) and COLLECT outcomes in wire order.
+        let mut outcomes: Vec<ChatPersist> = Vec::with_capacity(page.len());
         for f in &page {
-            // Re-check every iteration — each persists a DB write, and a swap can land
-            // between them.
+            // Re-check every iteration — STATE mutates per item, and a swap can land between them.
             if !session.is_valid() {
                 break;
             }
@@ -2188,7 +2204,6 @@ impl VectorCore {
                 }
                 continue;
             }
-            // STATE mutation under the lock; the async DB persist after it drops.
             let outcome = {
                 let mut st = state::STATE.lock().await;
                 apply_chat_to_state(&mut st, &f.event, channel_id, &my_pk)
@@ -2197,13 +2212,52 @@ impl VectorCore {
                 if matches!(outcome, ChatPersist::New(_)) {
                     new += 1;
                 }
-                persist_chat(channel_id, &outcome).await;
-                // Surface to the live UI, mirroring v1's sweep + the live dispatch handler:
-                // a silent DB-only backfill left the chat-list preview, unread badge, and
-                // sort order stale until the channel was opened. Raw emits (no notification
-                // ping) — a boot catch-up must not fire an OS ping per message. Headless
-                // consumers register no emitter, so these are a no-op there.
-                match &outcome {
+                outcomes.push(outcome);
+            }
+        }
+        // Pass 2 — persist: message saves COLLECT into batched transactions; deletes are
+        // flush barriers (a save committing after a delete it preceded on the wire would
+        // resurrect the deleted row). One tx per page in the common no-delete case.
+        let mut pending: Vec<&crate::types::Message> = Vec::new();
+        for outcome in &outcomes {
+            if !session.is_valid() {
+                pending.clear();
+                break;
+            }
+            match outcome {
+                ChatPersist::New(m) => pending.push(m),
+                ChatPersist::Updated { message, edit_event } => match edit_event {
+                    Some(ev) => {
+                        let mut ev = (**ev).clone();
+                        // get-or-CREATE: a lookup-only id would leave a fresh channel's edit at
+                        // chat_id 0 (orphaned, dropped on the reload fold).
+                        if let Ok(cid) = crate::db::id_cache::get_or_create_chat_id(channel_id) {
+                            ev.chat_id = cid;
+                        }
+                        let _ = crate::db::events::save_event(&ev).await;
+                    }
+                    None => pending.push(message),
+                },
+                ChatPersist::Removed(target_id) => {
+                    crate::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
+                    let _ = crate::db::events::delete_event(target_id).await;
+                }
+                ChatPersist::ReactionRemoved { reaction_id, message } => {
+                    crate::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
+                    let _ = crate::db::events::delete_event(reaction_id).await;
+                    pending.push(message);
+                }
+            }
+        }
+        crate::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
+        // Pass 3 — surface to the live UI, mirroring v1's sweep + the live dispatch handler:
+        // a silent DB-only backfill left the chat-list preview, unread badge, and sort order
+        // stale until the channel was opened. Raw emits (no notification ping) — a boot
+        // catch-up must not fire an OS ping per message. Headless consumers register no
+        // emitter, so these are a no-op there. After the persists so nothing surfaces unsaved.
+        if session.is_valid() {
+            for outcome in &outcomes {
+                match outcome {
                     ChatPersist::New(msg) => crate::traits::emit_event(
                         "message_new",
                         &serde_json::json!({ "message": msg, "chat_id": channel_id }),

@@ -48,21 +48,28 @@ fn row_to_attachment(row: &rusqlite::Row) -> rusqlite::Result<(String, Attachmen
 /// key, and its path; a completed download persists all three in one pass. Explicit un-download goes
 /// through `clear_attachment_download`, never here.
 pub fn insert_attachment_rows(conn: &rusqlite::Connection, event_id: &str, attachments: &[Attachment]) -> Result<(), String> {
+    if attachments.is_empty() {
+        return Ok(());
+    }
+    // prepare_cached: the statement survives on the connection across calls (and transactions),
+    // so bulk-sync batches don't re-parse the SQL per message.
+    let mut stmt = conn.prepare_cached(
+        "INSERT INTO attachments (event_id, att_index, hash, key, nonce, extension, name, url, \
+         path, size, img_meta, downloaded, webxdc_topic, group_id, original_hash, scheme_version, mls_filename) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17) \
+         ON CONFLICT(event_id, att_index) DO UPDATE SET \
+            key=excluded.key, nonce=excluded.nonce, extension=excluded.extension, \
+            name=excluded.name, url=excluded.url, size=excluded.size, img_meta=excluded.img_meta, \
+            webxdc_topic=excluded.webxdc_topic, group_id=excluded.group_id, \
+            original_hash=excluded.original_hash, scheme_version=excluded.scheme_version, \
+            mls_filename=excluded.mls_filename, \
+            downloaded=MAX(downloaded, excluded.downloaded), \
+            hash=CASE WHEN excluded.downloaded=1 THEN excluded.hash ELSE hash END, \
+            path=CASE WHEN excluded.downloaded=1 THEN excluded.path ELSE path END",
+    ).map_err(|e| format!("prepare insert attachment: {e}"))?;
     for (i, a) in attachments.iter().enumerate() {
         let img_meta_json = a.img_meta.as_ref().and_then(|m| serde_json::to_string(m).ok());
-        conn.execute(
-            "INSERT INTO attachments (event_id, att_index, hash, key, nonce, extension, name, url, \
-             path, size, img_meta, downloaded, webxdc_topic, group_id, original_hash, scheme_version, mls_filename) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17) \
-             ON CONFLICT(event_id, att_index) DO UPDATE SET \
-                key=excluded.key, nonce=excluded.nonce, extension=excluded.extension, \
-                name=excluded.name, url=excluded.url, size=excluded.size, img_meta=excluded.img_meta, \
-                webxdc_topic=excluded.webxdc_topic, group_id=excluded.group_id, \
-                original_hash=excluded.original_hash, scheme_version=excluded.scheme_version, \
-                mls_filename=excluded.mls_filename, \
-                downloaded=MAX(downloaded, excluded.downloaded), \
-                hash=CASE WHEN excluded.downloaded=1 THEN excluded.hash ELSE hash END, \
-                path=CASE WHEN excluded.downloaded=1 THEN excluded.path ELSE path END",
+        stmt.execute(
             rusqlite::params![
                 event_id, i as i64, a.id, a.key, a.nonce, a.extension, a.name, a.url,
                 a.path, a.size as i64, img_meta_json, a.downloaded as i64,

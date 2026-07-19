@@ -87,11 +87,171 @@ pub trait InboundEventHandler: Send + Sync {
     /// A Community was DISSOLVED by its owner (CORD-02 §9): sealed read-only, held keys still open
     /// history but nothing new is honored. The platform surfaces the grave.
     fn on_community_dissolved(&self, _community_id: &str) {}
+
+    /// Bulk-sync persist intercept: return `true` to take ownership of persisting a committed
+    /// DM/file message — the commit then SKIPS its per-message save AND its wrapper-ledger
+    /// write (`wrapper` = the gift-wrap's `(id_bytes, created_at)`; the owner MUST commit it
+    /// in the same transaction as the message row, or the message loses crash/drop
+    /// recoverability). Streaming sync loops (see [`BatchingPersist`]) buffer here and drain
+    /// many messages into one transaction. Default `false` keeps the per-message save.
+    fn buffer_persist(&self, _chat_id: &str, _msg: &Message, _wrapper: Option<([u8; 32], u64)>) -> bool { false }
 }
 
 /// No-op handler for CLI/tests.
 pub struct NoOpEventHandler;
 impl InboundEventHandler for NoOpEventHandler {}
+
+/// One deferred DM persist: the message, its chat, and its gift-wrap ledger entry — the
+/// ledger row commits in the same flush transaction as the message row (see
+/// `save_messages_batch_multi`), so a lost batch leaves the wrapper unledgered.
+struct BufferedDm {
+    chat_id: String,
+    msg: Message,
+    wrapper: Option<([u8; 32], u64)>,
+}
+
+/// Wraps any handler for a bulk-sync drain loop: every callback delegates to the inner
+/// handler, but committed messages BUFFER here instead of saving one transaction each —
+/// the loop calls [`BatchingPersist::flush`] periodically and at stream end to land them
+/// in batched transactions (`save_messages_batch_multi`).
+///
+/// Deferral is recoverable because the wrapper ledger (the negentropy fingerprint set)
+/// rides the flush transaction: a message lost to a crash, a stale-session drop, or a
+/// failed flush leaves its wrapper unledgered, so the next reconciliation re-delivers it.
+pub struct BatchingPersist<'a> {
+    inner: &'a dyn InboundEventHandler,
+    buf: std::sync::Mutex<Vec<BufferedDm>>,
+}
+
+impl<'a> BatchingPersist<'a> {
+    pub fn new(inner: &'a dyn InboundEventHandler) -> Self {
+        Self { inner, buf: std::sync::Mutex::new(Vec::new()) }
+    }
+
+    /// How many messages are waiting — the loop's flush-threshold probe.
+    pub fn buffered(&self) -> usize {
+        self.buf.lock().map(|b| b.len()).unwrap_or(0)
+    }
+
+    /// Drain the buffer into batched transactions (grouped by chat, arrival order kept).
+    /// On a stale session the drained messages are DROPPED, never written into the next
+    /// account's DB — their wrappers stay unledgered, so negentropy re-delivers them when
+    /// the original account returns.
+    pub async fn flush(&self, session: &crate::state::SessionGuard) -> usize {
+        let mut drained: Vec<BufferedDm> = match self.buf.lock() {
+            Ok(mut b) => b.drain(..).collect(),
+            Err(_) => return 0,
+        };
+        if drained.is_empty() || !session.is_valid() {
+            return 0;
+        }
+        // A deletion may have landed (live subscription or this stream) while an entry sat
+        // buffered: its delete_event no-ops on the not-yet-written row, so persisting the
+        // buffered copy would resurrect a deleted message. Keyed on the POSITIVE deletion
+        // tombstone, never STATE absence — the LRU evicts old messages from STATE, and
+        // archive-synced history is exactly that tail (an evicted message must still
+        // persist). A dropped entry's wrapper stays unledgered and re-delivers next sync,
+        // where the DB dedup sees the (still-deleted) state cleanly.
+        drained.retain(|e| !crate::state::was_message_deleted(&e.msg.id));
+        if drained.is_empty() {
+            return 0;
+        }
+        // Group by chat preserving first-seen chat order + per-chat arrival order.
+        let mut groups: Vec<(String, Vec<(&Message, Option<([u8; 32], u64)>)>)> = Vec::new();
+        for e in &drained {
+            match groups.iter_mut().find(|(c, _)| c == &e.chat_id) {
+                Some((_, v)) => v.push((&e.msg, e.wrapper)),
+                None => groups.push((e.chat_id.clone(), vec![(&e.msg, e.wrapper)])),
+            }
+        }
+        match crate::db::events::save_messages_batch_multi(&groups, Some(session)).await {
+            Ok(n) => n,
+            Err(e) => {
+                crate::log_warn!("[Sync] batched persist failed ({} msgs): {}", drained.len(), e);
+                0
+            }
+        }
+    }
+}
+
+impl InboundEventHandler for BatchingPersist<'_> {
+    fn buffer_persist(&self, chat_id: &str, msg: &Message, wrapper: Option<([u8; 32], u64)>) -> bool {
+        match self.buf.lock() {
+            Ok(mut b) => {
+                b.push(BufferedDm { chat_id: chat_id.to_string(), msg: msg.clone(), wrapper });
+                true
+            }
+            // Poisoned lock: fall back to the commit's own per-message save.
+            Err(_) => false,
+        }
+    }
+
+    fn on_dm_received(&self, chat_id: &str, msg: &Message, is_new: bool) {
+        self.inner.on_dm_received(chat_id, msg, is_new)
+    }
+    fn on_file_received(&self, chat_id: &str, msg: &Message, is_new: bool) {
+        self.inner.on_file_received(chat_id, msg, is_new)
+    }
+    fn on_reaction_received(&self, chat_id: &str, msg: &Message) {
+        self.inner.on_reaction_received(chat_id, msg)
+    }
+    fn on_message_deleted(&self, chat_id: &str, message_id: &str) {
+        // The deletion's delete_event no-ops when the target is still buffered here —
+        // purge it (unledgered wrapper → re-delivers → dedups against the deleted state)
+        // so the flush can't resurrect a deleted message.
+        if let Ok(mut b) = self.buf.lock() {
+            b.retain(|e| e.msg.id != message_id);
+        }
+        self.inner.on_message_deleted(chat_id, message_id)
+    }
+    fn on_community_invite(&self, community_id: &str) {
+        self.inner.on_community_invite(community_id)
+    }
+    fn on_community_message(&self, chat_id: &str, msg: &Message, is_new: bool) {
+        self.inner.on_community_message(chat_id, msg, is_new)
+    }
+    fn on_community_update(&self, chat_id: &str, target_id: &str, msg: &Message) {
+        self.inner.on_community_update(chat_id, target_id, msg)
+    }
+    fn on_community_removed(&self, chat_id: &str, target_id: &str) {
+        self.inner.on_community_removed(chat_id, target_id)
+    }
+    fn on_community_presence(
+        &self,
+        chat_id: &str,
+        npub: &str,
+        joined: bool,
+        event_id: &str,
+        created_at: u64,
+        invited_by: Option<&str>,
+        invited_label: Option<&str>,
+    ) {
+        self.inner.on_community_presence(chat_id, npub, joined, event_id, created_at, invited_by, invited_label)
+    }
+    fn on_community_typing(&self, chat_id: &str, npub: &str, until: u64) {
+        self.inner.on_community_typing(chat_id, npub, until)
+    }
+    fn on_community_webxdc(
+        &self,
+        chat_id: &str,
+        npub: &str,
+        topic_id: &str,
+        node_addr: Option<&str>,
+        event_id: &str,
+        created_at: u64,
+    ) {
+        self.inner.on_community_webxdc(chat_id, npub, topic_id, node_addr, event_id, created_at)
+    }
+    fn on_community_self_removed(&self, community_id: &str) {
+        self.inner.on_community_self_removed(community_id)
+    }
+    fn on_community_refreshed(&self, community_id: &str) {
+        self.inner.on_community_refreshed(community_id)
+    }
+    fn on_community_dissolved(&self, community_id: &str) {
+        self.inner.on_community_dissolved(community_id)
+    }
+}
 
 /// Result of Phase 1 (prepare_event) — everything needed for sequential commit.
 pub enum PreparedEvent {
@@ -305,21 +465,33 @@ pub async fn commit_prepared_event(
                 let mut cache = WRAPPER_ID_CACHE.lock().await;
                 cache.insert(wrapper_event_id_bytes);
             }
-            // Persist for cross-session dedup + negentropy
-            let _ = crate::db::wrappers::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at, crate::db::wrappers::TRANSPORT_NIP17);
 
-            // Blocked check — drop content from blocked contacts (wrapper still persisted for negentropy)
+            // Blocked check — drop content from blocked contacts (wrapper still ledgered so
+            // the dropped content never re-syncs)
             if !is_mine {
-                let state = crate::state::STATE.lock().await;
-                if state.get_profile(&contact).map_or(false, |p| p.flags.is_blocked()) {
+                let blocked = {
+                    let state = crate::state::STATE.lock().await;
+                    state.get_profile(&contact).map_or(false, |p| p.flags.is_blocked())
+                };
+                if blocked {
+                    let _ = crate::db::wrappers::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at, crate::db::wrappers::TRANSPORT_NIP17);
                     return false;
                 }
+            }
+
+            // Persist for cross-session dedup + negentropy — EXCEPT message rumors: the
+            // ledger IS the negentropy fingerprint set, and a batching handler may defer the
+            // message's save, so its wrapper must never be ledgered before its row lands (a
+            // ledgered-but-unpersisted message reads as "have" and is never re-delivered).
+            // Message wrappers ledger inside commit_dm_message / the batch-flush transaction.
+            if !matches!(result, RumorProcessingResult::TextMessage(_) | RumorProcessingResult::FileAttachment(_)) {
+                let _ = crate::db::wrappers::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at, crate::db::wrappers::TRANSPORT_NIP17);
             }
 
             match result {
                 RumorProcessingResult::TextMessage(mut msg) => {
                     msg.wrapper_event_id = Some(wrapper_event_id.clone());
-                    commit_dm_message(msg, &contact, is_mine, is_new, &wrapper_event_id, wrapper_event_id_bytes, handler, false).await
+                    commit_dm_message(msg, &contact, is_mine, is_new, &wrapper_event_id, wrapper_event_id_bytes, wrapper_created_at, handler, false).await
                 }
                 RumorProcessingResult::FileAttachment(mut msg) => {
                     msg.wrapper_event_id = Some(wrapper_event_id.clone());
@@ -351,7 +523,7 @@ pub async fn commit_prepared_event(
                             }
                         }
                     }
-                    commit_dm_message(msg, &contact, is_mine, is_new, &wrapper_event_id, wrapper_event_id_bytes, handler, true).await
+                    commit_dm_message(msg, &contact, is_mine, is_new, &wrapper_event_id, wrapper_event_id_bytes, wrapper_created_at, handler, true).await
                 }
                 RumorProcessingResult::Reaction(reaction) => {
                     commit_reaction(reaction, &contact, is_mine, &wrapper_event_id, handler).await
@@ -544,9 +716,21 @@ pub async fn commit_prepared_event(
             false
         }
         PreparedEvent::DedupSkip { wrapper_id_bytes, wrapper_created_at } => {
-            // Persist wrapper timestamp for negentropy backfill (skip no-op writes)
+            // Persist wrapper timestamp for negentropy backfill (skip no-op writes).
+            // Guarded: a cache-hit skip can name a wrapper whose message is still sitting in
+            // a batch buffer (deferred ledger) — inserting it here would mark the message
+            // "have" before its row exists. Only touch the ledger when the wrapper is
+            // already ledgered (timestamp backfill) or its row is verifiably persisted
+            // (legacy pre-ledger events, whose wrapper lives only on the events row).
             if wrapper_created_at > 0 {
-                let _ = crate::db::wrappers::update_wrapper_timestamp(&wrapper_id_bytes, wrapper_created_at);
+                if crate::db::wrappers::processed_wrapper_exists(&wrapper_id_bytes) {
+                    let _ = crate::db::wrappers::update_wrapper_timestamp(&wrapper_id_bytes, wrapper_created_at);
+                } else {
+                    let wrapper_hex = crate::simd::hex::bytes_to_hex_32(&wrapper_id_bytes);
+                    if crate::db::events::wrapper_event_exists(&wrapper_hex).unwrap_or(false) {
+                        let _ = crate::db::wrappers::save_processed_wrapper(&wrapper_id_bytes, wrapper_created_at, crate::db::wrappers::TRANSPORT_NIP17);
+                    }
+                }
             }
             false
         }
@@ -558,6 +742,13 @@ pub async fn commit_prepared_event(
 }
 
 /// Commit a DM text or file message (shared logic for both).
+///
+/// Owns this message's wrapper-ledger write (`processed_wrappers` = the negentropy
+/// fingerprint set): the wrapper is ledgered only once the message row is durably handled —
+/// immediately after a successful save, inside the batch-flush transaction when a handler
+/// defers, or right away when the message is a known duplicate. An unledgered wrapper is
+/// re-delivered by the next reconciliation, which is what makes a dropped batch recoverable.
+#[allow(clippy::too_many_arguments)]
 async fn commit_dm_message(
     mut msg: Message,
     contact: &str,
@@ -565,9 +756,15 @@ async fn commit_dm_message(
     is_new: bool,
     wrapper_event_id: &str,
     wrapper_event_id_bytes: [u8; 32],
+    wrapper_created_at: u64,
     handler: &dyn InboundEventHandler,
     is_file: bool,
 ) -> bool {
+    let ledger_wrapper = || {
+        let _ = crate::db::wrappers::save_processed_wrapper(
+            &wrapper_event_id_bytes, wrapper_created_at, crate::db::wrappers::TRANSPORT_NIP17,
+        );
+    };
     // Dedup: check if message already in DB
     if let Ok(true) = crate::db::events::message_exists_in_db(&msg.id) {
         // Already in DB — try to backfill wrapper_event_id
@@ -577,6 +774,7 @@ async fn commit_dm_message(
                 cache.insert(wrapper_event_id_bytes);
             }
         }
+        ledger_wrapper();
         return false;
     }
 
@@ -609,8 +807,19 @@ async fn commit_dm_message(
             handler.on_dm_received(contact, &msg, is_new);
         }
 
-        // Save to DB
-        let _ = crate::db::events::save_message(contact, &msg).await;
+        // Save to DB — unless a bulk-sync handler owns batched persistence (the handler then
+        // also owns the wrapper-ledger write, inside its flush transaction). On the immediate
+        // path the wrapper ledgers only after a successful save: a failed save left unledgered
+        // re-delivers on the next reconciliation instead of being lost.
+        if !handler.buffer_persist(contact, &msg, Some((wrapper_event_id_bytes, wrapper_created_at))) {
+            if crate::db::events::save_message(contact, &msg).await.is_ok() {
+                ledger_wrapper();
+            }
+        }
+    } else {
+        // STATE-level duplicate: a same-session twin owns the row; this wrapper carried
+        // nothing new, so ledger it now (parity with the old eager ledger).
+        ledger_wrapper();
     }
 
     added
@@ -771,6 +980,9 @@ async fn commit_deletion(
         Some((_chat_id, msg)) => msg,
         None => return false,
     };
+    // Tombstone BEFORE the row delete: the target may sit unflushed in a sync batch buffer
+    // (delete_event below would no-op) — the flush consults this and drops it.
+    crate::state::note_message_deleted(target_event_id);
 
     // Nuke any cached attachment files for this message — sender asked
     // for the message to disappear, and a downloaded file the receiver

@@ -2157,11 +2157,14 @@ async fn observe_channel_activity<T: Transport + ?Sized>(
             super::inbound::process_channel_batch(&mut st, &events, channel, &my_pk)
         };
         let ch_hex = channel.id.to_hex();
+        // No delete outcomes on this read-only observation sweep, so the whole channel's
+        // message saves land in one batched transaction at the end.
+        let mut pending: Vec<&crate::types::Message> = Vec::new();
         for o in &outcomes {
             match o {
                 super::inbound::IncomingEvent::NewMessage(m)
                 | super::inbound::IncomingEvent::Updated { message: m, .. } => {
-                    let _ = crate::db::events::save_message(&ch_hex, m).await;
+                    pending.push(m);
                 }
                 super::inbound::IncomingEvent::Presence { npub, joined, event_id, created_at, invited_by, invited_label } => {
                     let et = if *joined {
@@ -2181,6 +2184,7 @@ async fn observe_channel_activity<T: Transport + ?Sized>(
                 _ => {}
             }
         }
+        crate::db::events::flush_message_batch(&ch_hex, &mut pending, &session).await;
     }
     Ok(())
 }
