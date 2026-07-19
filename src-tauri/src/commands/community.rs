@@ -1796,13 +1796,18 @@ async fn sync_community_channel_inner(
     };
 
     let mut new_messages = 0u32;
+    // Message saves COLLECT into batched transactions (one tx per page in the common case);
+    // deletes are flush barriers — a batched save committing after a delete it preceded on
+    // the wire would resurrect the deleted row.
+    let mut pending: Vec<&vector_core::types::Message> = Vec::new();
     for outcome in &outcomes {
         if !session.is_valid() {
+            pending.clear();
             break;
         }
         match outcome {
             IncomingEvent::NewMessage(msg) => {
-                let _ = crate::db::save_message(channel_id, msg).await;
+                pending.push(msg);
                 // Latest page → emit (append + preview). Older page → silent: the frontend
                 // prepends these from its DB re-query (emitting message_new would append them
                 // at the BOTTOM, which is wrong for back-paged history).
@@ -1815,7 +1820,10 @@ async fn sync_community_channel_inner(
                 new_messages += 1;
             }
             IncomingEvent::Updated { target_id, message, edit_event } => {
-                persist_community_update(channel_id, message, edit_event.as_deref()).await;
+                match edit_event.as_deref() {
+                    Some(_) => persist_community_update(channel_id, message, edit_event.as_deref()).await,
+                    None => pending.push(message),
+                }
                 // Reactions/edits apply surgically by target id (position-independent), so
                 // emit on BOTH latest and older pages — an older page can carry a reaction to
                 // a still-visible message, which must update live.
@@ -1826,7 +1834,9 @@ async fn sync_community_channel_inner(
             }
             IncomingEvent::ReactionRemoved { message_id, reaction_id, message } => {
                 // Reaction revoked by its author — drop the kind-7 row (save is additive) and
-                // re-emit the parent so chips refresh live.
+                // re-emit the parent so chips refresh live. Barrier: an unflushed batched save
+                // carries this reaction inside its parent and would re-insert the row.
+                vector_core::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
                 let _ = crate::db::delete_event(reaction_id).await;
                 vector_core::emit_event(
                     "message_update",
@@ -1836,6 +1846,7 @@ async fn sync_community_channel_inner(
             IncomingEvent::Removed { target_id } => {
                 // Cooperative tombstone applies surgically by target id (position-independent),
                 // so honor it on both latest and older pages — drop locally + fade the row.
+                vector_core::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
                 let _ = crate::db::delete_event(target_id).await;
                 vector_core::emit_event(
                     "message_removed",
@@ -1866,6 +1877,7 @@ async fn sync_community_channel_inner(
                 // locally originated, so tombstone local-only (boot's explicit publish propagates). Stop the
                 // batch — the community is being torn down, so later same-batch writes (message saves,
                 // presence) would orphan rows under a now-deleted chat. Teardown retains the held epoch keys.
+                vector_core::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
                 self_remove_from_community(community_id, false).await;
                 return Ok(CommunitySyncResult { new_messages, reached_start: false, oldest_ms: None });
             }
@@ -1874,6 +1886,7 @@ async fn sync_community_channel_inner(
             }
         }
     }
+    vector_core::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
 
     // Cursors and the history-start verdict consider ONLY events that authenticate against the
     // channel's keys: the outer created_at is unauthenticated, and the cleartext pseudonym is in
@@ -3229,13 +3242,17 @@ async fn promote_preloaded_page(community: &vector_core::community::Community, p
         vector_core::community::inbound::process_channel_batch(&mut state, &page, &channel, &my_pk)
     };
     let mut painted = 0u32;
+    // Message saves COLLECT into one batched transaction; deletes are flush barriers
+    // (see flush_message_batch).
+    let mut pending: Vec<&vector_core::types::Message> = Vec::new();
     for outcome in &outcomes {
         if !session.is_valid() {
+            pending.clear();
             break;
         }
         match outcome {
             IncomingEvent::NewMessage(msg) => {
-                let _ = crate::db::save_message(&channel_id, msg).await;
+                pending.push(msg);
                 // Emit so the (optimistic, locked) chat row populates + unlocks NOW — the frontend
                 // learns messages via message_new, so without this the promote is invisible to the UI.
                 vector_core::emit_event(
@@ -3245,16 +3262,21 @@ async fn promote_preloaded_page(community: &vector_core::community::Community, p
                 painted += 1;
             }
             IncomingEvent::Updated { target_id, message, edit_event } => {
-                persist_community_update(&channel_id, message, edit_event.as_deref()).await;
+                match edit_event.as_deref() {
+                    Some(_) => persist_community_update(&channel_id, message, edit_event.as_deref()).await,
+                    None => pending.push(message),
+                }
                 vector_core::emit_event(
                     "message_update",
                     &serde_json::json!({ "old_id": target_id, "message": message, "chat_id": &channel_id }),
                 );
             }
             IncomingEvent::Removed { target_id } => {
+                vector_core::db::events::flush_message_batch(&channel_id, &mut pending, &session).await;
                 let _ = crate::db::delete_event(target_id).await;
             }
             IncomingEvent::ReactionRemoved { message_id, reaction_id, message } => {
+                vector_core::db::events::flush_message_batch(&channel_id, &mut pending, &session).await;
                 let _ = crate::db::delete_event(reaction_id).await;
                 vector_core::emit_event(
                     "message_update",
@@ -3266,6 +3288,7 @@ async fn promote_preloaded_page(community: &vector_core::community::Community, p
             _ => {}
         }
     }
+    vector_core::db::events::flush_message_batch(&channel_id, &mut pending, &session).await;
     painted > 0
 }
 

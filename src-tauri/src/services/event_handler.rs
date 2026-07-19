@@ -446,6 +446,17 @@ pub(crate) async fn tauri_commit_prepared_event(
     prepared: vector_core::PreparedEvent,
     is_new: bool,
 ) -> bool {
+    static HANDLER: TauriEventHandler = TauriEventHandler;
+    tauri_commit_prepared_event_with(prepared, is_new, &HANDLER).await
+}
+
+/// `tauri_commit_prepared_event` with a caller-chosen handler — the bulk-sync loops pass a
+/// `BatchingPersist` wrapper here so committed messages land in batched transactions.
+pub(crate) async fn tauri_commit_prepared_event_with(
+    prepared: vector_core::PreparedEvent,
+    is_new: bool,
+    handler: &dyn vector_core::InboundEventHandler,
+) -> bool {
     // Intercept WebXDC events — requires Iroh/MiniApps (Tauri-only)
     if let vector_core::PreparedEvent::Processed {
         ref result, ref contact,
@@ -475,8 +486,7 @@ pub(crate) async fn tauri_commit_prepared_event(
 
     // Everything else: vector-core handles processing.
     // TauriEventHandler hooks fire callbacks for notifications/badges.
-    static HANDLER: TauriEventHandler = TauriEventHandler;
-    core_handler::commit_prepared_event(prepared, is_new, &HANDLER).await
+    core_handler::commit_prepared_event(prepared, is_new, handler).await
 }
 
 // ============================================================================

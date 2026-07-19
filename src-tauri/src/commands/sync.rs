@@ -17,6 +17,11 @@ use crate::{
     nostr_client, STATE, WRAPPER_ID_CACHE,
 };
 
+/// Committed sync messages buffer up to this many before a batched-transaction flush
+/// (see `BatchingPersist`) — bounds the STATE-visible-but-unpersisted window while keeping
+/// the per-commit transaction overhead amortized.
+const PERSIST_BATCH: usize = 100;
+
 // ============================================================================
 // Profile Sync Commands
 // ============================================================================
@@ -118,6 +123,10 @@ pub async fn fetch_messages<R: Runtime>(
             return;
         };
 
+        // Pin to the session whose items/pubkey drive this reconcile — captured BEFORE the
+        // reconcile so a swap during it invalidates the whole fetch+commit pipeline.
+        let recon_session = vector_core::state::SessionGuard::capture();
+
         // Load negentropy items — use 2-day window for fast reconnection sync
         let all_items = db::load_negentropy_items().unwrap_or_default();
         let quick_since = Timestamp::now().as_secs().saturating_sub(2 * 24 * 3600);
@@ -158,6 +167,8 @@ pub async fn fetch_messages<R: Runtime>(
 
         // Fetch + process missing events
         if !missing_ids.is_empty() {
+            let recon_inner = crate::services::event_handler::TauriEventHandler;
+            let recon_batcher = vector_core::event_handler::BatchingPersist::new(&recon_inner);
             const BATCH_SIZE: usize = 500;
             for batch in missing_ids.chunks(BATCH_SIZE) {
                 let f = Filter::new().ids(batch.to_vec()).kind(Kind::GiftWrap);
@@ -178,7 +189,10 @@ pub async fn fetch_messages<R: Runtime>(
                         tokio::pin!(prepared_stream);
                         while let Some(result) = prepared_stream.next().await {
                             if let Ok(prepared) = result {
-                                crate::services::tauri_commit_prepared_event(prepared, false).await;
+                                crate::services::tauri_commit_prepared_event_with(prepared, false, &recon_batcher).await;
+                                if recon_batcher.buffered() >= PERSIST_BATCH {
+                                    recon_batcher.flush(&recon_session).await;
+                                }
                             }
                         }
                     }
@@ -187,6 +201,7 @@ pub async fn fetch_messages<R: Runtime>(
                     }
                 }
             }
+            recon_batcher.flush(&recon_session).await;
         }
 
         return;
@@ -472,6 +487,10 @@ pub async fn fetch_messages<R: Runtime>(
     let _dm_new_messages = async {
     let mut new_messages_count: u32 = 0;
 
+    // Pins the quick phase's batched persists to the session that started them — a swap
+    // mid-drain drops the unflushed buffer instead of writing it into the next account.
+    let quick_session = vector_core::state::SessionGuard::capture();
+
     // Load our known wrapper IDs + timestamps for reconciliation fingerprinting
     let negentropy_items = db::load_negentropy_items().unwrap_or_default();
     let valid_ts_count = negentropy_items.iter().filter(|(_, ts)| ts.as_secs() > 0).count();
@@ -580,6 +599,8 @@ pub async fn fetch_messages<R: Runtime>(
                 println!("[Sync][BG] Fetching {} additional events from background relays", extra_ids.len());
                 let relay_strs: Vec<String> = bg_client.relays().await.keys()
                     .map(|u| u.to_string()).collect();
+                let bg_inner = crate::services::event_handler::TauriEventHandler;
+                let bg_batcher = vector_core::event_handler::BatchingPersist::new(&bg_inner);
                 const BG_BATCH: usize = 500;
                 for batch in extra_ids.chunks(BG_BATCH) {
                     let f = Filter::new().ids(batch.to_vec()).kind(Kind::GiftWrap);
@@ -595,8 +616,11 @@ pub async fn fetch_messages<R: Runtime>(
                                 let prepared = vector_core::event_handler::prepare_event(
                                     event, &bg_client, my_public_key,
                                 ).await;
-                                if crate::services::tauri_commit_prepared_event(prepared, false).await {
+                                if crate::services::tauri_commit_prepared_event_with(prepared, false, &bg_batcher).await {
                                     count += 1;
+                                }
+                                if bg_batcher.buffered() >= PERSIST_BATCH {
+                                    bg_batcher.flush(&straggler_session).await;
                                 }
                             }
                             if count > 0 {
@@ -607,6 +631,7 @@ pub async fn fetch_messages<R: Runtime>(
                     }
                     if !straggler_session.is_valid() { return; }
                 }
+                bg_batcher.flush(&straggler_session).await;
                 println!("[Sync][BG] Background sync complete");
             }
         });
@@ -689,6 +714,11 @@ pub async fn fetch_messages<R: Runtime>(
             .buffer_unordered(8);
         tokio::pin!(prepared_stream);
 
+        // Committed messages buffer here and land in batched transactions (~100/tx)
+        // instead of one commit each — messages still emit + notify live per event.
+        let quick_inner = crate::services::event_handler::TauriEventHandler;
+        let batcher = vector_core::event_handler::BatchingPersist::new(&quick_inner);
+
         while let Some(result) = prepared_stream.next().await {
             total_events += 1;
             if let Ok(prepared) = result {
@@ -707,11 +737,19 @@ pub async fn fetch_messages<R: Runtime>(
                     PreparedEvent::CommunityInvite { .. } | PreparedEvent::CommunityInviteV2 { .. } => {}
                 }
                 let t = std::time::Instant::now();
-                if crate::services::tauri_commit_prepared_event(prepared, false).await {
+                if crate::services::tauri_commit_prepared_event_with(prepared, false, &batcher).await {
                     new_messages_count += 1;
+                }
+                if batcher.buffered() >= PERSIST_BATCH {
+                    batcher.flush(&quick_session).await;
                 }
                 commit_ns += t.elapsed().as_nanos() as u64;
             }
+        }
+        {
+            let t = std::time::Instant::now();
+            batcher.flush(&quick_session).await;
+            commit_ns += t.elapsed().as_nanos() as u64;
         }
 
         for h in fetch_handles { h.abort(); }
@@ -843,6 +881,8 @@ pub async fn fetch_messages<R: Runtime>(
                 let ids: Vec<EventId> = all_missing.into_iter().collect();
                 let relay_strs: Vec<String> = bg_client.relays().await.keys()
                     .map(|u| u.to_string()).collect();
+                let archive_inner = crate::services::event_handler::TauriEventHandler;
+                let archive_batcher = vector_core::event_handler::BatchingPersist::new(&archive_inner);
                 const BATCH: usize = 500;
                 let mut processed = 0u32;
                 for batch in ids.chunks(BATCH) {
@@ -867,8 +907,11 @@ pub async fn fetch_messages<R: Runtime>(
                                         "new_messages": archive_new,
                                     }));
                                 }
-                                if crate::services::tauri_commit_prepared_event(prepared, false).await {
+                                if crate::services::tauri_commit_prepared_event_with(prepared, false, &archive_batcher).await {
                                     archive_new += 1;
+                                }
+                                if archive_batcher.buffered() >= PERSIST_BATCH {
+                                    archive_batcher.flush(&archive_session).await;
                                 }
                             }
                         }
@@ -876,6 +919,7 @@ pub async fn fetch_messages<R: Runtime>(
                     }
                     if !archive_session.is_valid() { return; }
                 }
+                archive_batcher.flush(&archive_session).await;
             } else {
                 println!("[Sync] Archive: no missing events");
             }

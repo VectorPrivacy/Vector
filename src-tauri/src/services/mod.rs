@@ -12,7 +12,7 @@ pub mod subscription_handler;
 pub mod notification_service;
 
 pub(crate) use event_handler::handle_event;
-pub(crate) use event_handler::tauri_commit_prepared_event;
+pub(crate) use event_handler::tauri_commit_prepared_event_with;
 pub(crate) use subscription_handler::start_subscriptions;
 pub(crate) use notification_service::{NotificationData, show_notification_generic, resolve_mention_display_names, strip_content_for_preview};
 // Used by the Android background-sync notification chokepoint (post_notification_jni).

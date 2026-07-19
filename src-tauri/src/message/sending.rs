@@ -417,6 +417,10 @@ pub async fn delete_own_message(message_id: String) -> Result<vector_core::Delet
         state.remove_message(&message_id)
     };
 
+    // Tombstone BEFORE the row delete: a sync-batched self-echo of this message may sit
+    // unflushed (delete_event below would no-op) — the flush consults this and drops it.
+    vector_core::state::note_message_deleted(&message_id);
+
     // Drop the local DB row.
     if removed.is_some() {
         if let Err(e) = crate::db::delete_event(&message_id).await {
