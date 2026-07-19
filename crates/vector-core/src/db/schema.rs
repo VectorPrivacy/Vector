@@ -973,5 +973,39 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // =========================================================================
+    // Migration 75: Strip the vestigial `attachments` tag from backfilled events
+    // =========================================================================
+    // Migration 74 copied the attachments into the table but left the source tag
+    // in place as a fallback. Now reclaim that dead JSON from every event whose
+    // attachments are PROVABLY in the table — 74's backfill is all-or-nothing per
+    // event, so a matching table row means the whole vec was copied. A tag that 74
+    // could not parse (no row) keeps its raw bytes, so this is lossless. Smaller
+    // event rows also mean the message-load queries (which read `tags`) touch fewer
+    // bytes. The read fallback stays for any un-backfilled remnants.
+    run_atomic_migration(conn, 75, "Strip backfilled attachment tags", |tx| {
+        let events: Vec<(String, String)> = {
+            let mut stmt = tx.prepare(
+                "SELECT id, tags FROM events WHERE tags LIKE '%attachments%' \
+                 AND id IN (SELECT DISTINCT event_id FROM attachments)"
+            ).map_err(|e| format!("prepare tag strip: {}", e))?;
+            let mapped = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .map_err(|e| format!("query tag strip: {}", e))?;
+            mapped.flatten().collect()
+        };
+        for (id, tags_json) in events {
+            let Ok(mut tags) = serde_json::from_str::<Vec<Vec<String>>>(&tags_json) else { continue };
+            let before = tags.len();
+            tags.retain(|t| t.first().map(|s| s.as_str()) != Some("attachments"));
+            if tags.len() == before {
+                continue; // false-positive LIKE match; no actual attachments tag
+            }
+            let new_tags = serde_json::to_string(&tags).unwrap_or(tags_json);
+            tx.execute("UPDATE events SET tags=?1 WHERE id=?2", rusqlite::params![new_tags, id])
+                .map_err(|e| format!("strip attachments tag: {}", e))?;
+        }
+        Ok(())
+    })?;
+
     Ok(())
 }

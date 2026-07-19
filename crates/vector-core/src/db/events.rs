@@ -1806,6 +1806,57 @@ mod tests {
         assert_eq!(old.attachments[0].name, "old.png");
     }
 
+    // Migration 75's strip logic: remove the legacy attachments tag ONLY from events that are
+    // provably backfilled (have a table row); un-backfilled events keep their tag as the fallback.
+    #[tokio::test]
+    async fn attachment_tag_strip_is_gated_on_backfill() {
+        let (_tmp, _guard) = init_test_db();
+        let a = Attachment { id: "h1".into(), extension: "png".into(), name: "f.png".into(), downloaded: false, ..Default::default() };
+        let mk = |id: &str, secs: u64| Message {
+            id: id.into(), content: String::new(), at: secs * 1000, mine: false,
+            npub: Some("npub1s".into()), attachments: vec![a.clone()], ..Default::default()
+        };
+        save_message("npub1s", &mk("bf", 1000)).await.unwrap();
+        save_message("npub1s", &mk("unbf", 2000)).await.unwrap();
+
+        {
+            let conn = crate::db::get_write_connection_guard_static().unwrap();
+            let inner = serde_json::to_string(&vec![a.clone()]).unwrap();
+            let with_tag = |ms: &str| serde_json::to_string(&vec![
+                vec!["ms".to_string(), ms.to_string()],
+                vec!["attachments".to_string(), inner.clone()],
+            ]).unwrap();
+            // Both events carry a legacy tag; only `unbf` loses its table rows (un-backfilled).
+            conn.execute("UPDATE events SET tags=?1 WHERE id='bf'", rusqlite::params![with_tag("5")]).unwrap();
+            conn.execute("UPDATE events SET tags=?1 WHERE id='unbf'", rusqlite::params![with_tag("6")]).unwrap();
+            conn.execute("DELETE FROM attachments WHERE event_id='unbf'", []).unwrap();
+
+            // Replicate migration 75's gated strip.
+            let events: Vec<(String, String)> = {
+                let mut stmt = conn.prepare("SELECT id, tags FROM events WHERE tags LIKE '%attachments%' AND id IN (SELECT DISTINCT event_id FROM attachments)").unwrap();
+                let m = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).unwrap();
+                m.flatten().collect()
+            };
+            for (id, tj) in events {
+                let mut tags: Vec<Vec<String>> = serde_json::from_str(&tj).unwrap();
+                tags.retain(|t| t.first().map(|s| s.as_str()) != Some("attachments"));
+                conn.execute("UPDATE events SET tags=?1 WHERE id=?2",
+                    rusqlite::params![serde_json::to_string(&tags).unwrap(), id]).unwrap();
+            }
+
+            let bf: String = conn.query_row("SELECT tags FROM events WHERE id='bf'", [], |r| r.get(0)).unwrap();
+            assert!(!bf.contains("attachments"), "backfilled event's attachments tag stripped");
+            assert!(bf.contains("\"ms\""), "sibling ms tag survives the strip");
+            let unbf: String = conn.query_row("SELECT tags FROM events WHERE id='unbf'", [], |r| r.get(0)).unwrap();
+            assert!(unbf.contains("attachments"), "un-backfilled event keeps its tag (no table row)");
+        }
+
+        // The un-backfilled event still renders via the read fallback after the strip.
+        let chat_int = crate::db::id_cache::get_or_create_chat_id("npub1s").unwrap();
+        let views = get_message_views(chat_int, 10, 0).await.unwrap();
+        assert_eq!(views.iter().find(|m| m.id == "unbf").unwrap().attachments.len(), 1, "fallback still renders unbf");
+    }
+
     // Mark-as-unread anchors from the FULL DB history (a community row often holds only a preview
     // message in RAM). The anchor lands strictly before the target's second so the count query's
     // strict `>` still counts the newest contact message. Covers the community repro + edge cases.
