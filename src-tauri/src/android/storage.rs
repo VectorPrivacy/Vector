@@ -293,65 +293,14 @@ pub fn migrate_old_downloads() {
     // Phase 3: reconcile this account's stored attachment paths against disk.
     // One index-backed pass over attachment-bearing events (kind=FILE_ATTACHMENT)
     // — no full-table scan. Each attachment under an old dir is rewritten to the
-    // new path if the file is actually there, else marked undownloaded (covers
-    // failed/skipped moves). Paths live as JSON inside events.tags.
-    const FILE_ATTACHMENT_KIND: u16 = 15; // vector_core::stored_event::event_kind::FILE_ATTACHMENT
+    // new path if the file is actually there, else marked undownloaded (covers failed/skipped moves).
     let old_prefixes: Vec<String> = old_dirs
         .iter()
         .filter(|d| *d != &new_dir)
         .map(|d| format!("{}/", d.to_string_lossy()))
         .collect();
     if !old_prefixes.is_empty() {
-        if let Ok(conn) = crate::account_manager::get_db_connection_guard_static() {
-            let rows: Vec<(i64, String)> = conn
-                .prepare("SELECT id, tags FROM events WHERE kind = ?1")
-                .and_then(|mut stmt| {
-                    stmt.query_map(rusqlite::params![FILE_ATTACHMENT_KIND], |r| {
-                        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-                    })?
-                    .collect::<Result<Vec<_>, _>>()
-                })
-                .unwrap_or_default();
-
-            for (id, tags_json) in rows {
-                let mut tags: Vec<Vec<String>> = match serde_json::from_str(&tags_json) {
-                    Ok(t) => t,
-                    Err(_) => continue,
-                };
-                let Some(idx) = tags.iter().position(|t| t.first().map(|s| s.as_str()) == Some("attachments")) else { continue };
-                let mut atts: Vec<crate::Attachment> = serde_json::from_str(
-                    tags[idx].get(1).map(|s| s.as_str()).unwrap_or("[]"),
-                ).unwrap_or_default();
-
-                let mut changed = false;
-                for att in atts.iter_mut() {
-                    if old_prefixes.iter().any(|p| att.path.starts_with(p.as_str())) {
-                        if let Some(name) = std::path::Path::new(&att.path).file_name() {
-                            let new_path = new_dir.join(name);
-                            if new_path.exists() {
-                                att.path = new_path.to_string_lossy().to_string();
-                            } else {
-                                att.downloaded = false;
-                                att.downloading = false;
-                            }
-                            changed = true;
-                        }
-                    }
-                }
-
-                if changed {
-                    if let Ok(atts_json) = serde_json::to_string(&atts) {
-                        tags[idx] = vec!["attachments".to_string(), atts_json];
-                        if let Ok(new_tags) = serde_json::to_string(&tags) {
-                            let _ = conn.execute(
-                                "UPDATE events SET tags = ?1 WHERE id = ?2",
-                                rusqlite::params![new_tags, id],
-                            );
-                        }
-                    }
-                }
-            }
-        }
+        let _ = vector_core::db::attachments::rewrite_downloaded_paths(&old_prefixes, &new_dir);
     }
 
     let _ = vector_core::db::settings::set_sql_setting(FLAG.to_string(), "true".to_string());
