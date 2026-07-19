@@ -830,11 +830,25 @@ pub fn init_database(npub: &str) -> Result<(), String> {
 /// check and discard the connection instead of returning it to the
 /// (now-cleared) pool.
 pub fn close_database() {
+    // Refresh planner stats before dropping the working connection: at close its per-session change
+    // counters reflect everything that churned, so PRAGMA optimize re-analyzes exactly those tables.
+    optimize_database();
     bump_pool_generation();
     if let Ok(mut pool) = DB_READ_POOL.lock() {
         pool.clear();
     }
     *DB_WRITE_CONN.lock().unwrap() = None;
+}
+
+/// Refresh SQLite's query-planner statistics via `PRAGMA optimize`. Best-effort and cheap
+/// (incremental — re-analyzes only what changed since the last run), unlike the weekly VACUUM. Run
+/// at shutdown/connection-close so the NEXT boot plans from fresh stats without paying for it.
+pub fn optimize_database() {
+    if let Ok(guard) = DB_WRITE_CONN.lock() {
+        if let Some(conn) = guard.as_ref() {
+            let _ = conn.execute_batch("PRAGMA optimize;");
+        }
+    }
 }
 
 /// Get all available accounts (npub directories in app data).

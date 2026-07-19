@@ -90,7 +90,6 @@ CREATE INDEX IF NOT EXISTS idx_events_chat_time ON events(chat_id, created_at DE
 CREATE INDEX IF NOT EXISTS idx_events_kind ON events(kind);
 CREATE INDEX IF NOT EXISTS idx_events_reference ON events(reference_id) WHERE reference_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_events_wrapper ON events(wrapper_event_id) WHERE wrapper_event_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_events_user ON events(user_id);
 
 -- PIVX Promos table
 CREATE TABLE IF NOT EXISTS pivx_promos (
@@ -894,6 +893,18 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         tx.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_events_unread ON events(chat_id, mine, kind, created_at);"
         ).map_err(|e| format!("Failed to create unread covering index: {}", e))?;
+        Ok(())
+    })?;
+
+    // =========================================================================
+    // Migration 72: Drop the unused events(user_id) index
+    // =========================================================================
+    // No query filters, joins, or orders by events.user_id, so the index only
+    // cost a b-tree write on every event insert. Authors resolve via the
+    // denormalized npub column instead.
+    run_atomic_migration(conn, 72, "Drop unused events user_id index", |tx| {
+        tx.execute_batch("DROP INDEX IF EXISTS idx_events_user;")
+            .map_err(|e| format!("Failed to drop idx_events_user: {}", e))?;
         Ok(())
     })?;
 

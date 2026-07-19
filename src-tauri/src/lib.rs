@@ -341,6 +341,10 @@ pub fn run() {
                                 nostr_client.shutdown().await;
                             });
                         }
+
+                        // Refresh query-planner stats now (idle shutdown time) so the next launch
+                        // plans from fresh statistics without an analyze on the boot path.
+                        crate::account_manager::optimize_db();
                     }
                     _ => {}
                 }
