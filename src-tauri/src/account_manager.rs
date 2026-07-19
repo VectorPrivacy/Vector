@@ -635,6 +635,10 @@ pub async fn reset_session() {
         state.chats.clear();
         state.db_loaded = false;
         state.is_syncing = false;
+        // Drop the unread cache + its seeded flag, or the next account reads A's counts and never
+        // reseeds from its own DB.
+        state.unread_cache.clear();
+        state.unread_seeded = false;
     }
     { crate::WRAPPER_ID_CACHE.lock().await.clear(); }
     { crate::state::PENDING_EVENTS.lock().await.clear(); }

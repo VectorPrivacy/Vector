@@ -433,6 +433,15 @@ pub async fn delete_own_message(message_id: String) -> Result<vector_core::Delet
         })).ok();
     }
 
+    // Deleting our own newest message retreats the read anchor, so a contact message can re-surface
+    // as unread — reconcile the one chat and refresh the badge.
+    if removed.is_some() {
+        crate::commands::messaging::reconcile_chat_unread(&chat_id).await;
+        if let Some(handle) = TAURI_APP.get() {
+            let _ = crate::commands::messaging::update_unread_counter(handle.clone()).await;
+        }
+    }
+
     Ok(outcome)
 }
 

@@ -25,16 +25,18 @@ use crate::{
 /// zero and the dock badge never bumps. Also pushes a `chat_mark_read`
 /// event so the FE state and DB persistence catch up — the FE's own
 /// `message_new` markAsRead still runs as a belt-and-braces second hop.
-async fn auto_mark_if_active(chat_id: &str, msg_id: &str) {
+/// Returns true if the chat was the active one and was marked read here (so the caller can clear its
+/// unread cache entry without a DB reconcile); false otherwise (the caller reconciles the chat).
+async fn auto_mark_if_active(chat_id: &str, msg_id: &str) -> bool {
     let active = vector_core::state::get_active_chat();
-    if active.as_deref() != Some(chat_id) { return; }
+    if active.as_deref() != Some(chat_id) { return false; }
     // A swap can land while awaiting the STATE lock; re-check inside so we never write account A's
     // last_read into account B's freshly-swapped chat list/DB.
     let session = vector_core::state::SessionGuard::capture();
 
     let slim = {
         let mut state = STATE.lock().await;
-        if !session.is_valid() { return; }
+        if !session.is_valid() { return false; }
         if let Some(chat) = state.chats.iter_mut().find(|c| c.id == chat_id) {
             chat.last_read = vector_core::compact::encode_message_id(msg_id);
             state.get_chat(chat_id).map(|c| {
@@ -44,6 +46,7 @@ async fn auto_mark_if_active(chat_id: &str, msg_id: &str) {
             None
         }
     };
+    let marked = slim.is_some();
     if let Some(slim) = slim {
         let _ = vector_core::db::chats::save_slim_chat(&slim);
     }
@@ -53,6 +56,17 @@ async fn auto_mark_if_active(chat_id: &str, msg_id: &str) {
             "chat_id": chat_id,
             "last_read": msg_id,
         }));
+    }
+    marked
+}
+
+/// Update the unread cache for `chat_id` after a live inbound message: the active chat was just
+/// marked read (clear, no DB), otherwise reconcile the one chat from the DB.
+async fn refresh_chat_unread(chat_id: &str, was_marked_active: bool) {
+    if was_marked_active {
+        STATE.lock().await.unread_clear(chat_id);
+    } else {
+        commands::messaging::reconcile_chat_unread(chat_id).await;
     }
 }
 
@@ -92,7 +106,8 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
             // before the badge recount so the message never counts as unread.
             // The FE's own markAsRead still runs on the message_new event for
             // DB persistence, but this avoids the racey badge bump in between.
-            auto_mark_if_active(&chat_id, &msg_id).await;
+            let marked = auto_mark_if_active(&chat_id, &msg_id).await;
+            refresh_chat_unread(&chat_id, marked).await;
             // Check muted
             let is_muted = {
                 let state = STATE.lock().await;
@@ -138,7 +153,8 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
         let session = vector_core::state::SessionGuard::capture();
         tokio::spawn(async move {
             if !session.is_valid() { return; }
-            auto_mark_if_active(&chat_id, &msg_id).await;
+            let marked = auto_mark_if_active(&chat_id, &msg_id).await;
+            refresh_chat_unread(&chat_id, marked).await;
             // Check muted
             let is_muted = {
                 let state = STATE.lock().await;
@@ -191,7 +207,10 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
             // Advance last_read first if this is the chat the user is actively watching, so a message
             // in the open community never counts as unread on the badge recount below (mirrors the DM
             // path; without it the badge bumps to 1 and races the FE's markAsRead, leaving it stuck).
-            auto_mark_if_active(&chat_id, &msg.id).await;
+            let marked = auto_mark_if_active(&chat_id, &msg.id).await;
+            // Reconcile (not a blind +1): this handler also sees stale re-deliveries and bulk
+            // back-sync, so the one-chat DB recount is the only correct update.
+            refresh_chat_unread(&chat_id, marked).await;
             // Ping only for genuinely-live messages. A bulk back-sync (jump-to-unread) or a relay
             // re-delivering already-saved history pushes OLD events through this handler; by inner
             // timestamp they're stale, so skip the notification. They still surface + count via the

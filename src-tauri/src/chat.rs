@@ -22,6 +22,7 @@ pub async fn mark_as_read_headless(chat_id: &str) -> bool {
         if !state.chats[idx].set_as_read() {
             return false;
         }
+        state.unread_clear(chat_id);
         let lr = vector_core::compact::decode_message_id(&state.chats[idx].last_read);
         (crate::db::chats::SlimChatDB::from_chat(&state.chats[idx], &state.interner), lr)
     };
@@ -84,6 +85,10 @@ pub async fn mark_as_read(chat_id: String, message_id: Option<String>) -> bool {
             }
         }
 
+        // Reconcile from the DB: a message-scoped mark ("read up to here") can leave a non-zero
+        // remainder, so a blind clear would be wrong. The full mark-all-read case reconciles to 0.
+        crate::commands::messaging::reconcile_chat_unread(&chat_id).await;
+
         // Read clears any lingering OS notification for this chat (in-app open / another device).
         crate::services::notification_service::cancel_chat_notification(&chat_id);
 
@@ -122,6 +127,9 @@ pub async fn mark_as_unread(chat_id: String) -> Option<String> {
         crate::db::chats::SlimChatDB::from_chat(&state.chats[idx], &state.interner)
     };
     let _ = crate::db::chats::save_slim_chat(slim).await;
+
+    // The retreat surfaces the newest contact message again, so reconcile the exact remainder.
+    crate::commands::messaging::reconcile_chat_unread(&chat_id).await;
 
     if let Some(handle) = crate::TAURI_APP.get() {
         let _ = crate::commands::messaging::update_unread_counter(handle.clone()).await;

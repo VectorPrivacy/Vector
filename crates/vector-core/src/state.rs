@@ -560,6 +560,15 @@ pub struct ChatState {
     pub interner: NpubInterner,
     pub is_syncing: bool,
     pub db_loaded: bool,
+    /// Authoritative per-chat RAW unread counts (chat_identifier → count), so the badge recount is an
+    /// in-RAM fold instead of a whole-DB scan. Seeded once per account from `db::unread_counts` (see
+    /// `unread_seeded`), then kept current per-chat: cleared on read, reconciled from the DB
+    /// (`db::unread_count_for_chat`) on inbound / delete / mark-unread. RAW = pre muted/blocked
+    /// filter; the sum applies those, matching `sum_unread_from`. Cleared on account reset.
+    pub unread_cache: std::collections::HashMap<String, u32>,
+    /// False until `unread_cache` has been seeded from the DB for this account. Guards the one-time
+    /// seed so the full-scan query runs once per login, never per message.
+    pub unread_seeded: bool,
     #[cfg(debug_assertions)]
     pub cache_stats: crate::stats::CacheStats,
 }
@@ -572,6 +581,8 @@ impl ChatState {
             interner: NpubInterner::new(),
             is_syncing: false,
             db_loaded: false,
+            unread_cache: std::collections::HashMap::new(),
+            unread_seeded: false,
             #[cfg(debug_assertions)]
             cache_stats: crate::stats::CacheStats::new(),
         }
@@ -966,6 +977,44 @@ impl ChatState {
             total += counts.get(&chat.id).copied().unwrap_or(0);
         }
         total
+    }
+
+    // ------------------------------------------------------------------------
+    // Unread cache — in-RAM per-chat counts, so the per-message badge recount
+    // never re-scans the DB. See the `unread_cache` field doc.
+    // ------------------------------------------------------------------------
+
+    /// Seed the whole cache from a DB `unread_counts()` result and mark it seeded. Idempotent per
+    /// login; a later call replaces the map wholesale (used only if a reseed is ever forced).
+    pub fn unread_seed(&mut self, counts: std::collections::HashMap<String, u32>) {
+        self.unread_cache = counts;
+        self.unread_seeded = true;
+    }
+
+    /// The chat was read (opened / marked): zero its unread.
+    pub fn unread_clear(&mut self, chat_id: &str) {
+        self.unread_cache.remove(chat_id);
+    }
+
+    /// Reconcile a chat to an exact DB-computed count (delete / retreat / backfill). A zero drops the
+    /// entry so the map stays small and `unwrap_or(0)` reads it as caught-up.
+    pub fn unread_set(&mut self, chat_id: &str, count: u32) {
+        if count == 0 {
+            self.unread_cache.remove(chat_id);
+        } else {
+            self.unread_cache.insert(chat_id.to_string(), count);
+        }
+    }
+
+    /// Total unread for the badge, from the cache, applying the same muted/blocked filters as
+    /// [`sum_unread_from`].
+    pub fn sum_unread(&self) -> u32 {
+        self.sum_unread_from(&self.unread_cache)
+    }
+
+    /// A snapshot of the raw per-chat counts, for the frontend's boot badges.
+    pub fn unread_snapshot(&self) -> std::collections::HashMap<String, u32> {
+        self.unread_cache.clone()
     }
 
     pub fn count_unread_messages(&self) -> u32 {
@@ -1772,6 +1821,50 @@ mod tests {
         state.add_message_to_chat("npub1blocked", msg);
 
         assert_eq!(state.count_unread_messages(), 0, "blocked user DM should not count");
+    }
+
+    #[test]
+    fn unread_cache_seed_clear_set_and_sum() {
+        let mut state = ChatState::new();
+        state.create_dm_chat("npub1a");
+        state.create_dm_chat("npub1b");
+
+        let mut seed = std::collections::HashMap::new();
+        seed.insert("npub1a".to_string(), 3u32);
+        seed.insert("npub1b".to_string(), 2u32);
+        state.unread_seed(seed);
+        assert!(state.unread_seeded);
+        assert_eq!(state.sum_unread(), 5);
+
+        state.unread_clear("npub1a");
+        assert_eq!(state.sum_unread(), 2, "clear drops a's 3");
+
+        state.unread_set("npub1b", 4);
+        assert_eq!(state.sum_unread(), 4, "reconcile b to exact 4");
+        state.unread_set("npub1b", 0);
+        assert_eq!(state.sum_unread(), 0);
+        assert!(!state.unread_cache.contains_key("npub1b"), "a zero count drops the entry");
+    }
+
+    #[test]
+    fn unread_cache_sum_honours_muted_and_blocked() {
+        let mut state = ChatState::new();
+        let mut blocked = Profile::new();
+        blocked.flags.set_blocked(true);
+        state.insert_or_replace_profile("npub1blk", blocked);
+        state.create_dm_chat("npub1blk");
+        state.create_dm_chat("npub1mut");
+        state.get_chat_mut("npub1mut").unwrap().muted = true;
+        state.create_dm_chat("npub1ok");
+
+        let mut seed = std::collections::HashMap::new();
+        seed.insert("npub1blk".to_string(), 5u32);
+        seed.insert("npub1mut".to_string(), 7u32);
+        seed.insert("npub1ok".to_string(), 2u32);
+        state.unread_seed(seed);
+
+        // Blocked + muted chats are filtered exactly like sum_unread_from; only the normal chat counts.
+        assert_eq!(state.sum_unread(), 2);
     }
 
     #[test]

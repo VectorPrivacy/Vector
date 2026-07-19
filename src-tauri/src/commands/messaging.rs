@@ -240,17 +240,51 @@ pub async fn evict_chat_messages(chat_id: String, keep_count: usize) -> Result<(
 // Unread Count Commands
 // ============================================================================
 
+/// Seed the in-RAM unread cache from the DB once per login. The full-scan `unread_counts` query runs
+/// here and nowhere on the per-message badge path — after seeding, the badge is a pure RAM fold.
+async fn ensure_unread_seeded() {
+    if STATE.lock().await.unread_seeded {
+        return;
+    }
+    // The DB read straddles an await; a swap could land, so guard the seed against writing account
+    // A's counts into account B's freshly-swapped state.
+    let session = vector_core::state::SessionGuard::capture();
+    let counts = crate::db::unread_counts().await.unwrap_or_default();
+    let mut state = STATE.lock().await;
+    if !session.is_valid() {
+        return;
+    }
+    if !state.unread_seeded {
+        state.unread_seed(counts);
+    }
+}
+
+/// Recompute ONE chat's unread straight from the DB (indexed single-chat query) and store it in the
+/// cache. Used where an O(1) delta would be unsafe: a delete, a mark-unread retreat, or a batch
+/// backfill that adds messages outside the live inbound path.
+pub async fn reconcile_chat_unread(chat_id: &str) {
+    let session = vector_core::state::SessionGuard::capture();
+    let count = vector_core::db::events::unread_count_for_chat(chat_id).await.unwrap_or(0);
+    let mut state = STATE.lock().await;
+    if !session.is_valid() {
+        return;
+    }
+    // Before the seed the whole map is (re)built from the DB anyway, so only patch a live cache.
+    if state.unread_seeded {
+        state.unread_set(chat_id, count);
+    }
+}
+
 /// Update the window badge/overlay with the current unread message count
 /// Returns the unread message count
 #[tauri::command]
 pub async fn update_unread_counter<R: Runtime>(handle: AppHandle<R>) -> u32 {
-    // Count from the DB (correct even when only the last message per chat is in RAM — the boot
-    // state), then apply the cheap in-RAM muted/blocked filters. Walking STATE messages would
-    // under-count an unopened chat's backlog after a restart.
-    let counts = crate::db::unread_counts().await.unwrap_or_default();
+    // Fold the in-RAM unread cache (seeded once from the DB, maintained incrementally), applying the
+    // cheap muted/blocked filters. No per-message DB scan: the heavy query ran once at seed time.
+    ensure_unread_seeded().await;
     let unread_count = {
         let state = STATE.lock().await;
-        state.sum_unread_from(&counts)
+        state.sum_unread()
     };
 
     // Get the main window (only used on desktop for badge handling)
@@ -294,7 +328,16 @@ pub async fn update_unread_counter<R: Runtime>(handle: AppHandle<R>) -> u32 {
 /// with 0 unread are omitted (the frontend treats a missing entry as 0).
 #[tauri::command]
 pub async fn get_unread_counts() -> std::collections::HashMap<String, u32> {
-    crate::db::unread_counts().await.unwrap_or_default()
+    // The frontend's authoritative per-chat badge fetch (boot + refresh). Reseed the cache from the
+    // DB here so this call also HEALS any incremental drift; the per-message badge path stays a pure
+    // in-RAM fold between these refreshes.
+    let session = vector_core::state::SessionGuard::capture();
+    let counts = crate::db::unread_counts().await.unwrap_or_default();
+    let mut state = STATE.lock().await;
+    if session.is_valid() {
+        state.unread_seed(counts);
+    }
+    state.unread_snapshot()
 }
 
 /// Tell the backend which chat the user is actively watching, so inbound
