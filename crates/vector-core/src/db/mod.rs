@@ -20,6 +20,7 @@ pub mod schema;
 pub mod profiles;
 pub mod id_cache;
 pub mod events;
+pub mod attachments;
 pub mod chats;
 pub mod wrappers;
 pub mod nip17_keys;

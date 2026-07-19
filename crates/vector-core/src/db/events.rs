@@ -10,25 +10,26 @@ use crate::types::{Message, Attachment, Reaction};
 /// Primary storage function for the flat event architecture.
 /// Conditionally encrypts message/edit content based on user setting.
 /// Uses INSERT OR REPLACE with COALESCE to preserve existing wrapper_event_id.
-pub async fn save_event(event: &StoredEvent) -> Result<(), String> {
-    let conn = super::get_write_connection_guard_static()?;
-
-    let tags_json = serde_json::to_string(&event.tags)
-        .unwrap_or_else(|_| "[]".to_string());
-
-    // Conditionally encrypt message/edit content
-    let content = if event.kind == event_kind::CHAT_MESSAGE
+/// Conditionally encrypt an event's content per kind (messages/edits are encrypted at rest). Async,
+/// so callers run it BEFORE opening a sync transaction.
+async fn encrypt_event_content(event: &StoredEvent) -> String {
+    if event.kind == event_kind::CHAT_MESSAGE
         || event.kind == event_kind::PRIVATE_DIRECT_MESSAGE
         || event.kind == event_kind::MESSAGE_EDIT
     {
         maybe_encrypt(event.content.clone()).await
     } else {
         event.content.clone()
-    };
+    }
+}
 
-    // UPSERT (not INSERT OR REPLACE) so a re-save (reaction/edit) UPDATES in place and PRESERVES the
-    // rowid. get_messages_around's (created_at, received_at, rowid) cursor needs a stable final
-    // tiebreak to page through same-timestamp bursts; INSERT OR REPLACE churns the rowid and drops rows.
+/// Upsert the event row onto the given connection or transaction (so it can commit atomically with
+/// its attachment rows). `content` must already be encrypted (see `encrypt_event_content`).
+///
+/// UPSERT (not INSERT OR REPLACE) so a re-save (reaction/edit) UPDATES in place and PRESERVES the
+/// rowid. get_messages_around's (created_at, received_at, rowid) cursor needs a stable final
+/// tiebreak to page through same-timestamp bursts; INSERT OR REPLACE churns the rowid and drops rows.
+fn insert_event_row(conn: &rusqlite::Connection, event: &StoredEvent, content: &str, tags_json: &str) -> Result<(), String> {
     conn.execute(
         r#"
         INSERT INTO events (
@@ -44,25 +45,20 @@ pub async fn save_event(event: &StoredEvent) -> Result<(), String> {
             npub = excluded.npub, preview_metadata = excluded.preview_metadata
         "#,
         rusqlite::params![
-            event.id,
-            event.kind as i32,
-            event.chat_id,
-            event.user_id,
-            content,
-            tags_json,
-            event.reference_id,
-            event.created_at as i64,
-            event.received_at as i64,
-            event.mine as i32,
-            event.pending as i32,
-            event.failed as i32,
-            event.wrapper_event_id,
-            event.npub,
-            event.preview_metadata,
+            event.id, event.kind as i32, event.chat_id, event.user_id, content, tags_json,
+            event.reference_id, event.created_at as i64, event.received_at as i64,
+            event.mine as i32, event.pending as i32, event.failed as i32,
+            event.wrapper_event_id, event.npub, event.preview_metadata,
         ],
     ).map_err(|e| format!("Failed to save event: {}", e))?;
-
     Ok(())
+}
+
+pub async fn save_event(event: &StoredEvent) -> Result<(), String> {
+    let tags_json = serde_json::to_string(&event.tags).unwrap_or_else(|_| "[]".to_string());
+    let content = encrypt_event_content(event).await;
+    let conn = super::get_write_connection_guard_static()?;
+    insert_event_row(&conn, event, &content, &tags_json)
 }
 
 /// Extract persisted `["bot", npub]` routing tags (the write side lives in
@@ -156,7 +152,20 @@ pub async fn save_message(chat_id: &str, message: &Message) -> Result<(), String
     };
 
     let event = message_to_stored_event(message, chat_int_id, user_int_id);
-    save_event(&event).await?;
+
+    // Commit the event row and its attachment rows (the dedicated table is the sole source of truth;
+    // pre-migration events keep their legacy tag as an un-read fallback) in ONE transaction, so a
+    // file message can never persist without its attachments — new events have no tag to fall back
+    // on. Encrypt first: encryption is async and can't run inside the sync transaction.
+    let tags_json = serde_json::to_string(&event.tags).unwrap_or_else(|_| "[]".to_string());
+    let content = encrypt_event_content(&event).await;
+    {
+        let conn = super::get_write_connection_guard_static()?;
+        let tx = conn.unchecked_transaction().map_err(|e| format!("save_message tx: {e}"))?;
+        insert_event_row(&tx, &event, &content, &tags_json)?;
+        super::attachments::insert_attachment_rows(&tx, &message.id, &message.attachments)?;
+        tx.commit().map_err(|e| format!("save_message commit: {e}"))?;
+    }
 
     // Save reactions as separate kind=7 events
     for reaction in &message.reactions {
@@ -198,12 +207,7 @@ fn message_to_stored_event(message: &Message, chat_id: i64, user_id: Option<i64>
         ]);
     }
 
-    // Attachments as JSON tag
-    if !message.attachments.is_empty() {
-        if let Ok(json) = serde_json::to_string(&message.attachments) {
-            tags.push(vec!["attachments".to_string(), json]);
-        }
-    }
+    // Attachments are stored in the dedicated `attachments` table (see save_message), not a tag.
 
     // NIP-30 emoji tags — persist so reload from DB still renders the
     // custom emoji image instead of the literal `:shortcode:`.
@@ -798,6 +802,13 @@ pub async fn get_reply_contexts(
         latest_edits.entry(ref_id).or_insert(content);
     }
 
+    // Batch the file replies' attachments (one query, not one per reply) for the extension below.
+    let file_ids: Vec<String> = events.iter()
+        .filter(|(_, kind, _, _, _)| *kind == event_kind::FILE_ATTACHMENT as i32)
+        .map(|(id, _, _, _, _)| id.clone())
+        .collect();
+    let atts_by_event = super::attachments::get_attachments_for_events(&file_ids).unwrap_or_default();
+
     // Decrypt and build contexts
     let mut contexts = HashMap::new();
     for (id, kind, original_content, npub, tags) in events {
@@ -813,19 +824,22 @@ pub async fn get_reply_contexts(
             String::new()
         };
 
-        // Stored kind-15 tags carry the attachments as a JSON array under the "attachments" tag, each
-        // entry with its own `extension` (the rumor's file-type/name tags are not re-stored). Pull the
-        // first attachment's extension so the quote can show the file type.
+        // The first attachment's extension lets the quote show the file type. From the table, with a
+        // legacy-tag fallback for an un-backfilled pre-migration row.
         let extension = if has_attachment {
-            tags.as_deref()
-                .and_then(|t| serde_json::from_str::<Vec<Vec<String>>>(t).ok())
-                .and_then(|parsed| parsed.into_iter()
-                    .find(|t| t.first().map(|k| k == "attachments").unwrap_or(false))
-                    .and_then(|t| t.into_iter().nth(1)))
-                .and_then(|json| serde_json::from_str::<Vec<serde_json::Value>>(&json).ok())
-                .and_then(|atts| atts.into_iter().next())
-                .and_then(|a| a.get("extension").and_then(|e| e.as_str()).map(str::to_lowercase))
+            atts_by_event.get(&id)
+                .and_then(|atts| atts.first())
+                .map(|a| a.extension.to_lowercase())
                 .filter(|e| !e.is_empty())
+                .or_else(|| tags.as_deref()
+                    .and_then(|t| serde_json::from_str::<Vec<Vec<String>>>(t).ok())
+                    .and_then(|parsed| parsed.into_iter()
+                        .find(|t| t.first().map(|k| k == "attachments").unwrap_or(false))
+                        .and_then(|t| t.into_iter().nth(1)))
+                    .and_then(|json| serde_json::from_str::<Vec<serde_json::Value>>(&json).ok())
+                    .and_then(|atts| atts.into_iter().next())
+                    .and_then(|a| a.get("extension").and_then(|e| e.as_str()).map(str::to_lowercase))
+                    .filter(|e| !e.is_empty()))
         } else {
             None
         };
@@ -995,10 +1009,19 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
         edits.sort_by_key(|(ts, _, _)| *ts);
     }
 
-    // Step 3: Parse attachments from event tags (+ legacy messages table fallback)
-    let mut attachments_by_msg: HashMap<String, Vec<Attachment>> = HashMap::new();
+    // Step 3: Attachments from the dedicated table (batched), with a legacy-tag fallback for any
+    // file event not represented in the table (an un-backfilled pre-migration row).
+    let attach_ids: Vec<String> = message_events.iter()
+        .filter(|e| e.kind == event_kind::FILE_ATTACHMENT || e.kind == event_kind::CHAT_MESSAGE)
+        .map(|e| e.id.clone())
+        .collect();
+    let mut attachments_by_msg = super::attachments::get_attachments_for_events(&attach_ids)
+        .unwrap_or_default();
     for event in &message_events {
         if event.kind != event_kind::FILE_ATTACHMENT && event.kind != event_kind::CHAT_MESSAGE {
+            continue;
+        }
+        if attachments_by_msg.contains_key(&event.id) {
             continue;
         }
         if let Some(json) = event.get_tag("attachments") {
@@ -1256,10 +1279,18 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
         edits.sort_by_key(|(ts, _, _)| *ts);
     }
 
-    // Step 3: Parse attachments
-    let mut attachments_by_msg: HashMap<String, Vec<Attachment>> = HashMap::new();
+    // Step 3: Attachments from the dedicated table (batched), with a legacy-tag fallback.
+    let attach_ids: Vec<String> = message_events.iter()
+        .filter(|(_, e, _)| e.kind == event_kind::FILE_ATTACHMENT || e.kind == event_kind::CHAT_MESSAGE)
+        .map(|(_, e, _)| e.id.clone())
+        .collect();
+    let mut attachments_by_msg = super::attachments::get_attachments_for_events(&attach_ids)
+        .unwrap_or_default();
     for (_, event, tags_json) in &message_events {
         if event.kind != event_kind::FILE_ATTACHMENT && event.kind != event_kind::CHAT_MESSAGE {
+            continue;
+        }
+        if attachments_by_msg.contains_key(&event.id) {
             continue;
         }
         if let Some(val) = extract_tag_from_json(tags_json, "attachments") {
@@ -1659,6 +1690,120 @@ mod tests {
         assert_eq!(agree().await, 0);
         // A chat with nothing at all reconciles to 0 (no row in the map).
         assert_eq!(unread_count_for_chat("npub1nonexistent").await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn attachments_table_round_trip_dedup_and_cascade() {
+        let (_tmp, _guard) = init_test_db();
+        // downloaded:false mirrors a freshly-received attachment (Attachment::default is downloaded:true).
+        let att = |id: &str, name: &str| Attachment {
+            id: id.into(), url: format!("https://blossom/{id}"), name: name.into(),
+            extension: "png".into(), size: 42, downloaded: false, ..Default::default()
+        };
+        let msg = |mid: &str, secs: u64, atts: Vec<Attachment>| Message {
+            id: mid.into(), content: String::new(), at: secs * 1000, mine: false,
+            npub: Some("npub1sender".into()), attachments: atts, ..Default::default()
+        };
+
+        // Save a message with two attachments → both rows, order preserved by att_index.
+        save_message("npub1att", &msg("m1", 1000, vec![att("hashA", "a.png"), att("hashB", "b.png")])).await.unwrap();
+        let got = crate::db::attachments::get_attachments_for_event("m1").unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!((got[0].id.as_str(), got[1].id.as_str()), ("hashA", "hashB"), "att_index order");
+        assert_eq!(got[0].name, "a.png");
+        assert_eq!(got[0].size, 42);
+        assert!(!got[0].downloaded);
+
+        // Single-row download flip (no read-modify-write of a blob).
+        crate::db::attachments::set_attachment_downloaded("m1", "hashA", true, "/tmp/a.png").unwrap();
+        let got = crate::db::attachments::get_attachments_for_event("m1").unwrap();
+        assert!(got[0].downloaded && got[0].path == "/tmp/a.png");
+        assert!(!got[1].downloaded, "sibling attachment untouched");
+
+        // Dedup: a second message shares hashA → backfill-by-hash marks it (indexed, no LIKE scan).
+        save_message("npub1att", &msg("m2", 1001, vec![att("hashA", "a-again.png")])).await.unwrap();
+        let affected = crate::db::attachments::backfill_downloaded_by_hash("hashA", "/tmp/a.png", "m1").unwrap();
+        assert_eq!(affected, vec!["m2".to_string()]);
+        assert!(crate::db::attachments::get_attachments_for_event("m2").unwrap()[0].downloaded);
+
+        // The write funnel dual-populates the legacy tag, so get_message_views (still tag-backed
+        // during shadow-populate) composes the attachments onto the Message.
+        let chat_int = crate::db::id_cache::get_or_create_chat_id("npub1att").unwrap();
+        let views = get_message_views(chat_int, 10, 0).await.unwrap();
+        let m1 = views.iter().find(|m| m.id == "m1").unwrap();
+        assert_eq!(m1.attachments.len(), 2);
+
+        // Cascade: deleting the event removes its attachment rows.
+        delete_event("m1").await.unwrap();
+        assert!(crate::db::attachments::get_attachments_for_event("m1").unwrap().is_empty(), "ON DELETE CASCADE");
+    }
+
+    // The download persist path: a re-save must never DOWNGRADE download state (relay re-delivery),
+    // but a re-save carrying a completed download (+ the nonce→content-hash id rewrite) must persist.
+    #[tokio::test]
+    async fn attachment_download_state_is_monotonic_across_resaves() {
+        let (_tmp, _guard) = init_test_db();
+        let att = |id: &str, downloaded: bool, path: &str| Attachment {
+            id: id.into(), url: "u".into(), name: "f.png".into(), extension: "png".into(),
+            size: 1, downloaded, path: path.into(), ..Default::default()
+        };
+        let msg = |atts: Vec<Attachment>| Message {
+            id: "dl1".into(), content: String::new(), at: 1_000_000, mine: false,
+            npub: Some("npub1s".into()), attachments: atts, ..Default::default()
+        };
+
+        // Receive (not downloaded), then the user downloads → single-row flip.
+        save_message("npub1dl", &msg(vec![att("nonceid", false, "")])).await.unwrap();
+        crate::db::attachments::set_attachment_downloaded("dl1", "nonceid", true, "/tmp/f.png").unwrap();
+
+        // Relay re-delivery (downloaded=false) must NOT reset the download.
+        save_message("npub1dl", &msg(vec![att("nonceid", false, "")])).await.unwrap();
+        let got = crate::db::attachments::get_attachments_for_event("dl1").unwrap();
+        assert!(got[0].downloaded && got[0].path == "/tmp/f.png", "re-delivery preserves the download");
+
+        // Post-download re-save: id rewritten nonce→content-hash, downloaded=true persists in one pass.
+        save_message("npub1dl", &msg(vec![att("contenthash", true, "/tmp/f.png")])).await.unwrap();
+        let got = crate::db::attachments::get_attachments_for_event("dl1").unwrap();
+        assert_eq!(got[0].id, "contenthash", "hash rewritten nonce→content");
+        assert!(got[0].downloaded && got[0].path == "/tmp/f.png");
+
+        // A re-delivery AFTER the rewrite must keep the content-hash key (not revert to the nonce),
+        // so the hash-keyed download/backfill/clear helpers still resolve the row.
+        save_message("npub1dl", &msg(vec![att("nonceid", false, "")])).await.unwrap();
+        let got = crate::db::attachments::get_attachments_for_event("dl1").unwrap();
+        assert_eq!(got[0].id, "contenthash", "content-hash key survives a later re-delivery");
+        assert!(got[0].downloaded && got[0].path == "/tmp/f.png");
+    }
+
+    // An un-backfilled pre-migration event (attachments only in the legacy tag, no table row) still
+    // renders via the read fallback.
+    #[tokio::test]
+    async fn attachments_fall_back_to_legacy_tag_when_table_empty() {
+        let (_tmp, _guard) = init_test_db();
+        let a = Attachment {
+            id: "tagonly".into(), url: "u".into(), name: "old.png".into(), extension: "png".into(),
+            size: 7, downloaded: false, ..Default::default()
+        };
+        save_message("npub1old", &Message {
+            id: "old1".into(), content: String::new(), at: 2_000_000, mine: false,
+            npub: Some("npub1s".into()), attachments: vec![a.clone()], ..Default::default()
+        }).await.unwrap();
+
+        // Simulate the pre-migration shape: drop the table rows, write the legacy tag onto the event.
+        {
+            let conn = crate::db::get_write_connection_guard_static().unwrap();
+            conn.execute("DELETE FROM attachments WHERE event_id='old1'", []).unwrap();
+            let inner = serde_json::to_string(&vec![a]).unwrap();
+            let tags = serde_json::to_string(&vec![vec!["attachments".to_string(), inner]]).unwrap();
+            conn.execute("UPDATE events SET tags=?1 WHERE id='old1'", rusqlite::params![tags]).unwrap();
+        }
+        assert!(crate::db::attachments::get_attachments_for_event("old1").unwrap().is_empty(), "table empty");
+
+        let chat_int = crate::db::id_cache::get_or_create_chat_id("npub1old").unwrap();
+        let views = get_message_views(chat_int, 10, 0).await.unwrap();
+        let old = views.iter().find(|m| m.id == "old1").unwrap();
+        assert_eq!(old.attachments.len(), 1, "attachment served from the legacy-tag fallback");
+        assert_eq!(old.attachments[0].name, "old.png");
     }
 
     // Mark-as-unread anchors from the FULL DB history (a community row often holds only a preview

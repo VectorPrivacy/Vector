@@ -900,5 +900,78 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // =========================================================================
+    // Migration 74: Dedicated attachments table + backfill from event tags
+    // =========================================================================
+    // Attachments lived as a `["attachments", <json>]` entry inside events.tags,
+    // making dedup a LIKE scan, the integrity check a per-event JSON parse, and
+    // every download flip a read-modify-write of the whole tags blob. Normalize
+    // into one row per attachment, keyed to its event (cascade on delete) and
+    // indexed by content hash. Backfill from the existing tags in this same
+    // transaction; the original tag is LEFT IN PLACE as a safety net (the table
+    // is authoritative, but no data is destroyed) until a later release strips it.
+    // Tags are plaintext at rest (only content is encrypted), so no decrypt here.
+    run_atomic_migration(conn, 74, "Attachments table + backfill", |tx| {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS attachments (
+                id           INTEGER PRIMARY KEY,
+                event_id     TEXT NOT NULL,
+                att_index    INTEGER NOT NULL,
+                hash         TEXT NOT NULL,
+                key          TEXT NOT NULL DEFAULT '',
+                nonce        TEXT NOT NULL DEFAULT '',
+                extension    TEXT NOT NULL DEFAULT '',
+                name         TEXT NOT NULL DEFAULT '',
+                url          TEXT NOT NULL DEFAULT '',
+                path         TEXT NOT NULL DEFAULT '',
+                size         INTEGER NOT NULL DEFAULT 0,
+                img_meta     TEXT,
+                downloaded   INTEGER NOT NULL DEFAULT 0,
+                webxdc_topic TEXT, group_id TEXT, original_hash TEXT, scheme_version TEXT, mls_filename TEXT,
+                UNIQUE(event_id, att_index),
+                FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_attachments_hash       ON attachments(hash);
+            CREATE INDEX IF NOT EXISTS idx_attachments_downloaded ON attachments(downloaded) WHERE downloaded = 1;"
+        ).map_err(|e| format!("Failed to create attachments table: {}", e))?;
+
+        // Backfill: parse each event's attachments tag and insert one row per attachment.
+        let events: Vec<(String, String)> = {
+            let mut stmt = tx.prepare("SELECT id, tags FROM events WHERE tags LIKE '%attachments%'")
+                .map_err(|e| format!("prepare attachment backfill: {}", e))?;
+            let mapped = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .map_err(|e| format!("query attachment backfill: {}", e))?;
+            mapped.filter_map(|r| r.ok()).collect()
+        };
+        for (event_id, tags_json) in events {
+            let tags: Vec<Vec<String>> = match serde_json::from_str(&tags_json) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let att_json = tags.iter()
+                .find(|t| t.first().map(|s| s.as_str()) == Some("attachments"))
+                .and_then(|t| t.get(1));
+            let Some(att_json) = att_json else { continue };
+            let atts: Vec<crate::types::Attachment> = match serde_json::from_str(att_json) {
+                Ok(a) => a,
+                Err(_) => continue,
+            };
+            for (i, a) in atts.iter().enumerate() {
+                let img_meta_json = a.img_meta.as_ref().and_then(|m| serde_json::to_string(m).ok());
+                tx.execute(
+                    "INSERT INTO attachments (event_id, att_index, hash, key, nonce, extension, name, url, \
+                     path, size, img_meta, downloaded, webxdc_topic, group_id, original_hash, scheme_version, mls_filename) \
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+                    rusqlite::params![
+                        event_id, i as i64, a.id, a.key, a.nonce, a.extension, a.name, a.url,
+                        a.path, a.size as i64, img_meta_json, a.downloaded as i64,
+                        a.webxdc_topic, a.group_id, a.original_hash, a.scheme_version, a.mls_filename,
+                    ],
+                ).map_err(|e| format!("insert backfilled attachment: {}", e))?;
+            }
+        }
+        Ok(())
+    })?;
+
     Ok(())
 }
