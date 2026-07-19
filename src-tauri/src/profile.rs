@@ -1,6 +1,5 @@
 use tauri::Emitter;
 
-#[cfg(not(target_os = "android"))]
 use std::sync::Arc;
 #[cfg(not(target_os = "android"))]
 use tauri_plugin_fs::FsExt;
