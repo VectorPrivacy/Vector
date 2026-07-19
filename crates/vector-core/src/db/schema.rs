@@ -885,5 +885,17 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // =========================================================================
+    // Migration 71: Covering index for the unread-count query
+    // =========================================================================
+    // Column order = (chat_id, mine, kind) equality then a created_at range; the four columns
+    // cover both the per-chat anchor MAX and the count, so neither touches the table.
+    run_atomic_migration(conn, 71, "Covering index for unread counts", |tx| {
+        tx.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_events_unread ON events(chat_id, mine, kind, created_at);"
+        ).map_err(|e| format!("Failed to create unread covering index: {}", e))?;
+        Ok(())
+    })?;
+
     Ok(())
 }

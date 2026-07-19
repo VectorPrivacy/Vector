@@ -1385,19 +1385,25 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
 /// Muted/blocked filtering is left to the caller (it lives in RAM state, cheaply).
 pub async fn unread_counts() -> Result<std::collections::HashMap<String, u32>, String> {
     let conn = super::get_db_connection_guard_static()?;
-    // The `last_read` anchor is kind-agnostic on purpose: a "read to here" marker can land on a
-    // system event (kind 30078), and it must still cut the count by its timestamp, or the badge
-    // wedges at a permanent 99+. Only the own-message anchor is kind-filtered.
+    // Anchor computed once per chat in the CTE so the count scan doesn't re-derive it per row. The
+    // anchor filter rides the LEFT JOIN's ON clause so a never-read chat still yields a row (anchor
+    // 0 via COALESCE) and counts all its messages; in WHERE it would drop those chats. The
+    // `last_read` anchor is kind-agnostic: a "read to here" marker can land on a system event (kind
+    // 30078) and must still cut the count by its timestamp. Only the own-message anchor is kind-filtered.
     let mut stmt = conn
         .prepare(
-            "SELECT c.chat_identifier, COUNT(*) AS unread \
-             FROM events e JOIN chats c ON e.chat_id = c.id \
-             WHERE e.kind IN (?1, ?2, ?3) AND e.mine = 0 \
-               AND e.created_at > COALESCE(( \
-                     SELECT MAX(e2.created_at) FROM events e2 \
-                     WHERE e2.chat_id = c.id \
-                       AND ((e2.mine = 1 AND e2.kind IN (?1, ?2, ?3)) OR e2.id = c.last_read)), 0) \
-             GROUP BY c.chat_identifier",
+            "WITH anchors AS ( \
+                SELECT c.id AS chat_id, c.chat_identifier AS chat_identifier, \
+                       COALESCE(MAX(e.created_at), 0) AS anchor_ts \
+                FROM chats c \
+                LEFT JOIN events e ON e.chat_id = c.id \
+                  AND ((e.mine = 1 AND e.kind IN (?1, ?2, ?3)) OR e.id = c.last_read) \
+                GROUP BY c.id \
+             ) \
+             SELECT a.chat_identifier, COUNT(*) AS unread \
+             FROM events e JOIN anchors a ON a.chat_id = e.chat_id \
+             WHERE e.kind IN (?1, ?2, ?3) AND e.mine = 0 AND e.created_at > a.anchor_ts \
+             GROUP BY a.chat_identifier",
         )
         .map_err(|e| format!("prepare unread_counts: {e}"))?;
     let rows = stmt
@@ -1415,6 +1421,30 @@ pub async fn unread_counts() -> Result<std::collections::HashMap<String, u32>, S
         out.insert(r.0, r.1);
     }
     Ok(out)
+}
+
+/// Unread count for a SINGLE chat, same semantics as [`unread_counts`]. The RAM cache calls this to
+/// reconcile one chat (open / delete / retreat) without recomputing every chat's count.
+pub async fn unread_count_for_chat(chat_identifier: &str) -> Result<u32, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM events e JOIN chats c ON e.chat_id = c.id \
+             WHERE c.chat_identifier = ?4 AND e.kind IN (?1, ?2, ?3) AND e.mine = 0 \
+               AND e.created_at > COALESCE(( \
+                     SELECT MAX(e2.created_at) FROM events e2 \
+                     WHERE e2.chat_id = c.id \
+                       AND ((e2.mine = 1 AND e2.kind IN (?1, ?2, ?3)) OR e2.id = c.last_read)), 0)",
+            rusqlite::params![
+                event_kind::CHAT_MESSAGE as i32,
+                event_kind::PRIVATE_DIRECT_MESSAGE as i32,
+                event_kind::FILE_ATTACHMENT as i32,
+                chat_identifier
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("query unread_count_for_chat: {e}"))?;
+    Ok(count as u32)
 }
 
 /// What [`compute_unread_anchor`] decided a chat's read marker should become to surface its newest
@@ -1624,6 +1654,40 @@ mod tests {
         assert_eq!(unread().await, 0, "last_read=m8 clears all");
         save_message(chat, &mk("m9", 2004, false)).await.unwrap();
         assert_eq!(unread().await, 1, "one arrival after last_read");
+    }
+
+    // The single-chat reconcile query must agree with the full map for every state the cache
+    // reconciles from (never-read, own-reply cutoff, last_read marker).
+    #[tokio::test]
+    async fn unread_count_for_chat_matches_the_map() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "npub1reconcile";
+        let mk = |id: &str, secs: u64, mine: bool| Message {
+            id: id.into(), content: "x".into(), at: secs * 1000, mine,
+            npub: (!mine).then(|| "npub1sender".to_string()),
+            ..Default::default()
+        };
+        let agree = || async {
+            let map = unread_counts().await.unwrap().get(chat).copied().unwrap_or(0);
+            let one = unread_count_for_chat(chat).await.unwrap();
+            assert_eq!(map, one, "single-chat query diverged from the map");
+            one
+        };
+
+        for i in 0..4u64 { save_message(chat, &mk(&format!("m{i}"), 1000 + i, false)).await.unwrap(); }
+        assert_eq!(agree().await, 4);
+        save_message(chat, &mk("mine", 1010, true)).await.unwrap();
+        assert_eq!(agree().await, 0);
+        save_message(chat, &mk("after", 1011, false)).await.unwrap();
+        assert_eq!(agree().await, 1);
+        {
+            let conn = crate::db::get_write_connection_guard_static().unwrap();
+            conn.execute("UPDATE chats SET last_read = ?1 WHERE chat_identifier = ?2",
+                rusqlite::params!["after", chat]).unwrap();
+        }
+        assert_eq!(agree().await, 0);
+        // A chat with nothing at all reconciles to 0 (no row in the map).
+        assert_eq!(unread_count_for_chat("npub1nonexistent").await.unwrap(), 0);
     }
 
     // Mark-as-unread anchors from the FULL DB history (a community row often holds only a preview
