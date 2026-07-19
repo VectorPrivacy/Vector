@@ -768,6 +768,12 @@ pub fn init_database(npub: &str) -> Result<(), String> {
     // Run migrations
     schema::run_migrations(&mut conn)?;
 
+    // SQLite's prescribed open-time step for long-lived connections: analyze every table that needs
+    // it (missing stats, or grown/shrunk 10x), bounded by a temporary analysis_limit so it stays
+    // fast. The 0x10000 bit forces checking all tables since a fresh connection has no query history;
+    // this also satisfies the "run optimize after CREATE INDEX" guidance for the migrations above.
+    let _ = conn.execute_batch("PRAGMA optimize=0x10002;");
+
     // MLS is fully removed. Migration 41 drops the relational tables, but the OpenMLS/MDK
     // crypto store lived in a SEPARATE per-account file (`<account>/mls/`) that no migration
     // can reach. Purge it here: it's dead weight (can run to hundreds of MB) and, worse,
@@ -830,9 +836,6 @@ pub fn init_database(npub: &str) -> Result<(), String> {
 /// check and discard the connection instead of returning it to the
 /// (now-cleared) pool.
 pub fn close_database() {
-    // Refresh planner stats before dropping the working connection: at close its per-session change
-    // counters reflect everything that churned, so PRAGMA optimize re-analyzes exactly those tables.
-    optimize_database();
     bump_pool_generation();
     if let Ok(mut pool) = DB_READ_POOL.lock() {
         pool.clear();
@@ -840,9 +843,10 @@ pub fn close_database() {
     *DB_WRITE_CONN.lock().unwrap() = None;
 }
 
-/// Refresh SQLite's query-planner statistics via `PRAGMA optimize`. Best-effort and cheap
-/// (incremental — re-analyzes only what changed since the last run), unlike the weekly VACUUM. Run
-/// at shutdown/connection-close so the NEXT boot plans from fresh stats without paying for it.
+/// Run plain `PRAGMA optimize` on the live write connection — the periodic top-up SQLite recommends
+/// for long-lived connections (the heavy lifting is the `optimize=0x10002` at connection open).
+/// Best-effort and cheap: re-analyzes only tables whose stats the planner used and that changed
+/// materially since the last run.
 pub fn optimize_database() {
     if let Ok(guard) = DB_WRITE_CONN.lock() {
         if let Some(conn) = guard.as_ref() {

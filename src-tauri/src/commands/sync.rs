@@ -930,11 +930,15 @@ pub async fn fetch_messages<R: Runtime>(
                 });
             }
 
-            // Post-sync: weekly vacuum
+            // Post-sync: weekly vacuum + daily planner-stats refresh.
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             if !archive_session.is_valid() { return; }
             if let Err(e) = db::check_and_vacuum_if_needed().await {
                 eprintln!("[Maintenance] Weekly VACUUM check failed: {}", e);
+            }
+            if !archive_session.is_valid() { return; }
+            if let Err(e) = db::check_and_optimize_if_needed().await {
+                eprintln!("[Maintenance] Daily optimize check failed: {}", e);
             }
         });
     }

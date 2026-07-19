@@ -13,7 +13,7 @@ use jni::objects::{GlobalRef, JClass, JObject, JObjectArray, JString};
 use jni::{JavaVM, JNIEnv};
 use nostr_sdk::prelude::*;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::{NOSTR_CLIENT, MY_SECRET_KEY, ENCRYPTION_KEY, set_my_public_key};
@@ -115,29 +115,6 @@ pub extern "C" fn Java_io_vectorapp_MainActivity_nativeOnResume(
     }
 }
 
-/// Last time (unix secs) the background hook refreshed the query planner's stats. Throttles
-/// PRAGMA optimize so the frequent onPause (every app-switch/shade-pull) doesn't re-analyze.
-static LAST_BG_OPTIMIZE_SECS: AtomicI64 = AtomicI64::new(0);
-
-/// Refresh planner stats when the app backgrounds — the Android analogue of the desktop app-exit
-/// hook. Throttled (stats don't need refreshing more than a couple of times an hour) and run off the
-/// lifecycle thread so the first, slower analyze never stalls the app-switch.
-fn maybe_optimize_on_pause() {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let last = LAST_BG_OPTIMIZE_SECS.load(Ordering::Relaxed);
-    if now.saturating_sub(last) < 1800 {
-        return; // at most once per 30 min
-    }
-    LAST_BG_OPTIMIZE_SECS.store(now, Ordering::Relaxed);
-    std::thread::spawn(|| {
-        crate::account_manager::optimize_db();
-        logcat("Refreshed query-planner stats (background)");
-    });
-}
-
 /// Called from MainActivity.onPause via JNI
 #[no_mangle]
 pub extern "C" fn Java_io_vectorapp_MainActivity_nativeOnPause(
@@ -146,10 +123,6 @@ pub extern "C" fn Java_io_vectorapp_MainActivity_nativeOnPause(
 ) {
     ACTIVITY_IN_FOREGROUND.store(false, Ordering::Release);
     logcat("Activity paused (background)");
-
-    // Backgrounding is our chance to refresh planner stats on this account's live connection, before
-    // any standalone-sync re-init below swaps the pool. Throttled + off-thread (see the fn).
-    maybe_optimize_on_pause();
 
     // Start standalone sync if the foreground service is active but standalone sync isn't running.
     // This handles the case where the app was open (standalone sync was skipped), and the user

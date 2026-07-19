@@ -61,12 +61,6 @@ pub fn close_db_connection() {
     vector_core::db::close_database();
 }
 
-/// Refresh the query planner's statistics (PRAGMA optimize) without tearing the pool down. Called on
-/// app exit so the next launch plans from fresh stats without paying the analyze cost at boot.
-pub fn optimize_db() {
-    vector_core::db::optimize_database();
-}
-
 /// Initialize the DB pool using static path (for headless/background service).
 #[allow(dead_code)]
 pub fn init_db_pool_static(_db_path: &std::path::Path) -> Result<(), String> {

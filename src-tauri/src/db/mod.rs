@@ -8,7 +8,7 @@ mod attachments;
 mod events;
 
 // Re-exports
-pub use maintenance::check_and_vacuum_if_needed;
+pub use maintenance::{check_and_vacuum_if_needed, check_and_optimize_if_needed};
 // Settings functions used internally (not just as Tauri commands)
 pub use settings::{get_sql_setting, set_sql_setting, get_seed, set_seed, get_pkey};
 // Profile types and functions
