@@ -39,26 +39,6 @@ CREATE TABLE IF NOT EXISTS chats (
 CREATE INDEX IF NOT EXISTS idx_chats_identifier ON chats(chat_identifier);
 CREATE INDEX IF NOT EXISTS idx_chats_created ON chats(created_at DESC);
 
--- Messages table (content encrypted, metadata plaintext)
-CREATE TABLE IF NOT EXISTS messages (
-    id TEXT PRIMARY KEY,
-    chat_id INTEGER NOT NULL,
-    content_encrypted TEXT NOT NULL,
-    replied_to TEXT NOT NULL DEFAULT '',
-    preview_metadata TEXT,
-    attachments TEXT NOT NULL DEFAULT '[]',
-    reactions TEXT NOT NULL DEFAULT '[]',
-    at INTEGER NOT NULL,
-    mine INTEGER NOT NULL,
-    user_id INTEGER,
-    wrapper_event_id TEXT,
-    FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE,
-    FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE SET NULL
-);
-CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, at);
-CREATE INDEX IF NOT EXISTS idx_messages_time ON messages(at DESC);
-CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id);
-CREATE INDEX IF NOT EXISTS idx_messages_wrapper ON messages(wrapper_event_id);
 
 -- Settings table (key-value pairs)
 CREATE TABLE IF NOT EXISTS settings (
@@ -905,6 +885,18 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     run_atomic_migration(conn, 72, "Drop unused events user_id index", |tx| {
         tx.execute_batch("DROP INDEX IF EXISTS idx_events_user;")
             .map_err(|e| format!("Failed to drop idx_events_user: {}", e))?;
+        Ok(())
+    })?;
+
+    // =========================================================================
+    // Migration 73: Drop the legacy `messages` table
+    // =========================================================================
+    // Superseded by `events` at v0.3.1 (its data + attachment metadata were
+    // copied over then). The public app has shipped on `events` since v0.4.0,
+    // so no live account writes or reads `messages`. DROP takes its indexes too.
+    run_atomic_migration(conn, 73, "Drop legacy messages table", |tx| {
+        tx.execute_batch("DROP TABLE IF EXISTS messages;")
+            .map_err(|e| format!("Failed to drop legacy messages table: {}", e))?;
         Ok(())
     })?;
 

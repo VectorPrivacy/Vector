@@ -997,8 +997,6 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
 
     // Step 3: Parse attachments from event tags (+ legacy messages table fallback)
     let mut attachments_by_msg: HashMap<String, Vec<Attachment>> = HashMap::new();
-    let mut events_needing_legacy_lookup: Vec<String> = Vec::new();
-
     for event in &message_events {
         if event.kind != event_kind::FILE_ATTACHMENT && event.kind != event_kind::CHAT_MESSAGE {
             continue;
@@ -1007,33 +1005,6 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
             if let Ok(atts) = serde_json::from_str::<Vec<Attachment>>(json) {
                 if !atts.is_empty() {
                     attachments_by_msg.insert(event.id.clone(), atts);
-                    continue;
-                }
-            }
-        }
-        if event.kind == event_kind::FILE_ATTACHMENT {
-            events_needing_legacy_lookup.push(event.id.clone());
-        }
-    }
-
-    // Legacy fallback: old migrated events without attachments tag
-    if !events_needing_legacy_lookup.is_empty() {
-        if let Ok(conn) = super::get_db_connection_guard_static() {
-            let has_messages: bool = conn.query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='messages'",
-                [], |row| row.get::<_, i32>(0)
-            ).map(|c| c > 0).unwrap_or(false);
-
-            if has_messages {
-                for msg_id in &events_needing_legacy_lookup {
-                    if let Ok(json) = conn.query_row::<String, _, _>(
-                        "SELECT attachments FROM messages WHERE id = ?1",
-                        rusqlite::params![msg_id], |row| row.get(0),
-                    ) {
-                        if let Ok(atts) = serde_json::from_str::<Vec<Attachment>>(&json) {
-                            attachments_by_msg.insert(msg_id.to_string(), atts);
-                        }
-                    }
                 }
             }
         }
