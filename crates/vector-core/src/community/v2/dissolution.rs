@@ -106,6 +106,21 @@ pub fn seal_dissolved(
     Ok(wrap)
 }
 
+/// Signer-driven twin of [`seal_dissolved`] for bunker / NIP-55 accounts: the
+/// plaintext dissolution tombstone signs through a [`NostrSigner`]. `owner_pk`
+/// must equal `my_public_key()` (the owner identity the signer signs as).
+pub async fn seal_dissolved_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+    signer: &S,
+    owner_pk: PublicKey,
+    rumor: &UnsignedEvent,
+    community_id: &CommunityId,
+    wrap_at: Timestamp,
+) -> Result<Event, DissolveError> {
+    let group = dissolved_group_key(community_id);
+    let (wrap, _ephemeral) = stream::seal_and_wrap_signed(signer, owner_pk, rumor, SealForm::Plaintext, &group, stream::KIND_WRAP, wrap_at, &[]).await?;
+    Ok(wrap)
+}
+
 /// Open + structurally verify a wrap at the dissolved address into its signer.
 /// This proves the seal signature and the tombstone shape but NOT the owner —
 /// [`verify_dissolved`] is the fail-closed authority gate.

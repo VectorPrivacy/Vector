@@ -629,6 +629,97 @@ pub fn unwrap_direct_invite(wrap: &Event, recipient_keys: &Keys) -> Result<(Publ
     Ok((seal.pubkey, bundle))
 }
 
+// ── Signer-driven twins (bunker / NIP-55): identical wire, identity ops via NostrSigner ──
+
+/// [`build_invite_list_event`] via a [`NostrSigner`]. Self-encrypts to `my_pk` and
+/// signs the 13303 through the signer. `my_pk` must equal `my_public_key()`.
+pub async fn build_invite_list_event_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+    signer: &S,
+    my_pk: PublicKey,
+    list: &InviteList,
+) -> Result<Event, InviteError> {
+    let json = serde_json::to_string(list).map_err(|e| InviteError::Json(e.to_string()))?;
+    let content = signer.nip44_encrypt(&my_pk, &json).await.map_err(|e| InviteError::Crypto(e.to_string()))?;
+    let unsigned = EventBuilder::new(Kind::Custom(kind::INVITE_LIST), content).build(my_pk);
+    signer.sign_event(unsigned).await.map_err(|e| InviteError::Crypto(e.to_string()))
+}
+
+/// [`parse_invite_list_event`] via a [`NostrSigner`] (self-decrypt to `my_pk`).
+pub async fn parse_invite_list_event_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+    signer: &S,
+    my_pk: PublicKey,
+    event: &Event,
+) -> Result<InviteList, InviteError> {
+    if event.kind.as_u16() != kind::INVITE_LIST {
+        return Err(InviteError::BadEvent("not a kind-13303 invite list"));
+    }
+    let json = signer.nip44_decrypt(&my_pk, &event.content).await.map_err(|e| InviteError::Crypto(e.to_string()))?;
+    serde_json::from_str(&json).map_err(|e| InviteError::Json(e.to_string()))
+}
+
+/// [`build_direct_invite`] via a [`NostrSigner`]: the kind-13 seal's NIP-44 (inviter
+/// → recipient) and signature go through the signer; the ephemeral wrap stays local.
+pub async fn build_direct_invite_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+    signer: &S,
+    inviter_pk: PublicKey,
+    recipient: &PublicKey,
+    bundle: &CommunityInvite,
+) -> Result<Event, InviteError> {
+    let json = serde_json::to_string(bundle).map_err(|e| InviteError::Json(e.to_string()))?;
+    let mut rumor = EventBuilder::new(Kind::Custom(kind::DIRECT_INVITE), json)
+        .custom_created_at(Timestamp::now())
+        .build(inviter_pk);
+    rumor.ensure_id();
+    let rumor_json = rumor.as_json();
+    let seal_content = signer.nip44_encrypt(recipient, &rumor_json).await.map_err(|e| InviteError::Crypto(e.to_string()))?;
+    let seal_unsigned = EventBuilder::new(Kind::Seal, seal_content)
+        .custom_created_at(Timestamp::tweaked(RANGE_RANDOM_TIMESTAMP_TWEAK))
+        .build(inviter_pk);
+    let seal = signer.sign_event(seal_unsigned).await.map_err(|e| InviteError::Crypto(e.to_string()))?;
+    let ephemeral = Keys::generate();
+    let wrap_content = nip44::encrypt(ephemeral.secret_key(), recipient, seal.as_json(), nip44::Version::default())
+        .map_err(|e| InviteError::Crypto(e.to_string()))?;
+    let mut tags = vec![
+        Tag::public_key(*recipient),
+        Tag::custom(TagKind::Custom("k".into()), [kind::DIRECT_INVITE.to_string()]),
+    ];
+    if let Some(ms) = bundle.expires_at {
+        tags.push(Tag::custom(TagKind::Custom("expiration".into()), [(ms / 1000).to_string()]));
+    }
+    EventBuilder::new(Kind::GiftWrap, wrap_content)
+        .tags(tags)
+        .custom_created_at(Timestamp::tweaked(RANGE_RANDOM_TIMESTAMP_TWEAK))
+        .sign_with_keys(&ephemeral)
+        .map_err(|e| InviteError::Crypto(e.to_string()))
+}
+
+/// [`unwrap_direct_invite`] via a [`NostrSigner`]: both giftwrap peels decrypt
+/// through the signer. Same seal-verify + author-bind gates as the local path.
+pub async fn unwrap_direct_invite_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+    signer: &S,
+    wrap: &Event,
+) -> Result<(PublicKey, CommunityInvite), InviteError> {
+    if wrap.kind != Kind::GiftWrap {
+        return Err(InviteError::BadEvent("not a gift wrap"));
+    }
+    let seal_json = signer.nip44_decrypt(&wrap.pubkey, &wrap.content).await.map_err(|e| InviteError::Crypto(e.to_string()))?;
+    let seal = Event::from_json(&seal_json).map_err(|e| InviteError::Json(e.to_string()))?;
+    if seal.kind != Kind::Seal {
+        return Err(InviteError::BadEvent("inner is not a seal"));
+    }
+    seal.verify().map_err(|_| InviteError::BadEvent("seal signature invalid"))?;
+    let rumor_json = signer.nip44_decrypt(&seal.pubkey, &seal.content).await.map_err(|e| InviteError::Crypto(e.to_string()))?;
+    let rumor = UnsignedEvent::from_json(rumor_json.as_bytes()).map_err(|e| InviteError::Json(e.to_string()))?;
+    if rumor.kind.as_u16() != kind::DIRECT_INVITE {
+        return Err(InviteError::BadEvent("rumor is not a direct invite"));
+    }
+    if rumor.pubkey != seal.pubkey {
+        return Err(InviteError::BadEvent("rumor author does not match the seal signer"));
+    }
+    let bundle = CommunityInvite::from_bundle_json(&rumor.content)?;
+    Ok((seal.pubkey, bundle))
+}
+
 // ── helpers ────────────────────────────────────────────────────────────────────
 
 fn hex32(s: &str, field: &'static str) -> Result<[u8; 32], InviteError> {

@@ -26,7 +26,7 @@
 //! clobber a populated local list — treat an unreadable event as "no news".
 
 use nostr_sdk::nips::nip44::{self, Version};
-use nostr_sdk::prelude::{Event, EventBuilder, Keys, Kind};
+use nostr_sdk::prelude::{Event, EventBuilder, Keys, Kind, PublicKey};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -328,6 +328,33 @@ pub fn parse_list_event(event: &Event, my_keys: &Keys) -> Result<CommunityList, 
     }
     let json = nip44::decrypt(my_keys.secret_key(), &my_keys.public_key(), &event.content)
         .map_err(|e| ListError::Nip44(e.to_string()))?;
+    serde_json::from_str(&json).map_err(|e| ListError::Json(e.to_string()))
+}
+
+/// [`build_list_event`] via a [`NostrSigner`]: self-encrypts to `my_pk` and signs
+/// the 13302 through the signer. `my_pk` must equal `my_public_key()`.
+pub async fn build_list_event_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+    signer: &S,
+    my_pk: PublicKey,
+    list: &CommunityList,
+) -> Result<Event, ListError> {
+    list.assert_fits()?;
+    let json = serde_json::to_string(list).map_err(|e| ListError::Json(e.to_string()))?;
+    let content = signer.nip44_encrypt(&my_pk, &json).await.map_err(|e| ListError::Nip44(e.to_string()))?;
+    let unsigned = EventBuilder::new(Kind::Custom(kind::COMMUNITY_LIST), content).build(my_pk);
+    signer.sign_event(unsigned).await.map_err(|e| ListError::Sign(e.to_string()))
+}
+
+/// [`parse_list_event`] via a [`NostrSigner`] (self-decrypt to `my_pk`).
+pub async fn parse_list_event_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+    signer: &S,
+    my_pk: PublicKey,
+    event: &Event,
+) -> Result<CommunityList, ListError> {
+    if event.kind.as_u16() != kind::COMMUNITY_LIST {
+        return Err(ListError::WrongKind(event.kind.as_u16()));
+    }
+    let json = signer.nip44_decrypt(&my_pk, &event.content).await.map_err(|e| ListError::Nip44(e.to_string()))?;
     serde_json::from_str(&json).map_err(|e| ListError::Json(e.to_string()))
 }
 

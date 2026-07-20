@@ -305,6 +305,31 @@ pub fn seal_chat_rumor(
     Ok(stream::wrap_seal_with_tags(&seal, group, wrap_kind, wrap_at, &wrap_extra)?)
 }
 
+/// Signer-driven twin of [`seal_chat_rumor`] for bunker / NIP-55 accounts: the
+/// author seal signs through a [`NostrSigner`]; the group-key wrap is unchanged.
+/// `author` is the identity the signer signs as (must equal `my_public_key()`).
+pub async fn seal_chat_rumor_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+    signer: &S,
+    author: nostr_sdk::prelude::PublicKey,
+    rumor: &UnsignedEvent,
+    group: &GroupKey,
+    wrap_at: Timestamp,
+    ephemeral: bool,
+) -> Result<(Event, Keys), ChatError> {
+    let k = rumor.kind.as_u16();
+    if !is_chat_kind(k) {
+        return Err(ChatError::UnknownKind(k));
+    }
+    let wrap_kind = if ephemeral { stream::KIND_WRAP_EPHEMERAL } else { stream::KIND_WRAP };
+    let wrap_extra: Vec<Tag> = rumor
+        .tags
+        .iter()
+        .filter(|t| t.as_slice().first().map(|k| k.as_str() == "expiration").unwrap_or(false))
+        .cloned()
+        .collect();
+    Ok(stream::seal_and_wrap_signed(signer, author, rumor, SealForm::Encrypted, group, wrap_kind, wrap_at, &wrap_extra).await?)
+}
+
 /// A parsed reply reference — the NIP-C7 `q` tag's parent rumor id and (when
 /// carried, a SHOULD upstream) its author.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -255,6 +255,54 @@ pub fn open_blob_local(
     parse_bound_plaintext(&pt, scope, epoch)
 }
 
+/// Build one blob via a [`NostrSigner`] (the bunker / NIP-55 path). Wire-identical
+/// to [`build_blob_local`]: `signer.nip44_encrypt(recipient, bound_plaintext_b64)`
+/// whose conversation key is ECDH(signer_identity, recipient) — the same key the
+/// local path derives from the raw rotator secret. The `wrapped` field is the
+/// standard NIP-44 payload string (D5), so both paths emit identical wire.
+pub async fn build_blob<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+    signer: &S,
+    rotator_xonly: &[u8; 32],
+    recipient_pk: &PublicKey,
+    scope: RekeyScope,
+    epoch: Epoch,
+    new_key: &[u8; 32],
+) -> Result<RekeyBlob, RekeyError> {
+    let inner_b64 = Zeroizing::new(bound_plaintext_b64(scope, epoch, new_key));
+    let wrapped = signer
+        .nip44_encrypt(recipient_pk, inner_b64.as_str())
+        .await
+        .map_err(|e| RekeyError::Crypto(e.to_string()))?;
+    Ok(RekeyBlob {
+        locator: blob_locator(rotator_xonly, &recipient_pk.to_bytes(), scope, epoch),
+        wrapped,
+    })
+}
+
+/// Open a blob addressed to me via a [`NostrSigner`]. Mirror of [`open_blob_local`]:
+/// `signer.nip44_decrypt(rotator, blob.wrapped)` yields the base64 bound plaintext,
+/// then the scope/epoch bound check gates it. Per D1 the locator is NOT gated.
+pub async fn open_blob<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+    signer: &S,
+    rotator_pk: &PublicKey,
+    scope: RekeyScope,
+    epoch: Epoch,
+    blob: &RekeyBlob,
+) -> Result<[u8; 32], RekeyError> {
+    let inner_b64 = Zeroizing::new(
+        signer
+            .nip44_decrypt(rotator_pk, &blob.wrapped)
+            .await
+            .map_err(|e| RekeyError::Crypto(e.to_string()))?,
+    );
+    let pt = Zeroizing::new(
+        base64_simd::STANDARD
+            .decode_to_vec(inner_b64.as_bytes())
+            .map_err(|e| RekeyError::Crypto(e.to_string()))?,
+    );
+    parse_bound_plaintext(&pt, scope, epoch)
+}
+
 /// Find my blob in a chunk's array by my public locator (the lookup step, D1).
 /// `None` means this chunk doesn't carry my key — never a removal on its own
 /// (only "removed" once ALL chunks are held and none has it).
@@ -395,6 +443,36 @@ pub fn build_rekey_chunks_local(
             at_secs,
         )?;
         let (wrap, _) = seal_rekey_chunk(&rumor, rekey_group, rotator_keys, Timestamp::from_secs(at_secs))?;
+        out.push(wrap);
+    }
+    Ok(out)
+}
+
+/// Signer-driven twin of [`build_rekey_chunks_local`] for bunker / NIP-55 accounts:
+/// each chunk's encrypted seal signs through a [`NostrSigner`]. `rotator_pk` must
+/// equal `my_public_key()`. Wire-identical to the local path.
+#[allow(clippy::too_many_arguments)]
+pub async fn build_rekey_chunks<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+    signer: &S,
+    rotator_pk: PublicKey,
+    rekey_group: &GroupKey,
+    scope: RekeyScope,
+    new_epoch: Epoch,
+    prev_epoch: Epoch,
+    prev_commit: &[u8; 32],
+    blobs: &[RekeyBlob],
+    at_secs: u64,
+) -> Result<Vec<Event>, RekeyError> {
+    let groups: Vec<&[RekeyBlob]> = if blobs.is_empty() {
+        vec![&[]]
+    } else {
+        blobs.chunks(MAX_REKEY_BLOBS_PER_EVENT).collect()
+    };
+    let n = groups.len() as u32;
+    let mut out = Vec::with_capacity(groups.len());
+    for (idx, group_blobs) in groups.iter().enumerate() {
+        let rumor = build_rekey_rumor(rotator_pk, scope, new_epoch, prev_epoch, prev_commit, group_blobs, idx as u32 + 1, n, at_secs)?;
+        let (wrap, _) = stream::seal_and_wrap_signed(signer, rotator_pk, &rumor, SealForm::Encrypted, rekey_group, stream::KIND_WRAP, Timestamp::from_secs(at_secs), &[]).await?;
         out.push(wrap);
     }
     Ok(out)
@@ -651,6 +729,42 @@ mod tests {
             let got = open_blob_local(recipient.secret_key(), &rotator.public_key(), scope, epoch, &blob).unwrap();
             assert_eq!(got, key, "the recipient recovers the fresh key");
         }
+    }
+
+    #[tokio::test]
+    async fn signer_blob_is_wire_compatible_with_local_both_directions() {
+        // A remote signer (here a plain Keys, which impls NostrSigner) must build
+        // AND open blobs interchangeably with the raw-key path — the CORD-06 D5
+        // "identical wire" guarantee the bunker/NIP-55 integration rests on.
+        let rotator = keys(7);
+        let recipient = keys(8);
+        let scope = RekeyScope::Root;
+        let epoch = Epoch(3);
+        let key = [0x5Au8; 32];
+
+        // local build -> signer open
+        let blob_l = build_blob_local(rotator.secret_key(), &xonly(&rotator), &recipient.public_key(), scope, epoch, &key).unwrap();
+        let got_s = open_blob(&recipient, &rotator.public_key(), scope, epoch, &blob_l).await.unwrap();
+        assert_eq!(got_s, key, "signer opens a local-built blob");
+
+        // signer build -> local open (+ identical public locator)
+        let blob_s = build_blob(&rotator, &xonly(&rotator), &recipient.public_key(), scope, epoch, &key).await.unwrap();
+        assert_eq!(blob_s.locator, blob_l.locator, "same public locator regardless of build path");
+        let got_l = open_blob_local(recipient.secret_key(), &rotator.public_key(), scope, epoch, &blob_s).unwrap();
+        assert_eq!(got_l, key, "local opens a signer-built blob");
+
+        // signer build -> signer open
+        let got_ss = open_blob(&recipient, &rotator.public_key(), scope, epoch, &blob_s).await.unwrap();
+        assert_eq!(got_ss, key, "signer round-trips its own blob");
+    }
+
+    #[tokio::test]
+    async fn signer_blob_bound_check_still_gates_scope_epoch_splice() {
+        let rotator = keys(7);
+        let recipient = keys(8);
+        let blob = build_blob(&rotator, &xonly(&rotator), &recipient.public_key(), RekeyScope::Root, Epoch(1), &[9u8; 32]).await.unwrap();
+        assert!(open_blob(&recipient, &rotator.public_key(), RekeyScope::Root, Epoch(2), &blob).await.is_err(), "epoch splice rejected");
+        assert!(open_blob(&recipient, &rotator.public_key(), RekeyScope::Channel(CHAN), Epoch(1), &blob).await.is_err(), "scope splice rejected");
     }
 
     #[test]

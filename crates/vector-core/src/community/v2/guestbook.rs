@@ -174,6 +174,19 @@ pub fn seal_guestbook_rumor(
     Ok(stream::wrap_seal(&seal, group, stream::KIND_WRAP, wrap_at)?)
 }
 
+/// Signer-driven twin of [`seal_guestbook_rumor`] for bunker / NIP-55 accounts:
+/// the encrypted seal signs through a [`NostrSigner`]. `author` is the identity
+/// the signer signs as (must equal `my_public_key()`). Wire-identical output.
+pub async fn seal_guestbook_rumor_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+    signer: &S,
+    author: PublicKey,
+    rumor: &UnsignedEvent,
+    group: &GroupKey,
+    wrap_at: Timestamp,
+) -> Result<(Event, Keys), GuestbookError> {
+    Ok(stream::seal_and_wrap_signed(signer, author, rumor, SealForm::Encrypted, group, stream::KIND_WRAP, wrap_at, &[]).await?)
+}
+
 // ── Parse ────────────────────────────────────────────────────────────────────
 
 /// One parsed guestbook event: the entry plus the identity the coalesce

@@ -216,6 +216,19 @@ pub fn seal_control_edition(
     Ok(stream::wrap_seal(&seal, group, stream::KIND_WRAP, wrap_at)?)
 }
 
+/// Signer-driven twin of [`seal_control_edition`] for bunker / NIP-55 accounts:
+/// the plaintext seal signs through a [`NostrSigner`]. `author` is the identity
+/// the signer signs as (must equal `my_public_key()`). Wire-identical output.
+pub async fn seal_control_edition_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+    signer: &S,
+    author: PublicKey,
+    rumor: &UnsignedEvent,
+    group: &GroupKey,
+    wrap_at: Timestamp,
+) -> Result<(Event, Keys), ControlError> {
+    Ok(stream::seal_and_wrap_signed(signer, author, rumor, SealForm::Plaintext, group, stream::KIND_WRAP, wrap_at, &[]).await?)
+}
+
 /// Open a control-plane wrap into a verified, parsed edition. Strict on both
 /// gates: the rumor must be kind 3308, and the seal must be the plaintext form.
 pub fn open_control_edition(wrap: &Event, group: &GroupKey) -> Result<(ParsedEdition, OpenedStream), ControlError> {
@@ -382,6 +395,41 @@ pub fn genesis(owner_keys: &Keys, mut metadata: CommunityMetadata, at_secs: u64)
 
     let (meta_wrap, _) = seal_control_edition(&meta_rumor, &group, owner_keys, Timestamp::from_secs(at_secs))?;
     let (general_wrap, _) = seal_control_edition(&general_rumor, &group, owner_keys, Timestamp::from_secs(at_secs))?;
+
+    Ok(Genesis {
+        identity,
+        community_root,
+        general_channel_id,
+        wraps: [meta_wrap, general_wrap],
+    })
+}
+
+/// Signer-driven twin of [`genesis`] for bunker / NIP-55 accounts: mints from the
+/// owner's public key and seals the two genesis editions through a [`NostrSigner`].
+/// `owner_pk` must equal `my_public_key()` (the identity the signer signs as).
+pub async fn genesis_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+    owner_pk: PublicKey,
+    signer: &S,
+    mut metadata: CommunityMetadata,
+    at_secs: u64,
+) -> Result<Genesis, ControlError> {
+    validate_community_metadata(&metadata)?;
+    metadata.relays.truncate(super::super::MAX_COMMUNITY_RELAYS);
+
+    let identity = CommunityIdentity::mint(&owner_pk);
+    let community_root = super::super::random_32();
+    let general_channel_id = ChannelId(super::super::random_32());
+    let group = control_group_key(&community_root, &identity.community_id, Epoch(0));
+
+    let meta_json = serde_json::to_string(&metadata).map_err(|e| ControlError::Stream(StreamError::Parse(e.to_string())))?;
+    let meta_rumor = build_edition_rumor(owner_pk, vsk::COMMUNITY_METADATA, &identity.community_id.0, 1, None, &meta_json, at_secs, None);
+
+    let general = ChannelMetadata { name: "general".into(), private: false, ..Default::default() };
+    let general_json = serde_json::to_string(&general).map_err(|e| ControlError::Stream(StreamError::Parse(e.to_string())))?;
+    let general_rumor = build_edition_rumor(owner_pk, vsk::CHANNEL_METADATA, &general_channel_id.0, 1, None, &general_json, at_secs, None);
+
+    let (meta_wrap, _) = seal_control_edition_signed(signer, owner_pk, &meta_rumor, &group, Timestamp::from_secs(at_secs)).await?;
+    let (general_wrap, _) = seal_control_edition_signed(signer, owner_pk, &general_rumor, &group, Timestamp::from_secs(at_secs)).await?;
 
     Ok(Genesis {
         identity,

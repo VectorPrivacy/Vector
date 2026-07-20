@@ -302,6 +302,32 @@ pub fn wrap_seal_with_tags(
     Ok((wrap, ephemeral))
 }
 
+/// Signer-driven twin of [`build_seal`] + [`wrap_seal_with_tags`]: seal a rumor
+/// into its wrap using a [`NostrSigner`] for the author signature, so a NIP-46
+/// bunker (or NIP-55) account yields wire-identical output to the local-keys
+/// path. Only the seal signature needs the identity key; the seal content
+/// (symmetric group-key encrypt, or plaintext) and the group-key wrap do not.
+pub async fn seal_and_wrap_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+    signer: &S,
+    author: PublicKey,
+    rumor: &UnsignedEvent,
+    form: SealForm,
+    group: &GroupKey,
+    wrap_kind: u16,
+    wrap_at: Timestamp,
+    extra_tags: &[Tag],
+) -> Result<(Event, Keys), StreamError> {
+    let content = seal_content(rumor, form, group)?;
+    let unsigned = EventBuilder::new(Kind::Custom(form.kind()), content)
+        .custom_created_at(rumor.created_at)
+        .build(author);
+    let seal = signer
+        .sign_event(unsigned)
+        .await
+        .map_err(|e| StreamError::Sign(e.to_string()))?;
+    wrap_seal_with_tags(&seal, group, wrap_kind, wrap_at, extra_tags)
+}
+
 /// Re-wrap an already-verified PLAINTEXT seal into another stream (a compaction
 /// carrying a signed edition into a new epoch). The seal event is carried
 /// whole — its content string holds the rumor bytes verbatim, so the rumor id
@@ -463,6 +489,31 @@ mod tests {
         assert_eq!(opened.at_ms, 1_686_840_217_417);
         assert_eq!(opened.seal_form, SealForm::Encrypted);
         check_channel_binding(&opened.rumor, &chan(), Epoch(0)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn signer_seal_opens_identically_to_local_seal() {
+        // A signer that is a plain Keys (NOT the vault) must produce a wrap that
+        // opens to the same rumor + author as the local build_seal path — the seal
+        // half of the wire-identity guarantee the bunker/NIP-55 integration rests on.
+        let author = Keys::generate();
+        let g = group();
+        let tags = channel_binding_tags(&chan(), Epoch(0));
+        let rumor = build_rumor_ms(kind::MESSAGE, author.public_key(), "parity", tags, 1_686_840_217_000);
+        let wrap_at = Timestamp::from_secs(1_686_840_217);
+
+        let seal_l = build_seal(&rumor, SealForm::Encrypted, &g, &author).unwrap();
+        let (wrap_l, _) = wrap_seal(&seal_l, &g, KIND_WRAP, wrap_at).unwrap();
+        let (wrap_s, _) = seal_and_wrap_signed(&author, author.public_key(), &rumor, SealForm::Encrypted, &g, KIND_WRAP, wrap_at, &[])
+            .await
+            .unwrap();
+
+        let opened_l = open_wrap(&wrap_l, &g).unwrap();
+        let opened_s = open_wrap(&wrap_s, &g).unwrap();
+        assert_eq!(opened_l.rumor_id, opened_s.rumor_id, "same inner rumor id via either seal path");
+        assert_eq!(opened_s.author, author.public_key(), "signer seal carries the author identity");
+        assert_eq!(opened_l.seal_form, opened_s.seal_form);
+        assert_eq!(opened_s.rumor.content, "parity");
     }
 
     #[test]

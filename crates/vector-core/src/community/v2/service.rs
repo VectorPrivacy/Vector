@@ -3,14 +3,15 @@
 //! (a `swap_session` can land at any await — see CLAUDE.md), mirroring the v1
 //! service's discipline.
 //!
-//! First-cut scope (bots): create a community, send + fetch channel messages,
-//! accept invites, publish a Guestbook Join. Rotation/refounding/moderation and
-//! full roster folding layer on next. Signing is local-keys for now (bots hold
-//! their nsec); a NIP-46 bunker create/send path is a documented follow-up (v2's
-//! genesis + chat seals are sign-only ops, so it composes — just needs the async
-//! signer threaded through `build_seal`).
+//! Signing + NIP-44 flow through the active [`NostrSigner`] (`active_signer()`):
+//! the live client's signer for a NIP-46 bunker / NIP-55 offline account, else the
+//! local vault. Every identity op in v2 is `sign_event` / `nip44_encrypt` /
+//! `nip44_decrypt` — a remote signer's whole surface — so create, send, join,
+//! invite, moderate, rotate, and refound all work keylessly (CORD-06 D1/D5 made the
+//! rekey locator public + its blobs pairwise NIP-44, so unlike v1 there is no
+//! raw-ECDH exception).
 
-use nostr_sdk::prelude::{Event, Keys, PublicKey, SecretKey, Timestamp};
+use nostr_sdk::prelude::{Event, Keys, PublicKey, Timestamp};
 
 use super::super::transport::{Query, Transport};
 use super::super::{version, ChannelId, Epoch};
@@ -24,12 +25,40 @@ use super::{guestbook, stream, vsk};
 use crate::community::edition::ParsedEdition;
 use crate::state::SessionGuard;
 
-/// The local identity keys, or an error if none is installed. First-cut signing
-/// path (a bunker account routes through the async signer — a follow-up).
-fn local_keys() -> Result<Keys, String> {
-    crate::state::MY_SECRET_KEY
+/// The active signer for v2 authority actions: the live client's signer — which
+/// covers a NIP-46 bunker / NIP-55 offline signer — falling back to the local
+/// vault keys when there is no client or no signer attached (local accounts,
+/// headless/CLI paths, and tests). Every v2 seal, rekey blob, and control edition
+/// signs / NIP-44-wraps through this, so a keyless account can create AND
+/// administer a community. v2's rekey locator is public + its blobs are pairwise
+/// NIP-44 (CORD-06 D1/D5), so unlike v1 there is no raw-ECDH exception.
+async fn active_signer() -> Result<std::sync::Arc<dyn nostr_sdk::prelude::NostrSigner>, String> {
+    if let Some(client) = crate::state::nostr_client() {
+        if let Ok(s) = client.signer().await {
+            return Ok(s);
+        }
+    }
+    // No client signer: fall back to the local vault ONLY if it holds the ACTIVE
+    // identity's key. A remote-signer account's vault holds its CLIENT keypair,
+    // whose pubkey is NOT the identity — signing with it would emit wrong-identity
+    // events. Those self-reject on every reader (AuthorMismatch), but failing loudly
+    // here surfaces the misconfiguration instead of a silently-undeliverable send.
+    let keys = crate::state::MY_SECRET_KEY
         .to_keys()
-        .ok_or_else(|| "Concord v2 needs a local identity key (bunker create/send is not wired yet)".to_string())
+        .ok_or("no signer available (no client and no local key)")?;
+    if let Some(pk) = crate::state::my_public_key() {
+        if keys.public_key() != pk {
+            return Err("local key does not match the active identity (remote-signer account with no live signer)".to_string());
+        }
+    }
+    Ok(std::sync::Arc::new(keys))
+}
+
+/// The active identity's public key for addressing/tags — authoritative (set at
+/// login), no signer round-trip. Used everywhere v2 needs "who am I" so a keyless
+/// account (empty vault) still resolves its own identity.
+fn me_pk() -> Result<PublicKey, String> {
+    crate::state::my_public_key().ok_or_else(|| "no active identity".to_string())
 }
 
 fn now_ms() -> u64 {
@@ -50,7 +79,8 @@ pub async fn create_community<T: Transport + ?Sized>(
     description: Option<String>,
 ) -> Result<CommunityV2, String> {
     let session = SessionGuard::capture();
-    let owner = local_keys()?;
+    let signer = active_signer().await?;
+    let owner_pk = me_pk()?;
     let at_ms = now_ms();
 
     let meta = control::CommunityMetadata {
@@ -59,13 +89,13 @@ pub async fn create_community<T: Transport + ?Sized>(
         relays: relays.clone(),
         ..Default::default()
     };
-    let genesis = control::genesis(&owner, meta, at_ms / 1000).map_err(|e| e.to_string())?;
+    let genesis = control::genesis_signed(owner_pk, &signer, meta, at_ms / 1000).await.map_err(|e| e.to_string())?;
     let community = CommunityV2::from_genesis(&genesis, name, description, relays.clone(), at_ms);
 
     // Save-before-publish (like v1 create): no peers exist yet so there's no
     // shared view to diverge from, and the fresh-random keys are irrecoverable
-    // if a publish hiccup rolled them back. Re-check the session first — genesis
-    // signing straddled no await here, but the DB write is the side effect.
+    // if a publish hiccup rolled them back. Re-check the session after the genesis
+    // signing await (a bunker signs over the network) before the DB write.
     if !session.is_valid() {
         return Err("account changed during community creation".to_string());
     }
@@ -99,8 +129,8 @@ pub async fn create_community<T: Transport + ?Sized>(
     // proven-alive by the genesis ACK above, so durable here just guarantees the owner's
     // own join lands (member count) without a real block risk.
     let gb_group = super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
-    let join_rumor = guestbook::build_join_rumor(owner.public_key(), None, at_ms);
-    if let Ok((join_wrap, _)) = guestbook::seal_guestbook_rumor(&join_rumor, &gb_group, &owner, Timestamp::from_secs(at_ms / 1000)) {
+    let join_rumor = guestbook::build_join_rumor(owner_pk, None, at_ms);
+    if let Ok((join_wrap, _)) = guestbook::seal_guestbook_rumor_signed(&signer, owner_pk, &join_rumor, &gb_group, Timestamp::from_secs(at_ms / 1000)).await {
         let _ = transport.publish_durable(&join_wrap, &community.relays).await;
     }
 
@@ -151,9 +181,9 @@ pub async fn send_chat_message_at<T: Transport + ?Sized>(
     extra_tags: Vec<nostr_sdk::prelude::Tag>,
     at_ms: u64,
 ) -> Result<String, String> {
-    let (author, group, epoch, session) = chat_send_context(community, channel_id)?;
-    let rumor = chat::build_message_rumor(author.public_key(), channel_id, epoch, content, reply_to, emoji, extra_tags, at_ms);
-    publish_chat(transport, community, &session, &group, &author, channel_id, epoch, rumor, at_ms, false).await
+    let (author_pk, group, epoch, session) = chat_send_context(community, channel_id)?;
+    let rumor = chat::build_message_rumor(author_pk, channel_id, epoch, content, reply_to, emoji, extra_tags, at_ms);
+    publish_chat(transport, community, &session, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await
 }
 
 /// React to a channel message (kind 7, NIP-25 shape). `target_id_hex` /
@@ -171,11 +201,11 @@ pub async fn send_reaction<T: Transport + ?Sized>(
     emoji_content: &str,
     emoji: Option<(&str, &str)>,
 ) -> Result<String, String> {
-    let (author, group, epoch, session) = chat_send_context(community, channel_id)?;
+    let (author_pk, group, epoch, session) = chat_send_context(community, channel_id)?;
     let at_ms = now_ms();
     let rumor =
-        chat::build_reaction_rumor(author.public_key(), channel_id, epoch, target_id_hex, target_author_hex, target_kind, emoji_content, emoji, at_ms);
-    publish_chat(transport, community, &session, &group, &author, channel_id, epoch, rumor, at_ms, false).await
+        chat::build_reaction_rumor(author_pk, channel_id, epoch, target_id_hex, target_author_hex, target_kind, emoji_content, emoji, at_ms);
+    publish_chat(transport, community, &session, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await
 }
 
 /// Edit one of your own messages (kind 3302): peers re-render `target_id_hex`
@@ -188,10 +218,10 @@ pub async fn send_edit<T: Transport + ?Sized>(
     target_id_hex: &str,
     new_content: &str,
 ) -> Result<String, String> {
-    let (author, group, epoch, session) = chat_send_context(community, channel_id)?;
+    let (author_pk, group, epoch, session) = chat_send_context(community, channel_id)?;
     let at_ms = now_ms();
-    let rumor = chat::build_edit_rumor(author.public_key(), channel_id, epoch, target_id_hex, new_content, at_ms);
-    publish_chat(transport, community, &session, &group, &author, channel_id, epoch, rumor, at_ms, false).await
+    let rumor = chat::build_edit_rumor(author_pk, channel_id, epoch, target_id_hex, new_content, at_ms);
+    publish_chat(transport, community, &session, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await
 }
 
 /// Cooperative in-plane delete (kind 5, NIP-09 semantics): peers stop rendering
@@ -204,10 +234,10 @@ pub async fn send_delete<T: Transport + ?Sized>(
     target_id_hex: &str,
     target_kind: u16,
 ) -> Result<String, String> {
-    let (author, group, epoch, session) = chat_send_context(community, channel_id)?;
+    let (author_pk, group, epoch, session) = chat_send_context(community, channel_id)?;
     let at_ms = now_ms();
-    let rumor = chat::build_delete_rumor(author.public_key(), channel_id, epoch, target_id_hex, target_kind, at_ms);
-    publish_chat(transport, community, &session, &group, &author, channel_id, epoch, rumor, at_ms, false).await
+    let rumor = chat::build_delete_rumor(author_pk, channel_id, epoch, target_id_hex, target_kind, at_ms);
+    publish_chat(transport, community, &session, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await
 }
 
 /// WebXDC realtime peer signal (kind 3310) — the v2 twin of v1's
@@ -223,11 +253,11 @@ pub async fn send_webxdc_signal<T: Transport + ?Sized>(
     topic_id: &str,
     node_addr: Option<&str>,
 ) -> Result<(), String> {
-    let (author, group, epoch, session) = chat_send_context(community, channel_id)?;
+    let (author_pk, group, epoch, session) = chat_send_context(community, channel_id)?;
     let at_ms = now_ms();
     let content = crate::webxdc::peer_signal_content(topic_id, node_addr);
-    let rumor = chat::build_webxdc_rumor(author.public_key(), channel_id, epoch, &content, vec![], at_ms);
-    publish_chat(transport, community, &session, &group, &author, channel_id, epoch, rumor, at_ms, false).await.map(|_| ())
+    let rumor = chat::build_webxdc_rumor(author_pk, channel_id, epoch, &content, vec![], at_ms);
+    publish_chat(transport, community, &session, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await.map(|_| ())
 }
 
 /// Ephemeral typing indicator (kind 23311 in a 21059 wrap — relays never store it).
@@ -236,10 +266,10 @@ pub async fn send_typing<T: Transport + ?Sized>(
     community: &CommunityV2,
     channel_id: &ChannelId,
 ) -> Result<(), String> {
-    let (author, group, epoch, session) = chat_send_context(community, channel_id)?;
+    let (author_pk, group, epoch, session) = chat_send_context(community, channel_id)?;
     let at_ms = now_ms();
-    let rumor = chat::build_typing_rumor(author.public_key(), channel_id, epoch, at_ms);
-    publish_chat(transport, community, &session, &group, &author, channel_id, epoch, rumor, at_ms, true).await.map(|_| ())
+    let rumor = chat::build_typing_rumor(author_pk, channel_id, epoch, at_ms);
+    publish_chat(transport, community, &session, &group, author_pk, channel_id, epoch, rumor, at_ms, true).await.map(|_| ())
 }
 
 /// Everything a chat-plane send needs: local keys, the channel's group key +
@@ -247,9 +277,9 @@ pub async fn send_typing<T: Transport + ?Sized>(
 /// community (every honest member sealed it read-only) and a keyless Private
 /// channel — deriving from the root would post to the public plane; its key
 /// arrives over the rekey plane.
-fn chat_send_context(community: &CommunityV2, channel_id: &ChannelId) -> Result<(Keys, GroupKey, Epoch, SessionGuard), String> {
+fn chat_send_context(community: &CommunityV2, channel_id: &ChannelId) -> Result<(PublicKey, GroupKey, Epoch, SessionGuard), String> {
     let session = SessionGuard::capture();
-    let author = local_keys()?;
+    let author_pk = me_pk()?;
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     if crate::db::community::get_community_dissolved(&cid_hex).unwrap_or(false) {
         return Err("this community has been dissolved".to_string());
@@ -257,7 +287,7 @@ fn chat_send_context(community: &CommunityV2, channel_id: &ChannelId) -> Result<
     // A self-ban: every honest peer drops our events (CORD-04 §4) and the send
     // echo would silently no-op, so fail loudly instead of a message that seems
     // to send but shows up nowhere.
-    if crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default().contains(&author.public_key().to_hex()) {
+    if crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default().contains(&author_pk.to_hex()) {
         return Err("you are banned from this community".to_string());
     }
     let ch = community.channel(channel_id).ok_or("no such channel in this community")?;
@@ -265,7 +295,7 @@ fn chat_send_context(community: &CommunityV2, channel_id: &ChannelId) -> Result<
         return Err("this private channel has no key yet (awaiting rekey delivery)".to_string());
     }
     let (secret, epoch) = community.channel_secret(ch);
-    Ok((author, channel_group_key(&secret, channel_id, epoch), epoch, session))
+    Ok((author_pk, channel_group_key(&secret, channel_id, epoch), epoch, session))
 }
 
 /// Seal one chat rumor, re-check the session, publish, and echo the send into the
@@ -276,7 +306,7 @@ async fn publish_chat<T: Transport + ?Sized>(
     community: &CommunityV2,
     session: &SessionGuard,
     group: &GroupKey,
-    author: &Keys,
+    author_pk: PublicKey,
     channel_id: &ChannelId,
     epoch: Epoch,
     rumor: nostr_sdk::prelude::UnsignedEvent,
@@ -284,7 +314,8 @@ async fn publish_chat<T: Transport + ?Sized>(
     ephemeral: bool,
 ) -> Result<String, String> {
     let rumor_id = rumor.id.ok_or("rumor has no id")?.to_hex();
-    let (wrap, _p_tag_keys) = chat::seal_chat_rumor(&rumor, group, author, Timestamp::from_secs(at_ms / 1000), ephemeral)
+    let signer = active_signer().await?;
+    let (wrap, _p_tag_keys) = chat::seal_chat_rumor_signed(&signer, author_pk, &rumor, group, Timestamp::from_secs(at_ms / 1000), ephemeral).await
         .map_err(|e| e.to_string())?;
     if !session.is_valid() {
         return Err("account changed before send".to_string());
@@ -313,7 +344,7 @@ async fn publish_chat<T: Transport + ?Sized>(
                 if !session.is_valid() {
                     return Ok(rumor_id); // swapped on the lock await — never echo into another account.
                 }
-                super::inbound::apply_chat_to_state(&mut st, &event, &channel_hex, &author.public_key())
+                super::inbound::apply_chat_to_state(&mut st, &event, &channel_hex, &author_pk)
             };
             if let Some(outcome) = outcome {
                 if !session.is_valid() {
@@ -573,9 +604,10 @@ pub async fn send_direct_invite<T: Transport + ?Sized>(
     label: Option<String>,
 ) -> Result<Event, String> {
     let session = SessionGuard::capture();
-    let inviter = local_keys()?;
-    let bundle = bundle_of(community, Some(inviter.public_key()), expires_at_ms, label);
-    let wrap = invite::build_direct_invite(&inviter, recipient, &bundle).map_err(|e| e.to_string())?;
+    let signer = active_signer().await?;
+    let inviter_pk = me_pk()?;
+    let bundle = bundle_of(community, Some(inviter_pk), expires_at_ms, label);
+    let wrap = invite::build_direct_invite_signed(&signer, inviter_pk, recipient, &bundle).await.map_err(|e| e.to_string())?;
     if !session.is_valid() {
         return Err("account changed before sending invite".to_string());
     }
@@ -609,7 +641,7 @@ pub async fn mint_public_link<T: Transport + ?Sized>(
     let mut token = [0u8; super::derive::TOKEN_LEN];
     token.copy_from_slice(&super::super::random_32()[..super::derive::TOKEN_LEN]);
     let link_signer = Keys::generate();
-    let bundle = bundle_of(community, Some(local_keys()?.public_key()), expires_at_ms, label.clone());
+    let bundle = bundle_of(community, Some(me_pk()?), expires_at_ms, label.clone());
     let bundle_key = super::derive::invite_bundle_key(&token);
     let bundle_event = invite::build_bundle_event(&link_signer, &bundle, &bundle_key).map_err(|e| e.to_string())?;
     let url = invite::build_invite_url(base, &link_signer.public_key(), &token, &community.relays).map_err(|e| e.to_string())?;
@@ -647,20 +679,26 @@ async fn fetch_invite_list<T: Transport + ?Sized>(
     transport: &T,
     relays: &[String],
 ) -> Result<Option<invite::InviteList>, String> {
-    let me = local_keys()?;
+    let signer = active_signer().await?;
+    let my_pk = me_pk()?;
     let query = Query {
         kinds: vec![super::kind::INVITE_LIST],
-        authors: vec![me.public_key().to_hex()],
+        authors: vec![my_pk.to_hex()],
         limit: Some(4),
         evidence: crate::community::transport::Evidence::Full,
         ..Default::default()
     };
     let events = transport.fetch(&query, relays).await?;
-    Ok(events
-        .into_iter()
-        .filter_map(|e| invite::parse_invite_list_event(&e, &me).ok().map(|l| (e.created_at.as_secs(), l)))
-        .max_by_key(|(at, _)| *at)
-        .map(|(_, l)| l))
+    let mut best: Option<(u64, invite::InviteList)> = None;
+    for e in events {
+        if let Ok(l) = invite::parse_invite_list_event_signed(&signer, my_pk, &e).await {
+            let at = e.created_at.as_secs();
+            if best.as_ref().map(|(b, _)| at > *b).unwrap_or(true) {
+                best = Some((at, l));
+            }
+        }
+    }
+    Ok(best.map(|(_, l)| l))
 }
 
 /// The creator's LIVE (non-tombstoned) link-signer pubkeys for one community — the
@@ -678,8 +716,8 @@ fn live_signers_for(list: &invite::InviteList, community_id_hex: &str) -> Vec<Pu
 /// community — so members fold it into the Public/Private source of truth (a
 /// non-empty aggregate = Public).
 async fn publish_invite_registry<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, session: &SessionGuard, live_signers: &[PublicKey]) -> Result<(), String> {
-    let me = local_keys()?;
-    let eid = super::derive::invite_links_locator(community.id(), &me.public_key().to_bytes());
+    let my_pk = me_pk()?;
+    let eid = super::derive::invite_links_locator(community.id(), &my_pk.to_bytes());
     let content = invite::build_registry_content(live_signers);
     publish_control_edition(transport, community, session, vsk::INVITE_LINKS, &eid, &content, None).await
 }
@@ -688,7 +726,8 @@ async fn publish_invite_registry<T: Transport + ?Sized>(transport: &T, community
 /// 13303 Invite List and refresh the Registry (CORD-05 §4/§5).
 async fn record_minted_link<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, minted: &MintedLink) -> Result<(), String> {
     let session = SessionGuard::capture();
-    let me = local_keys()?;
+    let signer = active_signer().await?;
+    let my_pk = me_pk()?;
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let token_hex = crate::simd::hex::bytes_to_hex_16(&minted.token);
     // Err aborts the sync half (the link's bundle already published durably;
@@ -711,7 +750,7 @@ async fn record_minted_link<T: Transport + ?Sized>(transport: &T, community: &Co
     if !session.is_valid() {
         return Err("account changed during link record".to_string());
     }
-    let event = invite::build_invite_list_event(&me, &list).map_err(|e| e.to_string())?;
+    let event = invite::build_invite_list_event_signed(&signer, my_pk, &list).await.map_err(|e| e.to_string())?;
     transport.publish(&event, &community.relays).await?;
     let signers = live_signers_for(&list, &cid_hex);
     publish_invite_registry(transport, community, &session, &signers).await
@@ -724,7 +763,8 @@ async fn record_minted_link<T: Transport + ?Sized>(transport: &T, community: &Co
 /// the owner's separate read-cut).
 pub async fn revoke_public_link<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, token_hex: &str) -> Result<(), String> {
     let session = SessionGuard::capture();
-    let me = local_keys()?;
+    let signer = active_signer().await?;
+    let my_pk = me_pk()?;
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let mut list = fetch_invite_list(transport, &community.relays).await?.ok_or("no invite list found to revoke from")?;
     let entry = list
@@ -743,7 +783,7 @@ pub async fn revoke_public_link<T: Transport + ?Sized>(transport: &T, community:
     // Tombstone the Invite List entry (permanent — a stale device can't resurrect it).
     list.tombstones.push(invite::InviteTombstone { token: token_hex.to_string(), community_id: cid_hex.clone(), extra: Default::default() });
     list.entries.retain(|e| e.token != token_hex);
-    let event = invite::build_invite_list_event(&me, &list).map_err(|e| e.to_string())?;
+    let event = invite::build_invite_list_event_signed(&signer, my_pk, &list).await.map_err(|e| e.to_string())?;
     transport.publish(&event, &community.relays).await?;
     let signers = live_signers_for(&list, &cid_hex);
     publish_invite_registry(transport, community, &session, &signers).await?;
@@ -765,23 +805,28 @@ pub async fn refresh_public_links<T: Transport + ?Sized>(transport: &T, communit
     // Err — the caller (a post-refounding refresh) must be able to retry, or live
     // links keep serving the PRE-refound root and new joiners land on the dead
     // epoch. A genuinely-empty list is Ok (nothing to refresh).
-    let me = local_keys()?;
+    let signer = active_signer().await?;
+    let my_pk = me_pk()?;
     let query = Query {
         kinds: vec![super::kind::INVITE_LIST],
-        authors: vec![me.public_key().to_hex()],
+        authors: vec![my_pk.to_hex()],
         limit: Some(4),
         ..Default::default()
     };
     let events = transport.fetch(&query, &community.relays).await?;
-    let list = events
-        .into_iter()
-        .filter_map(|e| invite::parse_invite_list_event(&e, &me).ok().map(|l| (e.created_at.as_secs(), l)))
-        .max_by_key(|(at, _)| *at)
-        .map(|(_, l)| l);
-    let Some(list) = list else {
+    let mut best: Option<(u64, invite::InviteList)> = None;
+    for e in events {
+        if let Ok(l) = invite::parse_invite_list_event_signed(&signer, my_pk, &e).await {
+            let at = e.created_at.as_secs();
+            if best.as_ref().map(|(b, _)| at > *b).unwrap_or(true) {
+                best = Some((at, l));
+            }
+        }
+    }
+    let Some((_, list)) = best else {
         return Ok(());
     };
-    let creator = local_keys()?.public_key();
+    let creator = my_pk;
     let dead: std::collections::HashSet<&str> = list.tombstones.iter().map(|t| t.token.as_str()).collect();
     for entry in &list.entries {
         if entry.community_id != cid_hex || dead.contains(entry.token.as_str()) || entry.token.len() != 2 * super::derive::TOKEN_LEN {
@@ -864,7 +909,8 @@ async fn accept_bundle<T: Transport + ?Sized>(
     bundle: &CommunityInvite,
     invited_by: Option<PublicKey>,
 ) -> Result<CommunityV2, String> {
-    let me = local_keys()?;
+    let signer = active_signer().await?;
+    let my_pk = me_pk()?;
     let at_ms = now_ms();
     // Expiry gate: a past invite still previews but must not join (CORD-05 §1).
     if bundle.expired(at_ms) {
@@ -935,8 +981,8 @@ async fn accept_bundle<T: Transport + ?Sized>(
         .zip(Some(bundle.label.clone().unwrap_or_default()));
     let attr_ref = attribution.as_ref().map(|(c, l)| (c.as_str(), l.as_str()));
     let gb_group = super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
-    let join_rumor = guestbook::build_join_rumor(me.public_key(), attr_ref, at_ms);
-    if let Ok((join_wrap, _)) = guestbook::seal_guestbook_rumor(&join_rumor, &gb_group, &me, Timestamp::from_secs(at_ms / 1000)) {
+    let join_rumor = guestbook::build_join_rumor(my_pk, attr_ref, at_ms);
+    if let Ok((join_wrap, _)) = guestbook::seal_guestbook_rumor_signed(&signer, my_pk, &join_rumor, &gb_group, Timestamp::from_secs(at_ms / 1000)).await {
         let _ = transport.publish(&join_wrap, &community.relays).await;
     }
 
@@ -1058,8 +1104,8 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
 /// network await precedes the accept, so the guard captured here suffices.
 pub async fn accept_direct_invite<T: Transport + ?Sized>(transport: &T, wrap: &Event) -> Result<CommunityV2, String> {
     let session = SessionGuard::capture();
-    let me = local_keys()?;
-    let (inviter, bundle) = invite::unwrap_direct_invite(wrap, &me).map_err(|e| e.to_string())?;
+    let signer = active_signer().await?;
+    let (inviter, bundle) = invite::unwrap_direct_invite_signed(&signer, wrap).await.map_err(|e| e.to_string())?;
     accept_bundle(transport, &session, &bundle, Some(inviter)).await
 }
 
@@ -1184,11 +1230,12 @@ pub async fn accept_public_link<T: Transport + ?Sized>(transport: &T, url: &str)
 /// Leave a community: publish a Guestbook Leave and tear down the local hold.
 pub async fn leave_community<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<(), String> {
     let session = SessionGuard::capture();
-    let me = local_keys()?;
+    let signer = active_signer().await?;
+    let my_pk = me_pk()?;
     let at_ms = now_ms();
     let gb_group = super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
-    let leave_rumor = guestbook::build_leave_rumor(me.public_key(), at_ms);
-    if let Ok((wrap, _)) = guestbook::seal_guestbook_rumor(&leave_rumor, &gb_group, &me, Timestamp::from_secs(at_ms / 1000)) {
+    let leave_rumor = guestbook::build_leave_rumor(my_pk, at_ms);
+    if let Ok((wrap, _)) = guestbook::seal_guestbook_rumor_signed(&signer, my_pk, &leave_rumor, &gb_group, Timestamp::from_secs(at_ms / 1000)).await {
         let _ = transport.publish(&wrap, &community.relays).await;
     }
     if !session.is_valid() {
@@ -1212,13 +1259,14 @@ pub async fn leave_community<T: Transport + ?Sized>(transport: &T, community: &C
 /// rejoin with a fresh invite — cryptographic severance is the ban/refound path.
 pub async fn kick_member<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, target: &PublicKey) -> Result<(), String> {
     let session = SessionGuard::capture();
-    let me = local_keys()?;
+    let signer = active_signer().await?;
+    let my_pk = me_pk()?;
     // Fast local pre-check; readers re-verify independently. The `vac` citation
     // rides with the deferred citation-completeness pass (owner needs none).
     let authority = fetch_authority(transport, community).await;
     let owner_hex = community.owner()?.to_hex();
     if !authority.roles.can_act_on_member(
-        &me.public_key().to_hex(),
+        &my_pk.to_hex(),
         Some(&owner_hex),
         &target.to_hex(),
         crate::community::roles::Permissions::KICK,
@@ -1227,8 +1275,8 @@ pub async fn kick_member<T: Transport + ?Sized>(transport: &T, community: &Commu
     }
     let at_ms = now_ms();
     let gb_group = super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
-    let rumor = guestbook::build_kick_rumor(me.public_key(), *target, None, at_ms);
-    let (wrap, _) = guestbook::seal_guestbook_rumor(&rumor, &gb_group, &me, Timestamp::from_secs(at_ms / 1000))
+    let rumor = guestbook::build_kick_rumor(my_pk, *target, None, at_ms);
+    let (wrap, _) = guestbook::seal_guestbook_rumor_signed(&signer, my_pk, &rumor, &gb_group, Timestamp::from_secs(at_ms / 1000)).await
         .map_err(|e| e.to_string())?;
     if !session.is_valid() {
         return Err("account changed before send".to_string());
@@ -1533,13 +1581,14 @@ pub async fn memberlist<T: Transport + ?Sized>(transport: &T, community: &Commun
 /// Irreversible — on success the local hold is sealed read-only.
 pub async fn dissolve_community<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<(), String> {
     let session = SessionGuard::capture();
-    let me = local_keys()?;
-    if community.owner()? != me.public_key() {
+    let signer = active_signer().await?;
+    let my_pk = me_pk()?;
+    if community.owner()? != my_pk {
         return Err("only the owner can dissolve a community".to_string());
     }
     let at = now_ms() / 1000;
-    let rumor = super::dissolution::dissolved_tombstone_rumor(me.public_key(), community.id(), at);
-    let wrap = super::dissolution::seal_dissolved(&rumor, community.id(), &me, Timestamp::from_secs(at)).map_err(|e| e.to_string())?;
+    let rumor = super::dissolution::dissolved_tombstone_rumor(my_pk, community.id(), at);
+    let wrap = super::dissolution::seal_dissolved_signed(&signer, my_pk, &rumor, community.id(), Timestamp::from_secs(at)).await.map_err(|e| e.to_string())?;
     if !session.is_valid() {
         return Err("account changed during dissolve".to_string());
     }
@@ -1587,7 +1636,8 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
     if crate::db::community::get_community_dissolved(&cid_hex).unwrap_or(false) {
         return Err("this community has been dissolved; it cannot be re-founded".to_string());
     }
-    let me = local_keys()?;
+    let signer = active_signer().await?;
+    let my_pk = me_pk()?;
     // Serialize with the follow worker for the whole rotation: the commit tail
     // whole-row-saves, and an unserialized concurrent follow could otherwise be
     // rolled back (or adopt a half-published sibling of this very rotation).
@@ -1608,7 +1658,7 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
     // only the owner able to re-found.
     {
         let owner_hex = owner.to_hex();
-        let me_hex = me.public_key().to_hex();
+        let me_hex = my_pk.to_hex();
         // Persisted (last-folded) roster — the receive side is authoritative, so
         // this is a belt-and-suspenders gate. Fail-closed: a stale/empty roster
         // collapses to owner-only, which can only OVER-restrict a fresh admin whose
@@ -1616,7 +1666,7 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
         // first). It can never grant authority no one has.
         let roster = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
         let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
-        let authorized = me.public_key() == owner
+        let authorized = my_pk == owner
             || (!banned.contains(&me_hex)
                 && roster.is_authorized(&me_hex, Some(&owner_hex), crate::community::roles::Permissions::BAN)
                 && removed.iter().all(|t| {
@@ -1685,7 +1735,11 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
     // Mint-or-REUSE the new root, keyed by (scope, new_epoch) and archived BEFORE any
     // publish: a retried Refounding re-delivers the SAME root at this epoch/address, so
     // it can't double-mint two roots a receiver's correlation dedup would collapse into
-    // a permanent fork (CORD-06 §3 idempotency).
+    // a permanent fork (CORD-06 §3 idempotency). The compaction fetch above straddled
+    // this DB write — re-check so a mid-fetch swap can't archive into another account.
+    if !session.is_valid() {
+        return Err("account changed during re-founding compaction".to_string());
+    }
     let new_root = mint_or_reuse_rotation_key(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX, new_epoch.0)?;
     let new_control = control_group_key(&new_root, cid, new_epoch);
     let at = now_ms();
@@ -1729,21 +1783,23 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
     let members = memberlist(transport, community).await?;
     let removed_set: std::collections::HashSet<[u8; 32]> = removed.iter().map(|p| p.to_bytes()).collect();
     let mut recipients: Vec<PublicKey> = members.into_iter().filter(|m| !removed_set.contains(&m.to_bytes())).collect();
-    if !recipients.iter().any(|p| *p == me.public_key()) {
-        recipients.push(me.public_key());
+    if !recipients.iter().any(|p| *p == my_pk) {
+        recipients.push(my_pk);
     }
 
     // Base rekey blobs (the new root to each recipient), sealed under the PRIOR root.
     let mut base_blobs = Vec::new();
     for r in &recipients {
         base_blobs.push(
-            super::rekey::build_blob_local(me.secret_key(), &me.public_key().to_bytes(), r, super::rekey::RekeyScope::Root, new_epoch, &new_root)
+            super::rekey::build_blob(&signer, &my_pk.to_bytes(), r, super::rekey::RekeyScope::Root, new_epoch, &new_root)
+                .await
                 .map_err(|e| e.to_string())?,
         );
     }
     let base_group = super::derive::base_rekey_group_key(&community.community_root, cid, new_epoch);
     let base_chunks =
-        super::rekey::build_rekey_chunks_local(&me, &base_group, super::rekey::RekeyScope::Root, new_epoch, prev_epoch, &prev_commit, &base_blobs, at_secs)
+        super::rekey::build_rekey_chunks(&signer, my_pk, &base_group, super::rekey::RekeyScope::Root, new_epoch, prev_epoch, &prev_commit, &base_blobs, at_secs)
+            .await
             .map_err(|e| e.to_string())?;
 
     // Private-channel rekeys: each mints a fresh key at its next channel-epoch, sealed
@@ -1754,18 +1810,24 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
         let (Some(old_key), true) = (ch.key, ch.private) else { continue };
         let ch_new_epoch = Epoch(ch.epoch.0.checked_add(1).ok_or("channel epoch overflow")?);
         // Mint-or-reuse per channel too, keyed by (channel_id, next epoch) — same
-        // retry-idempotency as the base root.
+        // retry-idempotency as the base root. The base-rekey signing above is a bunker
+        // round-trip; re-check before this per-channel DB write straddles it.
+        if !session.is_valid() {
+            return Err("account changed during re-founding channel prepare".to_string());
+        }
         let ch_new_key = mint_or_reuse_rotation_key(&cid_hex, &crate::simd::hex::bytes_to_hex_32(&ch.id.0), ch_new_epoch.0)?;
         let ch_prev_commit = super::derive::epoch_key_commitment(ch.epoch, &old_key);
         let mut ch_blobs = Vec::new();
         for r in &recipients {
             ch_blobs.push(
-                super::rekey::build_blob_local(me.secret_key(), &me.public_key().to_bytes(), r, super::rekey::RekeyScope::Channel(ch.id), ch_new_epoch, &ch_new_key)
+                super::rekey::build_blob(&signer, &my_pk.to_bytes(), r, super::rekey::RekeyScope::Channel(ch.id), ch_new_epoch, &ch_new_key)
+                    .await
                     .map_err(|e| e.to_string())?,
             );
         }
         let ch_group = super::derive::channel_rekey_group_key(&community.community_root, &ch.id, ch_new_epoch);
-        let ch_chunks = super::rekey::build_rekey_chunks_local(&me, &ch_group, super::rekey::RekeyScope::Channel(ch.id), ch_new_epoch, ch.epoch, &ch_prev_commit, &ch_blobs, at_secs)
+        let ch_chunks = super::rekey::build_rekey_chunks(&signer, my_pk, &ch_group, super::rekey::RekeyScope::Channel(ch.id), ch_new_epoch, ch.epoch, &ch_prev_commit, &ch_blobs, at_secs)
+            .await
             .map_err(|e| e.to_string())?;
         channel_updates.push((ch.id, ch_new_key, ch_new_epoch));
         channel_chunk_sets.push(ch_chunks);
@@ -1791,8 +1853,8 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
     // it; an omitted member heals by publishing their own Join).
     let gb_group = super::derive::guestbook_group_key(&new_root, cid, new_epoch);
     let snap_id = crate::community::random_32();
-    for rumor in guestbook::build_snapshot_rumors(me.public_key(), &recipients, snap_id, at) {
-        if let Ok((wrap, _)) = guestbook::seal_guestbook_rumor(&rumor, &gb_group, &me, Timestamp::from_secs(at_secs)) {
+    for rumor in guestbook::build_snapshot_rumors(my_pk, &recipients, snap_id, at) {
+        if let Ok((wrap, _)) = guestbook::seal_guestbook_rumor_signed(&signer, my_pk, &rumor, &gb_group, Timestamp::from_secs(at_secs)).await {
             let _ = transport.publish(&wrap, &community.relays).await;
         }
     }
@@ -1934,19 +1996,25 @@ fn held_v2_relays() -> Vec<String> {
 /// must NOT drive a replaceable-event write from a failed read — it would clobber
 /// the live list); `Ok(None)` = genuinely no list yet; `Ok(Some)` = the list.
 async fn fetch_community_list<T: Transport + ?Sized>(transport: &T, relays: &[String]) -> Result<Option<super::list::CommunityList>, String> {
-    let me = local_keys()?;
+    let signer = active_signer().await?;
+    let my_pk = me_pk()?;
     let query = Query {
         kinds: vec![super::kind::COMMUNITY_LIST],
-        authors: vec![me.public_key().to_hex()],
+        authors: vec![my_pk.to_hex()],
         limit: Some(4),
         ..Default::default()
     };
     let events = transport.fetch(&query, relays).await?;
-    Ok(events
-        .into_iter()
-        .filter_map(|e| super::list::parse_list_event(&e, &me).ok().map(|l| (e.created_at.as_secs(), l)))
-        .max_by_key(|(at, _)| *at)
-        .map(|(_, l)| l))
+    let mut best: Option<(u64, super::list::CommunityList)> = None;
+    for e in events {
+        if let Ok(l) = super::list::parse_list_event_signed(&signer, my_pk, &e).await {
+            let at = e.created_at.as_secs();
+            if best.as_ref().map(|(b, _)| at > *b).unwrap_or(true) {
+                best = Some((at, l));
+            }
+        }
+    }
+    Ok(best.map(|(_, l)| l))
 }
 
 /// Rebuild this account's 13302 from its held v2 communities, MERGE with the remote
@@ -1959,7 +2027,8 @@ async fn fetch_community_list<T: Transport + ?Sized>(transport: &T, relays: &[St
 /// best-effort — a list-publish failure never fails the membership change itself.
 pub async fn republish_community_list<T: Transport + ?Sized>(transport: &T, just_joined: Option<&crate::community::CommunityId>) -> Result<(), String> {
     let session = SessionGuard::capture();
-    let me = local_keys()?;
+    let signer = active_signer().await?;
+    let my_pk = me_pk()?;
     let relays = held_v2_relays();
     if relays.is_empty() {
         return Ok(()); // nothing held → nothing to sync
@@ -1999,7 +2068,7 @@ pub async fn republish_community_list<T: Transport + ?Sized>(transport: &T, just
     }
     let merged = remote.merge(&local);
     merged.assert_fits().map_err(|e| e.to_string())?;
-    let event = super::list::build_list_event(&me, &merged).map_err(|e| e.to_string())?;
+    let event = super::list::build_list_event_signed(&signer, my_pk, &merged).await.map_err(|e| e.to_string())?;
     if !session.is_valid() {
         return Err("account changed during community-list publish".to_string());
     }
@@ -2009,7 +2078,8 @@ pub async fn republish_community_list<T: Transport + ?Sized>(transport: &T, just
 /// Record a permanent leave tombstone for `community_id` in the 13302, published to
 /// `relays` (the leaving community's own, since it's about to be deleted locally).
 async fn tombstone_community_list<T: Transport + ?Sized>(transport: &T, community_id: &crate::community::CommunityId, relays: &[String]) -> Result<(), String> {
-    let me = local_keys()?;
+    let signer = active_signer().await?;
+    let my_pk = me_pk()?;
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community_id.0);
     // A failed fetch here would drop other communities' entries (only the
     // tombstone would survive); preserve them by bailing — the leave re-records
@@ -2022,7 +2092,7 @@ async fn tombstone_community_list<T: Transport + ?Sized>(transport: &T, communit
     doc.tombstones.retain(|t| t.community_id != cid_hex);
     doc.tombstones.push(super::list::Tombstone { community_id: cid_hex, removed_at: now, extra: Default::default() });
     doc.assert_fits().map_err(|e| e.to_string())?;
-    let event = super::list::build_list_event(&me, &doc).map_err(|e| e.to_string())?;
+    let event = super::list::build_list_event_signed(&signer, my_pk, &doc).await.map_err(|e| e.to_string())?;
     transport.publish(&event, relays).await
 }
 
@@ -2099,7 +2169,8 @@ async fn publish_control_edition<T: Transport + ?Sized>(
     content: &str,
     citation: Option<&crate::community::edition::AuthorityCitation>,
 ) -> Result<(), String> {
-    let me = local_keys()?;
+    let signer = active_signer().await?;
+    let my_pk = me_pk()?;
     let control = control_group_key(&community.community_root, community.id(), community.root_epoch);
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let entity_hex = crate::simd::hex::bytes_to_hex_32(entity_id);
@@ -2108,8 +2179,8 @@ async fn publish_control_edition<T: Transport + ?Sized>(
         None => (1, None),
     };
     let at = now_ms() / 1000;
-    let rumor = control::build_edition_rumor(me.public_key(), vsk, entity_id, version, prev.as_ref(), content, at, citation);
-    let (wrap, _) = control::seal_control_edition(&rumor, &control, &me, Timestamp::from_secs(at)).map_err(|e| e.to_string())?;
+    let rumor = control::build_edition_rumor(my_pk, vsk, entity_id, version, prev.as_ref(), content, at, citation);
+    let (wrap, _) = control::seal_control_edition_signed(&signer, my_pk, &rumor, &control, Timestamp::from_secs(at)).await.map_err(|e| e.to_string())?;
     if !session.is_valid() {
         return Err("account changed before control publish".to_string());
     }
@@ -2188,8 +2259,8 @@ pub async fn grant_admin<T: Transport + ?Sized>(transport: &T, community: &Commu
     // Guard spans the multi-page fetch below: a swap mid-fetch must not let the
     // downstream publish's own (post-swap) guard write account A's floor into B.
     let session = SessionGuard::capture();
-    let me = local_keys()?;
-    if me.public_key() != community.owner()? {
+    let my_pk = me_pk()?;
+    if my_pk != community.owner()? {
         return Err("only the community owner can grant @admin".to_string());
     }
     let view = fetch_authority(transport, community).await;
@@ -2219,8 +2290,8 @@ pub async fn grant_admin<T: Transport + ?Sized>(transport: &T, community: &Commu
 /// A no-op when they don't hold it. Owner-only, like [`grant_admin`].
 pub async fn revoke_admin<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, member: &PublicKey) -> Result<(), String> {
     let session = SessionGuard::capture();
-    let me = local_keys()?;
-    if me.public_key() != community.owner()? {
+    let my_pk = me_pk()?;
+    if my_pk != community.owner()? {
         return Err("only the community owner can revoke @admin".to_string());
     }
     let view = fetch_authority(transport, community).await;
@@ -2284,8 +2355,8 @@ pub async fn edit_community_metadata<T: Transport + ?Sized>(transport: &T, commu
 /// coordinate. Gated on the reader side by `MANAGE_CHANNELS`.
 pub async fn edit_channel_metadata<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel_id: &ChannelId, meta: &control::ChannelMetadata) -> Result<(), String> {
     let session = SessionGuard::capture();
-    let me = local_keys()?;
-    ensure_channel_manager(community, &me.public_key())?;
+    let my_pk = me_pk()?;
+    ensure_channel_manager(community, &my_pk)?;
     // Public → private CONVERSION is a key rotation (CORD-03 §2) this build doesn't
     // mint yet — refuse the flag flip rather than publish an edition no reader can
     // key (members would keep posting on the root-derived plane, splitting the
@@ -2337,8 +2408,8 @@ pub async fn create_public_channel<T: Transport + ?Sized>(transport: &T, communi
     // a rotation would be rolled back to a stale root (a deaf community).
     let lock = super::realtime::follow_lock(community.id());
     let _guard = lock.lock().await;
-    let me = local_keys()?;
-    ensure_channel_manager(community, &me.public_key())?;
+    let my_pk = me_pk()?;
+    ensure_channel_manager(community, &my_pk)?;
     let channel_id = ChannelId(super::super::random_32());
     let meta = control::ChannelMetadata { name: name.to_string(), private: false, voice: None, deleted: None, custom: None, extra: Default::default() };
     control::validate_channel_metadata(&meta).map_err(|e| e.to_string())?;
@@ -2371,8 +2442,9 @@ pub async fn create_private_channel<T: Transport + ?Sized>(transport: &T, commun
     // rotation meanwhile would be rolled back by the whole-row save below).
     let lock = super::realtime::follow_lock(community.id());
     let _guard = lock.lock().await;
-    let me = local_keys()?;
-    ensure_channel_manager(community, &me.public_key())?;
+    let signer = active_signer().await?;
+    let my_pk = me_pk()?;
+    ensure_channel_manager(community, &my_pk)?;
     let meta = control::ChannelMetadata { name: name.to_string(), private: true, voice: None, deleted: None, custom: None, extra: Default::default() };
     control::validate_channel_metadata(&meta).map_err(|e| e.to_string())?;
     let content = serde_json::to_string(&meta).map_err(|e| e.to_string())?;
@@ -2383,20 +2455,22 @@ pub async fn create_private_channel<T: Transport + ?Sized>(transport: &T, commun
 
     // Recipients: every current member, plus me (multi-device).
     let mut recipients = memberlist(transport, community).await?;
-    if !recipients.iter().any(|p| *p == me.public_key()) {
-        recipients.push(me.public_key());
+    if !recipients.iter().any(|p| *p == my_pk) {
+        recipients.push(my_pk);
     }
     let prev_commit = super::derive::epoch_key_commitment(Epoch(0), &community.community_root);
     let mut blobs = Vec::with_capacity(recipients.len());
     for r in &recipients {
         blobs.push(
-            rekey::build_blob_local(me.secret_key(), &me.public_key().to_bytes(), r, RekeyScope::Channel(channel_id), epoch, &channel_key)
+            rekey::build_blob(&signer, &my_pk.to_bytes(), r, RekeyScope::Channel(channel_id), epoch, &channel_key)
+                .await
                 .map_err(|e| e.to_string())?,
         );
     }
     let group = channel_rekey_group_key(&community.community_root, &channel_id, epoch);
     let at_secs = now_ms() / 1000;
-    let chunks = rekey::build_rekey_chunks_local(&me, &group, RekeyScope::Channel(channel_id), epoch, Epoch(0), &prev_commit, &blobs, at_secs)
+    let chunks = rekey::build_rekey_chunks(&signer, my_pk, &group, RekeyScope::Channel(channel_id), epoch, Epoch(0), &prev_commit, &blobs, at_secs)
+        .await
         .map_err(|e| e.to_string())?;
     if !session.is_valid() {
         return Err("account changed during channel create".to_string());
@@ -2431,8 +2505,8 @@ pub async fn delete_channel<T: Transport + ?Sized>(transport: &T, community: &Co
     // Whole-row save below — serialize with the follow worker (see create_*_channel).
     let lock = super::realtime::follow_lock(community.id());
     let _guard = lock.lock().await;
-    let me = local_keys()?;
-    ensure_channel_manager(community, &me.public_key())?;
+    let my_pk = me_pk()?;
+    ensure_channel_manager(community, &my_pk)?;
     // The tombstone carries the FULL held document (deleted flag set): a strict
     // reader treats an edition as the entity, so even a deletion must not strip
     // fields it didn't touch (CORD-02 §6).
@@ -3231,8 +3305,7 @@ pub async fn debug_explain_base_rekey<T: Transport + ?Sized>(
     transport: &T,
     community: &CommunityV2,
 ) -> Result<serde_json::Value, String> {
-    let me = local_keys()?;
-    let my_xonly = me.public_key().to_bytes();
+    let my_xonly = me_pk()?.to_bytes();
     let owner = community.owner()?;
     let owner_hex = owner.to_hex();
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
@@ -3333,8 +3406,9 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
         }
         return Ok(RekeyFollow { updated: None, self_removed: false, dissolved: true });
     }
-    let me = local_keys()?;
-    let my_xonly = me.public_key().to_bytes();
+    let signer = active_signer().await?;
+    let my_pk = me_pk()?;
+    let my_xonly = my_pk.to_bytes();
     let owner = community.owner()?;
     let owner_hex = owner.to_hex();
     let mut cur = community.clone();
@@ -3353,7 +3427,7 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
     // or gate non-owner adoption on roster freshness) is a follow-on.
     let roster = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
     let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
-    let me_hex = me.public_key().to_hex();
+    let me_hex = my_pk.to_hex();
     let channel_rotator_ok = |rotator: &PublicKey| -> bool {
         if *rotator == owner {
             return true;
@@ -3450,7 +3524,7 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
             // Recoverable via a fresh bundle; an insider with MANAGE_CHANNELS can
             // exclude the member outright anyway, so the marginal harm is the wedge
             // outliving their demotion.
-            match advance_scope(&batches, RekeyScope::Channel(cid), &channel_rotator_ok, &channel_rotator_outranks_me, &|_r: &rekey::Rotation| true, me.secret_key(), &my_xonly, next) {
+            match advance_scope(&batches, RekeyScope::Channel(cid), &channel_rotator_ok, &channel_rotator_outranks_me, &|_r: &rekey::Rotation| true, &signer, &my_xonly, next).await {
                 Advance::Adopt { new_key } => {
                     if let Some(ch) = cur.channels.iter_mut().find(|c| c.id.0 == cid.0) {
                         ch.key = Some(new_key);
@@ -3533,7 +3607,7 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
                 }
                 true
             };
-            match advance_scope(&batches, RekeyScope::Root, &base_rotator_ok, &base_rotator_outranks_me, &base_admissible, me.secret_key(), &my_xonly, next) {
+            match advance_scope(&batches, RekeyScope::Root, &base_rotator_ok, &base_rotator_outranks_me, &base_admissible, &signer, &my_xonly, next).await {
                 Advance::Adopt { new_key } => {
                     cur.community_root = new_key;
                     cur.root_epoch = next;
@@ -3661,13 +3735,13 @@ async fn fetch_rekey_chunks<T: Transport + ?Sized>(
 /// came from a rotator who may remove ME (`rotator_may_remove_me`, the CORD-06
 /// strict-outrank rule) — else Stay; for a keyless holder they merely advance the
 /// scan cursor (any bit-holder's real rotation is scan progress, never a loss).
-fn advance_scope(
+async fn advance_scope<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
     batches: &[(Vec<rekey::RekeyChunk>, Option<(Epoch, [u8; 32])>)],
     scope: RekeyScope,
-    rotator_ok: &dyn Fn(&PublicKey) -> bool,
-    rotator_may_remove_me: &dyn Fn(&PublicKey) -> bool,
-    admissible: &dyn Fn(&rekey::Rotation) -> bool,
-    my_sk: &SecretKey,
+    rotator_ok: &(dyn Fn(&PublicKey) -> bool + Sync),
+    rotator_may_remove_me: &(dyn Fn(&PublicKey) -> bool + Sync),
+    admissible: &(dyn Fn(&rekey::Rotation) -> bool + Sync),
+    signer: &S,
     my_xonly: &[u8; 32],
     next_epoch: Epoch,
 ) -> Advance {
@@ -3697,7 +3771,7 @@ fn advance_scope(
             saw_complete_candidate = true;
             saw_outranking_candidate |= rotator_may_remove_me(&r.rotator);
             if let Some(blob) = rekey::find_my_blob(&r.blobs, &r.rotator.to_bytes(), my_xonly, r.scope, r.new_epoch) {
-                if let Ok(k) = rekey::open_blob_local(my_sk, &r.rotator, r.scope, r.new_epoch, blob) {
+                if let Ok(k) = rekey::open_blob(signer, &r.rotator, r.scope, r.new_epoch, blob).await {
                     winners.push(k);
                 }
             }
