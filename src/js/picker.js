@@ -3178,6 +3178,78 @@ function _pcShowSquareError() {
     );
 }
 
+// Sniff the web mime of imported bytes (magic bytes) so the File carries a type
+// the cropper preview + emoji_crop backend can route on.
+function _pcSniffImageMime(bytes) {
+    if (bytes.length > 3 && bytes[0] === 0x89 && bytes[1] === 0x50) return 'image/png';
+    if (bytes.length > 2 && bytes[0] === 0xFF && bytes[1] === 0xD8) return 'image/jpeg';
+    if (bytes.length > 3 && bytes[0] === 0x47 && bytes[1] === 0x49) return 'image/gif';
+    if (bytes.length > 11 && bytes[0] === 0x52 && bytes[8] === 0x57) return 'image/webp';
+    return 'image/png';
+}
+
+// Decode a base64 command result to bytes. Image commands return base64 (a JSON
+// string) because Tauri ships a Vec<u8>/ipc::Response as a raw response, which
+// Android's WebView drops on the way back (only inbound raw works there).
+function _b64ToBytes(b64) {
+    const bin = atob(b64 || '');
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+}
+
+// Encode bytes to base64 (chunked to stay under fromCharCode's arg limit) for
+// commands whose byte input goes over JSON, since Android's WebView won't
+// reliably deliver a raw request body for them.
+function _bytesToB64(bytes) {
+    let bin = '';
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    return btoa(bin);
+}
+
+// Native image picker -> Rust import (reads via ContentResolver/file I/O and
+// normalizes any decodable format, e.g. TIFF, to a web-safe one) -> File(s).
+// Replaces the WebView <input type=file>, whose content-URI reads are unreliable
+// on Android and which can't hand back undisplayable formats.
+async function _pcPickImage(multiple) {
+    const { open } = window.__TAURI__.dialog;
+    let picked;
+    try {
+        picked = await open({
+            multiple,
+            directory: false,
+            filters: [{ name: 'Image', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'tiff', 'tif', 'bmp', 'ico'] }],
+        });
+    } catch (_e) { picked = null; }
+    if (!picked) return multiple ? [] : null;
+    const sources = Array.isArray(picked) ? picked : [picked];
+    const out = [];
+    let failed = 0;
+    for (const source of sources) {
+        try {
+            const bytes = _b64ToBytes(await invoke('import_image_for_emoji', { source }));
+            const mime = _pcSniffImageMime(bytes);
+            const ext = mime.split('/')[1].replace('jpeg', 'jpg');
+            const base = (String(source).split(/[\\/]/).pop() || 'image').replace(/\.[^.]*$/, '') || 'image';
+            out.push(new File([bytes], `${base}.${ext}`, { type: mime }));
+        } catch (e) {
+            console.warn('[emoji-creator] image import failed:', e);
+            failed++;
+        }
+    }
+    // One summary rather than a modal per failed pick.
+    if (failed) {
+        _pcShowError('Oops! Couldn’t Read That!',
+            (failed === 1 ? 'That image couldn’t be imported.' : `${failed} images couldn’t be imported.`)
+                + ' Try PNG, JPG, GIF, or WebP.',
+            { title: 'Unsupported Image.', buttonText: 'GOT IT' });
+    }
+    return multiple ? out : (out[0] || null);
+}
+
 async function _pcAddFiles(fileList) {
     if (!fileList || !fileList.length) return;
     let rejectedFormat = false;
@@ -3535,19 +3607,19 @@ function _pcShowCropper(file) {
             ));
             ok.disabled = true;
             try {
+                // Uint8Array, not a bare ArrayBuffer — Android's WebView only
+                // delivers the former as a raw IPC body.
                 const buf = new Uint8Array(await file.arrayBuffer());
                 const out = await invoke('emoji_crop_and_reencode', {
-                    input: {
-                        bytes: Array.from(buf),
-                        mime:  file.type,
-                        x:     srcX,
-                        y:     srcY,
-                        w:     srcSize,
-                        h:     srcSize,
-                    },
+                    sourceB64: _bytesToB64(buf),
+                    mime: file.type || '',
+                    x: srcX,
+                    y: srcY,
+                    w: srcSize,
+                    h: srcSize,
                 });
                 const cropped = new File(
-                    [new Uint8Array(out)],
+                    [_b64ToBytes(out)],
                     file.name,
                     { type: file.type },
                 );
@@ -3871,16 +3943,13 @@ function _pcUploadErrorIsPermanent(msg) {
 }
 
 async function _pcUploadFile(file, kind = 'emoji') {
-    const buf = await file.arrayBuffer();
-    const bytes = Array.from(new Uint8Array(buf));
     let lastErr;
     for (let attempt = 0; attempt < 3; attempt++) {
         try {
-            return await invoke('emoji_pack_upload_image', {
-                bytes,
-                mime: file.type || 'application/octet-stream',
-                kind,
-            });
+            // base64 JSON in: async commands don't reliably receive a raw request
+            // body on Android's WebView. Fresh read per attempt (retries are rare).
+            const bytes = new Uint8Array(await file.arrayBuffer());
+            return await invoke('emoji_pack_upload_image', { bytesB64: _bytesToB64(bytes), kind });
         } catch (e) {
             lastErr = e;
             if (_pcUploadErrorIsPermanent(e)) break;
@@ -4158,26 +4227,21 @@ async function _pcDelete() {
         _pc.dirty = true;
     });
 
-    // Logo upload
+    // Logo upload — native picker + Rust import (handles content URIs +
+    // non-web-safe formats), not the WebView <input type=file>.
     const logoBtn = document.getElementById('emoji-creator-logo');
-    const logoInput = document.getElementById('emoji-creator-logo-input');
-    logoBtn.addEventListener('click', () => logoInput.click());
-    logoInput.addEventListener('change', (e) => {
-        const file = e.target.files && e.target.files[0];
+    logoBtn.addEventListener('click', async () => {
+        const file = await _pcPickImage(false);
         if (file) _pcSetLogoFile(file);
-        logoInput.value = '';
     });
 
-    // Bottom dropzone + drag/drop + file picker.
+    // Bottom dropzone: click opens the native picker (+ Rust import); the
+    // drag/drop handlers below still take DOM Files directly.
     const dz = document.getElementById('emoji-creator-dropzone');
-    const filesInput = document.getElementById('emoji-creator-files');
-    dz.addEventListener('click', () => {
+    dz.addEventListener('click', async () => {
         if (dz.classList.contains('is-disabled')) return;
-        filesInput.click();
-    });
-    filesInput.addEventListener('change', (e) => {
-        _pcAddFiles(e.target.files);
-        filesInput.value = '';
+        const files = await _pcPickImage(true);
+        if (files.length) _pcAddFiles(files);
     });
     dz.addEventListener('dragover', (e) => {
         e.preventDefault();

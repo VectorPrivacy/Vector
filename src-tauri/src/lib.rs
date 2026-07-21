@@ -758,6 +758,7 @@ pub fn run() {
             commands::emoji_packs::emoji_pack_delete_blob,
             commands::emoji_packs::emoji_pack_upload_image,
             commands::emoji_packs::emoji_crop_and_reencode,
+            commands::emoji_packs::import_image_for_emoji,
             // Per-DM wallpapers (commands/wallpaper.rs)
             commands::wallpaper::preview_wallpaper,
             commands::wallpaper::publish_wallpaper,

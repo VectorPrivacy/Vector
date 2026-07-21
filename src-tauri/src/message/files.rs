@@ -43,7 +43,12 @@ pub struct CacheFileBytesResult {
 /// This is called immediately when a file is selected via the WebView file input
 /// Returns file info and a thumbnail preview for images
 #[tauri::command]
-pub fn cache_file_bytes(bytes: Vec<u8>, file_name: String, extension: String) -> Result<CacheFileBytesResult, String> {
+pub fn cache_file_bytes(request: tauri::ipc::Request<'_>) -> Result<CacheFileBytesResult, String> {
+    // Raw-bytes IPC: file in the binary body; name (may be unicode, so base64'd)
+    // + extension in headers.
+    let bytes = crate::shared::ipc::raw_body(&request)?;
+    let file_name = crate::shared::ipc::header_b64(&request, "file-name").unwrap_or_default();
+    let extension = crate::shared::ipc::header(&request, "extension").unwrap_or_default();
     let size = bytes.len() as u64;
 
     // Generate preview for supported image types

@@ -11499,10 +11499,18 @@ window.addEventListener("DOMContentLoaded", async () => {
             toggleAttachmentPanel();
         };
 
-        // Handle File button in attachment panel (Android)
-        domAttachmentPanelFile.onclick = () => {
+        // Handle File button in attachment panel (Android). Use the native
+        // picker (dialog.open) -> content URI -> openFilePreview, which reads via
+        // ContentResolver. The WebView <input type=file> hands back a File whose
+        // arrayBuffer() can't read documents-provider content URIs.
+        domAttachmentPanelFile.onclick = async () => {
             closeAttachmentPanel();
-            androidFileInput.click();
+            const filepath = await selectFile();
+            if (filepath) {
+                const strReplyRef = strCurrentReplyReference;
+                cancelReply();
+                await openFilePreview(filepath, strOpenChat, strReplyRef);
+            }
         };
     } else {
         // Toggle attachment panel when clicking the add-file button

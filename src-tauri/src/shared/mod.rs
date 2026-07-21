@@ -12,5 +12,6 @@
 pub mod error;
 #[allow(dead_code)]
 pub mod image;
+pub mod ipc;
 #[allow(dead_code)]
 pub mod state_access;

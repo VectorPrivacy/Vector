@@ -247,10 +247,15 @@ pub async fn emoji_pack_delete_blob(url: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn emoji_pack_upload_image<R: tauri::Runtime>(
     handle: tauri::AppHandle<R>,
-    bytes: Vec<u8>,
-    mime: String,
+    bytes_b64: String,
     kind: Option<String>,
 ) -> Result<String, String> {
+    // JSON base64 in: an async command doesn't reliably receive a raw ipc::Request
+    // body on Android's WebView (only sync commands do), so bytes ride a base64 arg.
+    let bytes = base64_simd::STANDARD
+        .decode_to_vec(&bytes_b64)
+        .map_err(|e| format!("bytes base64: {}", e))?;
+
     let session = vector_core::state::SessionGuard::capture();
     if !session.is_valid() {
         return Err("Account swap in progress.".to_string());
@@ -278,9 +283,7 @@ pub async fn emoji_pack_upload_image<R: tauri::Runtime>(
 
     // Strip metadata (+ resize/cap) before upload: static emojis are re-encoded
     // (dropping any EXIF), animated emotes (GIF / animated WebP / APNG) pass
-    // through to keep their animation. The processed output drives the mime, so
-    // the caller's `mime` hint is no longer consulted.
-    let _ = mime;
+    // through to keep their animation. The processed output drives the mime.
     let prepared = crate::shared::image::prepare_upload_image(
         &bytes,
         crate::shared::image::UploadImageKind::Emoji,
@@ -840,7 +843,21 @@ pub struct EmojiCropInput {
 /// `x`/`y`/`w`/`h` are source-pixel coords. Crop must be square (the
 /// frontend enforces 1:1 lock); we sanity-check anyway.
 #[tauri::command]
-pub async fn emoji_crop_and_reencode(input: EmojiCropInput) -> Result<Vec<u8>, String> {
+pub async fn emoji_crop_and_reencode(
+    source_b64: String,
+    mime: String,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+) -> Result<String, String> {
+    // Fully-JSON (base64) IPC: Android's WebView is unreliable with raw request
+    // bodies for this command and drops raw responses outright, so base64 in +
+    // base64 out is the JSON path that works on every platform.
+    let bytes = base64_simd::STANDARD
+        .decode_to_vec(&source_b64)
+        .map_err(|e| format!("source base64: {}", e))?;
+    let input = EmojiCropInput { mime, x, y, w, h, bytes };
     if input.w != input.h {
         return Err("crop must be square".to_string());
     }
@@ -848,14 +865,68 @@ pub async fn emoji_crop_and_reencode(input: EmojiCropInput) -> Result<Vec<u8>, S
         return Err("crop must be non-empty".to_string());
     }
     if input.bytes.len() > MAX_EMOJI_BYTES * 4 {
-        // Source is allowed to be larger than the output cap — we'll
-        // shrink during re-encode — but reject ridiculous inputs early.
+        // Source is allowed to be larger than the output cap — we shrink during
+        // re-encode — but reject ridiculous inputs early.
         return Err("source too large".to_string());
     }
 
-    tokio::task::spawn_blocking(move || crop_and_reencode_blocking(input))
+    let out = tokio::task::spawn_blocking(move || crop_and_reencode_blocking(input))
         .await
-        .map_err(|e| format!("crop join: {}", e))?
+        .map_err(|e| format!("crop join: {}", e))??;
+    Ok(base64_simd::STANDARD.encode_to_string(&out))
+}
+
+/// Import an image (a content URI on Android or a file path on desktop) for the
+/// emoji/logo picker, normalized to a format every client + WebView can render.
+/// Web-safe formats (PNG/JPEG/GIF/WebP, animation included) pass through; anything
+/// else the image crate can decode (TIFF, BMP, ICO) is re-encoded to PNG. Reading
+/// is native (ContentResolver / file I/O), so this also sidesteps the WebView's
+/// broken content-URI reads. Bytes come back as a raw response.
+#[tauri::command]
+pub fn import_image_for_emoji(source: String) -> Result<String, String> {
+    let bytes = read_emoji_image_source(&source)?;
+
+    // Base64 out: a Vec<u8> return ships as a raw response, which Android's
+    // WebView drops (only the inbound raw path works there).
+    // Already web-safe (this set covers static + animated GIF/WebP): pass through.
+    if matches!(
+        vector_core::crypto::mime_from_magic_bytes(&bytes),
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+    ) {
+        return Ok(base64_simd::STANDARD.encode_to_string(&bytes));
+    }
+
+    // Anything else the image crate decodes (TIFF/BMP/ICO): normalize to PNG.
+    let mut reader = image::ImageReader::new(Cursor::new(&bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("sniff: {}", e))?;
+    reader.limits(vector_core::crypto::bounded_image_limits());
+    let img = reader
+        .decode()
+        .map_err(|_| "Image couldn't be read (unsupported or corrupt file)".to_string())?;
+    let mut png = Vec::new();
+    img.write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+        .map_err(|e| format!("png encode: {}", e))?;
+    Ok(base64_simd::STANDARD.encode_to_string(&png))
+}
+
+fn read_emoji_image_source(source: &str) -> Result<Vec<u8>, String> {
+    // Source is a full photo (pre-crop), so allow well over the emoji cap, but
+    // bound it — a huge pick would otherwise be read + base64'd + shipped over
+    // IPC only for the frontend's 256 KB gate to reject it.
+    const MAX_SOURCE_BYTES: usize = 32 * 1024 * 1024;
+    #[cfg(target_os = "android")]
+    if source.starts_with("content://") {
+        let (bytes, _) = crate::android::filesystem::read_android_uri_bytes(source.to_string())?;
+        if bytes.len() > MAX_SOURCE_BYTES {
+            return Err("Image is too large.".to_string());
+        }
+        return Ok(bytes);
+    }
+    if std::fs::metadata(source).map(|m| m.len() as usize).unwrap_or(0) > MAX_SOURCE_BYTES {
+        return Err("Image is too large.".to_string());
+    }
+    crate::shared::image::read_file_checked(source)
 }
 
 fn crop_and_reencode_blocking(input: EmojiCropInput) -> Result<Vec<u8>, String> {

@@ -165,6 +165,7 @@
     "allow-emoji-pack-delete-blob",
     "allow-emoji-pack-upload-image",
     "allow-emoji-crop-and-reencode",
+    "allow-import-image-for-emoji",
     "allow-preview-wallpaper",
     "allow-publish-wallpaper",
     "allow-cancel-wallpaper-preview",

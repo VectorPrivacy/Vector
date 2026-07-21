@@ -986,6 +986,12 @@ async function openFilePreviewWithFile(file, fileName, ext, receiver, replyRef =
     });
 }
 
+// UTF-8-safe base64 for header values that may carry non-ASCII (e.g. filenames),
+// which raw HTTP header values can't hold.
+function _b64utf8(str) {
+    return btoa(String.fromCharCode.apply(null, new TextEncoder().encode(str || '')));
+}
+
 /**
  * Open file preview with raw bytes (legacy, used for clipboard paste)
  * @param {Uint8Array} bytes - File bytes
@@ -1010,10 +1016,11 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
     // Cache bytes in Rust immediately - Rust will generate a thumbnail preview for images
     let preview = null;
     try {
-        const result = await invoke('cache_file_bytes', {
-            bytes: Array.from(bytes),
-            fileName: fileName,
-            extension: ext
+        const result = await invoke('cache_file_bytes', bytes, {
+            headers: {
+                'file-name': _b64utf8(fileName),
+                'extension': ext
+            }
         });
         // Rust returns a preview for images
         if (result.preview) {
@@ -1233,10 +1240,11 @@ async function startFileObjectCacheAndPreview(file, fileName, ext, contentArea, 
         const bytes = new Uint8Array(arrayBuffer);
         
         // Cache in Rust and get preview
-        const result = await invoke('cache_file_bytes', {
-            bytes: Array.from(bytes),
-            fileName: fileName,
-            extension: ext
+        const result = await invoke('cache_file_bytes', bytes, {
+            headers: {
+                'file-name': _b64utf8(fileName),
+                'extension': ext
+            }
         });
         // Cached bytes are now available for the metadata check.
         revealMetadataOptionIfPresent('');
