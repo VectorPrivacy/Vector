@@ -2704,6 +2704,7 @@ function openEmojiPackCreator(id) {
     _pc.logoFile = null;
     _pc.logoBlobUrl = '';
     _pc.pendingBlobDeletes = [];
+    _pc.savedPackId = null;
     if (editingPack) {
         _pc.mode = 'edit';
         _pc.editingId = editingPack.id;
@@ -2738,21 +2739,37 @@ function openEmojiPackCreator(id) {
 
 /** Saves pending edits (if dirty) and switches back to the normal
  *  emoji-section view. Safe to call multiple times. */
+// Returns true when the creator actually closed, false when a failed save kept
+// it open (so awaited callers don't tear the view out from under a live batch).
 async function closeEmojiPackCreator() {
-    if (!_pc.open) return;
+    if (!_pc.open) return true;
+    // A save in flight owns teardown/close. A concurrent close (sidebar tab,
+    // panel toggle) must no-op — otherwise it wipes _pc.emojis mid-upload and a
+    // later background failure loses the whole batch.
+    if (_pc.saving) return false;
     if (_pc.dirty && !_pc.saving) {
-        await _pcSave();
+        const saved = await _pcSave();
+        // On failure keep the editor open with previews intact so the user can
+        // retry; _pcSave surfaced the reason. Wiping below would drop the batch.
+        if (!saved) return false;
     }
     _pc.open = false;
     _pcShowView(false);
     _pcRevokeBlobUrls();
-    // Save can fail (network/relay error) — _pc.emojis still holds entries
-    // whose blobUrl strings we just revoked. Clear them so a re-open
-    // starting from cached _pc state doesn't render dead <img> sources.
-    if (_pc.dirty) {
-        _pc.emojis = [];
-        _pc.logoFile = null;
+    _pc.emojis = [];
+    _pc.logoFile = null;
+    // Land on the pack we just saved instead of the default scroll-to-top, so
+    // its emojis are right there. rAF lets the un-hidden sections lay out first.
+    const savedId = _pc.savedPackId;
+    _pc.savedPackId = null;
+    if (savedId) {
+        requestAnimationFrame(() => {
+            const section = document.querySelector(
+                `.emoji-pack-section[data-pack-id="${CSS.escape(savedId)}"]`);
+            if (section) section.scrollIntoView({ block: 'start' });
+        });
     }
+    return true;
 }
 
 function _pcShowView(showCreator) {
@@ -3166,6 +3183,7 @@ async function _pcAddFiles(fileList) {
     let rejectedFormat = false;
     let rejectedSize = false;
     let rejectedSquare = false;
+    let rejectedCropSize = false;
     const justAdded = [];
     for (const file of fileList) {
         if (_pc.emojis.length >= PC_MAX_EMOJIS) break;
@@ -3186,6 +3204,10 @@ async function _pcAddFiles(fileList) {
             if (!_pcIsCroppableImage(file)) { rejectedSquare = true; continue; }
             const cropped = await _pcShowCropper(file);
             if (!cropped) continue; // user cancelled — silent skip
+            // Squaring re-encodes every frame and can inflate a file that was
+            // under the cap past it. Re-check the crop OUTPUT (not the original)
+            // so it can't sail in and fail the whole batch at upload.
+            if (cropped.size > PC_MAX_FILE_BYTES) { rejectedCropSize = true; continue; }
             workingFile = cropped;
         }
         const entry = {
@@ -3198,9 +3220,10 @@ async function _pcAddFiles(fileList) {
     }
     if (justAdded.length > 0) _pc.dirty = true;
     _pcRenderGrid();
-    // Reject precedence (most actionable first): size → square →
+    // Reject precedence (most actionable first): size → crop-size → square →
     // format. Only one overlay surfaces per batch.
     if (rejectedSize) _pcShowSizeError();
+    else if (rejectedCropSize) _pcShowCropSizeError();
     else if (rejectedSquare) _pcShowSquareError();
     else if (rejectedFormat) _pcShowFormatError();
     if (justAdded.length > 0) _pcQueueNamingForEntries(justAdded);
@@ -3284,6 +3307,7 @@ async function _pcSetLogoFile(file) {
         if (!_pcIsCroppableImage(file)) { _pcShowSquareError(); return; }
         const cropped = await _pcShowCropper(file);
         if (!cropped) return; // user cancelled
+        if (cropped.size > PC_MAX_FILE_BYTES) { _pcShowCropSizeError(); return; }
         workingFile = cropped;
     }
     if (_pc.logoBlobUrl) {
@@ -3393,6 +3417,13 @@ function _pcShowError(pretitle, detail, opts = {}) {
 }
 function _pcShowSizeError() {
     _pcShowError('Oops! File Size Exceeded!', 'File Size must be under 256Kb.');
+}
+function _pcShowCropSizeError() {
+    _pcShowError(
+        'Oops! Too Big After Cropping!',
+        'Cropping this to a square re-encoded it over the 256 KB limit. Try an already-square version, or shrink it a little before adding.',
+        { title: 'Crop Pushed It Over.', buttonText: 'GOT IT' },
+    );
 }
 function _pcShowFormatError() {
     _pcShowError('Oops! Unsupported Format!', 'Use PNG, JPG, GIF, or WebP.');
@@ -3828,20 +3859,41 @@ function _pcClearAllBusy() {
     grid.querySelectorAll('.emoji-creator-cell-busy').forEach(o => o.remove());
 }
 
+// Deterministic rejections (too big / empty / wrong account / no server) won't
+// improve on retry; a Blossom/network flake gets a couple quick re-attempts so
+// one hiccup can't sink a whole batch.
+function _pcUploadErrorIsPermanent(msg) {
+    const m = String(msg || '').toLowerCase();
+    return m.includes('max is') || m.includes('is empty')
+        || m.includes('account swap') || m.includes('no blossom')
+        || m.includes('too large') || m.includes('too detailed')
+        || m.includes("couldn't be read");
+}
+
 async function _pcUploadFile(file, kind = 'emoji') {
     const buf = await file.arrayBuffer();
     const bytes = Array.from(new Uint8Array(buf));
-    return invoke('emoji_pack_upload_image', {
-        bytes,
-        mime: file.type || 'application/octet-stream',
-        kind,
-    });
+    let lastErr;
+    for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+            return await invoke('emoji_pack_upload_image', {
+                bytes,
+                mime: file.type || 'application/octet-stream',
+                kind,
+            });
+        } catch (e) {
+            lastErr = e;
+            if (_pcUploadErrorIsPermanent(e)) break;
+            await new Promise(r => setTimeout(r, 400 * (attempt + 1)));
+        }
+    }
+    throw lastErr;
 }
 
 /** Persist current state to relays + DB. Called on exit when dirty,
  *  not on every keystroke (would publish a new kind 30030 per stroke). */
 async function _pcSave() {
-    if (_pc.saving) return;
+    if (_pc.saving) return false;
     // .slice(0, 26) catches legacy packs whose titles predate the 26-char
     // cap — the input's maxlength only constrains new typing, not values
     // we hydrated into the field from an existing pack.
@@ -3850,7 +3902,7 @@ async function _pcSave() {
         // Empty pack — drop the in-progress edit silently. Better than
         // publishing a useless empty/no-name set the user clearly bailed on.
         _pc.dirty = false;
-        return;
+        return true;
     }
 
     const seenCodes = new Set();
@@ -3863,7 +3915,7 @@ async function _pcSave() {
         // paint the cell's busy state without searching by reference.
         sanitized.push({ ...e, shortcode: sc, originalIdx });
     });
-    if (!sanitized.length) { _pc.dirty = false; return; }
+    if (!sanitized.length) { _pc.dirty = false; return true; }
 
     // Defense-in-depth: only forward `editingIdentifier` when the matching
     // pack is still in `arrEmojiPacks` AND owned by the current user.
@@ -3890,7 +3942,12 @@ async function _pcSave() {
 
     try {
         let logoUrl = _pc.logoUrl || '';
-        if (_pc.logoFile) logoUrl = await _pcUploadFile(_pc.logoFile, 'emoji_pack_icon');
+        if (_pc.logoFile) {
+            logoUrl = await _pcUploadFile(_pc.logoFile, 'emoji_pack_icon');
+            // Commit so a retry after a partial failure skips re-uploading it.
+            _pc.logoUrl = logoUrl;
+            _pc.logoFile = null;
+        }
 
         const emojis = [];
         for (const e of sanitized) {
@@ -3899,12 +3956,17 @@ async function _pcSave() {
                 _pcSetCellBusy(e.originalIdx, 'uploading');
                 url = await _pcUploadFile(e.file, 'emoji');
                 _pcSetCellBusy(e.originalIdx, null);
+                // Commit each URL as it lands so a later failure in the batch
+                // keeps finished uploads: retry re-sends only what's left (no
+                // re-upload, no orphan blobs). blobUrl stays valid for preview.
+                const slot = _pc.emojis[e.originalIdx];
+                if (slot) { slot.url = url; slot.file = null; }
             }
             if (!url) continue;
             emojis.push({ shortcode: e.shortcode, url });
         }
 
-        await invoke('emoji_pack_create', {
+        const savedPack = await invoke('emoji_pack_create', {
             input: {
                 identifier: safeIdentifier,
                 title: name,
@@ -3939,10 +4001,20 @@ async function _pcSave() {
 
         await loadEmojiPacks();
         _pc.dirty = false;
+        // Remember which pack to land on once the editor closes (the returned
+        // id covers both create and edit) — see closeEmojiPackCreator.
+        _pc.savedPackId = (savedPack && savedPack.id) || _pc.editingId || null;
+        return true;
     } catch (e) {
         console.warn('[emoji-pack-creator] save failed:', e);
-        // Leave dirty=true so the next close-attempt retries; user can
-        // also tweak something and exit again.
+        // Keep dirty + the editor open (caller bails on false) and show why,
+        // instead of failing silently and dropping the batch on close.
+        _pcShowError(
+            'Couldn’t Save Pack',
+            `Your emojis are safe, nothing was lost. An upload didn’t finish (usually a passing network glitch). Tap Done to retry.\n\n(${String(e)})`,
+            { title: 'Your Progress Is Safe.', buttonText: 'GOT IT' },
+        );
+        return false;
     } finally {
         // Clear any lingering busy overlays — success or failure, the
         // upload phase is over.
@@ -4677,8 +4749,9 @@ document.querySelector('.emoji-sidebar').addEventListener('click', async (e) => 
     // but stopPropagation here keeps the active-tab toggle from cycling).
     if (btn.classList.contains('emoji-pack-tab-create')) return;
 
-    // Switching out of creator view: auto-save first.
-    if (_pc.open) await closeEmojiPackCreator();
+    // Switching out of creator view: auto-save first. A failed save keeps the
+    // creator open (emojis preserved), so don't switch tabs out from under it.
+    if (_pc.open && !(await closeEmojiPackCreator())) return;
 
     document.querySelectorAll('.emoji-category-btn').forEach(b => {
         b.classList.toggle('active', b === btn);

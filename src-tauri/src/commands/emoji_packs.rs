@@ -129,6 +129,9 @@ pub fn set_theme_emoji_pack(emojis: Vec<emoji_packs::PackEmoji>) -> Result<(), S
 /// pre-upload gate but we enforce server-side too so a tampered frontend
 /// can't push oversized blobs onto user's Blossom servers.
 const MAX_EMOJI_BYTES: usize = 256 * 1024;
+// Downscale floor when shrinking an oversized crop to fit the byte cap — an
+// emoji this small is still legible, and nothing legible fails to fit under it.
+const MIN_EMOJI_DIM: u32 = 48;
 
 #[derive(Deserialize)]
 pub struct EmojiPackEmojiInput {
@@ -299,7 +302,7 @@ pub async fn emoji_pack_upload_image<R: tauri::Runtime>(
     // tied to the original session. Bail loudly if the account changed
     // so the URL never gets stitched into the wrong pack.
     if !session.is_valid() {
-        return Err("Account swapped during upload — discard this URL.".to_string());
+        return Err("Account swapped during upload. Discard this URL.".to_string());
     }
 
     // Pre-cache the bytes locally under the URL we just got back from
@@ -314,6 +317,32 @@ pub async fn emoji_pack_upload_image<R: tauri::Runtime>(
     let _ = crate::image_cache::precache_image_bytes(
         &handle, &url, &bytes_arc, image_type,
     );
+
+    // Warm the presized-spritesheet cache the picker canvas reads for EVERY pack
+    // emoji (static + animated), so first view of a freshly-saved pack is a
+    // single file read: no fetch, no decode. Icons render as plain <img> and
+    // skip this. Detached + best-effort — the bytes are already in hand.
+    if !matches!(kind.as_deref(), Some("emoji_pack_icon")) {
+        if let Some(sheet_path) = emoji_spritesheet_path(&handle, &url) {
+            if !sheet_path.exists() {
+                let warm_bytes = bytes_arc.clone();
+                let warm_ct = mime_ref.to_string();
+                let warm_url = url.clone();
+                tokio::task::spawn_blocking(move || {
+                    if let Ok(decoded) = decode_to_spritesheet(&warm_bytes[..], &warm_ct, &warm_url) {
+                        let blob = serialize_spritesheet(
+                            decoded.frame_size, &decoded.durations, &decoded.png,
+                        );
+                        if std::fs::write(&sheet_path, &blob).is_ok() {
+                            if let Some(dir) = sheet_path.parent() {
+                                prune_spritesheet_cache(dir);
+                            }
+                        }
+                    }
+                });
+            }
+        }
+    }
 
     Ok(url)
 }
@@ -867,7 +896,47 @@ fn crop_and_reencode_blocking(input: EmojiCropInput) -> Result<Vec<u8>, String> 
     let (sw, sh) = (dynimg.width(), dynimg.height());
     validate_crop_bounds(x, y, w, h, sw, sh)?;
     let cropped = dynimg.crop_imm(x, y, w, h).to_rgba8();
-    encode_static(&cropped, format)
+    encode_within_budget(&[(cropped, 0u32)], w, |scaled| encode_static(&scaled[0].0, format))
+}
+
+/// Encode square `frames` (side `src_dim`) via `encode`, shrinking the side
+/// until the output fits `MAX_EMOJI_BYTES` (or the `MIN_EMOJI_DIM` floor). The
+/// common path encodes once at native size; only an oversized result (e.g. a
+/// GIF the re-encoder inflated past the cap) triggers downscaling. Emojis render
+/// tiny, so shrinking is imperceptible and is the only way such an emote can
+/// publish at all instead of being rejected.
+fn encode_within_budget<F>(
+    frames: &[(image::RgbaImage, u32)],
+    src_dim: u32,
+    encode: F,
+) -> Result<Vec<u8>, String>
+where
+    F: Fn(&[(image::RgbaImage, u32)]) -> Result<Vec<u8>, String>,
+{
+    let out = encode(frames)?;
+    // Fits, or already at/below the floor (shrinking a tiny input would only
+    // upscale it) — take the native encode.
+    if out.len() <= MAX_EMOJI_BYTES || src_dim <= MIN_EMOJI_DIM {
+        return Ok(out);
+    }
+    let mut dim = src_dim;
+    loop {
+        // ~12% smaller per step (~0.77x area) — converges in a couple passes.
+        dim = ((dim * 88) / 100).max(MIN_EMOJI_DIM);
+        let scaled: Vec<(image::RgbaImage, u32)> = frames
+            .iter()
+            .map(|(img, d)| {
+                (
+                    image::imageops::resize(img, dim, dim, image::imageops::FilterType::Lanczos3),
+                    *d,
+                )
+            })
+            .collect();
+        let out = encode(&scaled)?;
+        if out.len() <= MAX_EMOJI_BYTES || dim <= MIN_EMOJI_DIM {
+            return Ok(out);
+        }
+    }
 }
 
 fn crop_animated_webp(bytes: &[u8], x: u32, y: u32, w: u32, h: u32) -> Result<Vec<u8>, String> {
@@ -881,34 +950,31 @@ fn crop_animated_webp(bytes: &[u8], x: u32, y: u32, w: u32, h: u32) -> Result<Ve
     let (fw, fh) = (frames[0].0.width(), frames[0].0.height());
     validate_crop_bounds(x, y, w, h, fw, fh)?;
 
-    // Crop ahead of encoder construction so each AnimFrame's borrow of
-    // the pixel buffer outlives `add_frame`.
-    let cropped: Vec<(Vec<u8>, u32)> = frames
+    let cropped: Vec<(image::RgbaImage, u32)> = frames
         .into_iter()
         .map(|(rgba, duration)| {
-            let img = image::imageops::crop_imm(&rgba, x, y, w, h).to_image();
-            (img.into_raw(), duration.max(20))
+            (image::imageops::crop_imm(&rgba, x, y, w, h).to_image(), duration.max(20))
         })
         .collect();
 
-    let mut config = webp::WebPConfig::new().map_err(|_| "webp config init failed".to_string())?;
-    config.quality = 80.0;
-    let mut encoder = webp::AnimEncoder::new(w, h, &config);
-    encoder.set_loop_count(0);
-
-    // libwebp wants cumulative end-of-frame timestamps (not per-frame
-    // deltas). Decoder gives us deltas, so re-accumulate here.
-    let mut cumulative: i32 = 0;
-    for (pixels, duration) in &cropped {
-        cumulative = cumulative.saturating_add(*duration as i32);
-        let frame = webp::AnimFrame::from_rgba(pixels, w, h, cumulative);
-        encoder.add_frame(frame);
-    }
-
-    let mem = encoder
-        .try_encode()
-        .map_err(|e| format!("webp anim encode: {:?}", e))?;
-    Ok(mem.to_vec())
+    encode_within_budget(&cropped, w, |scaled| {
+        let dim = scaled[0].0.width();
+        let mut config = webp::WebPConfig::new().map_err(|_| "webp config init failed".to_string())?;
+        config.quality = 80.0;
+        let mut encoder = webp::AnimEncoder::new(dim, dim, &config);
+        encoder.set_loop_count(0);
+        // libwebp wants cumulative end-of-frame timestamps (not per-frame
+        // deltas). Decoder gives us deltas, so re-accumulate here.
+        let mut cumulative: i32 = 0;
+        for (img, duration) in scaled.iter() {
+            cumulative = cumulative.saturating_add(*duration as i32);
+            encoder.add_frame(webp::AnimFrame::from_rgba(img.as_raw(), dim, dim, cumulative));
+        }
+        let mem = encoder
+            .try_encode()
+            .map_err(|e| format!("webp anim encode: {:?}", e))?;
+        Ok(mem.to_vec())
+    })
 }
 
 fn crop_gif(bytes: &[u8], x: u32, y: u32, w: u32, h: u32) -> Result<Vec<u8>, String> {
@@ -919,24 +985,32 @@ fn crop_gif(bytes: &[u8], x: u32, y: u32, w: u32, h: u32) -> Result<Vec<u8>, Str
     let (fw, fh) = (frames[0].0.width(), frames[0].0.height());
     validate_crop_bounds(x, y, w, h, fw, fh)?;
 
-    let mut out = Vec::new();
-    {
-        // Speed 10 = fastest encode at lowest CPU. Emoji-scale GIFs are
-        // small enough that quality difference vs default is negligible.
-        let mut encoder = image::codecs::gif::GifEncoder::new_with_speed(&mut out, 10);
-        encoder
-            .set_repeat(image::codecs::gif::Repeat::Infinite)
-            .map_err(|e| format!("gif repeat: {}", e))?;
-        for (rgba, duration_ms) in frames {
-            let cropped = image::imageops::crop_imm(&rgba, x, y, w, h).to_image();
-            let delay = image::Delay::from_numer_denom_ms(duration_ms.max(20), 1);
-            let frame = image::Frame::from_parts(cropped, 0, 0, delay);
+    let cropped: Vec<(image::RgbaImage, u32)> = frames
+        .into_iter()
+        .map(|(rgba, duration_ms)| {
+            (image::imageops::crop_imm(&rgba, x, y, w, h).to_image(), duration_ms)
+        })
+        .collect();
+
+    encode_within_budget(&cropped, w, |scaled| {
+        let mut out = Vec::new();
+        {
+            // Speed 10 = fastest encode at lowest CPU. Emoji-scale GIFs are
+            // small enough that quality difference vs default is negligible.
+            let mut encoder = image::codecs::gif::GifEncoder::new_with_speed(&mut out, 10);
             encoder
-                .encode_frame(frame)
-                .map_err(|e| format!("gif frame: {}", e))?;
+                .set_repeat(image::codecs::gif::Repeat::Infinite)
+                .map_err(|e| format!("gif repeat: {}", e))?;
+            for (rgba, duration_ms) in scaled {
+                let delay = image::Delay::from_numer_denom_ms((*duration_ms).max(20), 1);
+                let frame = image::Frame::from_parts(rgba.clone(), 0, 0, delay);
+                encoder
+                    .encode_frame(frame)
+                    .map_err(|e| format!("gif frame: {}", e))?;
+            }
         }
-    }
-    Ok(out)
+        Ok(out)
+    })
 }
 
 fn validate_crop_bounds(x: u32, y: u32, w: u32, h: u32, sw: u32, sh: u32) -> Result<(), String> {
@@ -983,5 +1057,69 @@ fn encode_static(rgba: &image::RgbaImage, format: &str) -> Result<Vec<u8>, Strin
         _ => return Err(format!("encode: unsupported format {}", format)),
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spritesheet_roundtrip_and_truncation() {
+        let durations = vec![100u32, 120, 80];
+        let png = vec![0xABu8; 64];
+        let buf = serialize_spritesheet(48, &durations, &png);
+
+        let sheet = deserialize_spritesheet(&buf).expect("valid container round-trips");
+        assert_eq!(sheet.frame_size, 48);
+        assert_eq!(sheet.frame_count, 3);
+        assert_eq!(sheet.frame_durations_ms, durations);
+        assert_eq!(sheet.png_base64, base64_simd::STANDARD.encode_to_string(&png));
+
+        // Truncated / garbage buffers are a cache miss, never a panic.
+        assert!(deserialize_spritesheet(&buf[..buf.len() - 5]).is_none());
+        assert!(deserialize_spritesheet(b"nope").is_none());
+        assert!(deserialize_spritesheet(&[]).is_none());
+    }
+
+    fn square_frames(dim: u32) -> Vec<(image::RgbaImage, u32)> {
+        vec![(image::RgbaImage::new(dim, dim), 100u32)]
+    }
+
+    #[test]
+    fn budget_encodes_once_when_it_fits() {
+        // Fake encoder: output scales with frame area (64px * 4 bytes < cap).
+        let calls = std::cell::Cell::new(0u32);
+        let out = encode_within_budget(&square_frames(64), 64, |scaled| {
+            calls.set(calls.get() + 1);
+            let d = scaled[0].0.width();
+            Ok(vec![0u8; (d * d * 4) as usize])
+        })
+        .unwrap();
+        assert_eq!(out.len(), 64 * 64 * 4);
+        assert_eq!(calls.get(), 1, "no resample on the fits-at-native path");
+    }
+
+    #[test]
+    fn budget_shrinks_until_it_fits() {
+        let out = encode_within_budget(&square_frames(400), 400, |scaled| {
+            let d = scaled[0].0.width();
+            Ok(vec![0u8; (d * d * 4) as usize])
+        })
+        .unwrap();
+        assert!(out.len() <= MAX_EMOJI_BYTES, "shrank under the cap");
+        assert!(out.len() < 400 * 400 * 4, "actually shrank from native");
+    }
+
+    #[test]
+    fn budget_never_upscales_below_floor() {
+        // 40px is under MIN_EMOJI_DIM and over budget: must return the native
+        // encode, never upscale to the 48px floor (bigger, still over).
+        let out = encode_within_budget(&square_frames(40), 40, |scaled| {
+            let d = scaled[0].0.width();
+            Ok(vec![0u8; (d * d * 200) as usize])
+        })
+        .unwrap();
+        assert_eq!(out.len(), 40 * 40 * 200);
+    }
 }
 
