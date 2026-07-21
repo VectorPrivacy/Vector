@@ -462,6 +462,12 @@ pub async fn reauthorize_bunker<R: Runtime>(handle: AppHandle<R>) -> Result<Stri
 static PENDING_REAUTH_RESULT: std::sync::Mutex<Option<String>> =
     std::sync::Mutex::new(None);
 
+/// Known plaintext for the NIP-55 PIN verification canary. Encrypted under the
+/// derived key at setup (and when Local Encryption is toggled on) and
+/// re-decrypted at boot to reject a wrong PIN (a keyless account has no pkey
+/// whose failed decrypt would otherwise do this).
+pub(crate) const NIP55_PIN_CANARY: &str = "vector-nip55-pin-ok";
+
 #[tauri::command]
 pub fn get_pending_reauth_result() -> Option<String> {
     PENDING_REAUTH_RESULT.lock().unwrap().take()
@@ -547,6 +553,226 @@ async fn clear_pending_bunker_session() {
         if let Some(ref mut s) = *g { s.zeroize(); }
         *g = None;
     }
+    let _ = account_manager::clear_pending_account();
+    if let Some(client) = vector_core::take_nostr_client() {
+        let _ = client.shutdown().await;
+    }
+    crate::state::set_encryption_enabled(false);
+}
+
+// ============================================================================
+// NIP-55 offline signer (Amber) — Android login + status
+// ============================================================================
+
+/// Whether an on-device NIP-55 signer app is installed. `Ok(false)` on
+/// platforms without one (desktop), so the login screen can hide the button.
+#[tauri::command]
+pub fn is_external_signer_installed() -> Result<bool, String> {
+    vector_core::nip55_is_installed()
+}
+
+/// Read-only view of the active account's NIP-55 pairing, for the Security
+/// panel. `Ok(None)` for non-NIP-55 accounts so the panel hides the row.
+#[derive(serde::Serialize, Clone)]
+pub struct Nip55StatusInfo {
+    pub user_pubkey_hex: String,
+    pub user_npub: String,
+    pub signer_package: String,
+    pub state: String,
+    pub installed: bool,
+}
+
+#[tauri::command]
+pub async fn get_nip55_status() -> Result<Option<Nip55StatusInfo>, String> {
+    let signer_type = vector_core::db::get_signer_type()
+        .unwrap_or_else(|_| "local".to_string());
+    if signer_type != "nip55" {
+        return Ok(None);
+    }
+    let user_pubkey_hex = vector_core::db::get_nip55_user_pubkey()
+        .ok().flatten()
+        .ok_or("NIP-55 account missing cached identity pubkey")?;
+    let user_pk = PublicKey::from_hex(&user_pubkey_hex)
+        .map_err(|e| format!("Invalid NIP-55 identity pubkey on disk: {}", e))?;
+    let user_npub = user_pk.to_bech32().map_err(|e| format!("Bech32 error: {}", e))?;
+    let signer_package = vector_core::db::get_nip55_signer_package()
+        .ok().flatten().unwrap_or_default();
+    Ok(Some(Nip55StatusInfo {
+        user_pubkey_hex,
+        user_npub,
+        signer_package,
+        state: vector_core::nip55_state().as_label().to_string(),
+        installed: matches!(vector_core::nip55_is_installed(), Ok(true)),
+    }))
+}
+
+/// Sign in with an on-device NIP-55 signer (Amber). Fires the `get_public_key`
+/// pairing Intent, stages the session, and hands off to the encryption-choice
+/// flow (PIN / Password / Skip) the same way local and bunker logins do — the
+/// settings commit happens in `setup_encryption` / `skip_encryption`. Nothing
+/// secret is stored on this device at any point.
+#[tauri::command]
+pub async fn login_with_nip55<R: Runtime>(handle: AppHandle<R>) -> Result<LoginResult, String> {
+    // Refuse if any account is mid-encryption-migration — a fresh setup would
+    // tear the DB pool out from under the open migration transaction.
+    account_manager::refuse_if_migration_in_progress("login nip55")?;
+
+    // No external signer on desktop (or none installed): the login screen
+    // should have hidden the button, but guard defensively.
+    if !matches!(vector_core::nip55_is_installed(), Ok(true)) {
+        return Err("No compatible signer app is installed. Install Amber to sign in offline.".into());
+    }
+
+    // Orphan-cleanup: a previous attempt may have staged a session that never
+    // committed (no active-account marker). Always safe to drain — staged
+    // state isn't on disk.
+    if nostr_client().is_some() && account_manager::get_current_account().is_err() {
+        clear_pending_nip55_session().await;
+    }
+
+    // Already-logged-in: a NIP-55 login is always a fresh add. Switching
+    // accounts must go through logout first.
+    if nostr_client().is_some() {
+        return Err("Already logged in. Logout first to add another account.".into());
+    }
+
+    // Pairing handshake — the foreground get_public_key Intent. Returns the
+    // user's identity pubkey + the signer's package name.
+    let (user_pk, package) = vector_core::nip55_pair().await?;
+    let npub = user_pk.to_bech32().map_err(|e| format!("Bech32 error: {}", e))?;
+    let user_pk_hex = user_pk.to_hex();
+
+    // Existing-account collision: this identity is already on disk. Swap into
+    // it via session_reload instead of re-adding.
+    if let Ok(accounts) = account_manager::list_accounts(&handle) {
+        if accounts.iter().any(|n| n == &npub) {
+            let _ = vector_core::db::write_active_account_file(&npub);
+            let _ = handle.emit("session_reload", ());
+            return Ok(LoginResult { public: npub, existing: true });
+        }
+    }
+
+    // Stage the session. Active-account marker is NOT written here — the
+    // encryption-flow commit does that. On any failure the whole staged
+    // session is drained so nothing half-built survives.
+    let setup_result: Result<(), String> = async {
+        account_manager::set_pending_account(npub.clone())?;
+        crate::commands::tor::stop_and_join_if_running().await;
+        account_manager::init_profile_database(&handle, &npub).await?;
+
+        vector_core::set_pending_nip55_setup(user_pk_hex.clone(), package.clone());
+
+        // Install live session state (no DB commit yet). MY_SECRET_KEY stays
+        // empty — a NIP-55 account holds no key on this device.
+        set_my_public_key(user_pk);
+        vector_core::set_signer_kind(vector_core::SignerKind::Nip55);
+        #[cfg(target_os = "android")]
+        crate::android::external_signer::set_signer_package(package.clone());
+
+        let client = Client::builder()
+            .signer(vector_core::Nip55Signer::new(user_pk))
+            .opts(vector_core::nostr_client_options())
+            .monitor(Monitor::new(1024))
+            .build();
+        {
+            let mut slot = NOSTR_CLIENT.write().unwrap();
+            if slot.is_some() {
+                vector_core::log_warn!("[NIP-55 Login] NOSTR_CLIENT was set concurrently; reusing existing instance.");
+            } else {
+                *slot = Some(client);
+            }
+        }
+
+        let mut profile = Profile::new();
+        profile.flags.set_mine(true);
+        STATE.lock().await.insert_or_replace_profile(&npub, profile);
+
+        if let Err(e) = crate::commands::tor::sync_to_active_account().await {
+            vector_core::log_warn!("[NIP-55 Login] Tor start for new account failed: {}", e);
+        }
+        vector_core::blossom_servers::refresh_cache();
+        Ok(())
+    }.await;
+
+    if let Err(e) = setup_result {
+        clear_pending_nip55_session().await;
+        return Err(e);
+    }
+
+    Ok(LoginResult { public: npub, existing: false })
+}
+
+/// Re-run the NIP-55 pairing Intent — used when the signer reports a revoked
+/// permission (NeedsAuth) or was reinstalled. Refuses an identity swap: if the
+/// signer now returns a different pubkey, the user flipped identity on the
+/// signer side and reconnecting would silently mix two accounts' data.
+#[tauri::command]
+pub async fn reauthorize_nip55<R: Runtime>(_handle: AppHandle<R>) -> Result<String, String> {
+    if vector_core::signer_kind() != vector_core::SignerKind::Nip55 {
+        return Err("This is not an offline-signer account.".into());
+    }
+    if !matches!(vector_core::nip55_is_installed(), Ok(true)) {
+        vector_core::set_nip55_state(vector_core::Nip55State::Missing);
+        return Err("No compatible signer app is installed. Install Amber and try again.".into());
+    }
+    let expected_hex = vector_core::db::get_nip55_user_pubkey()
+        .ok().flatten()
+        .ok_or("NIP-55 account missing cached identity pubkey")?
+        .to_ascii_lowercase();
+
+    let session = vector_core::state::SessionGuard::capture();
+    let (user_pk, package) = vector_core::nip55_pair().await?;
+    if !session.is_valid() {
+        return Err("Account changed during re-authorization. Please try again.".into());
+    }
+    // Identity-swap guard (mirrors the bunker reauth + boot checks).
+    if user_pk.to_hex().to_ascii_lowercase() != expected_hex {
+        return Err(
+            "The signer returned a different identity than this account. \
+             Logout and re-add the account to use a different identity."
+                .into(),
+        );
+    }
+    // Re-pin the (possibly-updated) package and clear the needs-auth state.
+    vector_core::db::set_nip55_signer_package(&package)?;
+    #[cfg(target_os = "android")]
+    crate::android::external_signer::set_signer_package(package);
+    vector_core::set_nip55_state(vector_core::Nip55State::Ready);
+    user_pk.to_bech32().map_err(|e| format!("Bech32 error: {}", e))
+}
+
+/// Frontend-callable: drain a half-staged NIP-55 session (Back button on the
+/// signer screen). No-op when a session is already committed, so safe to fire
+/// unconditionally.
+#[tauri::command]
+pub async fn cancel_nip55_session() -> Result<(), String> {
+    if account_manager::get_current_account().is_ok() {
+        return Ok(());
+    }
+    clear_pending_nip55_session().await;
+    Ok(())
+}
+
+/// Drain a half-staged NIP-55 session — the in-memory state installed by
+/// `login_with_nip55` before the encryption flow commits. Called from the
+/// orphan-cleanup at the top of `login_with_nip55`, its rollback path, and the
+/// back-button path.
+async fn clear_pending_nip55_session() {
+    // Defensive re-check: a concurrent commit could have landed between the
+    // public guard and here. Never tear down a fully-committed session.
+    if account_manager::get_current_account().is_ok() {
+        return;
+    }
+    vector_core::drain_nip55_state();
+    #[cfg(target_os = "android")]
+    crate::android::external_signer::on_session_reset();
+    // NIP-55 holds no secret vault, but a prior local/bunker staging on this
+    // process could have left ENCRYPTION_KEY / MY_SECRET_KEY populated.
+    MY_SECRET_KEY.clear(&[&crate::ENCRYPTION_KEY]);
+    crate::ENCRYPTION_KEY.clear(&[&MY_SECRET_KEY]);
+    vector_core::clear_my_public_key();
+    vector_core::clear_pending_nip55_setup();
+    vector_core::set_signer_kind(vector_core::SignerKind::Local);
     let _ = account_manager::clear_pending_account();
     if let Some(client) = vector_core::take_nostr_client() {
         let _ = client.shutdown().await;
@@ -1080,15 +1306,16 @@ pub async fn create_account() -> Result<LoginResult, String> {
 
 /// Export account keys (nsec and seed phrase if available).
 ///
-/// Refuses bunker accounts: `pkey` for those holds the NIP-46 *client*
-/// keypair, not the user's identity nsec. The identity key lives on the
-/// remote signer and is intentionally inaccessible to Vector. Exporting
-/// the client key under an "nsec" label would mislead the user into
-/// importing it elsewhere as their identity and losing access.
+/// Refuses keyless accounts (bunker + NIP-55): the identity nsec never lives on
+/// this device. For bunker, `pkey` holds only the NIP-46 *client* keypair; for
+/// NIP-55 there's no key at all. Exporting either under an "nsec" label would
+/// mislead the user into importing a non-identity key elsewhere and losing
+/// access. Gated on `is_keyless()`, not `is_bunker()`, so a NIP-55 account
+/// doesn't fall through to the confusing "No nsec found" path.
 #[tauri::command]
 pub async fn export_keys() -> Result<serde_json::Value, String> {
-    if vector_core::is_bunker() {
-        return Err("This is a Remote Signer account. The identity key lives on your signer; Vector only holds the device pairing key, which is not your account.".into());
+    if vector_core::is_keyless() {
+        return Err("This is an external signer account. Your identity key lives on your signer app, never on this device, so there's nothing to export here.".into());
     }
     let stored = db::get_pkey()?
         .ok_or("No nsec found in database")?;
@@ -1265,100 +1492,155 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
     }
 
     let handle = TAURI_APP.get().ok_or("App not initialized")?;
-    let stored_pkey = db::get_pkey()?
-        .ok_or("No private key found")?;
 
-    // Decrypt if password provided. For both local and bunker accounts the
-    // `pkey` slot holds the same shape: a bech32 nsec, optionally encrypted
-    // at rest. For local accounts that nsec is the user's identity; for
-    // bunker accounts it's the NIP-46 client keypair. We derive + install
-    // ENCRYPTION_KEY here so the bunker_url decryption below (a separate
-    // settings read) doesn't have to redo Argon2id.
-    let mut nsec = if let Some(pwd) = password {
-        let key_bytes = crypto::hash_pass(pwd.clone()).await;
-        crate::ENCRYPTION_KEY.set(key_bytes, &[&MY_SECRET_KEY]);
-        crypto::internal_decrypt(stored_pkey, Some(pwd)).await
-            .map_err(|_| "Incorrect password".to_string())?
-    } else {
-        stored_pkey
-    };
-
-    // Initialize Client with the key, then zeroize the plaintext nsec
-    let keys = Keys::parse(&nsec).map_err(|_| "Invalid stored key".to_string())?;
-    nsec.zeroize();
-
-    let client_public_key = keys.public_key;
-    MY_SECRET_KEY.store_from_keys(&keys, &[&crate::ENCRYPTION_KEY]);
-
-    // One-time wrap of pre-existing plaintext community rows on an already-encrypted account.
-    if let Err(e) = crate::commands::encryption::backfill_community_at_rest() {
-        eprintln!("[Login] community at-rest backfill deferred: {e}");
-    }
-
-    // Branch: bunker-signer accounts re-bootstrap the NIP-46 connection
-    // BEFORE building the Nostr Client, so the Client gets installed with
-    // the right signer (NostrConnect, not GuardedSigner). `keys` here is
-    // the client keypair, not the user's identity — the user's identity
-    // is the remote signer's pubkey, persisted as `bunker_remote_pubkey`.
+    // Read the signer discriminator up-front. A NIP-55 offline account has no
+    // `pkey` row to decrypt, so it must branch BEFORE get_pkey.
     //
-    // INVARIANT: by the time this function runs, the DB pool has already
-    // been pointed at the active-account marker's npub — `boot_select_account`
+    // INVARIANT: by the time this function runs, the DB pool has already been
+    // pointed at the active-account marker's npub — `boot_select_account`
     // (in `account_manager.rs`) calls `set_current_account` + `init_database`
     // before this command executes. If that ever changes, `get_signer_type`
     // could read from the wrong account's DB and silently misroute the login.
     let signer_type = vector_core::db::get_signer_type().unwrap_or_else(|_| "local".to_string());
     let is_bunker_account = signer_type == "bunker";
+    let is_nip55_account = signer_type == "nip55";
 
-    let public_key = if is_bunker_account {
-        let bunker_url = vector_core::db::get_bunker_url().await
-            .map_err(|e| format!("Failed to read bunker_url: {}", e))?
-            .ok_or("Bunker account missing bunker_url")?;
-        // Hard requirement: if the bunker is unreachable at boot, the user
-        // can't sign anything anyway — falling through with the cached
-        // pubkey but no live NostrConnect leaves `client.signer()` returning
-        // a Client whose signer slot has been initialised against a None
-        // NostrConnect, which errors on the first send with a cryptic
-        // "Bunker signer not installed after prewarm". Better to surface
-        // the offline state immediately so the user knows to wake their
-        // signer and retry.
-        // Boot timeout is short: we're re-connecting to an already-paired
-        // signer that the user previously approved, so the round-trip
-        // doesn't involve any human approval. 15s catches sluggish relay
-        // routing without leaving the user staring at a "loading" screen.
-        let remote_pk = vector_core::attempt_bunker_login(
-            &bunker_url,
-            keys.clone(),
-            std::time::Duration::from_secs(15),
-        ).await.map_err(|e| {
-            format!("Remote signer unreachable — please ensure your signer app is online and retry. ({})", e)
-        })?;
-        // Identity-swap guard. If the signer returns a pubkey that differs
-        // from the one Vector has on disk for this account, the user has
-        // flipped identity on the signer side and reconnecting would silently
-        // mix two accounts' data. Refuse rather than install the wrong key.
-        // Mirrors the reauth flow's check; closes the boot-side hole.
-        let expected_remote_pk_hex = vector_core::db::get_bunker_remote_pubkey()
-            .ok().flatten()
-            .ok_or("Bunker account missing cached remote pubkey")?
-            .to_ascii_lowercase();
-        if remote_pk.to_hex().to_ascii_lowercase() != expected_remote_pk_hex {
-            if let Some(b) = vector_core::take_bunker_signer() {
-                let _ = b.shutdown().await;
+    // The user's identity pubkey for this session. For local/bunker accounts
+    // it's derived from the decrypted `pkey`; for NIP-55 it's the cached
+    // plaintext identity (nothing secret is stored on this device).
+    let public_key = if is_nip55_account {
+        // NIP-55 offline account: no pkey to decrypt. The at-rest ENCRYPTION_KEY
+        // (which protects only the local message DB, never signing) is derived
+        // explicitly here when encrypted — local/bunker get it as a decrypt
+        // side-effect, but NIP-55 has nothing to decrypt. MY_SECRET_KEY stays
+        // empty for the whole session.
+        if let Some(pwd) = password {
+            let key_bytes = crypto::hash_pass(pwd).await;
+            crate::ENCRYPTION_KEY.set(key_bytes, &[&MY_SECRET_KEY]);
+            // A keyless account has no pkey whose failed decrypt would reject a
+            // wrong PIN, so verify against the canary written at setup. Without
+            // this a wrong PIN is silently accepted and every at-rest write this
+            // session is encrypted under the wrong key (split-key corruption).
+            if let Ok(Some(stored)) = vector_core::db::get_sql_setting("nip55_pin_check".to_string()) {
+                let ok = matches!(
+                    crate::crypto::maybe_decrypt(stored).await,
+                    Ok(plain) if plain == NIP55_PIN_CANARY
+                );
+                if !ok {
+                    crate::ENCRYPTION_KEY.clear(&[&MY_SECRET_KEY]);
+                    return Err("Incorrect password".to_string());
+                }
             }
-            vector_core::set_bunker_state(vector_core::BunkerConnectionState::Idle);
-            return Err(
-                "Remote signer returned a different identity than this account. \
-                 Either re-authorize from Settings, or logout and re-add the account."
-                    .into()
-            );
         }
-        vector_core::set_signer_kind(vector_core::SignerKind::Bunker);
-        remote_pk
+        let user_pk_hex = vector_core::db::get_nip55_user_pubkey()
+            .map_err(|e| format!("Failed to read nip55_user_pubkey: {}", e))?
+            .ok_or("NIP-55 account missing cached identity pubkey")?;
+        let user_pk = PublicKey::parse(&user_pk_hex)
+            .map_err(|_| "Stored NIP-55 identity pubkey is invalid".to_string())?;
+        // Amber may have been uninstalled since last run. Boot anyway so the
+        // account still loads (read-only) and the UI can prompt a re-pair;
+        // surface Missing rather than hard-failing login and stranding the user.
+        if !matches!(vector_core::nip55_is_installed(), Ok(true)) {
+            vector_core::set_nip55_state(vector_core::Nip55State::Missing);
+            eprintln!("[Login] NIP-55 signer app not installed — booting read-only until re-paired.");
+        }
+        vector_core::set_signer_kind(vector_core::SignerKind::Nip55);
+        // Pin the paired signer package so the Amber IPC bridge can address it
+        // from the first op (ContentResolver authority + intent target).
+        #[cfg(target_os = "android")]
+        if let Ok(Some(pkg)) = vector_core::db::get_nip55_signer_package() {
+            crate::android::external_signer::set_signer_package(pkg);
+        }
+        debug_assert!(!MY_SECRET_KEY.has_key(), "NIP-55 boot must never populate the key vault");
+        user_pk
     } else {
-        client_public_key
+        let stored_pkey = db::get_pkey()?
+            .ok_or("No private key found")?;
+
+        // Decrypt if password provided. For both local and bunker accounts the
+        // `pkey` slot holds the same shape: a bech32 nsec, optionally encrypted
+        // at rest. For local accounts that nsec is the user's identity; for
+        // bunker accounts it's the NIP-46 client keypair. We derive + install
+        // ENCRYPTION_KEY here so the bunker_url decryption below (a separate
+        // settings read) doesn't have to redo Argon2id.
+        let mut nsec = if let Some(pwd) = password {
+            let key_bytes = crypto::hash_pass(pwd.clone()).await;
+            crate::ENCRYPTION_KEY.set(key_bytes, &[&MY_SECRET_KEY]);
+            crypto::internal_decrypt(stored_pkey, Some(pwd)).await
+                .map_err(|_| "Incorrect password".to_string())?
+        } else {
+            stored_pkey
+        };
+
+        // Initialize Client with the key, then zeroize the plaintext nsec
+        let keys = Keys::parse(&nsec).map_err(|_| "Invalid stored key".to_string())?;
+        nsec.zeroize();
+
+        let client_public_key = keys.public_key;
+        MY_SECRET_KEY.store_from_keys(&keys, &[&crate::ENCRYPTION_KEY]);
+
+        // Branch: bunker-signer accounts re-bootstrap the NIP-46 connection
+        // BEFORE building the Nostr Client, so the Client gets installed with
+        // the right signer (NostrConnect, not GuardedSigner). `keys` here is
+        // the client keypair, not the user's identity — the user's identity
+        // is the remote signer's pubkey, persisted as `bunker_remote_pubkey`.
+        if is_bunker_account {
+            let bunker_url = vector_core::db::get_bunker_url().await
+                .map_err(|e| format!("Failed to read bunker_url: {}", e))?
+                .ok_or("Bunker account missing bunker_url")?;
+            // Hard requirement: if the bunker is unreachable at boot, the user
+            // can't sign anything anyway — falling through with the cached
+            // pubkey but no live NostrConnect leaves `client.signer()` returning
+            // a Client whose signer slot has been initialised against a None
+            // NostrConnect, which errors on the first send with a cryptic
+            // "Bunker signer not installed after prewarm". Better to surface
+            // the offline state immediately so the user knows to wake their
+            // signer and retry.
+            // Boot timeout is short: we're re-connecting to an already-paired
+            // signer that the user previously approved, so the round-trip
+            // doesn't involve any human approval. 15s catches sluggish relay
+            // routing without leaving the user staring at a "loading" screen.
+            let remote_pk = vector_core::attempt_bunker_login(
+                &bunker_url,
+                keys.clone(),
+                std::time::Duration::from_secs(15),
+            ).await.map_err(|e| {
+                format!("Remote signer unreachable — please ensure your signer app is online and retry. ({})", e)
+            })?;
+            // Identity-swap guard. If the signer returns a pubkey that differs
+            // from the one Vector has on disk for this account, the user has
+            // flipped identity on the signer side and reconnecting would silently
+            // mix two accounts' data. Refuse rather than install the wrong key.
+            // Mirrors the reauth flow's check; closes the boot-side hole.
+            let expected_remote_pk_hex = vector_core::db::get_bunker_remote_pubkey()
+                .ok().flatten()
+                .ok_or("Bunker account missing cached remote pubkey")?
+                .to_ascii_lowercase();
+            if remote_pk.to_hex().to_ascii_lowercase() != expected_remote_pk_hex {
+                if let Some(b) = vector_core::take_bunker_signer() {
+                    let _ = b.shutdown().await;
+                }
+                vector_core::set_bunker_state(vector_core::BunkerConnectionState::Idle);
+                return Err(
+                    "Remote signer returned a different identity than this account. \
+                     Either re-authorize from Settings, or logout and re-add the account."
+                        .into()
+                );
+            }
+            vector_core::set_signer_kind(vector_core::SignerKind::Bunker);
+            remote_pk
+        } else {
+            client_public_key
+        }
     };
     set_my_public_key(public_key);
-    drop(keys);
+
+    // One-time wrap of pre-existing plaintext community rows on an already-
+    // encrypted account. Runs for every signer kind (a no-op when the account
+    // isn't encrypted); ENCRYPTION_KEY is installed by every branch above.
+    if let Err(e) = crate::commands::encryption::backfill_community_at_rest() {
+        eprintln!("[Login] community at-rest backfill deferred: {e}");
+    }
 
     // If the user previously enabled Tor, bootstrap it BEFORE building the
     // Nostr client so the client picks up the SOCKS proxy from the start.
@@ -1381,13 +1663,20 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
     }
 
     // Signer dispatch: bunker accounts wire the live NostrConnect handle
-    // (installed by attempt_bunker_login above) into the Client; local
-    // accounts use GuardedSigner over MY_SECRET_KEY as before.
+    // (installed by attempt_bunker_login above) into the Client; NIP-55
+    // accounts install a Nip55Signer over the Amber IPC bridge; local accounts
+    // use GuardedSigner over MY_SECRET_KEY as before.
     let client = if is_bunker_account {
         let bunker = vector_core::bunker_signer()
             .ok_or("Bunker signer not installed after prewarm")?;
         Client::builder()
             .signer(vector_core::WatchedBunkerSigner::new(bunker))
+            .opts(vector_core::nostr_client_options())
+            .monitor(Monitor::new(1024))
+            .build()
+    } else if is_nip55_account {
+        Client::builder()
+            .signer(vector_core::Nip55Signer::new(public_key))
             .opts(vector_core::nostr_client_options())
             .monitor(Monitor::new(1024))
             .build()
@@ -1477,6 +1766,50 @@ pub async fn setup_encryption<R: Runtime>(
     // `hash_pass` borrows by `&str` and doesn't zeroize what it borrows,
     // so without this the plaintext password would survive on the heap.
     let password = Zeroizing::new(password);
+
+    // NIP-55 offline account: nothing secret to encrypt, so it stages no
+    // PENDING_NSEC. It needs its own top-level commit path — the shared path
+    // below bails on the missing PENDING_NSEC, and relies on the pkey decrypt
+    // to install ENCRYPTION_KEY, which a keyless account has nothing to do.
+    if vector_core::signer_kind() == vector_core::SignerKind::Nip55 {
+        let (user_pk_hex, package) = vector_core::pending_nip55_setup()
+            .ok_or("Offline signer setup state missing. Please re-run Sign in with Amber.")?;
+        // Create the DB + set current account + restart Tor (mirror the shared
+        // path below).
+        if let Ok(Some(npub)) = crate::account_manager::get_pending_account() {
+            crate::commands::tor::stop_and_join_if_running().await;
+            if let Err(e) = crate::account_manager::init_profile_database(&handle, &npub).await {
+                let _ = crate::commands::tor::sync_to_active_account().await;
+                return Err(e);
+            }
+            crate::account_manager::set_current_account(npub)?;
+            crate::account_manager::clear_pending_account()?;
+            if let Err(e) = crate::commands::tor::sync_to_active_account().await {
+                eprintln!("[Account] Tor start for new account failed: {}", e);
+            }
+        }
+        if !session.is_valid() {
+            return Err("Account changed during setup. Please try again.".into());
+        }
+        // Install ENCRYPTION_KEY explicitly — it protects the local message DB
+        // only (signing never touches this device). No pkey means no
+        // decrypt-side-effect install, so derive it here.
+        let key_bytes = crypto::hash_pass((*password).clone()).await;
+        crate::ENCRYPTION_KEY.set(key_bytes, &[&MY_SECRET_KEY]);
+        if !session.is_valid() {
+            return Err("Account changed during setup. Please try again.".into());
+        }
+        vector_core::db::commit_nip55_account_setup(&user_pk_hex, &package, true, Some(&security_type))?;
+        vector_core::clear_pending_nip55_setup();
+        crate::state::set_encryption_enabled(true);
+        // Persist a PIN canary (encrypted under the derived key) so boot can
+        // reject a wrong PIN — a keyless account has no pkey to do it implicitly.
+        let canary = crate::crypto::maybe_encrypt(NIP55_PIN_CANARY.to_string()).await;
+        vector_core::db::set_sql_setting("nip55_pin_check".to_string(), canary)?;
+        vector_core::blossom_servers::refresh_cache();
+        broadcast_pending_invite_if_any();
+        return Ok(());
+    }
 
     // Clone (not take) so a transient DB failure leaves the original
     // PENDING_NSEC intact for retry. The Zeroizing wrapper scrubs the
@@ -1595,6 +1928,34 @@ pub async fn skip_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), Str
     // is async; `init_profile_database` is async. Re-validated before commit
     // so a concurrent `swap_session` can't land the rows in a foreign DB.
     let session = vector_core::state::SessionGuard::capture();
+
+    // NIP-55 offline account: no PENDING_NSEC (nothing secret on this device),
+    // and no ENCRYPTION_KEY since the user chose to skip local encryption.
+    if vector_core::signer_kind() == vector_core::SignerKind::Nip55 {
+        let (user_pk_hex, package) = vector_core::pending_nip55_setup()
+            .ok_or("Offline signer setup state missing. Please re-run Sign in with Amber.")?;
+        if let Ok(Some(npub)) = crate::account_manager::get_pending_account() {
+            crate::commands::tor::stop_and_join_if_running().await;
+            if let Err(e) = crate::account_manager::init_profile_database(&handle, &npub).await {
+                let _ = crate::commands::tor::sync_to_active_account().await;
+                return Err(e);
+            }
+            crate::account_manager::set_current_account(npub)?;
+            crate::account_manager::clear_pending_account()?;
+            if let Err(e) = crate::commands::tor::sync_to_active_account().await {
+                eprintln!("[Account] Tor start for new account failed: {}", e);
+            }
+        }
+        if !session.is_valid() {
+            return Err("Account changed during setup. Please try again.".into());
+        }
+        vector_core::db::commit_nip55_account_setup(&user_pk_hex, &package, false, None)?;
+        vector_core::clear_pending_nip55_setup();
+        crate::state::set_encryption_enabled(false);
+        vector_core::blossom_servers::refresh_cache();
+        broadcast_pending_invite_if_any();
+        return Ok(());
+    }
 
     // Clone (NOT take) into a Zeroizing wrapper so a transient failure
     // both (a) leaves the key recoverable in PENDING_NSEC and (b) scrubs

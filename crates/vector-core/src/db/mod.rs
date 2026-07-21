@@ -33,6 +33,9 @@ pub use settings::{
     get_bunker_url, set_bunker_url,
     get_bunker_remote_pubkey, set_bunker_remote_pubkey,
     commit_bunker_account_setup,
+    get_nip55_user_pubkey, set_nip55_user_pubkey,
+    get_nip55_signer_package, set_nip55_signer_package,
+    commit_nip55_account_setup,
 };
 
 // ============================================================================

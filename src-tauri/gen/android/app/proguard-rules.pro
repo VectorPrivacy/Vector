@@ -91,3 +91,11 @@
 # they're only referenced from native code — crashing release builds at boot
 # (externalMediaDir is resolved during startup) with NoSuchMethodError.
 -keep class io.vectorapp.VectorFiles { *; }
+
+# Keep ExternalSigner (NIP-55 Amber bridge). Its static methods (isInstalled,
+# queryContentResolver, launch, handleActivityResult) are invoked from Rust via
+# JNI, and its native callback nativeOnSignerResult must keep its exact name so
+# the Rust symbol resolves. R8 can't see JNI uses, so keep the whole class or
+# release builds hit NoSuchMethodError the moment the login screen probes for a
+# signer.
+-keep class io.vectorapp.ExternalSigner { *; }

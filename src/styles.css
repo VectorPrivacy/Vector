@@ -8882,6 +8882,18 @@ select:disabled:hover {
    primary nsec/seed input as a small underlined link, not a button. Bunker
    is a login flow only — the signer is the identity, so there's no parallel
    "create" path that would justify entry-screen prominence. */
+.login-signer-links {
+  /* Pin above the absolute-positioned input row inside login-import (its glow
+     halo sits at bottom: 0); column-stack so multiple signer links don't overlap. */
+  position: absolute;
+  bottom: 84px;
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
 .login-bunker-link-btn {
   background: none;
   border: none;
@@ -8890,13 +8902,6 @@ select:disabled:hover {
   padding: 6px 12px;
   cursor: pointer;
   transition: color 0.15s ease;
-  /* Pin above the absolute-positioned input row inside login-import. The
-     input lives at bottom: 0 of its container with a glow halo; we sit
-     ~84px up so the link stays clear of the halo. */
-  position: absolute;
-  bottom: 84px;
-  left: 0;
-  right: 0;
   display: flex;
   align-items: center;
   justify-content: center;

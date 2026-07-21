@@ -55,6 +55,9 @@ pub mod crypto;
 // === Signer (polymorphic: local vault vs. NIP-46 remote bunker) ===
 pub mod signer;
 
+// === NIP-55 offline signer (on-device Amber over Android IPC) ===
+pub mod nip55;
+
 // === Database ===
 pub mod db;
 
@@ -201,10 +204,11 @@ pub use state::{
     set_nostr_client, set_my_public_key,
     take_nostr_client, clear_my_public_key,
     set_pending_bunker_setup, pending_bunker_setup, clear_pending_bunker_setup,
+    set_pending_nip55_setup, pending_nip55_setup, clear_pending_nip55_setup,
 };
 pub use crypto::{GuardedKey, GuardedSigner};
 pub use signer::{
-    SignerKind, signer_kind, set_signer_kind, is_bunker,
+    SignerKind, signer_kind, set_signer_kind, is_bunker, is_keyless,
     BUNKER_SIGNER, bunker_signer, set_bunker_signer, take_bunker_signer,
     build_bunker_signer, prewarm_bunker, drain_bunker_state,
     parse_bunker_remote_pubkey, parse_bunker_relays,
@@ -212,6 +216,12 @@ pub use signer::{
     VectorAuthUrlHandler, attempt_bunker_login, WatchedBunkerSigner,
     vector_metadata, build_nostrconnect_uri, build_nostrconnect_session,
     VECTOR_APP_NAME, VECTOR_APP_URL, VECTOR_APP_ICON,
+};
+pub use nip55::{
+    Nip55Backend, Nip55Error, Nip55ResolverOutcome, Nip55Signer, Nip55State,
+    set_nip55_backend, nip55_backend, nip55_state, set_nip55_state, drain_nip55_state,
+    nip55_is_installed, nip55_pair, nip55_perms_json,
+    VECTOR_NIP55_SIGN_KINDS, VECTOR_NIP55_ENCRYPT_TYPES,
 };
 pub use error::{VectorError, Result};
 pub use traits::{EventEmitter, NoOpEmitter, set_event_emitter, emit_event};

@@ -157,6 +157,32 @@ pub fn clear_pending_bunker_setup() {
     *PENDING_BUNKER_SETUP.lock().unwrap() = None;
 }
 
+/// Staged NIP-55 pairing result between `login_with_nip55` and the subsequent
+/// encryption-flow commit. Both fields are public material (identity pubkey +
+/// signer package name), so no `Zeroizing` — unlike bunker, a NIP-55 account
+/// stages nothing secret. `setup_encryption` / `skip_encryption` reads this
+/// when `signer_kind() == Nip55` to write the right settings rows via
+/// `commit_nip55_account_setup`.
+///
+/// Tuple order: (user_pubkey_hex, signer_package).
+pub static PENDING_NIP55_SETUP: std::sync::Mutex<Option<(String, String)>> =
+    std::sync::Mutex::new(None);
+
+#[inline]
+pub fn set_pending_nip55_setup(user_pubkey_hex: String, signer_package: String) {
+    *PENDING_NIP55_SETUP.lock().unwrap() = Some((user_pubkey_hex, signer_package));
+}
+
+#[inline]
+pub fn pending_nip55_setup() -> Option<(String, String)> {
+    PENDING_NIP55_SETUP.lock().unwrap().clone()
+}
+
+#[inline]
+pub fn clear_pending_nip55_setup() {
+    *PENDING_NIP55_SETUP.lock().unwrap() = None;
+}
+
 pub static ENCRYPTION_KEY: crate::crypto::GuardedKey = crate::crypto::GuardedKey::empty();
 
 pub static ENCRYPTION_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -525,6 +551,30 @@ mod session_globals_tests {
 
         clear_pending_bunker_setup();
         assert!(pending_bunker_setup().is_none(), "cleared returns None");
+
+        // PendingNip55Setup: set → peek → clear. Both fields are public
+        // material (identity pubkey + signer package), so no Zeroizing — a
+        // NIP-55 account stages nothing secret.
+        clear_pending_nip55_setup();
+        assert!(pending_nip55_setup().is_none(), "starts as None");
+
+        let user_pk = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string();
+        let package = "com.greenart7c3.nostrsigner".to_string();
+        set_pending_nip55_setup(user_pk.clone(), package.clone());
+        let peek1 = pending_nip55_setup().expect("first peek");
+        let peek2 = pending_nip55_setup().expect("second peek");
+        assert_eq!(peek1.0, user_pk);
+        assert_eq!(peek1.1, package);
+        assert_eq!(peek1, peek2, "successive peeks return same data");
+
+        // Overwrite replaces cleanly.
+        set_pending_nip55_setup("beef".to_string(), "org.other.signer".to_string());
+        let after55 = pending_nip55_setup().expect("overwritten read");
+        assert_eq!(after55.0, "beef");
+        assert_eq!(after55.1, "org.other.signer");
+
+        clear_pending_nip55_setup();
+        assert!(pending_nip55_setup().is_none(), "cleared returns None");
 
         // SessionGuard interaction — capturing then bumping invalidates the
         // captured guard. This mirrors the contract every Tauri command that

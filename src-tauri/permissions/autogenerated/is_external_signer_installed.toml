@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-is-external-signer-installed"
+description = "Enables the is_external_signer_installed command without any pre-configured scope."
+commands.allow = ["is_external_signer_installed"]
+
+[[permission]]
+identifier = "deny-is-external-signer-installed"
+description = "Denies the is_external_signer_installed command without any pre-configured scope."
+commands.deny = ["is_external_signer_installed"]

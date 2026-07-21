@@ -246,6 +246,10 @@ pub extern "C" fn Java_io_vectorapp_VectorNotificationService_nativeStartBackgro
         }
     }
 
+    // Register the NIP-55 signer backend for service-only mode (no Activity, so
+    // lib.rs's setup hook never ran). Idempotent — a no-op in full-app mode.
+    crate::android::external_signer::register();
+
     let data_dir_str: String = match env.get_string(&data_dir) {
         Ok(s) => s.into(),
         Err(e) => {
@@ -753,7 +757,56 @@ async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey, bool, Op
 
         Ok((client, my_public_key, false, None))
     } else {
-        // Normal account — full signer client
+        // Unencrypted account. A NIP-55 offline account has no `pkey` row (the
+        // key lives in Amber), so branch before the pkey read — otherwise the
+        // SELECT errors and bg-sync dies at boot. The Nip55Signer routes
+        // decrypts through the service's Application context (which
+        // `with_android_context` already prefers), so headless pre-authorized
+        // ContentResolver decrypts work without an Activity. Un-remembered ops
+        // fail soft (no Activity to prompt) and defer to foreground.
+        let signer_type: Option<String> = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'signer_type'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+
+        if signer_type.as_deref() == Some("nip55") {
+            // Pin the paired signer package so ContentResolver decrypts can
+            // address Amber headlessly (no Activity in service-only mode).
+            let signer_package: Option<String> = conn
+                .query_row(
+                    "SELECT value FROM settings WHERE key = 'nip55_signer_package'",
+                    [],
+                    |row| row.get(0),
+                )
+                .ok();
+            let my_public_key = PublicKey::from_bech32(&npub_name)
+                .map_err(|e| format!("Failed to parse npub from dir name: {:?}", e))?;
+            drop(conn);
+
+            if let Some(pkg) = signer_package {
+                crate::android::external_signer::set_signer_package(pkg);
+            }
+            // Service-only mode has no Activity, so the foreground login branch
+            // never ran — set the discriminator here so is_keyless()/signer_kind()
+            // report correctly for any headless consumer.
+            vector_core::set_signer_kind(vector_core::SignerKind::Nip55);
+
+            logcat(&format!("Bootstrapped NIP-55 offline client for {}...",
+                &npub_name[..20.min(npub_name.len())]));
+
+            let client = Client::builder()
+                .signer(vector_core::Nip55Signer::new(my_public_key))
+                .opts(vector_core::nostr_client_options())
+                .build();
+            bg_connect_single_relay(&client, data_dir).await?;
+
+            return Ok((client, my_public_key, true, None));
+        }
+
+        // Normal (local) account — full signer client
         let pkey: String = conn
             .query_row(
                 "SELECT value FROM settings WHERE key = 'pkey'",

@@ -668,6 +668,7 @@ const domLoginStart = document.getElementById('login-start');
 const domLoginAccountCreationBtn = document.getElementById('start-account-creation-btn');
 const domLoginAccountBtn = document.getElementById('start-login-btn');
 const domLoginBunkerStartBtn = document.getElementById('start-bunker-btn');
+const domLoginNip55StartBtn = document.getElementById('start-nip55-btn');
 const domLogin = document.getElementById('login-form');
 const domLoginImport = document.getElementById('login-import');
 const domLoginInput = document.getElementById('login-input');
@@ -6009,6 +6010,8 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                     // that instead of leaving "Decrypting…" up the whole time.
                     const loadingMsg = window.__activeSignerType === 'bunker'
                         ? 'Connecting to Signer…'
+                        : window.__activeSignerType === 'nip55'
+                        ? 'Unlocking…'
                         : DECRYPTING_MSG;
                     updateStatusMessage(loadingMsg, true);
                     try {
@@ -6182,6 +6185,8 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                 // RPC, not decryption — show the more accurate message.
                 const loadingMsg = window.__activeSignerType === 'bunker'
                     ? 'Connecting to Signer…'
+                    : window.__activeSignerType === 'nip55'
+                    ? 'Unlocking…'
                     : DECRYPTING_MSG;
                 updateStatusMessage(loadingMsg, true);
                 try {
@@ -9885,25 +9890,58 @@ async function refreshRemoteSignerCard() {
     const card = document.getElementById('settings-remote-signer');
     const exportRow = document.getElementById('export-account-row');
     if (!card) return;
+    const labelEl = document.getElementById('remote-signer-label');
+    const hintEl = document.getElementById('remote-signer-hint');
     try {
         const status = await invoke('get_bunker_status');
-        if (!status) {
-            card.style.display = 'none';
-            if (exportRow) exportRow.style.display = '';
+        if (status) {
+            // NIP-46 bunker: a remote signer reached over a relay connection, so
+            // the online/offline dot (driven by the bunker_state listener) is
+            // meaningful here.
+            if (labelEl) labelEl.textContent = 'Remote Signer';
+            if (hintEl) hintEl.textContent = 'Your identity key lives on your signer app. Vector only holds a device pairing key.';
+            const pkEl = document.getElementById('remote-signer-pubkey');
+            if (pkEl) {
+                const npub = status.remote_npub || '';
+                pkEl.textContent = npub
+                    ? `${npub.slice(0, 12)}…${npub.slice(-6)}`
+                    : '…';
+                pkEl.title = npub;
+            }
+            card.style.display = '';
+            if (exportRow) exportRow.style.display = 'none';
             return;
         }
-        const pkEl = document.getElementById('remote-signer-pubkey');
-        if (pkEl) {
-            const npub = status.remote_npub || '';
-            pkEl.textContent = npub
-                ? `${npub.slice(0, 12)}…${npub.slice(-6)}`
-                : '—';
-            pkEl.title = npub;
+        // Not a bunker account — an on-device NIP-55 offline signer (Amber)
+        // reuses the same card (both keep the identity key off this device, so
+        // Export stays hidden for either).
+        const nip55 = await invoke('get_nip55_status').catch(() => null);
+        if (nip55) {
+            if (labelEl) labelEl.textContent = 'Offline Signer';
+            if (hintEl) hintEl.textContent = 'Your identity key stays in your signer app. Vector holds nothing on this device.';
+            const pkEl = document.getElementById('remote-signer-pubkey');
+            if (pkEl) {
+                const npub = nip55.user_npub || '';
+                pkEl.textContent = npub
+                    ? `${npub.slice(0, 12)}…${npub.slice(-6)}`
+                    : '…';
+                pkEl.title = npub;
+            }
+            // A local IPC signer has no online/offline connection to drop, so
+            // the dot reflects install health, not the noisy per-op state:
+            // green = installed & paired, red = the signer app is gone. A
+            // transient needs-auth is surfaced by a toast + the Re-authorize
+            // button, not a persistent red dot.
+            applyRemoteSignerDot(nip55.installed ? 'online' : 'offline');
+            card.style.display = '';
+            if (exportRow) exportRow.style.display = 'none';
+            return;
         }
-        card.style.display = '';
-        if (exportRow) exportRow.style.display = 'none';
+        // Local-key account — no external signer card.
+        card.style.display = 'none';
+        if (exportRow) exportRow.style.display = '';
     } catch (e) {
-        console.warn('[settings] get_bunker_status failed:', e);
+        console.warn('[settings] remote signer status failed:', e);
         card.style.display = 'none';
         if (exportRow) exportRow.style.display = '';
     }
@@ -10538,6 +10576,36 @@ window.addEventListener("DOMContentLoaded", async () => {
         }
     });
 
+    // NIP-55 offline-signer health. Fires when a background op comes back
+    // rejected (needs_auth) or the signer app is uninstalled (missing). Maps
+    // onto the same Security-panel dot as bunker; a needs_auth in steady state
+    // means Amber revoked a permission, so nudge the user to re-authorize.
+    await listen('nip55_state', (evt) => {
+        const state = evt?.payload?.state;
+        if (typeof applyRemoteSignerDot === 'function') {
+            // Dot tracks install health, not the noisy per-op state: only a
+            // genuinely-gone signer goes red. A needs_auth blip (a kind Amber
+            // didn't auto-approve) leaves the dot green and is surfaced by the
+            // toast + Re-authorize button instead of painting the card broken.
+            if (state === 'missing') applyRemoteSignerDot('offline');
+            else if (state === 'ready') applyRemoteSignerDot('online');
+        }
+        if (state === 'needs_auth') {
+            if (!window.__nip55NeedsAuthToastShown && typeof showToast === 'function') {
+                showToast('Your signer needs re-authorization. Open Settings to reconnect.');
+                window.__nip55NeedsAuthToastShown = true;
+            }
+        } else if (state === 'missing') {
+            if (!window.__nip55MissingToastShown && typeof showToast === 'function') {
+                showToast('Your signer app is not installed. Reinstall it to keep signing.');
+                window.__nip55MissingToastShown = true;
+            }
+        } else if (state === 'ready') {
+            window.__nip55NeedsAuthToastShown = false;
+            window.__nip55MissingToastShown = false;
+        }
+    });
+
     await listen('bunker_awaiting_approval', () => {
         // Countdown is reroll-bound; once we're waiting on user approval
         // in the signer app, auto-reroll would be hostile.
@@ -11019,6 +11087,40 @@ window.addEventListener("DOMContentLoaded", async () => {
         // keeps the entry screen clean for the 98% of users who don't run a
         // remote signer.
         domLoginBunkerStartBtn.onclick = showBunkerForm;
+    }
+
+    // NIP-55 offline signer (Amber): Android-only, and only when a signer app
+    // is actually installed — otherwise the button is a dead end. The reveal
+    // is async so the entry screen never flickers a button it can't honour.
+    if (domLoginNip55StartBtn && platformFeatures.os === 'android') {
+        invoke('is_external_signer_installed').then((installed) => {
+            if (installed) domLoginNip55StartBtn.style.display = '';
+        }).catch(() => { /* leave hidden */ });
+
+        domLoginNip55StartBtn.onclick = async () => {
+            domLoginNip55StartBtn.disabled = true;
+            try {
+                if (addAccountFlow.active) await addAccountFlow.commit();
+                // Blocks while Amber is foregrounded and the user approves; the
+                // Activity-result bridge resolves this once they return.
+                const { public: pubKey, existing } = await invoke('login_with_nip55');
+                strPubkey = pubKey;
+                if (existing) {
+                    // Identity already on disk; backend armed session_reload.
+                    return;
+                }
+                // Reuse the shared post-login flow: pick a security mode, then
+                // connect in the background so a relay hang doesn't strand us.
+                openEncryptionFlow(false);
+                invoke('connect').catch((err) => {
+                    console.warn('[login_with_nip55] connect() failed:', err);
+                });
+            } catch (e) {
+                popupConfirm(String(e), '', true, '', 'vector_warning.svg');
+            } finally {
+                domLoginNip55StartBtn.disabled = false;
+            }
+        };
     }
     if (domLoginBunkerCopyBtn) {
         domLoginBunkerCopyBtn.onclick = async () => {
@@ -12293,9 +12395,22 @@ domChatMessageInput.oninput = async (e) => {
     };
 
     if (domRemoteSignerReauthBtn) {
-        domRemoteSignerReauthBtn.onclick = (e) => {
+        domRemoteSignerReauthBtn.onclick = async (e) => {
             e.preventDefault();
             e.stopPropagation();
+            // NIP-55 re-auth is a direct Amber intent (no QR/paste), so dispatch
+            // on the actual account type rather than assuming bunker.
+            const nip55 = await invoke('get_nip55_status').catch(() => null);
+            if (nip55) {
+                try {
+                    await invoke('reauthorize_nip55');
+                    if (typeof showToast === 'function') showToast('Signer re-authorized.');
+                    refreshRemoteSignerCard();
+                } catch (err) {
+                    popupConfirm(String(err), '', true, '', 'vector_warning.svg');
+                }
+                return;
+            }
             if (typeof window.showBunkerForm === 'function') {
                 window.showBunkerForm('reauth');
             }

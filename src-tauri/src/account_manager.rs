@@ -133,7 +133,7 @@ pub fn list_accounts<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<String>, S
             if !ft.is_dir() || ft.is_symlink() { continue; }
             let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else { continue; };
             if !name.starts_with("npub1") { continue; }
-            if let Ok(true) = account_has_valid_pkey(handle, &name) {
+            if let Ok(true) = account_is_valid(handle, &name) {
                 accounts.push(name);
             }
         }
@@ -163,7 +163,7 @@ pub fn prune_invalid_accounts<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<S
             let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else { continue; };
             if !name.starts_with("npub1") { continue; }
 
-            if matches!(account_has_valid_pkey(handle, &name), Ok(false)) {
+            if matches!(account_is_valid(handle, &name), Ok(false)) {
                 let dir = entry.path();
                 if let Err(e) = std::fs::remove_dir_all(&dir) {
                     eprintln!("[Account Manager] prune_invalid_accounts: failed to remove {}: {}", dir.display(), e);
@@ -291,16 +291,23 @@ pub fn touch_last_active() -> Result<(), String> {
     vector_core::db::set_sql_setting("last_active".to_string(), now.to_string())
 }
 
-/// Check if an account has a valid pkey in its database.
+/// Check if an account directory holds a real, usable account.
 ///
-/// `Ok(true)` = real account. `Ok(false)` = DB opens but pkey row is
-/// missing/empty. `Err` = transient failure (lock, AV scanner) — callers
-/// that delete on `Ok(false)` MUST NOT treat `Err` the same way.
+/// `Ok(true)` = real account. `Ok(false)` = DB opens but carries no usable
+/// identity. `Err` = transient failure (lock, AV scanner) — callers that
+/// delete on `Ok(false)` MUST NOT treat `Err` the same way.
+///
+/// Local and bunker accounts prove validity with a non-empty `pkey` (identity
+/// nsec, or the NIP-46 client keypair). A **NIP-55 offline account has NO
+/// pkey** — its key lives in the signer app — so it proves validity with
+/// `signer_type='nip55'` + a cached `nip55_user_pubkey`. Without this branch a
+/// NIP-55 account is invisible to `list_accounts`, so boot wipes its marker and
+/// dumps the user on the Create/Login screen.
 ///
 /// Opens read-only + `NO_MUTEX` so probing an inactive account never
 /// creates WAL/SHM sidecar files and never blocks the active account's
 /// writer.
-fn account_has_valid_pkey<R: Runtime>(handle: &AppHandle<R>, npub: &str) -> Result<bool, String> {
+fn account_is_valid<R: Runtime>(handle: &AppHandle<R>, npub: &str) -> Result<bool, String> {
     let db_path = get_database_path(handle, npub)?;
 
     if !db_path.exists() {
@@ -312,14 +319,26 @@ fn account_has_valid_pkey<R: Runtime>(handle: &AppHandle<R>, npub: &str) -> Resu
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     ).map_err(|e| format!("Failed to open database: {}", e))?;
 
-    // Check if the pkey exists in settings table and is not empty
-    let result: Option<String> = conn.query_row(
-        "SELECT value FROM settings WHERE key = ?1",
-        rusqlite::params!["pkey"],
-        |row| row.get(0)
-    ).ok();
+    let setting = |key: &str| -> Option<String> {
+        conn.query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            rusqlite::params![key],
+            |row| row.get(0),
+        ).ok()
+    };
 
-    Ok(result.map(|s| !s.is_empty()).unwrap_or(false))
+    // Local / bunker: a non-empty pkey is the identity proof.
+    if setting("pkey").map(|s| !s.is_empty()).unwrap_or(false) {
+        return Ok(true);
+    }
+
+    // NIP-55 offline: no pkey by design; valid iff it carries the nip55
+    // discriminator + a cached identity pubkey.
+    if setting("signer_type").as_deref() == Some("nip55") {
+        return Ok(setting("nip55_user_pubkey").map(|s| !s.is_empty()).unwrap_or(false));
+    }
+
+    Ok(false)
 }
 
 /// Check if any account exists
@@ -627,6 +646,15 @@ pub async fn reset_session() {
     // login from leaking the previous bunker URL into the next account's
     // setup_encryption call.
     vector_core::clear_pending_bunker_setup();
+
+    // NIP-55 offline-signer state: reset the observable pairing state and drop
+    // any staged pairing result. On Android, also wake every stranded
+    // Intent-result waiter with a cancelled sentinel — a `spawn_blocking` thread
+    // parked on the pairing/fallback condvar won't poll `is_valid()` on its own.
+    vector_core::drain_nip55_state();
+    vector_core::clear_pending_nip55_setup();
+    #[cfg(target_os = "android")]
+    crate::android::external_signer::on_session_reset();
 
     // In-memory state owned by vector-core's globals.
     {

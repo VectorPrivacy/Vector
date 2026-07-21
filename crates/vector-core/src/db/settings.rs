@@ -284,3 +284,116 @@ pub fn commit_bunker_account_setup(
     tx.commit().map_err(|e| format!("Failed to commit tx: {}", e))?;
     Ok(())
 }
+
+// ============================================================================
+// NIP-55 offline-signer settings
+// ============================================================================
+//
+// A NIP-55 (Amber) account keeps NOTHING secret on this device — not even the
+// client keypair a bunker account holds. So there is no `pkey` row at all; the
+// only account-identifying material is public:
+//   - `signer_type`         — "nip55"
+//   - `nip55_user_pubkey`   — identity pubkey hex, plaintext (public material;
+//                             lets the locked account picker render the npub
+//                             pre-unlock, same as `bunker_remote_pubkey`).
+//   - `nip55_signer_package`— the signer app's Android package name, plaintext.
+//
+// `encryption_enabled`/`security_type` still apply, but they gate ONLY the
+// local at-rest DB encryption (messages Vector stores) — orthogonal to signing,
+// which never touches this device's storage.
+
+/// Read the cached NIP-55 identity pubkey (hex). Plaintext on disk (public-key
+/// material); readable before unlock so the account picker can show the npub.
+pub fn get_nip55_user_pubkey() -> Result<Option<String>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    Ok(conn.query_row(
+        "SELECT value FROM settings WHERE key = 'nip55_user_pubkey'",
+        [],
+        |row| row.get::<_, String>(0),
+    ).ok())
+}
+
+/// Persist the NIP-55 identity pubkey (hex).
+pub fn set_nip55_user_pubkey(pubkey_hex: &str) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('nip55_user_pubkey', ?1)",
+        rusqlite::params![pubkey_hex],
+    ).map_err(|e| format!("Failed to set nip55_user_pubkey: {}", e))?;
+    Ok(())
+}
+
+/// Read the paired signer app's Android package name. Pinned on every intent +
+/// as the ContentResolver authority so a second signer app can't intercept.
+pub fn get_nip55_signer_package() -> Result<Option<String>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    Ok(conn.query_row(
+        "SELECT value FROM settings WHERE key = 'nip55_signer_package'",
+        [],
+        |row| row.get::<_, String>(0),
+    ).ok())
+}
+
+/// Persist the paired signer app's package name. Updated on re-pair.
+pub fn set_nip55_signer_package(package: &str) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('nip55_signer_package', ?1)",
+        rusqlite::params![package],
+    ).map_err(|e| format!("Failed to set nip55_signer_package: {}", e))?;
+    Ok(())
+}
+
+/// Atomically commit NIP-55 new-account setup: `encryption_enabled`,
+/// `security_type`, `signer_type='nip55'`, and the two plaintext public fields.
+/// No `pkey` is written (nothing secret exists), and any stale key material
+/// from a prior local/bunker setup on this DB is scrubbed so login can't
+/// mis-route through a leftover pkey/bunker row. Transactional for the same
+/// reason as the sibling commits — a half-written account bricks login.
+pub fn commit_nip55_account_setup(
+    user_pubkey_hex: &str,
+    signer_package: &str,
+    encryption_enabled: bool,
+    security_type: Option<&str>,
+) -> Result<(), String> {
+    let mut conn = super::get_write_connection_guard_static()?;
+    let tx = conn.transaction()
+        .map_err(|e| format!("Failed to begin tx: {}", e))?;
+    tx.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('encryption_enabled', ?1)",
+        rusqlite::params![if encryption_enabled { "true" } else { "false" }],
+    ).map_err(|e| format!("Failed to set encryption_enabled: {}", e))?;
+    if let Some(st) = security_type {
+        tx.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('security_type', ?1)",
+            rusqlite::params![st],
+        ).map_err(|e| format!("Failed to set security_type: {}", e))?;
+    } else {
+        tx.execute(
+            "DELETE FROM settings WHERE key = 'security_type'",
+            [],
+        ).map_err(|e| format!("Failed to clear security_type: {}", e))?;
+    }
+    tx.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('signer_type', 'nip55')",
+        [],
+    ).map_err(|e| format!("Failed to set signer_type: {}", e))?;
+    tx.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('nip55_user_pubkey', ?1)",
+        rusqlite::params![user_pubkey_hex],
+    ).map_err(|e| format!("Failed to set nip55_user_pubkey: {}", e))?;
+    tx.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('nip55_signer_package', ?1)",
+        rusqlite::params![signer_package],
+    ).map_err(|e| format!("Failed to set nip55_signer_package: {}", e))?;
+    // Scrub any secret/bunker material a prior setup on this DB may have left —
+    // a NIP-55 account must never fall back to a stale key at boot.
+    for stale in ["pkey", "seed", "bunker_url", "bunker_remote_pubkey"] {
+        tx.execute(
+            "DELETE FROM settings WHERE key = ?1",
+            rusqlite::params![stale],
+        ).map_err(|e| format!("Failed to clear stale {}: {}", stale, e))?;
+    }
+    tx.commit().map_err(|e| format!("Failed to commit tx: {}", e))?;
+    Ok(())
+}

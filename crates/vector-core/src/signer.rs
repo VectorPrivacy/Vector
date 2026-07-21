@@ -44,6 +44,10 @@ pub enum SignerKind {
     /// The user's nsec lives on a remote NIP-46 signer; we only hold the
     /// client keypair used to RPC it.
     Bunker = 1,
+    /// The user's nsec lives in an on-device NIP-55 signer app (Amber) reached
+    /// over local Android IPC. Nothing secret is stored on this device at all
+    /// (not even a client keypair). Android-only.
+    Nip55 = 2,
 }
 
 impl SignerKind {
@@ -53,6 +57,7 @@ impl SignerKind {
         match self {
             SignerKind::Local => "local",
             SignerKind::Bunker => "bunker",
+            SignerKind::Nip55 => "nip55",
         }
     }
 
@@ -63,6 +68,7 @@ impl SignerKind {
     pub fn from_setting_str(s: &str) -> Self {
         match s {
             "bunker" => SignerKind::Bunker,
+            "nip55" => SignerKind::Nip55,
             _ => SignerKind::Local,
         }
     }
@@ -75,6 +81,7 @@ static SIGNER_KIND: AtomicU8 = AtomicU8::new(SignerKind::Local as u8);
 pub fn signer_kind() -> SignerKind {
     match SIGNER_KIND.load(Ordering::Acquire) {
         1 => SignerKind::Bunker,
+        2 => SignerKind::Nip55,
         _ => SignerKind::Local,
     }
 }
@@ -89,9 +96,24 @@ pub fn set_signer_kind(kind: SignerKind) {
 /// `true` iff the active account signs via a remote NIP-46 bunker. Hot-path
 /// helper for code that needs to branch on signer mode (e.g. parallelising
 /// gift-wrap signing harder when each call pays a round-trip).
+///
+/// Reserve this for genuinely NIP-46-relay-specific logic. For "we don't hold
+/// the identity key on this device" gates (key export refusal, keyless-account
+/// feature availability) use `is_keyless()` instead — a NIP-55 account is
+/// keyless but not a bunker.
 #[inline]
 pub fn is_bunker() -> bool {
     signer_kind() == SignerKind::Bunker
+}
+
+/// `true` iff the identity key is NOT held on this device — i.e. any remote /
+/// external signer (NIP-46 bunker or NIP-55 Amber). The local `MY_SECRET_KEY`
+/// vault does not hold the signing identity for these accounts, so anything
+/// that reads or exports the raw nsec must gate on this and route through
+/// `client.signer()` instead.
+#[inline]
+pub fn is_keyless() -> bool {
+    signer_kind() != SignerKind::Local
 }
 
 // ============================================================================
@@ -611,6 +633,11 @@ pub async fn attempt_bunker_login(
 /// by the frontend. The caller is responsible for `.shutdown().await`-ing
 /// the returned signer outside the lock.
 pub fn drain_bunker_state() -> Option<NostrConnect> {
+    // Resets SIGNER_KIND for EVERY signer kind, not just bunker — `reset_session`
+    // calls this unconditionally, so a NIP-55 (or any) → local swap lands the
+    // discriminator back at Local before the next account's login re-reads its
+    // own signer_type. Do NOT make this bunker-conditional or is_keyless() gets
+    // stuck across swaps.
     set_signer_kind(SignerKind::Local);
     set_bunker_state(BunkerConnectionState::Idle);
     take_bunker_signer()
@@ -624,8 +651,10 @@ mod tests {
     fn setting_roundtrip() {
         assert_eq!(SignerKind::from_setting_str("local"), SignerKind::Local);
         assert_eq!(SignerKind::from_setting_str("bunker"), SignerKind::Bunker);
+        assert_eq!(SignerKind::from_setting_str("nip55"), SignerKind::Nip55);
         assert_eq!(SignerKind::Local.as_setting_str(), "local");
         assert_eq!(SignerKind::Bunker.as_setting_str(), "bunker");
+        assert_eq!(SignerKind::Nip55.as_setting_str(), "nip55");
         // Unknown values fall back to Local — upgrade path for pre-NIP-46 rows.
         assert_eq!(SignerKind::from_setting_str(""), SignerKind::Local);
         assert_eq!(SignerKind::from_setting_str("garbage"), SignerKind::Local);
@@ -648,9 +677,18 @@ mod tests {
         set_signer_kind(SignerKind::Bunker);
         assert_eq!(signer_kind(), SignerKind::Bunker);
         assert!(is_bunker());
+        assert!(is_keyless());
         set_signer_kind(SignerKind::Local);
         assert_eq!(signer_kind(), SignerKind::Local);
         assert!(!is_bunker());
+        assert!(!is_keyless());
+
+        // NIP-55 is keyless but NOT a bunker — the two gates must not conflate.
+        set_signer_kind(SignerKind::Nip55);
+        assert_eq!(signer_kind(), SignerKind::Nip55);
+        assert!(!is_bunker());
+        assert!(is_keyless());
+        set_signer_kind(SignerKind::Local);
 
         // drain resets discriminator + state and returns the (absent) signer
         set_signer_kind(SignerKind::Bunker);

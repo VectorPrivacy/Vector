@@ -234,6 +234,11 @@ pub async fn disable_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), 
 
     match result {
         Ok(()) => {
+            // Drop the NIP-55 PIN canary — the account is plaintext now, so boot
+            // won't derive a key to check it against, and a re-enable rewrites it.
+            if vector_core::signer_kind() == vector_core::SignerKind::Nip55 {
+                let _ = vector_core::db::remove_setting("nip55_pin_check");
+            }
             let _ = handle.emit("encryption_migration_complete", ());
             Ok(())
         }
@@ -298,6 +303,18 @@ pub async fn enable_encryption<R: Runtime>(
 
     match result {
         Ok(()) => {
+            // NIP-55 keyless account: no pkey whose failed decrypt would reject a
+            // wrong PIN at boot, so persist the verification canary (same as
+            // setup_encryption). `set_encryption_enabled(true)` already ran inside
+            // the committed transaction, so maybe_encrypt encrypts it under the
+            // new key. Without this, toggling Local Encryption on a keyless
+            // account leaves boot unable to detect a wrong PIN → split-key corruption.
+            if vector_core::signer_kind() == vector_core::SignerKind::Nip55 {
+                let canary = crate::crypto::maybe_encrypt(
+                    crate::commands::account::NIP55_PIN_CANARY.to_string(),
+                ).await;
+                let _ = vector_core::db::set_sql_setting("nip55_pin_check".to_string(), canary);
+            }
             let _ = handle.emit("encryption_migration_complete", ());
             Ok(())
         }

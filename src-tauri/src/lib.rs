@@ -407,6 +407,11 @@ pub fn run() {
             // Bridge vector-core's EventEmitter to Tauri's emit system
             vector_core::set_event_emitter(Box::new(TauriEventEmitter));
 
+            // Register the Android NIP-55 (Amber) signer backend so keyless
+            // offline accounts can sign/encrypt/decrypt over local IPC.
+            #[cfg(target_os = "android")]
+            crate::android::external_signer::register();
+
             // Route racing-fetch stragglers (events a slow relay returns after a fast one already
             // answered) back through the realtime Community ingest path.
             vector_core::community::transport::set_community_ingest_sink(Box::new(
@@ -727,6 +732,11 @@ pub fn run() {
             commands::account::reauthorize_bunker,
             commands::account::get_pending_reauth_result,
             commands::account::get_bunker_status,
+            commands::account::login_with_nip55,
+            commands::account::reauthorize_nip55,
+            commands::account::get_nip55_status,
+            commands::account::cancel_nip55_session,
+            commands::account::is_external_signer_installed,
             commands::account::setup_encryption,
             commands::account::skip_encryption,
             // Emoji pack commands (commands/emoji_packs.rs)

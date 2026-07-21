@@ -1503,7 +1503,7 @@
             <div class="remote-signer-head">
               <div class="remote-signer-title">
                 <span class="remote-signer-dot" id="remote-signer-dot"></span>
-                <span>Remote Signer</span>
+                <span id="remote-signer-label">Remote Signer</span>
               </div>
               <button id="remote-signer-reauth-btn" class="cancel-btn">Re-authorize</button>
             </div>
@@ -1513,7 +1513,7 @@
                 <span class="remote-signer-meta-value remote-signer-mono" id="remote-signer-pubkey">—</span>
               </div>
             </div>
-            <p class="remote-signer-hint">Your identity key lives on your signer app. Vector only holds a device pairing key.</p>
+            <p class="remote-signer-hint" id="remote-signer-hint">Your identity key lives on your signer app. Vector only holds a device pairing key.</p>
           </div>
 
           <div class="form-group">
@@ -1675,10 +1675,16 @@
             </svg>
           </div>
         </div>
-          <button id="start-bunker-btn" class="login-bunker-link-btn" type="button">
-            <img src="./icons/key.svg" class="login-bunker-link-icon" alt="">
-            <span>Use a Remote Signer</span>
-          </button>
+          <div class="login-signer-links">
+            <button id="start-bunker-btn" class="login-bunker-link-btn" type="button">
+              <img src="./icons/key.svg" class="login-bunker-link-icon" alt="">
+              <span>Use a Remote Signer</span>
+            </button>
+            <button id="start-nip55-btn" class="login-bunker-link-btn" type="button" style="display: none;">
+              <img src="./icons/key.svg" class="login-bunker-link-icon" alt="">
+              <span>Sign in with Amber (Offline)</span>
+            </button>
+          </div>
         </div>
         <div id="login-bunker" class="login-bunker-container is-hidden" style="display: none;">
           <div class="login-bunker-fields">

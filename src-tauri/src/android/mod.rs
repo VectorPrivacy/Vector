@@ -1,5 +1,6 @@
 pub mod background_sync;
 pub mod clipboard;
+pub mod external_signer;
 pub mod filesystem;
 pub mod media_server;
 pub mod miniapp;

@@ -322,4 +322,11 @@ class MainActivity : TauriActivity() {
         // never resolves and the send times out after 60s.
         PermissionHandler.handlePermissionResult(requestCode, grantResults)
     }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        // Wake the native NIP-55 signer waiter for a returned Amber intent.
+        ExternalSigner.handleActivityResult(requestCode, resultCode, data)
+    }
 }
