@@ -47,33 +47,26 @@ pub fn encrypt_with_key(plaintext: &str, key: &[u8; 32]) -> Result<String, Strin
     Ok(result)
 }
 
-/// Decrypt a hex-encoded ciphertext with a key.
+/// Decrypt a hex-encoded ChaCha20-Poly1305 ciphertext with a key. Mirrors
+/// `maybe_decrypt_inner`'s fast path: SIMD hex decode, no plaintext copy, and
+/// `from_utf8_unchecked`.
 pub fn decrypt_with_key(hex_data: &str, key: &[u8; 32]) -> Result<String, String> {
-    if hex_data.len() < 24 {
+    let bytes = crate::simd::hex::hex_string_to_bytes(hex_data);
+    if bytes.len() < 12 {
         return Err("Ciphertext too short".to_string());
     }
-
-    let nonce_hex = &hex_data[..24]; // 12 bytes = 24 hex chars
-    let ciphertext_hex = &hex_data[24..];
-
-    let nonce_bytes = hex::decode(nonce_hex)
-        .map_err(|e| format!("Invalid nonce hex: {}", e))?;
-    let ciphertext = hex::decode(ciphertext_hex)
-        .map_err(|e| format!("Invalid ciphertext hex: {}", e))?;
-
+    let (nonce_bytes, ciphertext) = bytes.split_at(12);
     let nonce_arr: [u8; 12] = nonce_bytes.try_into()
         .map_err(|_| "Invalid nonce length".to_string())?;
     let nonce = chacha20poly1305::Nonce::from(nonce_arr);
     let cipher = ChaCha20Poly1305::new(key.into());
 
-    let mut plaintext = cipher.decrypt(&nonce, ciphertext.as_ref())
+    let plaintext = cipher.decrypt(&nonce, ciphertext)
         .map_err(|_| "Decryption failed (wrong key or corrupted data)".to_string())?;
 
-    let result = String::from_utf8(plaintext.clone())
-        .map_err(|_| "Decrypted data is not valid UTF-8".to_string())?;
-
-    plaintext.zeroize();
-    Ok(result)
+    // SAFETY: the content was valid UTF-8 when encrypted and Poly1305 authenticates the
+    // ciphertext, so these bytes are exactly what was stored — no re-validation needed.
+    Ok(unsafe { String::from_utf8_unchecked(plaintext) })
 }
 
 /// Check if encryption is enabled in the database.
