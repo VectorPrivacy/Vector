@@ -909,6 +909,7 @@ pub fn get_database_path(npub: &str) -> Result<PathBuf, String> {
 pub fn clear_id_caches() {
     id_cache::clear_id_caches();
     community::clear_banlist_cache();
+    community::clear_channel_community_cache();
 }
 
 // ============================================================================

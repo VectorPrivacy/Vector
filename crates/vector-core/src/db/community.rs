@@ -582,15 +582,47 @@ pub fn take_message_key(message_id: &str) -> Result<Option<(Keys, String, Vec<St
 
 /// The hex id of the Community that owns `channel_id`, if any is stored locally. Used to
 /// resolve a channel-addressed chat back to its Community for sending.
+// ── Channel → community cache ────────────────────────────────────────────────
+// The owning community of a channel is IMMUTABLE (a channel belongs to one community
+// for life; channel ids are random-32 and never reused — the save path refuses a
+// cross-community id claim), so a live entry is never wrong. It only needs eviction
+// when the channel row itself goes away: `delete_community_inner` (all rows) or a
+// `save_community_v2` prune (some rows); `save_community` is UPSERT-only and never
+// removes a channel, so it needs none. POSITIVES ONLY — a missing channel is never
+// cached, so a not-yet-synced channel resolves the moment its row lands and `None`
+// keeps meaning "gone" for delete-then-check callers. Swap-cleared via `clear_id_caches`.
+static CHANNEL_COMMUNITY_CACHE: std::sync::LazyLock<
+    std::sync::RwLock<std::collections::HashMap<String, String>>,
+> = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+
+/// Drop every cached channel→community mapping (account swap).
+pub fn clear_channel_community_cache() {
+    CHANNEL_COMMUNITY_CACHE.write().unwrap().clear();
+}
+
+/// Forget a community's channel mappings — its rows were dropped or rewritten, so any
+/// pruned entry must stop resolving. Retained channels refill lazily on next lookup.
+fn forget_community_channels(community_id: &str) {
+    CHANNEL_COMMUNITY_CACHE.write().unwrap().retain(|_, cid| cid != community_id);
+}
+
 pub fn community_id_for_channel(channel_id: &str) -> Result<Option<String>, String> {
+    if let Some(cid) = CHANNEL_COMMUNITY_CACHE.read().unwrap().get(channel_id) {
+        return Ok(Some(cid.clone()));
+    }
     let conn = super::get_db_connection_guard_static()?;
-    conn.query_row(
-        "SELECT community_id FROM community_channels WHERE channel_id = ?1",
-        params![channel_id],
-        |r| r.get::<_, String>(0),
-    )
-    .optional()
-    .map_err(|e| format!("community_id_for_channel: {e}"))
+    let cid: Option<String> = conn
+        .query_row(
+            "SELECT community_id FROM community_channels WHERE channel_id = ?1",
+            params![channel_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| format!("community_id_for_channel: {e}"))?;
+    if let Some(ref c) = cid {
+        CHANNEL_COMMUNITY_CACHE.write().unwrap().insert(channel_id.to_string(), c.clone());
+    }
+    Ok(cid)
 }
 
 /// Whether a Community with this id is already stored locally (joined). Cheaper than
@@ -962,6 +994,7 @@ fn delete_community_inner(community_id: &str, retain_keys: bool) -> Result<(), S
     }
     tx.commit().map_err(|e| format!("delete community commit: {e}"))?;
     BANLIST_CACHE.write().unwrap().remove(community_id);
+    forget_community_channels(community_id);
     // `community_message_keys` is INTENTIONALLY left intact: those are our OWN ephemeral signing keys for
     // NIP-09-deleting our own messages. The right to erase our own content from relays outlives membership
     // — even after a ban or leave we must keep the ability to purge what we sent — so they survive a
@@ -1972,6 +2005,9 @@ pub fn save_community_v2(c: &crate::community::v2::community::CommunityV2) -> Re
     }
 
     tx.commit().map_err(|e| format!("commit v2 community: {e}"))?;
+    // The save may have pruned channels (DELETE ... NOT IN the new set); evict so a
+    // pruned channel stops resolving to this community.
+    forget_community_channels(&id_hex);
     Ok(())
 }
 
