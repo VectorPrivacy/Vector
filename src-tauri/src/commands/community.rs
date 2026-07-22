@@ -2961,7 +2961,7 @@ pub(crate) async fn apply_community_presence(
         let nameless = {
             let state = vector_core::state::STATE.lock().await;
             state.get_profile(npub).is_none_or(|p| {
-                p.nickname.is_empty() && p.display_name.is_empty() && p.name.is_empty()
+                p.nickname().is_empty() && p.display_name.is_empty() && p.name.is_empty()
             })
         };
         if nameless {

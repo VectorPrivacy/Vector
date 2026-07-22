@@ -213,12 +213,15 @@ impl DeepSize for ProfileFlags {
 impl DeepSize for Profile {
     fn deep_size(&self) -> usize {
         std::mem::size_of::<Profile>()
-            + self.name.len() + self.display_name.len() + self.nickname.len()
-            + self.lud06.len() + self.lud16.len()
+            + self.name.len() + self.display_name.len()
             + self.banner.len() + self.avatar.len()
-            + self.about.len() + self.website.len() + self.nip05.len()
-            + self.status_title.len() + self.status_purpose.len() + self.status_url.len()
+            + self.about.len()
             + self.avatar_cached.len() + self.banner_cached.len()
+            + self.extras.as_ref().map_or(0, |e| {
+                std::mem::size_of::<crate::profile::ProfileExtras>()
+                    + e.nickname.len() + e.lud06.len() + e.lud16.len() + e.nip05.len()
+                    + e.website.len() + e.status_title.len() + e.status_purpose.len() + e.status_url.len()
+            })
     }
 }
 

@@ -47,21 +47,32 @@ pub struct Profile {
     pub id: u16,
     pub name: Box<str>,
     pub display_name: Box<str>,
-    pub nickname: Box<str>,
-    pub lud06: Box<str>,
-    pub lud16: Box<str>,
     pub banner: Box<str>,
     pub avatar: Box<str>,
     pub about: Box<str>,
-    pub website: Box<str>,
-    pub nip05: Box<str>,
-    pub status_title: Box<str>,
-    pub status_purpose: Box<str>,
-    pub status_url: Box<str>,
     pub last_updated: u32,
     pub flags: ProfileFlags,
     pub avatar_cached: Box<str>,
     pub banner_cached: Box<str>,
+    /// Rarely-set fields (lightning, nip05, website, local nickname, live status),
+    /// boxed out of the hot struct: most Vector profiles set none of these, so the
+    /// common case pays one null pointer instead of eight inline `Box<str>` headers
+    /// (the struct shrinks 248B -> 128B, and empty seen-but-unfetched placeholders
+    /// with it since empty `Box<str>` fields carry no heap).
+    pub extras: Option<Box<ProfileExtras>>,
+}
+
+/// The cold tail of `Profile`. Present only when at least one field is set.
+#[derive(Default, Clone, Debug, PartialEq)]
+pub struct ProfileExtras {
+    pub nickname: Box<str>,
+    pub lud06: Box<str>,
+    pub lud16: Box<str>,
+    pub nip05: Box<str>,
+    pub website: Box<str>,
+    pub status_title: Box<str>,
+    pub status_purpose: Box<str>,
+    pub status_url: Box<str>,
 }
 
 impl Default for Profile {
@@ -76,22 +87,31 @@ impl Profile {
             id: NO_NPUB,
             name: Box::<str>::default(),
             display_name: Box::<str>::default(),
-            nickname: Box::<str>::default(),
-            lud06: Box::<str>::default(),
-            lud16: Box::<str>::default(),
             banner: Box::<str>::default(),
             avatar: Box::<str>::default(),
             about: Box::<str>::default(),
-            website: Box::<str>::default(),
-            nip05: Box::<str>::default(),
-            status_title: Box::<str>::default(),
-            status_purpose: Box::<str>::default(),
-            status_url: Box::<str>::default(),
             last_updated: 0,
             flags: ProfileFlags::default(),
             avatar_cached: Box::<str>::default(),
             banner_cached: Box::<str>::default(),
+            extras: None,
         }
+    }
+
+    // Cold-field getters — the empty string when the extras box is absent.
+    #[inline] pub fn nickname(&self) -> &str { self.extras.as_ref().map_or("", |e| &e.nickname) }
+    #[inline] pub fn lud06(&self) -> &str { self.extras.as_ref().map_or("", |e| &e.lud06) }
+    #[inline] pub fn lud16(&self) -> &str { self.extras.as_ref().map_or("", |e| &e.lud16) }
+    #[inline] pub fn nip05(&self) -> &str { self.extras.as_ref().map_or("", |e| &e.nip05) }
+    #[inline] pub fn website(&self) -> &str { self.extras.as_ref().map_or("", |e| &e.website) }
+    #[inline] pub fn status_title(&self) -> &str { self.extras.as_ref().map_or("", |e| &e.status_title) }
+    #[inline] pub fn status_purpose(&self) -> &str { self.extras.as_ref().map_or("", |e| &e.status_purpose) }
+    #[inline] pub fn status_url(&self) -> &str { self.extras.as_ref().map_or("", |e| &e.status_url) }
+
+    /// Materialize the extras box for writing a cold field (allocates on first set).
+    #[inline]
+    pub fn extras_mut(&mut self) -> &mut ProfileExtras {
+        self.extras.get_or_insert_with(|| Box::new(ProfileExtras::default()))
     }
 
     /// Merge Nostr Metadata into this Profile. Returns `true` if any fields changed.
@@ -105,10 +125,10 @@ impl Profile {
             if *self.display_name != *name { self.display_name = name.into_boxed_str(); changed = true; }
         }
         if let Some(lud06) = meta.lud06 {
-            if *self.lud06 != *lud06 { self.lud06 = lud06.into_boxed_str(); changed = true; }
+            if self.lud06() != lud06 { self.extras_mut().lud06 = lud06.into_boxed_str(); changed = true; }
         }
         if let Some(lud16) = meta.lud16 {
-            if *self.lud16 != *lud16 { self.lud16 = lud16.into_boxed_str(); changed = true; }
+            if self.lud16() != lud16 { self.extras_mut().lud16 = lud16.into_boxed_str(); changed = true; }
         }
         if let Some(banner) = meta.banner {
             if *self.banner != *banner {
@@ -128,10 +148,10 @@ impl Profile {
             if *self.about != *about { self.about = about.into_boxed_str(); changed = true; }
         }
         if let Some(website) = meta.website {
-            if *self.website != *website { self.website = website.into_boxed_str(); changed = true; }
+            if self.website() != website { self.extras_mut().website = website.into_boxed_str(); changed = true; }
         }
         if let Some(nip05) = meta.nip05 {
-            if *self.nip05 != *nip05 { self.nip05 = nip05.into_boxed_str(); changed = true; }
+            if self.nip05() != nip05 { self.extras_mut().nip05 = nip05.into_boxed_str(); changed = true; }
         }
         if let Some(custom) = meta.custom.get("bot") {
             let bot_value = match custom.as_bool() {
@@ -185,18 +205,18 @@ impl SlimProfile {
             id: interner.resolve(profile.id).unwrap_or("").to_string(),
             name: profile.name.to_string(),
             display_name: profile.display_name.to_string(),
-            nickname: profile.nickname.to_string(),
-            lud06: profile.lud06.to_string(),
-            lud16: profile.lud16.to_string(),
+            nickname: profile.nickname().to_string(),
+            lud06: profile.lud06().to_string(),
+            lud16: profile.lud16().to_string(),
             banner: profile.banner.to_string(),
             avatar: profile.avatar.to_string(),
             about: profile.about.to_string(),
-            website: profile.website.to_string(),
-            nip05: profile.nip05.to_string(),
+            website: profile.website().to_string(),
+            nip05: profile.nip05().to_string(),
             status: Status {
-                title: profile.status_title.to_string(),
-                purpose: profile.status_purpose.to_string(),
-                url: profile.status_url.to_string(),
+                title: profile.status_title().to_string(),
+                purpose: profile.status_purpose().to_string(),
+                url: profile.status_url().to_string(),
             },
             last_updated: crate::compact::secs_from_compact(profile.last_updated),
             mine: profile.flags.is_mine(),
@@ -209,21 +229,28 @@ impl SlimProfile {
 
     /// Convert to internal Profile (for loading from DB).
     pub fn to_profile(&self) -> Profile {
+        // Only allocate the extras box when a cold field is actually set — the whole
+        // point of the split is that most profiles skip it.
+        let extras = (!self.nickname.is_empty() || !self.lud06.is_empty() || !self.lud16.is_empty()
+            || !self.nip05.is_empty() || !self.website.is_empty()
+            || !self.status.title.is_empty() || !self.status.purpose.is_empty() || !self.status.url.is_empty())
+        .then(|| Box::new(ProfileExtras {
+            nickname: self.nickname.clone().into_boxed_str(),
+            lud06: self.lud06.clone().into_boxed_str(),
+            lud16: self.lud16.clone().into_boxed_str(),
+            nip05: self.nip05.clone().into_boxed_str(),
+            website: self.website.clone().into_boxed_str(),
+            status_title: self.status.title.clone().into_boxed_str(),
+            status_purpose: self.status.purpose.clone().into_boxed_str(),
+            status_url: self.status.url.clone().into_boxed_str(),
+        }));
         Profile {
             id: NO_NPUB,
             name: self.name.clone().into_boxed_str(),
             display_name: self.display_name.clone().into_boxed_str(),
-            nickname: self.nickname.clone().into_boxed_str(),
-            lud06: self.lud06.clone().into_boxed_str(),
-            lud16: self.lud16.clone().into_boxed_str(),
             banner: self.banner.clone().into_boxed_str(),
             avatar: self.avatar.clone().into_boxed_str(),
             about: self.about.clone().into_boxed_str(),
-            website: self.website.clone().into_boxed_str(),
-            nip05: self.nip05.clone().into_boxed_str(),
-            status_title: self.status.title.clone().into_boxed_str(),
-            status_purpose: self.status.purpose.clone().into_boxed_str(),
-            status_url: self.status.url.clone().into_boxed_str(),
             last_updated: crate::compact::secs_to_compact(self.last_updated),
             flags: {
                 let mut f = ProfileFlags::default();
@@ -234,6 +261,7 @@ impl SlimProfile {
             },
             avatar_cached: self.avatar_cached.clone().into_boxed_str(),
             banner_cached: self.banner_cached.clone().into_boxed_str(),
+            extras,
         }
     }
 }
@@ -248,6 +276,36 @@ pub struct Status {
 impl Status {
     pub fn new() -> Self {
         Self { title: String::new(), purpose: String::new(), url: String::new() }
+    }
+}
+
+#[cfg(test)]
+mod size_tests {
+    use super::*;
+    #[test]
+    fn hot_profile_stays_compact() {
+        // Cold fields (lightning, nip05, website, nickname, live status) live behind
+        // Option<Box<ProfileExtras>>. The hot struct is 128B post-split (was 248B); this
+        // bound trips if someone re-inlines even one cold field (+16B for a Box<str>),
+        // which would bloat every cached profile incl. empty seen-but-unfetched placeholders.
+        let sz = std::mem::size_of::<Profile>();
+        println!("size_of::<Profile>() = {sz}");
+        assert!(sz <= 136, "Profile grew to {sz}B — a cold field was likely re-inlined");
+    }
+
+    #[test]
+    fn hot_only_metadata_never_allocates_extras() {
+        // The whole win rests on this: a profile with no cold field set must keep
+        // extras == None (a null pointer), never an allocated all-empty box.
+        let mut p = Profile::new();
+        p.from_metadata(Metadata::new().name("alice").about("hi").display_name("Alice"));
+        assert!(p.extras.is_none(), "hot-only metadata must not allocate the extras box");
+
+        let mut q = Profile::new();
+        q.from_metadata(Metadata::new().name("bob").nip05("bob@example.com"));
+        assert!(q.extras.is_some(), "a cold field present must allocate the box");
+        assert_eq!(q.nip05(), "bob@example.com");
+        assert_eq!(q.lud16(), "", "unset cold fields still read as empty");
     }
 }
 

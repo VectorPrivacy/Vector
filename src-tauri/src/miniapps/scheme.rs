@@ -384,8 +384,8 @@ async fn get_user_info() -> (String, String) {
             Ok(state) => {
                 // Find the user's own profile (where mine == true)
                 if let Some(profile) = state.profiles.iter().find(|p| p.flags.is_mine()) {
-                    if !profile.nickname.is_empty() {
-                        profile.nickname.to_string()
+                    if !profile.nickname().is_empty() {
+                        profile.nickname().to_string()
                     } else if !profile.name.is_empty() {
                         profile.name.to_string()
                     } else {

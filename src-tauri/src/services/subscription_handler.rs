@@ -228,7 +228,7 @@ pub(crate) async fn show_community_notification(chat_id: &str, msg: &vector_core
     let (sender_name, community_name, avatar, content) = {
         let state = crate::STATE.lock().await;
         let (sender, av) = state.get_profile(sender_npub).map(|p| {
-            let name = if !p.nickname.is_empty() { p.nickname.to_string() }
+            let name = if !p.nickname().is_empty() { p.nickname().to_string() }
                 else if !p.name.is_empty() { p.name.to_string() }
                 else { "Someone".to_string() };
             let cached = if !p.avatar_cached.is_empty() { Some(p.avatar_cached.to_string()) } else { None };

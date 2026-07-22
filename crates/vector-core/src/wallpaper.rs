@@ -730,8 +730,8 @@ pub async fn apply_received_wallpaper(
         state
             .get_profile(sender_npub)
             .and_then(|p| {
-                if !p.nickname.is_empty() {
-                    Some(p.nickname.to_string())
+                if !p.nickname().is_empty() {
+                    Some(p.nickname().to_string())
                 } else if !p.name.is_empty() {
                     Some(p.name.to_string())
                 } else {
@@ -818,8 +818,8 @@ async fn emit_wallpaper_removed(
         state
             .get_profile(by_npub)
             .and_then(|p| {
-                if !p.nickname.is_empty() {
-                    Some(p.nickname.to_string())
+                if !p.nickname().is_empty() {
+                    Some(p.nickname().to_string())
                 } else if !p.name.is_empty() {
                     Some(p.name.to_string())
                 } else {

@@ -843,8 +843,8 @@ fn get_user_display_name() -> String {
     for _ in 0..10 {
         if let Ok(state) = crate::STATE.try_lock() {
             if let Some(profile) = state.profiles.iter().find(|p| p.flags.is_mine()) {
-                if !profile.nickname.is_empty() {
-                    return profile.nickname.to_string();
+                if !profile.nickname().is_empty() {
+                    return profile.nickname().to_string();
                 } else if !profile.name.is_empty() {
                     return profile.name.to_string();
                 }

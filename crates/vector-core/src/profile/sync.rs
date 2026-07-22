@@ -262,9 +262,9 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
         let mut state = STATE.lock().await;
         match state.get_profile(&npub) {
             Some(p) => {
-                old_status_title = p.status_title.to_string();
-                old_status_purpose = p.status_purpose.to_string();
-                old_status_url = p.status_url.to_string();
+                old_status_title = p.status_title().to_string();
+                old_status_purpose = p.status_purpose().to_string();
+                old_status_url = p.status_url().to_string();
             }
             None => {
                 state.insert_or_replace_profile(&npub, Profile::new());
@@ -328,12 +328,20 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
                         profile.flags.set_mine(my_public_key == profile_pubkey);
 
                         // Update status
-                        let status_changed = *profile.status_title != *status_title
-                            || *profile.status_purpose != *status_purpose
-                            || *profile.status_url != *status_url;
-                        profile.status_title = status_title.into_boxed_str();
-                        profile.status_purpose = status_purpose.into_boxed_str();
-                        profile.status_url = status_url.into_boxed_str();
+                        let status_changed = profile.status_title() != status_title.as_str()
+                            || profile.status_purpose() != status_purpose.as_str()
+                            || profile.status_url() != status_url.as_str();
+                        // Only touch the extras box when there's a real status to store or one
+                        // already exists to clear — never materialize an empty box on the common
+                        // status-less profile (that would make it larger than before the split).
+                        let has_status = !status_title.is_empty()
+                            || !status_purpose.is_empty() || !status_url.is_empty();
+                        if profile.extras.is_some() || has_status {
+                            let ex = profile.extras_mut();
+                            ex.status_title = status_title.into_boxed_str();
+                            ex.status_purpose = status_purpose.into_boxed_str();
+                            ex.status_url = status_url.into_boxed_str();
+                        }
 
                         // Update metadata
                         let metadata_changed = profile.from_metadata(meta.unwrap());
@@ -478,19 +486,19 @@ async fn update_profile_inner(
         });
 
         // Carry forward remaining fields
-        if !profile.website.is_empty() {
-            if let Ok(url) = Url::parse(&*profile.website) {
+        if !profile.website().is_empty() {
+            if let Ok(url) = Url::parse(profile.website()) {
                 meta = meta.website(url);
             }
         }
-        if !profile.nip05.is_empty() {
-            meta = meta.nip05(&*profile.nip05);
+        if !profile.nip05().is_empty() {
+            meta = meta.nip05(profile.nip05());
         }
-        if !profile.lud06.is_empty() {
-            meta = meta.lud06(&*profile.lud06);
+        if !profile.lud06().is_empty() {
+            meta = meta.lud06(profile.lud06());
         }
-        if !profile.lud16.is_empty() {
-            meta = meta.lud16(&*profile.lud16);
+        if !profile.lud16().is_empty() {
+            meta = meta.lud16(profile.lud16());
         }
 
         meta
@@ -585,8 +593,9 @@ pub async fn update_status(status: String) -> bool {
                     Some(p) => p,
                     None => return false,
                 };
-                profile.status_purpose = "general".into();
-                profile.status_title = status.into_boxed_str();
+                let ex = profile.extras_mut();
+                ex.status_purpose = "general".into();
+                ex.status_title = status.into_boxed_str();
             }
 
             let slim = state.serialize_profile(id).unwrap();
@@ -679,7 +688,7 @@ pub async fn set_nickname(npub: String, nickname: String, handler: &dyn ProfileS
                 Some(p) => p,
                 None => return false,
             };
-            profile.nickname = nickname.into_boxed_str();
+            profile.extras_mut().nickname = nickname.into_boxed_str();
         }
         let slim = state.serialize_profile(id).unwrap();
         drop(state);

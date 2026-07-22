@@ -251,8 +251,8 @@ pub fn strip_content_for_preview(text: &str) -> String {
 pub fn resolve_mention_display_names(content: &str, state: &crate::state::ChatState) -> String {
     resolve_mentions_with(content, |npub| {
         let p = state.get_profile(npub)?;
-        if !p.nickname.is_empty() {
-            Some(p.nickname.to_string())
+        if !p.nickname().is_empty() {
+            Some(p.nickname().to_string())
         } else if !p.name.is_empty() {
             Some(p.name.to_string())
         } else {

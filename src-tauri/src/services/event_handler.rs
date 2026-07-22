@@ -344,8 +344,8 @@ fn get_dm_notification_info(
 ) -> Option<(String, String, Option<String>)> {
     let (name, avatar) = match state.get_profile(contact) {
         Some(profile) => {
-            let name = if !profile.nickname.is_empty() {
-                profile.nickname.to_string()
+            let name = if !profile.nickname().is_empty() {
+                profile.nickname().to_string()
             } else if !profile.name.is_empty() {
                 profile.name.to_string()
             } else {
@@ -374,8 +374,8 @@ fn get_file_notification_info(
 ) -> Option<(String, String, Option<String>)> {
     let (name, avatar) = match state.get_profile(contact) {
         Some(profile) => {
-            let name = if !profile.nickname.is_empty() {
-                profile.nickname.to_string()
+            let name = if !profile.nickname().is_empty() {
+                profile.nickname().to_string()
             } else if !profile.name.is_empty() {
                 profile.name.to_string()
             } else {
