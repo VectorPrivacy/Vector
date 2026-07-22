@@ -2758,9 +2758,10 @@ async function closeEmojiPackCreator() {
     _pcRevokeBlobUrls();
     _pc.emojis = [];
     _pc.logoFile = null;
-    // Land on the pack we just saved instead of the default scroll-to-top, so
-    // its emojis are right there. rAF lets the un-hidden sections lay out first.
-    const savedId = _pc.savedPackId;
+    // Land on the pack we were editing (saved or not) instead of the open-time
+    // scroll-to-top, so its emojis are right there. rAF lets the un-hidden
+    // sections lay out first.
+    const savedId = _pc.savedPackId || _pc.editingId;
     _pc.savedPackId = null;
     if (savedId) {
         requestAnimationFrame(() => {
