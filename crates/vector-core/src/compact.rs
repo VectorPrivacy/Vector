@@ -537,8 +537,6 @@ unsafe impl<T: Sync> Sync for TinyVec<T> {}
 pub struct CompactReaction {
     /// Reaction event ID as binary
     pub id: [u8; 32],
-    /// Message being reacted to (binary event ID)
-    pub reference_id: [u8; 32],
     /// Author npub index (interned via NpubInterner)
     pub author_idx: u16,
     /// Emoji string (supports standard emoji and custom like `:cat_heart_eyes:`)
@@ -555,17 +553,10 @@ impl CompactReaction {
         bytes_to_hex_32(&self.id)
     }
 
-    /// Get reference ID as hex string
-    #[inline]
-    pub fn reference_id_hex(&self) -> String {
-        bytes_to_hex_32(&self.reference_id)
-    }
-
     /// Convert from regular Reaction, interning author
     pub fn from_reaction(reaction: &Reaction, interner: &mut NpubInterner) -> Self {
         Self {
             id: hex_to_bytes_32(&reaction.id),
-            reference_id: hex_to_bytes_32(&reaction.reference_id),
             author_idx: interner.intern(&reaction.author_id),
             emoji: reaction.emoji.clone().into_boxed_str(),
             emoji_url: reaction.emoji_url.as_deref().map(|s| s.into()),
@@ -576,18 +567,20 @@ impl CompactReaction {
     pub fn from_reaction_owned(reaction: Reaction, interner: &mut NpubInterner) -> Self {
         Self {
             id: hex_to_bytes_32(&reaction.id),
-            reference_id: hex_to_bytes_32(&reaction.reference_id),
             author_idx: interner.intern(&reaction.author_id),
             emoji: reaction.emoji.into_boxed_str(),
             emoji_url: reaction.emoji_url.map(|s| s.into_boxed_str()),
         }
     }
 
-    /// Convert back to regular Reaction, resolving author from interner
-    pub fn to_reaction(&self, interner: &NpubInterner) -> Reaction {
+    /// Convert back to regular Reaction, resolving author from interner.
+    /// `parent_id` is the reacted-to message's binary event id: a CompactReaction
+    /// is always nested inside that message, so its id IS the reference (the field
+    /// used to be stored redundantly on every reaction).
+    pub fn to_reaction(&self, parent_id: &[u8; 32], interner: &NpubInterner) -> Reaction {
         Reaction {
             id: self.id_hex(),
-            reference_id: self.reference_id_hex(),
+            reference_id: bytes_to_hex_32(parent_id),
             author_id: interner.resolve(self.author_idx)
                 .map(|s| s.to_string())
                 .unwrap_or_default(),
@@ -1610,7 +1603,7 @@ impl CompactMessage {
                 .collect(),
             // Convert compact reactions back to regular Reaction
             reactions: self.reactions.iter()
-                .map(|r| r.to_reaction(interner))
+                .map(|r| r.to_reaction(&self.id, interner))
                 .collect(),
             // Unbox rare fields
             edit_history: self.edit_history.as_ref().map(|b| (**b).clone()),
@@ -3581,7 +3574,7 @@ mod tests {
         };
         let mut interner = NpubInterner::new();
         let compact = CompactReaction::from_reaction(&reaction, &mut interner);
-        let restored = compact.to_reaction(&interner);
+        let restored = compact.to_reaction(&hex_to_bytes_32(&reaction.reference_id), &interner);
 
         assert_eq!(restored.id, reaction.id, "id mismatch");
         assert_eq!(restored.reference_id, reaction.reference_id, "reference_id mismatch");
@@ -3619,7 +3612,7 @@ mod tests {
         };
         let mut interner = NpubInterner::new();
         let compact = CompactReaction::from_reaction(&reaction, &mut interner);
-        let restored = compact.to_reaction(&interner);
+        let restored = compact.to_reaction(&hex_to_bytes_32(&reaction.reference_id), &interner);
         assert_eq!(restored.emoji, "\u{1f431}\u{200d}\u{1f4bb}", "complex unicode emoji should roundtrip");
     }
 
@@ -3634,7 +3627,7 @@ mod tests {
         };
         let mut interner = NpubInterner::new();
         let compact = CompactReaction::from_reaction(&reaction, &mut interner);
-        let restored = compact.to_reaction(&interner);
+        let restored = compact.to_reaction(&hex_to_bytes_32(&reaction.reference_id), &interner);
         assert_eq!(restored.emoji, ":cat_heart_eyes:", "custom emoji shortcode should roundtrip");
     }
 
@@ -3650,7 +3643,7 @@ mod tests {
         let reaction_clone = reaction.clone();
         let mut interner = NpubInterner::new();
         let compact = CompactReaction::from_reaction_owned(reaction, &mut interner);
-        let restored = compact.to_reaction(&interner);
+        let restored = compact.to_reaction(&hex_to_bytes_32(&reaction_clone.reference_id), &interner);
 
         assert_eq!(restored.id, reaction_clone.id);
         assert_eq!(restored.author_id, reaction_clone.author_id);
