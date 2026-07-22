@@ -1364,17 +1364,37 @@ impl CompactMessageVec {
             self.messages.sort_by_key(|m| m.at);
             self.rebuild_index();
         } else if their_min >= our_last.unwrap() {
-            // All new messages are NEWER - append path (common for real-time)
+            // All new messages are NEWER - append path (common for real-time + catch-up).
             to_add.sort_by_key(|m| m.at);
             let base_pos = self.messages.len() as u32;
-            for (i, msg) in to_add.into_iter().enumerate() {
-                let msg_id = msg.id;
-                self.messages.push(msg);
-                // Insert into index
-                let idx_pos = self.id_index
-                    .binary_search_by(|(id, _)| id.cmp(&msg_id))
-                    .unwrap_err();
-                self.id_index.insert(idx_pos, (msg_id, base_pos + i as u32));
+            // Index entries for the appended messages (positions = append offsets, so no
+            // existing position shifts).
+            let mut new_index_entries: Vec<_> = to_add.iter()
+                .enumerate()
+                .map(|(i, msg)| (msg.id, base_pos + i as u32))
+                .collect();
+            self.messages.extend(to_add);
+            new_index_entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+            // Merge sorted index entries in O(n + k) instead of O(k * n) — mirrors the
+            // prepend path; a per-message binary-search-insert shifts the whole index each time.
+            let old_index = std::mem::take(&mut self.id_index);
+            self.id_index.reserve(old_index.len() + new_index_entries.len());
+            let mut old_iter = old_index.into_iter().peekable();
+            let mut new_iter = new_index_entries.into_iter().peekable();
+            while old_iter.peek().is_some() || new_iter.peek().is_some() {
+                match (old_iter.peek(), new_iter.peek()) {
+                    (Some((old_id, _)), Some((new_id, _))) => {
+                        if old_id < new_id {
+                            self.id_index.push(old_iter.next().unwrap());
+                        } else {
+                            self.id_index.push(new_iter.next().unwrap());
+                        }
+                    }
+                    (Some(_), None) => self.id_index.push(old_iter.next().unwrap()),
+                    (None, Some(_)) => self.id_index.push(new_iter.next().unwrap()),
+                    (None, None) => break,
+                }
             }
         } else if their_max <= our_first.unwrap() {
             // All new messages are OLDER - prepend path (common for pagination)
@@ -2751,6 +2771,26 @@ mod tests {
         let added = vec.insert_batch(msgs);
         assert_eq!(added, 3, "all 3 should be added");
         assert_eq!(vec.len(), 3);
+    }
+
+    #[test]
+    fn compact_vec_append_batch_merge_keeps_index_consistent() {
+        // Seed older messages, then append a large batch of NEWER ones — exercises the
+        // O(n+k) append-merge index build. Every id must stay findable (proves the merged
+        // id_index is complete + sorted) and dedup must still work off it.
+        let mut vec = CompactMessageVec::new();
+        let mk = |n: u32, at: u64| make_compact_msg(&format!("{:064x}", n), at);
+        let seed: Vec<_> = (0..50).map(|n| mk(n, n as u64)).collect();
+        assert_eq!(vec.insert_batch(seed), 50);
+        let batch: Vec<_> = (1000..1200).map(|n| mk(n, n as u64)).collect();
+        assert_eq!(vec.insert_batch(batch), 200, "all newer messages appended");
+        assert_eq!(vec.len(), 250);
+        for n in (0..50).chain(1000..1200) {
+            assert!(vec.find_by_hex_id(&format!("{:064x}", n)).is_some(), "id {n} must be findable via the merged index");
+        }
+        assert!(vec.find_by_hex_id(&format!("{:064x}", 9999u32)).is_none(), "never-inserted id must not be found");
+        let dup: Vec<_> = (1000..1200).map(|n| mk(n, n as u64)).collect();
+        assert_eq!(vec.insert_batch(dup), 0, "re-appended batch fully deduped via the merged index");
     }
 
     #[test]
