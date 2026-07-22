@@ -2767,7 +2767,11 @@ async function closeEmojiPackCreator() {
         requestAnimationFrame(() => {
             const section = document.querySelector(
                 `.emoji-pack-section[data-pack-id="${CSS.escape(savedId)}"]`);
-            if (section) section.scrollIntoView({ block: 'start' });
+            if (!section) return;
+            // Expand first — landing on a collapsed section hides the very
+            // emojis the user just edited.
+            section.classList.remove('collapsed');
+            section.scrollIntoView({ block: 'start' });
         });
     }
     return true;
