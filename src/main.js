@@ -11428,31 +11428,6 @@ window.addEventListener("DOMContentLoaded", async () => {
     const isAndroid = platformFeatures.os === 'android';
     
     if (isAndroid) {
-        // On Android, use a hidden file input to leverage WebView's built-in file picker
-        // This handles content URI permissions correctly
-        const androidFileInput = document.createElement('input');
-        androidFileInput.type = 'file';
-        androidFileInput.style.display = 'none';
-        androidFileInput.accept = '*/*';
-        document.body.appendChild(androidFileInput);
-        
-        androidFileInput.onchange = async (e) => {
-            const file = e.target.files?.[0];
-            if (file) {
-                // Reset reply selection while passing a copy of the reference to the backend
-                const strReplyRef = strCurrentReplyReference;
-                cancelReply();
-                
-                const fileName = file.name;
-                const ext = fileName.split('.').pop()?.toLowerCase() || '';
-                
-                // Open preview with the File object directly (more efficient)
-                await openFilePreviewWithFile(file, fileName, ext, strOpenChat, strReplyRef);
-            }
-            // Reset the input so the same file can be selected again
-            androidFileInput.value = '';
-        };
-        
         // Toggle attachment panel when clicking the add-file button
         domChatMessageInputFile.onclick = () => {
             toggleAttachmentPanel();
