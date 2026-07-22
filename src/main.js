@@ -7220,13 +7220,9 @@ async function startWallpaperChange(chatId) {
     if (!chat || chat.chat_type !== 'DirectMessage') return;
 
     try {
-        if (platformFeatures.os === 'android') {
-            // The Android picker is async (file input -> change event), and
-            // its onchange handler calls applyWallpaperPreview directly.
-            window.__wallpaperFileInput?.click();
-            return;
-        }
-        // Desktop: Tauri open dialog with image filter.
+        // Native picker on both platforms. Desktop returns a filesystem path,
+        // Android a content:// URI — the backend reads either natively (the
+        // WebView's file.arrayBuffer() returns nothing for content URIs).
         const { open } = window.__TAURI__.dialog;
         const filePath = await open({
             multiple: false,
@@ -7239,12 +7235,7 @@ async function startWallpaperChange(chatId) {
         showProcessingOverlay();
         let previewResult;
         try {
-            previewResult = await invoke('preview_wallpaper', {
-                chatId,
-                filePath,
-                bytes: null,
-                filename: null,
-            });
+            previewResult = await invoke('preview_wallpaper', { chatId, filePath });
         } finally {
             hideProcessingOverlay();
         }
@@ -11346,38 +11337,6 @@ window.addEventListener("DOMContentLoaded", async () => {
         wallpaperDimSlider.addEventListener('input', onWallpaperSliderInput);
     }
 
-    // Hidden Android file input for wallpaper picking. The HTML <input
-    // type="file"> hands us a Blob (with content-URI semantics on Android),
-    // which we read into bytes and forward to the backend.
-    const wallpaperFileInput = document.createElement('input');
-    wallpaperFileInput.type = 'file';
-    wallpaperFileInput.accept = 'image/*';
-    wallpaperFileInput.style.display = 'none';
-    document.body.appendChild(wallpaperFileInput);
-    wallpaperFileInput.onchange = async (e) => {
-        const file = e.target.files?.[0];
-        wallpaperFileInput.value = '';
-        if (!file || !strOpenChat) return;
-        try {
-            const buf = new Uint8Array(await file.arrayBuffer());
-            showProcessingOverlay();
-            let result;
-            try {
-                result = await invoke('preview_wallpaper', {
-                    chatId: strOpenChat,
-                    bytes: Array.from(buf),
-                    filename: file.name,
-                });
-            } finally {
-                hideProcessingOverlay();
-            }
-            await applyWallpaperPreview(strOpenChat, result);
-        } catch (err) {
-            popupConfirm('Couldn’t use that image', String(err), true);
-        }
-    };
-    window.__wallpaperFileInput = wallpaperFileInput;
-    
     // Add scroll event listener for procedural message loading + intent tracking
     let scrollTimeout;
     domChatMessages.addEventListener('scroll', () => {

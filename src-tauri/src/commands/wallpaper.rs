@@ -10,47 +10,43 @@ pub struct WallpaperPreviewResult {
     pub recommended_dim: u8,
 }
 
-/// Validate + prepare a picked image and return the local cached path for
-/// the chat to display while the user decides whether to confirm. Accepts
-/// EITHER a file_path (desktop Tauri dialog) OR raw bytes (Android, where
-/// the WebView file input only gives us a Blob).
+/// Validate + prepare a picked image and return the local cached path for the
+/// chat to display while the user decides whether to confirm. `file_path` is a
+/// real filesystem path on desktop, or a `content://` URI on Android (which we
+/// read natively — the WebView's `file.arrayBuffer()` returns nothing for those).
 #[tauri::command]
 pub async fn preview_wallpaper(
     chat_id: String,
-    file_path: Option<String>,
-    bytes: Option<Vec<u8>>,
-    filename: Option<String>,
+    file_path: String,
 ) -> Result<WallpaperPreviewResult, String> {
-    // The decode + resize + re-encode is CPU-bound (hundreds of ms on a slow
-    // device), so run it on a blocking thread to keep the async runtime and the
-    // UI free — the frontend paints a "Processing Image" overlay meanwhile.
-    let preview = if let Some(path) = file_path {
-        let cid = chat_id.clone();
-        tokio::task::spawn_blocking(move || wallpaper::prepare_wallpaper_preview(&cid, &path))
-            .await
-            .map_err(|e| format!("Image processing task failed: {e}"))??
-    } else if let Some(buf) = bytes {
-        let cid = chat_id.clone();
-        // Stage bytes into a temp file the validator can mmap. The temp file
-        // is unlinked immediately after — only the preview slot under
-        // wallpapers/ lives on past this call.
-        let safe_name = filename
-            .as_deref()
-            .unwrap_or("wallpaper-pick")
-            .replace(['/', '\\', '\0'], "_");
-        tokio::task::spawn_blocking(move || {
-            let tmp = std::env::temp_dir().join(format!("vector-wallpaper-{}", safe_name));
-            std::fs::write(&tmp, &buf)
+    // Android content:// URIs aren't filesystem paths — read them natively
+    // (ContentResolver) up front, since prepare_wallpaper_preview opens a path.
+    #[cfg(target_os = "android")]
+    let staged_bytes = if file_path.starts_with("content://") {
+        Some(crate::android::filesystem::read_android_uri_bytes(file_path.clone())?.0)
+    } else {
+        None
+    };
+    #[cfg(not(target_os = "android"))]
+    let staged_bytes: Option<Vec<u8>> = None;
+
+    // decode + resize + re-encode is CPU-bound (hundreds of ms on a slow device),
+    // so run it on a blocking thread — the frontend paints an overlay meanwhile.
+    let preview = tokio::task::spawn_blocking(move || {
+        if let Some(bytes) = staged_bytes {
+            // Stage into a temp file the validator can open; unlink after.
+            let tmp = std::env::temp_dir().join("vector-wallpaper-pick");
+            std::fs::write(&tmp, &bytes)
                 .map_err(|e| format!("Failed to stage wallpaper bytes: {}", e))?;
-            let result = wallpaper::prepare_wallpaper_preview(&cid, &tmp.to_string_lossy());
+            let result = wallpaper::prepare_wallpaper_preview(&chat_id, &tmp.to_string_lossy());
             let _ = std::fs::remove_file(&tmp);
             result
-        })
-        .await
-        .map_err(|e| format!("Image processing task failed: {e}"))??
-    } else {
-        return Err("preview_wallpaper needs either file_path or bytes".to_string());
-    };
+        } else {
+            wallpaper::prepare_wallpaper_preview(&chat_id, &file_path)
+        }
+    })
+    .await
+    .map_err(|e| format!("Image processing task failed: {e}"))??;
     Ok(WallpaperPreviewResult {
         path: preview.path,
         was_animated: preview.was_animated,
