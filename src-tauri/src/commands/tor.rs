@@ -52,6 +52,7 @@ fn read_setting_enabled() -> bool {
 /// That way Tor still starts (direct, no bridges) and the user isn't stuck
 /// in a "Starting…" failsafe-blackhole state on the next launch. The bridge
 /// LINES are preserved so they can re-enable them after reinstalling.
+#[cfg(feature = "tor")]
 fn read_saved_bridges() -> Vec<String> {
     let enabled = matches!(
         vector_core::db::settings::get_sql_setting("tor_bridges_enabled".to_string()),

@@ -1991,7 +1991,7 @@ impl VectorCore {
             }
             let state = crate::state::STATE.lock().await;
             for pk in members {
-                let Ok(npub) = pk.to_bech32() else { continue };
+                let Ok(npub) = pk.to_bech32();
                 if state.get_profile(&npub).map(|p| p.flags.is_bot()).unwrap_or(false) {
                     bots.push(pk);
                 }
@@ -2199,17 +2199,16 @@ impl VectorCore {
             if let crate::community::v2::chat::ChatEvent::Webxdc { opened } = &f.event {
                 if opened.author != my_pk {
                     if let Some((topic, addr)) = crate::webxdc::parse_peer_signal(&opened.rumor.content) {
-                        if let Ok(npub) = ToBech32::to_bech32(&opened.author) {
-                            crate::community::service::persist_webxdc_signal(
-                                channel_id,
-                                &npub,
-                                &topic,
-                                addr.as_deref(),
-                                &opened.rumor_id.to_hex(),
-                                opened.at_ms / 1000,
-                            )
-                            .await;
-                        }
+                        let Ok(npub) = ToBech32::to_bech32(&opened.author);
+                        crate::community::service::persist_webxdc_signal(
+                            channel_id,
+                            &npub,
+                            &topic,
+                            addr.as_deref(),
+                            &opened.rumor_id.to_hex(),
+                            opened.at_ms / 1000,
+                        )
+                        .await;
                     }
                 }
                 continue;

@@ -605,7 +605,7 @@ fn surface_presence(
         if banned.contains(&member.to_hex()) {
             continue;
         }
-        let Ok(npub) = member.to_bech32() else { continue };
+        let Ok(npub) = member.to_bech32();
         let event_id = crate::simd::hex::bytes_to_hex_32(&ev.rumor_id);
         let (by, label) = match &invited_by {
             Some((c, l)) => (Some(c.as_str()), Some(l.as_str())),

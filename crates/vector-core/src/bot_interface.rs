@@ -62,7 +62,7 @@ pub fn addressed_bots<'a, I: IntoIterator<Item = &'a Tag>>(tags: I) -> Vec<Strin
         }
         let Some(v) = s.get(1) else { continue };
         let Ok(pk) = nostr_sdk::prelude::PublicKey::from_hex(v) else { continue };
-        let Ok(npub) = pk.to_bech32() else { continue };
+        let Ok(npub) = pk.to_bech32();
         if !out.contains(&npub) {
             out.push(npub);
         }

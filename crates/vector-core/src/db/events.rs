@@ -1076,9 +1076,8 @@ fn normalize_reaction_author(author: String) -> String {
     if author.len() == 64 && author.bytes().all(|b| b.is_ascii_hexdigit()) {
         if let Ok(pk) = nostr_sdk::prelude::PublicKey::from_hex(&author) {
             use nostr_sdk::prelude::ToBech32;
-            if let Ok(npub) = pk.to_bech32() {
-                return npub;
-            }
+            let Ok(npub) = pk.to_bech32();
+            return npub;
         }
     }
     author

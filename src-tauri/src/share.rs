@@ -23,6 +23,8 @@ pub struct SharePayload {
 }
 
 /// Store an inbound share and emit it to the frontend if it's running.
+/// Fed only by the Android share-intent path; dead on desktop builds.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub fn set_pending_share(uris: Vec<String>, text: String) {
     if uris.is_empty() && text.is_empty() {
         return;

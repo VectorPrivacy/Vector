@@ -3840,7 +3840,7 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             crate::db::set_app_data_dir(tmp.path().to_path_buf());
 
-            let mut mk = || {
+            let mk = || {
                 let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let account = account_name(n);
                 std::fs::create_dir_all(tmp.path().join(&account)).unwrap();
@@ -7131,7 +7131,7 @@ mod tests {
         // The roleless-member half of B1: >500 Guestbook events must not evict an
         // honest member's Join from the counted set (an insider can flood throwaway
         // Joins to force exactly this). The pager sees them all.
-        let (_tmp, _guard, owner) = init_test_db();
+        let (_tmp, _guard, _owner) = init_test_db();
         let relay = MemoryRelay::new();
         let community = create_community(&relay, "GBFlood", vec!["wss://r".into()], None).await.unwrap();
         let gb = super::super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
@@ -7215,7 +7215,7 @@ mod tests {
         // archive — a deferred refinement shared with v1; convergence, the
         // security-critical property, is what this pins.)
         use crate::community::roles::{CommunityRoles, MemberGrant, Role};
-        let (_tmp, _guard, owner) = init_test_db();
+        let (_tmp, _guard, _owner) = init_test_db();
         let relay = MemoryRelay::new();
         let mut community = create_community(&relay, "Race", vec!["wss://r".into()], None).await.unwrap();
         let priv_id = ChannelId([0xC0; 32]);

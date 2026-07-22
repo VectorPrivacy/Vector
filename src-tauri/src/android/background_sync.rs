@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::{NOSTR_CLIENT, MY_SECRET_KEY, ENCRYPTION_KEY, set_my_public_key};
-use vector_core::state::{set_nostr_client, MY_PUBLIC_KEY};
+use vector_core::state::set_nostr_client;
 use crate::commands::relays::DEFAULT_RELAYS;
 use crate::services::event_handler::handle_event_with_context;
 
@@ -647,7 +647,7 @@ async fn bg_connect_single_relay(client: &Client, data_dir: &str) -> Result<(), 
 
         // Didn't connect — remove and try next
         logcat(&format!("Background: {} failed to connect, trying next", url));
-        client.remove_relay(url.as_str()).await;
+        let _ = client.remove_relay(url.as_str()).await;
     }
 
     Err("Failed to connect to any relay".to_string())

@@ -38,6 +38,8 @@ pub async fn get_chat_messages_paginated<R: Runtime>(
         let mut state = STATE.lock().await;
 
         // Use batch insert with zero-copy (moves the messages)
+        // `added` feeds only the debug-gated CacheStats below.
+        #[cfg_attr(not(debug_assertions), allow(unused_variables))]
         let added = state.add_messages_to_chat_batch(&chat_id, messages);
 
         #[cfg(debug_assertions)]
@@ -88,6 +90,8 @@ pub async fn get_message_views<R: Runtime>(
         let mut state = STATE.lock().await;
 
         // Use batch insert with zero-copy (moves the messages)
+        // `added` feeds only the debug-gated CacheStats below.
+        #[cfg_attr(not(debug_assertions), allow(unused_variables))]
         let added = state.add_messages_to_chat_batch(&chat_id, messages);
 
         #[cfg(debug_assertions)]
@@ -128,6 +132,8 @@ pub async fn get_messages_around_id<R: Runtime>(
         let mut state = STATE.lock().await;
 
         // Use batch insert with zero-copy (moves the messages)
+        // `added` feeds only the debug-gated CacheStats below.
+        #[cfg_attr(not(debug_assertions), allow(unused_variables))]
         let added = state.add_messages_to_chat_batch(&chat_id, messages);
 
         #[cfg(debug_assertions)]

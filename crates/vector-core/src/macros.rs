@@ -6,6 +6,20 @@
 /// WARN, override with `VECTOR_LOG=trace|debug|info|warn|error|off`. The level
 /// check is cheap and the message args aren't formatted when suppressed.
 
+// Release builds strip the info/debug/trace bodies entirely, so a variable
+// referenced only inside one of these macros would go unused. `keep_used!`
+// re-references the args in a dead `if false` block: DCE removes it (zero
+// runtime cost, args never evaluated) while the borrow checker still counts
+// the args as used, so call sites stay warning-free in every profile.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __log_keep_used {
+    ($($arg:tt)*) => {{
+        #[cfg(not(debug_assertions))]
+        if false { let _ = format_args!($($arg)*); }
+    }};
+}
+
 #[macro_export]
 macro_rules! log_info {
     ($($arg:tt)*) => {{
@@ -13,6 +27,7 @@ macro_rules! log_info {
         if $crate::logging::level_enabled($crate::logging::LEVEL_INFO) {
             eprintln!("[INFO] {}", format_args!($($arg)*));
         }
+        $crate::__log_keep_used!($($arg)*);
     }};
 }
 
@@ -23,6 +38,7 @@ macro_rules! log_debug {
         if $crate::logging::level_enabled($crate::logging::LEVEL_DEBUG) {
             eprintln!("[DEBUG] {}", format_args!($($arg)*));
         }
+        $crate::__log_keep_used!($($arg)*);
     }};
 }
 
@@ -33,6 +49,7 @@ macro_rules! log_trace {
         if $crate::logging::level_enabled($crate::logging::LEVEL_TRACE) {
             eprintln!("[TRACE] {}", format_args!($($arg)*));
         }
+        $crate::__log_keep_used!($($arg)*);
     }};
 }
 

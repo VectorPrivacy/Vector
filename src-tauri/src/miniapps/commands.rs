@@ -753,9 +753,8 @@ pub async fn miniapp_open(
                 if let Some(channel) = channel_state {
                     let topic_encoded = super::realtime::encode_topic_id(&channel.topic);
                     if let Some(my_pk) = crate::my_public_key() {
-                        if let Ok(my_npub) = my_pk.to_bech32() {
-                            state.remove_session_peer(&channel.topic, &my_npub).await;
-                        }
+                        let Ok(my_npub) = my_pk.to_bech32();
+                        state.remove_session_peer(&channel.topic, &my_npub).await;
                     }
                     let chat_id_clone = chat_id.clone();
                     // chat_id belongs to the account current NOW — bail in the task if it swaps.

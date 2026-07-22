@@ -1059,7 +1059,7 @@ pub async fn fetch_own_inbox_list(client: &Client) -> Result<Option<(Vec<String>
     let newest = events
         .into_iter()
         .max_by(|a, b| a.created_at.cmp(&b.created_at).then(b.id.cmp(&a.id)))
-        .map(|e| (parse_relay_tags(&e.tags), e.created_at.as_u64()));
+        .map(|e| (parse_relay_tags(&e.tags), e.created_at.as_secs()));
 
     // "No list found" is only trustworthy when a Discovery Relay answered:
     // a list curated elsewhere may live on none of our own relays, and a
@@ -1337,7 +1337,7 @@ pub async fn publish_inbox_relays_synced(
     // Anchor only on a confirmed landing in a still-current session: a
     // wrongly-advanced anchor gates future syncs off real network state.
     if session.is_valid() {
-        note_list_seen(event.created_at.as_u64().max(remote_ts));
+        note_list_seen(event.created_at.as_secs().max(remote_ts));
     }
 
     println!(

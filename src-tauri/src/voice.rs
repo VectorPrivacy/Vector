@@ -204,11 +204,6 @@ impl AudioRecorder {
         }
     }
 
-    /// True iff a recording is currently in progress.
-    pub fn is_recording(&self) -> bool {
-        self.recording.load(Ordering::SeqCst)
-    }
-
     /// Stop recording and load the result into the audio engine for preview.
     /// Returns AudioLoadResult with source ID and precomputed waveform.
     pub fn stop(&self) -> Result<AudioLoadResult, String> {

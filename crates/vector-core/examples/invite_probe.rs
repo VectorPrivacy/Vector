@@ -56,7 +56,7 @@ async fn main() {
         .collect();
     println!("\nDELETION (kind 5) events by the signer referencing this coord: {}", matching.len());
     for e in &matching {
-        println!("  id={} created_at={}", e.id, e.created_at.as_u64());
+        println!("  id={} created_at={}", e.id, e.created_at.as_secs());
     }
 
     println!(
