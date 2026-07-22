@@ -299,6 +299,10 @@ pub async fn emoji_pack_upload_image<R: tauri::Runtime>(
         servers,
         upload_bytes,
         Some(mime_ref),
+        // Emojis are tiny (<=1MB) and should upload near-instantly: treat a server silent
+        // for 10s as dead and fail over, instead of waiting out the full request timeout on
+        // a broken Blossom host. Larger uploads (attachments, profiles) keep more leeway.
+        Some(std::time::Duration::from_secs(10)),
     ).await?;
 
     // Re-check after the upload — caller will plumb this URL into a pack

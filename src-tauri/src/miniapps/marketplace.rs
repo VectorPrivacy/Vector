@@ -1055,6 +1055,7 @@ pub async fn publish_to_marketplace<T: NostrSigner + Clone>(
             blossom_servers.clone(),
             Arc::new(icon_data),
             Some(mime_type),
+            None,
         )
         .await
         {
@@ -1081,6 +1082,7 @@ pub async fn publish_to_marketplace<T: NostrSigner + Clone>(
         blossom_servers,
         Arc::new(file_data),
         Some("application/octet-stream"),
+        None,
     )
     .await?;
 

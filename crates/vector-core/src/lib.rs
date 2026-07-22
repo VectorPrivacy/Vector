@@ -740,7 +740,7 @@ impl VectorCore {
         if servers.is_empty() {
             return Err(VectorError::Other("No Blossom servers configured".into()));
         }
-        crate::blossom::upload_blob_with_failover(signer, servers, std::sync::Arc::new(bytes), Some(mime))
+        crate::blossom::upload_blob_with_failover(signer, servers, std::sync::Arc::new(bytes), Some(mime), None)
             .await
             .map_err(VectorError::Other)
     }

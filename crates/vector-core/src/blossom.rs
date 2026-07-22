@@ -157,12 +157,13 @@ where
                 if permanent {
                     return Err(e);
                 }
-                // Gateway timeouts (Cloudflare 524/522/520, 504): the origin couldn't ingest the upload
-                // within the edge window (a too-slow/too-large upload). Retrying the same server just
-                // repeats the multi-minute timeout, so route around to the next server immediately.
-                if matches!(status, Some(504 | 520 | 522 | 524)) {
+                // Cloudflare 52x (520 unknown / 521 down / 522 timeout / 523 unreachable /
+                // 524 timeout / 525 TLS-handshake-failed / 526 bad-cert) + 504: the origin
+                // can't ingest the upload, and retrying the same server just repeats the
+                // failure, so route around to the next server immediately.
+                if matches!(status, Some(504 | 520 | 521 | 522 | 523 | 524 | 525 | 526)) {
                     crate::log_warn!(
-                        "[Blossom] {} gateway-timed-out (status {}) on {} bytes; routing to the next server",
+                        "[Blossom] {} origin unreachable (status {}) on {} bytes; routing to the next server",
                         server_url, status.unwrap_or(0), file_data.len(),
                     );
                     return Err(e);
@@ -222,6 +223,7 @@ where
     // Redirects disabled: a 3xx mid-PUT would re-issue as GET and drop the body.
     let client = crate::net::build_http_client_with_options(
         std::time::Duration::from_secs(300),
+        None,
         false,
     )?;
 
@@ -394,12 +396,15 @@ where
     }
 }
 
-/// Simple upload without progress tracking
+/// Simple upload without progress tracking. `read_timeout` fast-fails a dead server
+/// (see `build_http_client_with_options`); pass it for small uploads (emoji, avatars)
+/// so failover is quick, `None` for large blobs whose server may go quiet mid-store.
 pub async fn upload_blob<T>(
     signer: T,
     server_url: &Url,
     file_data: Arc<Vec<u8>>,
     mime_type: Option<&str>,
+    read_timeout: Option<std::time::Duration>,
 ) -> Result<String, String>
 where
     T: NostrSigner,
@@ -425,6 +430,7 @@ where
     // Redirects disabled so a 3xx mid-PUT doesn't re-issue as GET.
     let client = crate::net::build_http_client_with_options(
         std::time::Duration::from_secs(300),
+        read_timeout,
         false,
     )?;
 
@@ -469,6 +475,7 @@ pub async fn upload_blob_with_failover<T>(
     server_urls: Vec<String>,
     file_data: Arc<Vec<u8>>,
     mime_type: Option<&str>,
+    read_timeout: Option<std::time::Duration>,
 ) -> Result<String, String>
 where
     T: NostrSigner + Clone,
@@ -488,7 +495,7 @@ where
         crate::log_info!("[Blossom] Attempting upload to server {} of {}: {}",
             index + 1, server_urls.len(), server_url_str);
 
-        match upload_blob(signer.clone(), &server_url, file_data.clone(), mime_type).await {
+        match upload_blob(signer.clone(), &server_url, file_data.clone(), mime_type, read_timeout).await {
             Ok(url) => {
                 crate::log_info!("[Blossom] Upload successful to: {}", server_url_str);
                 return Ok(url);

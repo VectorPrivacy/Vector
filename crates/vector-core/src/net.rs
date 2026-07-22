@@ -61,7 +61,7 @@ fn is_ipv6_private(ip: &std::net::Ipv6Addr) -> bool {
 /// clippy lint enforces this everywhere except this one canonical call site.
 #[allow(clippy::disallowed_methods)]
 pub fn build_http_client(timeout: std::time::Duration) -> Result<reqwest::Client, String> {
-    build_http_client_with_options(timeout, true)
+    build_http_client_with_options(timeout, None, true)
 }
 
 /// Like `build_http_client`, optionally without redirect-following.
@@ -70,9 +70,18 @@ pub fn build_http_client(timeout: std::time::Duration) -> Result<reqwest::Client
 #[allow(clippy::disallowed_methods)]
 pub fn build_http_client_with_options(
     timeout: std::time::Duration,
+    read_timeout: Option<std::time::Duration>,
     follow_redirects: bool,
 ) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder().timeout(timeout);
+    // Idle read timeout (opt-in): a server that accepts the connection but streams
+    // nothing back for this long is treated as dead, so upload failover moves on fast
+    // instead of waiting out the whole `timeout`. It resets on every received byte, so
+    // a slow-but-progressing transfer survives. Left None for large uploads, whose
+    // server can legitimately go quiet while it stores the blob.
+    if let Some(rt) = read_timeout {
+        builder = builder.read_timeout(rt);
+    }
     if !follow_redirects {
         builder = builder.redirect(reqwest::redirect::Policy::none());
     } else {
