@@ -93,7 +93,7 @@ pub fn ingest_message(
         return None;
     }
     state.ensure_community_chat(&chat_id);
-    if state.add_message_to_chat(&chat_id, msg.clone()) {
+    if state.add_message_to_chat(&chat_id, &msg) {
         Some(msg)
     } else {
         None

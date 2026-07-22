@@ -2309,7 +2309,7 @@ mod tests {
             let chat = chat.to_string();
             async move {
                 let mut st = crate::state::STATE.lock().await;
-                st.add_message_to_participant(&chat, m);
+                st.add_message_to_participant(&chat, &m);
             }
         };
         let wrap_a1 = ([0xA1u8; 32], 111u64);
@@ -2383,7 +2383,7 @@ mod tests {
         let m1 = mk("del_sametask");
         {
             let mut st = crate::state::STATE.lock().await;
-            st.add_message_to_participant(chat, m1.clone());
+            st.add_message_to_participant(chat, &m1);
         }
         batcher.buffer_persist(chat, &m1, Some(([0xD1u8; 32], 444)));
         {
@@ -2398,7 +2398,7 @@ mod tests {
         let m2 = mk("del_crosstask");
         {
             let mut st = crate::state::STATE.lock().await;
-            st.add_message_to_participant(chat, m2.clone());
+            st.add_message_to_participant(chat, &m2);
         }
         batcher.buffer_persist(chat, &m2, Some(([0xD2u8; 32], 555)));
         crate::state::note_message_deleted("del_crosstask");
@@ -2408,7 +2408,7 @@ mod tests {
         let wrap_evicted = ([0xE0u8; 32], 666u64);
         {
             let mut st = crate::state::STATE.lock().await;
-            st.add_message_to_participant(chat, m3.clone());
+            st.add_message_to_participant(chat, &m3);
             st.remove_message("evicted_ok");
         }
         batcher.buffer_persist(chat, &m3, Some(wrap_evicted));

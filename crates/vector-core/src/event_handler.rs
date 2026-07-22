@@ -786,7 +786,7 @@ async fn commit_dm_message(
     // Add to STATE (+ clear typing indicator for file senders)
     let added = {
         let mut state = crate::state::STATE.lock().await;
-        let added = state.add_message_to_participant(contact, msg.clone());
+        let added = state.add_message_to_participant(contact, &msg);
         if is_file && added {
             state.update_typing_and_get_active(contact, contact, 0);
         }

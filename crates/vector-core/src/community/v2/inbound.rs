@@ -118,7 +118,7 @@ pub fn apply_chat_to_state(state: &mut ChatState, event: &ChatEvent, channel_id:
             // Persist regardless of the STATE-add result: `event_exists` already proved
             // it's not in the DB, so a `false` here means only that another writer put it
             // in STATE first — the row must still be saved, or it's lost until re-fetch.
-            state.add_message_to_chat(channel_id, msg.clone());
+            state.add_message_to_chat(channel_id, &msg);
             Some(ChatPersist::New(msg))
         }
         ChatEvent::Reaction { opened, target, emoji, emoji_url, .. } => {

@@ -784,8 +784,8 @@ impl ChatState {
         }
     }
 
-    pub fn add_message_to_chat(&mut self, chat_id: &str, message: Message) -> bool {
-        let compact = CompactMessage::from_message(&message, &mut self.interner);
+    pub fn add_message_to_chat(&mut self, chat_id: &str, message: &Message) -> bool {
+        let compact = CompactMessage::from_message(message, &mut self.interner);
 
         let (is_msg_added, chat_idx) = if let Some(idx) = self.chats.iter().position(|c| c.id == chat_id) {
             let added = self.chats[idx].add_compact_message(compact);
@@ -852,7 +852,7 @@ impl ChatState {
     /// Add a message to a participant's DM chat. Creates profile if missing.
     ///
     /// Unlike the src-tauri version, emitting `profile_update` is the caller's responsibility.
-    pub fn add_message_to_participant(&mut self, their_npub: &str, message: Message) -> bool {
+    pub fn add_message_to_participant(&mut self, their_npub: &str, message: &Message) -> bool {
         let id = self.interner.intern(their_npub);
         if self.get_profile_by_id(id).is_none() {
             let profile = Profile::new();
@@ -1477,7 +1477,7 @@ mod tests {
         state.create_dm_chat("npub1peer");
 
         let msg = make_message(1, "hello", 1700000000000, false);
-        let added = state.add_message_to_chat("npub1peer", msg);
+        let added = state.add_message_to_chat("npub1peer", &msg);
 
         assert!(added, "first message should be added successfully");
         let chat = state.get_chat("npub1peer").unwrap();
@@ -1492,8 +1492,8 @@ mod tests {
         let msg1 = make_message(1, "hello", 1700000000000, false);
         let msg2 = make_message(1, "duplicate", 1700000001000, false);
 
-        let added1 = state.add_message_to_chat("npub1peer", msg1);
-        let added2 = state.add_message_to_chat("npub1peer", msg2);
+        let added1 = state.add_message_to_chat("npub1peer", &msg1);
+        let added2 = state.add_message_to_chat("npub1peer", &msg2);
 
         assert!(added1, "first insert should succeed");
         assert!(!added2, "duplicate ID should be rejected");
@@ -1549,7 +1549,7 @@ mod tests {
         let mut state = ChatState::new();
 
         let msg = make_message(1, "hi there", 1700000000000, false);
-        let added = state.add_message_to_participant("npub1stranger", msg);
+        let added = state.add_message_to_participant("npub1stranger", &msg);
 
         assert!(added, "message should be added");
         assert!(
@@ -1572,7 +1572,7 @@ mod tests {
         state.insert_or_replace_profile("npub1known", profile);
 
         let msg = make_message(1, "hello", 1700000000000, false);
-        state.add_message_to_participant("npub1known", msg);
+        state.add_message_to_participant("npub1known", &msg);
 
         // Profile should not be replaced
         let p = state.get_profile("npub1known").unwrap();
@@ -1589,8 +1589,8 @@ mod tests {
         let msg_b = make_message(2, "in chat b", 1700000001000, false);
         let msg_id_b = msg_b.id.clone();
 
-        state.add_message_to_chat("npub1a", msg_a);
-        state.add_message_to_chat("npub1b", msg_b);
+        state.add_message_to_chat("npub1a", &msg_a);
+        state.add_message_to_chat("npub1b", &msg_b);
 
         let (chat, found_msg) = state.find_message(&msg_id_b).expect("message should be found");
         assert_eq!(chat.id, "npub1b", "should find in correct chat");
@@ -1619,7 +1619,7 @@ mod tests {
 
         let msg = make_message(1, "original", 1700000000000, false);
         let msg_id = msg.id.clone();
-        state.add_message_to_chat("npub1peer", msg);
+        state.add_message_to_chat("npub1peer", &msg);
 
         let result = state.update_message(&msg_id, |cm| {
             cm.content = "updated content".to_string().into_boxed_str();
@@ -1645,7 +1645,7 @@ mod tests {
         let mut msg = make_message(1, "pending msg", 1700000000000, true);
         msg.pending = true;
         let pending_id = msg.id.clone();
-        state.add_message_to_chat("npub1peer", msg);
+        state.add_message_to_chat("npub1peer", &msg);
 
         let real_id = make_hex_id(2);
         let result = state.finalize_pending_message("npub1peer", &pending_id, &real_id);
@@ -1674,7 +1674,7 @@ mod tests {
 
         let msg = make_message(1, "deleteme", 1700000000000, false);
         let msg_id = msg.id.clone();
-        state.add_message_to_chat("npub1peer", msg);
+        state.add_message_to_chat("npub1peer", &msg);
 
         let result = state.remove_message(&msg_id);
         assert!(result.is_some(), "remove should return the removed message");
@@ -1696,8 +1696,8 @@ mod tests {
         let m1 = make_message(1, "one", 1_700_000_000_000, false);
         let m2 = make_message(2, "two", 1_700_000_001_000, false);
         let (m1_id, m2_id) = (m1.id.clone(), m2.id.clone());
-        state.add_message_to_chat("npub1peer", m1);
-        state.add_message_to_chat("npub1peer", m2);
+        state.add_message_to_chat("npub1peer", &m1);
+        state.add_message_to_chat("npub1peer", &m2);
 
         // Read up to the newest — m2 is the marker.
         state.chats.iter_mut().find(|c| c.id == "npub1peer").unwrap().last_read =
@@ -1730,7 +1730,7 @@ mod tests {
 
         let msg = make_message(1, "exists", 1700000000000, false);
         let msg_id = msg.id.clone();
-        state.add_message_to_chat("npub1peer", msg);
+        state.add_message_to_chat("npub1peer", &msg);
 
         assert!(state.message_exists(&msg_id), "added message should exist");
         assert!(!state.message_exists(&make_hex_id(99)), "unknown id should not exist");
@@ -1745,11 +1745,11 @@ mod tests {
 
         // Add an old message to the first chat
         let old_msg = make_message(1, "old", 1700000000000, false);
-        state.add_message_to_chat("npub1old", old_msg);
+        state.add_message_to_chat("npub1old", &old_msg);
 
         // Add a newer message to the second chat
         let new_msg = make_message(2, "new", 1700000002000, false);
-        state.add_message_to_chat("npub1new", new_msg);
+        state.add_message_to_chat("npub1new", &new_msg);
 
         assert_eq!(
             state.chats[0].id, "npub1new",
@@ -1769,7 +1769,7 @@ mod tests {
 
         // Give active chat a recent message
         let recent = make_message(1, "recent", 1700000010000, false);
-        state.add_message_to_chat("npub1active", recent);
+        state.add_message_to_chat("npub1active", &recent);
 
         // Batch-add old messages to history chat (pagination loading)
         let old_msgs: Vec<Message> = (10..15).map(|i| {
@@ -1796,7 +1796,7 @@ mod tests {
             let chat_idx = i as usize % 5;
             let chat_id = format!("npub1chat{}", chat_idx);
             let msg = make_message(i, &format!("msg {}", i), 1700000000000 + i as u64 * 1000, i % 3 == 0);
-            if state.add_message_to_chat(&chat_id, msg) {
+            if state.add_message_to_chat(&chat_id, &msg) {
                 total_added += 1;
             }
         }
@@ -1832,7 +1832,7 @@ mod tests {
 
         // Add message to a chat that doesn't exist yet (npub-style ID)
         let msg = make_message(1, "auto create", 1700000000000, false);
-        let added = state.add_message_to_chat("npub1auto", msg);
+        let added = state.add_message_to_chat("npub1auto", &msg);
 
         assert!(added, "message should be added");
         assert!(state.get_chat("npub1auto").is_some(), "DM chat should be auto-created");
@@ -1844,7 +1844,7 @@ mod tests {
 
         // Add message to a non-npub ID (should create a Community chat)
         let msg = make_message(1, "group msg", 1700000000000, false);
-        let added = state.add_message_to_chat("group_abc123", msg);
+        let added = state.add_message_to_chat("group_abc123", &msg);
 
         assert!(added, "message should be added");
         let chat = state.get_chat("group_abc123").expect("community chat should be auto-created");
@@ -1862,7 +1862,7 @@ mod tests {
 
         for i in 0..5u8 {
             let msg = make_message(i, &format!("msg {}", i), 1700000000000 + i as u64 * 1000, false);
-            state.add_message_to_chat("npub1peer", msg);
+            state.add_message_to_chat("npub1peer", &msg);
         }
 
         assert_eq!(state.count_unread_messages(), 5, "all 5 non-mine messages should be unread");
@@ -1874,7 +1874,7 @@ mod tests {
         state.create_dm_chat("npub1muted");
 
         let msg = make_message(1, "muted msg", 1700000000000, false);
-        state.add_message_to_chat("npub1muted", msg);
+        state.add_message_to_chat("npub1muted", &msg);
 
         state.get_chat_mut("npub1muted").unwrap().muted = true;
 
@@ -1891,7 +1891,7 @@ mod tests {
         state.create_dm_chat("npub1blocked");
 
         let msg = make_message(1, "blocked msg", 1700000000000, false);
-        state.add_message_to_chat("npub1blocked", msg);
+        state.add_message_to_chat("npub1blocked", &msg);
 
         assert_eq!(state.count_unread_messages(), 0, "blocked user DM should not count");
     }
@@ -1954,7 +1954,7 @@ mod tests {
         let msg6 = make_message(6, "them 5", 1700000006000, false);
 
         for m in [msg1, msg2, msg3, msg_mine, msg5, msg6] {
-            state.add_message_to_chat("npub1peer", m);
+            state.add_message_to_chat("npub1peer", &m);
         }
 
         // Counting from the end: msg6 (unread), msg5 (unread), then msg_mine breaks
@@ -1976,7 +1976,7 @@ mod tests {
         let read_marker_id = msg2.id.clone();
 
         for m in [msg1, msg2, msg3, msg4] {
-            state.add_message_to_chat("npub1peer", m);
+            state.add_message_to_chat("npub1peer", &m);
         }
 
         // Set last_read to msg2's ID
@@ -2020,11 +2020,11 @@ mod tests {
 
         // Message from blocked member
         let msg_blocked = make_message_from(1, "blocked says hi", 1700000001000, "npub1blockedmember");
-        state.add_message_to_chat("grp1", msg_blocked);
+        state.add_message_to_chat("grp1", &msg_blocked);
 
         // Message from normal member
         let msg_normal = make_message_from(2, "normal says hi", 1700000002000, "npub1normal");
-        state.add_message_to_chat("grp1", msg_normal);
+        state.add_message_to_chat("grp1", &msg_normal);
 
         assert_eq!(
             state.count_unread_messages(), 1,
@@ -2046,7 +2046,7 @@ mod tests {
                     1700000000000 + j as u64 * 1000,
                     false,
                 );
-                state.add_message_to_chat(&npub, msg);
+                state.add_message_to_chat(&npub, &msg);
             }
         }
 

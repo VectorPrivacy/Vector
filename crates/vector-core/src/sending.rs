@@ -605,7 +605,7 @@ pub async fn send_dm(
 
     {
         let mut state = STATE.lock().await;
-        state.add_message_to_participant(receiver_npub, msg.clone());
+        state.add_message_to_participant(receiver_npub, &msg);
     }
 
     callback.on_pending(receiver_npub, &msg);
@@ -829,7 +829,7 @@ pub async fn send_file_dm(
     };
     {
         let mut state = STATE.lock().await;
-        state.add_message_to_participant(receiver_npub, msg.clone());
+        state.add_message_to_participant(receiver_npub, &msg);
     }
     callback.on_pending(receiver_npub, &msg);
 

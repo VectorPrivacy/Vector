@@ -842,7 +842,7 @@ pub async fn send_community_message(
         };
         {
             let mut state = vector_core::state::STATE.lock().await;
-            state.add_message_to_chat(&channel_id, pending_msg.clone());
+            state.add_message_to_chat(&channel_id, &pending_msg);
         }
         callback.on_pending(&channel_id, &pending_msg);
 
@@ -954,7 +954,7 @@ pub async fn send_community_message(
     };
     {
         let mut state = vector_core::state::STATE.lock().await;
-        state.add_message_to_chat(&channel_id, pending_msg.clone());
+        state.add_message_to_chat(&channel_id, &pending_msg);
     }
     callback.on_pending(&channel_id, &pending_msg);
 
@@ -1328,7 +1328,7 @@ async fn dispatch_community_attachment_message(
     };
     {
         let mut state = vector_core::state::STATE.lock().await;
-        state.add_message_to_chat(&channel_id, pending_msg.clone());
+        state.add_message_to_chat(&channel_id, &pending_msg);
     }
     // Registers the cancel flag (keyed by pending_id) + emits the pending bubble.
     callback.on_pending(&channel_id, &pending_msg);
