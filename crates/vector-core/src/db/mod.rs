@@ -908,6 +908,7 @@ pub fn get_database_path(npub: &str) -> Result<PathBuf, String> {
 /// in `id_cache`; this is the public entry the swap path + callers already use.
 pub fn clear_id_caches() {
     id_cache::clear_id_caches();
+    community::clear_banlist_cache();
 }
 
 // ============================================================================

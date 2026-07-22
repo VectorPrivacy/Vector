@@ -595,14 +595,14 @@ fn surface_presence(
     };
     let chat_id = crate::simd::hex::bytes_to_hex_32(&primary.id.0);
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-    let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
+    let banned = crate::db::community::banned_set(&cid_hex);
     for ev in fresh {
         let (member, joined, at_ms, invited_by) = match &ev.entry {
             GuestbookEntry::Join { member, at_ms, invited_by } => (member, true, *at_ms, invited_by.clone()),
             GuestbookEntry::Leave { member, at_ms } => (member, false, *at_ms, None),
             GuestbookEntry::Kick { .. } | GuestbookEntry::Snapshot { .. } => continue,
         };
-        if banned.contains(&member.to_hex()) {
+        if banned.contains(&member.to_bytes()) {
             continue;
         }
         let Ok(npub) = member.to_bech32();

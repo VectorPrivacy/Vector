@@ -67,8 +67,7 @@ fn author_is_banned_here(channel_id: &str, author: &PublicKey) -> bool {
     let Ok(Some(cid_hex)) = crate::db::community::community_id_for_channel(channel_id) else {
         return false;
     };
-    let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
-    !banned.is_empty() && banned.contains(&author.to_hex())
+    crate::db::community::is_author_banned(&cid_hex, author)
 }
 
 /// What applying a v2 chat event to STATE yielded — the caller persists it (async)
@@ -415,8 +414,7 @@ fn dispatch_guestbook(ev: &guestbook::GuestbookEvent, community: &CommunityV2, h
     // their events (the memberlist fold subtracts them separately).
     if let GuestbookEntry::Join { member, .. } | GuestbookEntry::Leave { member, .. } = &ev.entry {
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-        let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
-        if banned.contains(&member.to_hex()) {
+        if crate::db::community::is_author_banned(&cid_hex, member) {
             return DispatchedV2::Ignored;
         }
     }

@@ -961,6 +961,7 @@ fn delete_community_inner(community_id: &str, retain_keys: bool) -> Result<(), S
             .map_err(|e| format!("delete community: {e}"))?;
     }
     tx.commit().map_err(|e| format!("delete community commit: {e}"))?;
+    BANLIST_CACHE.write().unwrap().remove(community_id);
     // `community_message_keys` is INTENTIONALLY left intact: those are our OWN ephemeral signing keys for
     // NIP-09-deleting our own messages. The right to erase our own content from relays outlives membership
     // — even after a ban or leave we must keep the ability to purge what we sent — so they survive a
@@ -1185,6 +1186,49 @@ pub fn community_invite_join_counts(
 /// the edition it came from. `at` is the version: the owner's own ban/unban writes its freshly
 /// built event time, and `fetch_and_apply_banlist` only calls this with a strictly-newer edition,
 /// so the stored banlist can never roll backwards.
+// ── Banlist cache ────────────────────────────────────────────────────────────
+// The inbound ban check runs per community event; uncached, each call costs a DB
+// fetch + ChaCha20 vault decrypt + JSON parse, even though the banlist only changes
+// on a fold. Cache the banned pubkeys as raw bytes, keyed by community_id — kept
+// coherent by write-through in `set_community_banlist` and eviction in
+// `delete_community_inner`, and cleared wholesale on account swap via
+// `clear_id_caches`. Absent entry = not yet loaded (lazy-fills from DB on first read).
+static BANLIST_CACHE: std::sync::LazyLock<
+    std::sync::RwLock<std::collections::HashMap<String, std::sync::Arc<std::collections::HashSet<[u8; 32]>>>>,
+> = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+
+fn banlist_set_from_hexes(hexes: &[String]) -> std::collections::HashSet<[u8; 32]> {
+    hexes.iter().filter_map(|h| crate::simd::hex::hex_to_bytes_32_checked(h)).collect()
+}
+
+/// Drop every cached banlist. The stored sets belong to the previous account's DB.
+pub fn clear_banlist_cache() {
+    BANLIST_CACHE.write().unwrap().clear();
+}
+
+/// The banned-pubkey set for a community, lazily decrypted+parsed from DB on first
+/// use and held (no further DB/decrypt) until a fold or delete invalidates it.
+pub fn banned_set(community_id: &str) -> std::sync::Arc<std::collections::HashSet<[u8; 32]>> {
+    if let Some(set) = BANLIST_CACHE.read().unwrap().get(community_id) {
+        return std::sync::Arc::clone(set);
+    }
+    let set = std::sync::Arc::new(banlist_set_from_hexes(
+        &get_community_banlist(community_id).unwrap_or_default(),
+    ));
+    BANLIST_CACHE
+        .write()
+        .unwrap()
+        .insert(community_id.to_string(), std::sync::Arc::clone(&set));
+    set
+}
+
+/// Whether `author` is banned in this community. The per-event hot check: a HashSet
+/// lookup once warm, no DB / decrypt / parse.
+pub fn is_author_banned(community_id: &str, author: &PublicKey) -> bool {
+    let set = banned_set(community_id);
+    !set.is_empty() && set.contains(&author.to_bytes())
+}
+
 pub fn set_community_banlist(community_id: &str, banned_hex: &[String], at: i64) -> Result<(), String> {
     let json = enc_txt(&serde_json::to_string(banned_hex).map_err(|e| e.to_string())?)?;
     let conn = super::get_write_connection_guard_static()?;
@@ -1193,6 +1237,12 @@ pub fn set_community_banlist(community_id: &str, banned_hex: &[String], at: i64)
         params![json, at, community_id],
     )
     .map_err(|e| format!("set banlist: {e}"))?;
+    // Write-through: the hot-path cache must not lag a fold — a stale ban would wrongly
+    // vanish a now-unbanned author's messages (fail-closed).
+    BANLIST_CACHE
+        .write()
+        .unwrap()
+        .insert(community_id.to_string(), std::sync::Arc::new(banlist_set_from_hexes(banned_hex)));
     Ok(())
 }
 
