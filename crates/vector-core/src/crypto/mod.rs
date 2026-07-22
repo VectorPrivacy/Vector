@@ -41,10 +41,12 @@ pub fn encrypt_with_key(plaintext: &str, key: &[u8; 32]) -> Result<String, Strin
     let ciphertext = cipher.encrypt(&nonce, plaintext.as_bytes())
         .map_err(|e| format!("Encryption failed: {}", e))?;
 
-    // Encode as hex: nonce + ciphertext
-    let mut result = hex::encode(&nonce[..]);
-    result.push_str(&hex::encode(&ciphertext));
-    Ok(result)
+    // SIMD hex-encode nonce || ciphertext in one pass (matches maybe_encrypt_inner) —
+    // one buffer + one encode instead of two scalar hex::encode calls + a concat.
+    let mut buffer = Vec::with_capacity(nonce.len() + ciphertext.len());
+    buffer.extend_from_slice(&nonce);
+    buffer.extend_from_slice(&ciphertext);
+    Ok(crate::simd::hex::bytes_to_hex_string(&buffer))
 }
 
 /// Decrypt a hex-encoded ChaCha20-Poly1305 ciphertext with a key. Mirrors
