@@ -960,12 +960,12 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
                 let img_meta_json = a.img_meta.as_ref().and_then(|m| serde_json::to_string(m).ok());
                 tx.execute(
                     "INSERT INTO attachments (event_id, att_index, hash, key, nonce, extension, name, url, \
-                     path, size, img_meta, downloaded, webxdc_topic, group_id, original_hash, scheme_version, mls_filename) \
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+                     path, size, img_meta, downloaded, webxdc_topic, group_id, original_hash) \
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
                     rusqlite::params![
                         event_id, i as i64, a.id, a.key, a.nonce, a.extension, a.name, a.url,
                         a.path, a.size as i64, img_meta_json, a.downloaded as i64,
-                        a.webxdc_topic, a.group_id, a.original_hash, a.scheme_version, a.mls_filename,
+                        a.webxdc_topic, a.group_id, a.original_hash,
                     ],
                 ).map_err(|e| format!("insert backfilled attachment: {}", e))?;
             }
@@ -1004,6 +1004,17 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
             tx.execute("UPDATE events SET tags=?1 WHERE id=?2", rusqlite::params![new_tags, id])
                 .map_err(|e| format!("strip attachments tag: {}", e))?;
         }
+        Ok(())
+    })?;
+
+    // Drop the two attachment columns that never carried production data: `mls_filename`
+    // (a vestige of the removed MLS feature) and `scheme_version` (unused MIP-04 plumbing).
+    // Neither is read anywhere; both were always NULL.
+    run_atomic_migration(conn, 76, "Drop dead attachment columns (mls_filename, scheme_version)", |tx| {
+        tx.execute("ALTER TABLE attachments DROP COLUMN scheme_version", [])
+            .map_err(|e| format!("drop scheme_version: {}", e))?;
+        tx.execute("ALTER TABLE attachments DROP COLUMN mls_filename", [])
+            .map_err(|e| format!("drop mls_filename: {}", e))?;
         Ok(())
     })?;
 

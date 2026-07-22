@@ -1132,8 +1132,6 @@ async fn process_outbound_community_attachment_bytes(
         webxdc_topic,
         group_id: None,
         original_hash: Some(plaintext_hash),
-        scheme_version: None,
-        mls_filename: None,
     };
     Ok(PreparedCommunityAttachment { attachment, encrypted, mime })
 }

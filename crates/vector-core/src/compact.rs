@@ -673,10 +673,6 @@ pub struct CompactAttachment {
     pub original_hash: Option<Box<[u8; 32]>>,
     /// WebXDC topic (Mini Apps only - very rare)
     pub webxdc_topic: Option<Box<str>>,
-    /// Legacy filename for AAD
-    pub mls_filename: Option<Box<str>>,
-    /// Scheme version (e.g., "mip04-v1")
-    pub scheme_version: Option<Box<str>>,
     /// Original filename (e.g. "memories.zip"). Empty = fallback to {hash}.{ext}
     pub name: Box<str>,
 }
@@ -746,8 +742,6 @@ impl CompactAttachment {
             group_id: att.group_id.as_ref().map(|s| Box::new(hex_to_bytes_32(s))),
             original_hash: att.original_hash.as_ref().map(|s| Box::new(hex_to_bytes_32(s))),
             webxdc_topic: att.webxdc_topic.clone().map(|s| s.into_boxed_str()),
-            mls_filename: att.mls_filename.clone().map(|s| s.into_boxed_str()),
-            scheme_version: att.scheme_version.clone().map(|s| s.into_boxed_str()),
             name: att.name.clone().into_boxed_str(),
         }
     }
@@ -772,8 +766,6 @@ impl CompactAttachment {
             group_id: att.group_id.map(|s| Box::new(hex_to_bytes_32(&s))),
             original_hash: att.original_hash.map(|s| Box::new(hex_to_bytes_32(&s))),
             webxdc_topic: att.webxdc_topic.map(|s| s.into_boxed_str()),
-            mls_filename: att.mls_filename.map(|s| s.into_boxed_str()),
-            scheme_version: att.scheme_version.map(|s| s.into_boxed_str()),
             name: att.name.into_boxed_str(),
         }
     }
@@ -795,8 +787,6 @@ impl CompactAttachment {
             webxdc_topic: self.webxdc_topic.as_ref().map(|s| s.to_string()),
             group_id: self.group_id.as_ref().map(|b| bytes_to_hex_32(b)),
             original_hash: self.original_hash.as_ref().map(|b| bytes_to_hex_32(b)),
-            scheme_version: self.scheme_version.as_ref().map(|s| s.to_string()),
-            mls_filename: self.mls_filename.as_ref().map(|s| s.to_string()),
         }
     }
 }
@@ -3080,8 +3070,6 @@ mod tests {
                 webxdc_topic: None,
                 group_id: None,
                 original_hash: None,
-                scheme_version: None,
-                mls_filename: None,
             }],
             reactions: vec![Reaction {
                 id: "dddd000000000000000000000000000000000000000000000000000000000000".into(),
@@ -3382,8 +3370,6 @@ mod tests {
             webxdc_topic: None,
             group_id: None,
             original_hash: None,
-            scheme_version: None,
-            mls_filename: None,
         };
 
         let compact = CompactAttachment::from_attachment(&att);
@@ -3418,8 +3404,6 @@ mod tests {
             webxdc_topic: None,
             group_id: None,
             original_hash: None,
-            scheme_version: None,
-            mls_filename: None,
         };
         let att_clone = att.clone();
 
@@ -3501,16 +3485,12 @@ mod tests {
         assert!(compact.group_id.is_none());
         assert!(compact.original_hash.is_none());
         assert!(compact.webxdc_topic.is_none());
-        assert!(compact.mls_filename.is_none());
-        assert!(compact.scheme_version.is_none());
 
         let restored = compact.to_attachment();
         assert!(restored.img_meta.is_none());
         assert!(restored.group_id.is_none());
         assert!(restored.original_hash.is_none());
         assert!(restored.webxdc_topic.is_none());
-        assert!(restored.mls_filename.is_none());
-        assert!(restored.scheme_version.is_none());
     }
 
     #[test]
@@ -3534,8 +3514,6 @@ mod tests {
             webxdc_topic: Some("game-state".into()),
             group_id: Some("cccc000000000000000000000000000000000000000000000000000000000000".into()),
             original_hash: Some("dddd000000000000000000000000000000000000000000000000000000000000".into()),
-            scheme_version: Some("mip04-v1".into()),
-            mls_filename: Some("encrypted.bin".into()),
         };
 
         let compact = CompactAttachment::from_attachment(&att);
@@ -3544,8 +3522,6 @@ mod tests {
         assert!(compact.group_id.is_some());
         assert!(compact.original_hash.is_some());
         assert!(compact.webxdc_topic.is_some());
-        assert!(compact.mls_filename.is_some());
-        assert!(compact.scheme_version.is_some());
 
         let restored = compact.to_attachment();
         let meta = restored.img_meta.unwrap();
@@ -3555,8 +3531,6 @@ mod tests {
         assert_eq!(restored.webxdc_topic, Some("game-state".into()));
         assert_eq!(restored.group_id.unwrap(), att.group_id.unwrap());
         assert_eq!(restored.original_hash.unwrap(), att.original_hash.unwrap());
-        assert_eq!(restored.scheme_version, Some("mip04-v1".into()));
-        assert_eq!(restored.mls_filename, Some("encrypted.bin".into()));
     }
 
     // ========================================================================

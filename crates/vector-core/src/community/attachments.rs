@@ -153,8 +153,6 @@ pub fn attachment_from_imeta(tag: &Tag, download_dir: &Path) -> Option<Attachmen
         webxdc_topic,
         group_id: None, // Community attachments use explicit key/nonce (NIP-17 technique).
         original_hash,
-        scheme_version: None,
-        mls_filename: None,
     })
 }
 
@@ -221,8 +219,6 @@ mod tests {
             webxdc_topic: None,
             group_id: None,
             original_hash: Some("a".repeat(64)),
-            scheme_version: None,
-            mls_filename: None,
         }
     }
 
@@ -394,8 +390,6 @@ mod tests {
             webxdc_topic: None,
             group_id: None,
             original_hash: Some("c".repeat(64)),
-            scheme_version: None,
-            mls_filename: None,
         };
         let parsed = attachment_from_imeta(&attachment_to_imeta(&att), &dir).expect("parses");
         // The parsed key/nonce (straight off the imeta) must decrypt the ciphertext.

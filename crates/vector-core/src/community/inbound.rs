@@ -860,7 +860,6 @@ mod tests {
             extension: ext.into(), name: n.into(), url: format!("https://b/{n}"),
             path: String::new(), size: 9, img_meta: None, downloading: false, downloaded: false,
             webxdc_topic: None, group_id: None, original_hash: Some("a".repeat(64)),
-            scheme_version: None, mls_filename: None,
         };
         let imetas = vec![attachment_to_imeta(&mk("a.png", "png")), attachment_to_imeta(&mk("b.txt", "txt"))];
         let inner = build_inner_full(

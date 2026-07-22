@@ -156,8 +156,6 @@ impl DeepSize for Attachment {
             + self.webxdc_topic.as_ref().map(|s| s.capacity()).unwrap_or(0)
             + self.group_id.as_ref().map(|s| s.capacity()).unwrap_or(0)
             + self.original_hash.as_ref().map(|s| s.capacity()).unwrap_or(0)
-            + self.scheme_version.as_ref().map(|s| s.capacity()).unwrap_or(0)
-            + self.mls_filename.as_ref().map(|s| s.capacity()).unwrap_or(0)
     }
 }
 
@@ -245,8 +243,6 @@ impl DeepSize for CompactAttachment {
             + self.group_id.as_ref().map(|_| 32).unwrap_or(0)
             + self.original_hash.as_ref().map(|_| 32).unwrap_or(0)
             + self.webxdc_topic.as_ref().map(|s| s.len()).unwrap_or(0)
-            + self.mls_filename.as_ref().map(|s| s.len()).unwrap_or(0)
-            + self.scheme_version.as_ref().map(|s| s.len()).unwrap_or(0)
     }
 }
 

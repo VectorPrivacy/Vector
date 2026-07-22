@@ -7425,10 +7425,7 @@ function createFileBoxSpinner(target, opts = {}) {
 }
 
 function isSpoilerAttachment(attachment) {
-    // DMs carry the filename on `.name`; MLS group attachments carry it on
-    // `.mls_filename` (`.name` is empty for the MLS path). Without checking
-    // both, MLS spoilers render unspoilered.
-    const fileName = attachment.name || attachment.mls_filename || '';
+    const fileName = attachment.name || '';
     return fileName.toUpperCase().startsWith('SPOILER_');
 }
 

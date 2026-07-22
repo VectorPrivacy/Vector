@@ -846,8 +846,6 @@ mod tests {
             webxdc_topic: None,
             group_id: None,
             original_hash: Some("b".repeat(64)),
-            scheme_version: None,
-            mls_filename: None,
         };
         let imeta = crate::community::attachments::attachment_to_imeta(&attachment);
         let member = Keys::generate();

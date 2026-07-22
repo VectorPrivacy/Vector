@@ -506,8 +506,6 @@ fn process_file_attachment(
         webxdc_topic,
         group_id: None,       // Kind 15 attachments use explicit key/nonce
         original_hash: original_file_hash, // ox tag value (original file hash)
-        scheme_version: None, // Kind 15 uses explicit encryption, not MIP-04
-        mls_filename: None,   // Kind 15 uses explicit encryption, not MIP-04
     };
 
     let emoji_tags = crate::types::EmojiTag::extract_from_tags(rumor.tags.iter());

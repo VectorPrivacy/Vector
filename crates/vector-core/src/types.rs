@@ -302,10 +302,6 @@ pub struct Attachment {
     pub group_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub original_hash: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scheme_version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mls_filename: Option<String>,
 }
 
 impl Default for Attachment {
@@ -325,8 +321,6 @@ impl Default for Attachment {
             webxdc_topic: None,
             group_id: None,
             original_hash: None,
-            scheme_version: None,
-            mls_filename: None,
         }
     }
 }
@@ -723,8 +717,6 @@ mod tests {
         assert!(att.webxdc_topic.is_none(), "default webxdc_topic should be None");
         assert!(att.group_id.is_none(), "default group_id should be None");
         assert!(att.original_hash.is_none(), "default original_hash should be None");
-        assert!(att.scheme_version.is_none(), "default scheme_version should be None");
-        assert!(att.mls_filename.is_none(), "default mls_filename should be None");
     }
 
     #[test]
@@ -748,8 +740,6 @@ mod tests {
             webxdc_topic: Some("game".to_string()),
             group_id: Some("g1".to_string()),
             original_hash: Some("sha256hash".to_string()),
-            scheme_version: Some("v2".to_string()),
-            mls_filename: Some("encrypted.bin".to_string()),
         };
 
         let json = serde_json::to_string(&att).expect("serialize should succeed");
@@ -765,8 +755,6 @@ mod tests {
         assert!(att.webxdc_topic.is_none(), "webxdc_topic should be None when absent");
         assert!(att.group_id.is_none(), "group_id should be None when absent");
         assert!(att.original_hash.is_none(), "original_hash should be None when absent");
-        assert!(att.scheme_version.is_none(), "scheme_version should be None when absent");
-        assert!(att.mls_filename.is_none(), "mls_filename should be None when absent");
     }
 
     #[test]
@@ -776,8 +764,6 @@ mod tests {
         assert!(!json.contains("webxdc_topic"), "None webxdc_topic should be omitted");
         assert!(!json.contains("group_id"), "None group_id should be omitted");
         assert!(!json.contains("original_hash"), "None original_hash should be omitted");
-        assert!(!json.contains("scheme_version"), "None scheme_version should be omitted");
-        assert!(!json.contains("mls_filename"), "None mls_filename should be omitted");
     }
 
     // ========================================================================
