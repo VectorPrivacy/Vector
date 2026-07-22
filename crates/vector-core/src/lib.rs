@@ -740,9 +740,17 @@ impl VectorCore {
         if servers.is_empty() {
             return Err(VectorError::Other("No Blossom servers configured".into()));
         }
-        crate::blossom::upload_blob_with_failover(signer, servers, std::sync::Arc::new(bytes), Some(mime), None)
-            .await
-            .map_err(VectorError::Other)
+        // Avatars/banners run larger than emojis (up to ~1MB), so give a more generous
+        // 20s idle window before treating a silent server as dead and failing over.
+        crate::blossom::upload_blob_with_failover(
+            signer,
+            servers,
+            std::sync::Arc::new(bytes),
+            Some(mime),
+            Some(std::time::Duration::from_secs(20)),
+        )
+        .await
+        .map_err(VectorError::Other)
     }
 
     /// Block a user by npub.
