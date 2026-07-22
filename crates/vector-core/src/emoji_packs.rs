@@ -1943,7 +1943,10 @@ fn build_pack_event(pack: &EmojiPack) -> Result<EventBuilder, String> {
         return Err("pack identifier required".to_string());
     }
     let mut builder = EventBuilder::new(Kind::Custom(KIND_EMOJI_SET), "")
-        .tag(Tag::custom(TagKind::custom("d"), [pack.identifier.clone()]));
+        .tag(Tag::custom(TagKind::custom("d"), [pack.identifier.clone()]))
+        // Stamp Vector as the authoring client (same ["client","vector"] tag our kind-0
+        // profile publishes carry) so packs made or edited here are attributable.
+        .tag(Tag::custom(TagKind::custom("client"), ["vector"]));
 
     // Spec-compliant metadata (NIP-51).
     if !pack.title.is_empty() {
@@ -2450,6 +2453,21 @@ mod tests {
         assert_eq!(pack.description, "specd");
         assert_eq!(pack.emojis.len(), 2);
         assert_eq!(pack.addr(), format!("30030:{}:myPack", k.public_key().to_hex()));
+    }
+
+    #[test]
+    fn own_pack_event_carries_the_vector_client_tag() {
+        // Packs we publish/edit must be attributable to Vector, matching the
+        // ["client","vector"] tag our kind-0 profile publishes carry.
+        let k = keys();
+        let ev = build_pack_event(&k, "myPack", Some(("title", "Mine")), None, None, &[("smile", "https://e.x/s.png")]);
+        let pack = parse_pack_from_event(&ev, None).unwrap();
+        let built = super::build_pack_event(&pack).unwrap().sign_with_keys(&k).unwrap();
+        let has_client = built.tags.iter().any(|t| {
+            let s = t.as_slice();
+            s.first().map(String::as_str) == Some("client") && s.get(1).map(String::as_str) == Some("vector")
+        });
+        assert!(has_client, "own pack event must carry the [\"client\",\"vector\"] tag");
     }
 
     #[test]
