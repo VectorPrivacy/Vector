@@ -237,7 +237,7 @@ impl DeepSize for CompactAttachment {
     fn deep_size(&self) -> usize {
         std::mem::size_of::<CompactAttachment>()
             + self.extension.len() + self.url.len() + self.path.len()
-            + self.name.capacity()
+            + self.name.len()
             + self.img_meta.as_ref().map(|m| m.deep_size()).unwrap_or(0)
             + self.group_id.as_ref().map(|_| 32).unwrap_or(0)
             + self.original_hash.as_ref().map(|_| 32).unwrap_or(0)

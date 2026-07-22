@@ -678,7 +678,7 @@ pub struct CompactAttachment {
     /// Scheme version (e.g., "mip04-v1")
     pub scheme_version: Option<Box<str>>,
     /// Original filename (e.g. "memories.zip"). Empty = fallback to {hash}.{ext}
-    pub name: String,
+    pub name: Box<str>,
 }
 
 impl CompactAttachment {
@@ -748,7 +748,7 @@ impl CompactAttachment {
             webxdc_topic: att.webxdc_topic.clone().map(|s| s.into_boxed_str()),
             mls_filename: att.mls_filename.clone().map(|s| s.into_boxed_str()),
             scheme_version: att.scheme_version.clone().map(|s| s.into_boxed_str()),
-            name: att.name.clone(),
+            name: att.name.clone().into_boxed_str(),
         }
     }
 
@@ -774,7 +774,7 @@ impl CompactAttachment {
             webxdc_topic: att.webxdc_topic.map(|s| s.into_boxed_str()),
             mls_filename: att.mls_filename.map(|s| s.into_boxed_str()),
             scheme_version: att.scheme_version.map(|s| s.into_boxed_str()),
-            name: att.name,
+            name: att.name.into_boxed_str(),
         }
     }
 
@@ -785,7 +785,7 @@ impl CompactAttachment {
             key: self.key_hex(),
             nonce: self.nonce_hex(),
             extension: self.extension.to_string(),
-            name: self.name.clone(),
+            name: self.name.to_string(),
             url: self.url.to_string(),
             path: self.path.to_string(),
             size: self.size,
