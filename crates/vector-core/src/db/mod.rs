@@ -11,7 +11,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, LazyLock, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::ops::{Deref, DerefMut};
-use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -903,84 +902,12 @@ pub fn get_database_path(npub: &str) -> Result<PathBuf, String> {
 // ID Caches
 // ============================================================================
 
-static CHAT_ID_CACHE: LazyLock<Arc<RwLock<HashMap<String, i64>>>> =
-    LazyLock::new(|| Arc::new(RwLock::new(HashMap::new())));
-
-static USER_ID_CACHE: LazyLock<Arc<RwLock<HashMap<String, i64>>>> =
-    LazyLock::new(|| Arc::new(RwLock::new(HashMap::new())));
-
+/// Clear every id cache on account switch. Row ids are PER-ACCOUNT (each account
+/// has its own DB + id sequence), so a stale entry after a swap points into the
+/// wrong DB: writes FK-fail silently and reads hit the wrong row. The caches live
+/// in `id_cache`; this is the public entry the swap path + callers already use.
 pub fn clear_id_caches() {
-    CHAT_ID_CACHE.write().unwrap().clear();
-    USER_ID_CACHE.write().unwrap().clear();
-    // ALSO clear the parallel caches in `id_cache` — that's the pair `db::events::save_message` and the
-    // community member-activity read actually use. Chat/user row ids are PER-ACCOUNT (each account has its
-    // own DB + id sequence), so a stale entry after an account swap points into the wrong DB → writes
-    // FK-fail (silently) and reads hit the wrong/empty row. One public clear must wipe every id cache.
     id_cache::clear_id_caches();
-}
-
-/// Get or create a chat_id integer for a chat identifier string.
-pub fn get_or_create_chat_id(conn: &rusqlite::Connection, identifier: &str, chat_type: i32) -> Result<i64, String> {
-    // Check cache first
-    if let Some(&id) = CHAT_ID_CACHE.read().unwrap().get(identifier) {
-        return Ok(id);
-    }
-
-    // Try to find existing
-    let result: Option<i64> = conn.query_row(
-        "SELECT id FROM chats WHERE chat_identifier = ?1",
-        rusqlite::params![identifier],
-        |row| row.get(0),
-    ).ok();
-
-    if let Some(id) = result {
-        CHAT_ID_CACHE.write().unwrap().insert(identifier.to_string(), id);
-        return Ok(id);
-    }
-
-    // Create new
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-    conn.execute(
-        "INSERT INTO chats (chat_identifier, chat_type, participants, created_at) VALUES (?1, ?2, '', ?3)",
-        rusqlite::params![identifier, chat_type, now],
-    ).map_err(|e| format!("Failed to create chat: {}", e))?;
-
-    let id = conn.last_insert_rowid();
-    CHAT_ID_CACHE.write().unwrap().insert(identifier.to_string(), id);
-    Ok(id)
-}
-
-/// Get or create a user_id integer for an npub.
-pub fn get_or_create_user_id(conn: &rusqlite::Connection, npub: &str) -> Result<i64, String> {
-    if let Some(&id) = USER_ID_CACHE.read().unwrap().get(npub) {
-        return Ok(id);
-    }
-
-    let result: Option<i64> = conn.query_row(
-        "SELECT id FROM profiles WHERE npub = ?1",
-        rusqlite::params![npub],
-        |row| row.get(0),
-    ).ok();
-
-    if let Some(id) = result {
-        USER_ID_CACHE.write().unwrap().insert(npub.to_string(), id);
-        return Ok(id);
-    }
-
-    conn.execute(
-        "INSERT OR IGNORE INTO profiles (npub) VALUES (?1)",
-        rusqlite::params![npub],
-    ).map_err(|e| format!("Failed to create user: {}", e))?;
-
-    let id = conn.query_row(
-        "SELECT id FROM profiles WHERE npub = ?1",
-        rusqlite::params![npub],
-        |row| row.get(0),
-    ).map_err(|e| format!("Failed to get user id: {}", e))?;
-
-    USER_ID_CACHE.write().unwrap().insert(npub.to_string(), id);
-    Ok(id)
 }
 
 // ============================================================================
