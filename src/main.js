@@ -9079,9 +9079,13 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
             let shown = 0;
             // Hoist tiers: owner → admins → members. Within a tier, sort alphabetically by display
             // (nickname → name → npub), so rows read A→Z inside each tier.
-            const tierOf = (npub) => npub === ownerNpub ? 0 : (adminNpubs.includes(npub) ? 1 : 2);
+            // Index profiles + admins once so the sort comparator and render loop are O(1) lookups
+            // (arrProfiles.find / adminNpubs.includes per call made this O(members * profiles * log)).
+            const profileById = new Map(arrProfiles.map(p => [p.id, p]));
+            const adminSet = new Set(adminNpubs);
+            const tierOf = (npub) => npub === ownerNpub ? 0 : (adminSet.has(npub) ? 1 : 2);
             const displayOf = (m) => {
-                const profile = arrProfiles.find(p => p.id === m.npub) || null;
+                const profile = profileById.get(m.npub) || null;
                 const name = profile ? (profile.nickname || profile.name || profile.display_name || '') : '';
                 return name || (m.npub.substring(0, 10) + '...' + m.npub.substring(m.npub.length - 6));
             };
@@ -9090,7 +9094,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                 displayOf(a).toLowerCase().localeCompare(displayOf(b).toLowerCase()));
             for (const m of ordered) {
                 const isCommunityOwner = m.npub === ownerNpub;
-                const profile = arrProfiles.find(p => p.id === m.npub) || null;
+                const profile = profileById.get(m.npub) || null;
                 const name = profile ? (profile.nickname || profile.name || profile.display_name || '') : '';
                 const display = name || (m.npub.substring(0, 10) + '...' + m.npub.substring(m.npub.length - 6));
                 if (f && !(display + ' ' + m.npub).toLowerCase().includes(f)) continue;
