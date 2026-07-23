@@ -8371,8 +8371,12 @@ async function openChat(contact) {
     // messages into view (same on-demand windowing as messages).
     try {
         const systemEvents = await invoke('get_system_events', { conversationId: contact });
+        // Index once: dedup-vs-loaded-messages and the known-profile check were each O(n) per
+        // system event (O(systemEvents * messages) + O(systemEvents * profiles)) on chat open.
+        const initialMsgIds = new Set(initialMessages.map(m => m.id));
+        const knownProfileIds = new Set(arrProfiles.map(p => p.id));
         const buffer = (systemEvents || [])
-            .filter(event => !initialMessages.find(m => m.id === event.id))
+            .filter(event => !initialMsgIds.has(event.id))
             .map(event => ({
                 id: event.id,
                 at: event.at,
@@ -8380,7 +8384,7 @@ async function openChat(contact) {
                 // stored content. Fetch unknown profiles so the next open resolves them.
                 content: (() => {
                     const np = event.member_npub;
-                    if (np && !arrProfiles.some(p => p.id === np) && !strangerProfileRequested.has(np)) {
+                    if (np && !knownProfileIds.has(np) && !strangerProfileRequested.has(np)) {
                         strangerProfileRequested.add(np);
                         invoke('load_profile', { npub: np }).catch(() => {});
                     }
@@ -12892,9 +12896,13 @@ function renderCreateGroupList(filterText = '') {
     }
 
     // Sort profiles: selected members first (by selection order), then unselected by last message time
+    // Pre-index selection order + chat timestamps so the comparator is O(1) per lookup — `indexOf`
+    // + `arrChats.find` per comparison made this O(profiles * (members + chats) * log).
+    const selIndexById = new Map(arrSelectedGroupMembers.map((id, i) => [id, i]));
+    const chatTsById = new Map(arrChats.map(c => [c.id, getChatSortTimestamp(c)]));
     const sortedProfiles = [...arrProfiles].sort((a, b) => {
-        const aSelectedIndex = arrSelectedGroupMembers.indexOf(a?.id);
-        const bSelectedIndex = arrSelectedGroupMembers.indexOf(b?.id);
+        const aSelectedIndex = selIndexById.get(a?.id) ?? -1;
+        const bSelectedIndex = selIndexById.get(b?.id) ?? -1;
         const aSelected = aSelectedIndex !== -1;
         const bSelected = bSelectedIndex !== -1;
 
@@ -12908,8 +12916,8 @@ function renderCreateGroupList(filterText = '') {
         }
 
         // For unselected members: sort by last message time (most recent first)
-        const aChatTimestamp = getChatSortTimestamp(arrChats.find(c => c.id === a?.id) || {});
-        const bChatTimestamp = getChatSortTimestamp(arrChats.find(c => c.id === b?.id) || {});
+        const aChatTimestamp = chatTsById.get(a?.id) || 0;
+        const bChatTimestamp = chatTsById.get(b?.id) || 0;
 
         // If both have timestamps, sort by most recent
         if (aChatTimestamp && bChatTimestamp) {
