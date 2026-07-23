@@ -17693,9 +17693,19 @@ body.profile-switcher-editing .profile-switcher-add {
 .cmt-direct-row { display: flex; gap: 8px; align-items: stretch; }
 .cmt-direct-row input { flex: 1; margin-bottom: 0 !important; }
 
-.cmt-status { font-size: 13px; min-height: 17px; margin: 4px 2px 12px; opacity: 0.85; }
-.cmt-status.cmt-ok { color: var(--accent-color, #59fcb3); opacity: 1; }
-.cmt-status.cmt-err { color: var(--danger-color); opacity: 1; }
+/* Collapses to nothing when idle (no reserved gap above the CTA); expands with a transition when
+   setStatus writes a message. Driven purely by :empty, so no JS toggling is needed. */
+.cmt-status {
+  font-size: 13px;
+  opacity: 0;
+  max-height: 0;
+  margin: 0 2px;
+  overflow: hidden;
+  transition: max-height 0.25s ease, opacity 0.2s ease, margin 0.25s ease;
+}
+.cmt-status:not(:empty) { opacity: 0.85; max-height: 60px; margin: 4px 2px 10px; }
+.cmt-status.cmt-ok:not(:empty) { color: var(--accent-color, #59fcb3); opacity: 1; }
+.cmt-status.cmt-err:not(:empty) { color: var(--danger-color); opacity: 1; }
 .cmt-close { width: 100%; }
 /* Top-right X (shares the relay dialog's button styling) — pushed to the header's far edge. */
 .cmt-close-x { margin-left: auto; align-self: flex-start; }
@@ -17747,14 +17757,63 @@ body.profile-switcher-editing .profile-switcher-add {
 }
 
 /* Direct Invites contact picker */
-.cmt-contacts {
-  max-height: 240px;
+/* Single-scroll modal. A scrolling .cmt-modal wrapping a scrolling contact list nests two scroll
+   containers, and WKWebView re-composited the inner list as the row-hover overlay animated,
+   dipping avatar opacity (a flicker). So the modal never scrolls: a fixed header sits above ONE
+   scroll region (.cmt-body) that holds everything, with the list flowing inline (no scroll of its
+   own) and the action button as a sticky footer inside the scroll. */
+.cmt-modal {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.cmt-header { flex-shrink: 0; }
+.cmt-body {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
+}
+.cmt-contacts {
   margin: 6px 0 12px;
   padding-right: 2px;
 }
-.cmt-invite-btn { width: 100%; }
-.cmt-invite-btn:disabled { opacity: 0.45; }
+/* Sticky action bar: rides inside the scroll so it shares the cards' width (same scrollbar inset)
+   and stays pinned to the bottom of the viewport. Solid bg hides rows scrolling underneath. */
+.cmt-footer {
+  position: sticky;
+  bottom: 0;
+  background: #0a0a0a;
+  padding-top: 10px;
+  margin-top: 2px;
+}
+/* Morphing CTA: gray "Done" (no selection) cross-fades to accent "Invite N" (selection > 0). The
+   two faces are stacked; one slides+fades out while the other slides+fades in, background gray->accent. */
+.cmt-cta {
+  position: relative;
+  overflow: hidden;
+  width: 100%;
+  transition: background 0.25s ease, color 0.25s ease, filter 0.15s ease;
+}
+.cmt-cta .cmt-cta-face {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  transition: opacity 0.2s ease, transform 0.22s ease;
+}
+.cmt-cta .cmt-cta-face-invite {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transform: translateY(65%);
+}
+.cmt-cta .cmt-cta-face-invite .icon { background-color: #000; }
+.cmt-cta.has-selection { background: var(--accent-color, #59fcb3); color: #000; }
+.cmt-cta.has-selection .cmt-cta-face-done { opacity: 0; transform: translateY(-65%); }
+.cmt-cta.has-selection .cmt-cta-face-invite { opacity: 1; transform: translateY(0); }
+/* Hover: dim, never the ghost-gray fill (which would beat the accent on specificity). */
+.cmt-cta:not(.has-selection):hover:not(:disabled) { filter: brightness(1.25); }
+.cmt-cta.has-selection:hover:not(:disabled) { background: var(--accent-color, #59fcb3); filter: brightness(0.9); }
 .group-placeholder { opacity: 0.5; font-style: italic; }
 
 /* Processing overlay: dimmed + blurred backdrop that blocks input while a short

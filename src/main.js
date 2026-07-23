@@ -9495,33 +9495,43 @@ async function openCommunityInvitePanel(chat) {
             <button id="cmt-close-x" class="relay-dialog-close cmt-close-x">&times;</button>
         </div>
 
-        <section class="cmt-section">
-            <div class="cmt-section-head">
-                <span class="icon icon-share"></span>
-                <div>
-                    <p class="cmt-section-title">Invite Links <span id="cmt-mode" class="cmt-mode-pill"></span></p>
-                    <p class="cmt-section-desc">Anyone with a link can join. Revoke every link to go private again.</p>
+        <div class="cmt-body">
+            <section class="cmt-section">
+                <div class="cmt-section-head">
+                    <span class="icon icon-share"></span>
+                    <div>
+                        <p class="cmt-section-title">Invite Links <span id="cmt-mode" class="cmt-mode-pill"></span></p>
+                        <p class="cmt-section-desc">Anyone with a link can join. Revoke every link to go private again.</p>
+                    </div>
                 </div>
-            </div>
-            <div id="cmt-links"></div>
-            <button id="cmt-new-link" class="cmt-btn cmt-btn-secondary"><span class="icon icon-plus"></span>Create invite link</button>
-        </section>
+                <div id="cmt-links"></div>
+                <button id="cmt-new-link" class="cmt-btn cmt-btn-secondary"><span class="icon icon-plus"></span>Create invite link</button>
+            </section>
 
-        <section class="cmt-section">
-            <div class="cmt-section-head">
-                <span class="icon icon-add-user"></span>
-                <div>
-                    <p class="cmt-section-title">Direct Invites</p>
-                    <p class="cmt-section-desc">Pick contacts to invite, or paste an npub to add someone new.</p>
+            <section class="cmt-section">
+                <div class="cmt-section-head">
+                    <span class="icon icon-add-user"></span>
+                    <div>
+                        <p class="cmt-section-title">Direct Invites</p>
+                        <p class="cmt-section-desc">Pick contacts to invite, or paste an npub to add someone new.</p>
+                    </div>
                 </div>
-            </div>
-            <input id="cmt-npub" type="text" placeholder="Search contacts or paste an npub..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
-            <div id="cmt-contacts" class="cmt-contacts"></div>
-            <button id="cmt-send-npub" class="cmt-btn cmt-btn-primary cmt-invite-btn" disabled><span class="icon icon-send"></span><span id="cmt-invite-label">Invite</span></button>
-        </section>
+                <input id="cmt-npub" type="text" placeholder="Search contacts or paste an npub..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+                <div id="cmt-contacts" class="cmt-contacts"></div>
+            </section>
 
-        <div id="cmt-status" class="cmt-status"></div>
-        <button id="cmt-close" class="cmt-btn cmt-btn-ghost cmt-close">Done</button>
+            <!-- Sticky action bar inside the single scroll region: gray "Done" morphs to accent
+                 "Invite N" as contacts are picked, so the primary action is always reachable
+                 without scrolling to the bottom. Riding inside the scroll keeps it aligned with
+                 the cards (same scrollbar inset). -->
+            <div class="cmt-footer">
+                <div id="cmt-status" class="cmt-status"></div>
+                <button id="cmt-close" class="cmt-btn cmt-btn-ghost cmt-cta cmt-close">
+                    <span class="cmt-cta-face cmt-cta-face-done">Done</span>
+                    <span class="cmt-cta-face cmt-cta-face-invite"><span class="icon icon-send"></span>Invite <span id="cmt-cta-count"></span></span>
+                </button>
+            </div>
+        </div>
     `;
     overlay.appendChild(box);
     document.body.appendChild(overlay);
@@ -9529,13 +9539,16 @@ async function openCommunityInvitePanel(chat) {
 
     const status = box.querySelector('#cmt-status');
     const linksDiv = box.querySelector('#cmt-links');
+    let statusTimer = null;
     const setStatus = (msg, isError) => {
+        clearTimeout(statusTimer);   // a new message cancels any pending auto-dismiss
         status.textContent = msg || '';
         status.classList.toggle('cmt-err', !!isError);
         status.classList.toggle('cmt-ok', !!msg && !isError);
     };
-    box.querySelector('#cmt-close').onclick = () => { if (busy) return; popBack('community-invite'); dismiss(); };
-    box.querySelector('#cmt-close-x').onclick = () => { if (busy) return; popBack('community-invite'); dismiss(); };
+    // The footer CTA (#cmt-close) is wired below, after the contact picker mounts — its action
+    // depends on whether anything is selected (Done = dismiss, Invite N = send).
+    box.querySelector('#cmt-close-x').onclick = () => { if (busy) return; VectorSvelte.unmountComponent(cl.instance); popBack('community-invite'); dismiss(); };
     // Lock the ENTIRE panel during a critical op: disable every control + block close/backdrop-dismiss, so a
     // link create / revoke (which re-keys) / direct invite can't be raced or interrupted half-applied. Restores
     // each control's prior disabled state on release (e.g. the Invite button stays disabled if nothing's picked).
@@ -9702,11 +9715,7 @@ async function openCommunityInvitePanel(chat) {
     // ── Direct Invites: a multi-select contact list (DM contacts) with paste-to-add ──
     const npubInput = box.querySelector('#cmt-npub');
     const contactsDiv = box.querySelector('#cmt-contacts');
-    const inviteBtn = box.querySelector('#cmt-send-npub');
-    const inviteLabel = box.querySelector('#cmt-invite-label');
     const myNpub = arrProfiles.find(p => p.mine)?.id;
-    const selectedInvitees = new Set();   // npubs chosen to invite
-    const strangerInvitees = new Set();   // pasted npubs not in our contacts
     // Banned npubs can't be invited (§7) — hide them from the picker (the backend also refuses). Empty if
     // we lack the ban permission to read the list (then the backend refusal is the only guard).
     let bannedSet = new Set();
@@ -9721,85 +9730,37 @@ async function openCommunityInvitePanel(chat) {
     if (ownerNpub) memberSet.add(ownerNpub);
     for (const a of (chat.metadata?.admins || [])) memberSet.add(a);
 
-    const buildContactRow = (npub, profile) => {
-        const isSel = selectedInvitees.has(npub);
-        const row = document.createElement('div');
-        row.className = 'member-pick-row';
-        const bg = document.createElement('div');
-        bg.className = 'member-pick-hover';
-        row.appendChild(bg);
-        row.addEventListener('mouseenter', () => {
-            const c = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
-            bg.style.background = `linear-gradient(to right, ${c}40, transparent)`;
-        });
-        const avatar = createAvatarImg(profile ? getProfileAvatarSrc(profile) : null, 25, false);
-        avatar.className = 'member-pick-avatar';
-        row.appendChild(avatar);
-        const nameSpan = document.createElement('div');
-        nameSpan.className = 'compact-member-name';
-        const nm = profile ? (profile.nickname || profile.name || profile.display_name || '') : '';
-        nameSpan.textContent = nm || (npub.substring(0, 10) + '...' + npub.substring(npub.length - 6));
-        if (nm) twemojify(nameSpan);
-        row.appendChild(nameSpan);
-        const indicator = document.createElement('div');
-        indicator.className = 'member-pick-indicator' + (isSel ? ' selected' : '');
-        row.appendChild(indicator);
-        row.addEventListener('click', (e) => {
-            e.preventDefault(); e.stopPropagation();
-            if (selectedInvitees.has(npub)) selectedInvitees.delete(npub);
-            else selectedInvitees.add(npub);
-            renderContacts(npubInput.value || '');
-        });
-        return row;
-    };
-
-    const renderContacts = (filterText = '') => {
-        contactsDiv.innerHTML = '';
-        const f = (filterText || '').trim().toLowerCase();
-        const filterNpub = extractNpub(filterText);
-        const dmIds = new Set(arrChats.filter(c => c.chat_type === 'DirectMessage').map(c => c.id));
-        const frag = document.createDocumentFragment();
-
-        // Pasted strangers (show if selected, or matching the current filter npub) — never a banned npub
-        // or an existing member.
-        for (const npub of strangerInvitees) {
-            if (bannedSet.has(npub) || memberSet.has(npub)) continue;
-            if (!selectedInvitees.has(npub) && filterNpub !== npub) continue;
-            frag.appendChild(buildContactRow(npub, arrProfiles.find(p => p.id === npub) || null));
-        }
-
-        // DM contacts: selected first, then most-recent conversation. Banned npubs + existing members excluded.
-        // Pre-index chat sort timestamps so the comparator is an O(1) Map lookup — a `arrChats.find`
-        // per comparison made this O(n^2 log n), re-run on every filter keystroke.
-        const chatTsById = new Map(arrChats.map(c => [c.id, getChatSortTimestamp(c)]));
-        const contacts = arrProfiles
-            .filter(p => p && p.id && p.id !== myNpub && !p.is_blocked && !bannedSet.has(p.id) && !memberSet.has(p.id) && dmIds.has(p.id))
-            .sort((a, b) => {
-                const aSel = selectedInvitees.has(a.id), bSel = selectedInvitees.has(b.id);
-                if (aSel !== bSel) return aSel ? -1 : 1;
-                return (chatTsById.get(b.id) || 0) - (chatTsById.get(a.id) || 0);
-            });
-        for (const p of contacts) {
-            const name = p.nickname || p.name || p.display_name || '';
-            if (f && !(name + ' ' + p.id).toLowerCase().includes(filterNpub || f)) continue;
-            frag.appendChild(buildContactRow(p.id, p));
-        }
-
-        if (!frag.childElementCount) {
-            contactsDiv.innerHTML = `<p class="cmt-empty" style="text-align:center;">${f ? 'No matches.' : 'No contacts yet. Paste an npub to invite someone.'}</p>`;
-        } else {
-            contactsDiv.appendChild(frag);
-        }
-
-        const n = selectedInvitees.size;
-        inviteBtn.disabled = n === 0;
-        inviteLabel.textContent = n === 0 ? 'Invite' : `Invite ${n}`;
-    };
-    renderContacts();
+    // Reactive contact picker (Svelte island — src/components/ContactList.svelte). The
+    // filter / strangers / selection / profiles stores are the vanilla<->component bridge;
+    // the paste handler + footer CTA below drive them, the component reactively renders.
+    const cl = VectorSvelte.mountContactList(contactsDiv, {
+        profiles: arrProfiles,
+        myNpub,
+        banned: [...bannedSet],
+        members: [...memberSet],
+        dmNpubs: arrChats.filter(c => c.chat_type === 'DirectMessage').map(c => c.id),
+        chatTsById: new Map(arrChats.map(c => [c.id, getChatSortTimestamp(c)])),
+        avatarSrc: (p) => (p ? getProfileAvatarSrc(p) : null) || null,
+        makePlaceholder: () => createPlaceholderAvatar(false, 25),
+        twemojify: (el) => twemojify(el),
+        // Plain hex+alpha gradient (like Create Group's mouseenter handler) — a cheap cached
+        // layer. color-mix() here re-rasterized every frame under the opacity fade -> avatar flicker.
+        hoverBg: `linear-gradient(to right, ${getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim()}40, transparent)`,
+    });
+    // The footer CTA morphs with the selection: gray "Done" (dismiss) when nothing's picked,
+    // accent "Invite N" (send) once contacts are selected. The store drives its class + count.
+    const cta = box.querySelector('#cmt-close');
+    const ctaCount = box.querySelector('#cmt-cta-count');
+    cl.selection.subscribe((sel) => {
+        const n = sel.size;
+        cta.classList.toggle('has-selection', n > 0);
+        if (n > 0) ctaCount.textContent = n;
+    });
 
     // Typing filters; a pasted/typed valid npub gets added to the list and auto-selected — unless it's
     // me, a banned npub, or someone already in the community (can't invite any of them).
     npubInput.oninput = () => {
+        cl.filter.set(npubInput.value || '');
         const np = extractNpub(npubInput.value || '');
         if (np && np !== myNpub && !bannedSet.has(np) && !memberSet.has(np)) {
             // Strangers = anyone who isn't an existing DM contact; the contacts loop only
@@ -9807,34 +9768,39 @@ async function openCommunityInvitePanel(chat) {
             // path or it shows nowhere. Fetch the profile only when we don't already have it.
             const isDmContact = arrChats.some(c => c.chat_type === 'DirectMessage' && c.id === np);
             if (!isDmContact) {
-                strangerInvitees.add(np);
+                cl.strangers.update(s => s.includes(np) ? s : [...s, np]);
                 if (!arrProfiles.some(p => p.id === np) && !strangerProfileRequested.has(np)) {
                     strangerProfileRequested.add(np);
-                    invoke('load_profile', { npub: np }).then(() => renderContacts(npubInput.value || '')).catch(() => {});
+                    invoke('load_profile', { npub: np }).then(() => cl.profiles.set([...arrProfiles])).catch(() => {});
                 }
             }
-            selectedInvitees.add(np);
+            cl.selection.update(s => (s.add(np), s));
         }
-        renderContacts(npubInput.value || '');
     };
 
-    inviteBtn.onclick = async (e) => {
-        const targets = [...selectedInvitees];
-        if (!targets.length) return;
-        e.currentTarget.disabled = true;
-        setStatus(`Inviting ${targets.length}...`);
+    cta.onclick = async () => {
+        if (busy) return;
+        const targets = [...VectorSvelte.get(cl.selection)];
+        if (!targets.length) {   // "Done" — nothing selected, just close the panel
+            VectorSvelte.unmountComponent(cl.instance); popBack('community-invite'); dismiss();
+            return;
+        }
+        // "Invite N" — send; the cleared selection then morphs the button back to "Done".
+        cta.disabled = true;
+        setStatus(`Inviting ${targets.length} ${targets.length === 1 ? 'person' : 'people'}…`);
         let ok = 0, fail = 0;
         for (const np of targets) {
             try { await invoke('invite_to_community', { communityId, inviteeNpub: np }); ok++; }
             catch (_) { fail++; }
         }
+        cta.disabled = false;
         if (fail === 0) {
             setStatus(`Invited ${ok} ${ok === 1 ? 'person' : 'people'}!`);
-            selectedInvitees.clear(); strangerInvitees.clear(); npubInput.value = '';
+            cl.selection.set(new Set()); cl.strangers.set([]); npubInput.value = ''; cl.filter.set('');
+            statusTimer = setTimeout(() => setStatus(''), 3000);   // success toast collapses itself after 3s
         } else {
             setStatus(`Invited ${ok}, ${fail} failed.`, ok === 0);
         }
-        renderContacts('');
     };
 }
 

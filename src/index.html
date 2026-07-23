@@ -13,6 +13,8 @@
          global `qrcode(typeNumber, errorCorrectionLevel)` factory used by
          the bunker-connect screen + future Profile QR / contact-share UI. -->
     <script src="/js/qrcode-generator.js" defer></script>
+    <!-- Svelte islands: IIFE exposing the VectorSvelte global (compiled from src/components/*.svelte). -->
+    <script src="/components.bundle.js" defer></script>
     <script src="/main.js" defer></script>
     <script src="/js/event-cache.js" defer></script>
     <script src="/js/back-stack.js" defer></script>

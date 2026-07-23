@@ -41,3 +41,6 @@ dist-android/
 # Local-only design/planning docs (never publish)
 CONCORD_V2_IMPL_PLAN.md
 TODO-v0.4.0.md
+
+# Svelte island bundle (generated from src/components/*.svelte by build-svelte.mjs)
+src/components.bundle.js

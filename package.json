@@ -15,12 +15,17 @@
     "build:bare": "npm run tauri:build:bare",
     "android:dev": "./scripts/android-dev.sh",
     "android:build": "tauri android build",
+    "svelte:build": "node scripts/build-svelte.mjs",
+    "svelte:watch": "node scripts/build-svelte.mjs --watch",
     "test:cache": "node --test \"tests/event-cache/*.test.mjs\""
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.9.6",
     "emojibase-data": "^17.0.0",
+    "esbuild": "^0.28.1",
+    "esbuild-svelte": "^0.9.5",
     "lightningcss": "^1.31.1",
+    "svelte": "^5.56.7",
     "terser": "^5.46.0"
   },
   "dependencies": {

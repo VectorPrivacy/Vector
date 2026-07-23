@@ -14,6 +14,7 @@
 import { cpSync, rmSync, readdirSync, readFileSync, writeFileSync, statSync, symlinkSync, lstatSync, unlinkSync } from 'fs';
 import { join, dirname, extname, basename } from 'path';
 import { fileURLToPath } from 'url';
+import { buildSvelte } from './build-svelte.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -24,6 +25,13 @@ const isDev = process.argv.includes('--dev');
 const isCopy = process.argv.includes('--copy');
 
 console.log(`[build-frontend] ${isDev ? 'DEV' : isCopy ? 'COPY' : 'RELEASE'} build`);
+
+// ── Step 0: compile Svelte islands → src/components.bundle.js ─────────────
+// Runs first in every mode so the bundle exists in src/ before the symlink/copy.
+// Release compiles Svelte in production mode (strips dev validation / a11y warnings / HMR +
+// FILENAME machinery); desktop-dev + android-dev keep the dev bundle. (Active .svelte dev uses
+// `npm run svelte:watch` for incremental rebuilds.)
+await buildSvelte({ dev: isDev || isCopy });
 
 // Remove dist safely — if it's a symlink, just unlink it (never follow into src/)
 function cleanDist() {
