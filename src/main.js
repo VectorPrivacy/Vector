@@ -3553,37 +3553,43 @@ async function setupRustListeners() {
         {
             const id = evt.payload.id;
             const newName = evt.payload.nickname || evt.payload.name || evt.payload.display_name || (id.substring(0, 12) + '…');
-            document.querySelectorAll(`.dmsg-author[data-npub="${id}"]`).forEach(a => {
-                // .dmsg-author holds ONLY the name — bot/admin/owner badges are siblings in the parent
-                // .dmsg-header — so reset + re-twemojify the whole element. (Patching the first text node
-                // left the original twemoji <img>s behind, duplicating emoji as raw text + image.)
-                a.textContent = newName;
-                twemojify(a);
-            });
             const newAvatarSrc = getProfileAvatarSrc(evt.payload);
-            document.querySelectorAll(`.dmsg-avatar[data-npub="${id}"]`).forEach(av => {
-                const fresh = createAvatarImg(newAvatarSrc, 40, false);
-                fresh.classList.add('dmsg-avatar', 'btn');
-                fresh.dataset.npub = id;
-                fresh.style.margin = '0';
-                av.replaceWith(fresh);
-            });
-            // Reply-quote name + small avatar for this author resolve the same way.
-            document.querySelectorAll(`.dmsg-reply-name[data-npub="${id}"]`).forEach(n => {
-                n.textContent = newName;
-                twemojify(n);
-            });
-            document.querySelectorAll(`.dmsg-reply-avatar[data-npub="${id}"]`).forEach(av => {
-                const fresh = createAvatarImg(newAvatarSrc, 16);
-                fresh.classList.add('dmsg-reply-avatar');
-                fresh.dataset.npub = id;
-                // Re-wire the mini-profile opener the original render attached (replaceWith drops it).
-                fresh.addEventListener('click', (e) => { e.stopPropagation(); showMiniProfile(id, e.currentTarget); });
-                av.replaceWith(fresh);
-            });
-            // Mention chips (@tags in chat + npub tags in profile bios) resolve their display name here too.
-            document.querySelectorAll(`.mention[data-npub="${id}"]`).forEach(span => {
-                span.textContent = '@' + newName;
+            // One DOM traversal for every element type keyed on this npub (was 5 separate
+            // querySelectorAll scans). The grouped selector matches all five in a single pass;
+            // classes are mutually exclusive so each node is handled exactly once, and the static
+            // NodeList keeps the replaceWith calls safe mid-iteration.
+            document.querySelectorAll(
+                `.dmsg-author[data-npub="${id}"], .dmsg-avatar[data-npub="${id}"], ` +
+                `.dmsg-reply-name[data-npub="${id}"], .dmsg-reply-avatar[data-npub="${id}"], ` +
+                `.mention[data-npub="${id}"]`
+            ).forEach(el => {
+                if (el.classList.contains('dmsg-author')) {
+                    // .dmsg-author holds ONLY the name — bot/admin/owner badges are siblings in the parent
+                    // .dmsg-header — so reset + re-twemojify the whole element. (Patching the first text node
+                    // left the original twemoji <img>s behind, duplicating emoji as raw text + image.)
+                    el.textContent = newName;
+                    twemojify(el);
+                } else if (el.classList.contains('dmsg-avatar')) {
+                    const fresh = createAvatarImg(newAvatarSrc, 40, false);
+                    fresh.classList.add('dmsg-avatar', 'btn');
+                    fresh.dataset.npub = id;
+                    fresh.style.margin = '0';
+                    el.replaceWith(fresh);
+                } else if (el.classList.contains('dmsg-reply-name')) {
+                    // Reply-quote name resolves the same as the author name.
+                    el.textContent = newName;
+                    twemojify(el);
+                } else if (el.classList.contains('dmsg-reply-avatar')) {
+                    const fresh = createAvatarImg(newAvatarSrc, 16);
+                    fresh.classList.add('dmsg-reply-avatar');
+                    fresh.dataset.npub = id;
+                    // Re-wire the mini-profile opener the original render attached (replaceWith drops it).
+                    fresh.addEventListener('click', (e) => { e.stopPropagation(); showMiniProfile(id, e.currentTarget); });
+                    el.replaceWith(fresh);
+                } else if (el.classList.contains('mention')) {
+                    // Mention chips (@tags in chat + npub tags in profile bios).
+                    el.textContent = '@' + newName;
+                }
             });
         }
         
