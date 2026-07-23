@@ -9761,14 +9761,15 @@ async function openCommunityInvitePanel(chat) {
         }
 
         // DM contacts: selected first, then most-recent conversation. Banned npubs + existing members excluded.
+        // Pre-index chat sort timestamps so the comparator is an O(1) Map lookup — a `arrChats.find`
+        // per comparison made this O(n^2 log n), re-run on every filter keystroke.
+        const chatTsById = new Map(arrChats.map(c => [c.id, getChatSortTimestamp(c)]));
         const contacts = arrProfiles
             .filter(p => p && p.id && p.id !== myNpub && !p.is_blocked && !bannedSet.has(p.id) && !memberSet.has(p.id) && dmIds.has(p.id))
             .sort((a, b) => {
                 const aSel = selectedInvitees.has(a.id), bSel = selectedInvitees.has(b.id);
                 if (aSel !== bSel) return aSel ? -1 : 1;
-                const at = getChatSortTimestamp(arrChats.find(c => c.id === a.id) || {});
-                const bt = getChatSortTimestamp(arrChats.find(c => c.id === b.id) || {});
-                return (bt || 0) - (at || 0);
+                return (chatTsById.get(b.id) || 0) - (chatTsById.get(a.id) || 0);
             });
         for (const p of contacts) {
             const name = p.nickname || p.name || p.display_name || '';
