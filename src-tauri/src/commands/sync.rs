@@ -362,19 +362,43 @@ pub async fn fetch_messages<R: Runtime>(
                 // teardown from older builds) renders as an un-deletable ghost — every community
                 // command starts at load_community and errors "not found". Drop STATE + DB rows.
                 {
-                    let held: std::collections::HashSet<String> =
-                        vector_core::db::community::list_community_ids()
-                            .unwrap_or_default()
-                            .into_iter()
-                            .filter_map(|id| vector_core::db::community::load_community(&id).ok().flatten())
-                            .flat_map(|c| c.channels.iter().map(|ch| ch.id.to_hex()).collect::<Vec<_>>())
-                            .collect();
-                    let orphans: Vec<String> = state
-                        .chats
-                        .iter()
-                        .filter(|c| matches!(c.chat_type, vector_core::chat::ChatType::Community) && !held.contains(&c.id))
-                        .map(|c| c.id.clone())
-                        .collect();
+                    // FAIL-SAFE: a read error must never be read as "not held". `delete_chat`
+                    // drops the row AND its events, so an empty or partial `held` set doesn't
+                    // just hide a community — it destroys its message history. An errored
+                    // enumeration therefore skips the sweep entirely and retries next boot;
+                    // keeping a ghost row for one more session costs nothing.
+                    let mut held = std::collections::HashSet::new();
+                    let mut trustworthy = true;
+                    match vector_core::db::community::list_community_ids() {
+                        Ok(ids) => {
+                            for id in ids {
+                                match vector_core::db::community::load_community(&id) {
+                                    // Ok(None) is a legitimate "not held" — only Err is unsafe.
+                                    Ok(Some(c)) => held.extend(c.channels.iter().map(|ch| ch.id.to_hex())),
+                                    Ok(None) => {}
+                                    Err(e) => {
+                                        eprintln!("[Boot] orphan sweep: community read failed ({e}) — skipping the sweep");
+                                        trustworthy = false;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[Boot] orphan sweep: community list failed ({e}) — skipping the sweep");
+                            trustworthy = false;
+                        }
+                    }
+                    let orphans: Vec<String> = if trustworthy {
+                        state
+                            .chats
+                            .iter()
+                            .filter(|c| matches!(c.chat_type, vector_core::chat::ChatType::Community) && !held.contains(&c.id))
+                            .map(|c| c.id.clone())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     if !orphans.is_empty() {
                         println!("[Boot] pruning {} orphaned community chat row(s)", orphans.len());
                         state.chats.retain(|c| !orphans.contains(&c.id));
