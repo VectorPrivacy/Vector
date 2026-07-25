@@ -704,8 +704,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "90dbd31c98227229239363921e60fcf5e558e43ec69094d46fc4996f08d1d5bc"
 dependencies = [
  "bitcoin_hashes",
- "rand 0.8.7",
- "rand_core 0.5.1",
+ "rand 0.7.3",
+ "rand_core 0.6.4",
  "serde",
  "unicode-normalization",
 ]
@@ -1967,7 +1967,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2899,7 +2899,7 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.2.1",
+ "windows-link 0.1.1",
  "windows-result 0.4.1",
 ]
 
@@ -4427,7 +4427,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc2f4eb4bc735547cfed7c0a4922cbd04a4655978c09b54f1f7b228750664c34"
 dependencies = [
  "cfg-if",
- "windows-targets 0.52.6",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -5041,7 +5041,7 @@ dependencies = [
  "pin-project-lite",
  "rustc-hash",
  "rustls",
- "socket2 0.6.1",
+ "socket2 0.5.9",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -5085,15 +5085,15 @@ checksum = "bde7a5d5102f1cff03d482240f0ed20551661f63663620f4b26112ed751165e9"
 dependencies = [
  "cfg_aliases",
  "libc",
- "socket2 0.6.1",
+ "socket2 0.5.9",
  "tracing",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "nostr"
-version = "0.44.0"
-source = "git+https://github.com/VectorPrivacy/nostr.git?branch=zeroize-secretkey#0f9f3a7ac42a0ac699b48458e87b4130c00cb54e"
+version = "0.44.5"
+source = "git+https://github.com/VectorPrivacy/nostr.git?branch=zeroize-secretkey-v0.44.5#11c11805b1469b3604aadfc9352c752ca3d938e4"
 dependencies = [
  "aes",
  "base64 0.22.1",
@@ -5162,9 +5162,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-relay-pool"
-version = "0.44.0"
+version = "0.44.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b1073ccfbaea5549fb914a9d52c68dab2aecda61535e5143dd73e95445a804b"
+checksum = "91b2c039df4f96c4bf7dae52a74fd5516ad6dda83a11c0c69dea91b5255a4f37"
 dependencies = [
  "async-utility",
  "async-wsocket",
@@ -5248,7 +5248,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6756,7 +6756,7 @@ dependencies = [
  "derive-deftly",
  "libc",
  "paste",
- "thiserror 2.0.18",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -7382,7 +7382,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.11.0",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7440,7 +7440,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7666,7 +7666,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b55fb86dfd3a2f5f76ea78310a88f96c4ea21a3031f8d212443d56123fd0521"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -9193,7 +9193,7 @@ dependencies = [
  "getrandom 0.3.2",
  "once_cell",
  "rustix 1.1.3",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
