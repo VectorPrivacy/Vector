@@ -205,11 +205,12 @@ pub(crate) async fn show_community_notification(chat_id: &str, msg: &vector_core
 
     let should_notify = {
         let state = crate::STATE.lock().await;
-        // Only a community's surfaced (primary) row notifies — sibling-channel rows
-        // are bare persistence anchors carrying no community metadata.
+        // Only a community's surfaced (primary) row notifies. Every channel is registered
+        // and synced, but there is no row to open for a sibling channel, so ringing for
+        // one would be a notification the user can't act on or clear.
         let registered = state
             .get_chat(chat_id)
-            .is_some_and(|c| c.metadata.custom_fields.contains_key("community_id"));
+            .is_some_and(|c| c.is_surfaced_community_channel());
         let mentions_me = msg.mentions_me();
         let sender_blocked = state.get_profile(sender_npub).map_or(false, |p| p.flags.is_blocked());
         let sender_dm_muted = state.get_chat(sender_npub).map_or(false, |c| c.muted);

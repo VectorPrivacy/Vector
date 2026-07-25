@@ -40,12 +40,14 @@ pub(crate) async fn sync_community_chats(community: &vector_core::community::Com
     // never to the bottom (no messages → newest, not oldest).
     let created_at_ms = vector_core::community::list::membership_added_at(&community_id)
         .or_else(|| vector_core::db::community::community_created_at_ms(&community.id));
+    // Every channel is registered and synced; the chat list renders only the primary one.
+    let primary_channel = community.channels.first().map(|c| c.id.to_hex()).unwrap_or_default();
     let slims = {
         let mut state = vector_core::state::STATE.lock().await;
         let mut slims = Vec::new();
         for ch in &community.channels {
             let channel_id = ch.id.to_hex();
-            state.upsert_community_chat(&channel_id, &name, &description, &community_id, is_owner, has_icon, owner_npub.as_deref(), created_at_ms, community.dissolved, vector_core::community::ConcordProtocol::V1);
+            state.upsert_community_chat(&channel_id, &name, &description, &community_id, is_owner, has_icon, owner_npub.as_deref(), created_at_ms, community.dissolved, vector_core::community::ConcordProtocol::V1, &ch.name, &primary_channel);
             if let Some(chat) = state.chats.iter().find(|c| c.id == channel_id) {
                 slims.push(vector_core::db::chats::SlimChatDB::from_chat(chat, &state.interner));
             }

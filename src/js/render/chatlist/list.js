@@ -17,6 +17,20 @@
 let lastChatlistStateHash = '';
 
 /**
+ * Whether a Community chat is the one row its community gets in the list.
+ *
+ * Every channel is registered and synced, but this release renders a community as a
+ * SINGLE row: its primary channel ("general", else the first one). The backend stamps
+ * `primary_channel` onto every channel row, so a sibling is any row whose own id isn't
+ * that value. Rows written before the stamp existed fall back to rendering — better a
+ * duplicate row than a community that silently disappears from the list.
+ */
+function isPrimaryChannelChat(chat) {
+    const primary = chat?.metadata?.custom_fields?.primary_channel;
+    return !primary || primary === chat.id;
+}
+
+/**
  * Generate a hash representing the current state of all chats
  */
 function generateChatlistStateHash() {
@@ -98,9 +112,12 @@ function renderChatlist() {
         if (!chatIsGroup(chat) && chat.messages.length === 0) continue;
 
         // A Community row without its owning community_id is a bare persistence
-        // anchor (a sibling channel of a multi-channel community) — only the
-        // community's primary row carries metadata and renders.
+        // anchor (a channel row auto-created by the message persist).
         if (chatIsGroup(chat) && !chat.metadata?.custom_fields?.community_id) continue;
+
+        // One row per community: a multi-channel community's other channels stay synced
+        // and addressable, they just don't each get a row of their own.
+        if (chatIsGroup(chat) && !isPrimaryChannelChat(chat)) continue;
 
         // Message-less community: lazy-load its latest membership event so the preview can show
         // "X has joined" instead of "No messages yet" (cached onto chat.lastSystemEvent).

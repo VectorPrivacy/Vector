@@ -913,45 +913,46 @@ pub(crate) async fn register_v2_chats_inner(community: &crate::community::v2::co
         // community's metadata (v1-group parity; multi-channel UI is a later cut).
         let Some(primary) = community.primary_channel() else { return };
         let primary_hex = crate::simd::hex::bytes_to_hex_32(&primary.id.0);
-        let sibling_ids: Vec<String> = community
-            .channels
-            .iter()
-            .filter(|c| c.id.0 != primary.id.0)
-            .map(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0))
-            .collect();
-        let slim = {
+        // Every channel gets a real chat row carrying its own name plus the community's
+        // primary id. The chat list still shows ONE row per community (it renders only the
+        // primary), but the sibling rows are now addressable, which is what lets the UI
+        // reach a multi-channel community's other channels.
+        let slims = {
             let mut st = state::STATE.lock().await;
             if !session.is_valid() {
                 return; // account swapped during the join/create — don't write into the new one.
             }
-            st.upsert_community_chat(
-                &primary_hex,
-                &community.name,
-                community.description.as_deref().unwrap_or(""),
-                &id_hex,
-                is_owner,
-                community.icon.is_some(),
-                owner_npub.as_deref(),
-                Some(community.created_at_ms),
-                community.dissolved,
-                crate::community::ConcordProtocol::V2,
-            );
-            // Sibling-channel rows the message persist auto-created are bare
-            // anchors (their DB rows keep the history's FK) — never surfaced.
-            st.chats.retain(|c| !sibling_ids.contains(&c.id));
-            st.chats
-                .iter()
-                .find(|c| c.id == primary_hex)
-                .map(|chat| crate::db::chats::SlimChatDB::from_chat(chat, &st.interner))
+            let mut slims = Vec::new();
+            for ch in &community.channels {
+                let ch_hex = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
+                st.upsert_community_chat(
+                    &ch_hex,
+                    &community.name,
+                    community.description.as_deref().unwrap_or(""),
+                    &id_hex,
+                    is_owner,
+                    community.icon.is_some(),
+                    owner_npub.as_deref(),
+                    Some(community.created_at_ms),
+                    community.dissolved,
+                    crate::community::ConcordProtocol::V2,
+                    &ch.name,
+                    &primary_hex,
+                );
+                if let Some(chat) = st.chats.iter().find(|c| c.id == ch_hex) {
+                    slims.push(crate::db::chats::SlimChatDB::from_chat(chat, &st.interner));
+                }
+            }
+            slims
         };
-        // Persist the row so a fresh boot reloads the community's name/metadata
+        // Persist the rows so a fresh boot reloads each channel's name/metadata
         // instead of the bare auto-created anchor. Session re-check: don't write
-        // account A's row into a swapped-in account B's DB.
+        // account A's rows into a swapped-in account B's DB.
         if !session.is_valid() {
             return;
         }
-        if let Some(slim) = slim {
-            let _ = crate::db::chats::save_slim_chat(&slim);
+        for slim in &slims {
+            let _ = crate::db::chats::save_slim_chat(slim);
         }
 }
 
@@ -1150,6 +1151,7 @@ impl VectorCore {
             .and_then(|pk| ToBech32::to_bech32(&pk).ok());
         {
             let created_at_ms = crate::db::community::community_created_at_ms(&community.id);
+            let primary_hex = community.channels.first().map(|c| c.id.to_hex()).unwrap_or_default();
             let mut st = state::STATE.lock().await;
             for ch in &community.channels {
                 st.upsert_community_chat(
@@ -1163,6 +1165,8 @@ impl VectorCore {
                     created_at_ms,
                     community.dissolved,
                     crate::community::ConcordProtocol::V1,
+                    &ch.name,
+                    &primary_hex,
                 );
             }
         }
@@ -1205,6 +1209,7 @@ impl VectorCore {
             .and_then(|pk| ToBech32::to_bech32(&pk).ok());
         {
             let created_at_ms = crate::db::community::community_created_at_ms(&community.id);
+            let primary_hex = community.channels.first().map(|c| c.id.to_hex()).unwrap_or_default();
             let mut st = state::STATE.lock().await;
             for ch in &community.channels {
                 st.upsert_community_chat(
@@ -1218,6 +1223,8 @@ impl VectorCore {
                     created_at_ms,
                     community.dissolved,
                     crate::community::ConcordProtocol::V1,
+                    &ch.name,
+                    &primary_hex,
                 );
             }
         }
