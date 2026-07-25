@@ -974,14 +974,50 @@ pub async fn community_is_public<T: Transport + ?Sized>(transport: &T, community
         .map(|(entity, f)| (entity, (f.1, f.2, f.3)))
         .collect();
     let control = control_group_key(&community.community_root, cid, community.root_epoch);
-    let query = Query { kinds: vec![stream::KIND_WRAP], authors: vec![control.pk_hex()], limit: Some(FOLLOW_PAGE), ..Default::default() };
-    let editions: Vec<ParsedEdition> = transport
-        .fetch(&query, &community.relays)
-        .await
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|w| control::open_control_edition(w, &control).ok().map(|(ed, _)| ed))
-        .collect();
+    // WHOLE plane, not the newest page. Public-vs-Private is decided by whether any
+    // live invite link exists, so a registry pushed out of a single window reads as
+    // retired — and any member can push it out, since the plane key comes from the
+    // community root they hold. Truncation fails toward Public: over-stating it only
+    // makes a caller take the stronger remedy (privatise + re-found + reissue), while
+    // under-stating it leaves a live link open behind a ban.
+    let mut editions: Vec<ParsedEdition> = Vec::new();
+    let mut seen_wraps: std::collections::HashSet<nostr_sdk::EventId> = std::collections::HashSet::new();
+    let mut oldest: Option<u64> = None;
+    let mut until: Option<u64> = None;
+    for page in 0..COMPACT_MAX_PAGES {
+        let query = Query {
+            kinds: vec![stream::KIND_WRAP],
+            authors: vec![control.pk_hex()],
+            until,
+            limit: Some(FOLLOW_PAGE),
+            ..Default::default()
+        };
+        let Ok(wraps) = transport.fetch(&query, &community.relays).await else { return true };
+        let mut fresh = 0usize;
+        for w in &wraps {
+            if !seen_wraps.insert(w.id) {
+                continue;
+            }
+            fresh += 1;
+            let at = w.created_at.as_secs();
+            if oldest.is_none_or(|o| at < o) {
+                oldest = Some(at);
+            }
+            if let Ok((ed, _)) = control::open_control_edition(w, &control) {
+                editions.push(ed);
+            }
+        }
+        if fresh == 0 {
+            if wraps.len() >= FOLLOW_PAGE {
+                return true; // same-second wall: the plane can't be read whole
+            }
+            break;
+        }
+        until = oldest;
+        if page + 1 == COMPACT_MAX_PAGES {
+            return true;
+        }
+    }
     let authority = fold_authority(community, &editions, &floors);
 
     let mut by_eid: BTreeMap<[u8; 32], Vec<&ParsedEdition>> = BTreeMap::new();
@@ -991,17 +1027,28 @@ pub async fn community_is_public<T: Transport + ?Sized>(transport: &T, community
         }
     }
     for (eid, group) in &by_eid {
-        let fold_eds: Vec<version::Edition> = group.iter().map(|p| p.to_fold_edition()).collect();
+        // Authority BEFORE the fold, matching `apply_control_fold`. `fold_head`
+        // picks an equal-version winner author-blind (lowest inner id, which an
+        // author can grind), so folding first would let any member occupy the head
+        // slot and have the whole registry dropped by the check below — silently
+        // retiring a live invite link, i.e. flipping the community to Private.
+        let authed: Vec<&ParsedEdition> = group
+            .iter()
+            .copied()
+            .filter(|p| {
+                let author = p.author.to_hex();
+                // The creator must hold CREATE_INVITE, not be banned, AND own this coordinate.
+                !authority.banned.contains(&author)
+                    && authority.roles.is_authorized(&author, Some(&owner_hex), Permissions::CREATE_INVITE)
+                    && super::derive::invite_links_locator(cid, &p.author.to_bytes()) == *eid
+            })
+            .collect();
+        if authed.is_empty() {
+            continue;
+        }
+        let fold_eds: Vec<version::Edition> = authed.iter().map(|p| p.to_fold_edition()).collect();
         let (Some(hi), _) = fold_head(&fold_eds, floors.get(&crate::simd::hex::bytes_to_hex_32(eid))) else { continue };
-        let head = group[hi];
-        // The creator must hold CREATE_INVITE AND own this coordinate.
-        if !authority.roles.is_authorized(&head.author.to_hex(), Some(&owner_hex), Permissions::CREATE_INVITE) {
-            continue;
-        }
-        if super::derive::invite_links_locator(cid, &head.author.to_bytes()) != *eid {
-            continue;
-        }
-        if invite::parse_registry_content(&head.content).map(|s| !s.is_empty()).unwrap_or(false) {
+        if invite::parse_registry_content(&authed[hi].content).map(|s| !s.is_empty()).unwrap_or(false) {
             return true;
         }
     }
@@ -1844,7 +1891,11 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
     let mut seen_wraps: std::collections::HashSet<nostr_sdk::EventId> = std::collections::HashSet::new();
     let mut oldest: Option<u64> = None;
     let mut until: Option<u64> = None;
-    for _ in 0..FOLLOW_MAX_PAGES {
+    // Read to EXHAUSTION, not to coverage: an entity with no floor yet (a
+    // first-ever Banlist published while we were away) is invisible to a
+    // coverage test, so stopping there could compact it away.
+    let mut truncated = false;
+    for page in 0..COMPACT_MAX_PAGES {
         let query = Query {
             kinds: vec![stream::KIND_WRAP],
             authors: vec![current_control.pk_hex()],
@@ -1867,14 +1918,22 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
                 opened.push(parsed);
             }
         }
-        // Page until every committed entity has its editions in hand (raw coverage),
-        // so the floor-driven compaction below can fold each head.
-        let present: std::collections::HashSet<String> =
-            opened.iter().map(|(e, _)| crate::simd::hex::bytes_to_hex_32(&e.entity_id)).collect();
-        if floors.keys().all(|k| present.contains(k)) || fresh == 0 {
+        if fresh == 0 {
+            // `until` is inclusive: a FULL page with nothing new is a same-second
+            // wall no cursor steps past, so older editions stay unreachable. A
+            // short page is simply the end of the plane.
+            truncated = wraps.len() >= FOLLOW_PAGE;
             break;
         }
         until = oldest;
+        if page + 1 == COMPACT_MAX_PAGES {
+            truncated = true;
+        }
+    }
+    if truncated {
+        return Err(
+            "The community's control plane is too deep to read in full right now; re-founding stopped so no member is left behind.".to_string(),
+        );
     }
 
     let prev_epoch = community.root_epoch;
@@ -2115,7 +2174,9 @@ pub async fn refound_at_birth<T: Transport + ?Sized>(
     let mut seen_wraps: std::collections::HashSet<nostr_sdk::EventId> = std::collections::HashSet::new();
     let mut oldest: Option<u64> = None;
     let mut until: Option<u64> = None;
-    for _ in 0..FOLLOW_MAX_PAGES {
+    // Exhaustion, not coverage — see the sibling read in `refound_community`.
+    let mut truncated = false;
+    for page in 0..COMPACT_MAX_PAGES {
         let query = Query { kinds: vec![stream::KIND_WRAP], authors: vec![current_control.pk_hex()], until, limit: Some(FOLLOW_PAGE), ..Default::default() };
         let wraps = transport.fetch(&query, &community.relays).await?;
         let mut fresh = 0usize;
@@ -2128,10 +2189,17 @@ pub async fn refound_at_birth<T: Transport + ?Sized>(
                 opened.push(parsed);
             }
         }
-        let present: std::collections::HashSet<String> =
-            opened.iter().map(|(e, _)| crate::simd::hex::bytes_to_hex_32(&e.entity_id)).collect();
-        if floors.keys().all(|k| present.contains(k)) || fresh == 0 { break; }
+        if fresh == 0 {
+            truncated = wraps.len() >= FOLLOW_PAGE;
+            break;
+        }
         until = oldest;
+        if page + 1 == COMPACT_MAX_PAGES { truncated = true; }
+    }
+    if truncated {
+        return Err(
+            "The community's control plane is too deep to read in full right now; re-founding stopped so no member is left behind.".to_string(),
+        );
     }
 
     let prev_epoch = community.root_epoch; // 0
@@ -2963,6 +3031,12 @@ pub async fn follow_control<T: Transport + ?Sized>(
     let mut until: Option<u64> = None;
     let mut fold = ControlFold { updated: None, heads: Vec::new(), gapped: false };
     let mut authority = AuthoritySet::owner_only();
+    // Whether this round gave up with editions still unread. The follow is
+    // procedural by design — process what arrives, converge with everyone else —
+    // so a short read never blocks reading, writing or epoch adoption. It only
+    // withholds the ROSTER cache below: caching a partial authority as this
+    // device's baseline is the one step that outlives the round.
+    let mut truncated = true;
     for _ in 0..FOLLOW_MAX_PAGES {
         let query = Query {
             kinds: vec![stream::KIND_WRAP],
@@ -2997,7 +3071,16 @@ pub async fn follow_control<T: Transport + ?Sized>(
         // gated metadata/channel fold over the same edition set.
         authority = fold_authority(community, &editions, &floors);
         fold = apply_control_fold(community, &editions, &floors, &authority);
-        if !(fold.gapped || authority.gapped) || fresh == 0 {
+        if !(fold.gapped || authority.gapped) {
+            truncated = false; // nothing is gapped: this view is coherent
+            break;
+        }
+        if fresh == 0 {
+            // A FULL page with nothing new is a same-second wall no `until` steps
+            // past, so older editions stay unreachable; a short page is the end
+            // of the plane, and a gap in THAT is the relay withholding, not us
+            // giving up early.
+            truncated = wraps.len() >= FOLLOW_PAGE;
             break;
         }
         until = oldest;
@@ -3053,7 +3136,11 @@ pub async fn follow_control<T: Transport + ?Sized>(
                 !floors.contains_key(&eid) || head_ents.contains(eid.as_str())
             })
         });
-    if !authority.gapped && stored_complete && newest_roster_at >= crate::db::community::get_community_roles_at(&cid_hex)? {
+    // `truncated` covers the case the other three can't: a COLD device (no floors,
+    // no stored roster) folding under a plane a member has inflated past the pager.
+    // `stored_complete` is trivially true with nothing stored, so without this the
+    // first sync would cache a partial authority as its own baseline.
+    if !truncated && !authority.gapped && stored_complete && newest_roster_at >= crate::db::community::get_community_roles_at(&cid_hex)? {
         crate::db::community::set_community_roles(&cid_hex, &authority.roles, newest_roster_at)?;
     }
     match fold.updated {
@@ -3067,8 +3154,19 @@ pub async fn follow_control<T: Transport + ?Sized>(
 
 /// Control-follow paging bounds: enough depth to re-anchor a long-offline floor
 /// (H1/M8 refetch) without letting a flooding relay stall the follow queue.
-const FOLLOW_MAX_PAGES: usize = 4;
+///
+/// Nearly free to raise: both follow loops exit the moment the fold stops being
+/// gapped, so the cap only binds when something is genuinely missing — exactly
+/// when paging further is what's wanted. The old ceiling of 4 (~2k editions) sat
+/// under a plane that 100 roles + 400 grants already outgrows before counting
+/// superseded versions, which accumulate until a compaction retires them.
+const FOLLOW_MAX_PAGES: usize = 32;
 const FOLLOW_PAGE: usize = 500;
+/// Page ceiling for a COMPACTION read (CORD-06 §3: a Refounder that cannot fold
+/// every Control Event must abort). Far above any real plane, but plane depth is
+/// attacker-controlled — any member holds the key that mints wraps — so the read
+/// is bounded and reports coming up short rather than compacting a partial view.
+const COMPACT_MAX_PAGES: usize = 512;
 
 /// A folded control head to persist as the per-entity refuse-downgrade floor.
 #[derive(Clone)]
@@ -6328,6 +6426,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_rogue_registry_fork_cannot_retire_the_owners_live_link() {
+        // Registries are coordinate-bound to their creator, but `fold_head` picks an
+        // equal-version winner AUTHOR-BLIND, by lowest inner id — and an author grinds
+        // that freely by varying content. Folding before authorising would let any
+        // member occupy the owner's registry head, fail the authority check, and drop
+        // the whole registry: a live invite link silently retired, flipping the
+        // community to Private and steering a moderator into the wrong ban remedy.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Forked", vec!["wss://r".into()], None).await.unwrap();
+        mint_public_link(&relay, &community, "https://x", None, None).await.unwrap();
+        assert!(community_is_public(&relay, &community).await, "a live link makes it Public");
+
+        let cid = community.id();
+        let control = control_group_key(&community.community_root, cid, community.root_epoch);
+        let eid = crate::community::v2::derive::invite_links_locator(cid, &owner.public_key().to_bytes());
+
+        let query = Query {
+            kinds: vec![stream::KIND_WRAP],
+            authors: vec![control.pk_hex()],
+            limit: Some(FOLLOW_PAGE),
+            ..Default::default()
+        };
+        let wraps = relay.fetch(&query, &community.relays).await.unwrap();
+        let target = wraps
+            .iter()
+            .filter_map(|w| control::open_control_edition(w, &control).ok().map(|(e, _)| e))
+            .filter(|e| e.entity_id == eid)
+            .max_by_key(|e| e.version)
+            .expect("the owner published a registry");
+
+        // Grind a same-version fork under the owner's coordinate that OUTRANKS the
+        // real head on the tiebreak (~2 tries against a uniform id).
+        let rogue = Keys::generate();
+        let mut planted = false;
+        for n in 0..4_000u64 {
+            let content = format!("[{{\"token\":\"{n:032x}\",\"url\":\"https://evil\",\"expires_at\":0}}]");
+            let rumor = control::build_edition_rumor(
+                rogue.public_key(),
+                vsk::INVITE_LINKS,
+                &eid,
+                target.version,
+                target.prev_hash.as_ref(),
+                &content,
+                9_000,
+                None,
+            );
+            let (w, _) = control::seal_control_edition(&rumor, &control, &rogue, Timestamp::from_secs(9_000)).unwrap();
+            let (ed, _) = control::open_control_edition(&w, &control).unwrap();
+            if ed.inner_id < target.inner_id {
+                relay.publish(&w, &community.relays).await.unwrap();
+                planted = true;
+                break;
+            }
+        }
+        assert!(planted, "the test needs a fork that wins the tiebreak");
+
+        assert!(
+            community_is_public(&relay, &community).await,
+            "an unauthorised fork must not retire the owner's live link"
+        );
+    }
+
+    #[tokio::test]
     async fn a_registry_from_a_non_create_invite_holder_does_not_make_it_public() {
         // The CREATE_INVITE gate: a rogue publishing a registry can't fake Public.
         let (_tmp, _guard, owner) = init_test_db();
@@ -8394,6 +8556,44 @@ mod tests {
             m.truncate(self.cap.min(q.limit.unwrap_or(usize::MAX)));
             Ok(m)
         }
+    }
+
+    #[tokio::test]
+    async fn refound_aborts_when_the_control_plane_cannot_be_read_in_full() {
+        // CORD-06 §3: a Refounder that cannot fold every Control Event must abort.
+        // `until` is inclusive, so a page-wide block of same-second wraps is a wall
+        // no cursor steps past — everything older (the genesis editions, a Banlist)
+        // is unreachable. Compacting THAT view carries only what was read into the
+        // new epoch, dropping the rest for every member, permanently. Any member can
+        // build the wall: the plane key comes from the community root they hold.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let memory = MemoryRelay::new();
+        let community = create_community(&memory, "Walled", vec!["wss://r".into()], None).await.unwrap();
+        let control = control_group_key(&community.community_root, community.id(), community.root_epoch);
+
+        let rogue = Keys::generate();
+        let mut events: Vec<Event> = Vec::new();
+        for i in 0..FOLLOW_PAGE {
+            let content = format!("{{\"name\":\"junk{i}\",\"private\":false}}");
+            let rumor = control::build_edition_rumor(
+                rogue.public_key(),
+                vsk::CHANNEL_METADATA,
+                &[0xAB; 32],
+                1,
+                None,
+                &content,
+                9_000,
+                None,
+            );
+            let (w, _) = control::seal_control_edition(&rumor, &control, &rogue, Timestamp::from_secs(9_000)).unwrap();
+            events.push(w);
+        }
+        let relay = CappedRelay { events, cap: FOLLOW_PAGE };
+
+        let err = refound_community(&relay, &community, &[])
+            .await
+            .expect_err("a plane that can't be read whole must never be compacted");
+        assert!(err.contains("too deep to read in full"), "unexpected error: {err}");
     }
 
     #[tokio::test]
