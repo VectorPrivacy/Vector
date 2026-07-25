@@ -4595,6 +4595,41 @@ mod tests {
         assert_eq!(migration::drive_migration(&bed.relay, &m_v1).await.unwrap(), None);
     }
 
+    /// The wizard records the twin in the cross-device community list, like every other v2
+    /// join/create path. Sibling devices normally discover the twin by folding the carrier
+    /// themselves, but one that no longer holds the v1 community has no carrier to fold, so
+    /// the list is its only route in.
+    #[tokio::test]
+    async fn wizard_publishes_the_twin_to_the_cross_device_list() {
+        use crate::community::migration;
+        let (bed, owner, _member) = TestBed::new();
+        let unlocked = migration::MIGRATION_UNLOCK_AT + 1;
+
+        bed.swap_to(&owner);
+        let mut v1 = crate::community::Community::create("Guild", "general", bed.relays.clone());
+        let v1_cid = v1.id.to_hex();
+        v1.owner_attestation = Some({
+            use nostr_sdk::JsonUtil;
+            crate::community::owner::build_owner_attestation_unsigned(owner.keys.public_key(), &v1_cid)
+                .sign_with_keys(&owner.keys).unwrap().as_json()
+        });
+        crate::db::community::save_community(&v1).unwrap();
+
+        let v2_hex = migration::migrate_community_to_v2(&bed.relay, &v1, unlocked).await.unwrap();
+
+        // The twin is live in the published list, so a fresh/carrier-less device finds it.
+        let list = fetch_community_list(&bed.relay, &bed.relays).await.unwrap()
+            .expect("the wizard published a community list");
+        assert!(list.is_live(&v2_hex), "the twin must be live in the cross-device list");
+        // The v1 community is NOT tombstoned there: a tombstone reads as "you left" and
+        // `sync_community_list` would tear down a sibling's v1 row before it can fold the
+        // carrier, stranding it. The local `migrated_to` fence is what stops v1 ghosts.
+        assert!(
+            !list.tombstones.iter().any(|t| t.community_id == v1_cid),
+            "migration must not tombstone the v1 community"
+        );
+    }
+
     /// The wizard takes the same per-cid claim the member drive does, so a double-fired
     /// command (or the owner's own carrier self-fold racing the wizard's phase 2→3 gap)
     /// cannot run two wizards: the second would re-mint a twin before the ledger lands

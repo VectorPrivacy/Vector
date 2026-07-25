@@ -637,13 +637,24 @@ pub async fn migrate_community_to_v2<T: Transport + ?Sized>(
     // a mid-wizard account swap can't land the flip + ledger row in the wrong account's DB.
     // `twin` is intentionally not re-saved here (see the fence contract below).
     emit_migration_progress("Switching you over...", 92);
-    let flock = super::v2::realtime::follow_lock(&twin.identity.community_id);
-    let _fguard = flock.lock().await;
-    if !session.is_valid() {
-        return Err("account changed during migration".to_string());
+    {
+        // Scoped to the flip transaction alone: the follow lock must never be held across
+        // network I/O (the list republish below awaits).
+        let flock = super::v2::realtime::follow_lock(&twin.identity.community_id);
+        let _fguard = flock.lock().await;
+        if !session.is_valid() {
+            return Err("account changed during migration".to_string());
+        }
+        crate::db::community::reparent_channels_and_fence(&v1_cid, &v2_hex)?;
+        crate::db::community::set_migration_ledger(&v1_cid, &v2_hex, PHASE_FLIPPED, "")?;
     }
-    crate::db::community::reparent_channels_and_fence(&v1_cid, &v2_hex)?;
-    crate::db::community::set_migration_ledger(&v1_cid, &v2_hex, PHASE_FLIPPED, "")?;
+
+    // Record the twin in the cross-device community list, the same step `create_community`
+    // takes for a normal v2 community. Sibling devices usually discover the twin by folding
+    // the carrier themselves, but one that no longer holds the v1 community has no carrier to
+    // fold and the list is its only route. Runs AFTER the flip so the list never advertises a
+    // half-built twin (pre-refound it is epoch 0 with no snapshot). Best-effort.
+    let _ = super::v2::service::republish_community_list(transport, Some(&twin.identity.community_id)).await;
     // Stamp the owner's OWN chats as v2 + notify the UI — the wizard doesn't fold its own
     // carrier, so without this the owner's client would show the stale v1 row until a
     // later fold/boot. Same finalize the member path uses (idempotent if a self-fold beat us).
