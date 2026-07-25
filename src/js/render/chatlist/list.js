@@ -33,7 +33,7 @@ function generateChatlistStateHash() {
         const isGroup = chatIsGroup(chat);
         const profile = !isGroup ? getProfile(chat.id) : null;
         const cLastMsg = chat.messages[chat.messages.length - 1];
-        const nUnread = computeRowBadgeCount(chat);
+        const nUnread = computeListRowBadgeCount(chat);
         const activeTypers = chat.active_typers || [];
 
         // Push values directly (faster than creating object)
@@ -57,6 +57,9 @@ function generateChatlistStateHash() {
             isGroup ? chat.metadata?.custom_fields?.name : undefined,
             chat._joining // so the "Joining…" lock clearing re-renders the row
         );
+        // Channel set, expanded state and per-channel unread all repaint the row's
+        // nested channel list, so they belong in the gate.
+        if (isGroup) channelStateHashParts(chat, states);
     }
 
     return JSON.stringify(states);
@@ -98,9 +101,12 @@ function renderChatlist() {
         if (!chatIsGroup(chat) && chat.messages.length === 0) continue;
 
         // A Community row without its owning community_id is a bare persistence
-        // anchor (a sibling channel of a multi-channel community) — only the
-        // community's primary row carries metadata and renders.
+        // anchor (a channel row auto-created by the message persist).
         if (chatIsGroup(chat) && !chat.metadata?.custom_fields?.community_id) continue;
+
+        // One row per community: its non-primary channels render nested under it
+        // (see renderCommunityChannels), not beside it.
+        if (chatIsGroup(chat) && !isPrimaryChannelChat(chat)) continue;
 
         // Message-less community: lazy-load its latest membership event so the preview can show
         // "X has joined" instead of "No messages yet" (cached onto chat.lastSystemEvent).
@@ -117,6 +123,12 @@ function renderChatlist() {
 
         const divContact = renderChat(chat, primaryColor);
         fragment.appendChild(divContact);
+
+        // Nested channel list for a multi-channel community, directly under its row.
+        if (chatIsGroup(chat)) {
+            const channels = renderCommunityChannels(chat.metadata.custom_fields.community_id);
+            if (channels) fragment.appendChild(channels);
+        }
     }
 
     // Give the final element a bottom-margin boost to allow scrolling past the fadeout
@@ -133,6 +145,13 @@ function renderChatlist() {
 
     // Replace the existing list in one native call
     domChatList.replaceChildren(fragment);
+
+    // Rows are rebuilt from scratch, so the widescreen selection has to be re-stamped.
+    wsMarkActiveRow();
+
+    // The rail's shortcuts are the same data in a different shape, so they rebuild here
+    // and inherit this function's state-hash gate.
+    renderRailShortcuts();
 
     // Update the back button notification
     updateChatBackNotification();
@@ -284,6 +303,25 @@ function computeRowBadgeCount(chat) {
     // the last message per chat is in RAM. Fall back to the in-memory walk before the first
     // refresh lands (or if it ever failed).
     return (typeof chat.unread === 'number') ? chat.unread : countUnreadMessages(chat);
+}
+
+/**
+ * The badge for a chat-list ROW. Identical to `computeRowBadgeCount` except on a
+ * community's row, which represents every channel: its badge is the community total, so
+ * unread in a collapsed secondary channel still flags the community.
+ */
+function computeListRowBadgeCount(chat) {
+    const communityId = chatIsGroup(chat) && isPrimaryChannelChat(chat)
+        ? chat.metadata?.custom_fields?.community_id
+        : null;
+    if (!communityId) return computeRowBadgeCount(chat);
+    let total = 0;
+    for (const c of arrChats) {
+        if (c.chat_type !== 'Community') continue;
+        if (c.metadata?.custom_fields?.community_id !== communityId) continue;
+        total += computeRowBadgeCount(c);
+    }
+    return total;
 }
 
 function countPingMessages(chat) {

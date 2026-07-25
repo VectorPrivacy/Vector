@@ -736,6 +736,12 @@ impl ChatState {
     /// row carries name/description/owning-community directly (and persists + loads like
     /// any DM — no separate hydrate). `is_owner`/`has_icon` are stored as "true"/"1"
     /// strings in `custom_fields`. The caller persists the row (`save_slim_chat`).
+    ///
+    /// `name` is the COMMUNITY's name (every channel row carries it, so the chat list can
+    /// label a community from any one of its rows); `channel_name` is this channel's own.
+    /// `primary_channel` is the community's primary channel id — equal to `channel_id` on
+    /// that row, and what the UI uses to render one list row per community while still
+    /// holding a chat per channel.
     pub fn upsert_community_chat(
         &mut self,
         channel_id: &str,
@@ -748,11 +754,15 @@ impl ChatState {
         created_at_ms: Option<u64>,
         dissolved: bool,
         protocol: crate::community::ConcordProtocol,
+        channel_name: &str,
+        primary_channel: &str,
     ) {
         self.ensure_community_chat(channel_id);
         if let Some(chat) = self.chats.iter_mut().find(|c| c.id == channel_id) {
             let cf = &mut chat.metadata.custom_fields;
             cf.insert("name".to_string(), name.to_string());
+            cf.insert("channel_name".to_string(), channel_name.to_string());
+            cf.insert("primary_channel".to_string(), primary_channel.to_string());
             cf.insert("description".to_string(), description.to_string());
             cf.insert("community_id".to_string(), community_id.to_string());
             cf.insert("is_owner".to_string(), is_owner.to_string());

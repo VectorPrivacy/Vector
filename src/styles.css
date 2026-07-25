@@ -2535,6 +2535,184 @@ html, body {
   overflow: hidden;
 }
 
+/* ===== Nested community channel list (chat list) =====
+   A multi-channel community renders one row, with its channels underneath. Rows are
+   deliberately lighter than a `.chatlist-contact`: they're a level down the hierarchy,
+   not peers of it. */
+.chatlist-expander {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  flex-shrink: 0;
+  margin-left: 2px;
+  opacity: 0.45;
+  transition: opacity 0.15s ease;
+}
+
+.chatlist-expander:hover {
+  opacity: 1;
+}
+
+.chatlist-expander .icon {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  background-color: rgba(255, 255, 255, 0.75);
+  transition: transform 0.16s cubic-bezier(0.33, 1, 0.68, 1);
+}
+
+.chatlist-expander.expanded .icon {
+  transform: rotate(180deg);
+}
+
+.chatlist-channels {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  /* Indented to the community avatar's centre line, so the group reads as one unit. */
+  margin: 2px 0 8px 34px;
+  padding-left: 10px;
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.chatlist-channel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 7px;
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 14px;
+  -webkit-user-select: none;
+  user-select: none;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.chatlist-channel:hover {
+  background-color: rgba(255, 255, 255, 0.045);
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.chatlist-channel.active {
+  background-color: color-mix(in srgb, var(--accent-color, #59fcb3) 12%, transparent);
+  color: #fff;
+}
+
+.chatlist-channel.has-unread {
+  color: #fff;
+  font-weight: 500;
+}
+
+.chatlist-channel-hash {
+  flex-shrink: 0;
+  font-size: 15px;
+  opacity: 0.55;
+}
+
+.chatlist-channel-name {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+
+.chatlist-channel-badge {
+  flex-shrink: 0;
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background-color: var(--primary-color, #33db98);
+  color: #000;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+}
+
+.chatlist-channel-delete {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.chatlist-channel:hover .chatlist-channel-delete {
+  opacity: 0.6;
+}
+
+.chatlist-channel-delete:hover {
+  opacity: 1 !important;
+}
+
+.chatlist-channel-delete .icon {
+  position: relative;
+  width: 12px;
+  height: 12px;
+  margin: 0;
+  background-color: var(--danger-color, #ff2ea9);
+}
+
+.chatlist-channel-add {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.chatlist-channel-add .chatlist-channel-hash {
+  font-size: 16px;
+}
+
+/* Community overview metrics, in one place so the widescreen sidebar can retune
+   them (a 300px column can't afford the full-screen lead-in). */
+#group-overview {
+  --group-overview-avatar: 100px;
+  --group-overview-avatar-lead: 100px;
+  --group-overview-tail: 75px;
+}
+
+.group-overview-avatar-frame {
+  position: relative;
+  margin: var(--group-overview-avatar-lead) auto 0;
+  width: var(--group-overview-avatar);
+  height: var(--group-overview-avatar);
+  text-align: center;
+}
+
+#group-overview-avatar,
+.group-overview-avatar-img {
+  width: var(--group-overview-avatar);
+  height: var(--group-overview-avatar);
+}
+
+#group-overview-avatar {
+  border-radius: initial;
+  display: inline-block;
+}
+
+.group-overview-avatar-img {
+  object-fit: cover;
+  border-radius: 50%;
+}
+
+.group-overview-body {
+  padding-bottom: var(--group-overview-tail);
+}
+
+#group-mute-btn {
+  position: absolute;
+  right: 20px;
+  top: 110px;
+  z-index: 1;
+  width: 42px;
+  height: 42px;
+  padding: 6px;
+}
+
 .back-btn {
   position: absolute;
   cursor: pointer;

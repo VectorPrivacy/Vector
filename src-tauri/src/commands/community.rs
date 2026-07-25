@@ -40,12 +40,13 @@ pub(crate) async fn sync_community_chats(community: &vector_core::community::Com
     // never to the bottom (no messages → newest, not oldest).
     let created_at_ms = vector_core::community::list::membership_added_at(&community_id)
         .or_else(|| vector_core::db::community::community_created_at_ms(&community.id));
+    let primary_channel = community.channels.first().map(|c| c.id.to_hex()).unwrap_or_default();
     let slims = {
         let mut state = vector_core::state::STATE.lock().await;
         let mut slims = Vec::new();
         for ch in &community.channels {
             let channel_id = ch.id.to_hex();
-            state.upsert_community_chat(&channel_id, &name, &description, &community_id, is_owner, has_icon, owner_npub.as_deref(), created_at_ms, community.dissolved, vector_core::community::ConcordProtocol::V1);
+            state.upsert_community_chat(&channel_id, &name, &description, &community_id, is_owner, has_icon, owner_npub.as_deref(), created_at_ms, community.dissolved, vector_core::community::ConcordProtocol::V1, &ch.name, &primary_channel);
             if let Some(chat) = state.chats.iter().find(|c| c.id == channel_id) {
                 slims.push(vector_core::db::chats::SlimChatDB::from_chat(chat, &state.interner));
             }
@@ -3617,6 +3618,77 @@ pub async fn rename_community_channel(
     // channel names ride the list's `current` snapshot too — refresh so a rehydrating device shows
     // the renamed channel (no-op if unchanged).
     vector_core::community::list::refresh_membership_current(&community);
+    Ok(())
+}
+
+/// Add a channel to a **v2** Community (CORD-03 §1-2). A public channel derives its
+/// Chat-Plane key from the community root; a private one mints its own and rekeys the
+/// current members, which is why it takes the longer transport budget. The v1 protocol
+/// has no channel-create edition, so v1 is refused rather than silently no-op'd.
+/// Authorization (`MANAGE_CHANNELS`, or owner) is enforced in vector-core.
+#[tauri::command]
+pub async fn create_community_channel(
+    community_id: String,
+    name: String,
+    private: Option<bool>,
+) -> Result<String, String> {
+    let session = vector_core::state::SessionGuard::capture();
+    if !is_v2_community(&community_id) {
+        return Err("Only Concord v2 communities support extra channels".to_string());
+    }
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("A channel needs a name".to_string());
+    }
+    let id_bytes = hex_to_id32(&community_id)?;
+    let community = vector_core::db::community::load_community_v2(&CommunityId(id_bytes))?
+        .ok_or("Community not found")?;
+    let transport = LiveTransport::with_timeout(Duration::from_secs(20));
+    let channel_id = if private.unwrap_or(false) {
+        vector_core::community::v2::service::create_private_channel(&transport, &community, trimmed).await?
+    } else {
+        vector_core::community::v2::service::create_public_channel(&transport, &community, trimmed).await?
+    };
+    if !session.is_valid() {
+        return Err("account changed during channel create".to_string());
+    }
+    // Re-load: the create wrote the new channel onto the held document, and registering
+    // from the stale in-memory copy would drop it again.
+    if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&CommunityId(id_bytes)) {
+        vector_core::VectorCore.register_v2_chats(&c, &session).await;
+    }
+    Ok(vector_core::simd::hex::bytes_to_hex_32(&channel_id.0))
+}
+
+/// Tombstone a channel in a **v2** Community (CORD-03 §2). The primary channel is refused:
+/// it anchors the community's chat-list row and its history. Message history for a deleted
+/// channel stays in the local DB; the community document is the authority on which channels
+/// exist, so a tombstoned one simply stops being listed.
+#[tauri::command]
+pub async fn delete_community_channel(community_id: String, channel_id: String) -> Result<(), String> {
+    let session = vector_core::state::SessionGuard::capture();
+    if !is_v2_community(&community_id) {
+        return Err("Only Concord v2 communities support channel deletion".to_string());
+    }
+    let id_bytes = hex_to_id32(&community_id)?;
+    let ch_id = vector_core::community::ChannelId(hex_to_id32(&channel_id)?);
+    let community = vector_core::db::community::load_community_v2(&CommunityId(id_bytes))?
+        .ok_or("Community not found")?;
+    if community.primary_channel().is_some_and(|p| p.id.0 == ch_id.0) {
+        return Err("The community's first channel can't be deleted".to_string());
+    }
+    let name = community
+        .channel(&ch_id)
+        .map(|c| c.name.clone())
+        .ok_or("Channel not found in Community")?;
+    let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+    vector_core::community::v2::service::delete_channel(&transport, &community, &ch_id, &name).await?;
+    if !session.is_valid() {
+        return Err("account changed during channel delete".to_string());
+    }
+    if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&CommunityId(id_bytes)) {
+        vector_core::VectorCore.register_v2_chats(&c, &session).await;
+    }
     Ok(())
 }
 

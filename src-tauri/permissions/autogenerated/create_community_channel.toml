@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-create-community-channel"
+description = "Enables the create_community_channel command without any pre-configured scope."
+commands.allow = ["create_community_channel"]
+
+[[permission]]
+identifier = "deny-create-community-channel"
+description = "Denies the create_community_channel command without any pre-configured scope."
+commands.deny = ["create_community_channel"]

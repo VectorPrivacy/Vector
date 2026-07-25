@@ -843,6 +843,8 @@ pub fn run() {
             commands::community::revoke_public_invite,
             commands::community::update_community_metadata,
             commands::community::rename_community_channel,
+            commands::community::create_community_channel,
+            commands::community::delete_community_channel,
             commands::community::set_community_image,
             commands::community::cache_community_image,
             commands::community::cache_invite_logo,

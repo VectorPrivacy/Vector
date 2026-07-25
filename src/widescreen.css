@@ -1,0 +1,768 @@
+/* ============================================================================
+   Vector Widescreen — multi-pane desktop layout
+   ----------------------------------------------------------------------------
+   Vector's panes (#chats, #chat, #profile, …) are siblings inside
+   `main.container`, shown one at a time by imperative `style.display` writes
+   scattered across main.js. Widescreen does NOT unwind that: it grids the
+   container and uses `!important` visibility locks, which beat the inline
+   `display: none` those call sites keep writing. Every pane's state logic
+   (headers, message DOM, strOpenChat, the back stack) runs unchanged.
+
+   CONTRACT: every IN-FLOW child of `main.container` must be placed explicitly
+   in §2. Out-of-flow children (`position: fixed`, i.e. every overlay panel)
+   are not grid items and need no placement — only a `left` offset if they
+   should clear the rail.
+
+   `body.ws` is owned by js/widescreen.js (width + logged-in), never by a media
+   query, so the class and the layout can never disagree.
+   ========================================================================= */
+
+:root {
+  --ws-rail-w: 232px;
+  --ws-rail-collapsed-w: 72px;
+  --ws-list-w: 330px;           /* live value; js/widescreen.js persists it */
+  --ws-list-min: 260px;
+  --ws-list-max: 520px;
+  --ws-details-w: 300px;
+  /* Left edge of the "active pane" column (rail + list), for the fixed-position
+     descendants inside the tab panes that can't be grid-placed. */
+  --ws-main-left: calc(var(--ws-rail-w) + var(--ws-list-w));
+
+  /* Surfaces are translucent white over the theme's own root background, so
+     all 7 themes get a coherent rail/list without per-theme overrides. */
+  --ws-rail-bg: rgba(255, 255, 255, 0.024);
+  --ws-list-bg: rgba(255, 255, 255, 0.012);
+  --ws-seam: rgba(255, 255, 255, 0.055);
+  --ws-hover: rgba(255, 255, 255, 0.045);
+}
+
+/* ===================== 0. Widescreen-only furniture ====================== */
+/* These live in the markup permanently (the rail is #navbar re-dressed, so its
+   extras are its children) and must be invisible in single-pane mode. */
+
+#ws-rail-head,
+#ws-rail-shortcuts,
+#ws-rail-spacer,
+#ws-rail-collapse,
+#ws-rail-account,
+#ws-list-resize {
+  display: none;
+}
+
+/* ============================ 1. Shell grid ============================== */
+
+/* Column 4 is the details sidebar. It always exists so opening it animates a
+   width rather than restructuring the grid; `ws-details` gives it its size. */
+body.ws main.container {
+  display: grid;
+  grid-template-columns: var(--ws-rail-w) var(--ws-list-w) minmax(0, 1fr) 0px;
+  grid-template-rows: minmax(0, 1fr);
+  height: 100%;
+  overflow: hidden;
+}
+
+body.ws.ws-details main.container {
+  grid-template-columns: var(--ws-rail-w) var(--ws-list-w) minmax(0, 1fr) var(--ws-details-w);
+}
+
+body.ws.ws-rail-collapsed {
+  --ws-rail-w: var(--ws-rail-collapsed-w);
+}
+
+/* ========================== 2. Pane placement ============================ */
+
+body.ws #chats {
+  grid-column: 2;
+  grid-row: 1;
+  background-color: var(--ws-list-bg);
+  border-right: 1px solid var(--ws-seam);
+  /* `.chats` centres its flow children vertically; at full pane height that
+     would float the composer row into the middle of the list. */
+  justify-content: flex-start;
+  min-height: 0;
+  overflow: hidden;
+}
+
+body.ws #chat,
+body.ws #ws-conv-empty {
+  grid-column: 3;
+  grid-row: 1;
+}
+
+/* The tab panes (Profile / Settings / Invites) and the composer flows are the
+   "ACTIVE PANE": they take the conversation's column rather than covering the
+   list, so the chat list is permanently on screen in widescreen. They stack over
+   #chat / #ws-conv-empty in the same cell and win on z-index. */
+body.ws #profile,
+body.ws #chat-new,
+body.ws #create-group,
+body.ws #invites {
+  grid-column: 3;
+  grid-row: 1;
+  z-index: 30;
+  background-color: #030303;
+}
+
+/* Community details becomes the member sidebar: same pane, same renderer, same
+   moderation controls — docked beside the conversation instead of replacing it. */
+body.ws #group-overview {
+  grid-column: 4;
+  grid-row: 1;
+  z-index: 20;
+  overflow: hidden;
+  background-color: var(--ws-rail-bg);
+  border-left: 1px solid var(--ws-seam);
+}
+
+/* Login can reappear mid-session (Add Profile, bunker re-auth), so it covers
+   the rail too — belt and braces with the logged-in gate in widescreen.js. */
+body.ws #login-form {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  z-index: 500;
+  background-color: #030303;
+}
+
+/* ======================= 3. Visibility locks ============================= */
+
+/* These beat the inline `display: none` that openChat/closeChat/openProfile
+   keep writing. Panes stay live; only their geometry changed. */
+body.ws #navbar {
+  display: flex !important;
+}
+
+body.ws #chats {
+  display: flex !important;
+}
+
+body.ws.ws-chat-open #chat {
+  display: flex !important;
+}
+
+body.ws:not(.ws-chat-open) #ws-conv-empty {
+  display: flex;
+}
+
+/* Pane fade-ins are a single-pane remnant: they mark a whole-SCREEN transition.
+   Here the panes are columns that never leave, so the fade reads as a flash on
+   every chat switch, details toggle and tab change. `.fadein-anim`'s `forwards`
+   fill also means one interrupted mid-flight leaves its pane stuck at the 0%
+   keyframe (opacity: 0).
+
+   Zeroed rather than `animation: none`, deliberately: the open* functions add the
+   class and remove it again on `animationend`, so killing the animation outright
+   would strand the class AND leak a listener per open. A 0s animation still fires
+   the event, so the existing cleanup runs with nothing drawn. */
+body.ws #chat,
+body.ws #chats,
+body.ws #group-overview,
+body.ws #profile,
+body.ws #settings,
+body.ws #invites,
+body.ws #chat-new,
+body.ws #create-group,
+body.ws #ws-rail-account #account {
+  animation-duration: 0s !important;
+  animation-delay: 0s !important;
+}
+
+/* The list is always on screen, so its per-pane back affordances are noise. */
+body.ws #chat-back-btn,
+body.ws #chat-bookmarks-btn {
+  display: none !important;
+}
+
+/* openChat hides the Settings tab so a chat can own the whole screen; in the
+   rail every tab has to stay reachable. (#invites-btn is deliberately absent:
+   it hides when there are no invites, which is still true here.) */
+body.ws #settings-btn {
+  display: flex !important;
+}
+
+/* =================== 4. Un-viewporting the pane internals ================ */
+/* Rules whose viewport assumptions (100% width, bottom: 65px for the mobile
+   navbar) only held when a pane WAS the viewport. */
+
+/* The conversation header joins the flex flow, which also retires the 75px
+   scroll clearance under it and the blur behind an opaque strip. */
+body.ws #chat {
+  height: 100%;
+  min-height: 0;
+}
+
+body.ws #chat > .chat-header {
+  position: relative;
+  backdrop-filter: none;
+  background-color: rgba(22, 22, 22, 0.96);
+  border-bottom: 1px solid var(--ws-seam);
+}
+
+body.ws .chat-messages {
+  padding-top: 12px;
+}
+
+/* The list fills whatever the header block leaves, instead of measuring the
+   viewport with hardcoded insets. */
+body.ws #chat-list {
+  position: relative;
+  inset: auto;
+  flex: 1;
+  min-height: 0;
+  padding-left: 8px;
+  padding-right: 8px;
+  padding-bottom: 8px;
+}
+
+body.ws #chats {
+  padding-top: 12px;
+}
+
+/* The sync bar's -14px lift tucked it under the account row that used to sit
+   above it; that row now lives in the rail footer. */
+body.ws #chats > .sync-line {
+  margin-top: 0;
+  margin-bottom: 8px;
+}
+
+body.ws #chats > .fadeout-bottom {
+  display: none;
+}
+
+/* The active pane starts after the rail AND the list, so every `position: fixed`
+   descendant that used to span the viewport needs that inset. `.profile-content`
+   matters most: the entire profile body lives inside it, and left-unset it drops
+   its banner-anchored Edit button on top of the rail. */
+body.ws .profile-header,
+body.ws .profile-content,
+body.ws .chat-new-header,
+body.ws #settings {
+  left: var(--ws-main-left);
+}
+
+/* Settings is fixed, so it can't be grid-placed; it's inset to the same column
+   by hand. The tab handlers all hide the details pane, so ws-details is normally
+   off here — the variant is for the frame where it hasn't caught up yet. */
+body.ws.ws-details #settings {
+  right: var(--ws-details-w);
+}
+
+/* The details sidebar is a narrow column, so its header joins the flex flow
+   (like the conversation's) instead of being pinned to a viewport edge. */
+body.ws #group-overview > .chat-header {
+  position: relative;
+  backdrop-filter: none;
+  background-color: rgba(22, 22, 22, 0.96);
+  border-bottom: 1px solid var(--ws-seam);
+  flex-shrink: 0;
+}
+
+/* The scroll region is inline-styled `height: 100%`, which overflows once a
+   60px header shares the column. */
+body.ws #group-overview > div:not(.chat-header) {
+  flex: 1;
+  min-height: 0;
+  height: auto !important;
+}
+
+/* Points away from the conversation now that the pane docks on the right. */
+body.ws #group-overview-back-btn .nav-icon {
+  transform: rotate(180deg);
+}
+
+/* The overview's vertical rhythm was drawn for a full phone screen: 100px of
+   lead-in above a 100px avatar, 75px of tail. In a 300px column that pushed the
+   member list below the fold. */
+body.ws #group-overview {
+  --group-overview-avatar: 72px;
+  --group-overview-avatar-lead: 22px;
+  --group-overview-tail: 18px;
+}
+
+body.ws #group-mute-btn {
+  top: 12px;
+  right: 12px;
+}
+
+/* Kick/Ban sit beside the name in a narrow column; let the name give way first. */
+body.ws #group-overview .member-pick-row .compact-member-name {
+  min-width: 0;
+}
+
+body.ws .profile-content,
+body.ws #settings {
+  bottom: 0;
+}
+
+/* Settings is the one pane that was never a card over a backdrop: it relied on
+   being the only thing on screen, so widescreen has to give it a surface. Its
+   rows are built for a phone column, hence the centred measure. */
+body.ws #settings {
+  top: 0;                 /* its 10px inset would let the list peek above it */
+  right: 0;               /* the stock 2px would leave a seam at the pane's edge */
+  background-color: #030303;
+  padding-left: 20px;
+  padding-right: 20px;
+}
+
+/* Settings' rows are built for a phone column, so they get a centred measure —
+   applied to the CHILDREN, not as percentage padding on #settings itself: it is
+   position: fixed, so a percentage there resolves against the viewport rather
+   than the pane and swallows most of the column. */
+body.ws #settings > * {
+  max-width: 760px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* The account row moves into the rail footer (see widescreen.js), so its
+   in-list incarnation must not also reserve 60px at the top of the list. */
+body.ws #ws-rail-account #account {
+  height: auto;
+  background-color: transparent;
+  justify-content: flex-start;
+  width: 100%;
+}
+
+/* ============================== 5. The rail ============================== */
+
+body.ws #navbar {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: var(--ws-rail-w);
+  height: auto;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  padding: 0;
+  gap: 2px;
+  background-color: var(--ws-rail-bg);
+  border-right: 1px solid var(--ws-seam);
+  z-index: 40;
+  overflow: hidden;
+  /* Snaps with its grid column rather than animating out of step with it. */
+}
+
+body.ws #ws-rail-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 58px;
+  flex-shrink: 0;
+  padding: 0 16px;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* The lockup: layered V mark + typeface, optically balanced (the mark is a tall
+   glyph, the typeface a short wordmark, so they can't share a height). */
+#ws-rail-mark {
+  width: 15px;
+  height: 26px;
+  flex-shrink: 0;
+}
+
+#ws-rail-typeface {
+  width: 115px;
+  height: 15px;
+  flex-shrink: 0;
+}
+
+
+/* ---- Rail shortcuts: recent DMs, then the community strip ---- */
+
+body.ws #ws-rail-shortcuts {
+  display: flex;
+  flex-direction: column;
+  /* Grows to its content but yields first when the rail runs short, scrolling
+     internally so the nav tabs and account footer are never pushed off. */
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 2px 0 6px;
+  /* Same bottom fade as the chat list, but as a MASK rather than a gradient
+     overlay: the rail's surface is a translucent tint over whatever the theme's
+     root colour is, so there's no single colour to fade into. */
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent);
+}
+
+/* The chat list's chunky 10px thumb is too much furniture inside a 232px rail. */
+body.ws #ws-rail-shortcuts::-webkit-scrollbar {
+  width: 6px;
+}
+
+/* Hairline rule between the two groups, only when both actually have rows. */
+body.ws #ws-rail-dms.has-rows + #ws-rail-spaces.has-rows {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--ws-seam);
+}
+
+.ws-rail-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 8px;
+  padding: 4px 8px;
+  border-radius: 10px;
+  min-width: 0;
+  transition: background-color 0.12s ease;
+}
+
+.ws-rail-item:hover {
+  background-color: var(--ws-hover);
+}
+
+.ws-rail-item.active {
+  background-color: color-mix(in srgb, var(--accent-color, #59fcb3) 13%, transparent);
+}
+
+.ws-rail-item-avatar {
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  object-fit: cover;
+  border-radius: 50%;
+  margin: 0;
+}
+
+/* Communities read as rounded squares, DMs as circles: a room is not a person.
+   createAvatarImg hardcodes an inline `border-radius: 50%`, hence !important. */
+.ws-rail-item.is-community .ws-rail-item-avatar {
+  border-radius: 8px !important;
+}
+
+.ws-rail-item-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  text-align: left;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.ws-rail-item:hover .ws-rail-item-name,
+.ws-rail-item.active .ws-rail-item-name {
+  color: #fff;
+}
+
+.ws-rail-item-badge {
+  flex-shrink: 0;
+  min-width: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background-color: var(--primary-color, #33db98);
+  color: #000;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 19px;
+  text-align: center;
+}
+
+/* Muted rooms still count, they just stop shouting. */
+.ws-rail-item-badge.muted {
+  background-color: rgba(255, 255, 255, 0.16);
+  color: rgba(255, 255, 255, 0.75);
+}
+
+/* Collapsed: avatars only, with the badge as a corner dot. */
+body.ws.ws-rail-collapsed .ws-rail-item {
+  justify-content: center;
+  gap: 0;
+  position: relative;
+}
+
+body.ws.ws-rail-collapsed .ws-rail-item-name {
+  display: none;
+}
+
+body.ws.ws-rail-collapsed .ws-rail-item-badge {
+  position: absolute;
+  top: 2px;
+  right: 6px;
+  min-width: 9px;
+  height: 9px;
+  padding: 0;
+  border-radius: 50%;
+  font-size: 0;
+  line-height: 0;
+  overflow: hidden;
+}
+
+/* Nav rows: icon-left + label, with a neutral pill on the active tab. */
+body.ws #navbar .navbar-btn {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 11px;
+  margin: 0 8px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  flex-shrink: 0;
+  transition: background-color 0.12s ease, opacity 0.12s ease;
+}
+
+body.ws #navbar .navbar-btn:hover {
+  background-color: var(--ws-hover);
+}
+
+/* Selected tab reads as a neutral surface, not an accent: the accent is spent on
+   unread badges and the open conversation, and a green tab competed with both. */
+body.ws #navbar .navbar-btn:not(.navbar-btn-inactive) {
+  background-color: var(--ws-hover);
+}
+
+body.ws #navbar .navbar-icon {
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  flex-shrink: 0;
+}
+
+body.ws #navbar .navbar-text {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  text-align: left;
+}
+
+/* The dot rides the row's right edge here, not the icon's corner. */
+body.ws #navbar .navbar-btn .update-notification-dot {
+  top: 50%;
+  right: 10px;
+  margin-top: -4px;
+}
+
+body.ws #ws-rail-spacer {
+  display: block;
+  flex: 1;
+  min-height: 8px;
+}
+
+body.ws #ws-rail-collapse {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 11px;
+  margin: 0 8px 6px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  flex-shrink: 0;
+  opacity: 0.4;
+  transition: opacity 0.12s ease, background-color 0.12s ease;
+}
+
+body.ws #ws-rail-collapse:hover {
+  opacity: 1;
+  background-color: var(--ws-hover);
+}
+
+body.ws #ws-rail-collapse .navbar-icon {
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  flex-shrink: 0;
+  transition: transform 0.18s cubic-bezier(0.33, 1, 0.68, 1);
+}
+
+body.ws.ws-rail-collapsed #ws-rail-collapse .navbar-icon {
+  transform: rotate(180deg);
+}
+
+body.ws #ws-rail-account {
+  display: block;
+  flex-shrink: 0;
+  padding: 8px;
+  border-top: 1px solid var(--ws-seam);
+}
+
+/* The re-parented #account block: left-aligned name over status, full width.
+   The status sits one avatar + gap in from the edge so it lines up under the NAME,
+   which means the name row itself has to be flush left (it ships centred). */
+body.ws #ws-rail-account #account {
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body.ws #ws-rail-account .profile-header-info {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  max-width: 100%;
+  min-width: 0;
+  width: 100%;
+  overflow: hidden;
+}
+
+body.ws #ws-rail-account .profile-header-name-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+
+body.ws #ws-rail-account #account-name {
+  margin: 0;
+  max-width: 100%;
+  font-size: 14px;
+  text-align: left;
+}
+
+body.ws #ws-rail-account #account-status {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  padding-left: 30px;
+  font-size: 12px;
+  text-align: left;
+}
+
+/* Collapsed: icons only. The account chip keeps its avatar (that IS its icon)
+   and drops just the text. */
+body.ws.ws-rail-collapsed #ws-rail-typeface,
+body.ws.ws-rail-collapsed #navbar .navbar-text,
+body.ws.ws-rail-collapsed #ws-rail-collapse .navbar-text,
+body.ws.ws-rail-collapsed #ws-rail-account #account-name,
+body.ws.ws-rail-collapsed #ws-rail-account #account-status {
+  display: none;
+}
+
+body.ws.ws-rail-collapsed #ws-rail-head {
+  padding: 0;
+  justify-content: center;
+}
+
+body.ws.ws-rail-collapsed #navbar .navbar-btn,
+body.ws.ws-rail-collapsed #ws-rail-collapse {
+  justify-content: center;
+  gap: 0;
+}
+
+body.ws.ws-rail-collapsed #ws-rail-account {
+  display: flex;
+  justify-content: center;
+}
+
+body.ws.ws-rail-collapsed #ws-rail-account .profile-header-info,
+body.ws.ws-rail-collapsed #ws-rail-account .profile-header-name-row {
+  width: auto;
+  align-items: center;
+}
+
+/* ========================= 6. The list resizer =========================== */
+
+body.ws #ws-list-resize {
+  display: block;
+  grid-column: 2;
+  grid-row: 1;
+  justify-self: end;
+  width: 11px;
+  margin-right: -5px;
+  z-index: 45;
+  cursor: col-resize;
+  position: relative;
+}
+
+body.ws #ws-list-resize::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 5px;
+  width: 1px;
+  background-color: var(--accent-color, #59fcb3);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+body.ws #ws-list-resize:hover::after,
+body.ws.ws-resizing #ws-list-resize::after {
+  opacity: 0.7;
+}
+
+/* A drag must not select list text or hand the pointer to a row underneath. */
+body.ws.ws-resizing {
+  cursor: col-resize;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+body.ws.ws-resizing #chats,
+body.ws.ws-resizing #chat {
+  pointer-events: none;
+}
+
+/* Column changes snap rather than animate. Transitioning `grid-template-columns`
+   relayouts every pane on every frame, and column 3 holds the message list — a
+   1000-row relayout per frame for 180ms of easing is the worst trade in the file.
+   Panes that want motion should animate transform/opacity instead. */
+
+/* ====================== 7. Empty conversation pane ======================= */
+
+#ws-conv-empty {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  min-height: 0;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Full stacked lockup here (unlike the rail's cropped shield) — at this size
+   the wordmark reads, and the watermark wants the whole mark. */
+#ws-conv-empty img {
+  width: 128px;
+  height: 132px;
+  opacity: 0.1;
+}
+
+#ws-conv-empty p {
+  margin: 0;
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.35);
+}
+
+/* ===================== 8. Widescreen list-row polish ===================== */
+
+/* The 120px reservation for avatar + timestamp + badge was tuned against a
+   full-viewport list; in a 330px pane it ate the name. */
+body.ws .chatlist-contact-preview {
+  width: calc(100% - 88px);
+}
+
+/* `margin: auto` on both sides floated the timestamp into the middle of the
+   gap it was meant to sit at the end of. */
+body.ws .chatlist-contact-timestamp {
+  margin-left: auto;
+  margin-right: 8px;
+}
+
+/* The pair of composer buttons has less room per button here, and "Group Chat"
+   was wrapping to a second line while "New Chat" stayed on one. */
+body.ws .new-chat-btn {
+  font-size: 13px;
+}
+
+body.ws .new-chat-btn .icon {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+}
+
+/* The list stays on screen while a chat is open, so the open chat needs to
+   read as selected. */
+body.ws .chatlist-contact.ws-active {
+  background-color: color-mix(in srgb, var(--accent-color, #59fcb3) 9%, transparent);
+  border-color: color-mix(in srgb, var(--accent-color, #59fcb3) 45%, transparent);
+}
+
+/* Mobile taps a row and leaves; a desktop pointer lives over the list. */
+body.ws .chatlist-contact {
+  cursor: pointer;
+}

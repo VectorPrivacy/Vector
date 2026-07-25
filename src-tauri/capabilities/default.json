@@ -95,6 +95,8 @@
     "allow-revoke-public-invite",
     "allow-update-community-metadata",
     "allow-rename-community-channel",
+    "allow-create-community-channel",
+    "allow-delete-community-channel",
     "allow-set-community-image",
     "allow-cache-community-image",
     "allow-cache-invite-logo",

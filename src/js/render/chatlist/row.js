@@ -24,8 +24,10 @@ function renderChat(chat, primaryColor) {
     const profile = !isGroup ? getProfile(chat.id) : null;
 
     // Muted DMs stay silent; muted groups still surface pings (mentions of
-    // you / admin @everyone). See `computeRowBadgeCount` for the policy.
-    const nUnread = computeRowBadgeCount(chat);
+    // you / admin @everyone). See `computeRowBadgeCount` for the policy. A community
+    // row totals its channels (`computeListRowBadgeCount`) so a collapsed channel's
+    // unread still shows.
+    const nUnread = computeListRowBadgeCount(chat);
 
     // The Chat container (The ID is the Contact's npub).
     // Theme accent piped through CSS var so theme switches re-color the
@@ -190,6 +192,19 @@ function renderChat(chat, primaryColor) {
             ? '99+'
             : (chat.chat_type === 'Community' && nUnread >= COMMUNITY_UNREAD_PLUS_THRESHOLD ? `${nUnread}+` : String(nUnread));
         divContact.appendChild(spanCount);
+    }
+
+    // Multi-channel community: an expander for the nested channel list, which is the
+    // only route to a channel that isn't the community's primary one.
+    const communityId = chat.metadata?.custom_fields?.community_id;
+    if (communityId && communityHasChannelList(communityId)) {
+        const expander = document.createElement('div');
+        expander.className = 'chatlist-expander btn';
+        expander.classList.toggle('expanded', communityChannelsShown(communityId));
+        expander.title = 'Channels';
+        expander.innerHTML = '<span class="icon icon-chevron-down"></span>';
+        expander.onclick = (e) => { e.stopPropagation(); toggleCommunityExpanded(communityId); };
+        divContact.appendChild(expander);
     }
 
     // Right-click (desktop) / long-press (mobile) context menu.

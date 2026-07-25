@@ -1763,11 +1763,12 @@ function finalizePendingMessage(chatId, pendingId, eventId) {
 }
 
 /**
- * Compute a timestamp for sorting chats, falling back to metadata for empty groups.
+ * One chat's own activity time: its newest conversation message, or its join/creation
+ * time when it has none.
  * @param {Chat} chat
  * @returns {number}
  */
-function getChatSortTimestamp(chat) {
+function getChatOwnSortTimestamp(chat) {
     // Find the latest actual conversation message — skip system events so a
     // wallpaper change doesn't bubble the chat to the top of the chatlist.
     let lastMessage = null;
@@ -1779,24 +1780,45 @@ function getChatSortTimestamp(chat) {
             break;
         }
     }
-    let lastActivity = lastMessage?.at || 0;
+    if (lastMessage?.at) return lastMessage.at;
 
-    if (!lastActivity) {
-        // No real messages yet — fall back to join/creation time so a fresh community
-        // sorts by when we joined, not to the bottom. custom_fields values are strings.
-        let t = Number(
-            chat.metadata?.created_at ||
-            chat.metadata?.custom_fields?.created_at ||
-            chat.created_at ||
-            0
-        );
-        // Mixed clocks: custom_fields.created_at is ms, the chat row's created_at is
-        // SECONDS — unnormalized seconds sort 1000× older than every ms timestamp.
-        if (t > 0 && t < 1e12) t *= 1000;
-        lastActivity = t;
+    // No real messages yet — fall back to join/creation time so a fresh community
+    // sorts by when we joined, not to the bottom. custom_fields values are strings.
+    let t = Number(
+        chat.metadata?.created_at ||
+        chat.metadata?.custom_fields?.created_at ||
+        chat.created_at ||
+        0
+    );
+    // Mixed clocks: custom_fields.created_at is ms, the chat row's created_at is
+    // SECONDS — unnormalized seconds sort 1000× older than every ms timestamp.
+    if (t > 0 && t < 1e12) t *= 1000;
+    return t || 0;
+}
+
+/**
+ * Compute a timestamp for sorting chats, falling back to metadata for empty groups.
+ * A community's row stands in for the whole community, so it sorts on the newest
+ * activity across ALL its channels — otherwise a busy secondary channel leaves the
+ * community stranded at the bottom of the list behind its own quiet primary row.
+ * @param {Chat} chat
+ * @returns {number}
+ */
+function getChatSortTimestamp(chat) {
+    let lastActivity = getChatOwnSortTimestamp(chat);
+    const communityId = chatIsGroup(chat) && isPrimaryChannelChat(chat)
+        ? chat.metadata?.custom_fields?.community_id
+        : null;
+    if (communityId) {
+        for (const sibling of arrChats) {
+            if (sibling === chat || sibling.chat_type !== 'Community') continue;
+            if (sibling.metadata?.custom_fields?.community_id !== communityId) continue;
+            // Own-timestamp only: two rows of one community both claiming to be primary
+            // (legacy rows with no stamp) would otherwise recurse into each other.
+            lastActivity = Math.max(lastActivity, getChatOwnSortTimestamp(sibling));
+        }
     }
-
-    return lastActivity || 0;
+    return lastActivity;
 }
 
 /**
@@ -3051,6 +3073,8 @@ async function setupRustListeners() {
         dmsgClearDeleteMetaCache();
         try {
             const summary = await invoke('get_community', { communityId });
+            // A folded control edition can add, rename or tombstone channels.
+            setCommunityChannels(communityId, summary.channels);
             for (const c of arrChats) {
                 if (c.metadata?.custom_fields?.community_id !== communityId) continue;
                 const f = c.metadata.custom_fields;
@@ -5275,6 +5299,8 @@ async function login(skipAnimations = false) {
 
                 // Finished boot!
                 fInit = false;
+                // Widescreen waits for a live session (it docks the account chip).
+                wsUpdate();
                 // Catch a share that landed between the cold-start poll and now (the live listener
                 // skips events while fInit was still true).
                 consumePendingShare();
@@ -6609,8 +6635,7 @@ function setChatHeader(chat, profile, isGroup, fNotes) {
         domChatAvatar = createAvatarImg(groupAvatarSrc, 22, true);
         domChatAvatar.classList.add('btn');
         domChatAvatar.onclick = () => {
-            closeChat();
-            openGroupOverview(chat);
+            openCommunityDetails(chat);
         };
     } else {
         const chatAvatarSrc = getProfileAvatarSrc(profile);
@@ -6628,10 +6653,9 @@ function setChatHeader(chat, profile, isGroup, fNotes) {
         domChatContact.classList.remove('btn');
         domChatContact.onclick = null;
     } else if (isGroup) {
-        domChatContact.textContent = chat?.metadata?.custom_fields?.name || `Group ${strOpenChat.substring(0, 10)}...`;
+        domChatContact.textContent = communityChatTitle(chat) || `Group ${strOpenChat.substring(0, 10)}...`;
         domChatContact.onclick = () => {
-            closeChat();
-            openGroupOverview(chat);
+            openCommunityDetails(chat);
         };
         domChatContact.classList.add('btn');
     } else {
@@ -6930,8 +6954,7 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             domChatAvatar = createAvatarImg(groupAvatarSrc, 22, true);
             domChatAvatar.classList.add('btn');
             domChatAvatar.onclick = () => {
-                closeChat();
-                openGroupOverview(chat);
+                openCommunityDetails(chat);
             };
         } else {
             // DM: use profile avatar or placeholder
@@ -6947,10 +6970,9 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             domChatContactStatus.textContent = 'Encrypted Notes to Self';
             domChatContactStatus.classList.remove('typing-indicator-text');
         } else if (isGroup) {
-            domChatContact.textContent = chat?.metadata?.custom_fields?.name || `Group ${strOpenChat.substring(0, 10)}...`;
+            domChatContact.textContent = communityChatTitle(chat) || `Group ${strOpenChat.substring(0, 10)}...`;
             domChatContact.onclick = () => {
-                closeChat();
-                openGroupOverview(chat);
+                openCommunityDetails(chat);
             };
             domChatContact.classList.add('btn');
 
@@ -8340,6 +8362,7 @@ async function openChat(contact) {
     const isGroup = chatIsGroup(chat);
     const profile = !isGroup ? getProfile(contact) : null;
     strOpenChat = contact;
+    wsSyncOpenChat();
     updateSelfDestructIndicator(contact);
     // Warm the command-bot snapshot so the attachment menu's Commands item
     // (bot-chats only) is ready by the time the panel opens.
@@ -8736,6 +8759,7 @@ async function closeChat() {
     domChatNew.style.display = 'none';
     domChat.style.display = 'none';
     strOpenChat = "";
+    wsSyncOpenChat();
     previousChatBeforeProfile = ""; // Clear when closing chat
     nLastTypingIndicator = 0;
     syncBackendActiveChat();
@@ -9019,7 +9043,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
     if (avatarSrc) {
         const img = document.createElement('img');
         img.src = avatarSrc;
-        img.style.cssText = 'width:100px;height:100px;object-fit:cover;border-radius:50%;';
+        img.className = 'group-overview-avatar-img';
         img.onerror = () => { img.replaceWith(domGroupOverviewAvatar); domGroupOverviewAvatar.style.display = 'inline-block'; };
         domGroupOverviewAvatar.style.display = 'none';
         avatarParent.appendChild(img);
@@ -9558,7 +9582,9 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         popBack('group-overview');
         domGroupOverview.style.display = 'none';
         domGroupOverview.removeAttribute('data-group-id');
-        openChat(chat.id);
+        // Widescreen docks this as a sidebar beside a still-open conversation, so
+        // dismissing it must not re-enter the chat (and rebuild its message DOM).
+        if (!wsActive()) openChat(chat.id);
     };
 }
 
@@ -10541,7 +10567,9 @@ function editProfileDescription() {
  * A utility to "select" one Navbar item, deselecting the rest automatically.
  */
 function navbarSelect(strSelectionID = '') {
-    for (const navItem of domNavbar.querySelectorAll('div')) {
+    // Scoped to the tab buttons: the navbar also carries the widescreen rail's
+    // head, collapse toggle and account chip, which must not be dimmed.
+    for (const navItem of domNavbar.querySelectorAll('.navbar-btn')) {
         if (strSelectionID === navItem.id) navItem.classList.remove('navbar-btn-inactive');
         else navItem.classList.add('navbar-btn-inactive');
     }
@@ -10957,6 +10985,7 @@ window.addEventListener("DOMContentLoaded", async () => {
                 
                 // Mark init as complete so renderChatlist works
                 fInit = false;
+                wsUpdate();
                 // Catch a share that landed between the cold-start poll and now (the live listener
                 // skips events while fInit was still true).
                 consumePendingShare();
@@ -12776,9 +12805,13 @@ document.addEventListener('keydown', (e) => {
 function adjustSize() {
     // Chat List: resize the list to fit within the screen after the upper Account area
     // Note: no idea why the `- 50px` is needed below, magic numbers, I guess.
-    const nNewChatBtnHeight = domChatNewDM?.getBoundingClientRect().height || 0;
-    const nNavbarHeight = domNavbar.getBoundingClientRect().height;
-    domChatList.style.maxHeight = (window.innerHeight - (domChatList.offsetTop + nNewChatBtnHeight + nNavbarHeight)) + 50 + 'px';
+    // Widescreen sizes the list by flex instead: this math treats the list as the
+    // viewport, and would read the full-height rail as a viewport-tall navbar.
+    if (!wsActive()) {
+        const nNewChatBtnHeight = domChatNewDM?.getBoundingClientRect().height || 0;
+        const nNavbarHeight = domNavbar.getBoundingClientRect().height;
+        domChatList.style.maxHeight = (window.innerHeight - (domChatList.offsetTop + nNewChatBtnHeight + nNavbarHeight)) + 50 + 'px';
+    }
 
     // Re-calculate chat input size on window resize (text may reflow)
     autoResizeChatInput();
