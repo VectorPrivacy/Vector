@@ -392,11 +392,19 @@ function _dmsgPositionToolbar(rowEl) {
     // domChatMessages, so it scrolls with the content automatically and no
     // per-frame reposition is needed during scroll.
     const tbW = _dmsgToolbarEl.offsetWidth || 140;
+    const tbH = _dmsgToolbarEl.offsetHeight || 34;
     const rowTop = rowEl.offsetTop;
     const rowRight = rowEl.offsetLeft + rowEl.offsetWidth;
 
     // Anchor: top-right of the row, raised so it overlaps the row above.
-    let top = rowTop - 16;
+    //
+    // A streak continuation has no header and only a 1px gap, so its first line of TEXT
+    // starts at the row's top edge — the standard lift drops the toolbar straight onto it.
+    // Lift those until only the last few pixels overlap the row: covering a little more of
+    // the row above (same author, same streak) beats covering the line you're hovering to
+    // act on. Derived from the measured height so a taller toolbar stays clear.
+    const lift = rowEl.dataset.streak === 'continuation' ? tbH - 4 : 16;
+    let top = rowTop - lift;
     let left = rowRight - tbW - 8;
 
     // Don't push above the very top of the scroll content.
