@@ -1928,6 +1928,41 @@ function createAvatarImg(src, size, isGroup = false) {
 }
 
 /**
+ * The name cell of a member-style row (`.member-pick-row`): the display name plus any
+ * inline markers. Shared by the community member list, the banlist and the invite
+ * picker so all three truncate identically and mark bots the same way the chat list
+ * and profile do.
+ *
+ * The cell — not the name — carries the row's flex growth, so the name can shrink and
+ * ellipsize instead of pushing the row's trailing controls out of the container.
+ *
+ * @param {string} display - The text to show (a real name, or a shortened npub).
+ * @param {Profile|null} profile - The member's profile, for the bot marker.
+ * @param {boolean} twemoji - Whether `display` is a real name that may carry emoji.
+ * @returns {{cell: HTMLDivElement, nameEl: HTMLDivElement}}
+ */
+function buildMemberNameCell(display, profile, twemoji) {
+    const cell = document.createElement('div');
+    cell.className = 'member-pick-identity';
+
+    const nameEl = document.createElement('div');
+    nameEl.className = 'compact-member-name';
+    nameEl.textContent = display;
+    if (twemoji) twemojify(nameEl);
+    cell.appendChild(nameEl);
+
+    if (profile?.bot) {
+        const botIcon = document.createElement('span');
+        botIcon.className = 'icon icon-bot member-pick-bot';
+        botIcon.addEventListener('mouseenter', () => showGlobalTooltip('Bot', botIcon));
+        botIcon.addEventListener('mouseleave', hideGlobalTooltip);
+        cell.appendChild(botIcon);
+    }
+
+    return { cell, nameEl };
+}
+
+/**
  * Tracks if we're in the initial chat open period for auto-scrolling
  */
 let chatOpenAutoScrollTimer = null;
@@ -9313,11 +9348,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                 const avatar = createAvatarImg(profile ? getProfileAvatarSrc(profile) : null, 25, false);
                 avatar.className = 'member-pick-avatar';
                 row.appendChild(avatar);
-                const nameSpan = document.createElement('div');
-                nameSpan.className = 'compact-member-name';
-                nameSpan.textContent = display;
-                if (name) twemojify(nameSpan);
-                row.appendChild(nameSpan);
+                row.appendChild(buildMemberNameCell(display, profile, !!name).cell);
                 // Role-engine moderation: shown to anyone who holds KICK/BAN AND outranks this member
                 // (the owner outranks all; an admin outranks non-admins — never the owner, never self).
                 // Two tiers (§7 escalation ladder): KICK is cooperative + soft (they self-remove, can
@@ -9422,12 +9453,9 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                     av.className = 'member-pick-avatar';
                     av.style.opacity = '0.5';
                     row.appendChild(av);
-                    const ns = document.createElement('div');
-                    ns.className = 'compact-member-name';
-                    ns.textContent = disp;
-                    ns.style.opacity = '0.6';
-                    if (nm) twemojify(ns);
-                    row.appendChild(ns);
+                    const banned = buildMemberNameCell(disp, p, !!nm);
+                    banned.cell.style.opacity = '0.6';
+                    row.appendChild(banned.cell);
                     const unbanBtn = document.createElement('button');
                     unbanBtn.className = 'cmt-btn cmt-btn-sm cmt-btn-secondary';
                     unbanBtn.title = 'Unban';
@@ -13066,11 +13094,8 @@ function renderCreateGroupList(filterText = '') {
         avatar.className = 'member-pick-avatar';
         row.appendChild(avatar);
 
-        const nameSpan = document.createElement('div');
-        nameSpan.className = 'compact-member-name';
-        nameSpan.textContent = name || (npub.substring(0, 10) + '...' + npub.substring(npub.length - 6));
-        if (name) twemojify(nameSpan);
-        row.appendChild(nameSpan);
+        const display = name || (npub.substring(0, 10) + '...' + npub.substring(npub.length - 6));
+        row.appendChild(buildMemberNameCell(display, profile, !!name).cell);
 
         // No admin toggle at create: invitees haven't joined yet, so a role grant has no
         // member to bind to (you promote them from Group Info after they accept).

@@ -10700,6 +10700,7 @@ select:disabled:hover {
     display: flex;
     align-items: center;
     gap: 6px;
+    flex-shrink: 0;
     transition: opacity 0.15s ease;
 }
 @media (hover: hover) {
@@ -10727,6 +10728,22 @@ select:disabled:hover {
 
 .member-pick-row .member-pick-avatar {
     margin-right: 10px;
+    flex-shrink: 0;
+    position: relative;
+    z-index: 1;
+}
+
+/* Name + inline markers (bot chip) for a member-style row. The cell owns the flex
+   growth and, crucially, `min-width: 0`: a flex item defaults to `min-width: auto`,
+   which refuses to shrink below its content and shoved the Kick/Ban buttons clean out
+   of the member list. The name truncates here so the row's trailing controls always
+   keep their space. */
+.member-pick-identity {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+    min-width: 0;
     position: relative;
     z-index: 1;
 }
@@ -10734,10 +10751,27 @@ select:disabled:hover {
 .compact-member-name {
     color: #f7f4f4;
     font-size: 14px;
-    flex: 1;
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     text-align: left;
     position: relative;
     z-index: 1;
+}
+
+/* Bot marker, same glyph + accent the chat list and profile use. Sized to the name's
+   cap height; `position: relative` and `margin: 0` undo the base `.icon` absolute
+   inset + auto margins (which would centre it and push its siblings apart). */
+.member-pick-bot {
+    position: relative;
+    width: 14px;
+    height: 14px;
+    margin: 0;
+    flex-shrink: 0;
+    display: inline-block;
+    background-color: var(--icon-color-primary, #59fcb3);
 }
 
 /* Compact member list emoji styling */
