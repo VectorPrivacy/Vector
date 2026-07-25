@@ -560,7 +560,7 @@ async fn probe_invites(since_hours: u64, from: Option<&str>) {
     // Unwrap each, tally inner kinds, detail every invite bundle.
     let mut by_kind: BTreeMap<u16, usize> = BTreeMap::new();
     let mut undecryptable = 0usize;
-    let mut invites_found: Vec<(nostr_sdk::PublicKey, u64, vector_core::community::invite::CommunityInvite)> = Vec::new();
+    let mut invites_found: Vec<(nostr_sdk::PublicKey, u64, vector_core::community::invite::CommunityInvite, nostr_sdk::EventId, u64)> = Vec::new();
     let mut seen_senders: HashSet<nostr_sdk::PublicKey> = HashSet::new();
     for ev in union.values() {
         match nostr_sdk::nips::nip59::UnwrappedGift::from_gift_wrap(&keys, ev).await {
@@ -571,7 +571,7 @@ async fn probe_invites(since_hours: u64, from: Option<&str>) {
                 if k == COMMUNITY_INVITE_BUNDLE {
                     if let Some(inv) = vector_core::community::invite::parse_invite_rumor(g.rumor.kind, &g.rumor.content) {
                         if from_pk.map(|p| p == g.sender).unwrap_or(true) {
-                            invites_found.push((g.sender, g.rumor.created_at.as_secs(), inv));
+                            invites_found.push((g.sender, g.rumor.created_at.as_secs(), inv, ev.id, ev.created_at.as_secs()));
                         }
                     }
                 }
@@ -600,16 +600,18 @@ async fn probe_invites(since_hours: u64, from: Option<&str>) {
         println!("    NONE. No COMMUNITY_INVITE_BUNDLE gift wrap for this account on these relays in-window.");
         println!("    → the invite never reached these relays (sender-side / relay-mismatch), OR it is older than {since_hours}h.");
     }
-    invites_found.sort_by_key(|(_, ts, _)| *ts);
-    for (sender, ts, inv) in &invites_found {
+    invites_found.sort_by_key(|(_, ts, _, _, _)| *ts);
+    for (sender, ts, inv, wrap_id, wrap_ts) in &invites_found {
         println!(
-            "    • '{}'  ({}…)\n        from {}\n        sent {}  relays {}  channels {}",
+            "    • '{}'  ({}…)\n        from {}\n        sent {}  relays {}  channels {}\n        wrap {}  outer_ts {}",
             inv.name,
             &inv.community_id[..inv.community_id.len().min(16)],
             sender.to_bech32().unwrap_or_else(|_| sender.to_hex()),
             ts,
             inv.relays.len(),
             inv.channels.len(),
+            wrap_id.to_hex(),
+            wrap_ts,
         );
     }
 }

@@ -26,7 +26,9 @@ fn is_zero_u64(n: &u64) -> bool {
 pub struct InviteChannel {
     pub id: String,
     pub key: String,
-    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    /// Always serialized: v0.4.0 readers have no `serde(default)` here, so an omitted
+    /// epoch fails their whole bundle/list parse. Never add `skip_serializing_if`.
+    #[serde(default)]
     pub epoch: u64,
     pub name: String,
 }
@@ -216,6 +218,18 @@ mod tests {
         assert!(parsed.relays.len() <= super::super::MAX_COMMUNITY_RELAYS);
         let member = accept_invite(&parsed).unwrap();
         assert!(member.relays.len() <= super::super::MAX_COMMUNITY_RELAYS);
+    }
+
+    #[test]
+    fn epoch_zero_channel_serializes_the_field_explicitly() {
+        // v0.4.0 wire contract: InviteChannel.epoch has no serde(default) on shipped
+        // clients, so it must appear in the JSON even at 0 — in the invite bundle AND
+        // in every CommunityInvite embedded in a Community List blob.
+        let owner = Community::create("HQ", "general", vec!["wss://r1".into()]);
+        let bundle = build_invite(&owner);
+        assert_eq!(bundle.channels[0].epoch, 0);
+        let json = bundle.to_json().unwrap();
+        assert!(json.contains("\"epoch\":0"), "epoch must never be omitted: {json}");
     }
 
     #[test]
