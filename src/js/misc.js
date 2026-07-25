@@ -837,9 +837,86 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// Referral params are DELIBERATE — someone chose to share credit with someone
+// else, and a messenger that strips them can't share a referral link at all.
+// The line: a stable identifier saying WHO gets credit stays; a per-click
+// fingerprint the ad network minted for this one click (cjevent, irclickid,
+// fbclid) goes. Never add a name from here to TRACKING_PARAMS_GLOBAL.
+const REFERRAL_PARAM_RE = /^(?:tag|partner|wmlspartner|campid|a(?:f|ff)id|affname|aff|aff_[a-z_]+|affiliate(?:_id)?|ref|refcode|ref_code|referral(?:_?code)?|invite(?:_?code)?|invited_by|via|promo(?:_?code)?|coupon|discount(?:_?code)?|sponsor|supporter|creator|epic_(?:affiliate|creator_id))$/i;
+
+// Tracking parameters common to every site. Sources: AdGuard TrackParamFilter,
+// ClearURLs, Brave's query filter. Hoisted to module scope: linkify runs this
+// per message, and rebuilding the list per call showed up as pure waste.
+const TRACKING_PARAMS_GLOBAL = [
+  // Facebook/Meta
+  'fbclid', 'fbadid', 'fb_action_ids', 'fb_action_types', 'fb_comment_id',
+  'fb_ref', 'fb_source', 'action_object_map', 'action_type_map',
+  'action_ref_map', 'mibextid', 'extid',
+
+  // Google Ads / Shopping / Analytics
+  'gclid', 'gclsrc', 'dclid', 'gbraid', 'wbraid', 'srsltid',
+  'gad_campaignid', '_ga', '_gl', 'usqp',
+
+  // Microsoft/Bing
+  'msclkid',
+
+  // Yandex
+  'yclid', 'ysclid', 'clckid', '_openstat',
+
+  // Twitter/X — bare 's'/'t' stay in the Twitter branch: globally they eat
+  // WordPress search (?s=) and everyone else's timestamps (?t=).
+  'twclid', '__twitter_impression',
+
+  // TikTok / Twitch
+  'ttclid', 'tt_medium', 'tt_content',
+
+  // Reddit / Pinterest / LinkedIn ad click IDs
+  'rdt_cid', 'epik', 'li_fat_id',
+
+  // Per-click IDs minted by affiliate networks (Impact, CJ, Awin, ShareASale,
+  // TradeDoubler, Rakuten). The affiliate's own ID is a referral, not these.
+  'irclickid', 'irgwc', 'ir_campaignid', 'ir_adid', 'ir_partnerid',
+  'cjevent', 'cjdata', 'awc', 'sscid', 'tduid', 'ranMID', 'ranEAID',
+  'ranSiteID', 'clickid', 'iclid', 'external_click_id', 'rb_clickid',
+  'wickedid', 'sms_click', 'sms_source', 'sms_uph',
+
+  // Email + marketing automation
+  'mc_cid', 'mc_eid', 'mc_tc', 'ck_subscriber_id', 'ml_subscriber',
+  'ml_subscriber_hash', 'vero_conv', 'vero_id', 'mkt_tok', '__s',
+  'elq', 'elqTrackId', 'elqaid', 'elqat', 'elqak',
+
+  // HubSpot
+  '_hsenc', '_hsmi', '__hssc', '__hstc', '__hsfp', 'hsCtaTracking',
+
+  // Adobe / AT Internet / Webtrekk
+  's_cid', 'sc_cid', 'adobe_mc_ref', 'adobe_mc_sdid', 'xtor',
+  'wt_mc', 'wt_zmc', 'wtrid',
+
+  // Publisher CMS campaign tags
+  'cmpid', 'ncid', 'ftag', 'os_ehash', 'guccounter', 'guce_referrer',
+  'guce_referrer_sig', 'tracking_source', 'recommended_by',
+
+  // Alibaba's pair, pasted around by AliExpress/Taobao/Tmall/Lazada/Bilibili
+  'spm', 'scm',
+
+  // Generic tracking
+  'referrer', 'source', 'campaign', 'medium'
+];
+
+// Whole `utm_` namespace, plus its clones under a vendor prefix (hmb_, mtm_,
+// pk_, gad_, at_, int_, itm_) — matching the shape catches prefixes we've never
+// seen. The ≤4-char prefix bound spares `search_term` / `custom_content`.
+const TRACKING_UTM_CLONE_RE = /^(?:utm_.|[a-z][a-z0-9]{0,3}_(?:source|medium|campaign|term|content|source_platform|creative_format|marketing_tactic)$)/i;
+
+// Namespaces a single analytics vendor owns outright, so nothing functional can
+// live under them: Matomo, HubSpot Ads, AppsFlyer, Adjust, Branch, Blueshift,
+// Sailthru, Vox, Vero, AT Internet's mail tags, Temu.
+const TRACKING_NAMESPACE_RE = /^(?:mtm_|pk_|hsa_|af_|adj_|adjust_|_branch_|bsft_|_sgm_|oly_|vero_|_x_(?:ads|ns|bg|sessn)_|at_(?:campaign|creation|custom|emailtype|link|medium|ptr_|recipient|send_))/i;
+
 /**
  * Removes tracking and marketing parameters from URLs for privacy.
- * Supports major platforms: YouTube, Amazon, Facebook, Twitter/X, Google, etc.
+ * Covers Big Tech, social, shopping, search engines and email campaign tags.
+ * Referral/affiliate credit is preserved — see REFERRAL_PARAM_RE.
  *
  * @param {string} urlString - The URL to clean
  * @returns {string} The cleaned URL without tracking parameters
@@ -849,144 +926,301 @@ function cleanTrackingFromUrl(urlString) {
     const url = new URL(urlString);
     const normalizedOriginal = url.href;
     const hostname = url.hostname.toLowerCase();
-    
-    // Common tracking parameters across all sites
-    const commonTrackingParams = [
-      // Google Analytics & Marketing
-      'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
-      'utm_id', 'utm_source_platform', 'utm_creative_format', 'utm_marketing_tactic',
-      
-      // Facebook/Meta
-      'fbclid', 'fb_action_ids', 'fb_action_types', 'fb_ref', 'fb_source',
-      
-      // Google Click Identifier
-      'gclid', 'gclsrc', 'dclid',
-      
-      // Microsoft/Bing
-      'msclkid',
-      
-      // Twitter/X
-      'twclid', 's', 't',
-      
-      // TikTok
-      'tt_medium', 'tt_content',
-      
-      // Mailchimp
-      'mc_cid', 'mc_eid',
-      
-      // HubSpot
-      '_hsenc', '_hsmi', '__hssc', '__hstc', '__hsfp', 'hsCtaTracking',
-      
-      // Marketo
-      'mkt_tok',
-      
-      // Adobe
-      'sc_cid',
-      
-      // Generic tracking
-      'ref', 'referrer', 'source', 'campaign', 'medium'
-    ];
-    
-    // YouTube-specific tracking
-    if (hostname.includes('youtube.com') || hostname.includes('youtu.be')) {
-      const youtubeTrackingParams = [
-        'feature', 'si', 'app', 'kw', 'annotation_id', 'src_vid',
-        'ab_channel', 'start_radio', 'rv', 'pp'
-      ];
-      youtubeTrackingParams.forEach(param => url.searchParams.delete(param));
+    // Raw pairs, captured before any mutation, so survivors can be restored
+    // byte-exact at the end instead of re-serialized.
+    const rawPairs = url.search ? url.search.slice(1).split('&') : [];
+    const rawPairName = pair => {
+      const raw = pair.split('=')[0];
+      try { return decodeURIComponent(raw.replace(/\+/g, ' ')); } catch (e) { return raw; }
+    };
+
+    // Names actually present, so the ~200-entry lists cost a Set hit each rather
+    // than a full delete() scan. Deleting never adds a name, so this stays valid.
+    const present = new Set(url.searchParams.keys());
+    const dropParams = names => names.forEach(name => {
+      if (present.has(name)) url.searchParams.delete(name);
+    });
+    // Snapshot the keys: deleting from a live URLSearchParams skips entries.
+    const dropMatching = (pattern, keep) => {
+      for (const param of [...url.searchParams.keys()]) {
+        if (pattern.test(param) && !(keep && keep.test(param))) url.searchParams.delete(param);
+      }
+    };
+    const takeReferrals = () => [...url.searchParams].filter(([name]) => REFERRAL_PARAM_RE.test(name));
+    // Anchored so `notamazon.evil.com` can't claim a host's rules. The label form
+    // covers the multi-TLD giants (amazon.co.uk, google.de, ebay.com.au).
+    const hostIs = (...domains) => domains.some(d => hostname === d || hostname.endsWith('.' + d));
+    const hostLabelIs = label => new RegExp(`(^|\\.)${label}\\.[a-z]{2,}(\\.[a-z]{2,})?$`).test(hostname);
+
+    // YouTube. `t`/`start`/`list`/`index`/`lc` are functional (timestamp,
+    // playlist position, linked comment) and must survive.
+    if (hostIs('youtube.com', 'youtu.be', 'youtube-nocookie.com')) {
+      dropParams([
+        'feature', 'si', 'is', 'app', 'kw', 'annotation_id', 'src_vid',
+        'ab_channel', 'start_radio', 'rv', 'pp', 'themeRefresh',
+        'source_ve_path', 'embeds_referring_origin', 'embeds_referring_euri',
+        'embeds_euri', 'embeds_origin'
+      ]);
     }
-    
-    // Amazon-specific tracking
-    else if (hostname.includes('amazon.')) {
+
+    // Google properties. Search links carry a dozen session/telemetry params;
+    // `q`, `hl`, `tbm`, `tbs`, `num`, `start` and Maps' `data` survive.
+    else if (hostLabelIs('google')) {
+      dropParams([
+        'ved', 'ei', 'sei', 'oq', 'aqs', 'sourceid', 'sxsrf', 'rlz', 'uact',
+        'usg', 'sa', 'esrc', 'cd', 'cad', 'atyp', 'vet', 'je', 'dcr', 'dpr',
+        'iflsig', 'fbs', 'ictx', 'cshid', 'sclient', '_u', 'site', 'ie',
+        'pcampaignid', 'icid', 'original_referer'
+      ]);
+      dropMatching(/^(?:gs_|gws_|gfe_|bi[hw]$|btn|sca_(?:esv|upv)$)/);
+    }
+
+    // Bing. Note the uppercase spellings: param deletion is case-sensitive.
+    else if (hostIs('bing.com')) {
+      dropParams([
+        'cvid', 'CVID', 'qs', 'sk', 'sc', 'sp', 'pq', 'form', 'FORM', 'PC',
+        'ghsh', 'ghacc', 'ghpl', 'toWww', 'redig', 'ntref', 'ocid'
+      ]);
+    }
+
+    // DuckDuckGo. `t` is the client tag, but only junk on a shared search URL —
+    // elsewhere on the site it can be load-bearing, so require `q` alongside it.
+    else if (hostIs('duckduckgo.com')) {
+      dropParams(['atb', 'origin', 'from', 'vis', 'perf_id', 'vqd', 'ia_source']);
+      if (url.searchParams.has('q')) url.searchParams.delete('t');
+    }
+
+    // Yandex
+    else if (hostLabelIs('yandex')) {
+      dropParams([
+        'lr', 'redircnt', 'clid', 'banerid', 'suggest_reqid', 'did', 'msid',
+        'persistent_id', 'from'
+      ]);
+    }
+
+    // Amazon — `tag` is the Associates referral and survives the wipe below.
+    else if (hostLabelIs('amazon')) {
       // Amazon URLs: keep only the essential product ID path
       // Format: /product-name/dp/PRODUCT_ID or /dp/PRODUCT_ID
       const pathMatch = url.pathname.match(/\/dp\/([A-Z0-9]+)/i);
       if (pathMatch) {
         // Reconstruct clean Amazon URL with just the product ID
+        const referrals = takeReferrals();
         url.search = ''; // Remove all query parameters
         // Keep the path up to and including the product ID
         const dpIndex = url.pathname.indexOf('/dp/');
         if (dpIndex !== -1) {
           url.pathname = url.pathname.substring(0, dpIndex + 14); // /dp/ + 10 char ID
         }
+        referrals.forEach(([name, value]) => url.searchParams.set(name, value));
       }
       // If no product ID found, just remove tracking params
-      const amazonTrackingParams = [
+      dropParams([
         'crid', 'dib', 'dib_tag', 'keywords', 'qid', 'sprefix', 'sr',
-        'ie', 'psc', 'pd_rd_i', 'pd_rd_r', 'pd_rd_w', 'pd_rd_wg',
-        'pf_rd_i', 'pf_rd_m', 'pf_rd_p', 'pf_rd_r', 'pf_rd_s', 'pf_rd_t',
-        'ref', 'ref_', 'tag', 'linkCode', 'creative', 'creativeASIN',
-        'ascsubtag', 'asc_campaign', 'asc_refurl', 'asc_source'
-      ];
-      amazonTrackingParams.forEach(param => url.searchParams.delete(param));
+        'ie', 'psc', 'ref', 'ref_', 'linkCode', 'creative', 'creativeASIN',
+        'ascsubtag', 'asc_campaign', 'asc_refurl', 'asc_source', 'content-id',
+        'social_share', 'th', 'smid', 'refRID', 'rnid', 'camp', 'spIA',
+        'qualifier', '_encoding', 'dchild', 'starsLeft', 'skipTwisterOG',
+        'aaxitk', 'ms3_c', 'colid', 'coliid', 'twchReferral', 'ingress',
+        'yTwchPos'
+      ]);
+      dropMatching(/^(?:p[fd]_rd_|__mk_|cv_ct_|sb-ci-|field-lbr_)/);
     }
-    
+
     // eBay-specific tracking — item pages carry a wall of _trkparms / itmprp /
     // itmmeta / itmprp junk. Anchored host match (not loose .includes) because
     // this branch rewrites the path, so a false positive would mangle the URL.
-    else if (/(^|\.)ebay\.[a-z.]+$/.test(hostname)) {
+    else if (hostLabelIs('ebay')) {
       // Item pages reduce to /itm/ITEM_ID. The ID is a long digit run, either
       // right after /itm/ or the trailing segment of a legacy title-slug URL.
       const itmMatch = url.pathname.match(/\/itm\/(?:.+\/)?(\d{6,})/);
       if (itmMatch) {
         // `var` pre-selects a SKU on multi-variation listings — functional, not
-        // a tracker, so it survives the wipe.
+        // a tracker, so it survives the wipe, as does Partner Network `campid`.
         const variation = url.searchParams.get('var');
+        const referrals = takeReferrals();
         url.search = '';
         url.hash = '';
         url.pathname = `/itm/${itmMatch[1]}`;
         if (variation) url.searchParams.set('var', variation);
+        referrals.forEach(([name, value]) => url.searchParams.set(name, value));
       } else {
         // Non-item eBay URLs (search, store, etc.): strip the known trackers.
-        const ebayTrackingParams = [
+        dropParams([
           '_trkparms', '_trksid', 'itmprp', 'itmmeta', 'hash', 'amdata',
-          'epid', '_from', 'mkcid', 'mkrid', 'campid', 'toolid', 'customid',
+          'epid', '_from', 'mkcid', 'mkrid', 'toolid', 'customid',
           'mkevt', 'nordt', 'rt', 'ssspo', 'sssrc', 'ssuid', 'widget_ver'
-        ];
-        ebayTrackingParams.forEach(param => url.searchParams.delete(param));
+        ]);
       }
     }
 
-    // Twitter/X-specific
-    else if (hostname.includes('twitter.com') || hostname.includes('x.com')) {
-      const twitterTrackingParams = ['s', 't', 'ref_src', 'ref_url', 'src'];
-      twitterTrackingParams.forEach(param => url.searchParams.delete(param));
+    // Etsy
+    else if (hostIs('etsy.com')) {
+      dropParams([
+        'click_key', 'click_sum', 'organic_search_click', 'ref', 'frs', 'sts'
+      ]);
+      dropMatching(/^ga_/);
     }
-    
-    // Facebook-specific
-    else if (hostname.includes('facebook.com') || hostname.includes('fb.com')) {
-      const facebookTrackingParams = [
-        'fbclid', 'fb_action_ids', 'fb_action_types', 'fb_ref', 'fb_source',
-        'action_object_map', 'action_type_map', 'action_ref_map'
-      ];
-      facebookTrackingParams.forEach(param => url.searchParams.delete(param));
+
+    // AliExpress / Taobao / Tmall / Lazada — `spm`/`scm` are stripped globally,
+    // `aff_*` is the affiliate's credit and stays.
+    else if (hostLabelIs('aliexpress') || hostLabelIs('lazada') || hostIs('taobao.com', 'tmall.com')) {
+      dropParams([
+        'algo_pvid', 'algo_expid', 'algo_exp_id', 'curPageLogUid', 'pdp_npi',
+        'ws_ab_test', 'btsid', 'gps-id', 'mall_affr', 'terminal_id',
+        'utparam', 'utparam-url', 'scm_id', 'scm-url', 'sk', 'dp', 'cv',
+        'pvid', 'ut_sk', 'ali_refid', 'ali_trackid', 'acm', 'abbucket',
+        'abtest', 'trackInfo', 'impid', 'clickTrackInfo', 'ad_src', 'impsrc'
+      ]);
     }
-    
-    // Instagram-specific
-    else if (hostname.includes('instagram.com')) {
-      const instagramTrackingParams = ['igshid', 'igsh'];
-      instagramTrackingParams.forEach(param => url.searchParams.delete(param));
+
+    // Walmart / Target / Best Buy / Newegg / Temu
+    else if (hostIs('walmart.com')) {
+      dropParams(['u1', 'from', 'sourceid', 'veh']);
+      dropMatching(/^ath/);
     }
-    
-    // LinkedIn-specific
-    else if (hostname.includes('linkedin.com')) {
-      const linkedinTrackingParams = ['trk', 'trkInfo', 'lipi', 'licu', 'originalSubdomain'];
-      linkedinTrackingParams.forEach(param => url.searchParams.delete(param));
+    else if (hostIs('target.com')) {
+      dropParams([
+        'CPNG', 'LID', 'LNM', 'DFA', 'fndsrc', 'adgroup', 'network',
+        'device', 'location', 'targetid', 'ds_rl'
+      ]);
     }
-    
-    // Vimeo-specific
-    else if (hostname.includes('vimeo.com')) {
-      const vimeoTrackingParams = ['share', 'fl', 'fe'];
-      vimeoTrackingParams.forEach(param => url.searchParams.delete(param));
+    else if (hostIs('bestbuy.com')) {
+      dropParams(['acampID', 'mpid', 'intl', 'loc']);
     }
-    
-    // Remove common tracking parameters from all URLs
-    // Exception: YouTube uses 't' for timestamps, so skip it for YouTube URLs
-    commonTrackingParams.forEach(param => {
-      if ((hostname.includes('youtube.com') || hostname.includes('youtu.be')) && param === 't') return;
-      url.searchParams.delete(param);
-    });
-    
+    else if (hostIs('newegg.com')) {
+      dropParams(['ACRID', 'ASUBID', 'ASID', 'nm_mc', 'cm_mmc']);
+    }
+    else if (hostIs('temu.com')) {
+      dropParams(['top_gallery_url', 'refer_page_name', 'refer_page_id', 'refer_page_sn']);
+    }
+
+    // Twitter/X
+    else if (hostIs('twitter.com', 'x.com', 't.co')) {
+      dropParams(['s', 't', 'cn', 'ref_src', 'refsrc', 'ref_url', 'src']);
+    }
+
+    // Facebook / Messenger
+    else if (hostIs('facebook.com', 'fb.com', 'fb.me', 'm.me', 'messenger.com')) {
+      dropParams([
+        'sfnsn', 'rdid', 'paipv', '_rdr', 'rdc', 'rdr', '__tn__', '_nc_x',
+        'comment_tracking', 'dti', 'eav', 'idorvanity', 'wtsid', 'ls_ref',
+        'action_history', 'tracking', 'referral_story_type', 'video_source',
+        'ftentidentifier', 'pageid', 'eid'
+      ]);
+      dropMatching(/^(?:hc_|__cft__|__xts__)/);
+    }
+
+    // Instagram
+    else if (hostIs('instagram.com')) {
+      dropParams(['igshid', 'igsh', 'ig_rid']);
+    }
+
+    // TikTok
+    else if (hostIs('tiktok.com')) {
+      dropParams([
+        'is_from_webapp', 'is_copy_url', 'sender_device', 'sender_web_id',
+        'web_id', 'refer', 'u_code', 'share_app_id', 'share_app_name',
+        'share_link_id', 'share_item_id', 'share_iid', 'share_region',
+        'social_share_type', 'embed_source', 'referer_url', 'referer_video_id',
+        'trackParams', 'ug_btm', 'enter_from', 'preview_pb', 'sec_user_id',
+        'user_id', '_r', '_t', '_d'
+      ]);
+    }
+
+    // Reddit — the app's Branch keys arrive percent-encoded (`%24deep_link`), but
+    // searchParams decodes names, so the `$` spelling is the one that matches.
+    else if (hostIs('reddit.com', 'redd.it')) {
+      dropParams([
+        'share_id', 'correlation_id', 'rdt', 'ref_source', 'ref_campaign',
+        'entry_point', 'target_user', 'post_index', 'post_fullname',
+        '$deep_link', '$3p', '$original_url', '$android_deeplink_path'
+      ]);
+    }
+
+    // LinkedIn
+    else if (hostIs('linkedin.com')) {
+      dropParams([
+        'trk', 'trkInfo', 'trackingId', 'refId', 'originalSubdomain',
+        'midToken', 'midSig', 'eid', 'courseClaim'
+      ]);
+      dropMatching(/^li[a-z]{2}$/);
+    }
+
+    // Pinterest / Snapchat
+    else if (hostIs('pinterest.com', 'pin.it')) {
+      dropParams(['nic', 'nic_v1', 'nic_v2', 'amp_client_id', 'mweb_unauth_id', 'sender']);
+    }
+    else if (hostIs('snapchat.com')) {
+      dropParams(['sc_referrer', 'sc_ua', 'sc_ref']);
+    }
+
+    // Spotify — `context` survives: it decides which playlist/album a track
+    // plays inside.
+    else if (hostIs('spotify.com')) {
+      dropParams(['si', 'nd', 'nid', 'sp_cid', 'dlsi', 'pi', 'referral']);
+    }
+
+    // Apple. `cid`/`ct`/`pt`/`app` are Apple's campaign tags but far too generic
+    // to touch anywhere else, hence the host scope.
+    else if (hostIs('apple.com')) {
+      dropParams(['itsct', 'itscg', 'cid', 'ct', 'pt', 'app']);
+      dropMatching(/^ign-itsc/);
+    }
+
+    // Twitch — tt_medium/tt_content are already global.
+    else if (hostIs('twitch.tv')) {
+      dropParams(['tt_email_id']);
+    }
+
+    // Steam / GOG / Epic / Humble. `snr` is a breadcrumb of where you clicked
+    // from; Humble's hmb_* fall to the UTM-clone rule.
+    else if (hostIs('steampowered.com', 'steamcommunity.com')) {
+      dropParams(['snr', 'curator_clanid']);
+    }
+    else if (hostIs('gog.com')) {
+      dropParams(['pp', 'track_click', 'link_id']);
+    }
+    else if (hostIs('epicgames.com')) {
+      dropParams(['epic_gameId']);
+    }
+    else if (hostIs('humblebundle.com')) {
+      dropParams(['mcID', 'linkID']);
+    }
+
+    // Netflix / IMDb
+    else if (hostIs('netflix.com')) {
+      dropParams(['trackId', 'tctx']);
+    }
+    else if (hostIs('imdb.com')) {
+      dropParams(['ref_']);
+      dropMatching(/^pf_rd_/);
+    }
+
+    // GitHub email-notification links
+    else if (hostIs('github.com')) {
+      dropParams(['email_token', 'email_source', 'notification_referrer_id']);
+    }
+
+    // Vimeo
+    else if (hostIs('vimeo.com')) {
+      dropParams(['share', 'fl', 'fe']);
+    }
+
+    // Every host: the exact-name list, then the pattern families. Referral params
+    // are shielded from the patterns but NOT from the site branches above — those
+    // are curated per host, where a name like `ref_` is known to be a breadcrumb.
+    dropParams(TRACKING_PARAMS_GLOBAL);
+    dropMatching(TRACKING_UTM_CLONE_RE, REFERRAL_PARAM_RE);
+    dropMatching(TRACKING_NAMESPACE_RE, REFERRAL_PARAM_RE);
+
+    // Restore the survivors verbatim. URLSearchParams re-serializes the whole
+    // query (`!` -> `%21`, space -> `+`), and Maps' `data=` objects to that.
+    // Falls back to the re-serialized form if a branch introduced a new param.
+    const survivors = new Set([...url.searchParams.keys()]);
+    const kept = rawPairs.filter(pair => survivors.has(rawPairName(pair)));
+    if (new Set(kept.map(rawPairName)).size === survivors.size) url.search = kept.join('&');
+
     // Only return the cleaned URL if tracking params were actually removed
     // This avoids unwanted URL normalization (e.g., adding trailing slashes)
     if (url.href === normalizedOriginal) return urlString;
