@@ -560,11 +560,9 @@ impl VectorCore {
                 _ => None,
             }
         };
-        if let Some((cid, msg)) = msg_for_save {
+        if let Some((cid, mut msg)) = msg_for_save {
             let _ = db::events::save_message(&cid, &msg).await;
-            traits::emit_event_json("message_update", serde_json::json!({
-                "old_id": reference_id, "message": &msg, "chat_id": &cid
-            }));
+            traits::emit_message_update(&cid, reference_id, &mut msg).await;
         }
 
         Ok(rumor_id)
@@ -632,10 +630,8 @@ impl VectorCore {
                 msg.preview_metadata = None;
             })
         };
-        if let Some(msg) = msg_for_emit {
-            traits::emit_event_json("message_update", serde_json::json!({
-                "old_id": message_id, "message": &msg, "chat_id": to_npub
-            }));
+        if let Some(mut msg) = msg_for_emit {
+            traits::emit_message_update(to_npub, message_id, &mut msg).await;
             if let Ok(db_chat_id) = db::id_cache::get_chat_id_by_identifier(to_npub) {
                 let _ = db::events::save_edit_event(
                     &edit_id, message_id, new_content, &emoji_tags, db_chat_id, None, &my_npub,
@@ -1832,7 +1828,7 @@ impl VectorCore {
             let mut st = state::STATE.lock().await;
             inbound::process_incoming(&mut st, &outer, &channel, &author_pk)
         };
-        if let Some(inbound::IncomingEvent::Updated { target_id, message, edit_event }) = outcome {
+        if let Some(inbound::IncomingEvent::Updated { target_id, mut message, edit_event }) = outcome {
             if let Some(ev) = edit_event {
                 let mut ev = (*ev).clone();
                 if let Ok(cid) = crate::db::id_cache::get_chat_id_by_identifier(channel_id) { ev.chat_id = cid; }
@@ -1840,9 +1836,7 @@ impl VectorCore {
             } else {
                 let _ = crate::db::events::save_message(channel_id, &message).await;
             }
-            traits::emit_event_json("message_update", serde_json::json!({
-                "old_id": target_id, "message": &message, "chat_id": channel_id,
-            }));
+            traits::emit_message_update(channel_id, &target_id, &mut message).await;
         }
         Ok(())
     }
@@ -2316,10 +2310,11 @@ impl VectorCore {
                         &serde_json::json!({ "message": msg, "chat_id": channel_id }),
                     ),
                     ChatPersist::Updated { message, .. }
-                    | ChatPersist::ReactionRemoved { message, .. } => crate::traits::emit_event(
-                        "message_update",
-                        &serde_json::json!({ "old_id": message.id, "message": message, "chat_id": channel_id }),
-                    ),
+                    | ChatPersist::ReactionRemoved { message, .. } => {
+                        let mut message = message.clone();
+                        let target_id = message.id.clone();
+                        crate::traits::emit_message_update(channel_id, &target_id, &mut message).await;
+                    }
                     ChatPersist::Removed(target_id) => crate::traits::emit_event(
                         "message_removed",
                         &serde_json::json!({ "id": target_id, "chat_id": channel_id, "reason": "deleted" }),

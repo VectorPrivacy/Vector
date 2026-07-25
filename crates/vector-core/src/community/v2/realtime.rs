@@ -392,11 +392,19 @@ pub async fn dispatch_event(session: &SessionGuard, event: Event, handler: Arc<d
                 match inbound::persist_chat_event(&event, &channel_id, &my_pk, session).await {
                     Some(inbound::ChatPersist::New(message)) => handler.on_community_message(&channel_id, &message, true),
                     // A reaction or an edit: the folded TARGET row (its id is the
-                    // target's) — the same payload v1 hands this callback.
-                    Some(inbound::ChatPersist::Updated { message, .. }) => handler.on_community_update(&channel_id, &message.id, &message),
+                    // target's) — the same payload v1 hands this callback. Both come
+                    // back out of STATE, whose compact form drops the quoted
+                    // attachment's extension, so re-resolve before rendering.
+                    Some(inbound::ChatPersist::Updated { mut message, .. }) => {
+                        let _ = crate::db::events::populate_reply_context(&mut message).await;
+                        handler.on_community_update(&channel_id, &message.id, &message);
+                    }
                     // An un-react re-renders the PARENT (its chips changed) — the
                     // same surface a landed reaction drives.
-                    Some(inbound::ChatPersist::ReactionRemoved { message, .. }) => handler.on_community_update(&channel_id, &message.id, &message),
+                    Some(inbound::ChatPersist::ReactionRemoved { mut message, .. }) => {
+                        let _ = crate::db::events::populate_reply_context(&mut message).await;
+                        handler.on_community_update(&channel_id, &message.id, &message);
+                    }
                     Some(inbound::ChatPersist::Removed(target_id)) => handler.on_community_removed(&channel_id, &target_id),
                     None => {}
                 }

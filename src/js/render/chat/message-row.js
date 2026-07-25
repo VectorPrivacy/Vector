@@ -451,7 +451,10 @@ function _fmtCountdown(secs) {
 
 function _dmsgBuildReplyContext(msg, sender) {
     const hasBackendContext = msg.replied_to_content !== undefined || msg.replied_to_has_attachment;
-    const chat = sender ? getDMChat(sender.id) : arrChats.find(c => c.id === strOpenChat);
+    // The quoted message lives in the chat being rendered. `sender` is the row's
+    // author, so a DM lookup by their npub finds nothing in a Community and the
+    // quote loses its in-memory fallback entirely.
+    const chat = getChat(strOpenChat) || (sender ? getDMChat(sender.id) : undefined);
     const cMsg = chat?.messages.find(m => m.id === msg.replied_to);
 
     if (!hasBackendContext && !cMsg) return null;

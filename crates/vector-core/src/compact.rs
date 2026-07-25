@@ -3169,6 +3169,27 @@ mod tests {
         assert_eq!(restored.addressed_bots, msg.addressed_bots, "addressed_bots mismatch");
     }
 
+    // The compact form deliberately keeps only the "replied-to has an attachment"
+    // bool, so the extension does NOT survive a trip through STATE. Every path
+    // that emits a message read back out of RAM has to re-run
+    // populate_reply_context, or a quoted "GIF Animation" renders as a generic
+    // "Attachment" the moment a reaction re-emits the row.
+    #[test]
+    fn compact_drops_replied_to_attachment_extension() {
+        let mut msg = make_full_message();
+        msg.replied_to_has_attachment = Some(true);
+        msg.replied_to_attachment_extension = Some("gif".to_string());
+
+        let mut interner = NpubInterner::new();
+        let restored = CompactMessage::from_message(&msg, &mut interner).to_message(&interner);
+
+        assert_eq!(restored.replied_to_has_attachment, Some(true), "the bool survives RAM");
+        assert_eq!(
+            restored.replied_to_attachment_extension, None,
+            "the extension does not survive RAM — emitters must re-resolve it"
+        );
+    }
+
     #[test]
     fn compact_message_from_message_owned_roundtrip() {
         let msg = make_full_message();

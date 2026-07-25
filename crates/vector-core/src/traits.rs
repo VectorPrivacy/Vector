@@ -45,6 +45,21 @@ pub fn emit_event_json(event: &str, payload: serde_json::Value) {
     }
 }
 
+/// Emit `message_update` with the quoted-reply context re-resolved first.
+///
+/// STATE holds messages in compact form, which keeps only the *has an
+/// attachment* bool — `replied_to_attachment_extension` is dropped on the way
+/// back out. Every update path re-reads its message from STATE, so emitting one
+/// straight from RAM downgrades the quoted attachment's label ("GIF Animation"
+/// becomes a generic "Attachment") and the renderer never retries.
+pub async fn emit_message_update(chat_id: &str, old_id: &str, message: &mut crate::types::Message) {
+    let _ = crate::db::events::populate_reply_context(message).await;
+    emit_event(
+        "message_update",
+        &serde_json::json!({ "old_id": old_id, "message": &*message, "chat_id": chat_id }),
+    );
+}
+
 /// Check if an event emitter is registered.
 pub fn has_event_emitter() -> bool {
     EVENT_EMITTER.get().is_some()

@@ -331,7 +331,7 @@ pub async fn dispatch_event(
             // separate one-shot batch, never here. So these are always genuinely new; surface them.
             handler.on_community_message(&chat_id, &msg, true);
         }
-        Some(inbound::IncomingEvent::Updated { target_id, message, edit_event }) => {
+        Some(inbound::IncomingEvent::Updated { target_id, mut message, edit_event }) => {
             // Edits are event-sourced (folded on reload); reactions re-save the message row.
             if let Some(ev) = edit_event {
                 let mut ev = (*ev).clone();
@@ -342,15 +342,19 @@ pub async fn dispatch_event(
             } else {
                 let _ = crate::db::events::save_message(&chat_id, &message).await;
             }
+            // Re-resolve before emitting: this message came back out of STATE, whose
+            // compact form drops the quoted attachment's extension.
+            let _ = crate::db::events::populate_reply_context(&mut message).await;
             handler.on_community_update(&chat_id, &target_id, &message);
         }
         Some(inbound::IncomingEvent::Removed { target_id }) => {
             let _ = crate::db::events::delete_event(&target_id).await;
             handler.on_community_removed(&chat_id, &target_id);
         }
-        Some(inbound::IncomingEvent::ReactionRemoved { message_id, reaction_id, message }) => {
+        Some(inbound::IncomingEvent::ReactionRemoved { message_id, reaction_id, mut message }) => {
             // Drop the reaction's kind-7 row (save is additive) and refresh the parent's chips.
             let _ = crate::db::events::delete_event(&reaction_id).await;
+            let _ = crate::db::events::populate_reply_context(&mut message).await;
             handler.on_community_update(&chat_id, &message_id, &message);
         }
         Some(inbound::IncomingEvent::Presence { npub, joined, event_id, created_at, invited_by, invited_label }) => {

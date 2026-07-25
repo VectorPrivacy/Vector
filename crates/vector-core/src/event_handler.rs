@@ -868,12 +868,8 @@ async fn commit_reaction(
         } else { None }
     };
 
-    if let Some((chat_id, msg)) = msg_for_emit {
-        crate::traits::emit_event("message_update", &serde_json::json!({
-            "old_id": &reaction.reference_id,
-            "message": &msg,
-            "chat_id": &chat_id
-        }));
+    if let Some((chat_id, mut msg)) = msg_for_emit {
+        crate::traits::emit_message_update(&chat_id, &reaction.reference_id, &mut msg).await;
         let _ = crate::db::events::save_message(&chat_id, &msg).await;
         handler.on_reaction_received(&chat_id, &msg);
     }
@@ -913,12 +909,8 @@ async fn commit_edit(
             msg.apply_edit(new_content.to_string(), edited_at, emoji_tags.clone());
         })
     };
-    if let Some(msg) = msg_for_emit {
-        crate::traits::emit_event("message_update", &serde_json::json!({
-            "old_id": message_id,
-            "message": msg,
-            "chat_id": contact
-        }));
+    if let Some(mut msg) = msg_for_emit {
+        crate::traits::emit_message_update(contact, message_id, &mut msg).await;
     }
     true
 }
@@ -1077,7 +1069,7 @@ async fn commit_reaction_deletion(target_reaction_id: &str, sender: &PublicKey) 
         let mut state = crate::state::STATE.lock().await;
         state.remove_reaction_from_message(&message_id, target_reaction_id)
     };
-    let message = match updated {
+    let mut message = match updated {
         Some((_cid, msg)) => msg,
         None => return false,
     };
@@ -1088,14 +1080,7 @@ async fn commit_reaction_deletion(target_reaction_id: &str, sender: &PublicKey) 
         eprintln!("[reaction-delete] DB delete failed for {}: {}", target_reaction_id, e);
     }
 
-    crate::traits::emit_event(
-        "message_update",
-        &serde_json::json!({
-            "old_id": &message_id,
-            "message": &message,
-            "chat_id": &chat_id,
-        }),
-    );
+    crate::traits::emit_message_update(&chat_id, &message_id, &mut message).await;
     true
 }
 
