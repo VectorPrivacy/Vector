@@ -723,8 +723,27 @@ async fn fetch_and_apply_control_with<T: Transport + ?Sized>(
     // Owner derived from the deed at fold time; fail-closed (no proven owner / non-owner signer ⇒ rejected).
     if let Some(owner) = proven_owner_hex(community) {
         let by_fold = folded.dissolved_by.iter().any(|s| s.to_hex() == owner);
-        let by_probe = !by_fold && dissolved_tombstone_present(transport, community, &owner).await;
+        let probe_records = if by_fold {
+            Vec::new()
+        } else {
+            dissolved_tombstone_records(transport, community).await
+        };
+        let by_probe = !by_fold && probe_records.iter().any(|d| d.author.to_hex() == owner);
         if by_fold || by_probe {
+            // v1→v2 migration: extract + persist the pointer BEFORE the seal. The seal
+            // short-circuits every future control fetch for this community, so this fold is
+            // the payload's one guaranteed ride on a live client (the boot sweep re-probes
+            // for anyone who sealed on an older build). Selection is total and payload-aware:
+            // a plain `{}` tombstone seals but never sheds an already-published pointer.
+            let mut tombstones = folded.dissolved_editions.clone();
+            tombstones.extend(probe_records);
+            let mut migration_pointer_found = false;
+            if let Some((_, raw)) = super::migration::select_pointer(&tombstones, &owner) {
+                if session.is_valid() {
+                    let _ = crate::db::community::set_migration_pointer(&cid, &raw);
+                    migration_pointer_found = true;
+                }
+            }
             // This fold pass IS the "one bounded final drain": apply the last accepted control, then
             // seal. Subsequent syncs short-circuit on the flag above and drop everything.
             let _ = fetch_and_apply_banlist_inner(transport, community, Some(folded.clone())).await;
@@ -737,6 +756,17 @@ async fn fetch_and_apply_control_with<T: Transport + ?Sized>(
                 // from the single seal point covers EVERY caller — sync, boot, realtime refresh — not just the
                 // realtime path. Fires once: the short-circuit above skips it on every subsequent fetch.
                 crate::emit_event("community_refreshed", &serde_json::json!({ "community_id": cid }));
+                // A migration carrier drives the flip RIGHT HERE — the moment the member folds it.
+                // Post-seal is safe: `drive_migration`'s exemption lets a stale root still walk, and
+                // the whole drive is idempotent + retried by the boot maintenance, so a transient
+                // failure (relay flake mid-join) is never terminal. Best-effort by design.
+                if migration_pointer_found {
+                    match Box::pin(super::migration::drive_migration(transport, community)).await {
+                        Ok(Some(v2_hex)) => super::migration::spawn_finalize_migration(cid.clone(), v2_hex),
+                        Ok(None) => {}
+                        Err(e) => crate::log_warn!("migration drive for {cid}: {e}"),
+                    }
+                }
             }
             return Ok(folded.fetched);
         }
@@ -1034,7 +1064,7 @@ fn authority_citation(community: &Community, actor_hex: &str) -> Option<super::e
 
 /// The proven owner's pubkey (hex), or `None` on an unproven community (no attestation / fails to
 /// verify). The owner is DERIVED by verifying the attestation, never a bare claim.
-fn proven_owner_hex(community: &Community) -> Option<String> {
+pub(crate) fn proven_owner_hex(community: &Community) -> Option<String> {
     let cid = community.id.to_hex();
     community
         .owner_attestation
@@ -1317,6 +1347,12 @@ pub fn accept_invite(invite: &CommunityInvite) -> Result<Community, String> {
     match crate::db::community::load_community(&community.id)? {
         // Already a member: a re-accept doesn't grow the list, so it's exempt from the cap.
         Some(existing) => {
+            // Migration fence at the DOOR: this save's channel UPSERT blindly re-parents rows,
+            // so a stale v1 invite redeemed after the flip would steal the stitched channels
+            // back from the v2 twin. Gate BEFORE any persist, not just in finalize_member_join.
+            if crate::db::community::get_migrated_to(&existing.id.to_hex())?.is_some() {
+                return Err("This community has upgraded to Concord v2. Ask a member for a fresh invite.".to_string());
+            }
             if is_proven_owner(&existing) {
                 return Err("you already own this Community".to_string());
             }
@@ -1393,6 +1429,11 @@ pub async fn republish_community_metadata<T: Transport + ?Sized>(
 ) -> Result<(), String> {
     let session = SessionGuard::capture();
     let cid = community.id.to_hex();
+    // Migration fence: the success path saves the caller's v1 struct (blind channel UPSERT),
+    // which would steal stitched rows back from the v2 twin. Refuse before publishing.
+    if crate::db::community::get_migrated_to(&cid)?.is_some() {
+        return Err("this community has upgraded to Concord v2".to_string());
+    }
     let signer = active_signer().await?;
     let actor_pk = crate::state::my_public_key().ok_or("no local identity to sign the metadata edition")?;
     let owner = proven_owner_hex(community);
@@ -1446,6 +1487,10 @@ pub async fn republish_channel_metadata<T: Transport + ?Sized>(
     let session = SessionGuard::capture();
     let cid = community.id.to_hex();
     let ch_hex = channel_id.to_hex();
+    // Migration fence: same door-gate as republish_community_metadata (the save re-parents rows).
+    if crate::db::community::get_migrated_to(&cid)?.is_some() {
+        return Err("this community has upgraded to Concord v2".to_string());
+    }
     if !community.channels.iter().any(|c| &c.id == channel_id) {
         return Err("no such channel in this community".to_string());
     }
@@ -1766,15 +1811,58 @@ pub async fn revoke_public_invite<T: Transport + ?Sized>(
 /// cross-epoch discovery path: it fetches `dissolved_pseudonym` (community-id-derived, epoch-free) and
 /// opens under the community-id envelope key, so a client holding ANY epoch root finds it. Best-effort
 /// (a relay miss ⇒ false; the next sync re-probes). The caller has already derived + verified the owner.
-async fn dissolved_tombstone_present<T: Transport + ?Sized>(transport: &T, community: &Community, owner_hex: &str) -> bool {
+/// Every well-formed tombstone at the rotation-stable dissolved coordinate, full records out
+/// (the caller filters to the proven owner for the seal decision and runs
+/// `migration::select_pointer` for the payload). Best-effort — a relay miss yields empty.
+pub(crate) async fn dissolved_tombstone_records<T: Transport + ?Sized>(
+    transport: &T,
+    community: &Community,
+) -> Vec<super::roster::DissolvedEdition> {
     let z = super::derive::dissolved_pseudonym(&community.id);
     let q = Query { kinds: vec![event_kind::COMMUNITY_CONTROL], z_tags: vec![z], ..Default::default() };
-    for ev in transport.fetch(&q, &community.relays).await.unwrap_or_default() {
-        if super::roster::dissolved_tombstone_signer(&ev, &community.id).map(|s| s.to_hex()) == Some(owner_hex.to_string()) {
-            return true;
-        }
+    transport
+        .fetch(&q, &community.relays)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|ev| super::roster::dissolved_tombstone_open(ev, &community.id))
+        .collect()
+}
+
+/// Publish the v1→v2 migration CARRIER: an owner-signed GroupDissolved tombstone whose
+/// content carries the migration payload (§migration). One event seals v1 AND delivers the
+/// v2 keys to every member. Sealed at BOTH coordinates like an ordinary dissolution
+/// (rotation-stable + current-epoch fast path) with BYTE-IDENTICAL inner content, so the
+/// member's fold and probe extract the same payload. NO link-retire/rekey — dissolution
+/// moots every link. Does NOT seal locally: the wizard's own flip handles the owner's
+/// transition to v2. Bunker-safe (signs through the active `NostrSigner`).
+pub async fn publish_migration_carrier<T: Transport + ?Sized>(
+    transport: &T,
+    community: &Community,
+    payload_content: &str,
+) -> Result<(), String> {
+    let session = SessionGuard::capture();
+    if !is_proven_owner(community) {
+        return Err("only the community owner can migrate the community".to_string());
     }
-    false
+    let signer = active_signer().await?;
+    let actor_pk = crate::state::my_public_key().ok_or("no local identity to sign the migration")?;
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let unsigned = super::roster::build_group_dissolved_edition_unsigned_with_content(actor_pk, &community.id, created_at, payload_content);
+    let inner = unsigned.sign(&signer).await.map_err(|e| format!("sign migration carrier: {e}"))?;
+    // Size gate on the ACTUAL sealed outer before publishing — the wizard aborts cleanly
+    // rather than emit an event common relays would reject.
+    let stable = super::roster::seal_dissolved_edition(&Keys::generate(), &inner, &community.id)?;
+    super::migration::check_outer_size(&stable)?;
+    transport.publish_durable(&stable, &community.relays).await?;
+    if let Ok(fast) = super::roster::seal_control_edition(&Keys::generate(), &inner, &community.server_root_key, &community.id, community.server_root_epoch) {
+        let _ = transport.publish_durable(&fast, &community.relays).await;
+    }
+    if !session.is_valid() {
+        return Err("account changed during migration publish".to_string());
+    }
+    Ok(())
 }
 
 pub async fn dissolve_community<T: Transport + ?Sized>(
@@ -2038,7 +2126,7 @@ async fn fetch_and_apply_metadata_inner<T: Transport + ?Sized>(
         Ok(None)
     };
 
-    // Author-aware descending scan (/ B1b): the candidates are sorted (version desc, inner-id asc), so
+    // Author-aware descending scan: the candidates are sorted (version desc, inner-id asc), so
     // the first whose author CURRENTLY holds MANAGE_METADATA is both the highest-version AND (within a
     // version) the deterministic tiebreak winner. Skips a demoted author's editions, incl. a same-version
     // forgery. No authorized candidate → keep the floor.
@@ -2860,7 +2948,15 @@ pub fn apply_server_root_rekey(
 
     // a re-founding cannot cross a tombstone. Once dissolved, a base rekey is a "subsequent control
     // event" → refuse to advance the epoch (a rekey after a tombstone is invalid).
-    if crate::db::community::get_community_dissolved(&cid)? {
+    //
+    // MIGRATION EXEMPTION: a v1→v2 migration tombstone seals the community AND carries the v2
+    // keys (`m`) sealed under the PUBLISH-time root. A member stale by ≥1 base epoch at publish holds
+    // an older root and cannot open `m` until they walk forward — but the seal would normally block
+    // that walk, permanently stranding them. Allow the base epoch to advance ONLY while a migration
+    // pointer is held, the flip hasn't happened (`migrated_to` unset), and the target epoch does not
+    // exceed the publish epoch the pointer names. Never weakens the post-flip fence (gated on
+    // `migrated_to`) and never lets a plain dissolution advance (gated on the pointer's presence).
+    if crate::db::community::get_community_dissolved(&cid)? && !super::migration::catchup_exempt(&cid, parsed.new_epoch.0) {
         return Err("community is dissolved; base epoch cannot advance".to_string());
     }
 
@@ -7273,6 +7369,116 @@ mod tests {
         assert_eq!(reloaded.server_root_key.as_bytes(), owner.server_root_key.as_bytes());
     }
 
+    /// THE MIGRATION DOOR GATE. After a community flips to v2, its channel rows belong to the
+    /// twin. `save_community`'s channel UPSERT re-parents on conflict, so redeeming a stale v1
+    /// invite would silently steal every stitched row back to the dead v1 id — permanently, since
+    /// the flip never re-runs (`migrated_to` is terminal). The gate must fire BEFORE any persist.
+    #[tokio::test]
+    async fn stale_v1_invite_cannot_reparent_a_migrated_communitys_channels() {
+        let (_tmp, _guard) = init_test_db();
+        // Hold a v1 community as a member, and keep a copy of the invite that got us in.
+        let v1 = Community::create("Guild", "general", vec!["wss://r1".into()]);
+        let stale_invite = crate::community::invite::build_invite(&v1);
+        accept_invite(&stale_invite).expect("initial join");
+        let v1_cid = v1.id.to_hex();
+        let channel_hex = v1.channels[0].id.to_hex();
+        assert_eq!(
+            crate::db::community::community_id_for_channel(&channel_hex).unwrap().as_deref(),
+            Some(v1_cid.as_str()),
+            "precondition: the channel row starts parented to v1"
+        );
+
+        // The migration lands: channels re-parent to the twin and the fence is stamped.
+        let v2_cid = "9f".repeat(32);
+        crate::db::community::reparent_channels_and_fence(&v1_cid, &v2_cid).unwrap();
+        assert_eq!(
+            crate::db::community::community_id_for_channel(&channel_hex).unwrap().as_deref(),
+            Some(v2_cid.as_str()),
+            "precondition: the flip moved the channel to the twin"
+        );
+
+        // Redeem the stale v1 invite (the DM invite in the user's list, or an old link).
+        let err = accept_invite(&stale_invite).unwrap_err();
+        assert!(
+            err.contains("upgraded to Concord v2"),
+            "a migrated community must refuse a v1 re-accept, got: {err}"
+        );
+
+        // The corruption itself: the channel row must STILL belong to the twin.
+        assert_eq!(
+            crate::db::community::community_id_for_channel(&channel_hex).unwrap().as_deref(),
+            Some(v2_cid.as_str()),
+            "the refused accept must not have re-parented the channel back to v1"
+        );
+        // And the fence is untouched, so nothing re-drives.
+        assert_eq!(
+            crate::db::community::get_migrated_to(&v1_cid).unwrap().as_deref(),
+            Some(v2_cid.as_str())
+        );
+    }
+
+    /// The gate is scoped to MIGRATED communities only: a live v1 community still accepts
+    /// re-invites (re-accepts are legitimate and exempt from the membership cap), so the fix
+    /// can't regress ordinary joins.
+    #[tokio::test]
+    async fn accept_invite_still_works_for_a_live_v1_community() {
+        let (_tmp, _guard) = init_test_db();
+        let v1 = Community::create("Guild", "general", vec!["wss://r1".into()]);
+        let invite = crate::community::invite::build_invite(&v1);
+        accept_invite(&invite).expect("initial join");
+        // A second redeem of the same (still-live) community is accepted, not gated.
+        accept_invite(&invite).expect("re-accept on a live v1 community must still work");
+        assert!(crate::db::community::get_migrated_to(&v1.id.to_hex()).unwrap().is_none());
+    }
+
+    /// A community migrated by SOMEONE ELSE that this device never held is a FRESH join — the
+    /// `None` branch, deliberately ungated so the permanent on-ramp survives (save v1 → the
+    /// carrier fold seals it → the drive flips the user into the twin). Guards against
+    /// over-tightening the gate into the fresh-join path.
+    #[tokio::test]
+    async fn a_fresh_join_is_never_gated_by_another_communitys_fence() {
+        let (_tmp, _guard) = init_test_db();
+        // One community we hold and that has migrated.
+        let migrated = Community::create("Old", "general", vec!["wss://r1".into()]);
+        accept_invite(&crate::community::invite::build_invite(&migrated)).unwrap();
+        crate::db::community::reparent_channels_and_fence(&migrated.id.to_hex(), &"9f".repeat(32)).unwrap();
+
+        // A DIFFERENT community, never held: the fresh-join path is unaffected.
+        let fresh = Community::create("New", "general", vec!["wss://r2".into()]);
+        accept_invite(&crate::community::invite::build_invite(&fresh)).expect("fresh join must not be gated");
+        assert!(crate::db::community::load_community(&fresh.id).unwrap().is_some());
+    }
+
+    /// The management doors save the caller's v1 struct on success (same blind UPSERT), so they
+    /// carry the same fence — and refuse BEFORE publishing, so no orphan edition hits the relays.
+    #[tokio::test]
+    async fn metadata_republish_refuses_after_migration() {
+        let (_tmp, _guard) = init_test_db();
+        let owner = Keys::generate();
+        become_local(&owner);
+        let community = saved_community_owned_by(&owner);
+        let cid = community.id.to_hex();
+        let channel_id = community.channels[0].id;
+        let relay = MemoryRelay::new();
+
+        crate::db::community::reparent_channels_and_fence(&cid, &"9f".repeat(32)).unwrap();
+
+        let err = republish_community_metadata(&relay, &community).await.unwrap_err();
+        assert!(err.contains("upgraded to Concord v2"), "community metadata edit gated, got: {err}");
+        let err = republish_channel_metadata(&relay, &community, &channel_id, "renamed").await.unwrap_err();
+        assert!(err.contains("upgraded to Concord v2"), "channel rename gated, got: {err}");
+        // Gated BEFORE the publish: a successful publish records its own edition head, so an
+        // unadvanced head proves nothing reached the relays.
+        assert!(
+            crate::db::community::get_edition_head(&cid, &cid).unwrap().is_none(),
+            "no community edition was published"
+        );
+        assert!(
+            crate::db::community::get_edition_head(&cid, &channel_id.to_hex()).unwrap().is_none(),
+            "no channel edition was published"
+        );
+    }
+
     #[tokio::test]
     async fn accept_invite_rejects_id_collision_under_different_authority() {
         // We hold Community X as a MEMBER (authority pubkey A). A hostile bundle reuses
@@ -7643,6 +7849,75 @@ mod tests {
             "dissolution publishes NO 3303 rekey (no last-link privatize re-founding)");
         assert_eq!(crate::db::community::load_community(&community.id).unwrap().unwrap().server_root_epoch, before_epoch,
             "base epoch unchanged — dissolution rotates nothing");
+    }
+
+    /// A migration-carrier tombstone (vsk=10 with a payload) seals the community AND persists
+    /// the migration pointer in the same fold pass — the payload's one guaranteed ride on a
+    /// live client before the seal short-circuits future control fetches.
+    #[tokio::test]
+    async fn migration_carrier_tombstone_seals_and_persists_the_pointer() {
+        let (_tmp, _guard) = init_test_db();
+        let relay = MemoryRelay::new();
+        let owner = crate::state::MY_SECRET_KEY.to_keys().unwrap();
+        let community = create_community(&relay, "HQ", "general", vec!["r1".into()]).await.unwrap();
+        let cid = community.id.to_hex();
+
+        // Owner publishes a dissolution carrying a migration payload (signpost + sealed m).
+        let signpost = crate::community::migration::MigrationSignpost {
+            v2_community_id: "ab".repeat(32),
+            owner_xonly: owner.public_key().to_hex(),
+            owner_salt: "cd".repeat(32),
+            relays: vec!["r1".into()],
+            name: "HQ".into(),
+            primary_channel: community.channels[0].id.to_hex(),
+            root_epoch: 0,
+        };
+        let m = crate::community::migration::seal_m(community.server_root_key.as_bytes(), b"jm").unwrap();
+        let content = crate::community::migration::build_migration_content(&signpost, Some(m)).unwrap();
+        let inner = crate::community::roster::build_group_dissolved_edition_with_content(&owner, &community.id, 1000, &content).unwrap();
+        let outer = crate::community::roster::seal_control_edition(&Keys::generate(), &inner, &community.server_root_key, &community.id, community.server_root_epoch).unwrap();
+        relay.publish_durable(&outer, &community.relays).await.unwrap();
+
+        fetch_and_apply_control(&relay, &community).await.unwrap();
+
+        assert!(crate::db::community::get_community_dissolved(&cid).unwrap(), "carrier still seals");
+        let stored = crate::db::community::get_migration_pointer(&cid).unwrap().expect("pointer persisted");
+        let parsed = crate::community::migration::parse_migration_payload(&stored).unwrap();
+        assert_eq!(parsed.signpost.v2_community_id, "ab".repeat(32));
+        assert!(parsed.m.is_some(), "the sealed key material rode along");
+    }
+
+    /// The exemption: a base rekey may advance a SEALED community while a migration
+    /// pointer is held and the target epoch is within the publish epoch — but a plain
+    /// dissolution (no pointer) still refuses, and a flipped community (fence) refuses.
+    #[test]
+    fn migration_exemption_gates_the_dissolved_base_rekey() {
+        let (_tmp, _guard) = init_test_db();
+        let owner = Keys::generate();
+        let me = Keys::generate();
+        become_local(&me);
+        let community = saved_community_owned_by(&owner);
+        let cid = community.id.to_hex();
+        crate::db::community::set_community_dissolved(&cid).unwrap();
+
+        let parsed = owner_base_rekey(&owner, &community, &me.public_key(), 1, &[0xCDu8; 32]);
+        // No pointer → plain dissolution → still refuses (the existing invariant holds).
+        assert!(apply_server_root_rekey(&community, &parsed).is_err());
+
+        // A migration pointer whose publish epoch covers epoch 1 → the walk is exempted.
+        let signpost = crate::community::migration::MigrationSignpost {
+            v2_community_id: "ab".repeat(32), owner_xonly: owner.public_key().to_hex(),
+            owner_salt: "cd".repeat(32), relays: vec![], name: "x".into(),
+            primary_channel: "ef".repeat(32), root_epoch: 5,
+        };
+        let content = crate::community::migration::build_migration_content(&signpost, Some("bTE=".into())).unwrap();
+        crate::db::community::set_migration_pointer(&cid, &content).unwrap();
+        assert!(crate::community::migration::catchup_exempt(&cid, 1), "epoch 1 <= publish epoch 5 → exempt");
+        assert!(!crate::community::migration::catchup_exempt(&cid, 6), "beyond the publish epoch → not exempt");
+
+        // Once flipped, the fence overrides the exemption.
+        crate::db::community::set_migrated_to(&cid, &"ab".repeat(32)).unwrap();
+        assert!(!crate::community::migration::catchup_exempt(&cid, 1), "flipped → fence stands");
     }
 
     #[tokio::test]

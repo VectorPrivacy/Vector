@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-migrate-community"
+description = "Enables the migrate_community command without any pre-configured scope."
+commands.allow = ["migrate_community"]
+
+[[permission]]
+identifier = "deny-migrate-community"
+description = "Denies the migrate_community command without any pre-configured scope."
+commands.deny = ["migrate_community"]

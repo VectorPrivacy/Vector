@@ -898,7 +898,14 @@ impl VectorCore {
     /// skipped if the account swapped mid-flight (else we'd write A's community
     /// into B's in-memory chats).
     pub async fn register_v2_chats(&self, community: &crate::community::v2::community::CommunityV2, session: &state::SessionGuard) {
-        let owner_npub = community.owner().ok().and_then(|p| ToBech32::to_bech32(&p).ok());
+        register_v2_chats_inner(community, session).await
+    }
+}
+
+/// Free-function body of [`VectorCore::register_v2_chats`] — also the migration finalize's
+/// chat stamp (it runs from a spawned task with no facade handle; only globals are touched).
+pub(crate) async fn register_v2_chats_inner(community: &crate::community::v2::community::CommunityV2, session: &state::SessionGuard) {
+    let owner_npub = community.owner().ok().and_then(|p| ToBech32::to_bech32(&p).ok());
         let me = state::my_public_key();
         let is_owner = me.is_some_and(|m| community.owner().is_ok_and(|o| o == m));
         let id_hex = crate::simd::hex::bytes_to_hex_32(&community.identity.community_id.0);
@@ -946,8 +953,9 @@ impl VectorCore {
         if let Some(slim) = slim {
             let _ = crate::db::chats::save_slim_chat(&slim);
         }
-    }
+}
 
+impl VectorCore {
     /// Join a Community from a public invite URL (`vectorapp.io/invite#...`). Fetches the
     /// token-encrypted bundle, persists the member-view Community, and registers its channels
     /// as chats. Returns a JSON summary.
@@ -1095,6 +1103,19 @@ impl VectorCore {
         attribution: Option<(String, Option<String>)>,
     ) -> Result<serde_json::Value> {
         use crate::community::service;
+        // Migration fence: if this v1 community already flipped to v2, a stale parked
+        // invite or a lingering link must NOT re-run `save_community` — its blind UPSERT would
+        // re-parent the stitched channel rows back to v1 with v1 keys (the catastrophic mixed
+        // state). Short-circuit to "already upgraded"; the rows stay v2-owned. This is
+        // `migrated_to`-aware (not a blind dissolved gate) precisely so a FRESH joiner redeeming
+        // a still-live link stays on the open on-ramp path below.
+        if let Ok(Some(v2)) = crate::db::community::get_migrated_to(&community.id.to_hex()) {
+            return Ok(serde_json::json!({
+                "community_id": v2,
+                "version": 2,
+                "migrated": true,
+            }));
+        }
         // Persist the member-view row up front: the catch-up, the control fold, and chat registration all
         // read it back from the DB. A private bundle (unlike a public one with a preview) arrives with no
         // display metadata, so nothing else would have saved it. UPSERT — re-saving a public join is a no-op.

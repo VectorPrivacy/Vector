@@ -80,6 +80,7 @@ pub async fn clear() {
     COMMUNITY_ROUTES.lock().await.clear();
     CONTROL_ROUTES.lock().await.clear();
     REFRESH_CONTROL_INFLIGHT.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    super::migration::clear_drive_inflight();
 }
 
 /// Rebuild ONLY the in-memory route maps from the persisted communities, WITHOUT touching the live

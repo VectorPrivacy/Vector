@@ -190,9 +190,33 @@ pub fn build_group_dissolved_edition_unsigned(
     community_id: &CommunityId,
     created_at: u64,
 ) -> UnsignedEvent {
+    build_group_dissolved_edition_unsigned_with_content(author, community_id, created_at, "{}")
+}
+
+/// The tombstone with explicit content — the v1→v2 migration carrier (§migration). The
+/// content is covered by the inner owner signature; shipped clients never parse it, so a
+/// payload-bearing tombstone folds as a plain dissolution everywhere pre-migration.
+pub fn build_group_dissolved_edition_unsigned_with_content(
+    author: PublicKey,
+    community_id: &CommunityId,
+    created_at: u64,
+    content: &str,
+) -> UnsignedEvent {
     let entity_id = super::derive::dissolved_locator(community_id);
-    // Chain-free terminal marker: fixed v1, no prev_hash, empty content.
-    edition::build_edition_inner(author, VSK_DISSOLVED, &entity_id, 1, None, "{}", created_at, None)
+    // Chain-free terminal marker: fixed v1, no prev_hash.
+    edition::build_edition_inner(author, VSK_DISSOLVED, &entity_id, 1, None, content, created_at, None)
+}
+
+/// Signed convenience twin of [`build_group_dissolved_edition_unsigned_with_content`] (local-keys path).
+pub fn build_group_dissolved_edition_with_content(
+    actor: &Keys,
+    community_id: &CommunityId,
+    created_at: u64,
+    content: &str,
+) -> Result<Event, String> {
+    build_group_dissolved_edition_unsigned_with_content(actor.public_key(), community_id, created_at, content)
+        .sign_with_keys(actor)
+        .map_err(|e| format!("sign dissolved edition: {e}"))
 }
 
 /// Build a signed **InviteLinks** edition (vsk=8) at the CREATOR's own coordinate
@@ -395,6 +419,23 @@ pub fn seal_dissolved_edition(ephemeral: &Keys, inner: &Event, community_id: &Co
 /// checking that signer equals the proven owner (fail-closed authority). `None` for anything else
 /// (wrong key, malformed, wrong vsk, relabelled entity_id).
 pub fn dissolved_tombstone_signer(outer: &Event, community_id: &CommunityId) -> Option<PublicKey> {
+    dissolved_tombstone_open(outer, community_id).map(|d| d.author)
+}
+
+/// One well-formed GroupDissolved tombstone at the community's dissolved locator: the
+/// signer (validity is the CALLER's owner check) plus the fields the migration payload
+/// selection needs. Content is opaque here — `migration::parse_migration_payload` decides
+/// whether it carries a pointer; a plain `{}` is still a full-fledged dissolution.
+#[derive(Clone)]
+pub struct DissolvedEdition {
+    pub author: PublicKey,
+    pub created_at: u64,
+    pub inner_id: [u8; 32],
+    pub content: String,
+}
+
+/// Payload-aware twin of [`dissolved_tombstone_signer`]: same validity gate, full record out.
+pub fn dissolved_tombstone_open(outer: &Event, community_id: &CommunityId) -> Option<DissolvedEdition> {
     if outer.kind.as_u16() != event_kind::COMMUNITY_CONTROL {
         return None;
     }
@@ -402,7 +443,9 @@ pub fn dissolved_tombstone_signer(outer: &Event, community_id: &CommunityId) -> 
     let plaintext = cipher::open(&key, &outer.content).ok()?;
     let inner = Event::from_json(&String::from_utf8(plaintext).ok()?).ok()?;
     let p = edition::parse_edition_inner(&inner).ok()?;
-    (p.vsk == VSK_DISSOLVED && p.entity_id == super::derive::dissolved_locator(community_id)).then_some(p.author)
+    (p.vsk == VSK_DISSOLVED && p.entity_id == super::derive::dissolved_locator(community_id)).then_some(
+        DissolvedEdition { author: p.author, created_at: p.created_at, inner_id: p.inner_id, content: p.content },
+    )
 }
 
 /// The folded current head of one control entity — what the caller persists via `set_edition_head`
@@ -470,6 +513,10 @@ pub struct FoldedRoster {
     /// community as dissolved ONLY if the proven owner is in this set (mirrors `banlist_author`'s BAN
     /// check). A malformed edition at the locator is dropped (`skipped`), never honored.
     pub dissolved_by: Vec<PublicKey>,
+    /// EVERY well-formed tombstone record at the locator (not signer-deduped) — the v1→v2
+    /// migration's pointer source. `migration::select_pointer` filters to the proven owner
+    /// and picks the newest PAYLOAD-CARRYING one; `dissolved_by` stays the seal signal.
+    pub dissolved_editions: Vec<DissolvedEdition>,
     /// The banlist entity's current head, for the banlist path to advance `set_edition_head`.
     pub banlist_head: Option<EntityHead>,
     /// Folded per-creator invite-link sets (vsk=8, one per creator at `invite_links_locator(cid,
@@ -583,9 +630,21 @@ pub fn fold_roster(
     // A vsk=10 edition at the WRONG entity_id (relabel attempt) is ignored here and dropped/skipped below.
     let dissolved_eid = super::derive::dissolved_locator(community_id);
     let mut dissolved_by: Vec<PublicKey> = Vec::new();
+    let mut dissolved_editions: Vec<DissolvedEdition> = Vec::new();
     for p in &parsed {
-        if p.vsk == VSK_DISSOLVED && p.entity_id == dissolved_eid && !dissolved_by.contains(&p.author) {
-            dissolved_by.push(p.author);
+        if p.vsk == VSK_DISSOLVED && p.entity_id == dissolved_eid {
+            if !dissolved_by.contains(&p.author) {
+                dissolved_by.push(p.author);
+            }
+            // Full records (every well-formed one, not signer-deduped): the migration
+            // pointer selection needs created_at/id/content across ALL of an owner's
+            // tombstones, and a non-owner's are filtered by the caller like dissolved_by.
+            dissolved_editions.push(DissolvedEdition {
+                author: p.author,
+                created_at: p.created_at,
+                inner_id: p.inner_id,
+                content: p.content.clone(),
+            });
         }
     }
 
@@ -810,7 +869,7 @@ pub fn fold_roster(
 
     FoldedRoster {
         roles: out, role_authors, grant_authors, gapped_entities, skipped, fetched: 0, heads,
-        banned, banlist_author, banlist_head, dissolved_by,
+        banned, banlist_author, banlist_head, dissolved_by, dissolved_editions,
         invite_link_sets,
         root_meta, root_author, root_head, root_candidates, channel_meta, channel_candidates,
     }

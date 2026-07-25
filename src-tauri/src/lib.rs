@@ -807,6 +807,8 @@ pub fn run() {
             commands::community::ban_community_member,
             commands::community::unban_community_member,
             commands::community::delete_community,
+            commands::community::migrate_community,
+            commands::community::migration_status,
             commands::community::kick_community_member,
             commands::community::get_community_banlist,
             commands::community::hide_community_message,

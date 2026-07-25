@@ -63,8 +63,11 @@ pub fn dissolved_pseudonym(community_id: &CommunityId) -> String {
 
 /// Rotation-stable envelope key for the dissolution tombstone — community-id-derived so the tombstone is
 /// openable by any member or joiner at ANY epoch. The control plane is server-root-encrypted (per-epoch),
-/// which a post-rotation joiner can't open for the publish-epoch; the tombstone carries no secret (content
-/// is `{}`), so a community-id key is the right scope — member-computable, outsider-opaque, epoch-free.
+/// which a post-rotation joiner can't open for the publish-epoch; this id-derived OUTER envelope carries
+/// no secret, so a community-id key is the right scope — member-computable, outsider-opaque, epoch-free.
+/// NOTE: the v1→v2 migration carrier (§migration) puts the v2 keys in an INNER `m` sealed under the
+/// server root, NOT here — the community id rides in every invite bundle, so this envelope must never
+/// hold key material. The signpost fields it does carry (v2 id/relays/name) grant nothing.
 pub fn dissolved_envelope_key(community_id: &CommunityId) -> [u8; 32] {
     hkdf_sha256_32(&community_id.0, LABEL_DISSOLVED_ENVELOPE.as_bytes())
 }

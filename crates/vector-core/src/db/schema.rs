@@ -1018,5 +1018,29 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // v1→v2 community migration (task #10). `migrated_to` is the terminal per-community
+    // fence: set inside the flip transaction, checked by every v1 write path. `migration_pointer`
+    // persists the extracted dissolution payload (signpost + sealed key material) so the flip
+    // survives restarts; `migration_checked` stops the boot sweep re-probing a community whose
+    // tombstone turned out to be a plain payload-less dissolution. `community_migrations` is the
+    // owner wizard's resumable ledger — `twin` carries the created channel key material because
+    // the pre-flip v2 twin has zero channel rows locally (the hijack guard skips v1-owned rows).
+    run_atomic_migration(conn, 77, "v1->v2 migration: pointer columns + wizard ledger", |tx| {
+        tx.execute_batch(
+            "ALTER TABLE communities ADD COLUMN migrated_to TEXT;
+             ALTER TABLE communities ADD COLUMN migration_pointer TEXT;
+             ALTER TABLE communities ADD COLUMN migration_checked INTEGER NOT NULL DEFAULT 0;
+             CREATE TABLE IF NOT EXISTS community_migrations (
+                 community_id    TEXT PRIMARY KEY,
+                 v2_community_id TEXT NOT NULL,
+                 phase           INTEGER NOT NULL DEFAULT 0,
+                 twin            TEXT NOT NULL DEFAULT '',
+                 updated_at      INTEGER NOT NULL DEFAULT 0
+             );",
+        )
+        .map_err(|e| format!("migration 77: {}", e))?;
+        Ok(())
+    })?;
+
     Ok(())
 }

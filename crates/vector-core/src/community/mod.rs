@@ -17,6 +17,7 @@ pub mod invite_list;
 pub mod list;
 pub mod metadata;
 pub mod edition;
+pub mod migration;
 pub mod owner;
 pub mod rekey;
 pub mod roster;

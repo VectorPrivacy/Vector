@@ -17742,6 +17742,20 @@ body.profile-switcher-editing .profile-switcher-add {
 .rekey-pct { position: relative; font-size: 21px; font-weight: 700; color: #fff; font-variant-numeric: tabular-nums; }
 .rekey-title { font-size: 16px; font-weight: 700; margin: 0 0 5px; color: #fff; }
 .rekey-step { font-size: 13px; color: rgba(255, 255, 255, 0.62); margin: 0; min-height: 1.2em; }
+.rekey-warning {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  font-size: 12px; color: rgba(255, 200, 87, 0.85);
+  margin: 14px 0 0;
+}
+.rekey-warning .icon {
+  position: relative;
+  top: auto; left: auto; right: auto; bottom: auto;
+  display: inline-block;
+  margin: 0;
+  flex: none;
+  width: 14px; height: 14px;
+  background-color: rgba(255, 200, 87, 0.85);
+}
 
 /* The base .icon is position:absolute (fills a sized parent). In these inline
    contexts it must flow as a normal sized glyph instead. */

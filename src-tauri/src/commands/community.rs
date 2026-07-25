@@ -276,6 +276,70 @@ pub async fn delete_community(community_id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Owner "Upgrade to Concord v2" wizard entry (§migration). Builds the v2 twin (reusing v1
+/// channel ids, cloning banlist + admins), seals the twin's keys into the dissolution carrier,
+/// publishes it on v1, and flips the owner. OWNER-ONLY + timelock-gated (both re-checked in
+/// vector-core, not just the UI). Resumable — a re-run after a crash continues from the ledger.
+/// v2-only: a v2 community has no v1 to migrate from.
+#[tauri::command]
+pub async fn migrate_community(community_id: String) -> Result<String, String> {
+    let session = vector_core::state::SessionGuard::capture();
+    if is_v2_community(&community_id) {
+        return Err("this community is already on Concord v2".to_string());
+    }
+    let id_bytes = hex_to_id32(&community_id)?;
+    let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
+        .ok_or("Community not found")?;
+    if !session.is_valid() {
+        return Err("account changed before migration".to_string());
+    }
+    let now_secs = now_secs();
+    let transport = LiveTransport::with_timeout(Duration::from_secs(20));
+    // The wizard self-finalizes (re-stamps the owner's chats + emits `community_migrated`),
+    // so the UI updates without a reboot.
+    vector_core::community::migration::migrate_community_to_v2(&transport, &community, now_secs).await
+}
+
+/// Migration status for the Community-Details row: the timelock unlock time + whether it has
+/// passed, whether THIS community is eligible (v1 + owner + not dissolved/migrated), and any
+/// in-progress ledger phase. Drives the locked/countdown/ready/in-progress/migrated states.
+#[tauri::command]
+pub async fn migration_status(community_id: String) -> Result<serde_json::Value, String> {
+    let now = now_secs();
+    let unlock_at = vector_core::community::migration::MIGRATION_UNLOCK_AT;
+    let unlocked = vector_core::community::migration::wizard_unlocked(now);
+
+    // v2 communities are the destination, never a source.
+    if is_v2_community(&community_id) {
+        return Ok(serde_json::json!({
+            "unlock_at": unlock_at, "unlocked": unlocked,
+            "eligible": false, "state": "not_applicable",
+        }));
+    }
+    let id_bytes = hex_to_id32(&community_id)?;
+    let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?;
+    let is_owner = community.as_ref().is_some_and(vector_core::community::service::is_proven_owner);
+    let migrated_to = vector_core::db::community::get_migrated_to(&community_id).ok().flatten();
+    let dissolved = vector_core::db::community::get_community_dissolved(&community_id).unwrap_or(false);
+    let ledger_phase = vector_core::db::community::get_migration_ledger(&community_id)
+        .ok().flatten().map(|(_, p, _)| p).unwrap_or(0);
+
+    let migrated = migrated_to.is_some();
+    let state = vector_core::community::migration::migration_state(
+        migrated, ledger_phase, dissolved, is_owner, unlocked,
+    );
+    Ok(serde_json::json!({
+        "unlock_at": unlock_at,
+        "unlocked": unlocked,
+        "eligible": vector_core::community::migration::migration_eligible(
+            migrated, ledger_phase, dissolved, is_owner,
+        ),
+        "state": state,
+        "phase": ledger_phase,
+        "migrated_to": migrated_to,
+    }))
+}
+
 /// Kick a member: publish a cooperative kick (3309) into the primary channel. The kicked client
 /// self-removes on receipt; peers drop them from the member list. NOT a rekey — a malicious member who
 /// ignores the kick is BANNED instead. Requires the caller hold `KICK` and outrank the target (enforced
@@ -2643,6 +2707,23 @@ pub async fn sync_communities_boot() -> Result<(), String> {
                 }
             }
             vector_core::log_info!("[Boot] community list reconcile (background) in {:?}", t.elapsed());
+        });
+    }
+
+    // v1→v2 migration maintenance, backgrounded (network-bound: probes + possible joins).
+    // Re-drives any pointer-held-but-unflipped community (crash recovery / stale-root retry)
+    // and probes sealed pointer-less ones for a carrier this client missed (upgrade lag).
+    {
+        let maintenance_session = vector_core::state::SessionGuard::capture();
+        tokio::spawn(async move {
+            if !maintenance_session.is_valid() {
+                return;
+            }
+            let transport = vector_core::community::transport::LiveTransport::with_timeout(Duration::from_secs(12));
+            let flipped = vector_core::community::migration::run_migration_maintenance(&transport).await;
+            if !flipped.is_empty() {
+                vector_core::log_info!("[Boot] migration maintenance flipped {} community(ies)", flipped.len());
+            }
         });
     }
 

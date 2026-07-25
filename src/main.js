@@ -3095,6 +3095,64 @@ async function setupRustListeners() {
         }
     });
 
+    // A v1 community upgraded to Concord v2: the chat row is re-parented in place (same
+    // chat_identifier, so history/unread survive). Refresh its metadata to the v2 identity
+    // and drop one "Community upgraded" line into the open timeline. Nothing else moves.
+    _on('community_migrated', async (evt) => {
+        const v1Id = evt.payload?.v1_community_id;
+        const v2Id = evt.payload?.v2_community_id;
+        if (!v2Id) return;
+        // Re-point any chat row still tagged with the v1 community id to the v2 identity.
+        // This is load-bearing (it unlocks the composer + clears the dissolved flag), so it
+        // runs UNCONDITIONALLY — the get_community fetch below only decorates name/owner and
+        // is best-effort; a failed fetch must not leave the room locked.
+        const rows = arrChats.filter(c => {
+            const f = c.metadata?.custom_fields;
+            return f && (f.community_id === v1Id || f.community_id === v2Id);
+        });
+        for (const c of rows) {
+            const f = c.metadata.custom_fields;
+            f.community_id = v2Id;
+            f.proto_version = '2';
+            f.dissolved = 'false';
+        }
+        try {
+            const summary = await invoke('get_community', { communityId: v2Id });
+            for (const c of rows) {
+                const f = c.metadata.custom_fields;
+                f.name = summary.name;
+                if (summary.owner_npub) f.owner_npub = summary.owner_npub;
+            }
+        } catch (_) {}
+        renderChatlist();
+        if (strOpenChat) {
+            const open = arrChats.find(c => c.id === strOpenChat);
+            if (open && open.metadata?.custom_fields?.community_id === v2Id) {
+                // The carrier's dissolved-fold ran the composer lockdown (disabled input,
+                // hidden file/voice/emoji, "dissolved" notice) a beat before this migration
+                // event. The room is ALIVE on v2, so fully RESTORE the composer — mirror
+                // openChat's live-chat branch, not just the placeholder.
+                document.getElementById('dissolved-notice')?.remove();
+                domChatMessageInput.disabled = false;
+                domChatMessageInput.placeholder = 'Enter message...';
+                domChatMessageInput.style.paddingLeft = '';
+                domChatMessageInputFile.style.display = '';
+                domChatMessageInputVoice.style.display = '';
+                domChatMessageInputEmoji.style.display = '';
+                if (!document.getElementById('migrated-notice')) {
+                    // insertSystemEvent only appends when given a parent — attach explicitly
+                    // (same pattern as the dissolved notice).
+                    const note = insertSystemEvent('This community has upgraded to Concord v2.');
+                    if (note) {
+                        note.id = 'migrated-notice';
+                        note.style.marginBottom = '20px';
+                        domChatMessages.appendChild(note);
+                    }
+                }
+            }
+        }
+    });
+
     // A community synced in from another device (cross-device Community List, §6.3) appeared seamlessly —
     // render its metadata via the same path as a manual join so name/crown/members show without a restart.
     _on('community_surfaced', async (evt) => {
@@ -8850,6 +8908,82 @@ async function removeCommunityFromUI(communityId) {
     if (wasViewing) openChatlist();
 }
 
+/**
+ * Render the owner-only "Upgrade to Concord v2" migration row from the backend status.
+ * Timelock-gated: before the unlock the button is disabled and shows a countdown; once
+ * unlocked, a confirm dialog arms the irreversible wizard. Hidden entirely for members,
+ * v2 communities, and dissolved/migrated/ineligible ones.
+ */
+async function renderMigrationRow(communityId, name, chatId) {
+    const row = document.getElementById('group-migrate-row');
+    const btn = document.getElementById('group-migrate-btn');
+    const label = document.getElementById('group-migrate-label');
+    if (!row || !btn || !label) return;
+    row.style.display = 'none';
+    let status;
+    try {
+        status = await invoke('migration_status', { communityId });
+    } catch (_) { return; }
+    // Only surface the row where an action or a countdown is meaningful.
+    if (!status || (status.state !== 'ready' && status.state !== 'locked' && status.state !== 'in_progress')) return;
+    row.style.display = 'flex';
+    row.style.justifyContent = 'center';
+
+    const arm = () => {
+        btn.style.opacity = '';
+        btn.style.pointerEvents = '';
+    };
+    const disarm = () => {
+        btn.style.opacity = '0.5';
+        btn.style.pointerEvents = 'none';
+    };
+
+    if (status.state === 'locked') {
+        // Countdown to the unlock (unlock_at is unix seconds).
+        const days = Math.max(0, Math.ceil((status.unlock_at - Date.now() / 1000) / 86400));
+        label.innerText = days > 1 ? `Upgrade unlocks in ${days} days` : 'Upgrade unlocks soon';
+        disarm();
+        return;
+    }
+    if (status.state === 'in_progress') {
+        label.innerText = 'Resume upgrade';
+    } else {
+        label.innerText = 'Upgrade to Concord v2';
+    }
+    arm();
+    btn.onclick = async () => {
+        const ok = await popupConfirm(
+            'Upgrade to Concord v2?',
+            `This upgrades "<b>${escapeHtml(name)}</b>" to the newer, more private Concord v2.<br><br>Everyone here moves over automatically, keeping their history. Your old invite links will stop working, so you'll need to share new ones. This cannot be undone.`,
+            false, '', 'concord_v2.svg');
+        if (!ok) return;
+        disarm();
+        label.innerText = 'Upgrading...';
+        // Lock the app behind the unclosable ring modal for the whole wizard (rekey contract):
+        // the owner closing the app mid-wizard is the worst-case, so the UI holds them here
+        // until the backend returns. Registered before the invoke so no phase is missed.
+        const modal = await showRekeyProgressModal('Upgrading to Concord v2', 'community_migration_progress');
+        try {
+            await invoke('migrate_community', { communityId });
+            await modal.finish('Upgrade complete!');
+            modal.close();
+            // Land the owner back INSIDE the room. openGroupOverview hid every other pane, so a
+            // bare overview-hide paints black — this is the overview back-entry's close path. The
+            // v2 twin reuses the primary channel id, so the same chat id opens the migrated room.
+            popBack('group-overview');
+            domGroupOverview.style.display = 'none';
+            domGroupOverview.removeAttribute('data-group-id');
+            openChat(chatId);
+        } catch (e) {
+            modal.close();
+            await popupConfirm('Upgrade Failed', escapeHtml(String(e)), true, '', 'vector_warning.svg');
+            // Re-derive the row from backend status: a partially-progressed wizard must
+            // come back as "Resume upgrade", not the fresh-start label.
+            renderMigrationRow(communityId, name, chatId);
+        }
+    };
+}
+
 async function renderCommunityOverview(chat, preserveSearch = false) {
     const cf = chat.metadata?.custom_fields || {};
     const communityId = cf.community_id;
@@ -9414,6 +9548,12 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         };
     }
 
+    // "Upgrade to Concord v2" — owner-only, v1-only. Reflects the migration timelock:
+    // locked shows a countdown, ready arms the wizard (type-to-confirm, irreversible),
+    // in-progress shows a resumable state. Hidden for members, v2 communities, and any
+    // dissolved/migrated/ineligible community.
+    renderMigrationRow(communityId, name, chat.id);
+
     domGroupOverviewBackBtn.onclick = () => {
         popBack('group-overview');
         domGroupOverview.style.display = 'none';
@@ -9432,7 +9572,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
  * reroll → per-member key prep → send → per-edition repost → finalize) and fills a determinate ring.
  * Awaits the listener registration before returning so early phases aren't missed. Returns { finish, close }.
  */
-async function showRekeyProgressModal(title) {
+async function showRekeyProgressModal(title, eventName = 'community_rekey_progress') {
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay rekey-progress-overlay';
     overlay.onclick = (e) => e.stopPropagation(); // swallow — no backdrop dismiss
@@ -9442,6 +9582,7 @@ async function showRekeyProgressModal(title) {
         <div class="rekey-ring"><span class="rekey-pct">0%</span></div>
         <p class="rekey-title">${escapeHtml(title || 'Updating community keys')}</p>
         <p class="rekey-step">Starting...</p>
+        <p class="rekey-warning"><span class="icon icon-info"></span>Do not close the app during this process</p>
     `;
     overlay.appendChild(box);
     document.body.appendChild(overlay);
@@ -9461,7 +9602,7 @@ async function showRekeyProgressModal(title) {
         rafId = requestAnimationFrame(tick);
     });
     // Register BEFORE the caller invokes the op, so we don't miss the opening phases.
-    const unlisten = await listen('community_rekey_progress', (evt) => {
+    const unlisten = await listen(eventName, (evt) => {
         const { pct, label } = evt.payload || {};
         setProgress(typeof pct === 'number' ? pct : 0, label);
     });

@@ -1009,6 +1009,15 @@ fn delete_community_inner(community_id: &str, retain_keys: bool) -> Result<(), S
 /// banned. So a "leave" actually removes a member, and a leave-then-rejoin/post re-adds them.
 /// `created_at` is in seconds. Result is capped (anti-flood); see [`COMMUNITY_MEMBER_CAP`].
 pub fn community_member_activity(community_id: &str) -> Result<Vec<(String, u64)>, String> {
+    community_member_activity_capped(community_id, true)
+}
+
+/// [`community_member_activity`] with the anti-flood display cap OPTIONAL. The migration
+/// roster seed passes `capped = false` so a >500-member v1 community seeds EVERY member
+/// — a silent truncation there would permanently strand the dropped members (absent from the
+/// snapshot → absent from `memberlist()` → excluded from every future v2 rotation). Every
+/// other caller keeps the cap.
+pub fn community_member_activity_capped(community_id: &str, capped: bool) -> Result<Vec<(String, u64)>, String> {
     /// Cap on rendered members — bounds a presence-flood (fresh-identity 3306 spam) from
     /// growing the list / profile-fetch fan-out without limit.
     const COMMUNITY_MEMBER_CAP: usize = 500;
@@ -1149,7 +1158,9 @@ pub fn community_member_activity(community_id: &str) -> Result<Vec<(String, u64)
         }
     }
     out.sort_by(|a, b| b.1.cmp(&a.1));
-    out.truncate(COMMUNITY_MEMBER_CAP);
+    if capped {
+        out.truncate(COMMUNITY_MEMBER_CAP);
+    }
     Ok(out)
 }
 
@@ -1754,6 +1765,176 @@ pub fn set_community_dissolved(community_id: &str) -> Result<bool, String> {
         )
         .map_err(|e| format!("set dissolved: {e}"))?;
     Ok(changed > 0)
+}
+
+// ---- v1→v2 migration state (migration 77) ------------------------------------------------
+// `migration_pointer` is the extracted dissolution payload JSON (signpost + sealed `m`) —
+// wrapped by Local Encryption like every identifying community field. `migrated_to` is the
+// terminal flip fence. `migration_checked` converges the boot sweep on plain dissolutions.
+
+/// Persist the extracted migration payload. Overwrite-idempotent (pointer selection is
+/// total: the newest payload-carrying owner tombstone wins, so re-persisting is harmless).
+pub fn set_migration_pointer(community_id: &str, payload_json: &str) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let wrapped = enc_txt(payload_json)?;
+    conn.execute(
+        "UPDATE communities SET migration_pointer = ?2, migration_checked = 1 WHERE community_id = ?1",
+        params![community_id, wrapped],
+    )
+    .map_err(|e| format!("set migration pointer: {e}"))?;
+    Ok(())
+}
+
+/// The persisted migration payload JSON, if any. `None` for unknown/pointer-less communities.
+pub fn get_migration_pointer(community_id: &str) -> Result<Option<String>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let v: Option<Option<String>> = conn
+        .query_row(
+            "SELECT migration_pointer FROM communities WHERE community_id = ?1",
+            params![community_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("get migration pointer: {e}"))?;
+    Ok(v.flatten().map(|s| dec_txt(&s)))
+}
+
+/// Terminal flip fence: the v2 community id this v1 community migrated to. Set ONLY inside
+/// the flip transaction. One-way (no clear path) — mirrors the dissolved seal's discipline.
+pub fn set_migrated_to(community_id: &str, v2_community_id: &str) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "UPDATE communities SET migrated_to = ?2 WHERE community_id = ?1 AND migrated_to IS NULL",
+        params![community_id, v2_community_id],
+    )
+    .map_err(|e| format!("set migrated_to: {e}"))?;
+    Ok(())
+}
+
+/// The flip fence readout — every v1 write path checks this first. `None` = not migrated.
+pub fn get_migrated_to(community_id: &str) -> Result<Option<String>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let v: Option<Option<String>> = conn
+        .query_row(
+            "SELECT migrated_to FROM communities WHERE community_id = ?1",
+            params![community_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("get migrated_to: {e}"))?;
+    Ok(v.flatten())
+}
+
+/// Mark a dissolved community's tombstone as migration-checked (found to be a plain `{}`
+/// dissolution) so the boot sweep stops re-probing it. Set implicitly by
+/// [`set_migration_pointer`] too — either outcome converges the sweep.
+pub fn set_migration_checked(community_id: &str) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "UPDATE communities SET migration_checked = 1 WHERE community_id = ?1",
+        params![community_id],
+    )
+    .map_err(|e| format!("set migration checked: {e}"))?;
+    Ok(())
+}
+
+// ---- Owner migration wizard ledger (migration 77 `community_migrations`) ------------------
+// Resumable phase tracking. `twin` carries enough to rebuild the twin on resume (the pre-flip
+// v2 twin has ZERO channel rows locally — the hijack guard skips v1-owned rows — so a reloaded
+// twin would be channel-less; the ledger holds the twin's v2 id + created channel set).
+
+/// Upsert the wizard's ledger row (phase reached + serialized twin state).
+pub fn set_migration_ledger(v1_community_id: &str, v2_community_id: &str, phase: i64, twin_json: &str) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let wrapped = enc_txt(twin_json)?;
+    conn.execute(
+        "INSERT INTO community_migrations (community_id, v2_community_id, phase, twin, updated_at)
+         VALUES (?1, ?2, ?3, ?4, 0)
+         ON CONFLICT(community_id) DO UPDATE SET v2_community_id=?2, phase=?3, twin=?4",
+        params![v1_community_id, v2_community_id, phase, wrapped],
+    )
+    .map_err(|e| format!("set migration ledger: {e}"))?;
+    Ok(())
+}
+
+/// Read the wizard ledger row: `(v2_community_id, phase, twin_json)`.
+pub fn get_migration_ledger(v1_community_id: &str) -> Result<Option<(String, i64, String)>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let row = conn
+        .query_row(
+            "SELECT v2_community_id, phase, twin FROM community_migrations WHERE community_id = ?1",
+            params![v1_community_id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?)),
+        )
+        .optional()
+        .map_err(|e| format!("get migration ledger: {e}"))?;
+    Ok(row.map(|(v2, phase, twin)| (v2, phase, dec_txt(&twin))))
+}
+
+/// Re-parent every stitched channel row from the v1 community to the v2 twin, in ONE
+/// transaction, AND stamp the terminal fence (`migrated_to` + `dissolved`) on the v1 row.
+/// The dedicated migration transaction the v2 hijack guard (`save_community_v2`) forces: the
+/// generic v2 save SKIPS foreign-owned channel rows, so nothing but this may adopt them.
+/// Callers must NOT `save_community_v2` after this: every in-memory v2 view at flip time is
+/// CHANNEL-LESS (its channel ids were v1-owned, so the pre-flip saves skipped them), and the
+/// v2 save PRUNES channel rows absent from the passed struct — a post-flip re-save DELETES
+/// the just-re-parented rows. Public channels fold from the control plane; nothing needs a
+/// re-save. Idempotent: a crash re-run re-parents zero rows and the fence writes are no-ops.
+pub fn reparent_channels_and_fence(v1_community_id: &str, v2_community_id: &str) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let tx = conn.unchecked_transaction().map_err(|e| format!("flip txn: {e}"))?;
+    tx.execute(
+        "UPDATE community_channels SET community_id = ?2 WHERE community_id = ?1",
+        params![v1_community_id, v2_community_id],
+    )
+    .map_err(|e| format!("reparent channels: {e}"))?;
+    // Terminal fence: one-way, mirrors the dissolved seal's discipline. `dissolved` too,
+    // so a fallback-door/on-ramp flip (member never folded the tombstone) still activates
+    // fence layer 0 (the control fold short-circuit).
+    tx.execute(
+        "UPDATE communities SET migrated_to = ?2, dissolved = 1 WHERE community_id = ?1 AND migrated_to IS NULL",
+        params![v1_community_id, v2_community_id],
+    )
+    .map_err(|e| format!("set fence: {e}"))?;
+    tx.commit().map_err(|e| format!("flip commit: {e}"))?;
+    // The channel→community cache assumes an IMMUTABLE mapping (positives-only); the
+    // re-parent is the one place that mapping changes, so drop the stale v1 entries. They
+    // refill lazily as v2 on next lookup.
+    forget_community_channels(v1_community_id);
+    Ok(())
+}
+
+/// Communities the boot sweep must probe: sealed (`dissolved = 1`), never flipped, and not
+/// yet migration-checked. Returns their ids.
+pub fn migration_sweep_candidates() -> Result<Vec<String>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT community_id FROM communities
+             WHERE dissolved = 1 AND migrated_to IS NULL AND migration_checked = 0",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    Ok(rows.flatten().collect())
+}
+
+/// Communities whose flip is UNFINISHED: a pointer is held but `migrated_to` never landed
+/// (crash between the v2 join and the flip txn, an unopenable-`m` retry, or a stale-root
+/// walk that can now advance). The boot maintenance re-drives each.
+pub fn migration_flip_candidates() -> Result<Vec<String>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT community_id FROM communities
+             WHERE migration_pointer IS NOT NULL AND migrated_to IS NULL",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    Ok(rows.flatten().collect())
 }
 
 /// Whether a community has been sealed by a folded + owner-verified GroupDissolved tombstone.
@@ -2721,6 +2902,51 @@ mod tests {
         assert!(!community_exists(&c.id).unwrap());
         save_community(&c).unwrap();
         assert!(community_exists(&c.id).unwrap());
+    }
+
+    #[test]
+    fn reparent_moves_channels_stamps_fence_and_invalidates_cache() {
+        let (_tmp, _guard) = init_test_db();
+        let v1 = Community::create("HQ", "general", vec![]);
+        save_community(&v1).unwrap();
+        let v1_cid = v1.id.to_hex();
+        let v2_cid = "ab".repeat(32);
+        let chan = v1.channels[0].id.to_hex();
+
+        // Warm the positives-only cache with the v1 mapping, then flip.
+        assert_eq!(community_id_for_channel(&chan).unwrap().as_deref(), Some(v1_cid.as_str()));
+        reparent_channels_and_fence(&v1_cid, &v2_cid).unwrap();
+
+        // Channel re-parented (cache invalidated → refills as v2), fence stamped both ways.
+        assert_eq!(community_id_for_channel(&chan).unwrap().as_deref(), Some(v2_cid.as_str()),
+            "stale v1 cache entry must not survive the re-parent");
+        assert_eq!(get_migrated_to(&v1_cid).unwrap().as_deref(), Some(v2_cid.as_str()));
+        assert!(get_community_dissolved(&v1_cid).unwrap(), "flip seals v1 (fence layer 0)");
+
+        // Idempotent: a second flip re-parents zero rows and the one-way fence holds.
+        reparent_channels_and_fence(&v1_cid, &"cd".repeat(32)).unwrap();
+        assert_eq!(get_migrated_to(&v1_cid).unwrap().as_deref(), Some(v2_cid.as_str()),
+            "migrated_to is one-way — a second flip cannot repoint it");
+    }
+
+    #[test]
+    fn migration_sweep_candidates_are_sealed_unflipped_unchecked() {
+        let (_tmp, _guard) = init_test_db();
+        let a = Community::create("A", "g", vec![]);
+        let b = Community::create("B", "g", vec![]);
+        let c = Community::create("C", "g", vec![]);
+        for x in [&a, &b, &c] { save_community(x).unwrap(); }
+        // a: sealed, unchecked → candidate. b: sealed but flipped → not. c: live → not.
+        set_community_dissolved(&a.id.to_hex()).unwrap();
+        set_community_dissolved(&b.id.to_hex()).unwrap();
+        set_migrated_to(&b.id.to_hex(), &"ab".repeat(32)).unwrap();
+        let cands = migration_sweep_candidates().unwrap();
+        assert!(cands.contains(&a.id.to_hex()));
+        assert!(!cands.contains(&b.id.to_hex()), "flipped is not a candidate");
+        assert!(!cands.contains(&c.id.to_hex()), "live is not a candidate");
+        // Marking checked converges the sweep.
+        set_migration_checked(&a.id.to_hex()).unwrap();
+        assert!(!migration_sweep_candidates().unwrap().contains(&a.id.to_hex()));
     }
 
     #[test]

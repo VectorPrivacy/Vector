@@ -410,21 +410,38 @@ pub fn genesis(owner_keys: &Keys, mut metadata: CommunityMetadata, at_secs: u64)
 pub async fn genesis_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
     owner_pk: PublicKey,
     signer: &S,
+    metadata: CommunityMetadata,
+    at_secs: u64,
+) -> Result<Genesis, ControlError> {
+    genesis_signed_with_primary(owner_pk, signer, metadata, at_secs, None).await
+}
+
+/// [`genesis_signed`] with an OPTIONAL explicit primary-channel id + name — the
+/// migration-only path (§migration) so the v2 twin's #general reuses the v1 primary
+/// channel id and history stitches through the flip. `None` mints a fresh id (the
+/// ordinary create path).
+pub async fn genesis_signed_with_primary<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+    owner_pk: PublicKey,
+    signer: &S,
     mut metadata: CommunityMetadata,
     at_secs: u64,
+    primary: Option<(ChannelId, String)>,
 ) -> Result<Genesis, ControlError> {
     validate_community_metadata(&metadata)?;
     metadata.relays.truncate(super::super::MAX_COMMUNITY_RELAYS);
 
     let identity = CommunityIdentity::mint(&owner_pk);
     let community_root = super::super::random_32();
-    let general_channel_id = ChannelId(super::super::random_32());
+    let (general_channel_id, general_name) = match primary {
+        Some((id, name)) => (id, name),
+        None => (ChannelId(super::super::random_32()), "general".to_string()),
+    };
     let group = control_group_key(&community_root, &identity.community_id, Epoch(0));
 
     let meta_json = serde_json::to_string(&metadata).map_err(|e| ControlError::Stream(StreamError::Parse(e.to_string())))?;
     let meta_rumor = build_edition_rumor(owner_pk, vsk::COMMUNITY_METADATA, &identity.community_id.0, 1, None, &meta_json, at_secs, None);
 
-    let general = ChannelMetadata { name: "general".into(), private: false, ..Default::default() };
+    let general = ChannelMetadata { name: general_name, private: false, ..Default::default() };
     let general_json = serde_json::to_string(&general).map_err(|e| ControlError::Stream(StreamError::Parse(e.to_string())))?;
     let general_rumor = build_edition_rumor(owner_pk, vsk::CHANNEL_METADATA, &general_channel_id.0, 1, None, &general_json, at_secs, None);
 
