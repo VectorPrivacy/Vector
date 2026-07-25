@@ -1018,6 +1018,33 @@ pub async fn get_reply_contexts(
     Ok(contexts)
 }
 
+/// Populate reply context for a PAGE of messages in one query — the sync/back-page
+/// counterpart to [`populate_reply_context`]. Every path that emits a message straight to
+/// the UI must resolve the quote first: the frontend renders the emitted payload, and a
+/// reply whose parent lies outside the rendered window has no other source for it (a
+/// parent inside the window is resolved from memory instead). Messages whose parent isn't
+/// persisted yet are left untouched.
+pub async fn populate_reply_contexts(messages: Vec<&mut Message>) -> Result<(), String> {
+    let ids: Vec<String> = messages
+        .iter()
+        .filter(|m| !m.replied_to.is_empty())
+        .map(|m| m.replied_to.clone())
+        .collect();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let contexts = get_reply_contexts(&ids).await?;
+    for message in messages {
+        if let Some(ctx) = contexts.get(&message.replied_to) {
+            message.replied_to_content = Some(ctx.content.clone());
+            message.replied_to_npub = ctx.npub.clone();
+            message.replied_to_has_attachment = Some(ctx.has_attachment);
+            message.replied_to_attachment_extension = ctx.extension.clone();
+        }
+    }
+    Ok(())
+}
+
 /// Populate reply context for a single message.
 /// Used for real-time messages that don't go through get_message_views.
 pub async fn populate_reply_context(message: &mut Message) -> Result<(), String> {
@@ -1746,6 +1773,66 @@ mod tests {
 
     fn now_secs() -> u64 {
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+    }
+
+    /// A page of synced replies must come out of the batch resolver carrying their quotes.
+    /// The sync/promote paths emit straight to the UI, and the renderer falls back to the
+    /// in-memory parent only when the parent is inside the rendered window — so a reply to
+    /// an OLDER message renders with no quote at all unless the backend resolved it here.
+    /// Reopening the chat re-reads through `get_message_views` (which resolves), which is
+    /// why the bug looked like "replies lose their context until you reopen".
+    #[tokio::test]
+    async fn batch_resolver_fills_quotes_for_a_synced_page() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "channel_reply_batch";
+        let author = make_test_npub(90_001);
+
+        // An older, already-persisted parent (the case with no in-memory fallback).
+        let mut parent = Message::default();
+        parent.id = "parent_evt".to_string();
+        parent.content = "the original message".to_string();
+        parent.npub = Some(author.clone());
+        parent.at = now_secs() - 5_000;
+        save_message(chat, &parent).await.unwrap();
+
+        // The freshly-synced page: a reply to it, plus an unrelated message.
+        let mut reply = Message::default();
+        reply.id = "reply_evt".to_string();
+        reply.content = "replying now".to_string();
+        reply.replied_to = "parent_evt".to_string();
+        reply.at = now_secs();
+        let mut plain = Message::default();
+        plain.id = "plain_evt".to_string();
+        plain.content = "unrelated".to_string();
+        plain.at = now_secs();
+        // A reply whose parent this device has never seen must stay empty, not fabricate a quote.
+        let mut orphan = Message::default();
+        orphan.id = "orphan_evt".to_string();
+        orphan.replied_to = "never_seen_evt".to_string();
+        orphan.at = now_secs();
+
+        populate_reply_contexts(vec![&mut reply, &mut plain, &mut orphan]).await.unwrap();
+
+        assert_eq!(
+            reply.replied_to_content.as_deref(),
+            Some("the original message"),
+            "the synced reply carries its parent's content"
+        );
+        assert_eq!(reply.replied_to_npub.as_deref(), Some(author.as_str()), "and its parent's author");
+        assert!(plain.replied_to_content.is_none(), "a non-reply is untouched");
+        assert!(orphan.replied_to_content.is_none(), "an unresolvable parent leaves the quote empty");
+    }
+
+    /// An empty page (or one with no replies at all) must not query or error — the sync path
+    /// calls this for every page, most of which carry no replies.
+    #[tokio::test]
+    async fn batch_resolver_is_a_noop_without_replies() {
+        let (_tmp, _guard) = init_test_db();
+        populate_reply_contexts(vec![]).await.unwrap();
+        let mut plain = Message::default();
+        plain.id = "solo".to_string();
+        populate_reply_contexts(vec![&mut plain]).await.unwrap();
+        assert!(plain.replied_to_content.is_none());
     }
 
     // C-H2: a presence (join/leave) persisted from HISTORY must keep its authenticated timestamp so it

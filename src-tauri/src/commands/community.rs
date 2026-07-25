@@ -1852,10 +1852,26 @@ async fn sync_community_channel_inner(
     }
 
     // Process the batch into STATE (sync), collecting outcomes to persist (+ emit).
-    let outcomes = {
+    let mut outcomes = {
         let mut state = vector_core::state::STATE.lock().await;
         vector_core::community::inbound::process_channel_batch(&mut state, &events, &channel, &my_pk)
     };
+
+    // Resolve each reply's quote BEFORE emitting: the frontend renders the emitted payload,
+    // and a reply whose parent lies outside the rendered window has no other source for the
+    // quote (a parent inside the window is resolved from memory). One query for the page.
+    {
+        let quoted: Vec<&mut vector_core::types::Message> = outcomes
+            .iter_mut()
+            .filter_map(|o| match o {
+                IncomingEvent::NewMessage(m)
+                | IncomingEvent::Updated { message: m, .. }
+                | IncomingEvent::ReactionRemoved { message: m, .. } => Some(m),
+                _ => None,
+            })
+            .collect();
+        let _ = vector_core::db::events::populate_reply_contexts(quoted).await;
+    }
 
     let mut new_messages = 0u32;
     // Message saves COLLECT into batched transactions (one tx per page in the common case);
@@ -3322,10 +3338,26 @@ async fn promote_preloaded_page(community: &vector_core::community::Community, p
     if !session.is_valid() {
         return false;
     }
-    let outcomes = {
+    let mut outcomes = {
         let mut state = vector_core::state::STATE.lock().await;
         vector_core::community::inbound::process_channel_batch(&mut state, &page, &channel, &my_pk)
     };
+
+    // Resolve each reply's quote BEFORE emitting: the frontend renders the emitted payload,
+    // and a reply whose parent lies outside the rendered window has no other source for the
+    // quote (a parent inside the window is resolved from memory). One query for the page.
+    {
+        let quoted: Vec<&mut vector_core::types::Message> = outcomes
+            .iter_mut()
+            .filter_map(|o| match o {
+                IncomingEvent::NewMessage(m)
+                | IncomingEvent::Updated { message: m, .. }
+                | IncomingEvent::ReactionRemoved { message: m, .. } => Some(m),
+                _ => None,
+            })
+            .collect();
+        let _ = vector_core::db::events::populate_reply_contexts(quoted).await;
+    }
     let mut painted = 0u32;
     // Message saves COLLECT into one batched transaction; deletes are flush barriers
     // (see flush_message_batch).
