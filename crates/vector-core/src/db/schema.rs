@@ -1042,5 +1042,18 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // Direct Invites carry a NIP-40 24h expiry. Relay support for NIP-40 is optional, so the
+    // recipient enforces it locally too: the sender's declared expiry is persisted per parked
+    // invite and filtered on read. 0 = no expiry declared (a pre-expiry sender), which stays
+    // permanent — an invite whose sender never promised a deadline isn't ours to revoke.
+    run_atomic_migration(conn, 78, "Pending invite expiry (NIP-40)", |tx| {
+        tx.execute(
+            "ALTER TABLE pending_community_invites ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| format!("migration 78: {}", e))?;
+        Ok(())
+    })?;
+
     Ok(())
 }

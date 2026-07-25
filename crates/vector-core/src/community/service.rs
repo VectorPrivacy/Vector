@@ -6987,7 +6987,7 @@ mod tests {
         // Populate every community-scoped table.
         crate::db::community::store_epoch_key(&cid, crate::community::SERVER_ROOT_SCOPE_HEX, 1, &[0x11u8; 32]).unwrap();
         crate::db::community::save_public_invite("tok", &cid, "https://x/invite#y", None, None).unwrap();
-        crate::db::community::save_pending_invite(&cid, "{}", "npub1inviter").unwrap();
+        crate::db::community::save_pending_invite(&cid, "{}", "npub1inviter", 0).unwrap();
         crate::db::community::set_edition_head(&cid, &cid, 1, &[0x22u8; 32]).unwrap();
         crate::db::community::set_community_banlist(&cid, &["cc".repeat(32)], 100).unwrap();
 
@@ -7517,7 +7517,7 @@ mod tests {
         crate::db::community::save_community(&owner).unwrap();
         let bundle = crate::community::invite::build_invite(&owner).to_json().unwrap();
         let cid = owner.id.to_hex();
-        crate::db::community::save_pending_invite(&cid, &bundle, "npub1inviter").unwrap();
+        crate::db::community::save_pending_invite(&cid, &bundle, "npub1inviter", 0).unwrap();
 
         // Command sequence: peek (no delete) → accept (errs) → row survives.
         let peeked = crate::db::community::get_pending_invite(&cid).unwrap().expect("parked");
@@ -7532,7 +7532,7 @@ mod tests {
         let other = Community::create("Other", "general", vec![]);
         let ob = crate::community::invite::build_invite(&other).to_json().unwrap();
         let ocid = other.id.to_hex();
-        crate::db::community::save_pending_invite(&ocid, &ob, "npub1inviter").unwrap();
+        crate::db::community::save_pending_invite(&ocid, &ob, "npub1inviter", 0).unwrap();
         let op = crate::db::community::get_pending_invite(&ocid).unwrap().unwrap();
         let oinvite = crate::community::invite::CommunityInvite::from_json(&op).unwrap();
         accept_invite(&oinvite).expect("accept ok");

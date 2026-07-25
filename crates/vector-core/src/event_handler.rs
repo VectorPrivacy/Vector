@@ -281,6 +281,8 @@ pub enum PreparedEvent {
         /// wrapper, which NIP-59 backdates up to 2 days, this is honest; the tombstone
         /// supersession test needs it so a re-invite isn't misread as older than a decline.
         rumor_created_at: u64,
+        /// Sender-declared NIP-40 expiry (unix secs); 0 = none, so permanent.
+        expires_at: u64,
     },
     /// Concord v2 Direct Invite (inner kind 3313) — parked for explicit consent.
     /// Carries the raw bundle JSON (parked verbatim; the accept path re-parses it).
@@ -294,6 +296,8 @@ pub enum PreparedEvent {
         wrapper_created_at: u64,
         /// Inner rumor `created_at` (seconds) — the real send time (see the v1 variant).
         rumor_created_at: u64,
+        /// Sender-declared NIP-40 expiry (unix secs); 0 = none, so permanent.
+        expires_at: u64,
     },
     /// Duplicate event — just persist wrapper for negentropy.
     DedupSkip {
@@ -369,6 +373,7 @@ pub async fn prepare_event(
         return match crate::community::invite::parse_invite_rumor(rumor.kind, &rumor.content) {
             Some(invite) => PreparedEvent::CommunityInvite {
                 invite, inviter: contact.clone(), is_mine, wrapper_event_id_bytes, wrapper_created_at, rumor_created_at,
+                expires_at: crate::community::invite::expiration_secs(&rumor.tags).unwrap_or(0),
             },
             None => PreparedEvent::ErrorSkip { wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at },
         };
@@ -389,6 +394,7 @@ pub async fn prepare_event(
                 wrapper_event_id_bytes,
                 wrapper_created_at,
                 rumor_created_at,
+                expires_at: crate::community::invite::expiration_secs(&rumor.tags).unwrap_or(0),
             },
             None => PreparedEvent::ErrorSkip { wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at },
         };
@@ -449,6 +455,13 @@ pub async fn prepare_event(
 /// negentropy fetch queued events for commit), bail before any STATE /
 /// DB write. Centralized so individual spawn sites (sync.rs fetch_messages,
 /// archive task, sync_dms, subscription_handler) don't have to wrap.
+/// Whether a parked-invite candidate is already past the sender's NIP-40 deadline.
+/// `0` means the sender declared none, which stays permanent — an invite whose sender never
+/// promised a deadline is not ours to revoke.
+fn expired_invite(expires_at: u64) -> bool {
+    expires_at != 0 && expires_at <= nostr_sdk::prelude::Timestamp::now().as_secs()
+}
+
 pub async fn commit_prepared_event(
     prepared: PreparedEvent,
     is_new: bool,
@@ -601,7 +614,7 @@ pub async fn commit_prepared_event(
                 RumorProcessingResult::Ignored => false,
             }
         }
-        PreparedEvent::CommunityInvite { invite, inviter, is_mine, wrapper_event_id_bytes, wrapper_created_at, rumor_created_at } => {
+        PreparedEvent::CommunityInvite { invite, inviter, is_mine, wrapper_event_id_bytes, wrapper_created_at, rumor_created_at, expires_at } => {
             // Negentropy bookkeeping regardless of outcome (the outer wrapper id is
             // attacker-controlled, so it can't be the join-idempotency key — see below).
             {
@@ -612,6 +625,13 @@ pub async fn commit_prepared_event(
 
             // Never park our own echoed invite.
             if is_mine {
+                return false;
+            }
+
+            // Already past the sender's NIP-40 deadline (a catch-up sync of a stale wrap, or a
+            // relay that ignores expiry): never park it. Relays only stop DELIVERING an expired
+            // invite; a parked row would outlive the deadline locally.
+            if expired_invite(expires_at) {
                 return false;
             }
 
@@ -657,7 +677,7 @@ pub async fn commit_prepared_event(
                 Ok(j) => j,
                 Err(e) => { log_warn!("[community] invite re-serialize failed: {}", e); return false; }
             };
-            match crate::db::community::save_pending_invite(&community_id, &bundle_json, &inviter) {
+            match crate::db::community::save_pending_invite(&community_id, &bundle_json, &inviter, expires_at as i64) {
                 Ok(true) => {
                     handler.on_community_invite(&community_id);
                     // Warm the community's first page in the background so a subsequent Accept opens
@@ -677,7 +697,7 @@ pub async fn commit_prepared_event(
             }
             false
         }
-        PreparedEvent::CommunityInviteV2 { bundle_json, community_id, inviter, is_mine, wrapper_event_id_bytes, wrapper_created_at, rumor_created_at } => {
+        PreparedEvent::CommunityInviteV2 { bundle_json, community_id, inviter, is_mine, wrapper_event_id_bytes, wrapper_created_at, rumor_created_at, expires_at } => {
             {
                 let mut cache = WRAPPER_ID_CACHE.lock().await;
                 cache.insert(wrapper_event_id_bytes);
@@ -686,6 +706,10 @@ pub async fn commit_prepared_event(
 
             // Never park our own echoed invite.
             if is_mine {
+                return false;
+            }
+            // Past the sender's NIP-40 deadline — see the v1 arm.
+            if expired_invite(expires_at) {
                 return false;
             }
             // Idempotency on the INNER community_id (already validated hex), not the
@@ -708,7 +732,7 @@ pub async fn commit_prepared_event(
                 return false;
             }
             // Park for explicit consent — do NOT join/subscribe here. Accept via the command layer.
-            match crate::db::community::save_pending_invite(&community_id, &bundle_json, &inviter) {
+            match crate::db::community::save_pending_invite(&community_id, &bundle_json, &inviter, expires_at as i64) {
                 Ok(true) => handler.on_community_invite(&community_id),
                 Ok(false) => {} // raced — already parked
                 Err(e) => log_warn!("[community] v2 invite park failed: {}", e),

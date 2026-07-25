@@ -2358,6 +2358,12 @@ fn purge_stale_pending_invites(tombstones: &[vector_core::community::list::Commu
             purged_any = true;
         }
     }
+    // Reclaim invites past their sender-declared NIP-40 deadline (reads already hide them).
+    if let Ok(n) = vector_core::db::community::purge_expired_pending_invites() {
+        if n > 0 {
+            purged_any = true;
+        }
+    }
     if purged_any {
         vector_core::emit_event("community_invites_purged", &serde_json::json!({}));
     }
@@ -3281,7 +3287,7 @@ pub async fn invite_to_community(community_id: String, invitee_npub: String) -> 
         return Err("account changed during invite".to_string());
     }
 
-    let rumor = build_invite_rumor(&community, my_pk)?;
+    let rumor = build_invite_rumor(&community, my_pk, now_secs())?;
     let pending_id = format!("community-invite-{}", community_id);
 
     // self_send=false: the owner already holds the Community; echoing the bundle back

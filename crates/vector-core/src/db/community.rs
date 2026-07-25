@@ -647,6 +647,8 @@ pub struct PendingCommunityInvite {
     pub bundle_json: String,
     pub inviter_npub: String,
     pub received_at: i64,
+    /// Sender-declared NIP-40 expiry (unix secs); 0 = none declared, so permanent.
+    pub expires_at: i64,
 }
 
 /// Park an inbound invite bundle for explicit user consent (the carrier never
@@ -657,6 +659,7 @@ pub fn save_pending_invite(
     community_id: &str,
     bundle_json: &str,
     inviter_npub: &str,
+    expires_at: i64,
 ) -> Result<bool, String> {
     /// Cap on parked invites. Each row is one gift-wrapped invite from an arbitrary sender, so an
     /// attacker fabricating unbounded community_ids could otherwise grow this table without limit
@@ -673,9 +676,9 @@ pub fn save_pending_invite(
     let changed = conn
         .execute(
             "INSERT OR IGNORE INTO pending_community_invites
-                (community_id, bundle_json, inviter_npub, received_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![community_id, enc_bundle, enc_inviter, now_secs()],
+                (community_id, bundle_json, inviter_npub, received_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![community_id, enc_bundle, enc_inviter, now_secs(), expires_at],
         )
         .map_err(|e| format!("save pending invite: {e}"))?;
     // Only growth can breach the cap. Evict everything past the newest MAX rows
@@ -711,22 +714,39 @@ pub fn purge_pending_invites_for_held_communities() -> Result<usize, String> {
     Ok(n)
 }
 
+/// Drop parked invites whose sender-declared NIP-40 expiry has passed. Reads already hide
+/// them; this reclaims the rows (and keeps the newest-wins cap honest). Rows with no declared
+/// expiry are never touched. Returns the count purged.
+pub fn purge_expired_pending_invites() -> Result<usize, String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let n = conn
+        .execute(
+            "DELETE FROM pending_community_invites WHERE expires_at != 0 AND expires_at <= ?1",
+            params![now_secs()],
+        )
+        .map_err(|e| format!("purge expired pending invites: {e}"))?;
+    Ok(n)
+}
+
 /// All parked invites, newest first.
 pub fn list_pending_invites() -> Result<Vec<PendingCommunityInvite>, String> {
     let conn = super::get_db_connection_guard_static()?;
     let mut stmt = conn
         .prepare(
-            "SELECT community_id, bundle_json, inviter_npub, received_at
-               FROM pending_community_invites ORDER BY received_at DESC",
+            "SELECT community_id, bundle_json, inviter_npub, received_at, expires_at
+               FROM pending_community_invites
+              WHERE expires_at = 0 OR expires_at > ?1
+              ORDER BY received_at DESC",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map([], |r| {
+        .query_map(params![now_secs()], |r| {
             Ok(PendingCommunityInvite {
                 community_id: r.get(0)?,
                 bundle_json: dec_txt(&r.get::<_, String>(1)?),
                 inviter_npub: dec_txt(&r.get::<_, String>(2)?),
                 received_at: r.get(3)?,
+                expires_at: r.get(4)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -744,8 +764,9 @@ pub fn get_pending_invite(community_id: &str) -> Result<Option<String>, String> 
     let conn = super::get_db_connection_guard_static()?;
     let raw: Option<String> = conn
         .query_row(
-            "SELECT bundle_json FROM pending_community_invites WHERE community_id = ?1",
-            params![community_id],
+            "SELECT bundle_json FROM pending_community_invites
+              WHERE community_id = ?1 AND (expires_at = 0 OR expires_at > ?2)",
+            params![community_id, now_secs()],
             |r| r.get::<_, String>(0),
         )
         .optional()
@@ -2842,7 +2863,7 @@ mod tests {
         save_community(&c).unwrap();
         let cid = c.id.to_hex();
         save_public_invite(&"ab".repeat(32), &cid, "url", None, None).unwrap();
-        save_pending_invite(&"cd".repeat(32), "{}", "npub1x").unwrap();
+        save_pending_invite(&"cd".repeat(32), "{}", "npub1x", 0).unwrap();
         set_edition_head(&cid, &"a".repeat(64), 3, &[0x11u8; 32]).unwrap();
 
         // The save above archived the base + channel keys; this proves delete clears them too.
@@ -2955,8 +2976,8 @@ mod tests {
         let cid = "ab".repeat(32);
         // First park inserts; a re-invite for the same id is IGNORED (first-wins, so a
         // hostile re-send can't rewrite a parked bundle or re-notify).
-        assert!(save_pending_invite(&cid, "{\"bundle\":1}", "npub1inviter").unwrap());
-        assert!(!save_pending_invite(&cid, "{\"bundle\":2}", "npub1other").unwrap());
+        assert!(save_pending_invite(&cid, "{\"bundle\":1}", "npub1inviter", 0).unwrap());
+        assert!(!save_pending_invite(&cid, "{\"bundle\":2}", "npub1other", 0).unwrap());
         assert!(pending_invite_exists(&cid).unwrap());
 
         let listed = list_pending_invites().unwrap();
@@ -2981,10 +3002,10 @@ mod tests {
         let held = Community::create("Held", "general", vec![]);
         save_community(&held).unwrap();
         let held_hex = held.id.to_hex();
-        save_pending_invite(&held_hex, "{\"bundle\":1}", "npub1inviter").unwrap();
+        save_pending_invite(&held_hex, "{\"bundle\":1}", "npub1inviter", 0).unwrap();
         // An invite for a community we do NOT hold must survive the purge.
         let stranger = "ab".repeat(32);
-        save_pending_invite(&stranger, "{\"bundle\":2}", "npub1inviter").unwrap();
+        save_pending_invite(&stranger, "{\"bundle\":2}", "npub1inviter", 0).unwrap();
 
         let n = purge_pending_invites_for_held_communities().unwrap();
         assert_eq!(n, 1, "only the held community's invite is purged");
@@ -2996,7 +3017,7 @@ mod tests {
     fn decline_drops_pending_invite() {
         let (_tmp, _guard) = init_test_db();
         let cid = "cd".repeat(32);
-        save_pending_invite(&cid, "{}", "npub1x").unwrap();
+        save_pending_invite(&cid, "{}", "npub1x", 0).unwrap();
         delete_pending_invite(&cid).unwrap();
         assert!(!pending_invite_exists(&cid).unwrap());
     }
@@ -3010,15 +3031,66 @@ mod tests {
         // Insert 150; the table must cap at 100.
         for i in 0..150u32 {
             let cid = format!("{:064x}", i);
-            save_pending_invite(&cid, "{}", "npub1x").unwrap();
+            save_pending_invite(&cid, "{}", "npub1x", 0).unwrap();
         }
         let all = list_pending_invites().unwrap();
         assert_eq!(all.len(), 100, "table capped at MAX_PENDING_INVITES");
         // A spam flood can't grow it past the cap regardless of how many arrive.
         for i in 150..400u32 {
             let cid = format!("{:064x}", i);
-            save_pending_invite(&cid, "{}", "npub1x").unwrap();
+            save_pending_invite(&cid, "{}", "npub1x", 0).unwrap();
         }
         assert_eq!(list_pending_invites().unwrap().len(), 100, "cap holds under flood");
+    }
+
+    /// A parked invite past its sender-declared NIP-40 deadline is invisible to BOTH reads:
+    /// the list (so it stops cluttering) and the peek the accept path uses (so it can't be
+    /// redeemed). Relays only stop delivering an expired invite; the already-parked row is
+    /// ours to enforce.
+    #[test]
+    fn expired_parked_invites_are_hidden_from_list_and_accept() {
+        let (_tmp, _guard) = init_test_db();
+        let now = now_secs();
+        let live = "aa".repeat(32);
+        let expired = "bb".repeat(32);
+        let permanent = "cc".repeat(32);
+
+        save_pending_invite(&live, "{\"live\":1}", "npub1x", now + 3600).unwrap();
+        save_pending_invite(&expired, "{\"dead\":1}", "npub1x", now - 1).unwrap();
+        // 0 = the sender declared no deadline (a pre-expiry client): stays permanent, because
+        // an invite whose sender never promised a deadline isn't ours to revoke.
+        save_pending_invite(&permanent, "{\"forever\":1}", "npub1x", 0).unwrap();
+
+        let listed: Vec<String> = list_pending_invites().unwrap().into_iter().map(|i| i.community_id).collect();
+        assert!(listed.contains(&live), "an unexpired invite still lists");
+        assert!(listed.contains(&permanent), "a no-deadline invite still lists");
+        assert!(!listed.contains(&expired), "an expired invite is hidden from the list");
+
+        assert!(get_pending_invite(&live).unwrap().is_some());
+        assert!(get_pending_invite(&permanent).unwrap().is_some());
+        assert!(
+            get_pending_invite(&expired).unwrap().is_none(),
+            "an expired invite must not be redeemable"
+        );
+
+        // The row still exists until swept, and the sweep reclaims exactly the expired one.
+        assert!(pending_invite_exists(&expired).unwrap(), "hidden, not yet deleted");
+        assert_eq!(purge_expired_pending_invites().unwrap(), 1);
+        assert!(!pending_invite_exists(&expired).unwrap());
+        assert!(pending_invite_exists(&live).unwrap(), "the sweep spares live invites");
+        assert!(pending_invite_exists(&permanent).unwrap(), "and no-deadline ones");
+    }
+
+    /// The expiry is per-invite from the SENDER's tag, not derived from local receive time,
+    /// so a short-fuse invite expires on the sender's schedule even if it was just received.
+    #[test]
+    fn expiry_follows_the_senders_deadline_not_receipt_time() {
+        let (_tmp, _guard) = init_test_db();
+        let cid = "de".repeat(32);
+        // Received right now, but the sender's deadline already passed (a stale wrap that a
+        // NIP-40-ignoring relay still served).
+        save_pending_invite(&cid, "{}", "npub1x", now_secs() - 10).unwrap();
+        assert!(list_pending_invites().unwrap().is_empty(), "receipt time does not extend the deadline");
+        assert!(get_pending_invite(&cid).unwrap().is_none());
     }
 }

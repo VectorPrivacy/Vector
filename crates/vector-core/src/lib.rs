@@ -1300,10 +1300,16 @@ impl VectorCore {
             // the community relays wouldn't reach them. `#k=3313` per CORD-05 §6.
             let bundle = crate::community::v2::service::bundle_of(&community, Some(my_pk), None, None);
             let bundle_json = serde_json::to_string(&bundle).map_err(|e| VectorError::Other(e.to_string()))?;
+            // Same 24h NIP-40 expiry as v1 (invite::DIRECT_INVITE_EXPIRY_SECS): a bundle is
+            // live key material for a community that keeps rotating, so it must not linger.
+            let expires_at = nostr_sdk::prelude::Timestamp::now().as_secs()
+                + crate::community::invite::DIRECT_INVITE_EXPIRY_SECS;
+            let expiry_tag = nostr_sdk::Tag::expiration(nostr_sdk::prelude::Timestamp::from_secs(expires_at));
             let rumor = nostr_sdk::EventBuilder::new(
                 nostr_sdk::Kind::Custom(crate::community::v2::kind::DIRECT_INVITE),
                 bundle_json,
             )
+            .tag(expiry_tag.clone())
             .build(my_pk);
             let k_tag = nostr_sdk::Tag::custom(
                 nostr_sdk::TagKind::Custom("k".into()),
@@ -1312,7 +1318,7 @@ impl VectorCore {
             if !session.is_valid() {
                 return Err(VectorError::Other("account changed".into()));
             }
-            crate::inbox_relays::send_gift_wrap(&client, &recipient, rumor, [k_tag])
+            crate::inbox_relays::send_gift_wrap(&client, &recipient, rumor, [k_tag, expiry_tag])
                 .await
                 .map_err(VectorError::Other)?;
             return Ok(serde_json::json!({ "invited": invitee_npub, "version": 2 }));
@@ -1342,7 +1348,9 @@ impl VectorCore {
             return Err(VectorError::Other("account changed during invite".into()));
         }
 
-        let rumor = crate::community::invite::build_invite_rumor(&community, my_pk).map_err(VectorError::Other)?;
+        let now = nostr_sdk::prelude::Timestamp::now().as_secs();
+        let rumor = crate::community::invite::build_invite_rumor(&community, my_pk, now)
+            .map_err(VectorError::Other)?;
         let pending_id = format!("community-invite-{}", community_id);
         // self_send=false: the owner already holds the Community; the inbound guard would drop the echo.
         let config = SendConfig { self_send: false, ..SendConfig::gui() };

@@ -174,9 +174,36 @@ pub fn accept_invite(invite: &CommunityInvite) -> Result<Community, String> {
 /// existing private-DM path). `my_pubkey` is the rumor author — irrelevant to the
 /// bundle's trust (the owner attestation inside it anchors authority), it just
 /// satisfies NIP-01 serialization.
-pub fn build_invite_rumor(community: &Community, my_pubkey: PublicKey) -> Result<UnsignedEvent, String> {
+pub fn build_invite_rumor(
+    community: &Community,
+    my_pubkey: PublicKey,
+    now_secs: u64,
+) -> Result<UnsignedEvent, String> {
     let json = build_invite(community).to_json()?;
-    Ok(EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_INVITE_BUNDLE), json).build(my_pubkey))
+    Ok(
+        EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_INVITE_BUNDLE), json)
+            .tag(nostr_sdk::prelude::Tag::expiration(
+                nostr_sdk::prelude::Timestamp::from_secs(now_secs + DIRECT_INVITE_EXPIRY_SECS),
+            ))
+            .build(my_pubkey),
+    )
+}
+
+/// How long a Direct Invite stays valid. A bundle hands out live key material for a
+/// community that keeps evolving (rotations, renames, bans), so an invite that never
+/// expires is both stale key material and clutter in the recipient's list. The sender
+/// stamps NIP-40 on the rumor AND (mirrored by the send path) on the outer gift wrap, so
+/// relays drop it on schedule; recipients enforce it themselves too, since relay support
+/// for NIP-40 is optional.
+pub const DIRECT_INVITE_EXPIRY_SECS: u64 = 24 * 60 * 60;
+
+/// Read a NIP-40 `expiration` tag (unix seconds) off an invite rumor's tags. `None` =
+/// no expiry declared (a pre-expiry sender), which callers treat as permanent.
+pub fn expiration_secs(tags: &nostr_sdk::prelude::Tags) -> Option<u64> {
+    tags.iter()
+        .find(|t| t.as_slice().first().map(|k| k.as_str() == "expiration").unwrap_or(false))
+        .and_then(|t| t.as_slice().get(1))
+        .and_then(|v| v.parse::<u64>().ok())
 }
 
 /// Parse an inbound rumor as a Community invite. Returns `None` unless the rumor is an
@@ -218,6 +245,53 @@ mod tests {
         assert!(parsed.relays.len() <= super::super::MAX_COMMUNITY_RELAYS);
         let member = accept_invite(&parsed).unwrap();
         assert!(member.relays.len() <= super::super::MAX_COMMUNITY_RELAYS);
+    }
+
+    /// A Direct Invite carries a 24h NIP-40 expiry on the RUMOR. The send path mirrors any
+    /// rumor `expiration` tag onto the outer gift wrap, so tagging the rumor is what makes
+    /// relays drop the wrap on schedule — and it survives into the recipient's parked row.
+    #[test]
+    fn invite_rumor_declares_a_24h_expiry() {
+        let owner = Community::create("HQ", "general", vec!["wss://r1".into()]);
+        let author = Keys::generate();
+        let now = 1_800_000_000u64;
+        let rumor = build_invite_rumor(&owner, author.public_key(), now).unwrap();
+
+        let exp = expiration_secs(&rumor.tags).expect("rumor carries a NIP-40 expiration tag");
+        assert_eq!(exp, now + 86_400, "24h after the send time");
+        assert_eq!(DIRECT_INVITE_EXPIRY_SECS, 86_400);
+    }
+
+    /// `expiration_secs` is the recipient's read of the sender's promise, so it must be
+    /// total: absent, malformed, or valueless tags all mean "no deadline declared" rather
+    /// than a panic or a bogus 0 deadline (which would void the invite instantly).
+    #[test]
+    fn expiration_secs_is_total_over_hostile_tags() {
+        use nostr_sdk::prelude::{Tag, TagKind, Timestamp};
+        let author = Keys::generate();
+        let mk = |tags: Vec<Tag>| {
+            EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_INVITE_BUNDLE), "{}")
+                .tags(tags)
+                .build(author.public_key())
+        };
+
+        assert_eq!(expiration_secs(&mk(vec![]).tags), None, "no tag = no deadline");
+        // A non-numeric value must not be read as a deadline.
+        assert_eq!(
+            expiration_secs(&mk(vec![Tag::custom(TagKind::Custom("expiration".into()), ["soon"])]).tags),
+            None,
+        );
+        // A valueless expiration tag likewise.
+        assert_eq!(
+            expiration_secs(&mk(vec![Tag::custom(TagKind::Custom("expiration".into()), Vec::<String>::new())]).tags),
+            None,
+        );
+        // A real tag reads back exactly, even alongside other tags.
+        let tags = vec![
+            Tag::public_key(author.public_key()),
+            Tag::expiration(Timestamp::from_secs(1_800_086_400)),
+        ];
+        assert_eq!(expiration_secs(&mk(tags).tags), Some(1_800_086_400));
     }
 
     #[test]
@@ -337,7 +411,7 @@ mod tests {
     fn invite_rumor_round_trips() {
         let owner = Community::create("HQ", "general", vec!["wss://r1".into()]);
         let author = Keys::generate();
-        let rumor = build_invite_rumor(&owner, author.public_key()).unwrap();
+        let rumor = build_invite_rumor(&owner, author.public_key(), 1_800_000_000).unwrap();
 
         assert_eq!(rumor.kind, Kind::Custom(event_kind::COMMUNITY_INVITE_BUNDLE));
         let parsed = parse_invite_rumor(rumor.kind, &rumor.content).expect("parses");
@@ -355,7 +429,7 @@ mod tests {
         let owner = Community::create("HQ", "general", vec![]);
         let author = Keys::generate();
         let now = nostr_sdk::prelude::Timestamp::now().as_secs();
-        let rumor = build_invite_rumor(&owner, author.public_key()).unwrap();
+        let rumor = build_invite_rumor(&owner, author.public_key(), 1_800_000_000).unwrap();
         let stamped = rumor.created_at.as_secs();
         assert!(
             stamped + 5 >= now && stamped <= now + 5,
@@ -384,7 +458,7 @@ mod tests {
 
         let owner = Community::create("HQ", "general", vec!["r1".into()]);
         let author = Keys::generate();
-        let rumor = build_invite_rumor(&owner, author.public_key()).unwrap();
+        let rumor = build_invite_rumor(&owner, author.public_key(), 1_800_000_000).unwrap();
 
         // The invitee only ever sees the rumor content.
         let invite = parse_invite_rumor(rumor.kind, &rumor.content).expect("invite");
