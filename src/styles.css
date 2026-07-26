@@ -4424,9 +4424,25 @@ img.emoji-img-loading {
   padding: 0;
   cursor: pointer;
   transition: border-color 0.15s ease, background-color 0.15s ease;
-  touch-action: none;
+  /* `none` here forbade the browser from panning at all, so the grid could not be
+     scrolled by touching a cell — which is most of the grid. `pan-y` keeps
+     vertical scrolling native; the gesture arbiter flips this to `none` inline the
+     moment a drag arms, which is legal because arming requires a still finger, so
+     no pan has begun yet. */
+  touch-action: pan-y;
 }
 .emoji-creator-cell.is-hovered { border-color: rgba(255, 255, 255, 0.18); }
+
+/* The hold landed and a drag is possible — shown before any movement so the
+   gesture is legible. Matches the pack rail's armed state. */
+.emoji-creator-cell.is-drag-armed {
+  transform: scale(1.12);
+  border-color: var(--icon-color-primary);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+  transition: transform 120ms ease-out, box-shadow 120ms ease-out,
+              border-color 120ms ease-out;
+  z-index: 3;
+}
 
 /* Per-cell busy overlay — covers the emoji image with a scrim + ring
    while it's queued / uploading / deleting. Renders above the image

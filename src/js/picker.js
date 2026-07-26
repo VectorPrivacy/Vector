@@ -1032,23 +1032,39 @@ const _PT_ARM_MS = 180;
 const _PT_MENU_MS = 500;
 const _PT_SLOP_PX = 8;
 
-function _installPackTabGestures(tab, pack) {
-    // Desktop keeps its own affordance; long-press is the touch stand-in.
-    tab.addEventListener('contextmenu', (ev) => {
+/**
+ * Arbitrate the three things one press can mean on a list that both scrolls and
+ * reorders. Shared by the pack rail and the pack-creator grid — each supplies its
+ * own drag mechanics, but the disambiguation must be identical or the picker
+ * teaches two different gestures for the same motion.
+ *
+ * Deliberately NOT axis-aware in the grid's case: "horizontal means drag, vertical
+ * means scroll" misfires constantly on the diagonal drift of a real thumb, and
+ * press-then-drag is the platform convention anyway.
+ *
+ * @param {HTMLElement} el
+ * @param {object}   h
+ * @param {(x:number,y:number)=>void} h.onMenu      long-press / right-click
+ * @param {(ev:PointerEvent)=>void}   h.onDragStart threshold crossed while armed
+ * @param {(ev:PointerEvent)=>void}   h.onDragMove
+ * @param {(ev:PointerEvent)=>void}   h.onDragEnd
+ * @param {(ev:PointerEvent)=>boolean} [h.ignore]   skip the gesture entirely
+ * @param {string} [h.armClass]  toggled while a drag is possible but not started
+ */
+function installReorderGestures(el, h) {
+    el.addEventListener('contextmenu', (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
-        _showPackTabMenu(pack, ev.clientX, ev.clientY);
+        h.onMenu(ev.clientX, ev.clientY);
     });
 
-    tab.addEventListener('pointerdown', (ev) => {
+    el.addEventListener('pointerdown', (ev) => {
         if (ev.button !== 0) return;
+        if (h.ignore?.(ev)) return;
         const startX = ev.clientX;
         const startY = ev.clientY;
         const isTouch = ev.pointerType === 'touch';
         let dragging = false;
-        let ghost = null;
-        let offX = 0;
-        let offY = 0;
         // A mouse has a separate button for the menu, so it may drag at once.
         let armed = !isTouch;
         // Set once the gesture belongs to something else (scroll or menu).
@@ -1062,16 +1078,23 @@ function _installPackTabGestures(tab, pack) {
         };
         const disarm = () => {
             armed = false;
-            tab.classList.remove('is-drag-armed');
+            if (h.armClass) el.classList.remove(h.armClass);
+            // Hand panning back to the browser.
+            el.style.touchAction = '';
         };
 
         if (isTouch) {
             armTimer = setTimeout(() => {
                 armTimer = null;
                 armed = true;
-                tab.classList.add('is-drag-armed');
+                if (h.armClass) el.classList.add(h.armClass);
+                // Take the gesture from the browser: with `touch-action: pan-y` it
+                // would keep panning on vertical movement and ignore our
+                // preventDefault. Legal to flip now precisely because arming
+                // required a still finger — no pan has begun to interrupt.
+                el.style.touchAction = 'none';
                 // Confirms "you may now drag" without stealing the gesture, so
-                // letting go still just selects the pack.
+                // letting go still just taps.
                 navigator.vibrate?.(8);
             }, _PT_ARM_MS);
             menuTimer = setTimeout(() => {
@@ -1079,24 +1102,24 @@ function _installPackTabGestures(tab, pack) {
                 claimed = true;
                 disarm();
                 teardown();
-                tab.dataset.suppressClick = '1';
+                el.dataset.suppressClick = '1';
                 navigator.vibrate?.(14);
-                _showPackTabMenu(pack, startX, startY);
+                h.onMenu(startX, startY);
             }, _PT_MENU_MS);
         }
 
-        // Only swallow the scroll once we're genuinely dragging. Registered
-        // non-passive because Android WebView defaults touchmove to passive,
-        // where preventDefault is ignored and the rail scrolls under the drag.
+        // Only swallow the scroll once we're genuinely dragging. Non-passive
+        // because Android WebView defaults touchmove to passive, where
+        // preventDefault is ignored and the list scrolls under the drag.
         const onTouchMove = (te) => { if (dragging) te.preventDefault(); };
 
         const onMove = (mv) => {
             if (!dragging) {
-                const dist = Math.hypot(mv.clientX - startX, mv.clientY - startY);
                 if (claimed) return;
+                const dist = Math.hypot(mv.clientX - startX, mv.clientY - startY);
                 if (!armed) {
-                    // Moved before the hold landed: this is a scroll. Stand down
-                    // completely so the rail pans natively.
+                    // Moved before the hold landed: a scroll. Stand down so the
+                    // list pans natively.
                     if (dist > _PT_SLOP_PX) {
                         claimed = true;
                         clearTimers();
@@ -1108,28 +1131,9 @@ function _installPackTabGestures(tab, pack) {
                 // Moving rules out the long-press menu.
                 clearTimers();
                 dragging = true;
-                _packTabDragActive = true;
-                tab.classList.add('is-dragging');
-                const rect = tab.getBoundingClientRect();
-                ghost = tab.cloneNode(true);
-                ghost.classList.add('emoji-pack-tab-ghost');
-                ghost.classList.remove('is-dragging');
-                ghost.style.position = 'fixed';
-                ghost.style.left = `${rect.left}px`;
-                ghost.style.top = `${rect.top}px`;
-                ghost.style.width = `${rect.width}px`;
-                ghost.style.height = `${rect.height}px`;
-                ghost.style.pointerEvents = 'none';
-                ghost.style.zIndex = '2200';
-                document.body.appendChild(ghost);
-                offX = rect.width / 2;
-                offY = rect.height / 2;
+                h.onDragStart(mv);
             }
-            if (ghost) {
-                ghost.style.left = `${mv.clientX - offX}px`;
-                ghost.style.top = `${mv.clientY - offY}px`;
-            }
-            _updatePackTabDropTarget(mv.clientY);
+            h.onDragMove(mv);
         };
 
         function teardown() {
@@ -1142,25 +1146,61 @@ function _installPackTabGestures(tab, pack) {
         const onUp = (up) => {
             clearTimers();
             teardown();
-            if (!dragging) {
-                // Armed but released without moving: a plain tap on the pack.
-                disarm();
-                return;
-            }
-            tab.dataset.suppressClick = '1';
-            tab.classList.remove('is-dragging');
+            const wasDragging = dragging;
+            dragging = false;
             disarm();
-            _packTabDragActive = false;
-            if (ghost) ghost.remove();
-            const target = _resolvePackTabDropTarget(up.clientY);
-            _clearPackTabDropMarkers();
-            if (target) _applyPackTabReorder(tab, target);
+            if (wasDragging) h.onDragEnd(up);
         };
 
         window.addEventListener('pointermove', onMove);
         window.addEventListener('pointerup', onUp);
         window.addEventListener('pointercancel', onUp);
         window.addEventListener('touchmove', onTouchMove, { passive: false });
+    });
+}
+
+function _installPackTabGestures(tab, pack) {
+    let ghost = null;
+    let offX = 0;
+    let offY = 0;
+
+    installReorderGestures(tab, {
+        armClass: 'is-drag-armed',
+        onMenu: (x, y) => _showPackTabMenu(pack, x, y),
+        onDragStart: () => {
+            _packTabDragActive = true;
+            tab.classList.add('is-dragging');
+            const rect = tab.getBoundingClientRect();
+            ghost = tab.cloneNode(true);
+            ghost.classList.add('emoji-pack-tab-ghost');
+            ghost.classList.remove('is-dragging', 'is-drag-armed');
+            ghost.style.position = 'fixed';
+            ghost.style.left = `${rect.left}px`;
+            ghost.style.top = `${rect.top}px`;
+            ghost.style.width = `${rect.width}px`;
+            ghost.style.height = `${rect.height}px`;
+            ghost.style.pointerEvents = 'none';
+            ghost.style.zIndex = '2200';
+            document.body.appendChild(ghost);
+            offX = rect.width / 2;
+            offY = rect.height / 2;
+        },
+        onDragMove: (mv) => {
+            if (ghost) {
+                ghost.style.left = `${mv.clientX - offX}px`;
+                ghost.style.top = `${mv.clientY - offY}px`;
+            }
+            _updatePackTabDropTarget(mv.clientY);
+        },
+        onDragEnd: (up) => {
+            tab.dataset.suppressClick = '1';
+            tab.classList.remove('is-dragging');
+            _packTabDragActive = false;
+            if (ghost) { ghost.remove(); ghost = null; }
+            const target = _resolvePackTabDropTarget(up.clientY);
+            _clearPackTabDropMarkers();
+            if (target) _applyPackTabReorder(tab, target);
+        },
     });
 }
 
@@ -3003,24 +3043,12 @@ function _pcRenderGrid() {
         });
         cell.dataset.emojiTooltip = `:${e.shortcode}:`;
 
-        // Right-click (desktop) + long-press (mobile) context menu.
-        // Mobile users have no hover-× to reach, so this is the only
-        // path to delete on touch. The reorder handler's drag threshold
-        // (move > _PC_DRAG_THRESHOLD_PX) and the long-press tolerance
-        // (8px) don't fight — moving past either cancels both gestures.
-        if (typeof attachLongPressContextMenu === 'function') {
-            attachLongPressContextMenu(cell, (x, y) => {
-                if (typeof showContextMenu !== 'function') return;
-                showContextMenu({
-                    x, y,
-                    items: [
-                        { label: 'Rename Emoji', icon: 'edit',  onClick: () => _pcRenameEmoji(idx) },
-                        { label: 'Delete Emoji', icon: 'trash', danger: true, onClick: () => _pcRemoveEmoji(idx) },
-                    ],
-                });
-            });
-        }
-
+        // Reorder-drag, long-press menu (the only delete path on touch, with no
+        // hover-× to reach) and grid scrolling all begin as the same press, so ONE
+        // arbiter owns them. The previous pair of handlers each ran their own
+        // timers and could not agree who claimed the gesture: at 6px the drag won
+        // and the 8px long-press cancelled itself, so scrolling the grid was
+        // impossible. Right-click is wired inside it too.
         _pcInstallReorderHandlers(cell, idx);
         grid.appendChild(cell);
     });
@@ -3071,69 +3099,70 @@ function _pcClearDropMarkers() {
 const _PC_DRAG_THRESHOLD_PX = 6;
 let _pcDragActive = false;
 function _pcInstallReorderHandlers(cell, idx) {
-    cell.addEventListener('pointerdown', (ev) => {
-        if (ev.button !== 0) return;
-        if (ev.target.closest('.emoji-creator-cell-remove')) return;
-        const startX = ev.clientX;
-        const startY = ev.clientY;
-        let dragging = false;
-        let ghost = null;
-        let ghostOffsetX = 0;
-        let ghostOffsetY = 0;
+    let ghost = null;
+    let ghostOffsetX = 0;
+    let ghostOffsetY = 0;
 
-        const onMove = (mv) => {
-            if (!dragging) {
-                if (Math.hypot(mv.clientX - startX, mv.clientY - startY) < _PC_DRAG_THRESHOLD_PX) return;
-                dragging = true;
-                _pcDragActive = true;
-                cell.classList.add('is-dragging');
-                // Clear any stuck hover state — we own this class now,
-                // so a drag start is the right moment to normalize it.
-                const grid = document.getElementById('emoji-creator-grid');
-                if (grid) {
-                    grid.querySelectorAll('.is-hovered').forEach(c =>
-                        c.classList.remove('is-hovered'));
-                }
-                const rect = cell.getBoundingClientRect();
-                ghost = cell.cloneNode(true);
-                // Drop transient state from the clone so it reads as a static
-                // preview: kill the remove button, the hover-only chrome, and
-                // any nested pointer-capturing behaviour.
-                ghost.classList.add('emoji-creator-cell-ghost');
-                ghost.classList.remove('is-dragging');
-                const ghostRemove = ghost.querySelector('.emoji-creator-cell-remove');
-                if (ghostRemove) ghostRemove.remove();
-                ghost.style.position = 'fixed';
-                ghost.style.left = `${rect.left}px`;
-                ghost.style.top = `${rect.top}px`;
-                ghost.style.width = `${rect.width}px`;
-                ghost.style.height = `${rect.height}px`;
-                ghost.style.pointerEvents = 'none';
-                ghost.style.zIndex = '2200';
-                document.body.appendChild(ghost);
-                // Ghost is scaled (transform: scale 0.6) around its center,
-                // so centering the unscaled box on the cursor keeps the
-                // visible thumbnail anchored under the pointer regardless of
-                // where the user grabbed the cell.
-                ghostOffsetX = rect.width / 2;
-                ghostOffsetY = rect.height / 2;
+    installReorderGestures(cell, {
+        armClass: 'is-drag-armed',
+        // The remove-× is its own target; a press there must never become a drag.
+        ignore: (ev) => !!ev.target.closest('.emoji-creator-cell-remove'),
+        onMenu: (x, y) => {
+            if (typeof showContextMenu !== 'function') return;
+            showContextMenu({
+                x, y,
+                items: [
+                    { label: 'Rename Emoji', icon: 'edit',  onClick: () => _pcRenameEmoji(idx) },
+                    { label: 'Delete Emoji', icon: 'trash', danger: true, onClick: () => _pcRemoveEmoji(idx) },
+                ],
+            });
+        },
+        onDragStart: () => {
+            _pcDragActive = true;
+            cell.classList.add('is-dragging');
+            // Clear any stuck hover state — we own this class now, so a drag
+            // start is the right moment to normalize it.
+            const grid = document.getElementById('emoji-creator-grid');
+            if (grid) {
+                grid.querySelectorAll('.is-hovered').forEach(c =>
+                    c.classList.remove('is-hovered'));
             }
+            const rect = cell.getBoundingClientRect();
+            ghost = cell.cloneNode(true);
+            // Drop transient state from the clone so it reads as a static
+            // preview: kill the remove button, the hover-only chrome, and any
+            // nested pointer-capturing behaviour.
+            ghost.classList.add('emoji-creator-cell-ghost');
+            ghost.classList.remove('is-dragging', 'is-drag-armed');
+            const ghostRemove = ghost.querySelector('.emoji-creator-cell-remove');
+            if (ghostRemove) ghostRemove.remove();
+            ghost.style.position = 'fixed';
+            ghost.style.left = `${rect.left}px`;
+            ghost.style.top = `${rect.top}px`;
+            ghost.style.width = `${rect.width}px`;
+            ghost.style.height = `${rect.height}px`;
+            ghost.style.pointerEvents = 'none';
+            ghost.style.zIndex = '2200';
+            document.body.appendChild(ghost);
+            // Ghost is scaled (transform: scale 0.6) around its center, so
+            // centering the unscaled box on the cursor keeps the visible
+            // thumbnail anchored under the pointer regardless of where the
+            // user grabbed the cell.
+            ghostOffsetX = rect.width / 2;
+            ghostOffsetY = rect.height / 2;
+        },
+        onDragMove: (mv) => {
             if (ghost) {
                 ghost.style.left = `${mv.clientX - ghostOffsetX}px`;
                 ghost.style.top  = `${mv.clientY - ghostOffsetY}px`;
             }
             _pcUpdateDropTarget(mv.clientX, mv.clientY);
-        };
-
-        const onUp = (up) => {
-            window.removeEventListener('pointermove', onMove);
-            window.removeEventListener('pointerup', onUp);
-            window.removeEventListener('pointercancel', onUp);
-            if (!dragging) return;
+        },
+        onDragEnd: (up) => {
             cell.dataset.suppressClick = '1';
             cell.classList.remove('is-dragging');
             _pcDragActive = false;
-            if (ghost) ghost.remove();
+            if (ghost) { ghost.remove(); ghost = null; }
             const target = _pcResolveDropTarget(up.clientX, up.clientY);
             _pcClearDropMarkers();
             if (!target) return;
@@ -3147,11 +3176,7 @@ function _pcInstallReorderHandlers(cell, idx) {
             _pc.emojis.splice(to, 0, moved);
             _pc.dirty = true;
             _pcRenderGrid();
-        };
-
-        window.addEventListener('pointermove', onMove);
-        window.addEventListener('pointerup', onUp);
-        window.addEventListener('pointercancel', onUp);
+        },
     });
 }
 
