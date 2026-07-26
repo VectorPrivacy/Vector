@@ -2935,7 +2935,9 @@ function _pcRevokeBlobUrls() {
 
 function _pcSyncDom() {
     document.getElementById('emoji-creator-name').value = _pc.name;
-    document.getElementById('emoji-creator-delete').hidden = _pc.mode !== 'edit';
+    // Shown in BOTH modes: 'edit' deletes the published pack, 'create' discards the
+    // draft. Hiding it in create mode left the only exit labelled "Save and exit".
+    document.getElementById('emoji-creator-delete').hidden = false;
     _pcRenderLogo();
     _pcRenderGrid();
 }
@@ -4240,7 +4242,47 @@ function _pcSetSavingChrome(on) {
 }
 
 async function _pcDelete() {
-    if (!_pc.editingId || _pc.saving) return;
+    if (_pc.saving) return;
+    // Create mode: nothing exists yet to delete, so this is "discard the draft" —
+    // and it's the only non-committal way out of the creator, since the other exit
+    // is labelled "Save and exit". Draft emojis hold a File + blobUrl and are not
+    // uploaded until save, so there's normally nothing server-side to sweep; a
+    // `url` only appears on a cell whose upload landed during a save that later
+    // failed, and those are already queued in `pendingBlobDeletes`.
+    // A successful save closes the creator, so an open create-mode editor has never
+    // published — which is what the discard copy promises the user. Belt-and-braces
+    // in case a future change keeps it open after saving: adopt the saved id so this
+    // takes the real delete path rather than claiming nothing exists.
+    if (!_pc.editingId && _pc.savedPackId) _pc.editingId = _pc.savedPackId;
+    if (!_pc.editingId) {
+        const discard = await _pcShowConfirm({
+            title: 'Discard This Pack?',
+            detail: 'This pack was never saved. The emojis you added will be lost.',
+            icon: 'vector_warning.svg',
+            tone: 'danger',
+            confirmText: 'DISCARD',
+        });
+        if (!discard) return;
+        // Sweep anything a failed save already pushed to Blossom, so bailing out
+        // can't strand orphan blobs. Best-effort and unblocking.
+        const orphans = _pc.emojis.map(e => e.url).filter(Boolean)
+            .concat(_pc.pendingBlobDeletes, _pc.logoUrl ? [_pc.logoUrl] : []);
+        _pc.pendingBlobDeletes = [];
+        if (orphans.length) {
+            Promise.allSettled(orphans.map(url =>
+                invoke('emoji_pack_delete_blob', { url })
+                    .then(() => _emojiCacheMemo.delete(url))
+            )).catch(() => {});
+        }
+        _pc.dirty = false;
+        _pc.open = false;
+        _pc.emojis = [];
+        _pc.logoFile = null;
+        _pc.logoUrl = '';
+        _pcShowView(false);
+        _pcRevokeBlobUrls();
+        return;
+    }
     // In-panel confirm — popupConfirm lives outside .emoji-picker and
     // any click on it would trip the outside-close handler, snapping
     // the picker shut mid-flow.

@@ -3775,10 +3775,12 @@ body.chat-bg-disabled .chat-messages::before {
 
 .emoji-sidebar::-webkit-scrollbar { display: none; }
 
-/* `display: flex` below outranks the UA's `[hidden]` rule on its own,
-   so `<button … hidden>` would still render. This explicit reinstates
-   the hide. */
-.emoji-category-btn[hidden] { display: none; }
+/* `[hidden]` is a UA-stylesheet rule, so ANY author `display` on a class defeats
+   it and `el.hidden = true` leaves the element rendering. That silently produced a
+   dead control twice (the category buttons, then the creator's delete button, which
+   showed in create mode and no-op'd on click), so restore the invariant across the
+   picker instead of chasing it per element. */
+.emoji-picker [hidden] { display: none !important; }
 
 .emoji-category-btn {
   position: relative;
