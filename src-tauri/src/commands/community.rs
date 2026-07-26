@@ -1103,6 +1103,35 @@ async fn process_outbound_community_attachment(
     use_compression: bool,
     keep_metadata: bool,
 ) -> Result<PreparedCommunityAttachment, String> {
+    // Android's file dialog hands back a content:// URI, which std::fs can't open and which
+    // has no usable filename in its last path segment — the content resolver holds both the
+    // bytes and the real display name. Same routing the community image picker already uses.
+    #[cfg(target_os = "android")]
+    if file_path.starts_with("content://") {
+        let af = crate::android::filesystem::read_android_uri(file_path.to_string())
+            .map_err(|e| format!("read attachment: {e}"))?;
+        let mut name = if !name_override.is_empty() {
+            name_override.to_string()
+        } else {
+            af.name.clone()
+        };
+        // The bytes path derives the extension from the filename, but the resolver's
+        // display-name query can come back empty or bare (its own notes call out
+        // provider URIs like Google Photos), which would leave the attachment
+        // extensionless. `af.extension` is MIME-derived and survives that.
+        if std::path::Path::new(&name).extension().is_none() && !af.extension.is_empty() {
+            let stem = if name.is_empty() { "file" } else { name.as_str() };
+            name = format!("{stem}.{}", af.extension);
+        }
+        return process_outbound_community_attachment_bytes(
+            (*af.bytes).clone(),
+            &name,
+            use_compression,
+            keep_metadata,
+        )
+        .await;
+    }
+
     let bytes = std::fs::read(file_path).map_err(|e| format!("read attachment: {e}"))?;
     let name = if !name_override.is_empty() {
         name_override.to_string()
