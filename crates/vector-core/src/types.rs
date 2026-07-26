@@ -97,7 +97,7 @@ impl EmojiTag {
     /// parser — keeps the wire format and renderer aligned.
     pub fn extract_from_tags<'a, I>(tags: I) -> Vec<EmojiTag>
     where
-        I: IntoIterator<Item = &'a nostr_sdk::Tag>,
+        I: IntoIterator<Item = &'a nostr_sdk::prelude::Tag>,
     {
         let mut out: Vec<EmojiTag> = Vec::new();
         let mut seen = std::collections::HashSet::new();
@@ -800,7 +800,7 @@ mod tests {
     #[test]
     fn mentions_specific_npub() {
         // Generate a real npub for testing
-        let keys = nostr_sdk::Keys::generate();
+        let keys = nostr_sdk::prelude::Keys::generate();
         let npub = keys.public_key().to_bech32().unwrap();
         let msg = Message {
             content: format!("hey @{} check this", npub),
@@ -821,8 +821,8 @@ mod tests {
 
     #[test]
     fn extract_mentions_multiple() {
-        let keys1 = nostr_sdk::Keys::generate();
-        let keys2 = nostr_sdk::Keys::generate();
+        let keys1 = nostr_sdk::prelude::Keys::generate();
+        let keys2 = nostr_sdk::prelude::Keys::generate();
         let npub1 = keys1.public_key().to_bech32().unwrap();
         let npub2 = keys2.public_key().to_bech32().unwrap();
         let content = format!("cc @{} and @{} for review", npub1, npub2);
@@ -859,7 +859,7 @@ mod tests {
 
     #[test]
     fn extract_mentions_bare_and_prefixed_shapes() {
-        let npub = nostr_sdk::Keys::generate().public_key().to_bech32().unwrap();
+        let npub = nostr_sdk::prelude::Keys::generate().public_key().to_bech32().unwrap();
         for content in [
             format!("{}", npub),
             format!("rep given to nostr:{}! nice", npub),
@@ -873,7 +873,7 @@ mod tests {
 
     #[test]
     fn extract_mentions_rejects_glued_tokens() {
-        let npub = nostr_sdk::Keys::generate().public_key().to_bech32().unwrap();
+        let npub = nostr_sdk::prelude::Keys::generate().public_key().to_bech32().unwrap();
         // Glued into a longer alphanumeric token on either side = not a mention.
         assert!(super::extract_mentions(&format!("x{}", npub)).is_empty());
         assert!(super::extract_mentions(&format!("{}9", npub)).is_empty());

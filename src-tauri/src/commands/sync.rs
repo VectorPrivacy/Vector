@@ -138,14 +138,20 @@ pub async fn fetch_messages<R: Runtime>(
             .pubkey(my_public_key)
             .kind(Kind::GiftWrap)
             .since(Timestamp::from_secs(quick_since));
-        let sync_opts = nostr_sdk::SyncOptions::new()
-            .direction(nostr_sdk::SyncDirection::Down)
-            .initial_timeout(std::time::Duration::from_secs(3))
+        // Tor-aware: 3s is fine for a clearnet fingerprint round trip and always
+        // expires mid-circuit. A failure here `return`s, silently skipping this
+        // relay's entire reconnect catch-up, so a too-tight budget loses messages.
+        let neg_budget = vector_core::relay_request_timeout(std::time::Duration::from_secs(3));
+        let sync_opts = nostr_sdk::prelude::SyncOptions::new()
+            .direction(nostr_sdk::prelude::SyncDirection::Down)
+            .initial_timeout(neg_budget)
             .dry_run();
 
         let recon_result = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            relay.sync_with_items(filter, items, &sync_opts),
+            // Keeps the original 7s of slack over the inner budget, so the inner
+            // error surfaces instead of this blunt outer timeout.
+            neg_budget + std::time::Duration::from_secs(7),
+            relay.sync(filter).items(items).opts(sync_opts.clone()),
         ).await;
 
         let missing_ids: Vec<EventId> = match recon_result {
@@ -160,7 +166,7 @@ pub async fn fetch_messages<R: Runtime>(
                 return;
             }
             Err(_) => {
-                eprintln!("[Sync] Single-relay {} negentropy timed out (10s)", url);
+                eprintln!("[Sync] Single-relay {} negentropy timed out after {:?}", url, neg_budget);
                 return;
             }
         };
@@ -172,13 +178,13 @@ pub async fn fetch_messages<R: Runtime>(
             const BATCH_SIZE: usize = 500;
             for batch in missing_ids.chunks(BATCH_SIZE) {
                 let f = Filter::new().ids(batch.to_vec()).kind(Kind::GiftWrap);
-                match client.stream_events_from(
-                    vec![url.clone()], f,
-                    std::time::Duration::from_secs(30),
+                match client.stream_events(nostr_sdk::prelude::ReqTarget::manual(vec![url.clone()].into_iter().map(|u| (u, vec![f.clone()]))))
+                .timeout(std::time::Duration::from_secs(30),
                 ).await {
                     Ok(stream) => {
                         let client_clone = client.clone();
                         let prepared_stream = stream
+                            .filter_map(|(_relay, res)| async move { res.ok() })
                             .map(move |event| {
                                 let c = client_clone.clone();
                                 tokio::spawn(async move {
@@ -189,7 +195,14 @@ pub async fn fetch_messages<R: Runtime>(
                         tokio::pin!(prepared_stream);
                         while let Some(result) = prepared_stream.next().await {
                             if let Ok(prepared) = result {
-                                crate::services::tauri_commit_prepared_event_with(prepared, false, &recon_batcher).await;
+                                // `is_new: true` — this is the mid-session reconnect catch-up
+                                // (gated on `!is_syncing`, never the initial sync), so these
+                                // arrived while we were disconnected and are new to the user.
+                                // Committing them as not-new makes notifications and the unread
+                                // badge depend on whether this sync or the live subscription won
+                                // the race for a given message. `DedupSkip` on the wrapper cache
+                                // stops the loser from notifying twice.
+                                crate::services::tauri_commit_prepared_event_with(prepared, true, &recon_batcher).await;
                                 if recon_batcher.buffered() >= PERSIST_BATCH {
                                     recon_batcher.flush(&recon_session).await;
                                 }
@@ -538,9 +551,11 @@ pub async fn fetch_messages<R: Runtime>(
 
     // Dry-run negentropy reconciliation — exchange fingerprints only
     // This identifies which events the relay has that we don't, without transferring data.
-    let sync_opts = nostr_sdk::SyncOptions::new()
-        .direction(nostr_sdk::SyncDirection::Down)
-        .initial_timeout(std::time::Duration::from_secs(10))
+    // Tor-aware: shared by the primary race and the background straggler pass below.
+    let neg_budget = vector_core::relay_request_timeout(std::time::Duration::from_secs(10));
+    let sync_opts = nostr_sdk::prelude::SyncOptions::new()
+        .direction(nostr_sdk::prelude::SyncDirection::Down)
+        .initial_timeout(neg_budget)
         .dry_run();
 
     let reconcile_start = std::time::Instant::now();
@@ -565,8 +580,8 @@ pub async fn fetch_messages<R: Runtime>(
         let opts = sync_opts.clone();
         relay_futs.push(async move {
             let result = tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                relay.sync_with_items(f, items, &opts),
+                neg_budget + std::time::Duration::from_secs(5),
+                relay.sync(f).items(items).opts(opts.clone()),
             ).await;
             (url, result)
         });
@@ -597,7 +612,7 @@ pub async fn fetch_messages<R: Runtime>(
                 hard_failed.push(url);
             }
             Err(_) => {
-                eprintln!("[Sync]   Relay {} timed out (10s)", url);
+                eprintln!("[Sync]   Relay {} timed out after {:?}", url, neg_budget);
             }
         }
     }
@@ -625,7 +640,7 @@ pub async fn fetch_messages<R: Runtime>(
                         }
                     }
                     Ok(Err(e)) => eprintln!("[Sync][BG] {} failed: {}", url, e),
-                    Err(_) => eprintln!("[Sync][BG] {} timed out (10s)", url),
+                    Err(_) => eprintln!("[Sync][BG] {} timed out after {:?}", url, neg_budget),
                 }
             }
 
@@ -639,14 +654,14 @@ pub async fn fetch_messages<R: Runtime>(
                 const BG_BATCH: usize = 500;
                 for batch in extra_ids.chunks(BG_BATCH) {
                     let f = Filter::new().ids(batch.to_vec()).kind(Kind::GiftWrap);
-                    match bg_client.stream_events_from(
-                        relay_strs.clone(), f,
-                        std::time::Duration::from_secs(30),
+                    match bg_client.stream_events(nostr_sdk::prelude::ReqTarget::manual(relay_strs.clone().into_iter().map(|u| (u, vec![f.clone()]))))
+                .timeout(std::time::Duration::from_secs(30),
                     ).await {
                         Ok(stream) => {
                             tokio::pin!(stream);
                             let mut count = 0u32;
-                            while let Some(event) = stream.next().await {
+                            while let Some((_relay, res)) = stream.next().await {
+                                let Ok(event) = res else { continue };
                                 if !straggler_session.is_valid() { return; }
                                 let prepared = vector_core::event_handler::prepare_event(
                                     event, &bg_client, my_public_key,
@@ -704,12 +719,13 @@ pub async fn fetch_messages<R: Runtime>(
         let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
         let mut fetched = 0u32;
 
-        match client.stream_events_from(
-            relay_strs, fallback_filter, std::time::Duration::from_secs(20),
+        match client.stream_events(nostr_sdk::prelude::ReqTarget::manual(relay_strs.into_iter().map(|u| (u, vec![fallback_filter.clone()]))))
+                .timeout(std::time::Duration::from_secs(20),
         ).await {
             Ok(stream) => {
                 tokio::pin!(stream);
-                while let Some(event) = stream.next().await {
+                while let Some((_relay, res)) = stream.next().await {
+                                let Ok(event) = res else { continue };
                     if !quick_session.is_valid() { break; }
                     if !seen.insert(event.id.to_bytes()) { continue; }
                     fetched += 1;
@@ -761,13 +777,13 @@ pub async fn fetch_messages<R: Runtime>(
             fetch_handles.push(tokio::spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
                 let f = Filter::new().ids(batch_ids).kind(Kind::GiftWrap);
-                match c.stream_events_from(
-                    vec![relay], f,
-                    std::time::Duration::from_secs(5),
+                match c.stream_events(nostr_sdk::prelude::ReqTarget::manual(vec![relay].into_iter().map(|u| (u, vec![f.clone()]))))
+                .timeout(std::time::Duration::from_secs(5),
                 ).await {
                     Ok(stream) => {
                         tokio::pin!(stream);
-                        while let Some(event) = stream.next().await {
+                        while let Some((_relay, res)) = stream.next().await {
+                                let Ok(event) = res else { continue };
                             if tx.send(event).await.is_err() { break; }
                         }
                     }
@@ -903,8 +919,8 @@ pub async fn fetch_messages<R: Runtime>(
             if !session.is_valid() { return; }
             // Route through the active client signer (covers both local
             // and bunker accounts).
-            let client = match crate::nostr_client() { Some(c) => c, None => return };
-            let signer = match client.signer().await { Ok(s) => s, Err(_) => return };
+            let _client = match crate::nostr_client() { Some(c) => c, None => return };
+            let signer = match vector_core::signer::active_signer() { Ok(s) => s, Err(_) => return };
             let enabled_servers = vector_core::state::get_blossom_servers();
             match vector_core::blossom::probe_servers_for_octet_stream(
                 signer, enabled_servers, session,
@@ -947,8 +963,8 @@ pub async fn fetch_messages<R: Runtime>(
             let filter = Filter::new()
                 .pubkey(my_public_key)
                 .kind(Kind::GiftWrap);
-            let opts = nostr_sdk::SyncOptions::new()
-                .direction(nostr_sdk::SyncDirection::Down)
+            let opts = nostr_sdk::prelude::SyncOptions::new()
+                .direction(nostr_sdk::prelude::SyncDirection::Down)
                 .initial_timeout(std::time::Duration::from_secs(45))
                 .dry_run();
 
@@ -983,7 +999,7 @@ pub async fn fetch_messages<R: Runtime>(
                 futs.push(async move {
                     let result = tokio::time::timeout(
                         std::time::Duration::from_secs(120),
-                        relay.sync_with_items(f, i, &o),
+                        relay.sync(f).items(i).opts(o.clone()),
                     ).await;
                     (url, result)
                 });
@@ -1013,13 +1029,13 @@ pub async fn fetch_messages<R: Runtime>(
                 let mut processed = 0u32;
                 for batch in ids.chunks(BATCH) {
                     let f = Filter::new().ids(batch.to_vec()).kind(Kind::GiftWrap);
-                    match bg_client.stream_events_from(
-                        relay_strs.clone(), f,
-                        std::time::Duration::from_secs(30),
+                    match bg_client.stream_events(nostr_sdk::prelude::ReqTarget::manual(relay_strs.clone().into_iter().map(|u| (u, vec![f.clone()]))))
+                .timeout(std::time::Duration::from_secs(30),
                     ).await {
                         Ok(stream) => {
                             tokio::pin!(stream);
-                            while let Some(event) = stream.next().await {
+                            while let Some((_relay, res)) = stream.next().await {
+                                let Ok(event) = res else { continue };
                                 if !archive_session.is_valid() { return; }
                                 let prepared = vector_core::event_handler::prepare_event(
                                     event, &bg_client, my_public_key,

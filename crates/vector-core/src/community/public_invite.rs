@@ -155,10 +155,10 @@ pub fn build_public_invite_event(
     EventBuilder::new(Kind::Custom(event_kind::APPLICATION_SPECIFIC), content)
         .tags([
             Tag::identifier(locator),
-            Tag::custom(TagKind::Custom(TAG_SUBKIND.into()), [VSK_PUBLIC_INVITE.to_string()]),
-            Tag::custom(TagKind::Custom(TAG_VERSION.into()), [PROTOCOL_VERSION.to_string()]),
+            Tag::custom(TAG_SUBKIND, [VSK_PUBLIC_INVITE.to_string()]),
+            Tag::custom(TAG_VERSION, [PROTOCOL_VERSION.to_string()]),
         ])
-        .sign_with_keys(&signer)
+        .finalize(&signer)
         .map_err(|e| PublicInviteError::Sign(e.to_string()))
 }
 
@@ -174,10 +174,10 @@ pub fn build_public_invite_tombstone(token: &[u8; 32]) -> Result<Event, PublicIn
     EventBuilder::new(Kind::Custom(event_kind::APPLICATION_SPECIFIC), "")
         .tags([
             Tag::identifier(locator),
-            Tag::custom(TagKind::Custom(TAG_SUBKIND.into()), [VSK_PUBLIC_INVITE_REVOKED.to_string()]),
-            Tag::custom(TagKind::Custom(TAG_VERSION.into()), [PROTOCOL_VERSION.to_string()]),
+            Tag::custom(TAG_SUBKIND, [VSK_PUBLIC_INVITE_REVOKED.to_string()]),
+            Tag::custom(TAG_VERSION, [PROTOCOL_VERSION.to_string()]),
         ])
-        .sign_with_keys(&signer)
+        .finalize(&signer)
         .map_err(|e| PublicInviteError::Sign(e.to_string()))
 }
 
@@ -539,10 +539,10 @@ mod tests {
         let impostor = EventBuilder::new(Kind::Custom(event_kind::APPLICATION_SPECIFIC), "x")
             .tags([
                 Tag::identifier(locator_hex(&token)),
-                Tag::custom(TagKind::Custom(TAG_SUBKIND.into()), [VSK_PUBLIC_INVITE.to_string()]),
-                Tag::custom(TagKind::Custom(TAG_VERSION.into()), [PROTOCOL_VERSION.to_string()]),
+                Tag::custom(TAG_SUBKIND, [VSK_PUBLIC_INVITE.to_string()]),
+                Tag::custom(TAG_VERSION, [PROTOCOL_VERSION.to_string()]),
             ])
-            .sign_with_keys(&attacker)
+            .finalize(&attacker)
             .unwrap();
         let _ = &c;
         assert!(matches!(

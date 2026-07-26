@@ -18,6 +18,7 @@ use nostr_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::state::nostr_client;
+use crate::ClientRelayExt;
 
 /// NIP-51 kind for a user's "Emojis" list (replaceable, per-user).
 const KIND_EMOJI_LIST: u16 = 10030;
@@ -450,16 +451,16 @@ impl PackAddress {
 /// portable reference on the user's clipboard.
 pub fn naddr_from_addr(addr: &str) -> Result<String, String> {
     let parsed = parse_pack_address(addr)?;
-    let coord = nostr_sdk::nips::nip01::Coordinate {
+    let coord = nostr_sdk::prelude::nip01::Coordinate {
         kind: Kind::Custom(parsed.kind),
         public_key: parsed.pubkey,
         identifier: parsed.identifier,
     };
-    let n19 = nostr_sdk::nips::nip19::Nip19Coordinate {
+    let n19 = nostr_sdk::prelude::nip19::Nip19Coordinate {
         coordinate: coord,
         relays: Vec::new(),
     };
-    nostr_sdk::nips::nip19::Nip19::Coordinate(n19)
+    nostr_sdk::prelude::nip19::Nip19::Coordinate(n19)
         .to_bech32()
         .map_err(|e| format!("encode naddr: {}", e))
 }
@@ -469,10 +470,10 @@ pub fn naddr_from_addr(addr: &str) -> Result<String, String> {
 /// an unrelated replaceable event.
 pub fn parse_naddr(naddr: &str) -> Result<PackAddress, String> {
     let trimmed = naddr.trim().trim_start_matches("nostr:");
-    let parsed = nostr_sdk::nips::nip19::Nip19::from_bech32(trimmed)
+    let parsed = nostr_sdk::prelude::nip19::Nip19::from_bech32(trimmed)
         .map_err(|e| format!("invalid naddr: {}", e))?;
     let coord = match parsed {
-        nostr_sdk::nips::nip19::Nip19::Coordinate(c) => c,
+        nostr_sdk::prelude::nip19::Nip19::Coordinate(c) => c,
         _ => return Err("naddr expected (Nip19 was not a coordinate)".to_string()),
     };
     let kind = coord.kind.as_u16();
@@ -572,21 +573,21 @@ pub async fn decrypt_subscribed_addresses(
 /// NIP-44-self-decrypt a kind 10030 event's content. `None` = empty /
 /// undecryptable / no-signer (all treated as "no subscriptions").
 async fn decrypt_emoji_list_plaintext(
-    client: &Client,
+    _client: &Client,
     my_pk: &PublicKey,
     event: &Event,
 ) -> Option<String> {
     if event.content.is_empty() {
         return None;
     }
-    let signer = match client.signer().await {
+    let signer = match crate::signer::active_signer() {
         Ok(s) => s,
         Err(e) => {
             crate::log_warn!("[EmojiPacks] signer unavailable for emoji list decrypt: {}", e);
             return None;
         }
     };
-    match signer.nip44_decrypt(my_pk, &event.content).await {
+    match signer.nip44_decrypt_async(my_pk, &event.content).await {
         Ok(p) => Some(p),
         Err(e) => {
             crate::log_warn!("[EmojiPacks] emoji list decrypt failed: {}", e);
@@ -1009,14 +1010,14 @@ fn cache_write_relays(pubkey: PublicKey, relays: Vec<RelayUrl>, verified: bool) 
 /// only (useless for finding their packs), so we keep both/write and drop read.
 fn extract_write_relays(ev: &Event) -> Vec<RelayUrl> {
     let mut relays: Vec<RelayUrl> = Vec::new();
-    for (url, marker) in nostr_sdk::nips::nip65::extract_relay_list(ev) {
+    for (url, marker) in nostr_sdk::prelude::nip65::extract_relay_list(ev) {
         match marker {
-            None | Some(nostr_sdk::nips::nip65::RelayMetadata::Write) => {
-                if !relays.contains(url) {
+            None | Some(nostr_sdk::prelude::nip65::RelayMetadata::Write) => {
+                if !relays.contains(&url) {
                     relays.push(url.clone());
                 }
             }
-            Some(nostr_sdk::nips::nip65::RelayMetadata::Read) => {}
+            Some(nostr_sdk::prelude::nip65::RelayMetadata::Read) => {}
         }
     }
     relays
@@ -1036,7 +1037,7 @@ async fn fetch_author_write_relays(client: &Client, pubkey: PublicKey) -> Vec<Re
         .kind(Kind::RelayList)
         .limit(1);
     let events = match client
-        .fetch_events(filter, std::time::Duration::from_secs(NIP65_FETCH_TIMEOUT_SECS))
+        .fetch_events(filter).timeout(std::time::Duration::from_secs(NIP65_FETCH_TIMEOUT_SECS))
         .await
     {
         Ok(evs) => evs,
@@ -1072,7 +1073,7 @@ async fn prefetch_author_write_relays(client: &Client, authors: &[PublicKey]) {
         .authors(uncached.iter().copied())
         .kind(Kind::RelayList);
     let events = match client
-        .fetch_events(filter, std::time::Duration::from_secs(NIP65_FETCH_TIMEOUT_SECS))
+        .fetch_events(filter).timeout(std::time::Duration::from_secs(NIP65_FETCH_TIMEOUT_SECS))
         .await
     {
         Ok(evs) => evs,
@@ -1114,7 +1115,7 @@ async fn fetch_pack_from_relays(client: &Client, addr: &PackAddress) -> Option<E
 
     // 1) Home relays first (the shared pool). Covers our own packs and any
     //    pack that's on Vector's default relays — the common, fast case.
-    match client.fetch_events(filter.clone(), timeout).await {
+    match client.fetch_events(filter.clone()).timeout(timeout).await {
         Ok(events) => {
             if let Some(ev) = events.into_iter().max_by_key(|e| e.created_at) {
                 if let Some(pack) = parse_pack_from_event(&ev, me.as_deref()) {
@@ -1146,16 +1147,14 @@ async fn fetch_pack_via_isolated_client(
     timeout: std::time::Duration,
     my_pubkey_hex: Option<&str>,
 ) -> Option<EmojiPack> {
-    let scratch = ClientBuilder::new()
-        .opts(crate::nostr_client_options())
+    let scratch = crate::nostr_client_builder()
         .build();
     for r in relays {
-        let opts = crate::tor_aware_relay_options(RelayOptions::new().reconnect(false));
-        let _ = scratch.pool().add_relay(r.as_str(), opts).await;
+        let _ = scratch.add_managed_relay(r.as_str()).await;
     }
     scratch.connect().await;
 
-    let result = scratch.fetch_events(filter, timeout).await;
+    let result = scratch.fetch_events(filter).timeout(timeout).await;
     // Tear the scratch client down regardless of outcome.
     scratch.shutdown().await;
 
@@ -1262,7 +1261,7 @@ async fn connected_read_relays(client: &Client, read_only: bool) -> std::collect
         .relays()
         .await
         .iter()
-        .filter(|(_, r)| r.status() == RelayStatus::Connected && (!read_only || r.flags().has_read()))
+        .filter(|(_, r)| r.status() == RelayStatus::Connected && (!read_only || r.capabilities().load().can_read()))
         .map(|(url, _)| url.to_string())
         .collect()
 }
@@ -1372,7 +1371,7 @@ async fn sweep_packs_from_relays(client: &Client, addrs: &[PackAddress]) -> Pack
     let mut newest: HashMap<String, Event> = HashMap::new();
     let mut deletions: Vec<Event> = Vec::new();
     let mut home_ok = false;
-    match client.fetch_events(home_filter, timeout).await {
+    match client.fetch_events(home_filter).timeout(timeout).await {
         Ok(events) => {
             home_ok = true;
             merge_newest(&mut newest, newest_events_by_coord(events, &wanted));
@@ -1382,7 +1381,7 @@ async fn sweep_packs_from_relays(client: &Client, addrs: &[PackAddress]) -> Pack
         }
     }
     if home_ok {
-        match client.fetch_events(deletion_filter(&all_refs), timeout).await {
+        match client.fetch_events(deletion_filter(&all_refs)).timeout(timeout).await {
             Ok(events) => deletions.extend(events),
             Err(e) => crate::log_warn!("[EmojiPacks] home deletion fetch failed: {}", e),
         }
@@ -1477,12 +1476,10 @@ async fn sweep_via_isolated_client(
     del_filter: Filter,
     timeout: std::time::Duration,
 ) -> Option<(Vec<Event>, Vec<Event>, std::collections::HashSet<String>)> {
-    let scratch = ClientBuilder::new()
-        .opts(crate::nostr_client_options())
+    let scratch = crate::nostr_client_builder()
         .build();
     for r in relays {
-        let opts = crate::tor_aware_relay_options(RelayOptions::new().reconnect(false));
-        let _ = scratch.pool().add_relay(r.as_str(), opts).await;
+        let _ = scratch.add_managed_relay(r.as_str()).await;
     }
     scratch.connect().await;
     // `connect()` is non-blocking and this client is brand new, so wait for at
@@ -1497,9 +1494,9 @@ async fn sweep_via_isolated_client(
         }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     };
-    let result = scratch.fetch_events(pack_filter, timeout).await;
+    let result = scratch.fetch_events(pack_filter).timeout(timeout).await;
     let dels = match &result {
-        Ok(_) => scratch.fetch_events(del_filter, timeout).await.ok(),
+        Ok(_) => scratch.fetch_events(del_filter).timeout(timeout).await.ok(),
         Err(_) => None,
     };
     let after = connected_read_relays(&scratch, false).await;
@@ -1537,7 +1534,7 @@ pub async fn fetch_subscribed_packs(
         .limit(1);
 
     let list_events = client
-        .fetch_events(list_filter, std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
+        .fetch_events(list_filter).timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
         .await
         .map_err(|e| format!("fetch kind 10030: {}", e))?;
 
@@ -1832,13 +1829,13 @@ pub async fn publish_emoji_list(client: &Client) -> Result<(), String> {
     let plaintext = serde_json::to_string(&inner_tags)
         .map_err(|e| format!("Serialise emoji list: {}", e))?;
 
-    let signer = client.signer().await
+    let signer = crate::signer::active_signer()
         .map_err(|e| format!("Signer unavailable: {}", e))?;
-    let content = signer.nip44_encrypt(&my_pk, &plaintext).await
+    let content = signer.nip44_encrypt_async(&my_pk, &plaintext).await
         .map_err(|e| format!("nip44 encrypt emoji list: {}", e))?;
 
     let builder = EventBuilder::new(Kind::Custom(KIND_EMOJI_LIST), content);
-    client.send_event_builder(builder).await
+    crate::sign_and_send(&client, builder).await
         .map_err(|e| format!("Failed to publish emoji list (kind 10030): {}", e))?;
 
     crate::log_info!("[EmojiPacks] Published encrypted kind 10030 with {} pack subscription(s)", addrs.len());
@@ -1943,32 +1940,32 @@ fn build_pack_event(pack: &EmojiPack) -> Result<EventBuilder, String> {
         return Err("pack identifier required".to_string());
     }
     let mut builder = EventBuilder::new(Kind::Custom(KIND_EMOJI_SET), "")
-        .tag(Tag::custom(TagKind::custom("d"), [pack.identifier.clone()]))
+        .tag(Tag::custom("d", [pack.identifier.clone()]))
         // Stamp Vector as the authoring client (same ["client","vector"] tag our kind-0
         // profile publishes carry) so packs made or edited here are attributable.
-        .tag(Tag::custom(TagKind::custom("client"), ["vector"]));
+        .tag(Tag::custom("client", ["vector"]));
 
     // Spec-compliant metadata (NIP-51).
     if !pack.title.is_empty() {
         builder = builder
-            .tag(Tag::custom(TagKind::custom("title"), [pack.title.clone()]))
-            .tag(Tag::custom(TagKind::custom("name"), [pack.title.clone()]));
+            .tag(Tag::custom("title", [pack.title.clone()]))
+            .tag(Tag::custom("name", [pack.title.clone()]));
     }
     if !pack.image_url.is_empty() {
         builder = builder
-            .tag(Tag::custom(TagKind::custom("image"), [pack.image_url.clone()]))
-            .tag(Tag::custom(TagKind::custom("picture"), [pack.image_url.clone()]));
+            .tag(Tag::custom("image", [pack.image_url.clone()]))
+            .tag(Tag::custom("picture", [pack.image_url.clone()]));
     }
     if !pack.description.is_empty() {
         builder = builder
-            .tag(Tag::custom(TagKind::custom("description"), [pack.description.clone()]))
-            .tag(Tag::custom(TagKind::custom("about"), [pack.description.clone()]));
+            .tag(Tag::custom("description", [pack.description.clone()]))
+            .tag(Tag::custom("about", [pack.description.clone()]));
     }
 
     for e in &pack.emojis {
         if e.shortcode.is_empty() || e.url.is_empty() { continue; }
         builder = builder.tag(Tag::custom(
-            TagKind::custom("emoji"),
+            "emoji",
             [e.shortcode.clone(), e.url.clone()],
         ));
     }
@@ -2019,7 +2016,7 @@ pub async fn publish_pack(pack: &EmojiPack) -> Result<EmojiPack, String> {
     }
 
     let builder = build_pack_event(&to_save)?;
-    client.send_event_builder(builder).await
+    crate::sign_and_send(&client, builder).await
         .map_err(|e| format!("publish kind 30030: {}", e))?;
 
     if !session.is_valid() {
@@ -2061,8 +2058,8 @@ pub async fn delete_own_pack(id: &str) -> Result<(), String> {
     let client = nostr_client().ok_or_else(|| "Nostr client not initialised".to_string())?;
 
     let builder = EventBuilder::new(Kind::Custom(KIND_EMOJI_SET), "")
-        .tag(Tag::custom(TagKind::custom("d"), [parsed.identifier.clone()]));
-    client.send_event_builder(builder).await
+        .tag(Tag::custom("d", [parsed.identifier.clone()]));
+    crate::sign_and_send(&client, builder).await
         .map_err(|e| format!("publish empty kind 30030: {}", e))?;
 
     if !session.is_valid() {
@@ -2183,22 +2180,22 @@ mod tests {
         emojis: &[(&str, &str)],
     ) -> Event {
         let mut tags: Vec<Tag> = Vec::new();
-        tags.push(Tag::custom(TagKind::custom("d"), [d]));
+        tags.push(Tag::custom("d", [d]));
         if let Some((key, val)) = title_tag {
-            tags.push(Tag::custom(TagKind::custom(key), [val]));
+            tags.push(Tag::custom(key, [val]));
         }
         if let Some((key, val)) = image_tag {
-            tags.push(Tag::custom(TagKind::custom(key), [val]));
+            tags.push(Tag::custom(key, [val]));
         }
         if let Some((key, val)) = desc_tag {
-            tags.push(Tag::custom(TagKind::custom(key), [val]));
+            tags.push(Tag::custom(key, [val]));
         }
         for (code, url) in emojis {
-            tags.push(Tag::custom(TagKind::custom("emoji"), [*code, *url]));
+            tags.push(Tag::custom("emoji", [*code, *url]));
         }
         EventBuilder::new(Kind::Custom(KIND_EMOJI_SET), "")
             .tags(tags)
-            .sign_with_keys(k)
+            .finalize(k)
             .unwrap()
     }
 
@@ -2244,8 +2241,8 @@ mod tests {
 
     fn build_deletion_event(k: &Keys, addr: &str) -> Event {
         EventBuilder::new(Kind::EventDeletion, "")
-            .tag(Tag::custom(TagKind::custom("a"), [addr]))
-            .sign_with_keys(k)
+            .tag(Tag::custom("a", [addr]))
+            .finalize(k)
             .unwrap()
     }
 
@@ -2275,17 +2272,17 @@ mod tests {
         let ts = Timestamp::from_secs(1_700_000_000);
         let live_pinned = EventBuilder::new(Kind::Custom(KIND_EMOJI_SET), "")
             .tags(vec![
-                Tag::custom(TagKind::custom("d"), ["p"]),
-                Tag::custom(TagKind::custom("emoji"), ["a", "https://e.x/a.png"]),
+                Tag::custom("d", ["p"]),
+                Tag::custom("emoji", ["a", "https://e.x/a.png"]),
             ])
             .custom_created_at(ts)
-            .sign_with_keys(&k)
+            .finalize(&k)
             .unwrap();
         let del_at = |secs: u64| {
             EventBuilder::new(Kind::EventDeletion, "")
-                .tag(Tag::custom(TagKind::custom("a"), [addr.as_str()]))
+                .tag(Tag::custom("a", [addr.as_str()]))
                 .custom_created_at(Timestamp::from_secs(secs))
-                .sign_with_keys(&k)
+                .finalize(&k)
                 .unwrap()
         };
 
@@ -2462,7 +2459,7 @@ mod tests {
         let k = keys();
         let ev = build_pack_event(&k, "myPack", Some(("title", "Mine")), None, None, &[("smile", "https://e.x/s.png")]);
         let pack = parse_pack_from_event(&ev, None).unwrap();
-        let built = super::build_pack_event(&pack).unwrap().sign_with_keys(&k).unwrap();
+        let built = super::build_pack_event(&pack).unwrap().finalize(&k).unwrap();
         let has_client = built.tags.iter().any(|t| {
             let s = t.as_slice();
             s.first().map(String::as_str) == Some("client") && s.get(1).map(String::as_str) == Some("vector")
@@ -2490,16 +2487,16 @@ mod tests {
     fn parse_pack_prefers_spec_tags_over_ditto() {
         let k = keys();
         let mut tags: Vec<Tag> = vec![
-            Tag::custom(TagKind::custom("d"), ["both"]),
-            Tag::custom(TagKind::custom("title"), ["SpecTitle"]),
-            Tag::custom(TagKind::custom("name"), ["DittoName"]),
-            Tag::custom(TagKind::custom("image"), ["spec.png"]),
-            Tag::custom(TagKind::custom("picture"), ["ditto.png"]),
-            Tag::custom(TagKind::custom("emoji"), ["a", "https://e.x/a.png"]),
+            Tag::custom("d", ["both"]),
+            Tag::custom("title", ["SpecTitle"]),
+            Tag::custom("name", ["DittoName"]),
+            Tag::custom("image", ["spec.png"]),
+            Tag::custom("picture", ["ditto.png"]),
+            Tag::custom("emoji", ["a", "https://e.x/a.png"]),
         ];
         tags.extend(std::iter::empty());
         let ev = EventBuilder::new(Kind::Custom(KIND_EMOJI_SET), "")
-            .tags(tags).sign_with_keys(&k).unwrap();
+            .tags(tags).finalize(&k).unwrap();
         let pack = parse_pack_from_event(&ev, None).unwrap();
         assert_eq!(pack.title, "SpecTitle");
         assert_eq!(pack.image_url, "spec.png");
@@ -2510,10 +2507,10 @@ mod tests {
         let k = keys();
         let ev = EventBuilder::new(Kind::Custom(KIND_EMOJI_SET), "")
             .tags(vec![
-                Tag::custom(TagKind::custom("title"), ["No D"]),
-                Tag::custom(TagKind::custom("emoji"), ["a", "https://e.x/a.png"]),
+                Tag::custom("title", ["No D"]),
+                Tag::custom("emoji", ["a", "https://e.x/a.png"]),
             ])
-            .sign_with_keys(&k).unwrap();
+            .finalize(&k).unwrap();
         assert!(parse_pack_from_event(&ev, None).is_none());
     }
 
@@ -2586,16 +2583,16 @@ mod tests {
         // Construct a synthetic naddr via nostr-sdk and verify our decoder
         // round-trips kind / pubkey / identifier.
         let k = keys();
-        let coord = nostr_sdk::nips::nip01::Coordinate {
+        let coord = nostr_sdk::prelude::nip01::Coordinate {
             kind: Kind::Custom(30030),
             public_key: k.public_key(),
             identifier: "trip".to_string(),
         };
-        let n19 = nostr_sdk::nips::nip19::Nip19Coordinate {
+        let n19 = nostr_sdk::prelude::nip19::Nip19Coordinate {
             coordinate: coord,
             relays: Vec::new(),
         };
-        let naddr = nostr_sdk::nips::nip19::Nip19::Coordinate(n19).to_bech32().unwrap();
+        let naddr = nostr_sdk::prelude::nip19::Nip19::Coordinate(n19).to_bech32().unwrap();
         let parsed = parse_naddr(&naddr).unwrap();
         assert_eq!(parsed.kind, 30030);
         assert_eq!(parsed.pubkey, k.public_key());
@@ -2605,16 +2602,16 @@ mod tests {
     #[test]
     fn parse_naddr_rejects_non_30030_kinds() {
         let k = keys();
-        let coord = nostr_sdk::nips::nip01::Coordinate {
+        let coord = nostr_sdk::prelude::nip01::Coordinate {
             kind: Kind::Custom(30023), // long-form article
             public_key: k.public_key(),
             identifier: "essay".to_string(),
         };
-        let n19 = nostr_sdk::nips::nip19::Nip19Coordinate {
+        let n19 = nostr_sdk::prelude::nip19::Nip19Coordinate {
             coordinate: coord,
             relays: Vec::new(),
         };
-        let naddr = nostr_sdk::nips::nip19::Nip19::Coordinate(n19).to_bech32().unwrap();
+        let naddr = nostr_sdk::prelude::nip19::Nip19::Coordinate(n19).to_bech32().unwrap();
         let err = parse_naddr(&naddr).unwrap_err();
         assert!(err.contains("expected kind 30030"),
             "expected kind-rejection error, got: {}", err);
@@ -2623,16 +2620,16 @@ mod tests {
     #[test]
     fn parse_naddr_strips_nostr_uri_prefix() {
         let k = keys();
-        let coord = nostr_sdk::nips::nip01::Coordinate {
+        let coord = nostr_sdk::prelude::nip01::Coordinate {
             kind: Kind::Custom(30030),
             public_key: k.public_key(),
             identifier: "prefixed".to_string(),
         };
-        let n19 = nostr_sdk::nips::nip19::Nip19Coordinate {
+        let n19 = nostr_sdk::prelude::nip19::Nip19Coordinate {
             coordinate: coord,
             relays: Vec::new(),
         };
-        let naddr = nostr_sdk::nips::nip19::Nip19::Coordinate(n19).to_bech32().unwrap();
+        let naddr = nostr_sdk::prelude::nip19::Nip19::Coordinate(n19).to_bech32().unwrap();
         let with_prefix = format!("nostr:{}", naddr);
         let parsed = parse_naddr(&with_prefix).unwrap();
         assert_eq!(parsed.identifier, "prefixed");

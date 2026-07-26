@@ -651,7 +651,7 @@ impl VectorBotBuilder {
             .into_iter()
             .filter_map(|n| {
                 let s = n.into();
-                nostr_sdk::PublicKey::parse(&s).ok().and_then(|pk| pk.to_bech32().ok())
+                nostr_sdk::prelude::PublicKey::parse(&s).ok().and_then(|pk| pk.to_bech32().ok())
             })
             .collect();
         self.invite_policy(InvitePolicy::Whitelist(normalized))
@@ -1306,7 +1306,7 @@ where
 /// Classify an id: a valid bech32 `npub` is a DM, anything else (a 64-char hex channel
 /// id) is a Community channel.
 fn channel_kind_for(id: &str) -> ChannelKind {
-    if nostr_sdk::PublicKey::from_bech32(id).is_ok() {
+    if nostr_sdk::prelude::PublicKey::from_bech32(id).is_ok() {
         ChannelKind::Dm
     } else {
         ChannelKind::Community
@@ -1367,7 +1367,7 @@ fn default_data_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr_sdk::Keys;
+    use nostr_sdk::prelude::Keys;
 
     #[test]
     fn invite_policy_matrix() {

@@ -256,8 +256,8 @@ pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Res
     // and progress. Routes through the active client signer (local vault
     // for local accounts, NostrConnect for bunker accounts) so the auth
     // event is signed under the user's identity, not the bunker client key.
-    let client = nostr_client().ok_or("Not connected")?;
-    let signer = client.signer().await
+    let _client = nostr_client().ok_or("Not connected")?;
+    let signer = vector_core::signer::active_signer()
         .map_err(|e| format!("Signer unavailable: {}", e))?;
     let servers = crate::get_blossom_servers();
 

@@ -22,8 +22,10 @@
 //! cap is enforced HERE at every nesting layer — a lenient publisher mints
 //! events a strict reader cannot decrypt.
 
-use nostr_sdk::nips::nip44::v2::{decrypt_to_bytes, encrypt_to_bytes, ConversationKey};
-use nostr_sdk::prelude::{Event, EventBuilder, EventId, JsonUtil, Keys, Kind, PublicKey, Tag, TagKind, Timestamp, UnsignedEvent};
+use crate::event_ext::FinalizeUnsignedWithId;
+use nostr_sdk::prelude::FinalizeEvent;
+use nostr_sdk::prelude::nip44::v2::{decrypt_to_bytes, ConversationKey};
+use nostr_sdk::prelude::{Event, EventBuilder, EventId, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 
 use super::super::{ChannelId, Epoch};
 use super::derive::GroupKey;
@@ -209,7 +211,7 @@ pub fn build_rumor_ms(
     at_ms: u64,
 ) -> UnsignedEvent {
     let (secs, offset) = split_ms(at_ms);
-    tags.push(Tag::custom(TagKind::Custom(TAG_MS.into()), [offset.to_string()]));
+    tags.push(Tag::custom(TAG_MS, [offset.to_string()]));
     build_rumor_secs(kind, author, content, tags, secs)
 }
 
@@ -227,9 +229,8 @@ pub fn build_rumor_secs(
     // builder's byte-verbatim contract — no hidden normalization.
     let mut rumor = EventBuilder::new(Kind::Custom(kind), content)
         .tags(tags)
-        .allow_self_tagging()
         .custom_created_at(Timestamp::from_secs(at_secs))
-        .build(author);
+        .finalize_unsigned_with_id(author);
     rumor.ensure_id();
     rumor
 }
@@ -245,7 +246,7 @@ pub fn seal_content(rumor: &UnsignedEvent, form: SealForm, group: &GroupKey) -> 
     match form {
         SealForm::Plaintext => Ok(json),
         SealForm::Encrypted => {
-            let ct = encrypt_to_bytes(group.conv_key(), json.as_bytes()).map_err(|e| StreamError::Encrypt(e.to_string()))?;
+            let ct = crate::community::cipher::encrypt_with_random_nonce(group.conv_key(), json.as_bytes()).map_err(|e| StreamError::Encrypt(e.to_string()))?;
             Ok(base64_simd::STANDARD.encode_to_string(&ct))
         }
     }
@@ -258,7 +259,7 @@ pub fn build_seal(rumor: &UnsignedEvent, form: SealForm, group: &GroupKey, autho
     let content = seal_content(rumor, form, group)?;
     EventBuilder::new(Kind::Custom(form.kind()), content)
         .custom_created_at(rumor.created_at)
-        .sign_with_keys(author_keys)
+        .finalize(author_keys)
         .map_err(|e| StreamError::Sign(e.to_string()))
 }
 
@@ -290,24 +291,24 @@ pub fn wrap_seal_with_tags(
     }
     let seal_json = seal.as_json();
     cap(seal_json.len())?;
-    let ct = encrypt_to_bytes(group.conv_key(), seal_json.as_bytes()).map_err(|e| StreamError::Encrypt(e.to_string()))?;
+    let ct = crate::community::cipher::encrypt_with_random_nonce(group.conv_key(), seal_json.as_bytes()).map_err(|e| StreamError::Encrypt(e.to_string()))?;
     let ephemeral = Keys::generate();
     let mut tags = vec![Tag::public_key(ephemeral.public_key())];
     tags.extend_from_slice(extra_tags);
     let wrap = EventBuilder::new(Kind::Custom(wrap_kind), base64_simd::STANDARD.encode_to_string(&ct))
         .tags(tags)
         .custom_created_at(wrap_at)
-        .sign_with_keys(group.keys())
+        .finalize(group.keys())
         .map_err(|e| StreamError::Sign(e.to_string()))?;
     Ok((wrap, ephemeral))
 }
 
 /// Signer-driven twin of [`build_seal`] + [`wrap_seal_with_tags`]: seal a rumor
-/// into its wrap using a [`NostrSigner`] for the author signature, so a NIP-46
+/// into its wrap using a [`VectorSigner`] for the author signature, so a NIP-46
 /// bunker (or NIP-55) account yields wire-identical output to the local-keys
 /// path. Only the seal signature needs the identity key; the seal content
 /// (symmetric group-key encrypt, or plaintext) and the group-key wrap do not.
-pub async fn seal_and_wrap_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+pub async fn seal_and_wrap_signed<S: crate::signer::VectorSigner + ?Sized>(
     signer: &S,
     author: PublicKey,
     rumor: &UnsignedEvent,
@@ -320,9 +321,9 @@ pub async fn seal_and_wrap_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
     let content = seal_content(rumor, form, group)?;
     let unsigned = EventBuilder::new(Kind::Custom(form.kind()), content)
         .custom_created_at(rumor.created_at)
-        .build(author);
+        .finalize_unsigned_with_id(author);
     let seal = signer
-        .sign_event(unsigned)
+        .sign_event_async(unsigned)
         .await
         .map_err(|e| StreamError::Sign(e.to_string()))?;
     wrap_seal_with_tags(&seal, group, wrap_kind, wrap_at, extra_tags)
@@ -415,8 +416,8 @@ pub fn check_channel_binding(rumor: &UnsignedEvent, channel_id: &ChannelId, epoc
 /// The standard chat binding tags for a rumor: `["channel", id]` + `["epoch", n]`.
 pub fn channel_binding_tags(channel_id: &ChannelId, epoch: Epoch) -> Vec<Tag> {
     vec![
-        Tag::custom(TagKind::Custom(TAG_CHANNEL.into()), [channel_id.to_hex()]),
-        Tag::custom(TagKind::Custom(TAG_EPOCH.into()), [epoch.0.to_string()]),
+        Tag::custom(TAG_CHANNEL, [channel_id.to_hex()]),
+        Tag::custom(TAG_EPOCH, [epoch.0.to_string()]),
     ]
 }
 
@@ -456,6 +457,13 @@ fn unique_tag_unsigned(rumor: &UnsignedEvent, name: &'static str) -> Result<Opti
 
 #[cfg(test)]
 mod tests {
+
+    /// Wrap raw `Keys` as the polymorphic signer. `VectorSigner` pins its error to
+    /// `SignerError`, which bare `Keys` doesn't satisfy, so tests go through the
+    /// same enum the app uses.
+    fn as_signer(k: &Keys) -> crate::signer::ActiveSigner {
+        crate::signer::ActiveSigner::Keys(k.clone())
+    }
     use super::super::super::{ChannelId, Epoch};
     use super::super::derive::channel_group_key;
     use super::super::kind;
@@ -504,7 +512,7 @@ mod tests {
 
         let seal_l = build_seal(&rumor, SealForm::Encrypted, &g, &author).unwrap();
         let (wrap_l, _) = wrap_seal(&seal_l, &g, KIND_WRAP, wrap_at).unwrap();
-        let (wrap_s, _) = seal_and_wrap_signed(&author, author.public_key(), &rumor, SealForm::Encrypted, &g, KIND_WRAP, wrap_at, &[])
+        let (wrap_s, _) = seal_and_wrap_signed(&as_signer(&author), author.public_key(), &rumor, SealForm::Encrypted, &g, KIND_WRAP, wrap_at, &[])
             .await
             .unwrap();
 
@@ -593,7 +601,7 @@ mod tests {
         // bytes ride verbatim).
         let seal = EventBuilder::new(Kind::Custom(KIND_SEAL_PLAINTEXT), forged_json)
             .custom_created_at(rumor.created_at)
-            .sign_with_keys(&author)
+            .finalize(&author)
             .unwrap();
         let (wrap, _) = wrap_seal(&seal, &group(), KIND_WRAP, Timestamp::from_secs(1)).unwrap();
         assert!(matches!(open_wrap(&wrap, &group()), Err(StreamError::BadRumorId)));
@@ -610,7 +618,7 @@ mod tests {
             kind::MESSAGE,
             author.public_key(),
             "x",
-            vec![Tag::custom(TagKind::Custom("ms".into()), ["999".to_string()])],
+            vec![Tag::custom("ms", ["999".to_string()])],
             1_000,
         );
         assert_eq!(resolve_ms_strict(&ok).unwrap(), 1_000_999);
@@ -622,7 +630,7 @@ mod tests {
                 kind::MESSAGE,
                 author.public_key(),
                 "x",
-                vec![Tag::custom(TagKind::Custom("ms".into()), [bad.to_string()])],
+                vec![Tag::custom("ms", [bad.to_string()])],
                 1_000,
             );
             assert!(
@@ -641,7 +649,7 @@ mod tests {
             kind::MESSAGE,
             author.public_key(),
             "x",
-            vec![Tag::custom(TagKind::Custom("ms".into()), Vec::<String>::new())],
+            vec![Tag::custom("ms", Vec::<String>::new())],
             1_000,
         );
         assert!(matches!(resolve_ms_strict(&bare), Err(StreamError::BadMs)));
@@ -652,8 +660,8 @@ mod tests {
             author.public_key(),
             "x",
             vec![
-                Tag::custom(TagKind::Custom("ms".into()), Vec::<String>::new()),
-                Tag::custom(TagKind::Custom("ms".into()), ["5".to_string()]),
+                Tag::custom("ms", Vec::<String>::new()),
+                Tag::custom("ms", ["5".to_string()]),
             ],
             1_000,
         );
@@ -664,8 +672,8 @@ mod tests {
             author.public_key(),
             "x",
             vec![
-                Tag::custom(TagKind::Custom("ms".into()), ["1".to_string()]),
-                Tag::custom(TagKind::Custom("ms".into()), ["2".to_string()]),
+                Tag::custom("ms", ["1".to_string()]),
+                Tag::custom("ms", ["2".to_string()]),
             ],
             1_000,
         );

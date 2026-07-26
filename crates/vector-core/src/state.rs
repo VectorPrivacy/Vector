@@ -483,7 +483,7 @@ mod session_globals_tests {
         clear_pending_invite();
 
         // PublicKey: set → get → clear.
-        // Use a deterministic key from a hex seed; nostr_sdk::Keys::generate()
+        // Use a deterministic key from a hex seed; nostr_sdk::prelude::Keys::generate()
         // would also work but the deterministic form makes failures easier
         // to reproduce.
         let keys = Keys::parse(

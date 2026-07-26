@@ -20,11 +20,12 @@
 //! Signing is local (raw derived keys) — it never touches the account signer /
 //! bunker.
 
+use nostr_sdk::prelude::FinalizeEvent;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
 
-use nostr_sdk::prelude::{Client, ClientMessage, EventBuilder, Keys, RelayPoolNotification, RelayUrl};
+use nostr_sdk::prelude::{Client, ClientMessage, ClientNotification, EventBuilder, Keys, RelayUrl, StreamExt};
 
 use super::community::CommunityV2;
 
@@ -156,10 +157,10 @@ pub fn is_empty() -> bool {
 
 /// Sign a NIP-42 AUTH (kind-22242) event for EVERY registered stream key against
 /// `challenge` + `relay`. Local raw-key signing; a malformed key is skipped.
-fn sign_all(challenge: &str, relay: &RelayUrl) -> Vec<nostr_sdk::Event> {
+fn sign_all(challenge: &str, relay: &RelayUrl) -> Vec<nostr_sdk::prelude::Event> {
     let reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
     reg.values()
-        .filter_map(|keys| EventBuilder::auth(challenge, relay.clone()).sign_with_keys(keys).ok())
+        .filter_map(|keys| EventBuilder::auth(challenge, relay.clone()).finalize(keys).ok())
         .collect()
 }
 
@@ -168,12 +169,12 @@ fn sign_all(challenge: &str, relay: &RelayUrl) -> Vec<nostr_sdk::Event> {
 /// bare kind-22242 event). Best-effort per key. Returns how many were sent.
 async fn authenticate_streams(client: &Client, relay: &RelayUrl, challenge: &str) -> usize {
     let events = sign_all(challenge, relay);
-    let Ok(r) = client.pool().relay(relay.clone()).await else {
+    let Ok(Some(r)) = client.relay(relay.clone()).await else {
         return 0;
     };
     let mut sent = 0;
     for ev in events {
-        if r.send_msg(ClientMessage::auth(ev)).is_ok() {
+        if r.send_msg(ClientMessage::auth(ev)).await.is_ok() {
             sent += 1;
         }
     }
@@ -197,12 +198,12 @@ pub fn ensure_responder(client: &Client) {
     let session = crate::state::SessionGuard::capture();
     tokio::spawn(async move {
         let mut notifications = client.notifications();
-        while let Ok(n) = notifications.recv().await {
+        while let Some(n) = notifications.next().await {
             if !session.is_valid() {
                 break;
             }
-            if let RelayPoolNotification::Message { relay_url, message } = n {
-                if let nostr_sdk::RelayMessage::Auth { challenge } = message {
+            if let ClientNotification::Message { relay_url, message } = n {
+                if let nostr_sdk::prelude::RelayMessage::Auth { challenge } = *message {
                     let challenge = challenge.into_owned();
                     let fresh_connection = remember_challenge(&relay_url, &challenge);
                     if !is_empty() {
@@ -259,19 +260,23 @@ pub async fn prime_auth(client: &Client, relays: &[String]) {
             authenticate_streams(client, url, &challenge).await;
         }
     }
-    let authors: Vec<nostr_sdk::PublicKey> = {
+    let authors: Vec<nostr_sdk::prelude::PublicKey> = {
         let reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
-        reg.keys().filter_map(|pk| nostr_sdk::PublicKey::from_slice(pk).ok()).collect()
+        reg.keys().filter_map(|pk| nostr_sdk::prelude::PublicKey::from_slice(pk).ok()).collect()
     };
     if authors.is_empty() {
         return;
     }
-    let filter = nostr_sdk::Filter::new()
-        .kind(nostr_sdk::Kind::Custom(super::stream::KIND_WRAP))
+    let filter = nostr_sdk::prelude::Filter::new()
+        .kind(nostr_sdk::prelude::Kind::Custom(super::stream::KIND_WRAP))
         .authors(authors)
         .limit(1);
     // Bounded so a dead relay can't stall the subscription refresh behind it.
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(8), client.fetch_events_from(urls, filter, std::time::Duration::from_secs(6))).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(8), client
+        .fetch_events(nostr_sdk::prelude::ReqTarget::manual(
+            urls.into_iter().map(|u| (u, vec![filter.clone()])),
+        ))
+        .timeout(std::time::Duration::from_secs(6))).await;
 }
 
 #[cfg(test)]
@@ -359,7 +364,7 @@ mod tests {
         register([key.clone()]);
         let events = sign_all("shape-challenge", &relay);
         let ev = events.iter().find(|e| e.pubkey == key.public_key()).expect("signed by the registered key");
-        assert_eq!(ev.kind, nostr_sdk::Kind::Authentication);
+        assert_eq!(ev.kind, nostr_sdk::prelude::Kind::Authentication);
         assert!(ev.verify().is_ok(), "signature + id must verify");
         let tag_values: Vec<String> = ev.tags.iter().filter_map(|t| t.content().map(String::from)).collect();
         assert!(tag_values.iter().any(|v| v == "shape-challenge"), "carries the challenge tag");

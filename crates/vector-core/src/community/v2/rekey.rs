@@ -37,8 +37,8 @@
 //! apply-path concern keyed on prior-vs-current-root addressing) sits in the
 //! service layer.
 
-use nostr_sdk::nips::nip44::v2::{decrypt_to_bytes, encrypt_to_bytes, ConversationKey};
-use nostr_sdk::prelude::{Event, Keys, PublicKey, SecretKey, Tag, TagKind, Timestamp, UnsignedEvent};
+use nostr_sdk::prelude::nip44::v2::{decrypt_to_bytes, ConversationKey};
+use nostr_sdk::prelude::{Event, Keys, PublicKey, SecretKey, Tag, Timestamp, UnsignedEvent};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -223,7 +223,7 @@ pub fn build_blob_local(
 ) -> Result<RekeyBlob, RekeyError> {
     let inner_b64 = Zeroizing::new(bound_plaintext_b64(scope, epoch, new_key));
     let ck = ConversationKey::derive(rotator_sk, recipient_pk).map_err(|e| RekeyError::Crypto(e.to_string()))?;
-    let payload = encrypt_to_bytes(&ck, inner_b64.as_bytes()).map_err(|e| RekeyError::Crypto(e.to_string()))?;
+    let payload = crate::community::cipher::encrypt_with_random_nonce(&ck, inner_b64.as_bytes()).map_err(|e| RekeyError::Crypto(e.to_string()))?;
     Ok(RekeyBlob {
         locator: blob_locator(rotator_xonly, &recipient_pk.to_bytes(), scope, epoch),
         wrapped: base64_simd::STANDARD.encode_to_string(&payload),
@@ -255,12 +255,12 @@ pub fn open_blob_local(
     parse_bound_plaintext(&pt, scope, epoch)
 }
 
-/// Build one blob via a [`NostrSigner`] (the bunker / NIP-55 path). Wire-identical
+/// Build one blob via a [`VectorSigner`] (the bunker / NIP-55 path). Wire-identical
 /// to [`build_blob_local`]: `signer.nip44_encrypt(recipient, bound_plaintext_b64)`
 /// whose conversation key is ECDH(signer_identity, recipient) — the same key the
 /// local path derives from the raw rotator secret. The `wrapped` field is the
 /// standard NIP-44 payload string (D5), so both paths emit identical wire.
-pub async fn build_blob<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+pub async fn build_blob<S: crate::signer::VectorSigner + ?Sized>(
     signer: &S,
     rotator_xonly: &[u8; 32],
     recipient_pk: &PublicKey,
@@ -270,7 +270,7 @@ pub async fn build_blob<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
 ) -> Result<RekeyBlob, RekeyError> {
     let inner_b64 = Zeroizing::new(bound_plaintext_b64(scope, epoch, new_key));
     let wrapped = signer
-        .nip44_encrypt(recipient_pk, inner_b64.as_str())
+        .nip44_encrypt_async(recipient_pk, inner_b64.as_str())
         .await
         .map_err(|e| RekeyError::Crypto(e.to_string()))?;
     Ok(RekeyBlob {
@@ -279,10 +279,10 @@ pub async fn build_blob<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
     })
 }
 
-/// Open a blob addressed to me via a [`NostrSigner`]. Mirror of [`open_blob_local`]:
+/// Open a blob addressed to me via a [`VectorSigner`]. Mirror of [`open_blob_local`]:
 /// `signer.nip44_decrypt(rotator, blob.wrapped)` yields the base64 bound plaintext,
 /// then the scope/epoch bound check gates it. Per D1 the locator is NOT gated.
-pub async fn open_blob<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+pub async fn open_blob<S: crate::signer::VectorSigner + ?Sized>(
     signer: &S,
     rotator_pk: &PublicKey,
     scope: RekeyScope,
@@ -291,7 +291,7 @@ pub async fn open_blob<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
 ) -> Result<[u8; 32], RekeyError> {
     let inner_b64 = Zeroizing::new(
         signer
-            .nip44_decrypt(rotator_pk, &blob.wrapped)
+            .nip44_decrypt_async(rotator_pk, &blob.wrapped)
             .await
             .map_err(|e| RekeyError::Crypto(e.to_string()))?,
     );
@@ -370,11 +370,11 @@ pub fn build_rekey_rumor(
     }
     let content = serde_json::to_string(blobs).map_err(|e| RekeyError::Crypto(e.to_string()))?;
     let tags = vec![
-        Tag::custom(TagKind::Custom(TAG_SCOPE.into()), [scope.to_hex()]),
-        Tag::custom(TagKind::Custom(TAG_NEW_EPOCH.into()), [new_epoch.0.to_string()]),
-        Tag::custom(TagKind::Custom(TAG_PREV_EPOCH.into()), [prev_epoch.0.to_string()]),
-        Tag::custom(TagKind::Custom(TAG_PREV_COMMIT.into()), [crate::simd::hex::bytes_to_hex_32(prev_commit)]),
-        Tag::custom(TagKind::Custom(TAG_CHUNK.into()), [chunk_i.to_string(), chunk_n.to_string()]),
+        Tag::custom(TAG_SCOPE, [scope.to_hex()]),
+        Tag::custom(TAG_NEW_EPOCH, [new_epoch.0.to_string()]),
+        Tag::custom(TAG_PREV_EPOCH, [prev_epoch.0.to_string()]),
+        Tag::custom(TAG_PREV_COMMIT, [crate::simd::hex::bytes_to_hex_32(prev_commit)]),
+        Tag::custom(TAG_CHUNK, [chunk_i.to_string(), chunk_n.to_string()]),
     ];
     // Rekeys fold by their tags, not time; still stamp created_at for the wire.
     Ok(stream::build_rumor_secs(super::kind::REKEY, rotator, &content, tags, at_secs))
@@ -449,10 +449,10 @@ pub fn build_rekey_chunks_local(
 }
 
 /// Signer-driven twin of [`build_rekey_chunks_local`] for bunker / NIP-55 accounts:
-/// each chunk's encrypted seal signs through a [`NostrSigner`]. `rotator_pk` must
+/// each chunk's encrypted seal signs through a [`VectorSigner`]. `rotator_pk` must
 /// equal `my_public_key()`. Wire-identical to the local path.
 #[allow(clippy::too_many_arguments)]
-pub async fn build_rekey_chunks<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+pub async fn build_rekey_chunks<S: crate::signer::VectorSigner + ?Sized>(
     signer: &S,
     rotator_pk: PublicKey,
     rekey_group: &GroupKey,
@@ -692,8 +692,14 @@ fn parse_chunk(rumor: &UnsignedEvent) -> Result<(u32, u32), RekeyError> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Wrap raw `Keys` as the polymorphic signer. `VectorSigner` pins its error to
+    /// `SignerError`, which bare `Keys` doesn't satisfy, so tests go through the
+    /// same enum the app uses.
+    fn as_signer(k: &Keys) -> crate::signer::ActiveSigner {
+        crate::signer::ActiveSigner::Keys(k.clone())
+    }
     use super::*;
-    use nostr_sdk::prelude::JsonUtil;
 
     fn keys(byte: u8) -> Keys {
         Keys::new(SecretKey::from_slice(&[byte; 32]).unwrap())
@@ -733,7 +739,7 @@ mod tests {
 
     #[tokio::test]
     async fn signer_blob_is_wire_compatible_with_local_both_directions() {
-        // A remote signer (here a plain Keys, which impls NostrSigner) must build
+        // A remote signer (here a plain Keys, which impls VectorSigner) must build
         // AND open blobs interchangeably with the raw-key path — the CORD-06 D5
         // "identical wire" guarantee the bunker/NIP-55 integration rests on.
         let rotator = keys(7);
@@ -744,17 +750,17 @@ mod tests {
 
         // local build -> signer open
         let blob_l = build_blob_local(rotator.secret_key(), &xonly(&rotator), &recipient.public_key(), scope, epoch, &key).unwrap();
-        let got_s = open_blob(&recipient, &rotator.public_key(), scope, epoch, &blob_l).await.unwrap();
+        let got_s = open_blob(&as_signer(&recipient), &rotator.public_key(), scope, epoch, &blob_l).await.unwrap();
         assert_eq!(got_s, key, "signer opens a local-built blob");
 
         // signer build -> local open (+ identical public locator)
-        let blob_s = build_blob(&rotator, &xonly(&rotator), &recipient.public_key(), scope, epoch, &key).await.unwrap();
+        let blob_s = build_blob(&as_signer(&rotator), &xonly(&rotator), &recipient.public_key(), scope, epoch, &key).await.unwrap();
         assert_eq!(blob_s.locator, blob_l.locator, "same public locator regardless of build path");
         let got_l = open_blob_local(recipient.secret_key(), &rotator.public_key(), scope, epoch, &blob_s).unwrap();
         assert_eq!(got_l, key, "local opens a signer-built blob");
 
         // signer build -> signer open
-        let got_ss = open_blob(&recipient, &rotator.public_key(), scope, epoch, &blob_s).await.unwrap();
+        let got_ss = open_blob(&as_signer(&recipient), &rotator.public_key(), scope, epoch, &blob_s).await.unwrap();
         assert_eq!(got_ss, key, "signer round-trips its own blob");
     }
 
@@ -762,9 +768,9 @@ mod tests {
     async fn signer_blob_bound_check_still_gates_scope_epoch_splice() {
         let rotator = keys(7);
         let recipient = keys(8);
-        let blob = build_blob(&rotator, &xonly(&rotator), &recipient.public_key(), RekeyScope::Root, Epoch(1), &[9u8; 32]).await.unwrap();
-        assert!(open_blob(&recipient, &rotator.public_key(), RekeyScope::Root, Epoch(2), &blob).await.is_err(), "epoch splice rejected");
-        assert!(open_blob(&recipient, &rotator.public_key(), RekeyScope::Channel(CHAN), Epoch(1), &blob).await.is_err(), "scope splice rejected");
+        let blob = build_blob(&as_signer(&rotator), &xonly(&rotator), &recipient.public_key(), RekeyScope::Root, Epoch(1), &[9u8; 32]).await.unwrap();
+        assert!(open_blob(&as_signer(&recipient), &rotator.public_key(), RekeyScope::Root, Epoch(2), &blob).await.is_err(), "epoch splice rejected");
+        assert!(open_blob(&as_signer(&recipient), &rotator.public_key(), RekeyScope::Channel(CHAN), Epoch(1), &blob).await.is_err(), "scope splice rejected");
     }
 
     #[test]

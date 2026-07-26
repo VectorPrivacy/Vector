@@ -19,7 +19,8 @@
 //!     ([`super::derive::verify_community_id`]), not an attestation event —
 //!     vsk 7 is retired.
 
-use nostr_sdk::prelude::{Event, Keys, PublicKey, Tag, TagKind, Timestamp, UnsignedEvent};
+use nostr_sdk::prelude::{FinalizeEvent, FinalizeUnsignedEvent};
+use nostr_sdk::prelude::{Event, Keys, PublicKey, Tag, Timestamp, UnsignedEvent};
 use serde::{Deserialize, Serialize};
 
 use super::super::edition::{AuthorityCitation, EditionError, ParsedEdition, TAG_AUTHORITY_CITATION};
@@ -123,12 +124,12 @@ pub fn build_edition_rumor(
     authority: Option<&AuthorityCitation>,
 ) -> UnsignedEvent {
     let mut tags = vec![
-        Tag::custom(TagKind::Custom(TAG_SUBKIND.into()), [vsk.to_string()]),
-        Tag::custom(TagKind::Custom(TAG_ENTITY.into()), [crate::simd::hex::bytes_to_hex_32(entity_id)]),
-        Tag::custom(TagKind::Custom(TAG_EVERSION.into()), [version.to_string()]),
+        Tag::custom(TAG_SUBKIND, [vsk.to_string()]),
+        Tag::custom(TAG_ENTITY, [crate::simd::hex::bytes_to_hex_32(entity_id)]),
+        Tag::custom(TAG_EVERSION, [version.to_string()]),
     ];
     if let Some(p) = prev_hash {
-        tags.push(Tag::custom(TagKind::Custom(TAG_EPREV.into()), [crate::simd::hex::bytes_to_hex_32(p)]));
+        tags.push(Tag::custom(TAG_EPREV, [crate::simd::hex::bytes_to_hex_32(p)]));
     }
     if let Some(a) = authority {
         tags.push(a.to_tag());
@@ -217,9 +218,9 @@ pub fn seal_control_edition(
 }
 
 /// Signer-driven twin of [`seal_control_edition`] for bunker / NIP-55 accounts:
-/// the plaintext seal signs through a [`NostrSigner`]. `author` is the identity
+/// the plaintext seal signs through a [`VectorSigner`]. `author` is the identity
 /// the signer signs as (must equal `my_public_key()`). Wire-identical output.
-pub async fn seal_control_edition_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+pub async fn seal_control_edition_signed<S: crate::signer::VectorSigner + ?Sized>(
     signer: &S,
     author: PublicKey,
     rumor: &UnsignedEvent,
@@ -405,9 +406,9 @@ pub fn genesis(owner_keys: &Keys, mut metadata: CommunityMetadata, at_secs: u64)
 }
 
 /// Signer-driven twin of [`genesis`] for bunker / NIP-55 accounts: mints from the
-/// owner's public key and seals the two genesis editions through a [`NostrSigner`].
+/// owner's public key and seals the two genesis editions through a [`VectorSigner`].
 /// `owner_pk` must equal `my_public_key()` (the identity the signer signs as).
-pub async fn genesis_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+pub async fn genesis_signed<S: crate::signer::VectorSigner + ?Sized>(
     owner_pk: PublicKey,
     signer: &S,
     metadata: CommunityMetadata,
@@ -420,7 +421,7 @@ pub async fn genesis_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
 /// migration-only path (§migration) so the v2 twin's #general reuses the v1 primary
 /// channel id and history stitches through the flip. `None` mints a fresh id (the
 /// ordinary create path).
-pub async fn genesis_signed_with_primary<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+pub async fn genesis_signed_with_primary<S: crate::signer::VectorSigner + ?Sized>(
     owner_pk: PublicKey,
     signer: &S,
     mut metadata: CommunityMetadata,
@@ -538,7 +539,7 @@ mod tests {
         let entity = [0x55; 32];
         let content = "{\"member\":\"aa\",\"role_ids\":[]}";
         let v1_inner = build_edition_inner(author.public_key(), "3", &entity, 2, Some(&[0x66; 32]), content, 100, None)
-            .sign_with_keys(&author)
+            .finalize(&author)
             .unwrap();
         let v1_parsed = super::super::super::edition::parse_edition_inner(&v1_inner).unwrap();
 
@@ -572,7 +573,7 @@ mod tests {
     fn duplicate_machinery_tags_are_rejected() {
         let owner = Keys::generate();
         let mut rumor = simple_edition(&owner, 1, None);
-        let dup = Tag::custom(TagKind::Custom("eid".into()), [crate::simd::hex::bytes_to_hex_32(&[0x55; 32])]);
+        let dup = Tag::custom("eid", [crate::simd::hex::bytes_to_hex_32(&[0x55; 32])]);
         let mut tags: Vec<Tag> = rumor.tags.iter().cloned().collect();
         tags.push(dup);
         rumor = stream::build_rumor_secs(kind::CONTROL, owner.public_key(), &rumor.content, tags, 100);
@@ -589,9 +590,9 @@ mod tests {
         // the same numeric version — a same-version fork a strict peer drops.
         for bad in ["007", "+5", "01"] {
             let tags = vec![
-                Tag::custom(TagKind::Custom("vsk".into()), [vsk::GRANT]),
-                Tag::custom(TagKind::Custom("eid".into()), [crate::simd::hex::bytes_to_hex_32(&[0x55; 32])]),
-                Tag::custom(TagKind::Custom("ev".into()), [bad]),
+                Tag::custom("vsk", [vsk::GRANT]),
+                Tag::custom("eid", [crate::simd::hex::bytes_to_hex_32(&[0x55; 32])]),
+                Tag::custom("ev", [bad]),
             ];
             let rumor = stream::build_rumor_secs(kind::CONTROL, owner.public_key(), "{\"member\":\"aa\",\"role_ids\":[]}", tags, 100);
             assert!(

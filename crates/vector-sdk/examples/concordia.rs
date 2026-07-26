@@ -349,7 +349,7 @@ async fn push_profile_to_communities() {
     let Some(client) = vector_core::state::nostr_client() else { return };
     let Some(me) = vector_core::state::my_public_key() else { return };
     let filter = Filter::new().kind(Kind::Metadata).author(me).limit(1);
-    let Ok(evs) = client.fetch_events(filter, std::time::Duration::from_secs(8)).await else {
+    let Ok(evs) = client.fetch_events(filter).timeout(std::time::Duration::from_secs(8)).await else {
         eprintln!("!! could not fetch own kind-0 back for the community push");
         return;
     };
@@ -426,7 +426,7 @@ async fn bounce_community_relays() -> usize {
         if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&id) {
             for r in &c.relays {
                 if let Ok(url) = nostr_sdk::prelude::RelayUrl::parse(r) {
-                    if let Ok(relay) = client.pool().relay(url).await {
+                    if let Ok(Some(relay)) = client.relay(url).await {
                         relay.disconnect();
                         bounced += 1;
                     }

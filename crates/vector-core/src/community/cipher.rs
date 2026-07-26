@@ -3,12 +3,28 @@
 //! (metadata plane) are both raw 32-byte `ConversationKey`s; ciphertext is
 //! base64'd for carriage in an event's string `content` field.
 
-use nostr_sdk::nips::nip44::v2::{decrypt_to_bytes, encrypt_to_bytes, ConversationKey};
+use nostr_sdk::prelude::nip44::v2::{decrypt_to_bytes, encrypt_to_bytes_with_nonce, ConversationKey};
+use rand::RngCore;
+
+/// NIP-44 v2 encrypt with a freshly generated nonce.
+///
+/// The nonce MUST be unique per message under a given conversation key: reuse
+/// repeats the ChaCha20 keystream and forfeits both confidentiality and MAC
+/// integrity. Drawn from the OS CSPRNG here so no call site can supply its own.
+/// Wire output is unchanged (`[2][nonce][ct][mac]`).
+pub fn encrypt_with_random_nonce(
+    ck: &ConversationKey,
+    plaintext: &[u8],
+) -> Result<Vec<u8>, String> {
+    let mut nonce = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    encrypt_to_bytes_with_nonce(ck, plaintext, nonce).map_err(|e| e.to_string())
+}
 
 /// Encrypt `plaintext` under a raw 32-byte key, returning base64 for event content.
 pub fn seal(key: &[u8; 32], plaintext: &[u8]) -> Result<String, String> {
     let ck = ConversationKey::new(*key);
-    let ciphertext = encrypt_to_bytes(&ck, plaintext).map_err(|e| e.to_string())?;
+    let ciphertext = encrypt_with_random_nonce(&ck, plaintext)?;
     Ok(base64_simd::STANDARD.encode_to_string(&ciphertext))
 }
 

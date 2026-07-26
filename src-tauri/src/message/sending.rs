@@ -185,7 +185,7 @@ fn load_community_for_channel(chat_id: &str) -> Result<Option<vector_core::commu
 async fn resolve_delete_options(
     message_ids: &[String],
 ) -> HashMap<String, MessageDeleteOptions> {
-    use nostr_sdk::EventId;
+    use nostr_sdk::prelude::EventId;
     use vector_core::ChatType;
 
     struct Ctx {
@@ -375,7 +375,7 @@ pub async fn get_message_delete_meta_bulk(
 /// explanatory popup.
 #[tauri::command]
 pub async fn delete_own_message(message_id: String) -> Result<vector_core::DeleteOutcome, String> {
-    use nostr_sdk::EventId;
+    use nostr_sdk::prelude::EventId;
     use vector_core::ChatType;
 
     // Confirm the message exists, is ours, and grab its chat type.
@@ -488,8 +488,8 @@ pub async fn delete_failed_message(message_id: String) -> Result<(), String> {
             // signer so bunker users sign auth events under their identity
             // instead of the client-key (which would fail with the server's
             // pubkey check).
-            if let Some(client) = nostr_client() {
-                if let Ok(signer) = client.signer().await {
+            if let Some(_client) = nostr_client() {
+                if let Ok(signer) = vector_core::signer::active_signer() {
                     vector_core::blossom::delete_blobs_best_effort(signer, remote_urls);
                 }
             }

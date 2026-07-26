@@ -10,6 +10,8 @@
 //! envelope: ChaCha20 if the account has a password, plaintext if it
 //! doesn't (passwordless accounts are unencrypted by design).
 
+use crate::event_ext::FinalizeUnsignedWithId;
+use nostr_sdk::prelude::{FinalizeEvent, FinalizeUnsignedEvent};
 use nostr_sdk::prelude::*;
 use rusqlite::{params, OptionalExtension};
 
@@ -351,9 +353,10 @@ mod tests {
         let sender = Keys::generate();
         let recipient = Keys::generate();
         // Stand-in wrap: any valid signed event — the id is what must survive.
-        let wrap = EventBuilder::text_note("wrap").sign_with_keys(&ephemeral).unwrap();
-        let rumor = EventBuilder::private_msg_rumor(recipient.public_key(), "hello")
-            .build(sender.public_key());
+        let wrap = EventBuilder::text_note("wrap").finalize(&ephemeral).unwrap();
+        let rumor = EventBuilder::new(Kind::PrivateDirectMessage, "hello")
+            .tag(Tag::public_key(recipient.public_key()))
+            .finalize_unsigned_with_id(sender.public_key());
         (wrap, rumor, ephemeral, recipient.public_key())
     }
 

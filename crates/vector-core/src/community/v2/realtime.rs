@@ -24,6 +24,7 @@ use super::{derive, inbound};
 use crate::community::{CommunityId, ConcordProtocol, Epoch};
 use crate::event_handler::InboundEventHandler;
 use crate::state::SessionGuard;
+use crate::ClientRelayExt;
 
 /// The targeted subscription id (streams on desktop).
 static V2_SUB_ID: LazyLock<Mutex<Option<SubscriptionId>>> = LazyLock::new(|| Mutex::new(None));
@@ -222,7 +223,7 @@ pub async fn refresh_subscription(client: &Client) {
         if !relays.is_empty() {
             // Community relays ride GOSSIP|PING (warm but excluded from pool-wide DM ops).
             for r in &relays {
-                let _ = client.pool().add_relay(r.as_str(), crate::community_relay_options()).await;
+                let _ = client.add_managed_relay(r.as_str()).capabilities(crate::community_relay_capabilities()).await;
             }
             client.connect().await;
             // Wait briefly for at least one relay to actually connect (a subscribe
@@ -230,7 +231,7 @@ pub async fn refresh_subscription(client: &Client) {
             // trap as v1).
             let wanted: Vec<RelayUrl> = relays.iter().filter_map(|r| RelayUrl::parse(r).ok()).collect();
             for _ in 0..24 {
-                let pool = client.pool().all_relays().await;
+                let pool = client.relays().all().await;
                 if wanted.iter().any(|u| pool.get(u).map(|r| r.status() == RelayStatus::Connected).unwrap_or(false)) {
                     break;
                 }
@@ -273,13 +274,13 @@ pub async fn refresh_subscription(client: &Client) {
         return; // the pool re-applies the live subs across reconnects.
     }
     if let Some(old) = sub_guard.take() {
-        client.unsubscribe(&old).await;
+        let _ = client.unsubscribe(&old).await;
     }
     *set_guard = new_set;
 
     if authors.is_empty() {
         if let Some(old_pw) = V2_POOLWIDE_SUB_ID.lock().await.take() {
-            client.unsubscribe(&old_pw).await;
+            let _ = client.unsubscribe(&old_pw).await;
         }
         return;
     }
@@ -292,14 +293,19 @@ pub async fn refresh_subscription(client: &Client) {
     {
         let mut pw = V2_POOLWIDE_SUB_ID.lock().await;
         if let Some(old) = pw.take() {
-            client.unsubscribe(&old).await;
+            let _ = client.unsubscribe(&old).await;
         }
-        if let Ok(out) = client.subscribe(filter.clone(), None).await {
-            *pw = Some(out.val);
+        if let Ok(out) = client.subscribe(filter.clone()).await {
+            *pw = Some(out.value);
         }
     }
-    if let Ok(out) = client.subscribe_to(relays.iter().cloned(), filter, None).await {
-        *sub_guard = Some(out.val);
+    if let Ok(out) = client
+        .subscribe(nostr_sdk::prelude::ReqTarget::manual(
+            relays.iter().cloned().map(|u| (u, vec![filter.clone()])),
+        ))
+        .await
+    {
+        *sub_guard = Some(out.value);
     }
 }
 
@@ -326,7 +332,10 @@ pub(crate) async fn resubscribe_relay(client: &Client, relay: &RelayUrl) {
         .authors(authors)
         .limit(0);
     for id in [targeted, poolwide].into_iter().flatten() {
-        let _ = client.subscribe_with_id_to([relay.clone()], id, filter.clone(), None).await;
+        let _ = client
+            .subscribe(nostr_sdk::prelude::ReqTarget::single(relay.clone(), [filter.clone()]))
+            .with_id(id)
+            .await;
     }
 }
 

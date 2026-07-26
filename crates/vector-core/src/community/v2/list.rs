@@ -25,7 +25,9 @@
 //! stale device wipes a sibling's change; (2) a decrypt failure must never
 //! clobber a populated local list — treat an unreadable event as "no news".
 
-use nostr_sdk::nips::nip44::{self, Version};
+use crate::event_ext::FinalizeUnsignedWithId;
+use nostr_sdk::prelude::FinalizeEvent;
+use nostr_sdk::prelude::nip44::{self, Version};
 use nostr_sdk::prelude::{Event, EventBuilder, Keys, Kind, PublicKey};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -315,7 +317,7 @@ pub fn build_list_event(my_keys: &Keys, list: &CommunityList) -> Result<Event, L
     let content = nip44::encrypt(my_keys.secret_key(), &my_keys.public_key(), json.as_bytes(), Version::V2)
         .map_err(|e| ListError::Nip44(e.to_string()))?;
     EventBuilder::new(Kind::Custom(kind::COMMUNITY_LIST), content)
-        .sign_with_keys(my_keys)
+        .finalize(my_keys)
         .map_err(|e| ListError::Sign(e.to_string()))
 }
 
@@ -331,22 +333,22 @@ pub fn parse_list_event(event: &Event, my_keys: &Keys) -> Result<CommunityList, 
     serde_json::from_str(&json).map_err(|e| ListError::Json(e.to_string()))
 }
 
-/// [`build_list_event`] via a [`NostrSigner`]: self-encrypts to `my_pk` and signs
+/// [`build_list_event`] via a [`VectorSigner`]: self-encrypts to `my_pk` and signs
 /// the 13302 through the signer. `my_pk` must equal `my_public_key()`.
-pub async fn build_list_event_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+pub async fn build_list_event_signed<S: crate::signer::VectorSigner + ?Sized>(
     signer: &S,
     my_pk: PublicKey,
     list: &CommunityList,
 ) -> Result<Event, ListError> {
     list.assert_fits()?;
     let json = serde_json::to_string(list).map_err(|e| ListError::Json(e.to_string()))?;
-    let content = signer.nip44_encrypt(&my_pk, &json).await.map_err(|e| ListError::Nip44(e.to_string()))?;
-    let unsigned = EventBuilder::new(Kind::Custom(kind::COMMUNITY_LIST), content).build(my_pk);
-    signer.sign_event(unsigned).await.map_err(|e| ListError::Sign(e.to_string()))
+    let content = signer.nip44_encrypt_async(&my_pk, &json).await.map_err(|e| ListError::Nip44(e.to_string()))?;
+    let unsigned = EventBuilder::new(Kind::Custom(kind::COMMUNITY_LIST), content).finalize_unsigned_with_id(my_pk);
+    signer.sign_event_async(unsigned).await.map_err(|e| ListError::Sign(e.to_string()))
 }
 
-/// [`parse_list_event`] via a [`NostrSigner`] (self-decrypt to `my_pk`).
-pub async fn parse_list_event_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+/// [`parse_list_event`] via a [`VectorSigner`] (self-decrypt to `my_pk`).
+pub async fn parse_list_event_signed<S: crate::signer::VectorSigner + ?Sized>(
     signer: &S,
     my_pk: PublicKey,
     event: &Event,
@@ -354,7 +356,7 @@ pub async fn parse_list_event_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized
     if event.kind.as_u16() != kind::COMMUNITY_LIST {
         return Err(ListError::WrongKind(event.kind.as_u16()));
     }
-    let json = signer.nip44_decrypt(&my_pk, &event.content).await.map_err(|e| ListError::Nip44(e.to_string()))?;
+    let json = signer.nip44_decrypt_async(&my_pk, &event.content).await.map_err(|e| ListError::Nip44(e.to_string()))?;
     serde_json::from_str(&json).map_err(|e| ListError::Json(e.to_string()))
 }
 
@@ -555,7 +557,7 @@ mod tests {
         assert_eq!(parse_list_event(&ev, &keys).unwrap(), l);
 
         // A non-13302 event is rejected outright.
-        let wrong = EventBuilder::new(Kind::Custom(1), "x").sign_with_keys(&keys).unwrap();
+        let wrong = EventBuilder::new(Kind::Custom(1), "x").finalize(&keys).unwrap();
         assert!(matches!(parse_list_event(&wrong, &keys), Err(ListError::WrongKind(1))));
 
         // Another account can't decrypt it (fail-closed — caller keeps its list).

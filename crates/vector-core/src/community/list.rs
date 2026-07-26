@@ -10,7 +10,8 @@
 //! This module owns the data model + the merge (conflict resolution). Transport (encrypt/publish/fetch),
 //! reconcile, and rehydrate live alongside it (added in later increments).
 
-use nostr_sdk::prelude::{Client, EventBuilder, Filter, Kind, NostrSigner, PublicKey, Tag, Timestamp};
+use nostr_sdk::prelude::AsyncNip44;
+use nostr_sdk::prelude::{Client, EventBuilder, Filter, Kind, PublicKey, Tag, Timestamp};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -387,7 +388,7 @@ pub async fn fetch_community_list(
         .limit(1);
 
     let events = client
-        .fetch_events(filter, std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
+        .fetch_events(filter).timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
         .await
         .map_err(|e| format!("fetch community list (kind 30078): {}", e))?;
 
@@ -421,18 +422,18 @@ pub async fn fetch_community_list(
 
 /// Decrypt a fetched list event; a malformed/undecryptable payload degrades to an empty list (never an
 /// error that aborts a reconcile), matching the emoji list's posture.
-async fn decrypt_list_event(client: &Client, my_pk: &PublicKey, event: &nostr_sdk::prelude::Event) -> CommunityList {
+async fn decrypt_list_event(_client: &Client, my_pk: &PublicKey, event: &nostr_sdk::prelude::Event) -> CommunityList {
     if event.content.is_empty() {
         return CommunityList::default();
     }
-    let signer = match client.signer().await {
+    let signer = match crate::signer::active_signer() {
         Ok(s) => s,
         Err(e) => {
             crate::log_warn!("[CommunityList] signer unavailable for decrypt: {}", e);
             return CommunityList::default();
         }
     };
-    match signer.nip44_decrypt(my_pk, &event.content).await {
+    match signer.nip44_decrypt_async(my_pk, &event.content).await {
         Ok(plaintext) => CommunityList::from_json(&plaintext),
         Err(e) => {
             crate::log_warn!("[CommunityList] decrypt failed: {}", e);
@@ -458,16 +459,15 @@ pub async fn publish_community_list(
     let merged = load_local_list().merge(&relay);
     save_local_list(&merged)?;
 
-    let signer = client.signer().await.map_err(|e| format!("Signer unavailable: {}", e))?;
+    let signer = crate::signer::active_signer().map_err(|e| format!("Signer unavailable: {}", e))?;
     let content = signer
-        .nip44_encrypt(&my_pk, &merged.to_json())
+        .nip44_encrypt_async(&my_pk, &merged.to_json())
         .await
         .map_err(|e| format!("nip44 encrypt community list: {}", e))?;
 
     let builder = EventBuilder::new(Kind::Custom(event_kind::APPLICATION_SPECIFIC), content)
         .tag(Tag::identifier(COMMUNITY_LIST_D_TAG));
-    client
-        .send_event_builder(builder)
+    crate::sign_and_send(client, builder)
         .await
         .map_err(|e| format!("Failed to publish community list (kind 30078): {}", e))?;
 

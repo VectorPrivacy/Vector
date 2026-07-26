@@ -15,6 +15,7 @@
 //! accounts - if multiple accounts have the same contact, they share the cached image.
 //! The original URL is hashed with SHA-256 (truncated) to create the filename.
 
+use nostr_sdk::prelude::FinalizeEvent;
 use std::path::PathBuf;
 use std::time::Duration;
 use sha2::{Sha256, Digest};

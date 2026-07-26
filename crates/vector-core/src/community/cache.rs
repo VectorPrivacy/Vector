@@ -8,7 +8,7 @@
 //! flags, and in-flight page de-dup; future RAM-cache work (e.g. invite preload) layers onto the
 //! same structure + invalidation discipline.
 
-use nostr_sdk::Event;
+use nostr_sdk::prelude::Event;
 use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::{Duration, Instant};

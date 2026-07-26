@@ -222,8 +222,7 @@ pub fn select_pointer(editions: &[DissolvedEdition], owner_hex: &str) -> Option<
 
 /// Wire-size gate for the final sealed OUTER event — computed on the actual bytes, never
 /// estimated. Run by the wizard before publishing; failing is a clean abort.
-pub fn check_outer_size(outer: &nostr_sdk::Event) -> Result<(), String> {
-    use nostr_sdk::JsonUtil;
+pub fn check_outer_size(outer: &nostr_sdk::prelude::Event) -> Result<(), String> {
     let len = outer.as_json().len();
     if len > MAX_WIRE_EVENT {
         return Err(format!(
@@ -409,11 +408,11 @@ pub const PHASE_FLIPPED: i64 = 5;
 /// ARE seeded. That is v1-faithful (v1 shows them as a member), a deliberate divergence from
 /// the design's "− left" line for the admin case; a NON-admin who left is dropped by the leave
 /// filter. `owner_hex` is unused now (the DB seeds the owner) but kept for call-site clarity.
-fn v1_snapshot_members(v1_cid: &str, _owner_hex: &str) -> Vec<nostr_sdk::PublicKey> {
+fn v1_snapshot_members(v1_cid: &str, _owner_hex: &str) -> Vec<nostr_sdk::prelude::PublicKey> {
     crate::db::community::community_member_activity_capped(v1_cid, false)
         .unwrap_or_default()
         .iter()
-        .filter_map(|(npub, _)| nostr_sdk::PublicKey::parse(npub).ok())
+        .filter_map(|(npub, _)| nostr_sdk::prelude::PublicKey::parse(npub).ok())
         .collect()
 }
 
@@ -806,9 +805,8 @@ mod tests {
         let mut c = crate::community::Community::create("HQ", "general", vec![]);
         let cid = c.id.to_hex();
         {
-            use nostr_sdk::JsonUtil;
             c.owner_attestation = Some(crate::community::owner::build_owner_attestation_unsigned(owner.public_key(), &cid)
-                .sign_with_keys(&owner).unwrap().as_json());
+                .finalize(&owner).unwrap().as_json());
         }
         crate::db::community::save_community(&c).unwrap();
         crate::db::community::set_community_banlist(&cid, &[banned.public_key().to_hex()], 1).unwrap();

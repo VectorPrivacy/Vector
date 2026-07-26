@@ -19,6 +19,7 @@ use crate::community::transport::LiveTransport;
 use crate::event_handler::InboundEventHandler;
 use crate::state::SessionGuard;
 use crate::stored_event::event_kind;
+use crate::ClientRelayExt;
 
 /// Realtime channel-follow retry budget: a re-founding publishes the channel rekey under the NEW
 /// root right after the base rekey, so the base-3303-triggered follow can race its propagation.
@@ -205,13 +206,13 @@ pub async fn refresh_subscription(client: &Client) {
     }
 
     if let Some(old_id) = sub_guard.take() {
-        client.unsubscribe(&old_id).await;
+        let _ = client.unsubscribe(&old_id).await;
     }
     *set_guard = new_set;
 
     if pseudonyms.is_empty() {
         if let Some(old_pw) = COMMUNITY_POOLWIDE_SUB_ID.lock().await.take() {
-            client.unsubscribe(&old_pw).await;
+            let _ = client.unsubscribe(&old_pw).await;
         }
         return;
     }
@@ -219,7 +220,7 @@ pub async fn refresh_subscription(client: &Client) {
     // Community events live on the community's relays, which may differ from the user's DM relays.
     // Add them GOSSIP|PING (warm, but excluded from pool-wide DM/profile ops) and subscribe by TARGET.
     for r in &relays {
-        let _ = client.pool().add_relay(r.as_str(), crate::community_relay_options()).await;
+        let _ = client.add_managed_relay(r.as_str()).capabilities(crate::community_relay_capabilities()).await;
     }
     client.connect().await;
 
@@ -232,7 +233,7 @@ pub async fn refresh_subscription(client: &Client) {
     {
         let wanted: Vec<RelayUrl> = relays.iter().filter_map(|r| RelayUrl::parse(r).ok()).collect();
         for _ in 0..24 {
-            let pool = client.pool().all_relays().await;
+            let pool = client.relays().all().await;
             let any_live = wanted.iter().any(|u| {
                 pool.get(u).map(|r| r.status() == RelayStatus::Connected).unwrap_or(false)
             });
@@ -263,15 +264,20 @@ pub async fn refresh_subscription(client: &Client) {
     {
         let mut pw = COMMUNITY_POOLWIDE_SUB_ID.lock().await;
         if let Some(old) = pw.take() {
-            client.unsubscribe(&old).await;
+            let _ = client.unsubscribe(&old).await;
         }
-        if let Ok(out) = client.subscribe(filter.clone(), None).await {
-            *pw = Some(out.val);
+        if let Ok(out) = client.subscribe(filter.clone()).await {
+            *pw = Some(out.value);
         }
     }
     // Targeted subscribe — the path that streams on desktop.
-    if let Ok(output) = client.subscribe_to(relays.iter().cloned(), filter, None).await {
-        *sub_guard = Some(output.val);
+    if let Ok(output) = client
+        .subscribe(nostr_sdk::prelude::ReqTarget::manual(
+            relays.iter().cloned().map(|u| (u, vec![filter.clone()])),
+        ))
+        .await
+    {
+        *sub_guard = Some(output.value);
     }
 }
 

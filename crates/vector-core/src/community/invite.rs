@@ -9,6 +9,7 @@
 //!
 //! Byte fields are hex strings so the bundle is plain JSON inside the DM rumor.
 
+use crate::event_ext::FinalizeUnsignedWithId;
 use serde::{Deserialize, Serialize};
 
 use super::{Channel, ChannelId, ChannelKey, Community, CommunityId, Epoch, ServerRootKey};
@@ -185,7 +186,7 @@ pub fn build_invite_rumor(
             .tag(nostr_sdk::prelude::Tag::expiration(
                 nostr_sdk::prelude::Timestamp::from_secs(now_secs + DIRECT_INVITE_EXPIRY_SECS),
             ))
-            .build(my_pubkey),
+            .finalize_unsigned_with_id(my_pubkey),
     )
 }
 
@@ -267,23 +268,23 @@ mod tests {
     /// than a panic or a bogus 0 deadline (which would void the invite instantly).
     #[test]
     fn expiration_secs_is_total_over_hostile_tags() {
-        use nostr_sdk::prelude::{Tag, TagKind, Timestamp};
+        use nostr_sdk::prelude::{Tag, Timestamp};
         let author = Keys::generate();
         let mk = |tags: Vec<Tag>| {
             EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_INVITE_BUNDLE), "{}")
                 .tags(tags)
-                .build(author.public_key())
+                .finalize_unsigned_with_id(author.public_key())
         };
 
         assert_eq!(expiration_secs(&mk(vec![]).tags), None, "no tag = no deadline");
         // A non-numeric value must not be read as a deadline.
         assert_eq!(
-            expiration_secs(&mk(vec![Tag::custom(TagKind::Custom("expiration".into()), ["soon"])]).tags),
+            expiration_secs(&mk(vec![Tag::custom("expiration", ["soon"])]).tags),
             None,
         );
         // A valueless expiration tag likewise.
         assert_eq!(
-            expiration_secs(&mk(vec![Tag::custom(TagKind::Custom("expiration".into()), Vec::<String>::new())]).tags),
+            expiration_secs(&mk(vec![Tag::custom("expiration", Vec::<String>::new())]).tags),
             None,
         );
         // A real tag reads back exactly, even alongside other tags.

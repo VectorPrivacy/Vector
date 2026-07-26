@@ -282,7 +282,7 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
         .limit(1);
 
     let (status_title, status_purpose, status_url) = match client
-        .fetch_events(status_filter, Duration::from_secs(15))
+        .fetch_events(status_filter).timeout(Duration::from_secs(15))
         .await
     {
         Ok(res) => {
@@ -304,9 +304,22 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
     };
 
     // Fetch metadata from relays
+    // `Client::fetch_metadata` is gone: fetch the newest kind-0 and parse it.
     let fetch_result = client
-        .fetch_metadata(profile_pubkey, Duration::from_secs(15))
-        .await;
+        .fetch_events(
+            Filter::new()
+                .author(profile_pubkey)
+                .kind(Kind::Metadata)
+                .limit(1),
+        )
+        .timeout(Duration::from_secs(15))
+        .await
+        .map(|events| {
+            events
+                .into_iter()
+                .max_by_key(|e| e.created_at)
+                .and_then(|e| Metadata::from_json(&e.content).ok())
+        });
 
     // Abandon the fetch result if a swap happened during the await.
     if !session.is_valid() { return false; }
@@ -510,9 +523,9 @@ async fn update_profile_inner(
     // Build and sign Kind 0 metadata event
     let metadata_json = serde_json::to_string(&meta).unwrap();
     let metadata_event = EventBuilder::new(Kind::Metadata, metadata_json)
-        .tag(Tag::custom(TagKind::Custom(String::from("client").into()), vec!["vector"]));
+        .tag(Tag::custom("client", vec!["vector"]));
 
-    let Ok(event) = client.sign_event_builder(metadata_event).await else {
+    let Ok(event) = crate::sign_builder(metadata_event).await else {
         return false;
     };
 
@@ -571,9 +584,9 @@ pub async fn update_status(status: String) -> bool {
 
     // Build and sign kind 30315 status event
     let status_builder = EventBuilder::new(Kind::from_u16(30315), status.as_str())
-        .tag(Tag::custom(TagKind::d(), vec!["general"]));
+        .tag(Tag::custom("d", vec!["general"]));
 
-    let Ok(event) = client.sign_event_builder(status_builder).await else {
+    let Ok(event) = crate::sign_builder(status_builder).await else {
         return false;
     };
 

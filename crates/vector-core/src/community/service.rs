@@ -7,7 +7,8 @@
 //! point, and persisting an ephemeral secret (or reading one) must never cross into
 //! the wrong account's DB.
 
-use nostr_sdk::prelude::{Event, EventId, JsonUtil, Keys, Tag, ToBech32};
+use nostr_sdk::prelude::{FinalizeEvent, FinalizeEventAsync};
+use nostr_sdk::prelude::{Event, EventId, Keys, Tag, ToBech32};
 
 use super::invite::CommunityInvite;
 use super::public_invite::{
@@ -25,16 +26,6 @@ use crate::stored_event::event_kind;
 /// moderation hide signs through this, so a bunker account can create AND administer a community. (The
 /// REKEY path is the one exception — its blob locator needs a raw ECDH the signer can't expose, so it
 /// still requires a local key; the ban/privatize flows fail-fast for bunker accounts.)
-async fn active_signer() -> Result<std::sync::Arc<dyn nostr_sdk::prelude::NostrSigner>, String> {
-    if let Some(client) = crate::state::nostr_client() {
-        if let Ok(s) = client.signer().await {
-            return Ok(s);
-        }
-    }
-    let keys = crate::state::MY_SECRET_KEY.to_keys().ok_or("no signer available (no client and no local key)")?;
-    Ok(std::sync::Arc::new(keys))
-}
-
 /// Max communities a device may hold locally. The synced Community List is a single NIP-44 event
 /// (65 KB plaintext); past the cap even the slimmed list can't encrypt, so a NEW join/create is
 /// rejected above it (the user leaves one to make room).
@@ -71,19 +62,23 @@ pub async fn create_community<T: Transport + ?Sized>(
     // authority graph. It binds the community id to the creator's identity, signed by the owner's identity
     // signer. The proven owner is later DERIVED by verifying this, never an unverified claim. Sign via the
     // local vault when present (local accounts + tests), else the
-    // active client's signer (bunker / NIP-46). No signer at all → creation fails, by design.
+    // session signer (bunker / NIP-46 / NIP-55). No signer at all → creation fails, by design.
     let owner_pk = crate::state::my_public_key().ok_or("cannot create a community without an identity")?;
     let unsigned = super::owner::build_owner_attestation_unsigned(owner_pk, &community.id.to_hex());
     // Use the local vault ONLY if it actually holds the active identity's key — else a stale/mismatched
     // local secret would sign the attestation as the WRONG owner (or break verification). On mismatch,
     // fall through to the client signer, which is the authority that produced `my_public_key()`.
     let attestation = if let Some(keys) = crate::state::MY_SECRET_KEY.to_keys().filter(|k| k.public_key() == owner_pk) {
-        unsigned.sign_with_keys(&keys).map_err(|e| format!("sign owner attestation: {e}"))?
-    } else if let Some(client) = crate::state::nostr_client() {
-        let signer = client.signer().await.map_err(|e| format!("no signer for owner attestation: {e}"))?;
-        unsigned.sign(&signer).await.map_err(|e| format!("sign owner attestation: {e}"))?
+        unsigned.finalize(&keys).map_err(|e| format!("sign owner attestation: {e}"))?
     } else {
-        return Err("cannot create a community without an identity signer (the owner attestation is mandatory)".to_string());
+        // No matching local key: sign through the session signer (bunker / NIP-55).
+        // `active_signer()` fails closed, so a signer-less session still can't create —
+        // it no longer needs a live client to get there.
+        let signer = crate::signer::active_signer()
+            // Keeps the "identity signer" wording: the owner attestation is mandatory,
+            // so no usable signer means creation must not proceed.
+            .map_err(|e| format!("cannot create a community without an identity signer: {e}"))?;
+        unsigned.finalize_async(&signer).await.map_err(|e| format!("sign owner attestation: {e}"))?
     };
     community.owner_attestation = Some(attestation.as_json());
     // Minting + the DB write straddle the (above) signer round-trip, so re-check before persist.
@@ -99,7 +94,7 @@ pub async fn create_community<T: Transport + ?Sized>(
 
     // The owner signs every genesis edition with their REAL identity (keyless control plane) via the
     // active signer — local vault OR a NIP-46 bunker.
-    let signer = active_signer().await?;
+    let signer = crate::signer::active_signer()?;
     let cid = community.id.to_hex();
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -116,9 +111,9 @@ pub async fn create_community<T: Transport + ?Sized>(
     let admin = super::roles::Role::admin(crate::simd::hex::bytes_to_hex_32(&super::random_32()));
     let root_meta = super::metadata::CommunityMetadata::of(&community);
     let root_inner = super::roster::build_community_root_edition_unsigned(owner_pk, &community.id, &root_meta, 1, None, created, None)?
-        .sign(&signer).await.map_err(|e| format!("sign genesis group-root: {e}"))?;
+        .finalize_async(&signer).await.map_err(|e| format!("sign genesis group-root: {e}"))?;
     let role_inner = super::roster::build_role_edition_unsigned(owner_pk, &admin, 1, None, created, None)?
-        .sign(&signer).await.map_err(|e| format!("sign genesis admin-role: {e}"))?;
+        .finalize_async(&signer).await.map_err(|e| format!("sign genesis admin-role: {e}"))?;
     // (entity_hex, self_hash, inner_id-for-display-entities). The GroupRoot + channels record their
     // inner_id so a same-version genesis fork resolves by the deterministic tiebreak; the role doesn't
     // converge (authority record), so it carries None.
@@ -133,7 +128,7 @@ pub async fn create_community<T: Transport + ?Sized>(
     for channel in &community.channels {
         let meta = super::metadata::ChannelMetadata { name: channel.name.clone() };
         let inner = super::roster::build_channel_metadata_edition_unsigned(owner_pk, &channel.id, &meta, 1, None, created, None)?
-            .sign(&signer).await.map_err(|e| format!("sign genesis channel-metadata: {e}"))?;
+            .finalize_async(&signer).await.map_err(|e| format!("sign genesis channel-metadata: {e}"))?;
         heads.push((channel.id.to_hex(), super::version::edition_hash(&channel.id.0, 1, None, inner.content.as_bytes()), Some(inner.id.to_bytes())));
         to_publish.push(super::roster::seal_control_edition(&Keys::generate(), &inner, &community.server_root_key, &community.id, community.server_root_epoch)?);
     }
@@ -173,7 +168,7 @@ pub async fn send_message<T: Transport + ?Sized>(
     // front, then publish via the signed path. Identical wire output to the old
     // publish_message route.
     let inner = super::envelope::build_inner_event(author.public_key(), &channel.id, channel.epoch, content, ms, None)
-        .sign_with_keys(author)
+        .finalize(author)
         .map_err(|e| e.to_string())?;
     let (outer, ephemeral) = publish_signed_message(transport, community, channel, &inner, false).await?;
     // The publish straddled network I/O; bail before writing to the (possibly
@@ -217,7 +212,7 @@ pub async fn build_presence(
     channel: &Channel,
     joined: bool,
     attribution: Option<(String, Option<String>)>,
-) -> Result<nostr_sdk::Event, String> {
+) -> Result<nostr_sdk::prelude::Event, String> {
     let author_pk = crate::state::my_public_key().ok_or("not logged in")?;
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -231,8 +226,8 @@ pub async fn build_presence(
     let unsigned = super::envelope::build_inner_typed(
         author_pk, &channel.id, channel.epoch, event_kind::COMMUNITY_PRESENCE, &content, ms, None, &[],
     );
-    let signer = active_signer().await?;
-    unsigned.sign(&signer).await.map_err(|e| format!("Failed to sign presence: {e}"))
+    let signer = crate::signer::active_signer()?;
+    unsigned.finalize_async(&signer).await.map_err(|e| format!("Failed to sign presence: {e}"))
 }
 
 /// Publish a pre-built presence inner (from [`build_presence`]) to the channel's recipient set.
@@ -240,7 +235,7 @@ pub async fn publish_presence_event<T: Transport + ?Sized>(
     transport: &T,
     community: &Community,
     channel: &Channel,
-    inner: &nostr_sdk::Event,
+    inner: &nostr_sdk::prelude::Event,
 ) -> Result<(), String> {
     let _ = publish_signed_message(transport, community, channel, inner, true).await?;
     Ok(())
@@ -279,8 +274,8 @@ pub async fn publish_webxdc_signal<T: Transport + ?Sized>(
     let unsigned = super::envelope::build_inner_typed(
         author_pk, &channel.id, channel.epoch, event_kind::COMMUNITY_WEBXDC, &content, ms, None, &[],
     );
-    let signer = active_signer().await?;
-    let inner = unsigned.sign(&signer).await.map_err(|e| format!("Failed to sign webxdc signal: {e}"))?;
+    let signer = crate::signer::active_signer()?;
+    let inner = unsigned.finalize_async(&signer).await.map_err(|e| format!("Failed to sign webxdc signal: {e}"))?;
     let _ = publish_signed_message(transport, community, channel, &inner, true).await?;
     Ok(())
 }
@@ -303,8 +298,8 @@ pub async fn publish_typing_signal<T: Transport + ?Sized>(
     let unsigned = super::envelope::build_inner_typed(
         author_pk, &channel.id, channel.epoch, event_kind::COMMUNITY_TYPING, "typing", ms, None, &[],
     );
-    let signer = active_signer().await?;
-    let inner = unsigned.sign(&signer).await.map_err(|e| format!("Failed to sign typing signal: {e}"))?;
+    let signer = crate::signer::active_signer()?;
+    let inner = unsigned.finalize_async(&signer).await.map_err(|e| format!("Failed to sign typing signal: {e}"))?;
     let _ = publish_signed_message(transport, community, channel, &inner, false).await?;
     Ok(())
 }
@@ -439,8 +434,8 @@ pub async fn publish_kick<T: Transport + ?Sized>(
     let unsigned = super::envelope::build_inner_full(
         author_pk, &channel.id, channel.epoch, event_kind::COMMUNITY_KICK, target_hex, ms, None, &[], &extra,
     );
-    let signer = active_signer().await?;
-    let inner = unsigned.sign(&signer).await.map_err(|e| format!("Failed to sign kick: {e}"))?;
+    let signer = crate::signer::active_signer()?;
+    let inner = unsigned.finalize_async(&signer).await.map_err(|e| format!("Failed to sign kick: {e}"))?;
     publish_signed_message(transport, community, channel, &inner, true).await?;
     // Removal strips authority: revoke the kicked member's roles too (best-effort) so a kicked admin
     // doesn't rejoin (fresh invite) silently still admin, and no non-member lingers in the roster.
@@ -464,7 +459,7 @@ pub async fn publish_banlist<T: Transport + ?Sized>(
     let cid = community.id.to_hex();
     // Keyless model: sign with the actor's own identity via the active signer (local vault OR a NIP-46
     // bunker). `author` is the active pubkey; `signer` signs the unsigned edition below.
-    let signer = active_signer().await?;
+    let signer = crate::signer::active_signer()?;
     let actor_pk = crate::state::my_public_key().ok_or("no local identity to sign the banlist edition")?;
     // hierarchy gate: the actor must hold BAN and strictly outrank every member in the DELTA
     // both those being ADDED (ban) and those being REMOVED (unban). Gating only additions would let a
@@ -514,7 +509,7 @@ pub async fn publish_banlist<T: Transport + ?Sized>(
     // resolve the ban against that exact grant version (not their live roster). The owner cites nothing.
     let citation = authority_citation(community, &actor_pk.to_hex());
     let unsigned = super::roster::build_banlist_edition_unsigned(actor_pk, &community.id, banned_hex, version, prev_hash.as_ref(), created_at, citation.as_ref())?;
-    let inner = unsigned.sign(&signer).await.map_err(|e| format!("sign banlist edition: {e}"))?;
+    let inner = unsigned.finalize_async(&signer).await.map_err(|e| format!("sign banlist edition: {e}"))?;
     let outer = super::roster::seal_control_edition(&Keys::generate(), &inner, &community.server_root_key, &community.id, community.server_root_epoch)?;
     let self_hash = super::version::edition_hash(&entity_id, version, prev_hash.as_ref(), inner.content.as_bytes());
 
@@ -853,7 +848,7 @@ pub async fn set_member_grant<T: Transport + ?Sized>(
     let session = SessionGuard::capture();
     // Keyless model: the grant is a real-npub-signed edition. Sign
     // with the actor's own identity via the active signer (local vault OR a NIP-46 bunker).
-    let signer = active_signer().await?;
+    let signer = crate::signer::active_signer()?;
     let actor_pk = crate::state::my_public_key().ok_or("no local identity to sign the grant edition")?;
     let cid = community.id.to_hex();
     let grant = super::roles::MemberGrant { member: member_hex.to_string(), role_ids };
@@ -880,7 +875,7 @@ pub async fn set_member_grant<T: Transport + ?Sized>(
     // immutable wire data complete for the delegation-chain verifier, rather than baking in a gap.)
     let citation = authority_citation(community, &actor_pk.to_hex());
     let unsigned = super::roster::build_grant_edition_unsigned(actor_pk, &community.id, &grant, version, prev_hash.as_ref(), created_at, citation.as_ref())?;
-    let inner = unsigned.sign(&signer).await.map_err(|e| format!("sign grant edition: {e}"))?;
+    let inner = unsigned.finalize_async(&signer).await.map_err(|e| format!("sign grant edition: {e}"))?;
     let outer = super::roster::seal_control_edition(&Keys::generate(), &inner, &community.server_root_key, &community.id, community.server_root_epoch)?;
     // The new head's self_hash = a hash over the EXACT content bytes the inner committed to (not a
     // re-serialization), so the stored head matches the published edition and the next edition's
@@ -1085,7 +1080,7 @@ pub fn can_moderation_hide(community: &Community, actor_hex: &str, author_hex: &
     // owner-protection (`owner_hex == target_hex` is hex≠bech32) AND missed the roster position lookup
     // (defaulting to u32::MAX, the lowest rank), so an admin wrongly "outranked" and could hide the
     // owner. The enforcing `apply_delete` path avoids this by normalizing the same way (PublicKey::parse).
-    let to_hex = |s: &str| nostr_sdk::PublicKey::parse(s).map(|pk| pk.to_hex()).unwrap_or_else(|_| s.to_string());
+    let to_hex = |s: &str| nostr_sdk::prelude::PublicKey::parse(s).map(|pk| pk.to_hex()).unwrap_or_else(|_| s.to_string());
     let actor = to_hex(actor_hex);
     let author = to_hex(author_hex);
     let owner = proven_owner_hex(community);
@@ -1264,7 +1259,7 @@ pub async fn publish_owner_hide<T: Transport + ?Sized>(
     // message's author — the owner, outranked by no one, can never be hidden. Resolve the author from
     // local state (you can only moderate a message you can see). A granted
     // MANAGE_MESSAGES member can moderate. Peers RE-verify this against my real-npub inner sig + roster.
-    let signer = active_signer().await?;
+    let signer = crate::signer::active_signer()?;
     let me_pk = crate::state::my_public_key().ok_or("no local identity to sign the hide")?;
     let me = me_pk.to_hex();
     {
@@ -1293,7 +1288,7 @@ pub async fn publish_owner_hide<T: Transport + ?Sized>(
         me_pk, &channel.id, channel.epoch,
         event_kind::COMMUNITY_DELETE, "", ms, Some(target_message_id), &[], &extra,
     )
-    .sign(&signer)
+    .finalize_async(&signer)
     .await
     .map_err(|e| format!("sign hide: {e}"))?;
     let _ = publish_signed_message(transport, community, channel, &inner, true).await?;
@@ -1434,7 +1429,7 @@ pub async fn republish_community_metadata<T: Transport + ?Sized>(
     if crate::db::community::get_migrated_to(&cid)?.is_some() {
         return Err("this community has upgraded to Concord v2".to_string());
     }
-    let signer = active_signer().await?;
+    let signer = crate::signer::active_signer()?;
     let actor_pk = crate::state::my_public_key().ok_or("no local identity to sign the metadata edition")?;
     let owner = proven_owner_hex(community);
     let roster = crate::db::community::get_community_roles(&cid).unwrap_or_default();
@@ -1460,7 +1455,7 @@ pub async fn republish_community_metadata<T: Transport + ?Sized>(
     // immutable wire data complete rather than baking in a gap.
     let citation = authority_citation(community, &actor_pk.to_hex());
     let unsigned = super::roster::build_community_root_edition_unsigned(actor_pk, &community.id, &meta, version, prev_hash.as_ref(), created, citation.as_ref())?;
-    let inner = unsigned.sign(&signer).await.map_err(|e| format!("sign community-root edition: {e}"))?;
+    let inner = unsigned.finalize_async(&signer).await.map_err(|e| format!("sign community-root edition: {e}"))?;
     let outer = super::roster::seal_control_edition(&Keys::generate(), &inner, &community.server_root_key, &community.id, community.server_root_epoch)?;
     transport.publish_durable(&outer, &community.relays).await?;
     if session.is_valid() {
@@ -1494,7 +1489,7 @@ pub async fn republish_channel_metadata<T: Transport + ?Sized>(
     if !community.channels.iter().any(|c| &c.id == channel_id) {
         return Err("no such channel in this community".to_string());
     }
-    let signer = active_signer().await?;
+    let signer = crate::signer::active_signer()?;
     let actor_pk = crate::state::my_public_key().ok_or("no local identity to sign the channel metadata edition")?;
     let owner = proven_owner_hex(community);
     let roster = crate::db::community::get_community_roles(&cid).unwrap_or_default();
@@ -1514,7 +1509,7 @@ pub async fn republish_channel_metadata<T: Transport + ?Sized>(
     // nothing). Consumer doesn't version-pin metadata, but the wire data stays complete.
     let citation = authority_citation(community, &actor_pk.to_hex());
     let unsigned = super::roster::build_channel_metadata_edition_unsigned(actor_pk, channel_id, &meta, version, prev_hash.as_ref(), created, citation.as_ref())?;
-    let inner = unsigned.sign(&signer).await.map_err(|e| format!("sign channel-metadata edition: {e}"))?;
+    let inner = unsigned.finalize_async(&signer).await.map_err(|e| format!("sign channel-metadata edition: {e}"))?;
     let outer = super::roster::seal_control_edition(&Keys::generate(), &inner, &community.server_root_key, &community.id, community.server_root_epoch)?;
     transport.publish_durable(&outer, &community.relays).await?;
     if session.is_valid() {
@@ -1835,7 +1830,7 @@ pub(crate) async fn dissolved_tombstone_records<T: Transport + ?Sized>(
 /// (rotation-stable + current-epoch fast path) with BYTE-IDENTICAL inner content, so the
 /// member's fold and probe extract the same payload. NO link-retire/rekey — dissolution
 /// moots every link. Does NOT seal locally: the wizard's own flip handles the owner's
-/// transition to v2. Bunker-safe (signs through the active `NostrSigner`).
+/// transition to v2. Bunker-safe (signs through the active `VectorSigner`).
 pub async fn publish_migration_carrier<T: Transport + ?Sized>(
     transport: &T,
     community: &Community,
@@ -1845,12 +1840,12 @@ pub async fn publish_migration_carrier<T: Transport + ?Sized>(
     if !is_proven_owner(community) {
         return Err("only the community owner can migrate the community".to_string());
     }
-    let signer = active_signer().await?;
+    let signer = crate::signer::active_signer()?;
     let actor_pk = crate::state::my_public_key().ok_or("no local identity to sign the migration")?;
     let created_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let unsigned = super::roster::build_group_dissolved_edition_unsigned_with_content(actor_pk, &community.id, created_at, payload_content);
-    let inner = unsigned.sign(&signer).await.map_err(|e| format!("sign migration carrier: {e}"))?;
+    let inner = unsigned.finalize_async(&signer).await.map_err(|e| format!("sign migration carrier: {e}"))?;
     // Size gate on the ACTUAL sealed outer before publishing — the wizard aborts cleanly
     // rather than emit an event common relays would reject.
     let stable = super::roster::seal_dissolved_edition(&Keys::generate(), &inner, &community.id)?;
@@ -1876,7 +1871,7 @@ pub async fn dissolve_community<T: Transport + ?Sized>(
     if !is_proven_owner(community) {
         return Err("only the community owner can dissolve (delete) the community".to_string());
     }
-    let signer = active_signer().await?;
+    let signer = crate::signer::active_signer()?;
     let actor_pk = crate::state::my_public_key().ok_or("no local identity to sign the dissolution")?;
 
     // (b) Tombstone FIRST, must-succeed. The marker is the whole mechanism; build it chain-free (vsk=10,
@@ -1887,7 +1882,7 @@ pub async fn dissolve_community<T: Transport + ?Sized>(
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let unsigned = super::roster::build_group_dissolved_edition_unsigned(actor_pk, &community.id, created_at);
-    let inner = unsigned.sign(&signer).await.map_err(|e| format!("sign dissolution tombstone: {e}"))?;
+    let inner = unsigned.finalize_async(&signer).await.map_err(|e| format!("sign dissolution tombstone: {e}"))?;
     // Publish at the ROTATION-STABLE coordinate — the load-bearing path: a community-id-keyed
     // envelope at `dissolved_pseudonym`, found + openable by any client at any epoch, so a concurrent
     // re-founding can't strand the tombstone at an old epoch and let post-rotation joiners see a live group.
@@ -1944,7 +1939,7 @@ pub async fn publish_my_invite_links<T: Transport + ?Sized>(
         return Err("you need the create-invite permission to publish invite links".to_string());
     }
     let cid = community.id.to_hex();
-    let signer = active_signer().await?;
+    let signer = crate::signer::active_signer()?;
     let actor_pk = crate::state::my_public_key().ok_or("no local identity to sign the invite links")?;
     let entity_id = super::derive::invite_links_locator(&community.id, &actor_pk.to_bytes());
     let entity_hex = crate::simd::hex::bytes_to_hex_32(&entity_id);
@@ -1959,7 +1954,7 @@ pub async fn publish_my_invite_links<T: Transport + ?Sized>(
     // pinned authority: a non-owner creator cites the grant that authorizes them (owner cites nothing).
     let citation = authority_citation(community, &actor_pk.to_hex());
     let unsigned = super::roster::build_invite_links_edition_unsigned(actor_pk, &community.id, my_locators, version, prev_hash.as_ref(), created_at, citation.as_ref())?;
-    let inner = unsigned.sign(&signer).await.map_err(|e| format!("sign invite-links edition: {e}"))?;
+    let inner = unsigned.finalize_async(&signer).await.map_err(|e| format!("sign invite-links edition: {e}"))?;
     let outer = super::roster::seal_control_edition(&Keys::generate(), &inner, &community.server_root_key, &community.id, community.server_root_epoch)?;
     let self_hash = super::version::edition_hash(&entity_id, version, prev_hash.as_ref(), inner.content.as_bytes());
     transport.publish_durable(&outer, &community.relays).await?;
@@ -2377,9 +2372,9 @@ async fn reseal_base_to_observed<T: Transport + ?Sized>(
     // `community_member_activity` returns npubs in the events table's BECH32 form (`npub1...`), so parse
     // with `PublicKey::parse` (bech32 OR hex) — `from_hex` would reject every one, emptying the set and
     // sealing the community down to the owner alone (the re-founding inverted).
-    let participants: Vec<nostr_sdk::PublicKey> = crate::db::community::community_member_activity(&cid)?
+    let participants: Vec<nostr_sdk::prelude::PublicKey> = crate::db::community::community_member_activity(&cid)?
         .into_iter()
-        .filter_map(|(npub, _)| nostr_sdk::PublicKey::parse(&npub).ok())
+        .filter_map(|(npub, _)| nostr_sdk::prelude::PublicKey::parse(&npub).ok())
         .collect();
     // RESUMABLE re-founding (durable across interruption — outage, power cut, mass relay failure mid-cut).
     // A re-founding rotates the base THEN each channel key; a naive retry would re-run BOTH from scratch
@@ -2588,7 +2583,7 @@ pub async fn rotate_channel<T: Transport + ?Sized>(
     transport: &T,
     community: &Community,
     channel_id: &super::ChannelId,
-    recipients: &[nostr_sdk::PublicKey],
+    recipients: &[nostr_sdk::prelude::PublicKey],
     // the server root this rekey is ENVELOPED + ADDRESSED under. A standalone channel removal passes the
     // CURRENT root. A re-founding (base rotation) passes the PRIOR (pre-rotation) root — exactly like the
     // base rekey (`base_rekey_pseudonym(prior_root, …)`) — so every RETAINED member can still open it after
@@ -2678,7 +2673,7 @@ fn emit_rekey_progress(label: &str, pct: u8) {
 pub(crate) async fn rotate_server_root<T: Transport + ?Sized>(
     transport: &T,
     community: &Community,
-    recipients: &[nostr_sdk::PublicKey],
+    recipients: &[nostr_sdk::prelude::PublicKey],
 ) -> Result<u64, String> {
     let session = SessionGuard::capture();
     let cid = community.id.to_hex();
@@ -3593,6 +3588,9 @@ mod tests {
         // Per-account row-id caches survive close_database; clear them so a stale entry from a prior
         // test's DB can't point into this fresh account's DB and FK-fail an insert.
         crate::db::clear_id_caches();
+        // Drop any signer a prior test injected (see `simulate_bunker`) so it can't
+        // sign for this one.
+        crate::signer::set_test_signer(None);
         let tmp = tempfile::tempdir().unwrap();
         let n = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let account = make_test_npub(n);
@@ -3648,12 +3646,11 @@ mod tests {
     /// Build + persist a member-view community whose proven owner is `owner` (attestation signed by
     /// them), archiving the genesis epoch-0 channel key + server root via save_community.
     fn saved_community_owned_by(owner: &Keys) -> Community {
-        use nostr_sdk::JsonUtil;
         let mut community = Community::create("HQ", "general", vec!["r".into()]);
         let cid = community.id.to_hex();
         community.owner_attestation = Some(
             crate::community::owner::build_owner_attestation_unsigned(owner.public_key(), &cid)
-                .sign_with_keys(owner)
+                .finalize(owner)
                 .unwrap()
                 .as_json(),
         );
@@ -3665,12 +3662,11 @@ mod tests {
     /// is true and owner-gated actions like `create_public_invite` pass). NOT saved to the DB — for
     /// tests where the same single DB later plays the joiner.
     fn attested_community(name: &str, channel: &str, relays: Vec<String>) -> Community {
-        use nostr_sdk::JsonUtil;
         let owner = crate::state::MY_SECRET_KEY.to_keys().unwrap();
         let mut community = Community::create(name, channel, relays);
         community.owner_attestation = Some(
             crate::community::owner::build_owner_attestation_unsigned(owner.public_key(), &community.id.to_hex())
-                .sign_with_keys(&owner).unwrap().as_json(),
+                .finalize(&owner).unwrap().as_json(),
         );
         community
     }
@@ -3686,7 +3682,7 @@ mod tests {
     fn owner_channel_rekey(
         owner: &Keys,
         community: &Community,
-        recipient_pk: &nostr_sdk::PublicKey,
+        recipient_pk: &nostr_sdk::prelude::PublicKey,
         new_epoch: u64,
         new_key: &[u8; 32],
     ) -> super::super::rekey::ParsedRekey {
@@ -3781,7 +3777,7 @@ mod tests {
         let inner = super::super::envelope::build_inner_typed(
             author.public_key(), &channel.id, channel.epoch,
             crate::stored_event::event_kind::COMMUNITY_PRESENCE, "join", 5, None, &[],
-        ).sign_with_keys(&author).unwrap();
+        ).finalize(&author).unwrap();
         let outer = super::super::envelope::seal_with_signed_inner(
             &Keys::generate(), &inner, &channel.key, &channel.id, channel.epoch,
         ).unwrap();
@@ -3919,7 +3915,7 @@ mod tests {
     /// commitment (epoch 1 cites the genesis key), each carrying a blob for `recipient_pk`. Returns the
     /// events + the per-epoch keys. Does NOT touch the DB (so the recipient stays "behind" at epoch 0).
     fn build_rekey_chain(
-        owner: &Keys, community: &Community, recipient_pk: &nostr_sdk::PublicKey, n: u64,
+        owner: &Keys, community: &Community, recipient_pk: &nostr_sdk::prelude::PublicKey, n: u64,
     ) -> (Vec<Event>, Vec<[u8; 32]>) {
         let chan = &community.channels[0];
         let scope = super::super::derive::RekeyScope::Channel(chan.id);
@@ -4110,7 +4106,7 @@ mod tests {
     /// citing it, each carrying a ServerRoot blob for `recipient_pk`. Returns the events + per-epoch
     /// roots. Does NOT touch the DB (the recipient stays "behind" at base epoch 0).
     fn build_base_rekey_chain(
-        owner: &Keys, community: &Community, recipient_pk: &nostr_sdk::PublicKey, n: u64,
+        owner: &Keys, community: &Community, recipient_pk: &nostr_sdk::prelude::PublicKey, n: u64,
     ) -> (Vec<Event>, Vec<[u8; 32]>) {
         let mut prior_root = *community.server_root_key.as_bytes();
         let mut events = Vec::new();
@@ -4172,7 +4168,7 @@ mod tests {
         let new_root = [0x5Au8; 32];
         let scope = super::super::derive::RekeyScope::ServerRoot;
         let commit = super::super::rekey::epoch_key_commitment(crate::community::Epoch(0), &genesis);
-        let mk = |recipient: &nostr_sdk::PublicKey| {
+        let mk = |recipient: &nostr_sdk::prelude::PublicKey| {
             let blob = super::super::rekey::build_rekey_blob(owner.secret_key(), recipient, scope, crate::community::Epoch(1), &new_root).unwrap();
             super::super::rekey::build_server_root_rekey_event(
                 &Keys::generate(), &owner, &genesis, &community.id,
@@ -5386,7 +5382,7 @@ mod tests {
     /// An owner-authored base rekey to `new_epoch` carrying one ServerRoot blob for `recipient_pk`,
     /// citing the community's current (genesis epoch-0) root. Returns the opened ParsedRekey.
     fn owner_base_rekey(
-        owner: &Keys, community: &Community, recipient_pk: &nostr_sdk::PublicKey, new_epoch: u64, new_root: &[u8; 32],
+        owner: &Keys, community: &Community, recipient_pk: &nostr_sdk::prelude::PublicKey, new_epoch: u64, new_root: &[u8; 32],
     ) -> super::super::rekey::ParsedRekey {
         let prev = community.server_root_epoch.0;
         let blob = super::super::rekey::build_rekey_blob(
@@ -6518,7 +6514,7 @@ mod tests {
         // its genesis (the owner attestation must verify → the editions were signed by the right identity).
         let (_tmp, _guard) = init_test_db();
         let owner = crate::state::MY_SECRET_KEY.to_keys().unwrap();
-        crate::state::set_nostr_client(nostr_sdk::Client::builder().signer(owner.clone()).build());
+        crate::state::set_nostr_client(nostr_sdk::prelude::Client::builder().build());
 
         let relay = MemoryRelay::new();
         let community = create_community(&relay, "HQ", "general", vec!["r1".into()]).await.unwrap();
@@ -6550,7 +6546,10 @@ mod tests {
     /// Drop the local secret key while keeping a client signer + the public key — the test shape of a
     /// NIP-46 bunker account (signs remotely, no raw local key for ECDH rekeys).
     fn simulate_bunker(owner: &Keys) {
-        crate::state::set_nostr_client(nostr_sdk::Client::builder().signer(owner.clone()).build());
+        crate::state::set_nostr_client(nostr_sdk::prelude::Client::builder().build());
+        // The identity stays signable (as a bunker would) while the local vault
+        // goes empty, so any path that insists on a local key still fails.
+        crate::signer::set_test_signer(Some(crate::signer::ActiveSigner::Keys(owner.clone())));
         crate::state::MY_SECRET_KEY.clear(&[]);
         assert!(crate::state::MY_SECRET_KEY.to_keys().is_none(), "bunker sim: no local key");
     }
@@ -6794,7 +6793,7 @@ mod tests {
         use crate::community::derive::{base_rekey_pseudonym, recipient_pseudonym};
         use crate::community::rekey::{open_rekey_event, rekey_pairwise_secret};
         use crate::types::Message;
-        use nostr_sdk::ToBech32;
+        use nostr_sdk::prelude::ToBech32;
         let (_tmp, _guard) = init_test_db();
         let relay = MemoryRelay::new();
         let community = create_community(&relay, "HQ", "general", vec!["r1".into()]).await.unwrap();
@@ -7023,9 +7022,9 @@ mod tests {
 
         // Garbage 3308 at the real control pseudonym, ephemeral-signed (outers always are).
         let z = crate::community::roster::control_pseudonym(&community.server_root_key, &community.id, community.server_root_epoch);
-        let junk = nostr_sdk::EventBuilder::new(nostr_sdk::Kind::Custom(event_kind::COMMUNITY_CONTROL), "not a sealed edition")
-            .tags([nostr_sdk::Tag::custom(nostr_sdk::TagKind::Custom("z".into()), [z])])
-            .sign_with_keys(&Keys::generate())
+        let junk = nostr_sdk::prelude::EventBuilder::new(nostr_sdk::prelude::Kind::Custom(event_kind::COMMUNITY_CONTROL), "not a sealed edition")
+            .tags([nostr_sdk::prelude::Tag::custom("z", [z])])
+            .finalize(&Keys::generate())
             .unwrap();
         relay.publish(&junk, &community.relays).await.unwrap();
 
@@ -7094,7 +7093,7 @@ mod tests {
         use crate::community::derive::{base_rekey_pseudonym, recipient_pseudonym};
         use crate::community::rekey::{open_rekey_blob, open_rekey_event, rekey_pairwise_secret};
         use crate::types::Message;
-        use nostr_sdk::ToBech32;
+        use nostr_sdk::prelude::ToBech32;
         let (_tmp, _guard) = init_test_db();
         let relay = MemoryRelay::new();
         let community = create_community(&relay, "HQ", "general", vec!["r1".into()]).await.unwrap();
@@ -7334,7 +7333,7 @@ mod tests {
         let relay = MemoryRelay::new();
         // A message id we never sent → no retained key → error, no panic.
         let fake = Keys::generate();
-        let bogus = EventBuilder::new(Kind::Custom(1), "x").sign_with_keys(&fake).unwrap().id;
+        let bogus = EventBuilder::new(Kind::Custom(1), "x").finalize(&fake).unwrap().id;
         assert!(delete_message(&relay, &bogus.to_hex()).await.is_err());
     }
 
@@ -7552,7 +7551,7 @@ mod tests {
         let owner_keys = crate::state::MY_SECRET_KEY.to_keys().unwrap();
         owner.owner_attestation = Some(
             crate::community::owner::build_owner_attestation_unsigned(owner_keys.public_key(), &owner.id.to_hex())
-                .sign_with_keys(&owner_keys).unwrap().as_json(),
+                .finalize(&owner_keys).unwrap().as_json(),
         );
         // Owner mints a link.
         let (token_hex, url) = create_public_invite(&relay, &owner, None, None).await.expect("mint");
@@ -7603,7 +7602,7 @@ mod tests {
         // A hostile relay piles a NEWER event at the same locator d-tag, signed by a
         // different key (relay-shadow attack). fetch must skip it (fails token verify)
         // and still surface the genuine bundle, not report "no invite".
-        use nostr_sdk::prelude::{EventBuilder, Keys, Kind, Tag, TagKind, Timestamp};
+        use nostr_sdk::prelude::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
         let (_tmp, _guard) = init_test_db();
         let relay = MemoryRelay::new();
@@ -7617,11 +7616,11 @@ mod tests {
         let junk = EventBuilder::new(Kind::Custom(event_kind::APPLICATION_SPECIFIC), "garbage")
             .tags([
                 Tag::identifier(public_invite::locator_hex(&token)),
-                Tag::custom(TagKind::Custom("vsk".into()), ["6".to_string()]),
-                Tag::custom(TagKind::Custom("v".into()), ["1".to_string()]),
+                Tag::custom("vsk", ["6".to_string()]),
+                Tag::custom("v", ["1".to_string()]),
             ])
             .custom_created_at(Timestamp::from_secs(9_000_000_000))
-            .sign_with_keys(&attacker)
+            .finalize(&attacker)
             .unwrap();
         relay.publish(&junk, &relays).await.unwrap();
 
@@ -7728,7 +7727,7 @@ mod tests {
     /// caller-chosen so a test can prove backdating doesn't gate the binary seal.
     async fn publish_tombstone<T: Transport + ?Sized>(transport: &T, community: &Community, author: &Keys, created_at: u64) {
         let inner = crate::community::roster::build_group_dissolved_edition_unsigned(author.public_key(), &community.id, created_at)
-            .sign_with_keys(author).unwrap();
+            .finalize(author).unwrap();
         let outer = crate::community::roster::seal_control_edition(&Keys::generate(), &inner, &community.server_root_key, &community.id, community.server_root_epoch).unwrap();
         transport.publish_durable(&outer, &community.relays).await.unwrap();
     }
@@ -7986,7 +7985,7 @@ mod tests {
         let cid = community.id.to_hex();
         // Owner publishes the tombstone ONLY at the stable coordinate (no control_pseudonym copy).
         let inner = crate::community::roster::build_group_dissolved_edition_unsigned(owner.public_key(), &community.id, 1000)
-            .sign_with_keys(&owner).unwrap();
+            .finalize(&owner).unwrap();
         let stable = crate::community::roster::seal_dissolved_edition(&Keys::generate(), &inner, &community.id).unwrap();
         relay.inject(&stable, &community.relays);
         // Advance the base epoch (the local client hasn't folded the tombstone yet, so rotation is allowed —

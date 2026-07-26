@@ -6,22 +6,24 @@
 //! Inbound invites are PARKED for explicit consent (no auto-join, no relay connect);
 //! the user accepts or declines via the commands below.
 
+use nostr_sdk::prelude::FinalizeEventAsync;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nostr_sdk::ToBech32;
+use nostr_sdk::prelude::ToBech32;
 use vector_core::community::invite::{build_invite_rumor, CommunityInvite};
 use vector_core::community::public_invite::{parse_invite_url, PublicInvitePreview};
 use vector_core::community::transport::LiveTransport;
 use vector_core::community::{service, CommunityId};
 use vector_core::sending::{send_rumor_dm, NoOpSendCallback, SendCallback, SendConfig};
+use vector_core::ClientRelayExt;
 
 /// Write a Community's channel chats into STATE + the chats table with display metadata
 /// (name/description/owner/icon-flag), so they load uniformly with DMs at startup (no
 /// separate hydrate). Called whenever the Community is created, joined, or its metadata
 /// changes.
 pub(crate) async fn sync_community_chats(community: &vector_core::community::Community) {
-    use nostr_sdk::ToBech32;
+    use nostr_sdk::prelude::ToBech32;
     let session = vector_core::state::SessionGuard::capture();
     let is_owner = vector_core::community::service::is_proven_owner(community);
     let has_icon = community.icon.is_some();
@@ -352,7 +354,7 @@ pub async fn kick_community_member(community_id: String, npub: String) -> Result
         return vector_core::VectorCore.kick_member(&community_id, &npub).await.map_err(|e| e.to_string());
     }
     let session = vector_core::state::SessionGuard::capture();
-    let hex = nostr_sdk::PublicKey::parse(&npub).map_err(|_| "invalid npub".to_string())?.to_hex();
+    let hex = nostr_sdk::prelude::PublicKey::parse(&npub).map_err(|_| "invalid npub".to_string())?.to_hex();
     let id_bytes = hex_to_id32(&community_id)?;
     let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
         .ok_or("Community not found")?;
@@ -380,7 +382,7 @@ pub async fn get_community_banlist(community_id: String) -> Result<Vec<String>, 
     let hexes = vector_core::db::community::get_community_banlist(&community_id)?;
     Ok(hexes
         .iter()
-        .filter_map(|h| nostr_sdk::PublicKey::from_hex(h).ok().and_then(|pk| pk.to_bech32().ok()))
+        .filter_map(|h| nostr_sdk::prelude::PublicKey::from_hex(h).ok().and_then(|pk| pk.to_bech32().ok()))
         .collect())
 }
 
@@ -392,7 +394,7 @@ pub async fn grant_community_admin(community_id: String, npub: String) -> Result
         return vector_core::VectorCore.grant_admin(&community_id, &npub).await.map_err(|e| e.to_string());
     }
     let session = vector_core::state::SessionGuard::capture();
-    let member = nostr_sdk::PublicKey::parse(&npub).map_err(|_| "invalid npub".to_string())?;
+    let member = nostr_sdk::prelude::PublicKey::parse(&npub).map_err(|_| "invalid npub".to_string())?;
     let id_bytes = hex_to_id32(&community_id)?;
     let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
         .ok_or("Community not found")?;
@@ -413,7 +415,7 @@ pub async fn revoke_community_admin(community_id: String, npub: String) -> Resul
         return vector_core::VectorCore.revoke_admin(&community_id, &npub).await.map_err(|e| e.to_string());
     }
     let session = vector_core::state::SessionGuard::capture();
-    let member = nostr_sdk::PublicKey::parse(&npub).map_err(|_| "invalid npub".to_string())?;
+    let member = nostr_sdk::prelude::PublicKey::parse(&npub).map_err(|_| "invalid npub".to_string())?;
     let id_bytes = hex_to_id32(&community_id)?;
     let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
         .ok_or("Community not found")?;
@@ -444,7 +446,7 @@ pub fn get_community_admins(community_id: String) -> Result<Vec<String>, String>
         .grants
         .iter()
         .filter(|g| roles.is_admin(&g.member))
-        .filter_map(|g| nostr_sdk::PublicKey::from_hex(&g.member).ok().and_then(|pk| pk.to_bech32().ok()))
+        .filter_map(|g| nostr_sdk::prelude::PublicKey::from_hex(&g.member).ok().and_then(|pk| pk.to_bech32().ok()))
         .collect())
 }
 
@@ -508,7 +510,7 @@ pub fn get_community_invite_summary(community_id: String) -> Result<serde_json::
         .into_iter()
         .filter(|s| !s.locators.is_empty())
         .filter_map(|s| {
-            let npub = nostr_sdk::PublicKey::from_hex(&s.creator_hex).ok()?.to_bech32().ok()?;
+            let npub = nostr_sdk::prelude::PublicKey::from_hex(&s.creator_hex).ok()?.to_bech32().ok()?;
             Some(serde_json::json!({ "npub": npub, "count": s.locators.len() }))
         })
         .collect();
@@ -545,7 +547,7 @@ async fn set_member_banned(community_id: &str, npub: &str, banned: bool) -> Resu
         return vector_core::VectorCore.set_member_banned(community_id, npub, banned).await.map_err(|e| e.to_string());
     }
     let session = vector_core::state::SessionGuard::capture();
-    let hex = nostr_sdk::PublicKey::parse(npub).map_err(|_| "invalid npub".to_string())?.to_hex();
+    let hex = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| "invalid npub".to_string())?.to_hex();
     let id_bytes = hex_to_id32(community_id)?;
     let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
         .ok_or("Community not found")?;
@@ -1026,9 +1028,9 @@ pub async fn send_community_message(
 
     // 2. Sign the inner event (local or bunker — may round-trip), then publish.
     let signed = async {
-        let client = vector_core::state::nostr_client().ok_or("Not logged in")?;
-        let signer = client.signer().await.map_err(|e| format!("Signer unavailable: {e}"))?;
-        unsigned.sign(&signer).await.map_err(|e| format!("Failed to sign message: {e}"))
+        let _client = vector_core::state::nostr_client().ok_or("Not logged in")?;
+        let signer = vector_core::signer::active_signer().map_err(|e| format!("Signer unavailable: {e}"))?;
+        unsigned.finalize_async(&signer).await.map_err(|e| format!("Failed to sign message: {e}"))
     }
     .await;
 
@@ -1401,8 +1403,8 @@ async fn dispatch_community_attachment_message(
     // between progress ticks still aborts the transfer.
     let cancel_flag = crate::message::upload_cancel_flags().lock().unwrap().get(&pending_id).cloned();
 
-    let client = vector_core::state::nostr_client().ok_or("Not logged in")?;
-    let signer = client.signer().await.map_err(|e| format!("Signer unavailable: {e}"))?;
+    let _client = vector_core::state::nostr_client().ok_or("Not logged in")?;
+    let signer = vector_core::signer::active_signer().map_err(|e| format!("Signer unavailable: {e}"))?;
     let servers = vector_core::blossom_servers::compute_enabled_servers();
     if servers.is_empty() {
         let _ = mark_attachment_send_failed(&callback, &channel_id, &pending_id).await;
@@ -1538,7 +1540,7 @@ async fn dispatch_community_attachment_message(
     };
 
     let signed = unsigned
-        .sign(&signer)
+        .finalize_async(&signer)
         .await
         .map_err(|e| format!("Failed to sign message: {e}"));
 
@@ -2114,9 +2116,9 @@ pub async fn debug_v2_follow_trace(community_id: String) -> Result<serde_json::V
     // Relay pool status for the community's relays.
     let mut relay_status = Vec::new();
     if let Some(client) = vector_core::state::nostr_client() {
-        let pool = client.pool().all_relays().await;
+        let pool = client.relays().all().await;
         for r in &c.relays {
-            let status = nostr_sdk::RelayUrl::parse(r)
+            let status = nostr_sdk::prelude::RelayUrl::parse(r)
                 .ok()
                 .and_then(|u| pool.get(&u).map(|rel| format!("{:?}", rel.status())))
                 .unwrap_or_else(|| "NOT IN POOL".into());
@@ -2199,19 +2201,24 @@ pub async fn debug_v2_probe_rekey_planes(community_id: String) -> Result<serde_j
     let mut report = Vec::new();
     for (label, group) in candidates {
         let pk_hex = group.pk_hex();
-        // Tor-aware options (probe traffic must obey the user's transport) +
-        // auto NIP-42 so the fresh connection auths as the plane key.
-        let opts = vector_core::nostr_client_options().automatic_authentication(true);
-        let client = nostr_sdk::Client::builder().signer(group.keys().clone()).opts(opts).build();
+        // Probe traffic must obey the user's transport, and this connection auths
+        // as the PLANE key rather than the session identity — hence its own
+        // authenticator instead of `nostr_client_builder()`.
+        let client = vector_core::apply_tor_proxy(
+            nostr_sdk::prelude::Client::builder().authenticator(
+                nostr_sdk::prelude::SignerAuthenticator::new(group.keys().clone()),
+            ),
+        )
+        .build();
         for r in &c.relays {
-            let _ = client.add_relay(r.clone()).await;
+            let _ = client.add_managed_relay(r.clone()).await;
         }
         client.connect().await;
         tokio::time::sleep(Duration::from_millis(1200)).await;
-        let filter = nostr_sdk::Filter::new()
+        let filter = nostr_sdk::prelude::Filter::new()
             .kinds([
-                nostr_sdk::Kind::Custom(stream::KIND_WRAP),
-                nostr_sdk::Kind::Custom(stream::KIND_WRAP_EPHEMERAL),
+                nostr_sdk::prelude::Kind::Custom(stream::KIND_WRAP),
+                nostr_sdk::prelude::Kind::Custom(stream::KIND_WRAP_EPHEMERAL),
             ])
             .author(group.pk());
         let mut per_relay = Vec::new();
@@ -2223,7 +2230,8 @@ pub async fn debug_v2_probe_rekey_planes(community_id: String) -> Result<serde_j
             // already-authenticated connection instead of dying on the first
             // CLOSED. (An ungated warmup never triggers auth at all.)
             let _ = client
-                .fetch_events_from(vec![r.clone()], filter.clone(), Duration::from_secs(6))
+                .fetch_events(nostr_sdk::prelude::ReqTarget::manual(vec![r.clone()].into_iter().map(|u| (u, vec![filter.clone().clone()]))))
+            .timeout(Duration::from_secs(6))
                 .await;
             tokio::time::sleep(Duration::from_millis(800)).await;
             let entry = match vector_core::community::transport::fetch_relay_eose(&client, r, filter.clone(), Duration::from_secs(8)).await {
@@ -2390,7 +2398,7 @@ fn purge_stale_pending_invites(tombstones: &[vector_core::community::list::Commu
 /// A remote device edited our Community List (the live self-sync path): fold the received event into the
 /// local mirror (NO republish — avoids an echo loop) and rehydrate any newly-present community, so a join
 /// on another device appears here WITHOUT a reboot. A removal arriving this way tears the community down.
-pub(crate) async fn ingest_community_list_update(event: nostr_sdk::Event) {
+pub(crate) async fn ingest_community_list_update(event: nostr_sdk::prelude::Event) {
     let session = vector_core::state::SessionGuard::capture();
     let client = match vector_core::state::nostr_client() {
         Some(c) => c,
@@ -2427,7 +2435,7 @@ pub(crate) async fn ingest_community_list_update(event: nostr_sdk::Event) {
 
 /// Route a live Invite List update from another device: decrypt, merge into the local mirror, and hydrate
 /// the read model so a link minted (or revoked) elsewhere appears (or disappears) here without a restart.
-pub(crate) async fn ingest_invite_list_update(event: nostr_sdk::Event) {
+pub(crate) async fn ingest_invite_list_update(event: nostr_sdk::prelude::Event) {
     let session = vector_core::state::SessionGuard::capture();
     let client = match vector_core::state::nostr_client() {
         Some(c) => c,
@@ -2878,8 +2886,8 @@ pub async fn delete_community_message(message_id: String) -> Result<(), String> 
     // Layer 3 — best-effort Blossom blob delete for attachments (signed by the active
     // identity so bunker accounts authorize correctly).
     if !attachment_urls.is_empty() {
-        if let Some(client) = vector_core::state::nostr_client() {
-            if let Ok(signer) = client.signer().await {
+        if let Some(_client) = vector_core::state::nostr_client() {
+            if let Ok(signer) = vector_core::signer::active_signer() {
                 vector_core::blossom::delete_blobs_best_effort(signer, attachment_urls);
             }
         }
@@ -2966,7 +2974,7 @@ pub async fn revoke_reaction(reaction_id: String) -> Result<(), String> {
         )
         .await?;
     } else {
-        use nostr_sdk::{EventId, PublicKey};
+        use nostr_sdk::prelude::{EventId, PublicKey};
         let rid = EventId::from_hex(&reaction_id).map_err(|e| format!("Invalid reaction id: {e}"))?;
         let recipient = PublicKey::parse(&chat_id)
             .map_err(|e| format!("Invalid DM counterpart: {e}"))?;
@@ -3193,9 +3201,9 @@ async fn publish_community_control(
     let unsigned = vector_core::community::envelope::build_inner_typed(
         author_pk, &channel.id, channel.epoch, kind, content, ms, Some(target), emoji_tags,
     );
-    let client = vector_core::state::nostr_client().ok_or("Not logged in")?;
-    let signer = client.signer().await.map_err(|e| format!("Signer unavailable: {e}"))?;
-    let inner = unsigned.sign(&signer).await.map_err(|e| format!("Failed to sign: {e}"))?;
+    let _client = vector_core::state::nostr_client().ok_or("Not logged in")?;
+    let signer = vector_core::signer::active_signer().map_err(|e| format!("Signer unavailable: {e}"))?;
+    let inner = unsigned.finalize_async(&signer).await.map_err(|e| format!("Failed to sign: {e}"))?;
     if !session.is_valid() {
         return Err("account changed during send".to_string());
     }
@@ -3294,7 +3302,7 @@ pub async fn invite_to_community(community_id: String, invitee_npub: String) -> 
     }
     // A BANNED npub can't be re-invited: they self-removed and stay out — admins shouldn't be able to
     // pull them back in. Match the banlist (stored as lowercase hex) against the invitee.
-    let invitee_hex = nostr_sdk::PublicKey::parse(&invitee_npub).map_err(|_| "invalid npub".to_string())?.to_hex();
+    let invitee_hex = nostr_sdk::prelude::PublicKey::parse(&invitee_npub).map_err(|_| "invalid npub".to_string())?.to_hex();
     if vector_core::db::community::get_community_banlist(&community_id)?.iter().any(|b| b == &invitee_hex) {
         return Err("That member is banned from this community and can't be invited".to_string());
     }
@@ -3331,7 +3339,7 @@ pub async fn list_community_invites() -> Result<Vec<vector_core::db::community::
 /// seeded here (a seeded cursor would skip that re-fetch and silently drop them).
 /// Returns `true` if it painted ≥1 message (so the caller can flag the summary `preloaded` and the
 /// frontend opens immediately instead of awaiting the first sync).
-async fn promote_preloaded_page(community: &vector_core::community::Community, page: Vec<nostr_sdk::Event>) -> bool {
+async fn promote_preloaded_page(community: &vector_core::community::Community, page: Vec<nostr_sdk::prelude::Event>) -> bool {
     use vector_core::community::inbound::IncomingEvent;
     let Some(channel) = community.channels.first().cloned() else { return false };
     let channel_id = channel.id.to_hex();
@@ -3783,8 +3791,8 @@ pub async fn set_community_image(
     let params = vector_core::crypto::generate_encryption_params();
     let encrypted = vector_core::crypto::encrypt_data(&bytes, &params)?;
 
-    let client = vector_core::state::nostr_client().ok_or("Nostr client not initialised")?;
-    let signer = client.signer().await.map_err(|e| format!("signer: {e}"))?;
+    let _client = vector_core::state::nostr_client().ok_or("Nostr client not initialised")?;
+    let signer = vector_core::signer::active_signer().map_err(|e| format!("signer: {e}"))?;
     let servers = vector_core::blossom_servers::compute_enabled_servers();
     if servers.is_empty() {
         return Err("No Blossom servers configured.".to_string());

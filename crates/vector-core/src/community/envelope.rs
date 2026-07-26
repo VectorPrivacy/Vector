@@ -13,6 +13,7 @@
 //! epoch — the threat that any member, holding the channel key, could otherwise lift
 //! another member's signed content into a different context.
 
+use crate::event_ext::FinalizeUnsignedWithId;
 use nostr_sdk::prelude::*;
 
 use super::cipher;
@@ -149,14 +150,14 @@ pub fn seal_message_with_ephemeral(
     // Local-keys convenience: build the inner event, sign it with the author's keys, and
     // seal. Identical wire output to the signer path (golden-vector stable).
     let inner = build_inner_event(author_keys.public_key(), channel_id, epoch, content, ms, None)
-        .sign_with_keys(author_keys)
+        .finalize(author_keys)
         .map_err(|e| EnvelopeError::Sign(e.to_string()))?;
     seal_with_signed_inner(ephemeral, &inner, channel_key, channel_id, epoch)
 }
 
 /// Build the inner authorship-proof event UNSIGNED, so the caller can sign it with
 /// whatever the account uses — local keys OR a NIP-46 remote bunker (parity with the
-/// DM send path, which signs through the active `NostrSigner`). `author` is the
+/// DM send path, which signs through the active `VectorSigner`). `author` is the
 /// identity pubkey the signer will sign as.
 ///
 /// `ms` is the full send time in epoch-milliseconds, split the way Vector's DMs do:
@@ -209,26 +210,26 @@ pub fn build_inner_full(
     let created_secs = ms / 1000;
     let ms_offset = ms % 1000;
     let mut tags = vec![
-        Tag::custom(TagKind::Custom(TAG_CHANNEL.into()), [channel_id.to_hex()]),
-        Tag::custom(TagKind::Custom(TAG_EPOCH.into()), [epoch.0.to_string()]),
-        Tag::custom(TagKind::Custom(TAG_MS.into()), [ms_offset.to_string()]),
+        Tag::custom(TAG_CHANNEL, [channel_id.to_hex()]),
+        Tag::custom(TAG_EPOCH, [epoch.0.to_string()]),
+        Tag::custom(TAG_MS, [ms_offset.to_string()]),
     ];
     // Target reference: an `e` tag marked "reply" (Vector's DM convention) — the
     // replied-to / reacted-to / edited message's inner id.
     if let Some(target) = reference.filter(|t| !t.is_empty()) {
-        tags.push(Tag::custom(TagKind::e(), [target.to_string(), String::new(), "reply".to_string()]));
+        tags.push(Tag::custom("e", [target.to_string(), String::new(), "reply".to_string()]));
     }
     // NIP-30 custom emoji: ["emoji", shortcode, url] for each `:shortcode:` used in the
     // content (so custom-emoji messages + reactions render the image, parity with DMs).
     for et in emoji_tags {
-        tags.push(Tag::custom(TagKind::Custom("emoji".into()), [et.shortcode.clone(), et.url.clone()]));
+        tags.push(Tag::custom("emoji", [et.shortcode.clone(), et.url.clone()]));
     }
     // Extra inner tags appended verbatim (NIP-92 `imeta` attachment tags).
     tags.extend(extra_tags.iter().cloned());
     EventBuilder::new(Kind::Custom(kind), content)
         .tags(tags)
         .custom_created_at(Timestamp::from_secs(created_secs))
-        .build(author)
+        .finalize_unsigned_with_id(author)
 }
 
 /// Seal an already-signed inner authorship event into the outer wire event. The inner
@@ -279,12 +280,12 @@ pub fn seal_with_signed_inner(
     EventBuilder::new(Kind::Custom(inner_kind), content_b64)
         .tags([
             Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::Z)),
+                "z",
                 [pseudonym.to_hex()],
             ),
-            Tag::custom(TagKind::Custom(TAG_VERSION.into()), [PROTOCOL_VERSION.to_string()]),
+            Tag::custom(TAG_VERSION, [PROTOCOL_VERSION.to_string()]),
         ])
-        .sign_with_keys(ephemeral)
+        .finalize(ephemeral)
         .map_err(|e| EnvelopeError::Sign(e.to_string()))
 }
 
@@ -411,10 +412,10 @@ mod tests {
     }
 
     fn channel_tag() -> Tag {
-        Tag::custom(TagKind::Custom(TAG_CHANNEL.into()), [chan().to_hex()])
+        Tag::custom(TAG_CHANNEL, [chan().to_hex()])
     }
     fn epoch0_tag() -> Tag {
-        Tag::custom(TagKind::Custom(TAG_EPOCH.into()), ["0".to_string()])
+        Tag::custom(TAG_EPOCH, ["0".to_string()])
     }
 
     /// Seal an arbitrary inner event into a correctly-tagged outer (epoch 0).
@@ -423,12 +424,12 @@ mod tests {
         EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_MESSAGE), content)
             .tags([
                 Tag::custom(
-                    TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::Z)),
+                    "z",
                     [super::super::derive::channel_pseudonym(&key(), &chan(), Epoch(0)).to_hex()],
                 ),
-                Tag::custom(TagKind::Custom(TAG_VERSION.into()), [PROTOCOL_VERSION.to_string()]),
+                Tag::custom(TAG_VERSION, [PROTOCOL_VERSION.to_string()]),
             ])
-            .sign_with_keys(&Keys::generate())
+            .finalize(&Keys::generate())
             .unwrap()
     }
 
@@ -447,15 +448,15 @@ mod tests {
 
     #[tokio::test]
     async fn signer_path_matches_local_keys_path() {
-        // Parity with DMs: the inner event can be signed through the async
-        // `NostrSigner` (the same path a NIP-46 bunker uses) instead of local keys.
-        // `Keys` implements `NostrSigner`, so signing the unsigned inner via `.sign()`
-        // exercises that path; the sealed result must open identically.
+        // Parity with DMs: the inner event can be signed through the async signing
+        // path (the same one a NIP-46 bunker uses) instead of local keys. `Keys`
+        // implements the async capability traits, so finalizing the unsigned inner
+        // asynchronously exercises that path; the sealed result must open identically.
         let author = Keys::generate();
         let ephemeral = Keys::generate();
 
         let unsigned = build_inner_event(author.public_key(), &chan(), Epoch(0), "via signer", 1_700_000_000_777, None);
-        let inner: Event = unsigned.sign(&author).await.expect("remote-style sign");
+        let inner: Event = unsigned.finalize_async(&author).await.expect("remote-style sign");
         let outer = seal_with_signed_inner(&ephemeral, &inner, &key(), &chan(), Epoch(0)).expect("seal");
 
         let opened = open_message(&outer, &key(), &chan(), Epoch(0)).expect("open");
@@ -473,7 +474,7 @@ mod tests {
         let author = Keys::generate();
         let target = "a".repeat(64);
         let inner = build_inner_event(author.public_key(), &chan(), Epoch(0), "re: hi", 5, Some(&target))
-            .sign_with_keys(&author)
+            .finalize(&author)
             .unwrap();
         let outer = seal_with_signed_inner(&Keys::generate(), &inner, &key(), &chan(), Epoch(0)).unwrap();
         let opened = open_message(&outer, &key(), &chan(), Epoch(0)).unwrap();
@@ -499,7 +500,7 @@ mod tests {
             author.public_key(), &chan(), Epoch(0),
             crate::stored_event::event_kind::COMMUNITY_MESSAGE, "gm :fire:", 1, None, &tags,
         )
-        .sign_with_keys(&author)
+        .finalize(&author)
         .unwrap();
         let outer = seal_with_signed_inner(&Keys::generate(), &inner, &key(), &chan(), Epoch(0)).unwrap();
         let opened = open_message(&outer, &key(), &chan(), Epoch(0)).unwrap();
@@ -530,13 +531,13 @@ mod tests {
         let author = Keys::generate();
         let inner = EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_MESSAGE), "x")
             .tags([
-                Tag::custom(TagKind::Custom(TAG_CHANNEL.into()), [chan().to_hex()]),
-                Tag::custom(TagKind::Custom(TAG_EPOCH.into()), ["0".to_string()]),
-                Tag::custom(TagKind::Custom(TAG_MS.into()), ["1".to_string()]),
-                Tag::custom(TagKind::e(), ["aa".repeat(32), String::new(), "reply".to_string()]),
-                Tag::custom(TagKind::e(), ["bb".repeat(32), String::new(), "reply".to_string()]),
+                Tag::custom(TAG_CHANNEL, [chan().to_hex()]),
+                Tag::custom(TAG_EPOCH, ["0".to_string()]),
+                Tag::custom(TAG_MS, ["1".to_string()]),
+                Tag::custom("e", ["aa".repeat(32), String::new(), "reply".to_string()]),
+                Tag::custom("e", ["bb".repeat(32), String::new(), "reply".to_string()]),
             ])
-            .sign_with_keys(&author)
+            .finalize(&author)
             .unwrap();
         let outer = seal_with_signed_inner(&Keys::generate(), &inner, &key(), &chan(), Epoch(0)).unwrap();
         assert!(open_message(&outer, &key(), &chan(), Epoch(0)).is_ok(),
@@ -576,7 +577,7 @@ mod tests {
             author.public_key(), &chan(), Epoch(0),
             event_kind::COMMUNITY_MESSAGE, "look at these", 1_700_000_000_123,
             Some(&reply_target), &[], &imetas,
-        ).sign_with_keys(&author).unwrap();
+        ).finalize(&author).unwrap();
         let outer = seal_with_signed_inner(&Keys::generate(), &inner, &key(), &chan(), Epoch(0)).unwrap();
 
         let opened = open_message(&outer, &key(), &chan(), Epoch(0)).unwrap();
@@ -606,7 +607,7 @@ mod tests {
         let author = Keys::generate();
         let other = ChannelId([0xbbu8; 32]);
         let inner = build_inner_event(author.public_key(), &other, Epoch(0), "x", 1, None)
-            .sign_with_keys(&author)
+            .finalize(&author)
             .unwrap();
         let err = seal_with_signed_inner(&Keys::generate(), &inner, &key(), &chan(), Epoch(0));
         assert!(matches!(err, Err(EnvelopeError::ChannelMismatch)), "got {err:?}");
@@ -702,12 +703,12 @@ mod tests {
         outer = EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_MESSAGE), corrupted)
             .tags([
                 Tag::custom(
-                    TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::Z)),
+                    "z",
                     [super::super::derive::channel_pseudonym(&key(), &chan(), Epoch(0)).to_hex()],
                 ),
-                Tag::custom(TagKind::Custom(TAG_VERSION.into()), [PROTOCOL_VERSION.to_string()]),
+                Tag::custom(TAG_VERSION, [PROTOCOL_VERSION.to_string()]),
             ])
-            .sign_with_keys(&ephemeral)
+            .finalize(&ephemeral)
             .unwrap();
         let err = open_message(&outer, &key(), &chan(), Epoch(0));
         assert!(matches!(err, Err(EnvelopeError::Decrypt(_))), "got {err:?}");
@@ -717,12 +718,12 @@ mod tests {
     fn missing_version_tag_is_rejected() {
         let author = Keys::generate();
         let inner = EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_MESSAGE), "x")
-            .sign_with_keys(&author)
+            .finalize(&author)
             .unwrap();
         let content = cipher::seal(key().as_bytes(), inner.as_json().as_bytes()).unwrap();
         let ephemeral = Keys::generate();
         let outer = EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_MESSAGE), content)
-            .sign_with_keys(&ephemeral)
+            .finalize(&ephemeral)
             .unwrap();
         assert!(matches!(
             open_message(&outer, &key(), &chan(), Epoch(0)),
@@ -758,13 +759,13 @@ mod tests {
         // never reaching decryption.
         let author = Keys::generate();
         let inner = EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_MESSAGE), "x")
-            .sign_with_keys(&author)
+            .finalize(&author)
             .unwrap();
         let content = cipher::seal(key().as_bytes(), inner.as_json().as_bytes()).unwrap();
         let ephemeral = Keys::generate();
         let outer = EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_MESSAGE), content)
-            .tags([Tag::custom(TagKind::Custom(TAG_VERSION.into()), ["999".to_string()])])
-            .sign_with_keys(&ephemeral)
+            .tags([Tag::custom(TAG_VERSION, ["999".to_string()])])
+            .finalize(&ephemeral)
             .unwrap();
         let err = open_message(&outer, &key(), &chan(), Epoch(0));
         assert!(matches!(err, Err(EnvelopeError::BadVersion(Some(ref v))) if v == "999"), "got {err:?}");
@@ -776,7 +777,7 @@ mod tests {
         let author = Keys::generate();
         let inner = EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_REACTION), "+")
             .tags([channel_tag(), epoch0_tag()])
-            .sign_with_keys(&author)
+            .finalize(&author)
             .unwrap();
         let outer = wrap_inner(&inner);
         let err = open_message(&outer, &key(), &chan(), Epoch(0));
@@ -792,7 +793,7 @@ mod tests {
         let author = Keys::generate();
         let inner = EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_MESSAGE), "real")
             .tags([channel_tag(), epoch0_tag()])
-            .sign_with_keys(&author)
+            .finalize(&author)
             .unwrap();
         let mut v: serde_json::Value = serde_json::from_str(&inner.as_json()).unwrap();
         v["content"] = serde_json::Value::String("forged".into());
@@ -801,12 +802,12 @@ mod tests {
         let outer = EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_MESSAGE), content)
             .tags([
                 Tag::custom(
-                    TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::Z)),
+                    "z",
                     [super::super::derive::channel_pseudonym(&key(), &chan(), Epoch(0)).to_hex()],
                 ),
-                Tag::custom(TagKind::Custom(TAG_VERSION.into()), [PROTOCOL_VERSION.to_string()]),
+                Tag::custom(TAG_VERSION, [PROTOCOL_VERSION.to_string()]),
             ])
-            .sign_with_keys(&Keys::generate())
+            .finalize(&Keys::generate())
             .unwrap();
         let err = open_message(&outer, &key(), &chan(), Epoch(0));
         assert!(matches!(err, Err(EnvelopeError::BadSignature)), "got {err:?}");
@@ -818,7 +819,7 @@ mod tests {
         let author = Keys::generate();
         let inner = EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_MESSAGE), "hi")
             .tags([epoch0_tag()])
-            .sign_with_keys(&author)
+            .finalize(&author)
             .unwrap();
         let outer = wrap_inner(&inner);
         let err = open_message(&outer, &key(), &chan(), Epoch(0));
@@ -831,7 +832,7 @@ mod tests {
         let author = Keys::generate();
         let inner = EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_MESSAGE), "hi")
             .tags([channel_tag(), channel_tag(), epoch0_tag()])
-            .sign_with_keys(&author)
+            .finalize(&author)
             .unwrap();
         let outer = wrap_inner(&inner);
         let err = open_message(&outer, &key(), &chan(), Epoch(0));
@@ -847,12 +848,12 @@ mod tests {
         let author = Keys::generate();
         let inner = EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_MESSAGE), "x")
             .tags([channel_tag(), epoch0_tag()])
-            .sign_with_keys(&author)
+            .finalize(&author)
             .unwrap();
         let content = cipher::seal(key().as_bytes(), inner.as_json().as_bytes()).unwrap();
         let outer = EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_MESSAGE), content)
-            .tags([Tag::custom(TagKind::Custom(TAG_VERSION.into()), ["7".to_string()])])
-            .sign_with_keys(&Keys::generate())
+            .tags([Tag::custom(TAG_VERSION, ["7".to_string()])])
+            .finalize(&Keys::generate())
             .unwrap();
         let wrong_key = ChannelKey([0x99u8; 32]);
         let err = open_message(&outer, &wrong_key, &chan(), Epoch(0));
@@ -870,12 +871,12 @@ mod tests {
         let mangled = EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_MESSAGE), truncated)
             .tags([
                 Tag::custom(
-                    TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::Z)),
+                    "z",
                     [super::super::derive::channel_pseudonym(&key(), &chan(), Epoch(0)).to_hex()],
                 ),
-                Tag::custom(TagKind::Custom(TAG_VERSION.into()), [PROTOCOL_VERSION.to_string()]),
+                Tag::custom(TAG_VERSION, [PROTOCOL_VERSION.to_string()]),
             ])
-            .sign_with_keys(&Keys::generate())
+            .finalize(&Keys::generate())
             .unwrap();
         assert!(matches!(open_message(&mangled, &key(), &chan(), Epoch(0)), Err(EnvelopeError::Decrypt(_))));
     }

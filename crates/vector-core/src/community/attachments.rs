@@ -42,7 +42,7 @@ pub fn attachment_to_imeta(att: &Attachment) -> Tag {
     if let Some(topic) = att.webxdc_topic.as_deref().filter(|t| !t.is_empty()) {
         fields.push(format!("webxdc-topic {}", topic));
     }
-    Tag::custom(TagKind::Custom(IMETA.into()), fields)
+    Tag::custom(IMETA, fields)
 }
 
 /// Read a single `key value` field from an `imeta` tag's entries (value is everything
@@ -340,9 +340,9 @@ mod tests {
     fn multiple_imeta_tags_parse_in_order() {
         let dir = std::env::temp_dir();
         let tags = vec![
-            Tag::custom(TagKind::Custom("z".into()), ["pseudonym"]),
+            Tag::custom("z", ["pseudonym"]),
             attachment_to_imeta(&sample("a.png", "png", false)),
-            Tag::custom(TagKind::Custom("ms".into()), ["12"]),
+            Tag::custom("ms", ["12"]),
             attachment_to_imeta(&sample("b.pdf", "pdf", false)),
         ];
         let atts = attachments_from_tags(tags.iter(), &dir);
@@ -355,13 +355,13 @@ mod tests {
     #[test]
     fn non_imeta_and_incomplete_tags_are_skipped() {
         let dir = std::env::temp_dir();
-        let not_imeta = Tag::custom(TagKind::Custom("e".into()), ["abc"]);
+        let not_imeta = Tag::custom("e", ["abc"]);
         assert!(attachment_from_imeta(&not_imeta, &dir).is_none());
         // No `url` at all → None (NIP-92 requires a url).
-        let no_url = Tag::custom(TagKind::Custom("imeta".into()), ["m image/png"]);
+        let no_url = Tag::custom("imeta", ["m image/png"]);
         assert!(attachment_from_imeta(&no_url, &dir).is_none());
         // A url-only imeta is valid now — an unencrypted (plaintext) attachment.
-        let plain = Tag::custom(TagKind::Custom("imeta".into()), ["url https://x/y"]);
+        let plain = Tag::custom("imeta", ["url https://x/y"]);
         assert!(attachment_from_imeta(&plain, &dir).is_some(), "url-only imeta = plaintext attachment");
     }
 
@@ -404,7 +404,7 @@ mod tests {
         // attacker-controlled. A non-hex / traversal basis must be refused, never joined
         // into a filesystem path.
         let dir = std::path::Path::new("/tmp/vector-test-dl");
-        let traversal = Tag::custom(TagKind::Custom("imeta".into()), [
+        let traversal = Tag::custom("imeta", [
             "url https://x/y",
             "decryption-key 00",
             "decryption-nonce 11",
@@ -413,7 +413,7 @@ mod tests {
         assert!(attachment_from_imeta(&traversal, dir).is_none(), "traversal ox rejected");
 
         // Falls back to nonce when ox absent — a non-hex nonce is likewise rejected.
-        let bad_nonce = Tag::custom(TagKind::Custom("imeta".into()), [
+        let bad_nonce = Tag::custom("imeta", [
             "url https://x/y",
             "decryption-key 00",
             "decryption-nonce ../evil",
@@ -421,7 +421,7 @@ mod tests {
         assert!(attachment_from_imeta(&bad_nonce, dir).is_none(), "traversal nonce rejected");
 
         // A legitimate hex basis still parses.
-        let good = Tag::custom(TagKind::Custom("imeta".into()), [
+        let good = Tag::custom("imeta", [
             "url https://x/y".to_string(),
             "decryption-key 00".to_string(),
             "decryption-nonce 11".to_string(),
@@ -437,7 +437,7 @@ mod tests {
         // NO decryption params. It must parse (empty key/nonce = plaintext) so we can
         // best-effort render it, identity keyed by the `x` content hash.
         let x = "b".repeat(64);
-        let tag = Tag::custom(TagKind::Custom("imeta".into()), [
+        let tag = Tag::custom("imeta", [
             "url https://blossom.ditto.pub/abc.png".to_string(),
             "m image/png".to_string(),
             "dim 640x480".to_string(),
@@ -450,7 +450,7 @@ mod tests {
         assert_eq!(att.extension, "png");
 
         // Half-specified encryption (key without a nonce) is still refused.
-        let half = Tag::custom(TagKind::Custom("imeta".into()), ["url https://x/y", "decryption-key 00"]);
+        let half = Tag::custom("imeta", ["url https://x/y", "decryption-key 00"]);
         assert!(attachment_from_imeta(&half, &dir).is_none(), "key without nonce dropped");
     }
 
@@ -476,7 +476,7 @@ mod tests {
     fn malformed_imeta_does_not_panic_and_drops_gracefully() {
         let dir = std::env::temp_dir();
         // Garbage entries, duplicate keys, value-less keys, weird spacing — must not panic.
-        let junk = Tag::custom(TagKind::Custom("imeta".into()), [
+        let junk = Tag::custom("imeta", [
             "url",                 // no value (skipped: `field` needs `key<space>`)
             "decryption-key",      // no value
             "random noise here",
@@ -489,11 +489,11 @@ mod tests {
         assert!(att.key.is_empty() && att.nonce.is_empty());
 
         // No url anywhere → None (not a panic).
-        let no_url = Tag::custom(TagKind::Custom("imeta".into()), ["m image/png", "random"]);
+        let no_url = Tag::custom("imeta", ["m image/png", "random"]);
         assert!(attachment_from_imeta(&no_url, &dir).is_none());
 
         // Empty imeta (just the tag name) → None.
-        let empty = Tag::custom(TagKind::Custom("imeta".into()), Vec::<String>::new());
+        let empty = Tag::custom("imeta", Vec::<String>::new());
         assert!(attachment_from_imeta(&empty, &dir).is_none());
     }
 }

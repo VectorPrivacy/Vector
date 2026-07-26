@@ -24,7 +24,7 @@
 //! - **Reactions**: `Kind::Reaction` - Emoji reactions to messages
 //! - **Typing Indicators**: `Kind::ApplicationSpecificData` - Real-time typing status
 
-use std::borrow::Cow;
+use crate::tags::TagsExt;
 use std::path::Path;
 use nostr_sdk::prelude::*;
 use crate::types::{Message, Attachment, ImageMetadata, Reaction};
@@ -261,7 +261,7 @@ fn process_unknown_event(
 
     // Extract reference_id from e-tag if present
     let reference_id = rumor.tags
-        .find(TagKind::e())
+        .find_kind("e")
         .and_then(|tag| tag.content())
         .map(|s| s.to_string());
 
@@ -353,20 +353,20 @@ fn process_file_attachment(
 ) -> Result<RumorProcessingResult, String> {
     // Extract decryption parameters
     let decryption_key = rumor.tags
-        .find(TagKind::Custom(Cow::Borrowed("decryption-key")))
+        .find_kind("decryption-key")
         .and_then(|tag| tag.content())
         .ok_or("Missing decryption-key tag")?
         .to_string();
 
     let decryption_nonce = rumor.tags
-        .find(TagKind::Custom(Cow::Borrowed("decryption-nonce")))
+        .find_kind("decryption-nonce")
         .and_then(|tag| tag.content())
         .ok_or("Missing decryption-nonce tag")?
         .to_string();
 
     // Extract original file hash (ox tag) if present
     let original_file_hash = rumor.tags
-        .find(TagKind::Custom(Cow::Borrowed("ox")))
+        .find_kind("ox")
         .and_then(|tag| tag.content())
         .map(|s| s.to_string());
 
@@ -387,13 +387,13 @@ fn process_file_attachment(
         // silently drops and the image renders as a generic file box with no
         // preview — the bug this belt-and-braces read exists to prevent.
         let thumbhash_opt = rumor.tags
-            .find(TagKind::Custom(Cow::Borrowed("thumbhash")))
-            .or_else(|| rumor.tags.find(TagKind::Custom(Cow::Borrowed("thumb"))))
+            .find_kind("thumbhash")
+            .or_else(|| rumor.tags.find_kind("thumb"))
             .and_then(|tag| tag.content())
             .map(|s| s.to_string());
 
         let dimensions_opt = rumor.tags
-            .find(TagKind::Custom(Cow::Borrowed("dim")))
+            .find_kind("dim")
             .and_then(|tag| tag.content())
             .and_then(|s| {
                 let parts: Vec<&str> = s.split('x').collect();
@@ -420,14 +420,14 @@ fn process_file_attachment(
 
     // Figure out the file extension: prefer the name tag's extension, fall back to MIME-derived
     let mime_type = rumor.tags
-        .find(TagKind::Custom(Cow::Borrowed("file-type")))
+        .find_kind("file-type")
         .and_then(|tag| tag.content())
         .ok_or("Missing file-type tag")?;
     let mime_extension = extension_from_mime(mime_type);
 
     // Extract filename from name tag (used for extension override and display name)
     let file_name = rumor.tags
-        .find(TagKind::Custom(Cow::Borrowed("name")))
+        .find_kind("name")
         .and_then(|tag| tag.content())
         .map(|s| sanitize_filename(s))
         .unwrap_or_default();
@@ -445,7 +445,7 @@ fn process_file_attachment(
 
     // Grab the reported file size
     let reported_size = rumor.tags
-        .find(TagKind::Custom(Cow::Borrowed("size")))
+        .find_kind("size")
         .and_then(|tag| tag.content())
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(0);
@@ -485,7 +485,7 @@ fn process_file_attachment(
     // Bounded sanity (mirrors the Community parser): base32 alphabet only,
     // 32-byte payload (52 chars); anything else is dropped, not propagated.
     let webxdc_topic = rumor.tags
-        .find(TagKind::Custom(Cow::Borrowed("webxdc-topic")))
+        .find_kind("webxdc-topic")
         .and_then(|tag| tag.content())
         .filter(|t| t.len() == 52 && t.bytes().all(|b| b.is_ascii_uppercase() || (b'2'..=b'7').contains(&b)))
         .map(|s| s.to_string());
@@ -551,7 +551,7 @@ fn process_file_attachment(
 /// wrong target — reject ambiguity for every transport (shared hardening; honest senders emit exactly
 /// one `e` tag). This mirrors Concord's `unique_tag` discipline and extends it to DMs.
 fn unique_event_ref(rumor: &RumorEvent) -> Option<String> {
-    let mut matches = rumor.tags.iter().filter(|t| t.kind() == TagKind::e());
+    let mut matches = rumor.tags.iter().filter(|t| t.kind() == "e");
     let first = matches.next()?;
     if matches.next().is_some() {
         return None;
@@ -703,7 +703,7 @@ fn process_app_specific(
     // Check if this is a typing indicator
     if is_typing_indicator(&rumor) {
         let expiry_tag = rumor.tags
-            .find(TagKind::Expiration)
+            .find_kind("expiration")
             .ok_or("Typing indicator missing expiration tag")?;
 
         let expiry_timestamp: u64 = expiry_tag.content()
@@ -743,19 +743,19 @@ fn process_app_specific(
     // Check if this is a PIVX payment
     if is_pivx_payment(&rumor) {
         let gift_code = rumor.tags
-            .find(TagKind::Custom(Cow::Borrowed("gift-code")))
+            .find_kind("gift-code")
             .and_then(|tag| tag.content())
             .ok_or("PIVX payment missing gift-code tag")?
             .to_string();
 
         let amount_str = rumor.tags
-            .find(TagKind::Custom(Cow::Borrowed("amount")))
+            .find_kind("amount")
             .and_then(|tag| tag.content())
             .unwrap_or("0");
         let amount_piv = amount_str.parse::<u64>().unwrap_or(0) as f64 / 100_000_000.0;
 
         let address = rumor.tags
-            .find(TagKind::Custom(Cow::Borrowed("address")))
+            .find_kind("address")
             .and_then(|tag| tag.content())
             .map(|s| s.to_string());
 
@@ -794,35 +794,35 @@ fn process_app_specific(
         // so they're optional here; the apply step treats an empty url as
         // "revert to default theme".
         let url = rumor.tags
-            .find(TagKind::Custom(Cow::Borrowed("url")))
+            .find_kind("url")
             .and_then(|tag| tag.content())
             .unwrap_or_default()
             .to_string();
         let decryption_key = rumor.tags
-            .find(TagKind::Custom(Cow::Borrowed("decryption-key")))
+            .find_kind("decryption-key")
             .and_then(|tag| tag.content())
             .unwrap_or_default()
             .to_string();
         let decryption_nonce = rumor.tags
-            .find(TagKind::Custom(Cow::Borrowed("decryption-nonce")))
+            .find_kind("decryption-nonce")
             .and_then(|tag| tag.content())
             .unwrap_or_default()
             .to_string();
         let plaintext_hash = rumor.tags
-            .find(TagKind::Custom(Cow::Borrowed("x")))
+            .find_kind("x")
             .and_then(|tag| tag.content())
             .map(|s| s.to_string());
         let mime = rumor.tags
-            .find(TagKind::Custom(Cow::Borrowed("m")))
+            .find_kind("m")
             .and_then(|tag| tag.content())
             .map(|s| s.to_string());
         let blur = rumor.tags
-            .find(TagKind::Custom(Cow::Borrowed("blur")))
+            .find_kind("blur")
             .and_then(|tag| tag.content())
             .and_then(|s| s.parse::<u32>().ok())
             .map(|n| n.min(30) as u8);
         let dim = rumor.tags
-            .find(TagKind::Custom(Cow::Borrowed("dim")))
+            .find_kind("dim")
             .and_then(|tag| tag.content())
             .and_then(|s| s.parse::<u32>().ok())
             .map(|n| n.min(100) as u8);
@@ -855,13 +855,13 @@ fn process_app_specific(
         log_info!("[WEBXDC] Detected peer advertisement in rumor from another device");
 
         let topic_id = rumor.tags
-            .find(TagKind::Custom(Cow::Borrowed("webxdc-topic")))
+            .find_kind("webxdc-topic")
             .and_then(|tag| tag.content())
             .ok_or("Peer advertisement missing webxdc-topic tag")?
             .to_string();
 
         let node_addr = rumor.tags
-            .find(TagKind::Custom(Cow::Borrowed("webxdc-node-addr")))
+            .find_kind("webxdc-node-addr")
             .and_then(|tag| tag.content())
             .ok_or("Peer advertisement missing webxdc-node-addr tag")?
             .to_string();
@@ -885,7 +885,7 @@ fn process_app_specific(
         log_info!("[WEBXDC] Detected peer-left signal from another device");
 
         let topic_id = rumor.tags
-            .find(TagKind::Custom(Cow::Borrowed("webxdc-topic")))
+            .find_kind("webxdc-topic")
             .and_then(|tag| tag.content())
             .ok_or("Peer-left missing webxdc-topic tag")?
             .to_string();
@@ -906,24 +906,24 @@ fn process_app_specific(
 /// Check if a rumor is a WebXDC peer advertisement
 fn is_webxdc_peer_advertisement(rumor: &RumorEvent) -> bool {
     rumor.content == "peer-advertisement"
-        && rumor.tags.find(TagKind::Custom(Cow::Borrowed("webxdc-topic"))).is_some()
-        && rumor.tags.find(TagKind::Custom(Cow::Borrowed("webxdc-node-addr"))).is_some()
+        && rumor.tags.find_kind("webxdc-topic").is_some()
+        && rumor.tags.find_kind("webxdc-node-addr").is_some()
 }
 
 /// Check if a rumor is a WebXDC peer-left signal
 fn is_webxdc_peer_left(rumor: &RumorEvent) -> bool {
     rumor.content == "peer-left"
-        && rumor.tags.find(TagKind::Custom(Cow::Borrowed("webxdc-topic"))).is_some()
+        && rumor.tags.find_kind("webxdc-topic").is_some()
 }
 
 /// Check if a rumor is a PIVX payment
 fn is_pivx_payment(rumor: &RumorEvent) -> bool {
     rumor.tags
-        .find(TagKind::d())
+        .find_kind("d")
         .and_then(|tag| tag.content())
         .map(|content| content == "pivx-payment")
         .unwrap_or(false)
-        && rumor.tags.find(TagKind::Custom(Cow::Borrowed("gift-code"))).is_some()
+        && rumor.tags.find_kind("gift-code").is_some()
 }
 
 // ============================================================================
@@ -936,7 +936,7 @@ fn is_pivx_payment(rumor: &RumorEvent) -> bool {
 /// to provide millisecond precision for accurate message ordering.
 fn extract_millisecond_timestamp(rumor: &RumorEvent) -> u64 {
     let ms_tag = rumor.tags
-        .find(TagKind::Custom(Cow::Borrowed("ms")))
+        .find_kind("ms")
         .and_then(|t| t.content());
     resolve_message_timestamp(rumor.created_at.as_secs(), ms_tag)
 }
@@ -970,29 +970,19 @@ pub fn resolve_message_timestamp(created_at_secs: u64, ms_tag: Option<&str>) -> 
 /// Looks for an "e" tag with the "reply" marker to identify
 /// which message this rumor is replying to.
 fn extract_reply_reference(rumor: &RumorEvent) -> String {
-    match rumor.tags.find(TagKind::e()) {
-        Some(tag) => {
-            // Check via SDK method first, then fallback to manual marker check
-            // (Tag::custom may not set internal reply flag)
-            if tag.is_reply() {
-                tag.content().unwrap_or("").to_string()
-            } else {
-                let slice = tag.as_slice();
-                if slice.get(3).map(|s| s == "reply").unwrap_or(false) {
-                    tag.content().unwrap_or("").to_string()
-                } else {
-                    String::new()
-                }
-            }
+    match rumor.tags.find_kind("e") {
+        // Marker sits at index 3 of the raw tag (`["e", id, relay, "reply"]`).
+        Some(tag) if tag.as_slice().get(3).is_some_and(|s| s == "reply") => {
+            tag.content().unwrap_or("").to_string()
         }
-        None => String::new(),
+        _ => String::new(),
     }
 }
 
 /// Check if rumor is a typing indicator
 fn is_typing_indicator(rumor: &RumorEvent) -> bool {
     let has_vector_tag = rumor.tags
-        .find(TagKind::d())
+        .find_kind("d")
         .and_then(|tag| tag.content())
         .map(|content| content == "vector")
         .unwrap_or(false);
@@ -1005,7 +995,7 @@ fn is_typing_indicator(rumor: &RumorEvent) -> bool {
 /// Check if rumor is a wallpaper-change application-data event.
 fn is_wallpaper_change(rumor: &RumorEvent) -> bool {
     rumor.tags
-        .find(TagKind::d())
+        .find_kind("d")
         .and_then(|tag| tag.content())
         .map(|content| content == "vector-wallpaper")
         .unwrap_or(false)
@@ -1014,7 +1004,7 @@ fn is_wallpaper_change(rumor: &RumorEvent) -> bool {
 /// Check if rumor is a leave request
 fn is_leave_request(rumor: &RumorEvent) -> bool {
     let has_vector_tag = rumor.tags
-        .find(TagKind::d())
+        .find_kind("d")
         .and_then(|tag| tag.content())
         .map(|content| content == "vector")
         .unwrap_or(false);
@@ -1054,13 +1044,13 @@ mod tests {
     fn ambiguous_target_is_rejected_for_reaction_edit_delete() {
         let keys = test_keypair();
         let two_e = || tags(vec![
-            Tag::custom(TagKind::e(), ["aa".repeat(32)]),
-            Tag::custom(TagKind::e(), ["bb".repeat(32)]),
+            Tag::custom("e", ["aa".repeat(32)]),
+            Tag::custom("e", ["bb".repeat(32)]),
         ]);
         assert!(process_rumor(make_rumor(&keys, Kind::Reaction, "🔥", two_e()), dm_context(&keys), &temp_dir()).is_err());
         assert!(process_rumor(make_rumor(&keys, Kind::EventDeletion, "", two_e()), dm_context(&keys), &temp_dir()).is_err());
         assert!(process_rumor(make_rumor(&keys, Kind::from(event_kind::MESSAGE_EDIT), "edited", two_e()), dm_context(&keys), &temp_dir()).is_err());
-        let one_e = tags(vec![Tag::custom(TagKind::e(), ["aa".repeat(32)])]);
+        let one_e = tags(vec![Tag::custom("e", ["aa".repeat(32)])]);
         assert!(process_rumor(make_rumor(&keys, Kind::Reaction, "🔥", one_e), dm_context(&keys), &temp_dir()).is_ok());
     }
 
@@ -1080,7 +1070,7 @@ mod tests {
     /// Create a custom tag (e.g., ["ms", "456"])
     fn custom_tag(key: &str, values: &[&str]) -> Tag {
         let owned: Vec<String> = values.iter().map(|s| s.to_string()).collect();
-        Tag::custom(TagKind::custom(key.to_string()), owned)
+        Tag::custom(key.to_string(), owned)
     }
 
     fn make_rumor(keys: &Keys, kind: Kind, content: &str, t: Tags) -> RumorEvent {
@@ -1153,7 +1143,7 @@ mod tests {
     fn test_text_message_with_reply() {
         let keys = test_keypair();
         let t = tags(vec![
-            Tag::custom(TagKind::e(), ["abc123def456".to_string(), String::new(), "reply".to_string()]),
+            Tag::custom("e", ["abc123def456".to_string(), String::new(), "reply".to_string()]),
         ]);
         let rumor = make_rumor(&keys, Kind::PrivateDirectMessage, "Reply text", t);
         let ctx = dm_context(&keys);

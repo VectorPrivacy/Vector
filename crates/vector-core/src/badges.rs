@@ -57,10 +57,13 @@ pub async fn has_fawkes_badge(pubkey: &PublicKey) -> Result<bool, String> {
         // event alongside the current one.
         .limit(10);
     let mut events = client
-        .stream_events(filter, std::time::Duration::from_secs(10))
+        .stream_events(filter)
+        .timeout(std::time::Duration::from_secs(10))
         .await
         .map_err(|e| e.to_string())?;
-    while let Some(event) = events.next().await {
+    // 0.45 streams (relay, Result<Event>) so callers can attribute per-relay failures.
+    while let Some((_relay, res)) = events.next().await {
+        let Ok(event) = res else { continue };
         if is_valid_fawkes_claim(&event.content, event.created_at.as_secs()) {
             return Ok(true);
         }
@@ -302,10 +305,12 @@ async fn fetch_bug_hunter_raw(pubkey: &PublicKey) -> Result<(Vec<(EventId, u8)>,
         .limit(64);
     let mut awards: Vec<(EventId, u8)> = Vec::new();
     let mut stream = client
-        .stream_events(award_filter, std::time::Duration::from_secs(10))
+        .stream_events(award_filter)
+        .timeout(std::time::Duration::from_secs(10))
         .await
         .map_err(|e| e.to_string())?;
-    while let Some(ev) = stream.next().await {
+    while let Some((_relay, res)) = stream.next().await {
+        let Ok(ev) = res else { continue };
         let coord = ev.tags.iter().find_map(|t| {
             let s = t.as_slice();
             if s.first().map(|k| k == "a").unwrap_or(false) {
@@ -328,10 +333,12 @@ async fn fetch_bug_hunter_raw(pubkey: &PublicKey) -> Result<(Vec<(EventId, u8)>,
         .limit(256);
     let mut revoked: HashSet<EventId> = HashSet::new();
     let mut rstream = client
-        .stream_events(revoke_filter, std::time::Duration::from_secs(10))
+        .stream_events(revoke_filter)
+        .timeout(std::time::Duration::from_secs(10))
         .await
         .map_err(|e| e.to_string())?;
-    while let Some(ev) = rstream.next().await {
+    while let Some((_relay, res)) = rstream.next().await {
+        let Ok(ev) = res else { continue };
         for t in ev.tags.iter() {
             let s = t.as_slice();
             if s.first().map(|k| k == "e").unwrap_or(false) {

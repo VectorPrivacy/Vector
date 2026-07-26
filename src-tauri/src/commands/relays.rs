@@ -13,6 +13,7 @@ use nostr_sdk::prelude::*;
 use tauri::{AppHandle, Emitter, Runtime};
 
 use crate::{nostr_client, TAURI_APP, get_blossom_servers};
+use vector_core::ClientRelayExt;
 
 // ============================================================================
 // Constants
@@ -125,32 +126,35 @@ pub fn validate_relay_url(url: &str) -> Result<String, String> {
 }
 
 /// Add a relay to the pool with race-safe handling of Tor bootstrap completing
-/// mid-call. The relay's stored `connection_mode` is captured at `add_relay`
-/// time. If the user was bootstrapping when we built options but bootstrap
-/// completes before we'd connect, the stored options point at the blackhole
-/// while the live transport is now the actual proxy. Detect this transition
-/// and refresh by cycling the relay; otherwise just add. The closure is
-/// invoked twice only on the rare race path.
+/// mid-call. nostr 0.45 resolves the proxy per connection attempt rather than
+/// storing it at `add_relay` time, so the old blackhole-goes-stale race (and the
+/// remove/re-add cycle that compensated for it) is gone: a relay added mid-bootstrap
+/// simply picks up the live transport when it connects.
 async fn add_relay_failsafe<F>(
-    client: &nostr_sdk::Client,
+    client: &nostr_sdk::prelude::Client,
     url: &str,
-    mut make_opts: F,
-) -> Result<(), nostr_sdk::client::Error>
+    mut make_caps: F,
+) -> Result<(), nostr_sdk::prelude::Error>
 where
-    F: FnMut() -> nostr_sdk::RelayOptions,
+    F: FnMut() -> nostr_sdk::prelude::RelayCapabilities,
 {
-    let was_deferring = defer_connect_for_bootstrap();
-    let newly_added = client.pool().add_relay(url, make_opts()).await?;
+    let newly_added = client
+        .add_managed_relay(url)
+        .capabilities(make_caps())
+        .await?;
 
-    // Promotion: the relay was already pooled — possibly a GOSSIP|PING Community relay
-    // (`community_relay_options`). The user is now adding it as their OWN relay, so grant READ+WRITE
-    // on the existing handle. Additive + in-place: keeps the single live connection and any Community
-    // subscription intact (no disconnect), and lets pool-wide DM/profile ops use it.
+    // Promotion: the relay was already pooled — possibly a GOSSIP Community relay
+    // (`community_relay_capabilities`). The user is now adding it as their OWN relay, so grant
+    // READ+WRITE on the existing handle. Additive + in-place: keeps the single live connection and any
+    // Community subscription intact (no disconnect), and lets pool-wide DM/profile ops use it.
     if !newly_added {
-        // all_relays(): a pre-existing GOSSIP-only community relay isn't in `relays()` (READ/WRITE only).
-        if let Ok(parsed) = nostr_sdk::RelayUrl::parse(url) {
-            if let Some(relay) = client.pool().all_relays().await.get(&parsed) {
-                relay.flags().add(nostr_sdk::RelayServiceFlags::READ | nostr_sdk::RelayServiceFlags::WRITE);
+        // relays().all(): a pre-existing GOSSIP-only community relay isn't in `relays()` (READ/WRITE only).
+        if let Ok(parsed) = nostr_sdk::prelude::RelayUrl::parse(url) {
+            if let Some(relay) = client.relays().all().await.get(&parsed) {
+                relay.capabilities().add(
+                    nostr_sdk::prelude::RelayCapabilities::READ
+                        | nostr_sdk::prelude::RelayCapabilities::WRITE,
+                );
             }
         }
     }
@@ -161,15 +165,7 @@ where
         return Ok(());
     }
 
-    if was_deferring {
-        // Bootstrap completed between the options-capture and now. Stored
-        // mode is stale (blackhole), refresh by cycling. Propagate the
-        // re-add error so the caller can log it; otherwise a vanished
-        // relay would be reported as success.
-        let _ = client.remove_relay(url).await;
-        client.pool().add_relay(url, make_opts()).await?;
-    }
-    if let Err(e) = client.pool().connect_relay(url).await {
+    if let Err(e) = client.connect_relay(url).await {
         eprintln!("[Relay] connect_relay({}) failed: {}", url, e);
     }
     Ok(())
@@ -229,14 +225,14 @@ pub fn update_relay_metrics(url: &str, update_fn: impl FnOnce(&mut RelayMetrics)
 /// Helper to build RelayOptions based on mode. Tor-aware: when the embedded
 /// Tor service is active, the returned options carry `ConnectionMode::proxy`
 /// so the new relay socket comes up through Tor immediately.
-pub fn relay_options_for_mode(mode: &str) -> RelayOptions {
-    let opts = RelayOptions::new().reconnect(false);
-    let opts = match mode {
-        "read" => opts.write(false),
-        "write" => opts.read(false),
-        _ => opts,
-    };
-    vector_core::tor_aware_relay_options(opts)
+pub fn relay_capabilities_for_mode(mode: &str) -> nostr_sdk::prelude::RelayCapabilities {
+    use nostr_sdk::prelude::RelayCapabilities;
+    // read/write were RelayOptions in 0.44; 0.45 models them as capabilities.
+    match mode {
+        "read" => RelayCapabilities::READ,
+        "write" => RelayCapabilities::WRITE,
+        _ => RelayCapabilities::READ | RelayCapabilities::WRITE,
+    }
 }
 
 /// Resolve the desired *enabled* relay set — the "north star" the reconcile
@@ -409,6 +405,7 @@ pub async fn get_relays<R: Runtime>(handle: AppHandle<R>) -> Result<Vec<RelayInf
                 RelayStatus::Connected => "connected",
                 RelayStatus::Disconnected => "disconnected",
                 RelayStatus::Terminated => "terminated",
+                RelayStatus::Shutdown => "shutdown",
                 RelayStatus::Banned => "banned",
                 RelayStatus::Sleeping => "sleeping",
             };
@@ -437,6 +434,7 @@ pub async fn get_relays<R: Runtime>(handle: AppHandle<R>) -> Result<Vec<RelayInf
                 RelayStatus::Connected => "connected",
                 RelayStatus::Disconnected => "disconnected",
                 RelayStatus::Terminated => "terminated",
+                RelayStatus::Shutdown => "shutdown",
                 RelayStatus::Banned => "banned",
                 RelayStatus::Sleeping => "sleeping",
             }.to_string()
@@ -490,8 +488,8 @@ fn spawn_probe_for_server(server_url: String) {
         // local GuardedSigner, bunker accounts get NostrConnect (so the
         // probe auth event is signed by the user identity, not the client
         // device key).
-        let client = match crate::nostr_client() { Some(c) => c, None => return };
-        let signer = match client.signer().await { Ok(s) => s, Err(_) => return };
+        let _client = match crate::nostr_client() { Some(c) => c, None => return };
+        let signer = match vector_core::signer::active_signer() { Ok(s) => s, Err(_) => return };
         match vector_core::blossom::probe_servers_for_octet_stream(
             signer, vec![server_url], session,
         ).await {
@@ -654,7 +652,7 @@ pub async fn toggle_default_relay<R: Runtime>(handle: AppHandle<R>, url: String,
             // doesn't come up Direct when Tor is on (or pre-bootstrap). The
             // failsafe helper handles the boot-completes-mid-call race.
             match add_relay_failsafe(&client, &normalized_url, || {
-                vector_core::tor_aware_relay_options(RelayOptions::new().reconnect(false))
+                relay_capabilities_for_mode("both")
             }).await {
                 Ok(_) => {
                     if defer_connect_for_bootstrap() {
@@ -666,7 +664,7 @@ pub async fn toggle_default_relay<R: Runtime>(handle: AppHandle<R>, url: String,
                 Err(e) => eprintln!("[Relay] Failed to enable default relay: {}", e),
             }
         } else {
-            if let Err(e) = client.pool().remove_relay(&normalized_url).await {
+            if let Err(e) = client.remove_relay(&normalized_url).await {
                 eprintln!("[Relay] Note: Could not disable default relay in pool: {}", e);
             } else {
                 println!("[Relay] Disabled default relay: {}", normalized_url);
@@ -711,7 +709,7 @@ pub async fn add_custom_relay<R: Runtime>(handle: AppHandle<R>, url: String, mod
     if let Some(client) = nostr_client() {
         if client.relays().await.len() > 0 {
             match add_relay_failsafe(&client, &new_relay.url, || {
-                relay_options_for_mode(&relay_mode)
+                relay_capabilities_for_mode(&relay_mode)
             }).await {
                 Ok(_) => {
                     println!("[Relay] Added custom relay to pool: {} (mode: {})", new_relay.url, relay_mode);
@@ -743,7 +741,7 @@ pub async fn remove_custom_relay<R: Runtime>(handle: AppHandle<R>, url: String) 
     save_custom_relays(&handle, &relays).await?;
 
     if let Some(client) = nostr_client() {
-        if let Err(e) = client.pool().remove_relay(&url).await {
+        if let Err(e) = client.remove_relay(&url).await {
             eprintln!("[Relay] Note: Could not remove relay from pool: {}", e);
         } else {
             println!("[Relay] Removed custom relay from pool: {}", url);
@@ -782,12 +780,12 @@ pub async fn toggle_custom_relay<R: Runtime>(handle: AppHandle<R>, url: String, 
 
     if let Some(client) = nostr_client() {
         if enabled {
-            match add_relay_failsafe(&client, &url, || relay_options_for_mode(&relay_mode)).await {
+            match add_relay_failsafe(&client, &url, || relay_capabilities_for_mode(&relay_mode)).await {
                 Ok(_) => println!("[Relay] Enabled custom relay: {} (mode: {})", url, relay_mode),
                 Err(e) => eprintln!("[Relay] Failed to enable relay: {}", e),
             }
         } else {
-            if let Err(e) = client.pool().remove_relay(&url).await {
+            if let Err(e) = client.remove_relay(&url).await {
                 eprintln!("[Relay] Note: Could not disable relay in pool: {}", e);
             } else {
                 println!("[Relay] Disabled custom relay: {}", url);
@@ -829,8 +827,8 @@ pub async fn update_relay_mode<R: Runtime>(handle: AppHandle<R>, url: String, mo
 
     if is_enabled {
         if let Some(client) = nostr_client() {
-            let _ = client.pool().remove_relay(&url).await;
-            match add_relay_failsafe(&client, &url, || relay_options_for_mode(&mode)).await {
+            let _ = client.remove_relay(&url).await;
+            match add_relay_failsafe(&client, &url, || relay_capabilities_for_mode(&mode)).await {
                 Ok(_) => println!("[Relay] Updated relay mode: {} -> {}", url, mode),
                 Err(e) => {
                     eprintln!("[Relay] Failed to update relay mode: {}", e);
@@ -938,7 +936,7 @@ async fn local_relay_view<R: Runtime>(handle: &AppHandle<R>) -> (Vec<String>, Ve
 /// remote list deliberately dropped).
 async fn apply_inbound_reconcile<R: Runtime>(
     handle: &AppHandle<R>,
-    client: &nostr_sdk::Client,
+    client: &nostr_sdk::prelude::Client,
     session: &vector_core::state::SessionGuard,
     plan: vector_core::inbox_relays::InboundReconcile,
     remote_ts: u64,
@@ -1013,7 +1011,7 @@ async fn apply_inbound_reconcile<R: Runtime>(
 
     // Pool reconciliation for what was actually applied.
     for url in &applied_adopts {
-        if let Err(e) = add_relay_failsafe(client, url, || relay_options_for_mode("both")).await {
+        if let Err(e) = add_relay_failsafe(client, url, || relay_capabilities_for_mode("both")).await {
             eprintln!("[Relay] Adopted relay add failed for {}: {}", url, e);
         }
         println!("[Relay] Adopted from DM relay list: {}", url);
@@ -1025,11 +1023,11 @@ async fn apply_inbound_reconcile<R: Runtime>(
             .find(|c| norm(&c.url) == norm(url))
             .map(|c| c.mode.clone())
             .unwrap_or_else(|| "both".to_string());
-        let _ = add_relay_failsafe(client, url, || relay_options_for_mode(&mode)).await;
+        let _ = add_relay_failsafe(client, url, || relay_capabilities_for_mode(&mode)).await;
         println!("[Relay] Re-enabled from DM relay list: {}", url);
     }
     for url in &applied_retires {
-        let _ = client.pool().remove_relay(url.as_str()).await;
+        let _ = client.remove_relay(url.as_str()).await;
         restore_discovery_role(client, url).await;
         println!("[Relay] Retired (removed on another device): {}", url);
         add_relay_log(url, "info", "Disabled (removed from your DM relay list elsewhere)");
@@ -1057,8 +1055,8 @@ async fn restore_discovery_role(client: &Client, url: &str) {
     if !is_discovery {
         return;
     }
-    let pool = client.pool();
-    if pool.add_relay(url, vector_core::discovery_relay_options()).await.is_ok() {
+    let pool = client.clone();
+    if pool.add_managed_relay(url).capabilities(vector_core::discovery_relay_capabilities()).await.is_ok() {
         let _ = pool.connect_relay(url).await;
         println!("[Relay] Restored Discovery Relay role: {}", url);
     }
@@ -1115,6 +1113,7 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                         RelayStatus::Connected => "connected",
                         RelayStatus::Disconnected => "disconnected",
                         RelayStatus::Terminated => "terminated",
+                RelayStatus::Shutdown => "shutdown",
                         RelayStatus::Banned => "banned",
                         RelayStatus::Sleeping => "sleeping",
                     };
@@ -1178,13 +1177,13 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                         .limit(1);
 
                     let start = std::time::Instant::now();
+                    // A false "unhealthy" verdict costs a full disconnect/reconnect cycle,
+                    // so the probe budget has to follow the transport in use.
+                    let probe = vector_core::relay_request_timeout(std::time::Duration::from_secs(8));
                     let result = tokio::time::timeout(
-                        std::time::Duration::from_secs(10),
-                        client_health.fetch_events_from(
-                            vec![url.to_string()],
-                            test_filter,
-                            std::time::Duration::from_secs(8)
-                        )
+                        probe + std::time::Duration::from_secs(2),
+                        client_health.fetch_events(nostr_sdk::prelude::ReqTarget::manual(vec![url.to_string()].into_iter().map(|u| (u, vec![test_filter.clone()]))))
+                            .timeout(probe)
                     ).await;
 
                     let elapsed = start.elapsed();
@@ -1207,7 +1206,7 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                             let _ = relay.disconnect();
                             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                             add_relay_log(&url_str, "info", "Attempting reconnection...");
-                            let _ = relay.try_connect(std::time::Duration::from_secs(10)).await;
+                            let _ = relay.try_connect().timeout(vector_core::relay_connect_timeout(std::time::Duration::from_secs(10))).await;
                             let _ = handle_health.emit("relay_health_check", serde_json::json!({
                                 "url": url_str,
                                 "healthy": false,
@@ -1219,7 +1218,7 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                             let _ = relay.disconnect();
                             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                             add_relay_log(&url_str, "info", "Attempting reconnection...");
-                            let _ = relay.try_connect(std::time::Duration::from_secs(10)).await;
+                            let _ = relay.try_connect().timeout(vector_core::relay_connect_timeout(std::time::Duration::from_secs(10))).await;
                             let _ = handle_health.emit("relay_health_check", serde_json::json!({
                                 "url": url_str,
                                 "healthy": false,
@@ -1227,10 +1226,13 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                             }));
                         }
                     }
-                } else if status == RelayStatus::Terminated || status == RelayStatus::Disconnected {
+                // Not `Disconnected`/`Pending`: `try_connect` is a silent no-op on both.
+                // The reconcile loop rescues Pending, and a Disconnected relay is one
+                // whose own reconnect is enabled and already retrying.
+                } else if status == RelayStatus::Terminated || status == RelayStatus::Sleeping {
                     let url_str = url.to_string();
                     add_relay_log(&url_str, "info", "Attempting reconnection...");
-                    let _ = relay.try_connect(std::time::Duration::from_secs(10)).await;
+                    let _ = relay.try_connect().timeout(vector_core::relay_connect_timeout(std::time::Duration::from_secs(10))).await;
                     let _ = handle_health.emit("relay_health_check", serde_json::json!({
                         "url": url_str,
                         "healthy": false,
@@ -1243,20 +1245,24 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
         }
     });
 
-    // Pool reconcile: nostr-sdk auto-reconnect is off by design, so a relay
-    // that drops can leave the pool entirely and never return on its own.
+    // Pool reconcile: nostr-sdk auto-reconnect is off by design (every registration
+    // goes through `add_managed_relay`), so a relay that drops can leave the pool
+    // entirely and never return on its own.
     // Every 10s, re-add any enabled relay missing from the pool and reconnect
     // dead ones; the short warmup covers the startup window. Re-resolves the
     // active client each pass so an account swap can't reconcile a stale pool.
     let handle_recon = handle.clone();
     tokio::spawn(async move {
         let norm = |u: &str| u.trim_end_matches('/').to_ascii_lowercase();
+        // First time each relay was seen sitting in `Pending`. See the rescue below.
+        let mut pending_since: std::collections::HashMap<String, std::time::Instant> =
+            std::collections::HashMap::new();
         tokio::time::sleep(std::time::Duration::from_secs(8)).await;
 
         loop {
             if let Some(client) = nostr_client() {
                 let desired = desired_enabled_relays(&handle_recon).await;
-                let pool = client.pool();
+                let pool = client.clone();
                 let pool_keys: Vec<String> = client.relays().await.keys()
                     .map(|k| norm(&k.to_string()))
                     .collect();
@@ -1264,24 +1270,57 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                 // Re-add anything in the desired set that's missing entirely.
                 for (url, mode) in &desired {
                     if !pool_keys.iter().any(|k| k == &norm(url)) {
-                        if pool.add_relay(url.as_str(), relay_options_for_mode(mode)).await.is_ok() {
+                        if pool.add_managed_relay(url.as_str()).capabilities(relay_capabilities_for_mode(mode)).await.is_ok() {
                             println!("[Reconcile] re-added missing relay {}; connecting...", url);
                             add_relay_log(url.as_str(), "info", "Reconcile: re-added missing relay; connecting...");
-                            if let Ok(relay) = pool.relay(url.as_str()).await {
-                                let _ = relay.try_connect(std::time::Duration::from_secs(8)).await;
+                            if let Ok(Some(relay)) = pool.relay(url.as_str()).await {
+                                let _ = relay.try_connect().timeout(vector_core::relay_connect_timeout(std::time::Duration::from_secs(8))).await;
                             }
                         }
                     }
                 }
 
+                // Rescue relays wedged in `Pending`. `Relay::connect()` marks a relay
+                // Pending *before* checking whether the previous connection task is still
+                // unwinding, and bails out of spawning a new one if it is — leaving the
+                // relay Pending with nothing driving it. `try_connect()` can't recover it
+                // either: Pending isn't a connectable status, so it returns Ok and does
+                // nothing. Forcing Terminated first makes it connectable again.
+                //
+                // Scanned across `all()` capabilities because Pending is unrecoverable on
+                // any relay, and rescuing it only finishes a connection already asked for.
+                // Deliberately NOT Tor-aware, unlike every other budget here: Pending is only
+                // held between `connect()` and the spawned task's first poll, which sets
+                // Connecting before any socket work. Its duration is network-independent, so
+                // 15s is already orders of magnitude above anything legitimate.
+                let stuck_after = std::time::Duration::from_secs(15);
+                let all_relays = client.relays().all().await;
+                pending_since.retain(|k, _| all_relays.keys().any(|u| norm(&u.to_string()) == *k));
+                for (url, relay) in all_relays {
+                    let key = norm(&url.to_string());
+                    if relay.status() != RelayStatus::Pending {
+                        pending_since.remove(&key);
+                        continue;
+                    }
+                    let since = *pending_since.entry(key.clone()).or_insert_with(std::time::Instant::now);
+                    if since.elapsed() >= stuck_after {
+                        add_relay_log(url.as_str(), "warn", "Wedged in Pending; forcing reconnect");
+                        relay.disconnect();
+                        let _ = relay.try_connect().timeout(vector_core::relay_connect_timeout(std::time::Duration::from_secs(5))).await;
+                        // Restart the clock so a relay that keeps re-wedging is retried on
+                        // the same interval rather than every pass.
+                        pending_since.insert(key, std::time::Instant::now());
+                    }
+                }
+
                 // Reconnect present-but-dead relays — the manual replacement
-                // for nostr-sdk's disabled auto-reconnect.
+                // for nostr-sdk's disabled auto-reconnect. Not `Disconnected`: that
+                // status only occurs on relays whose own reconnect is enabled, which
+                // are already retrying on their own schedule.
                 for (_url, relay) in client.relays().await {
                     match relay.status() {
-                        RelayStatus::Terminated
-                        | RelayStatus::Disconnected
-                        | RelayStatus::Sleeping => {
-                            let _ = relay.try_connect(std::time::Duration::from_secs(5)).await;
+                        RelayStatus::Terminated | RelayStatus::Sleeping => {
+                            let _ = relay.try_connect().timeout(vector_core::relay_connect_timeout(std::time::Duration::from_secs(5))).await;
                         }
                         _ => {}
                     }
@@ -1321,7 +1360,7 @@ pub async fn connect<R: Runtime>(handle: AppHandle<R>) -> bool {
     let disabled_defaults = disabled_defaults.unwrap_or_default();
 
     // Collect all relays to add (URL, options, is_default, mode_info)
-    let mut relays_to_add: Vec<(String, RelayOptions, bool, String)> = Vec::new();
+    let mut relays_to_add: Vec<(String, nostr_sdk::prelude::RelayCapabilities, bool, String)> = Vec::new();
 
     // Add default relays (unless disabled)
     for default_url in DEFAULT_RELAYS {
@@ -1329,7 +1368,7 @@ pub async fn connect<R: Runtime>(handle: AppHandle<R>) -> bool {
         if !is_disabled {
             relays_to_add.push((
                 default_url.to_string(),
-                vector_core::tor_aware_relay_options(RelayOptions::new().reconnect(false)),
+                relay_capabilities_for_mode("both"),
                 true,
                 "both".to_string(),
             ));
@@ -1345,7 +1384,7 @@ pub async fn connect<R: Runtime>(handle: AppHandle<R>) -> bool {
             if relay.enabled {
                 relays_to_add.push((
                     relay.url,
-                    relay_options_for_mode(&relay.mode),
+                    relay_capabilities_for_mode(&relay.mode),
                     false,
                     relay.mode,
                 ));
@@ -1368,18 +1407,18 @@ pub async fn connect<R: Runtime>(handle: AppHandle<R>) -> bool {
         }
         relays_to_add.push((
             url.to_string(),
-            vector_core::discovery_relay_options(),
+            vector_core::discovery_relay_capabilities(),
             false,
             "discovery".to_string(),
         ));
     }
 
     // Add all relays in parallel
-    let pool = client.pool();
+    let pool = client.clone();
     let add_futures: Vec<_> = relays_to_add.into_iter().map(|(url, opts, is_default, mode)| {
         let pool = pool.clone();
         async move {
-            match pool.add_relay(&url, opts).await {
+            match pool.add_managed_relay(&url).capabilities(opts).await {
                 Ok(_) => {
                     if is_default {
                         println!("[Relay] Added default relay: {}", url);
@@ -1433,3 +1472,54 @@ pub async fn connect<R: Runtime>(handle: AppHandle<R>) -> bool {
 // - get_relay_logs
 // - monitor_relay_connections
 // - connect
+
+#[cfg(test)]
+mod managed_relay_invariant {
+    /// Vector owns every reconnect (see the reconcile loop). `reconnect` is the one
+    /// relay option `ClientBuilder` can't default, so a bare `add_relay` silently
+    /// re-enables the pool's own retry schedule — which is invisible to the health
+    /// check, fights our loop over the same socket, and was how 13 of 17 registration
+    /// sites ended up with it on. Enforced here rather than by review.
+    #[test]
+    fn every_registration_goes_through_add_managed_relay() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let trees = [root.join("src"), root.join("../crates/vector-core/src")];
+
+        let mut offenders = Vec::new();
+        let mut managed = 0usize;
+        let mut stack: Vec<std::path::PathBuf> = trees.to_vec();
+        while let Some(path) = stack.pop() {
+            if path.is_dir() {
+                for entry in std::fs::read_dir(&path).into_iter().flatten().flatten() {
+                    stack.push(entry.path());
+                }
+                continue;
+            }
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let Ok(src) = std::fs::read_to_string(&path) else { continue };
+            for (i, line) in src.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or("");
+                managed += code.matches(".add_managed_relay(").count();
+                // The trait impl itself is the one legitimate caller.
+                if code.contains(".add_relay(") && !code.contains(".reconnect(false)") {
+                    offenders.push(format!("{}:{}", path.display(), i + 1));
+                }
+            }
+        }
+
+        // Positive control: a wrong scan path would find no offenders and pass
+        // vacuously, which is worse than having no test at all.
+        assert!(
+            managed >= 15,
+            "only saw {managed} managed registrations — the source scan is not reading the trees"
+        );
+
+        assert!(
+            offenders.is_empty(),
+            "bare `add_relay` re-enables the pool's own reconnect; use `add_managed_relay`:\n  {}",
+            offenders.join("\n  ")
+        );
+    }
+}

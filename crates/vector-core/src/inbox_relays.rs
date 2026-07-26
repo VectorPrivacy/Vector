@@ -12,6 +12,7 @@ use nostr_sdk::prelude::*;
 use std::sync::LazyLock;
 
 use crate::state::nostr_client;
+use crate::ClientRelayExt;
 
 // ============================================================================
 // Per-relay publish tracker — closes "dependent-event-races-parent" races
@@ -184,6 +185,7 @@ pub fn spawn_tracked_publish(
             let result = relay
                 .send_event(&event)
                 .await
+                .map(|o| *o.id())
                 .map_err(|e| e.to_string());
             if result.is_ok() {
                 tracker.note_success(url.clone());
@@ -306,12 +308,11 @@ async fn inbox_query_targets(client: &Client) -> Vec<RelayUrl> {
         .map(normalize_relay_url)
         .collect();
     client
-        .pool()
-        .all_relays()
+        .relays().all()
         .await
         .iter()
         .filter(|(url, relay)| {
-            relay.flags().has_read() || discovery.contains(&normalize_relay_url(url.as_str()))
+            relay.capabilities().load().can_read() || discovery.contains(&normalize_relay_url(url.as_str()))
         })
         .map(|(url, _)| url.clone())
         .collect()
@@ -336,11 +337,14 @@ async fn fetch_inbox_relays(client: &Client, pubkey: &PublicKey) -> FetchResult 
     let targets = inbox_query_targets(client).await;
     let fetched = if targets.is_empty() {
         client
-            .fetch_events(filter, std::time::Duration::from_secs(5))
+            .fetch_events(filter).timeout(std::time::Duration::from_secs(5))
             .await
     } else {
         client
-            .fetch_events_from(targets, filter, std::time::Duration::from_secs(5))
+            .fetch_events(nostr_sdk::prelude::ReqTarget::manual(
+                targets.into_iter().map(|u| (u, vec![filter.clone()])),
+            ))
+            .timeout(std::time::Duration::from_secs(5))
             .await
     };
     let events = match fetched {
@@ -505,8 +509,8 @@ pub async fn send_event_first_ok(
     client: &Client,
     urls: Vec<RelayUrl>,
     event: &Event,
-) -> Result<Output<EventId>, nostr_sdk::client::Error> {
-    let pool = client.pool();
+) -> Result<nostr_sdk::prelude::SendEventOutput, nostr_sdk::prelude::Error> {
+    let pool = client;
     let relays = pool.relays().await;
     let event_id = event.id;
 
@@ -528,11 +532,7 @@ pub async fn send_event_first_ok(
     let handles = spawn_tracked_publish(resolved, event.clone());
 
     // Race: return as soon as the first relay succeeds
-    let mut output = Output {
-        val: event_id,
-        success: std::collections::HashSet::new(),
-        failed: HashMap::new(),
-    };
+    let mut output = Output::new(event_id);
 
     let mut remaining = handles;
     while !remaining.is_empty() {
@@ -542,7 +542,7 @@ pub async fn send_event_first_ok(
         if let Ok((url, relay_result)) = result {
             match relay_result {
                 Ok(_) => {
-                    output.success.insert(url);
+                    output.success.insert(url, nostr_sdk::prelude::EventSendStatus::Sent);
                     // First success — remaining spawned tasks continue in background
                     // updating the tracker as they settle. Dropping JoinHandles
                     // detaches but does NOT cancel them.
@@ -565,12 +565,12 @@ pub async fn send_event_first_ok(
 pub async fn send_event_pool_first_ok(
     client: &Client,
     event: &Event,
-) -> Result<Output<EventId>, nostr_sdk::client::Error> {
-    let pool = client.pool();
+) -> Result<nostr_sdk::prelude::SendEventOutput, nostr_sdk::prelude::Error> {
+    let pool = client;
     let relays = pool.relays().await;
     let write_urls: Vec<RelayUrl> = relays
         .iter()
-        .filter(|(_, r)| r.flags().has_write())
+        .filter(|(_, r)| r.capabilities().load().can_write())
         .map(|(url, _)| url.clone())
         .collect();
     send_event_first_ok(&client, write_urls, event).await
@@ -590,8 +590,7 @@ pub fn wrap_with_retained_key(
     seal: &Event,
     extra_tags: impl IntoIterator<Item = Tag>,
 ) -> Result<(Event, SecretKey), String> {
-    use nostr_sdk::nips::nip44;
-    use nostr_sdk::nips::nip59::RANGE_RANDOM_TIMESTAMP_TWEAK;
+    use nostr_sdk::prelude::nip44;
 
     if seal.kind != Kind::Seal {
         return Err(format!("expected Seal kind, got {:?}", seal.kind));
@@ -609,8 +608,8 @@ pub fn wrap_with_retained_key(
     tags.push(Tag::public_key(*receiver));
     let event = EventBuilder::new(Kind::GiftWrap, content)
         .tags(tags)
-        .custom_created_at(Timestamp::tweaked(RANGE_RANDOM_TIMESTAMP_TWEAK))
-        .sign_with_keys(&keys)
+        .custom_created_at(Timestamp::tweaked(crate::sending::NIP59_RANDOM_TIMESTAMP_TWEAK))
+        .finalize(&keys)
         .map_err(|e| format!("sign wrap: {}", e))?;
     Ok((event, secret))
 }
@@ -619,7 +618,7 @@ pub fn wrap_with_retained_key(
 /// persist `wrap_event_id`, `wrap_secret`, and `targeted_relays` for
 /// future deletion.
 pub struct GiftWrapSendOutcome {
-    pub output: Output<EventId>,
+    pub output: nostr_sdk::prelude::SendEventOutput,
     pub wrap_event_id: EventId,
     pub wrap_secret: SecretKey,
     /// Relay URL set we attempted (inbox if known, pool write-relays as
@@ -640,16 +639,14 @@ pub struct BuiltGiftWrap {
 
 /// Seal + wrap a rumor with a retained ephemeral key, without publishing.
 pub async fn build_gift_wrap_retained(
-    client: &Client,
+    _client: &Client,
     recipient: &PublicKey,
     rumor: UnsignedEvent,
     extra_tags: impl IntoIterator<Item = Tag>,
 ) -> Result<BuiltGiftWrap, String> {
-    let signer = client.signer().await.map_err(|e| e.to_string())?;
-    let seal: Event = EventBuilder::seal(&signer, recipient, rumor)
-        .await
-        .map_err(|e| e.to_string())?
-        .sign(&signer)
+    let signer = crate::signer::active_signer().map_err(|e| e.to_string())?;
+    let seal: Event = nostr_sdk::prelude::GiftWrapSealBuilder::new(rumor, *recipient)
+        .finalize_async(&signer)
         .await
         .map_err(|e| e.to_string())?;
     let (event, secret) = wrap_with_retained_key(recipient, &seal, extra_tags)?;
@@ -709,10 +706,10 @@ pub async fn resolve_gift_wrap_targets(
     let targeted_strs: Vec<String> = if !inbox_strs.is_empty() {
         inbox_strs.clone()
     } else {
-        let pool = client.pool();
+        let pool = client;
         let relays = pool.relays().await;
         relays.iter()
-            .filter(|(_, r)| r.flags().has_write())
+            .filter(|(_, r)| r.capabilities().load().can_write())
             .map(|(url, _)| url.to_string())
             .collect()
     };
@@ -723,11 +720,11 @@ pub async fn resolve_gift_wrap_targets(
     // and match on the canonical string form so e.g. `wss://relay.damus.io`
     // and `wss://relay.damus.io/` count as the same relay.
     use normalize_relay_url as normalize_url_for_match;
-    let pool = client.pool();
+    let pool = client;
     // all_relays(): GOSSIP-flagged pool members (discovery/community relays)
     // must count as pooled here — classifying one as transient would remove
     // it from the pool after the send, silently killing its real role.
-    let pool_relays = pool.all_relays().await;
+    let pool_relays = pool.relays().all().await;
     let pool_norm: Vec<(String, RelayUrl, Relay)> = pool_relays.iter()
         .map(|(url, relay)| (
             normalize_url_for_match(&url.to_string()),
@@ -758,11 +755,9 @@ pub async fn resolve_gift_wrap_targets(
             let already_added = transient_added.iter()
                 .any(|u| normalize_url_for_match(&u.to_string()) == norm);
             if in_pool || already_added { continue; }
-
-            let opts = crate::tor_aware_relay_options(RelayOptions::new().reconnect(false));
-            if pool.add_relay(s.as_str(), opts).await.is_ok() {
-                if let Ok(relay) = pool.relay(s.as_str()).await {
-                    let _ = relay.try_connect(std::time::Duration::from_secs(6)).await;
+            if pool.add_managed_relay(s.as_str()).await.is_ok() {
+                if let Ok(Some(relay)) = pool.relay(s.as_str()).await {
+                    let _ = relay.try_connect().timeout(crate::relay_connect_timeout(std::time::Duration::from_secs(6))).await;
                     transient_added.push(relay.url().clone());
                     resolved.push((relay.url().clone(), relay));
                 }
@@ -804,10 +799,11 @@ pub async fn reconnect_gift_wrap_targets(targets: &GiftWrapTargets) {
     if stale.is_empty() {
         return;
     }
-    futures_util::future::join_all(
-        stale.into_iter()
-            .map(|r| r.try_connect(std::time::Duration::from_secs(6)))
-    ).await;
+    // TryConnect is IntoFuture, not Future, so join_all needs it awaited inside.
+    futures_util::future::join_all(stale.into_iter().map(|r| async move {
+        r.try_connect().timeout(crate::relay_connect_timeout(std::time::Duration::from_secs(6))).await
+    }))
+    .await;
 }
 
 /// Publish an already-built wrap to resolved targets, racing for the
@@ -825,7 +821,7 @@ pub async fn publish_gift_wrap_to_targets(
     client: &Client,
     targets: &GiftWrapTargets,
     event: &Event,
-) -> Result<Output<EventId>, String> {
+) -> Result<nostr_sdk::prelude::SendEventOutput, String> {
     // `resolved.is_empty()` implies no transient add succeeded (each success
     // pushes onto `resolved`), so this branch can't leak a transient relay.
     if targets.resolved.is_empty() {
@@ -843,11 +839,7 @@ pub async fn publish_gift_wrap_to_targets(
     // moment any one relay accepts. Remaining tasks continue in
     // the background, updating the tracker as they settle. The
     // dropped JoinHandles detach but do not cancel the tasks.
-    let mut output = Output {
-        val: event.id,
-        success: HashSet::new(),
-        failed: HashMap::new(),
-    };
+    let mut output = Output::new(event.id);
     let mut remaining = handles;
     while !remaining.is_empty() {
         let (result, _idx, rest) = futures_util::future::select_all(remaining).await;
@@ -855,7 +847,7 @@ pub async fn publish_gift_wrap_to_targets(
         if let Ok((url, relay_result)) = result {
             match relay_result {
                 Ok(_) => {
-                    output.success.insert(url);
+                    output.success.insert(url, nostr_sdk::prelude::EventSendStatus::Sent);
                     drop(remaining);
                     break;
                 }
@@ -873,7 +865,7 @@ pub async fn publish_gift_wrap_to_targets(
 /// confirmed inbox relay satisfies NIP-17, so cutting any still-in-flight
 /// background publishes to the others is acceptable.
 pub async fn teardown_gift_wrap_targets(client: &Client, targets: &GiftWrapTargets) {
-    let pool = client.pool();
+    let pool = client;
     for url in &targets.transient_added {
         let _ = pool.remove_relay(url).await;
     }
@@ -896,7 +888,7 @@ pub async fn send_gift_wrap(
     recipient: &PublicKey,
     rumor: UnsignedEvent,
     extra_tags: impl IntoIterator<Item = Tag>,
-) -> Result<Output<EventId>, String> {
+) -> Result<nostr_sdk::prelude::SendEventOutput, String> {
     let outcome = send_gift_wrap_retained(client, recipient, rumor, extra_tags).await?;
     Ok(outcome.output)
 }
@@ -1025,7 +1017,7 @@ pub async fn fetch_own_inbox_list(client: &Client) -> Result<Option<(Vec<String>
         .collect();
     let deadline = Instant::now() + std::time::Duration::from_secs(8);
     loop {
-        let relays = client.pool().all_relays().await;
+        let relays = client.relays().all().await;
         let connected: Vec<&RelayUrl> = targets
             .iter()
             .filter(|url| {
@@ -1052,7 +1044,10 @@ pub async fn fetch_own_inbox_list(client: &Client) -> Result<Option<(Vec<String>
 
     let filter = Filter::new().author(me).kind(Kind::Custom(10050)).limit(1);
     let events = client
-        .fetch_events_from(targets.clone(), filter, std::time::Duration::from_secs(6))
+        .fetch_events(nostr_sdk::prelude::ReqTarget::manual(
+            targets.iter().cloned().map(|u| (u, vec![filter.clone()])),
+        ))
+        .timeout(std::time::Duration::from_secs(6))
         .await
         .map_err(|e| e.to_string())?;
     // NIP-01 replaceable tie-break: newest created_at, lowest id on a tie.
@@ -1072,7 +1067,7 @@ pub async fn fetch_own_inbox_list(client: &Client) -> Result<Option<(Vec<String>
             .iter()
             .any(|url| discovery.contains(&normalize_relay_url(url.as_str())));
         if has_discovery_target {
-            let relays = client.pool().all_relays().await;
+            let relays = client.relays().all().await;
             let discovery_answered = targets.iter().any(|url| {
                 discovery.contains(&normalize_relay_url(url.as_str()))
                     && relays
@@ -1243,11 +1238,10 @@ pub async fn publish_inbox_relays_synced(
     let ours: Vec<String> = match ours_override {
         Some(list) => list,
         None => client
-            .pool()
             .relays()
             .await
             .iter()
-            .filter(|(_, relay)| relay.flags().has_read())
+            .filter(|(_, relay)| relay.capabilities().load().can_read())
             .map(|(url, _)| url.to_string())
             .collect(),
     };
@@ -1286,10 +1280,9 @@ pub async fn publish_inbox_relays_synced(
 
     let mut builder = EventBuilder::new(Kind::Custom(10050), "");
     for url in &plan.list {
-        builder = builder.tag(Tag::custom(TagKind::custom("relay"), vec![url.clone()]));
+        builder = builder.tag(Tag::custom("relay", vec![url.clone()]));
     }
-    let event = client
-        .sign_event_builder(builder)
+    let event = crate::sign_builder(builder)
         .await
         .map_err(|e| format!("Failed to sign inbox relays: {}", e))?;
 
@@ -1306,18 +1299,17 @@ pub async fn publish_inbox_relays_synced(
         .map(|s| normalize_relay_url(s))
         .collect();
     let discovery_targets: Vec<RelayUrl> = client
-        .pool()
-        .all_relays()
+        .relays().all()
         .await
         .iter()
         .filter(|(url, relay)| {
-            !relay.flags().has_write() && discovery.contains(&normalize_relay_url(url.as_str()))
+            !relay.capabilities().load().can_write() && discovery.contains(&normalize_relay_url(url.as_str()))
         })
         .map(|(url, _)| url.clone())
         .collect();
     let mut discovery_ok = false;
     if !discovery_targets.is_empty() {
-        if let Ok(out) = client.send_event_to(discovery_targets, &event).await {
+        if let Ok(out) = client.send_event(&event).to(discovery_targets).await {
             discovery_ok = !out.success.is_empty();
         }
     }
@@ -1671,8 +1663,8 @@ mod tests {
     #[test]
     fn parse_relay_tags_extracts_urls() {
         let tags = Tags::from_list(vec![
-            Tag::custom(TagKind::custom("relay"), vec!["wss://relay.example.com"]),
-            Tag::custom(TagKind::custom("relay"), vec!["wss://other.example.com"]),
+            Tag::custom("relay", vec!["wss://relay.example.com"]),
+            Tag::custom("relay", vec!["wss://other.example.com"]),
         ]);
         let result = parse_relay_tags(&tags);
         assert_eq!(result, vec![
@@ -1684,9 +1676,9 @@ mod tests {
     #[test]
     fn parse_relay_tags_ignores_non_relay_tags() {
         let tags = Tags::from_list(vec![
-            Tag::custom(TagKind::custom("relay"), vec!["wss://good.example.com"]),
-            Tag::custom(TagKind::custom("p"), vec!["deadbeef"]),
-            Tag::custom(TagKind::custom("e"), vec!["cafebabe"]),
+            Tag::custom("relay", vec!["wss://good.example.com"]),
+            Tag::custom("p", vec!["deadbeef"]),
+            Tag::custom("e", vec!["cafebabe"]),
         ]);
         let result = parse_relay_tags(&tags);
         assert_eq!(result, vec!["wss://good.example.com".to_string()]);
@@ -1703,7 +1695,7 @@ mod tests {
     fn parse_relay_tags_ignores_relay_tag_without_value() {
         // A ["relay"] tag with no URL should be skipped (len < 2)
         let tags = Tags::from_list(vec![
-            Tag::custom(TagKind::custom("relay"), Vec::<String>::new()),
+            Tag::custom("relay", Vec::<String>::new()),
         ]);
         let result = parse_relay_tags(&tags);
         assert!(result.is_empty());

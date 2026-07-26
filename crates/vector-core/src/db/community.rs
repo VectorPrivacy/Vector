@@ -11,8 +11,9 @@
 //! (32-byte raw key vs 60-byte ciphertext; `looks_encrypted` for text) let a half-migrated DB
 //! read back correctly, so the toggle/PIN-rekey flows and the one-time backfill are safe to re-run.
 
+use nostr_sdk::prelude::{FinalizeEvent, FinalizeUnsignedEvent};
 use nostr_sdk::prelude::{Keys, PublicKey, SecretKey};
-use nostr_sdk::ToBech32;
+use nostr_sdk::prelude::ToBech32;
 use rusqlite::{params, OptionalExtension};
 
 use crate::community::{Channel, ChannelId, ChannelKey, Community, CommunityId, Epoch, ServerRootKey};
@@ -2695,7 +2696,6 @@ mod tests {
 
     #[test]
     fn owner_is_protected_from_the_banlist_a_member_is_not() {
-        use nostr_sdk::JsonUtil;
         let (_tmp, _guard) = init_test_db();
         let mut community = Community::create("HQ", "general", vec!["wss://r".into()]);
         // Give it a proven owner (index 0).
@@ -2705,7 +2705,7 @@ mod tests {
                 owner_id.public_key(),
                 &community.id.to_hex(),
             )
-            .sign_with_keys(&owner_id)
+            .finalize(&owner_id)
             .unwrap()
             .as_json(),
         );

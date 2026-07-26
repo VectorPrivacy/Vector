@@ -317,7 +317,7 @@ pub enum PreparedEvent {
 /// Safe to call from multiple tokio tasks concurrently.
 pub async fn prepare_event(
     event: Event,
-    client: &Client,
+    _client: &Client,
     my_public_key: PublicKey,
 ) -> PreparedEvent {
     let wrapper_created_at = event.created_at.as_secs();
@@ -338,7 +338,13 @@ pub async fn prepare_event(
 
     // Unwrap gift wrap (CPU-bound ECDH + ChaCha20Poly1305)
     let unwrap_start = std::time::Instant::now();
-    let (rumor, sender) = match client.unwrap_gift_wrap(&event).await {
+    let signer = match crate::signer::active_signer() {
+        Ok(s) => s,
+        Err(_) => return PreparedEvent::ErrorSkip {
+            wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at,
+        },
+    };
+    let (rumor, sender) = match UnwrappedGift::from_gift_wrap_async(&signer, &event).await {
         Ok(UnwrappedGift { rumor, sender }) => (rumor, sender),
         Err(_) => return PreparedEvent::ErrorSkip {
             wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at,
@@ -974,7 +980,7 @@ async fn commit_deletion(
             None => false,
         }
     } else {
-        match nostr_sdk::PublicKey::from_bech32(&chat_id) {
+        match nostr_sdk::prelude::PublicKey::from_bech32(&chat_id) {
             Ok(counterpart) => sender == &counterpart,
             Err(_) => false, // chat id wasn't an npub (shouldn't happen for DMs)
         }
@@ -1054,7 +1060,7 @@ async fn commit_reaction_deletion(target_reaction_id: &str, sender: &PublicKey) 
     };
 
     // Authorization: only the reaction's own author may revoke it.
-    let authorized = nostr_sdk::PublicKey::parse(&author_npub)
+    let authorized = nostr_sdk::prelude::PublicKey::parse(&author_npub)
         .map(|pk| pk == *sender)
         .unwrap_or(false);
     if !authorized {

@@ -58,7 +58,7 @@ pub async fn reconcile_missing(
         let items = local_items.clone();
         let o = opts.clone();
         futs.push(async move {
-            let r = tokio::time::timeout(timeout, relay.sync_with_items(f, items, &o)).await;
+            let r = tokio::time::timeout(timeout, relay.sync(f).items(items).opts(o)).await;
             (url, r)
         });
     }

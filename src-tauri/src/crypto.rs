@@ -6,8 +6,7 @@
 //! - encrypt_with_key/decrypt_with_key for re-keying flows
 //! - Re-exports for backward compatibility
 
-use crate::rand;
-use crate::rand::Rng;
+use ::rand::Rng;
 use crate::util::{bytes_to_hex_string, hex_string_to_bytes};
 use chacha20poly1305::{
     aead::Aead,
@@ -34,7 +33,7 @@ pub async fn hash_pass(mut password: String) -> [u8; 32] {
 
 /// Encrypt with an explicit key (for re-keying — doesn't touch ENCRYPTION_KEY global).
 pub fn encrypt_with_key(input: &str, key: &[u8; 32]) -> String {
-    let mut rng = rand::thread_rng();
+    let mut rng = ::rand::thread_rng();
     let nonce_bytes: [u8; 12] = rng.gen();
 
     let cipher = ChaCha20Poly1305::new_from_slice(key)

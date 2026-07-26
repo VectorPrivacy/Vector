@@ -16,10 +16,13 @@ categories = ["network-programming", "cryptography", "asynchronous"]
 # workspace `[patch.crates-io]` redirects the shared `nostr` to the zeroize fork for
 # in-workspace builds (so the app keeps secret-key zeroization), while published
 # crates resolve to stock nostr.
-nostr = "0.44"
-nostr-sdk = { version = "0.44.1", features = ["nip06", "nip44", "nip59"] }
-nostr-blossom = "0.44.0"
-nostr-connect = "0.44"
+# NIP features live on `nostr` now: 0.45 dropped `all-nips` and every `nipXX`
+# feature from nostr-sdk, and the sdk enables only std/rand/os-rng on `nostr`.
+# Cargo unifies these across the workspace, so this is the one place they're set.
+nostr = { version = "0.45.0-alpha.5", features = ["nip04", "nip06", "nip44", "nip46", "nip59", "rand", "os-rng"] }
+nostr-sdk = "0.45.0-alpha.5"
+nostr-blossom = "0.45.0-alpha.5"
+nostr-connect = "0.45.0-alpha.5"
 bip39 = { version = "2.2.2", features = ["rand"] }
 
 # Database

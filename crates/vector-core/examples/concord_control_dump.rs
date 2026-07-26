@@ -51,7 +51,13 @@ async fn main() {
     let filter = Filter::new()
         .kind(Kind::Custom(3308))
         .custom_tags(SingleLetterTag::lowercase(Alphabet::Z), [pseudonym]);
-    let events = client.fetch_events_from(community.relays.clone(), filter, Duration::from_secs(20)).await.unwrap();
+    let events = client
+        .fetch_events(ReqTarget::manual(
+            community.relays.clone().into_iter().map(|u| (u, vec![filter.clone()])),
+        ))
+        .timeout(Duration::from_secs(20))
+        .await
+        .unwrap();
     println!("\nfetched {} raw control events from relays", events.len());
     let inners: Vec<Event> = events.iter().filter_map(|e| roster::open_control_edition(e, &community.server_root_key).ok()).collect();
     println!("opened {} inner editions", inners.len());

@@ -20,7 +20,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nostr_sdk::prelude::{Event, Keys, PublicKey, Tag, TagKind, Timestamp, UnsignedEvent};
+use nostr_sdk::prelude::{Event, Keys, PublicKey, Tag, Timestamp, UnsignedEvent};
 
 use super::super::edition::AuthorityCitation;
 use super::derive::GroupKey;
@@ -98,7 +98,7 @@ pub fn build_join_rumor(author: PublicKey, invite_attribution: Option<(&str, &st
     let mut tags = Vec::new();
     if let Some((creator, label)) = invite_attribution {
         tags.push(Tag::custom(
-            TagKind::Custom(TAG_INVITE.into()),
+            TAG_INVITE,
             [creator.to_string(), label.to_string()],
         ));
     }
@@ -153,7 +153,7 @@ pub fn build_snapshot_rumors(
             let hexes: Vec<String> = chunk.iter().map(|p| p.to_hex()).collect();
             let content = serde_json::to_string(&hexes).expect("a string array always serializes");
             let tags = vec![Tag::custom(
-                TagKind::Custom(TAG_SNAP.into()),
+                TAG_SNAP,
                 [id_hex.clone(), (idx + 1).to_string(), n.to_string()],
             )];
             stream::build_rumor_ms(kind::SNAPSHOT, refounder, &content, tags, at_ms)
@@ -175,9 +175,9 @@ pub fn seal_guestbook_rumor(
 }
 
 /// Signer-driven twin of [`seal_guestbook_rumor`] for bunker / NIP-55 accounts:
-/// the encrypted seal signs through a [`NostrSigner`]. `author` is the identity
+/// the encrypted seal signs through a [`VectorSigner`]. `author` is the identity
 /// the signer signs as (must equal `my_public_key()`). Wire-identical output.
-pub async fn seal_guestbook_rumor_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+pub async fn seal_guestbook_rumor_signed<S: crate::signer::VectorSigner + ?Sized>(
     signer: &S,
     author: PublicKey,
     rumor: &UnsignedEvent,
@@ -904,7 +904,7 @@ mod tests {
             kind::KICK,
             k.public_key(),
             "",
-            vec![Tag::custom(TagKind::Custom("p".into()), ["not-hex".to_string()])],
+            vec![Tag::custom("p", ["not-hex".to_string()])],
             1_000,
         );
         assert!(matches!(through_err(&bad, &k), GuestbookError::BadTag("p")));
@@ -920,7 +920,7 @@ mod tests {
                 k.public_key(),
                 content,
                 vec![Tag::custom(
-                    TagKind::Custom("snap".into()),
+                    "snap",
                     [id.to_string(), i.to_string(), n.to_string()],
                 )],
                 1_000,
@@ -953,7 +953,7 @@ mod tests {
             k.public_key(),
             &content,
             vec![Tag::custom(
-                TagKind::Custom("snap".into()),
+                "snap",
                 [crate::simd::hex::bytes_to_hex_32(&[0x5a; 32]), "1".to_string(), "1".to_string()],
             )],
             1_000,

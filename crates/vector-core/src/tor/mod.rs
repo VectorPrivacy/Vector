@@ -479,7 +479,7 @@ impl TorService {
     }
 
     /// Raw SOCKS5 listener address — used by clients that take a `SocketAddr`
-    /// directly instead of a URL (e.g. `nostr_sdk::ClientOptions::proxy`).
+    /// directly instead of a URL (e.g. `nostr_sdk::prelude::ClientOptions::proxy`).
     pub fn socks_addr(&self) -> SocketAddr {
         self.socks_addr
     }

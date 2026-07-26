@@ -42,7 +42,7 @@ pub async fn publish_message<T: Transport + ?Sized>(
 }
 
 /// Publish a message whose inner authorship event was already signed externally (via the
-/// active `NostrSigner` — local keys OR a NIP-46 bunker). Mirrors [`publish_message`] but
+/// active `VectorSigner` — local keys OR a NIP-46 bunker). Mirrors [`publish_message`] but
 /// is signer-agnostic, so bunker accounts can post (parity with DMs). Returns the
 /// published outer event + its retained ephemeral key.
 /// `durable`: control/moderation events (a hide, a presence-join that must reliably land so the sender
@@ -75,8 +75,9 @@ pub async fn delete_own_message<T: Transport + ?Sized>(
     ephemeral: &Keys,
     outer_event_id: EventId,
 ) -> Result<(), String> {
-    let deletion = EventBuilder::delete(EventDeletionRequest::new().ids([outer_event_id]))
-        .sign_with_keys(ephemeral)
+    let deletion = EventDeletionRequest::new()
+        .ids([outer_event_id])
+        .finalize(ephemeral)
         .map_err(|e| e.to_string())?;
     transport.publish_durable(&deletion, relays).await
 }
@@ -485,7 +486,7 @@ mod tests {
         let react_inner = super::super::envelope::build_inner_typed(
             bob.public_key(), &channel.id, channel.epoch,
             event_kind::COMMUNITY_REACTION, "🔥", 3, Some(&m1_inner), &[],
-        ).sign_with_keys(&bob).unwrap();
+        ).finalize(&bob).unwrap();
         let react_outer = seal_with_signed_inner(&Keys::generate(), &react_inner, &channel.key, &channel.id, channel.epoch).unwrap();
         relay.publish(&react_outer, &community.relays).await.unwrap();
 
@@ -516,7 +517,7 @@ mod tests {
 
         // One signed inner authorship event → one message_id.
         let inner = super::super::envelope::build_inner_event(alice.public_key(), &channel.id, channel.epoch, "dup me", 1, None)
-            .sign_with_keys(&alice)
+            .finalize(&alice)
             .unwrap();
         // Two independent outer wrappers carrying that exact inner.
         let outer_a = seal_with_signed_inner(&Keys::generate(), &inner, &channel.key, &channel.id, channel.epoch).unwrap();
@@ -547,12 +548,12 @@ mod tests {
         let garbage = EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_MESSAGE), "not-base64-or-cipher!!")
             .tags([
                 Tag::custom(
-                    TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::Z)),
+                    "z",
                     [pseudonym.to_hex()],
                 ),
-                Tag::custom(TagKind::Custom("v".into()), ["1".to_string()]),
+                Tag::custom("v", ["1".to_string()]),
             ])
-            .sign_with_keys(&Keys::generate())
+            .finalize(&Keys::generate())
             .unwrap();
         relay.publish(&garbage, &community.relays).await.unwrap();
 
@@ -683,7 +684,7 @@ mod tests {
         let mut cleanup_ok = true;
         for (ephemeral, outer) in &published {
             let del = EventBuilder::delete(EventDeletionRequest::new().ids([outer.id]))
-                .sign_with_keys(ephemeral)
+                .finalize(ephemeral)
                 .expect("build deletion");
             if let Err(e) = transport.publish(&del, &relays).await {
                 cleanup_ok = false;

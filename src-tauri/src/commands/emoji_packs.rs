@@ -230,9 +230,9 @@ pub async fn emoji_pack_delete_blob(url: String) -> Result<(), String> {
     if !session.is_valid() {
         return Err("Account swap in progress.".to_string());
     }
-    let client = vector_core::state::nostr_client()
+    let _client = vector_core::state::nostr_client()
         .ok_or_else(|| "Nostr client not initialised".to_string())?;
-    let signer = client.signer().await
+    let signer = vector_core::signer::active_signer()
         .map_err(|e| format!("Failed to get signer: {}", e))?;
     vector_core::blossom::delete_blob_by_url(signer, &url).await
 }
@@ -271,9 +271,9 @@ pub async fn emoji_pack_upload_image<R: tauri::Runtime>(
         return Err("File is empty.".to_string());
     }
 
-    let client = vector_core::state::nostr_client()
+    let _client = vector_core::state::nostr_client()
         .ok_or_else(|| "Nostr client not initialised".to_string())?;
-    let signer = client.signer().await
+    let signer = vector_core::signer::active_signer()
         .map_err(|e| format!("Failed to get signer: {}", e))?;
 
     let servers = vector_core::blossom_servers::compute_enabled_servers();

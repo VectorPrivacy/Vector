@@ -192,9 +192,9 @@ pub async fn publish_blossom_servers(client: &Client) -> Result<(), String> {
     let servers = compute_enabled_servers();
     let mut builder = EventBuilder::new(Kind::Custom(10063), "");
     for url in &servers {
-        builder = builder.tag(Tag::custom(TagKind::custom("server"), vec![url.clone()]));
+        builder = builder.tag(Tag::custom("server", vec![url.clone()]));
     }
-    client.send_event_builder(builder).await
+    crate::sign_and_send(client, builder).await
         .map_err(|e| format!("Failed to publish blossom servers: {}", e))?;
     crate::log_info!("[BlossomServers] Published kind 10063 with {} server(s)", servers.len());
     Ok(())
@@ -274,7 +274,7 @@ pub async fn fetch_and_merge_own_list(
         .kind(Kind::Custom(10063))
         .limit(1);
     let events = client
-        .fetch_events(filter, std::time::Duration::from_secs(8))
+        .fetch_events(filter).timeout(std::time::Duration::from_secs(8))
         .await
         .map_err(|e| format!("Failed to fetch kind 10063: {}", e))?;
 
@@ -290,7 +290,7 @@ pub async fn fetch_and_merge_own_list(
 
     let urls_from_event: Vec<String> = event.tags.iter()
         .filter_map(|t| {
-            if t.kind() == TagKind::custom("server") {
+            if t.kind() == "server" {
                 t.content().map(|s| s.to_string())
             } else {
                 None

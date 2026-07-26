@@ -4,9 +4,18 @@
 //! Clients provide a `SendCallback` for status notifications (pending/sent/failed/progress)
 //! and a `SendConfig` for retry/cancel behavior.
 
+use crate::event_ext::FinalizeUnsignedWithId;
+use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use nostr_sdk::prelude::*;
+
+/// NIP-59's gift-wrap backdating window (0 to 2 days).
+///
+/// nostr 0.45 made its own copy of this private, but the wrap timestamps we mint
+/// must stay inside the window readers expect, so it's pinned here rather than
+/// re-guessed per call site.
+pub const NIP59_RANDOM_TIMESTAMP_TWEAK: Range<u64> = 0..172_800;
 
 use crate::state::{nostr_client, my_public_key, STATE};
 use crate::types::{Message, Attachment};
@@ -612,21 +621,23 @@ pub async fn send_dm(
 
     // Build the rumor
     let milliseconds = now.as_millis() % 1000;
-    let mut rumor = EventBuilder::private_msg_rumor(receiver, content);
+    // NIP-17 rumor: kind 14 + recipient p-tag (upstream's `make_rumor` is private).
+    let mut rumor = EventBuilder::new(Kind::PrivateDirectMessage, content)
+        .tag(Tag::public_key(receiver));
 
     if let Some(reply_id) = reply_to {
         if !reply_id.is_empty() {
             rumor = rumor.tag(Tag::custom(
-                TagKind::e(),
+                "e",
                 [reply_id.to_string(), String::new(), "reply".to_string()],
             ));
         }
     }
 
-    let mut rumor = rumor.tag(Tag::custom(TagKind::custom("ms"), [milliseconds.to_string()]));
+    let mut rumor = rumor.tag(Tag::custom("ms", [milliseconds.to_string()]));
     for et in &emoji_tags {
         rumor = rumor.tag(Tag::custom(
-            TagKind::custom("emoji"),
+            "emoji",
             [et.shortcode.clone(), et.url.clone()],
         ));
     }
@@ -635,7 +646,7 @@ pub async fn send_dm(
     if let Some(exp) = config.expiration {
         rumor = rumor.tag(Tag::expiration(Timestamp::from_secs(exp)));
     }
-    let built_rumor = rumor.build(my_pk);
+    let built_rumor = rumor.finalize_unsigned_with_id(my_pk);
     let event_id = built_rumor.id.ok_or("Rumor has no id")?.to_hex();
 
     // Send via gift-wrap with retry
@@ -760,7 +771,7 @@ pub async fn send_file_dm(
     // Sign the Blossom auth event via the active client signer so bunker
     // accounts route through NostrConnect (the user's identity key lives on
     // the remote signer; MY_SECRET_KEY only holds the NIP-46 client key).
-    let signer = client.signer().await
+    let signer = crate::signer::active_signer()
         .map_err(|e| format!("Signer unavailable: {}", e))?;
 
     let now = std::time::SystemTime::now()
@@ -884,33 +895,33 @@ pub async fn send_file_dm(
     // Build Kind 15
     let mut file_rumor = EventBuilder::new(Kind::from_u16(15), &upload_url)
         .tag(Tag::public_key(receiver))
-        .tag(Tag::custom(TagKind::custom("file-type"), [mime_type]))
-        .tag(Tag::custom(TagKind::custom("size"), [encrypted_size.to_string()]))
-        .tag(Tag::custom(TagKind::custom("encryption-algorithm"), ["aes-gcm"]))
-        .tag(Tag::custom(TagKind::custom("decryption-key"), [params.key.as_str()]))
-        .tag(Tag::custom(TagKind::custom("decryption-nonce"), [params.nonce.as_str()]))
-        .tag(Tag::custom(TagKind::custom("ox"), [file_hash.clone()]));
+        .tag(Tag::custom("file-type", [mime_type]))
+        .tag(Tag::custom("size", [encrypted_size.to_string()]))
+        .tag(Tag::custom("encryption-algorithm", ["aes-gcm"]))
+        .tag(Tag::custom("decryption-key", [params.key.as_str()]))
+        .tag(Tag::custom("decryption-nonce", [params.nonce.as_str()]))
+        .tag(Tag::custom("ox", [file_hash.clone()]));
     if !filename.is_empty() {
-        file_rumor = file_rumor.tag(Tag::custom(TagKind::custom("name"), [filename]));
+        file_rumor = file_rumor.tag(Tag::custom("name", [filename]));
     }
     if let Some(ref topic) = webxdc_topic {
-        file_rumor = file_rumor.tag(Tag::custom(TagKind::custom("webxdc-topic"), [topic.as_str()]));
+        file_rumor = file_rumor.tag(Tag::custom("webxdc-topic", [topic.as_str()]));
     }
     // Include image preview metadata for compatible rendering across all clients
     if let Some(ref meta) = img_meta {
         if !meta.thumbhash.is_empty() {
             // `thumbhash` names the value accurately; receivers read `thumb` too
             // (legacy), so this stays backward-compatible in both directions.
-            file_rumor = file_rumor.tag(Tag::custom(TagKind::custom("thumbhash"), [meta.thumbhash.as_str()]));
+            file_rumor = file_rumor.tag(Tag::custom("thumbhash", [meta.thumbhash.as_str()]));
         }
-        file_rumor = file_rumor.tag(Tag::custom(TagKind::custom("dim"), [format!("{}x{}", meta.width, meta.height)]));
+        file_rumor = file_rumor.tag(Tag::custom("dim", [format!("{}x{}", meta.width, meta.height)]));
     }
-    file_rumor = file_rumor.tag(Tag::custom(TagKind::custom("ms"), [milliseconds.to_string()]));
+    file_rumor = file_rumor.tag(Tag::custom("ms", [milliseconds.to_string()]));
     if let Some(exp) = config.expiration {
         file_rumor = file_rumor.tag(Tag::expiration(Timestamp::from_secs(exp)));
     }
 
-    let built_rumor = file_rumor.build(my_pk);
+    let built_rumor = file_rumor.finalize_unsigned_with_id(my_pk);
     let event_id = built_rumor.id.ok_or("Rumor has no id")?.to_hex();
 
     retry_send_gift_wrap(

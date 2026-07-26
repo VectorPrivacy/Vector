@@ -138,8 +138,8 @@ pub async fn sweep_expired() -> Option<u64> {
                     .filter(|u| !u.is_empty())
                     .collect();
                 if !urls.is_empty() {
-                    if let Some(ref client) = client {
-                        if let Ok(signer) = client.signer().await {
+                    if let Some(ref _client) = client {
+                        if let Ok(signer) = crate::signer::active_signer() {
                             crate::blossom::delete_blobs_best_effort(signer, urls);
                         }
                     }

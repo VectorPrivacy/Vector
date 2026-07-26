@@ -183,9 +183,7 @@ pub async fn login<R: Runtime>(
     set_my_public_key(public_key);
     drop(keys); // Drop the Keys struct (secp256k1 Drop zeroizes)
 
-    let client = Client::builder()
-        .signer(vector_core::GuardedSigner::new(public_key))
-        .opts(vector_core::nostr_client_options())
+    let client = vector_core::nostr_client_builder()
         .monitor(Monitor::new(1024))
         .build();
     // The standalone background-sync path on Android can install a client
@@ -313,7 +311,7 @@ pub async fn reauthorize_bunker<R: Runtime>(handle: AppHandle<R>) -> Result<Stri
         let storage_url = bunker_uri.to_string();
 
         let _ = handle_for_task.emit("bunker_awaiting_approval", serde_json::json!({}));
-        let remote_pk = match nc.get_public_key().await {
+        let remote_pk = match nc.get_public_key_async().await {
             Ok(pk) => pk,
             Err(e) => {
                 vector_core::log_warn!("[bunker-reauth] get_public_key failed: {}", e);
@@ -402,17 +400,11 @@ pub async fn reauthorize_bunker<R: Runtime>(handle: AppHandle<R>) -> Result<Stri
                 return;
             }
         };
-        let watched = vector_core::WatchedBunkerSigner::new(new_inner);
-
-        if was_boot_reauth {
-            // Don't install the Client — session_reload will rebuild it
-            // through the normal boot path. Installing here would leave a
-            // half-initialised Client that the boot path would refuse to
-            // replace (the concurrent-install guard in login_from_stored_key
-            // skips when NOSTR_CLIENT is already Some).
-        } else if let Some(client) = vector_core::nostr_client() {
-            client.set_signer(watched).await;
-        }
+        // Nothing to install: the client no longer owns a signer, and
+        // `active_signer()` rebuilds the watched wrapper from `BUNKER_SIGNER` on
+        // every call — so the handle refreshed just above is already live for the
+        // next signing op.
+        drop(new_inner);
 
         // Drain the old NostrConnect in the background — its relay pool can
         // take a moment to release sockets, and the success event shouldn't
@@ -669,9 +661,7 @@ pub async fn login_with_nip55<R: Runtime>(handle: AppHandle<R>) -> Result<LoginR
         #[cfg(target_os = "android")]
         crate::android::external_signer::set_signer_package(package.clone());
 
-        let client = Client::builder()
-            .signer(vector_core::Nip55Signer::new(user_pk))
-            .opts(vector_core::nostr_client_options())
+        let client = vector_core::nostr_client_builder()
             .monitor(Monitor::new(1024))
             .build();
         {
@@ -917,11 +907,9 @@ pub async fn connect_bunker<R: Runtime>(
         set_my_public_key(remote_pk);
         vector_core::set_signer_kind(vector_core::SignerKind::Bunker);
 
-        let bunker = vector_core::bunker_signer()
+        let _bunker = vector_core::bunker_signer()
             .ok_or_else(|| "Internal error: bunker signer slot empty after prewarm".to_string())?;
-        let client = Client::builder()
-            .signer(vector_core::WatchedBunkerSigner::new(bunker))
-            .opts(vector_core::nostr_client_options())
+        let client = vector_core::nostr_client_builder()
             .monitor(Monitor::new(1024))
             .build();
         {
@@ -1093,7 +1081,7 @@ pub async fn start_nostrconnect_session<R: Runtime>(
         let _ = handle_for_task.emit("bunker_awaiting_approval",
             serde_json::json!({}));
         vector_core::log_debug!("[bunker] awaiting signer.get_public_key() (Amber may prompt in Manual mode)…");
-        let remote_pk = match signer.get_public_key().await {
+        let remote_pk = match signer.get_public_key_async().await {
             Ok(pk) => {
                 vector_core::log_debug!("[bunker] get_public_key() resolved → user pubkey discovered");
                 pk
@@ -1163,11 +1151,9 @@ pub async fn start_nostrconnect_session<R: Runtime>(
             set_my_public_key(remote_pk);
             vector_core::set_signer_kind(vector_core::SignerKind::Bunker);
 
-            let bunker = vector_core::bunker_signer()
+            let _bunker = vector_core::bunker_signer()
                 .ok_or_else(|| "Bunker signer slot drained mid-stage".to_string())?;
-            let client = Client::builder()
-                .signer(vector_core::WatchedBunkerSigner::new(bunker))
-                .opts(vector_core::nostr_client_options())
+            let client = vector_core::nostr_client_builder()
                 .monitor(Monitor::new(1024))
                 .build();
             { let mut slot = NOSTR_CLIENT.write().unwrap();
@@ -1268,9 +1254,7 @@ pub async fn create_account() -> Result<LoginResult, String> {
     set_my_public_key(public_key);
     drop(keys);
 
-    let client = Client::builder()
-        .signer(vector_core::GuardedSigner::new(public_key))
-        .opts(vector_core::nostr_client_options())
+    let client = vector_core::nostr_client_builder()
         .monitor(Monitor::new(1024))
         .build();
     // The standalone background-sync path on Android can install a client
@@ -1383,12 +1367,12 @@ pub async fn encrypt(input: String, password: Option<String>) -> String {
             tokio::spawn(async move {
                 // Create and publish the acceptance event
                 let event_builder = EventBuilder::new(Kind::ApplicationSpecificData, "vector_invite_accepted")
-                    .tag(Tag::custom(TagKind::Custom("l".into()), vec!["vector"]))
-                    .tag(Tag::custom(TagKind::Custom("d".into()), vec![invite_code.as_str()]))
+                    .tag(Tag::custom("l", vec!["vector"]))
+                    .tag(Tag::custom("d", vec![invite_code.as_str()]))
                     .tag(Tag::public_key(inviter_pubkey));
 
                 // Build the event
-                match client.sign_event_builder(event_builder).await {
+                match vector_core::sign_builder(event_builder).await {
                     Ok(event) => {
                         // Send only to trusted relays
                         match client.send_event_to(active_trusted_relays().await.into_iter(), &event).await {
@@ -1667,23 +1651,17 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
     // accounts install a Nip55Signer over the Amber IPC bridge; local accounts
     // use GuardedSigner over MY_SECRET_KEY as before.
     let client = if is_bunker_account {
-        let bunker = vector_core::bunker_signer()
+        let _bunker = vector_core::bunker_signer()
             .ok_or("Bunker signer not installed after prewarm")?;
-        Client::builder()
-            .signer(vector_core::WatchedBunkerSigner::new(bunker))
-            .opts(vector_core::nostr_client_options())
+        vector_core::nostr_client_builder()
             .monitor(Monitor::new(1024))
             .build()
     } else if is_nip55_account {
-        Client::builder()
-            .signer(vector_core::Nip55Signer::new(public_key))
-            .opts(vector_core::nostr_client_options())
+        vector_core::nostr_client_builder()
             .monitor(Monitor::new(1024))
             .build()
     } else {
-        Client::builder()
-            .signer(vector_core::GuardedSigner::new(public_key))
-            .opts(vector_core::nostr_client_options())
+        vector_core::nostr_client_builder()
             .monitor(Monitor::new(1024))
             .build()
     };
@@ -2060,10 +2038,10 @@ fn broadcast_pending_invite_if_any() {
         // `l:vector` tag is part of the published event shape; external
         // indexers / relay filters may key on it.
         let event_builder = EventBuilder::new(Kind::ApplicationSpecificData, "vector_invite_accepted")
-            .tag(Tag::custom(TagKind::Custom("l".into()), vec!["vector"]))
-            .tag(Tag::custom(TagKind::Custom("d".into()), vec![invite_code.as_str()]))
+            .tag(Tag::custom("l", vec!["vector"]))
+            .tag(Tag::custom("d", vec![invite_code.as_str()]))
             .tag(Tag::public_key(inviter_pubkey));
-        match client.sign_event_builder(event_builder).await {
+        match vector_core::sign_builder(event_builder).await {
             Ok(event) => {
                 if !session.is_valid() { return; }
                 match client.send_event_to(active_trusted_relays().await.into_iter(), &event).await {

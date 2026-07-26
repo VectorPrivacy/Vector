@@ -34,9 +34,12 @@ pub mod error;
 pub mod traits;
 
 // Nostr SDK trait imports needed for bech32 operations
-use nostr_sdk::prelude::ToBech32;
+use crate::event_ext::FinalizeUnsignedWithId;
+use nostr_sdk::prelude::{FinalizeEventAsync, ToBech32};
 
 // === Core Types ===
+pub mod event_ext;
+pub mod tags;
 pub mod types;
 pub mod profile;
 pub mod chat;
@@ -76,87 +79,242 @@ pub mod webxdc;
 #[cfg(feature = "tor")]
 pub mod tor;
 
-/// Build a `nostr_sdk::ClientOptions` with the embedded-Tor SOCKS proxy
-/// applied if (and only if) the `tor` feature is on AND `tor::TorService` is
-/// currently active. When Tor is off, returns the default options unchanged.
+/// NIP-42 authenticator.
 ///
-/// Note: nostr-sdk's `proxy()` lives on `Connection`, not `ClientOptions`
-/// directly — we build a `Connection` with the proxy mode and pass it via
-/// `ClientOptions::connection(...)`. The `connection()` method itself is
-/// `#[cfg(not(target_arch = "wasm32"))]`, but Vector targets are all native.
+/// Many Concord/Armada communities live on AUTH-gating relays (Ditto's default
+/// gates kind-1059), where an unauthenticated client silently reads back ZERO
+/// events — a join's control-plane verify then fails closed and every community
+/// fetch comes up empty. Registering this is what unlocks those reads; a relay
+/// that doesn't challenge is unaffected.
 ///
-/// Callers should use this rather than `ClientOptions::new()` directly so the
-/// Tor toggle automatically covers their relay traffic.
-pub fn nostr_client_options() -> nostr_sdk::ClientOptions {
-    // NIP-42: authenticate to relays that challenge, using the account signer. Many
-    // Concord/Armada communities live on AUTH-gating relays (Ditto's default gates
-    // kind-1059), where an unauthenticated client silently reads back ZERO events —
-    // so a join's control-plane verify fails closed and every community fetch comes
-    // up empty. Auto-auth unlocks those reads; a relay that doesn't challenge is
-    // unaffected.
-    let opts = nostr_sdk::ClientOptions::new().automatic_authentication(true);
-    #[cfg(all(feature = "tor", not(target_arch = "wasm32")))]
+/// The signer is resolved per challenge rather than captured at client
+/// construction, so a bunker that connects later (or an account swap) authks
+/// under the identity that is live *now*.
+#[derive(Debug)]
+pub struct VectorAuthenticator;
+
+impl nostr_sdk::prelude::Authenticator for VectorAuthenticator {
+    fn make_auth_event<'a>(
+        &'a self,
+        relay_url: &'a nostr_sdk::prelude::RelayUrl,
+        challenge: &'a str,
+    ) -> nostr_sdk::prelude::BoxedFuture<'a, std::result::Result<nostr_sdk::prelude::Event, nostr_sdk::prelude::Error>>
     {
-        match tor::transport_state() {
-            tor::TorTransportState::Active(addr) => {
-                return opts.connection(nostr_sdk::client::Connection::new().proxy(addr));
-            }
-            tor::TorTransportState::RequiredButInactive => {
-                // Tor failsafe: route to a blackhole so the relay socket can't
-                // accidentally come up direct while Tor is mid-bootstrap.
-                return opts.connection(
-                    nostr_sdk::client::Connection::new().proxy(tor::blackhole_proxy_addr()),
-                );
-            }
-            tor::TorTransportState::Disabled => {}
-        }
+        Box::pin(async move {
+            let signer =
+                signer::active_signer().map_err(nostr_sdk::prelude::Error::other)?;
+            Ok(nostr_sdk::prelude::EventBuilder::auth(challenge, relay_url.clone())
+                .finalize_async(&signer)
+                .await?)
+        })
     }
-    opts
 }
 
-/// Augment a `RelayOptions` with the Tor connection mode when active. Used
-/// by every site that adds a relay to the pool — default relays at boot,
-/// custom user relays, community relays, NIP-17 inbox relays — so they all
-/// come up through Tor when the toggle is on.
+/// A `ClientBuilder` carrying Vector's client-wide policy: NIP-42 auth plus the
+/// embedded-Tor SOCKS proxy.
 ///
-/// Without this, `RelayOptions::new()` (or the per-mode helper) defaults to
-/// `ConnectionMode::Direct`, and relays added at boot would stay direct even
-/// after Tor is bootstrapped — `switch_relay_transport()` covers existing
-/// relays on toggle, but not freshly-added ones.
-pub fn tor_aware_relay_options(opts: nostr_sdk::RelayOptions) -> nostr_sdk::RelayOptions {
-    #[cfg(all(feature = "tor", not(target_arch = "wasm32")))]
-    {
-        match tor::transport_state() {
-            tor::TorTransportState::Active(addr) => {
-                return opts.connection_mode(nostr_sdk::pool::ConnectionMode::proxy(addr));
-            }
-            tor::TorTransportState::RequiredButInactive => {
-                // Tor failsafe: pin to blackhole so this relay can never come
-                // up direct while Tor isn't running.
-                return opts.connection_mode(
-                    nostr_sdk::pool::ConnectionMode::proxy(tor::blackhole_proxy_addr()),
-                );
-            }
-            tor::TorTransportState::Disabled => {}
-        }
-    }
-    opts
-}
-
-/// Relay options for a Community / "external" relay: the GOSSIP flag (+ PING for a 24/7 keepalive
-/// connection). GOSSIP is read/write-capable when TARGETED — `can_read()` is `READ|GOSSIP|DISCOVERY`
-/// and `can_write()` is `WRITE|GOSSIP`, so per-relay checks pass for `fetch_events_from` /
-/// `send_event_to` / `subscribe_to`. But pool-wide ops select READ-only / WRITE-only relays, so the
-/// DM/giftwrap subscription (`subscribe(None)`) and the user's outbox (`send_event`) skip GOSSIP
-/// relays — the user's own traffic never touches relays they don't own. (A bare PING-only relay can
-/// NOT be used: `can_write()`/`can_read()` are false → the relay layer returns WriteDisabled /
-/// ReadDisabled.) An overlap relay that's ALSO a user relay keeps its existing READ+WRITE flags —
-/// `add_relay` is a no-op (`Ok(false)`) for a url already pooled, reusing the one existing connection.
-pub fn community_relay_options() -> nostr_sdk::RelayOptions {
-    use nostr_sdk::RelayServiceFlags;
-    tor_aware_relay_options(
-        nostr_sdk::RelayOptions::new().flags(RelayServiceFlags::GOSSIP | RelayServiceFlags::PING),
+/// Callers should start from this rather than `ClientBuilder::new()` so both come
+/// along automatically.
+///
+/// The proxy is a closure, not a fixed address: nostr resolves it per connection
+/// attempt, so it reads the *current* Tor state. That covers relays added later
+/// in the session, which previously needed the transport re-applied per
+/// `add_relay`.
+pub fn nostr_client_builder() -> nostr_sdk::prelude::ClientBuilder {
+    apply_tor_proxy(
+        nostr_sdk::prelude::ClientBuilder::new()
+            .authenticator(VectorAuthenticator)
+            // The pool's own attempts need the Tor floor too, not just our explicit
+            // `try_connect` calls (0.45 default is 15s — under a circuit build).
+            .connect_timeout(relay_connect_timeout(std::time::Duration::from_secs(15))),
     )
+}
+
+/// Register a relay with the pool's own auto-reconnect disabled.
+///
+/// Vector drives every reconnect from its reconcile loop, because it needs the
+/// connection lifecycle to be observable and to sequence with health checks and
+/// the Tor transport switch. The pool's retry is invisible to all of that, so two
+/// schedules end up fighting over one socket.
+///
+/// This exists as a helper rather than a per-call `.reconnect(false)` because
+/// `reconnect` is the one relay option `ClientBuilder` cannot default: it lives
+/// only on `RelayOptions`, so every registration site has to opt out by hand, and
+/// most of them silently didn't.
+pub trait ClientRelayExt {
+    /// `Client::add_relay` with `reconnect(false)` already applied.
+    fn add_managed_relay<'client, 'url, U>(
+        &'client self,
+        url: U,
+    ) -> nostr_sdk::prelude::AddRelay<'client, 'url>
+    where
+        U: Into<nostr_sdk::prelude::RelayUrlArg<'url>>;
+}
+
+impl ClientRelayExt for nostr_sdk::prelude::Client {
+    fn add_managed_relay<'client, 'url, U>(
+        &'client self,
+        url: U,
+    ) -> nostr_sdk::prelude::AddRelay<'client, 'url>
+    where
+        U: Into<nostr_sdk::prelude::RelayUrlArg<'url>>,
+    {
+        self.add_relay(url).reconnect(false)
+    }
+}
+
+/// Minimum a relay connect attempt gets while Tor is on.
+///
+/// Circuit construction dominates the handshake and routinely runs tens of
+/// seconds, especially on the first connection after the toggle.
+#[cfg(all(feature = "tor", not(target_arch = "wasm32")))]
+const TOR_RELAY_CONNECT_FLOOR: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Adjust a relay connect budget for the transport actually in use.
+///
+/// Clearnet TCP+TLS settles in well under a second, so the tight per-call budgets
+/// are right there and each caller's intent is preserved. Under Tor those same
+/// budgets expire mid-circuit, and because the health-check and reconcile loops
+/// treat a timeout as "unhealthy" they call `disconnect()` — which terminates the
+/// connection task — then retry, so a relay churns `pending → terminated` forever
+/// and never connects. Raising the floor lets the circuit finish.
+pub fn relay_connect_timeout(clearnet: std::time::Duration) -> std::time::Duration {
+    #[cfg(all(feature = "tor", not(target_arch = "wasm32")))]
+    {
+        if !matches!(tor::transport_state(), tor::TorTransportState::Disabled) {
+            return clearnet.max(TOR_RELAY_CONNECT_FLOOR);
+        }
+    }
+    clearnet
+}
+
+/// Floor for a relay round-trip (request → response) while Tor is active.
+#[cfg(all(feature = "tor", not(target_arch = "wasm32")))]
+const TOR_RELAY_REQUEST_FLOOR: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Adjust a relay request budget for the transport actually in use.
+///
+/// Companion to [`relay_connect_timeout`] for round trips rather than connections.
+/// A relay that answers a probe in 200ms direct can take many seconds through three
+/// hops, so a clearnet-sized budget reads a healthy relay as dead.
+pub fn relay_request_timeout(clearnet: std::time::Duration) -> std::time::Duration {
+    #[cfg(all(feature = "tor", not(target_arch = "wasm32")))]
+    {
+        if !matches!(tor::transport_state(), tor::TorTransportState::Disabled) {
+            return clearnet.max(TOR_RELAY_REQUEST_FLOOR);
+        }
+    }
+    clearnet
+}
+
+/// Apply the Tor proxy policy to any `ClientBuilder`.
+///
+/// Separate from [`nostr_client_builder`] because a client that authenticates as
+/// something other than the user (the Concord stream-auth plane key) still needs
+/// the same transport: without it the plane fetch connects direct and ties the
+/// user's IP to community membership.
+pub fn apply_tor_proxy(
+    builder: nostr_sdk::prelude::ClientBuilder,
+) -> nostr_sdk::prelude::ClientBuilder {
+    #[cfg(all(feature = "tor", not(target_arch = "wasm32")))]
+    let builder = builder.proxy(nostr_sdk::prelude::Proxy::custom(|_url| tor_proxy_target()));
+    builder
+}
+
+/// Resolve the proxy every connection attempt must use, for the transport in use.
+///
+/// Named rather than inlined into the `Proxy::custom` closure so the failsafe is
+/// testable: returning `None` here means "connect direct", so the only leak-safe
+/// answer while Tor is the chosen transport but not yet up is the blackhole.
+#[cfg(all(feature = "tor", not(target_arch = "wasm32")))]
+fn tor_proxy_target() -> Option<std::net::SocketAddr> {
+    match tor::transport_state() {
+        tor::TorTransportState::Active(addr) => Some(addr),
+        // Tor failsafe: route to a blackhole so a relay socket can't come up
+        // direct while Tor is mid-bootstrap.
+        tor::TorTransportState::RequiredButInactive => Some(tor::blackhole_proxy_addr()),
+        tor::TorTransportState::Disabled => None,
+    }
+}
+
+/// Sign an `EventBuilder` with the session signer.
+///
+/// Stands in for 0.44's `Client::sign_event_builder`, which went away when the
+/// client stopped owning a signer.
+pub async fn sign_builder(
+    builder: nostr_sdk::prelude::EventBuilder,
+) -> std::result::Result<nostr_sdk::prelude::Event, String> {
+    let signer = signer::active_signer()?;
+    builder
+        .finalize_async(&signer)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Sign an `EventBuilder` with the session signer and publish it.
+///
+/// Stands in for 0.44's `Client::send_event_builder`.
+pub async fn sign_and_send(
+    client: &nostr_sdk::prelude::Client,
+    builder: nostr_sdk::prelude::EventBuilder,
+) -> std::result::Result<nostr_sdk::prelude::SendEventOutput, String> {
+    let event = sign_builder(builder).await?;
+    client
+        .send_event(&event)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Seal, wrap and publish a rumor to `receiver`.
+///
+/// Stands in for 0.44's `Client::gift_wrap` / `gift_wrap_to`, which went away
+/// with the client's signer. An empty `relays` publishes pool-wide, matching
+/// `gift_wrap`; a non-empty one targets those relays, matching `gift_wrap_to`.
+pub async fn send_gift_wrap<'u, I, U, T>(
+    client: &nostr_sdk::prelude::Client,
+    relays: I,
+    receiver: &nostr_sdk::prelude::PublicKey,
+    rumor: nostr_sdk::prelude::UnsignedEvent,
+    extra_tags: T,
+) -> std::result::Result<nostr_sdk::prelude::SendEventOutput, String>
+where
+    I: IntoIterator<Item = U>,
+    U: Into<nostr_sdk::prelude::RelayUrlArg<'u>>,
+    T: IntoIterator<Item = nostr_sdk::prelude::Tag>,
+{
+    let signer = signer::active_signer()?;
+    let wrap = nostr_sdk::prelude::GiftWrapBuilder::new(*receiver, rumor)
+        .extra_tags(extra_tags)
+        .finalize_async(&signer)
+        .await
+        .map_err(|e| e.to_string())?;
+    let targets: Vec<nostr_sdk::prelude::RelayUrlArg<'u>> =
+        relays.into_iter().map(Into::into).collect();
+    if targets.is_empty() {
+        client.send_event(&wrap).await.map_err(|e| e.to_string())
+    } else {
+        client
+            .send_event(&wrap)
+            .to(targets)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Capabilities for a Community / "external" relay: GOSSIP only.
+///
+/// GOSSIP is read/write-capable when TARGETED — `can_read()` is
+/// `READ|GOSSIP|DISCOVERY` and `can_write()` is `WRITE|GOSSIP`, so per-relay
+/// targeted ops pass. But pool-wide ops select READ-only / WRITE-only relays, so
+/// the DM/giftwrap subscription and the user's outbox skip GOSSIP relays — the
+/// user's own traffic never touches relays they don't own.
+///
+/// No PING counterpart any more: 0.45 demoted PING from a capability flag to a
+/// per-relay option (`AddRelay::ping`) that already defaults to true, with
+/// `sleep_when_idle` defaulting to false. The 24/7 keepalive this used to buy is
+/// now the default, so it doesn't belong in the capability set.
+pub fn community_relay_capabilities() -> nostr_sdk::prelude::RelayCapabilities {
+    nostr_sdk::prelude::RelayCapabilities::GOSSIP
 }
 
 /// Relay options for a Discovery Relay (see `state::DISCOVERY_RELAYS`): the same
@@ -164,8 +322,8 @@ pub fn community_relay_options() -> nostr_sdk::RelayOptions {
 /// `fetch_events_from` / `send_event_to`, invisible to pool-wide DM/profile ops.
 /// An overlap with a user relay keeps the user's READ+WRITE flags (`add_relay`
 /// no-ops on an already-pooled url).
-pub fn discovery_relay_options() -> nostr_sdk::RelayOptions {
-    community_relay_options()
+pub fn discovery_relay_capabilities() -> nostr_sdk::prelude::RelayCapabilities {
+    community_relay_capabilities()
 }
 
 // === Event Storage ===
@@ -356,17 +514,14 @@ impl VectorCore {
 
         // Build Nostr client — tor-aware options so a headless consumer with
         // the Tor pref ON proxies (or blackholes) instead of dialing direct.
-        let client = ClientBuilder::new()
-            .signer(keys)
-            .opts(nostr_client_options())
+        let client = crate::nostr_client_builder()
             // Relay health monitor — powers the reconnect-driven catch-up in `listen()`.
             .monitor(Monitor::new(1024))
             .build();
 
         // Add trusted relays
         for relay in state::TRUSTED_RELAYS {
-            let opts = tor_aware_relay_options(nostr_sdk::RelayOptions::default());
-            client.pool().add_relay(*relay, opts).await.ok();
+            client.add_managed_relay(*relay).await.ok();
         }
 
         // Connect
@@ -488,10 +643,10 @@ impl VectorCore {
             }
             let shortcode = &emoji[1..emoji.len() - 1];
             if shortcode.is_empty() { return None; }
-            Some(Tag::custom(TagKind::custom("emoji"), [shortcode.to_string(), url.to_string()]))
+            Some(Tag::custom("emoji", [shortcode.to_string(), url.to_string()]))
         });
 
-        let reaction_target = nostr_sdk::nips::nip25::ReactionTarget {
+        let reaction_target = nostr_sdk::prelude::nip25::ReactionTarget {
             event_id: reference_event,
             public_key: receiver_pubkey,
             coordinate: None,
@@ -502,7 +657,7 @@ impl VectorCore {
         if let Some(tag) = custom_emoji_tag {
             builder = builder.tag(tag);
         }
-        let rumor = builder.build(my_public_key);
+        let rumor = builder.finalize_unsigned_with_id(my_public_key);
         let inner_rumor_id = rumor.id;
         let rumor_id = inner_rumor_id.ok_or(VectorError::Other("Failed to get rumor ID".into()))?.to_hex();
 
@@ -580,16 +735,22 @@ impl VectorCore {
         let expiry = Timestamp::from_secs(Timestamp::now().as_secs() + 30);
         let rumor = EventBuilder::new(Kind::ApplicationSpecificData, "typing")
             .tag(Tag::public_key(pubkey))
-            .tag(Tag::custom(TagKind::d(), vec!["vector"]))
+            .tag(Tag::custom("d", vec!["vector"]))
             .tag(Tag::expiration(expiry))
-            .build(my_public_key);
+            .finalize_unsigned_with_id(my_public_key);
 
-        client.gift_wrap_to(
-            state::active_trusted_relays().await,
-            &pubkey,
-            rumor,
-            [Tag::expiration(expiry)],
-        ).await.map_err(|e| VectorError::Nostr(e.to_string()))?;
+        // Client no longer wraps: build the wrap, then publish it to the target relays.
+        let signer = signer::active_signer().map_err(VectorError::Other)?;
+        let wrap = nostr_sdk::prelude::GiftWrapBuilder::new(pubkey, rumor.clone())
+            .extra_tags([Tag::expiration(expiry)])
+            .finalize_async(&signer)
+            .await
+            .map_err(|e| VectorError::Nostr(e.to_string()))?;
+        client
+            .send_event(&wrap)
+            .to(state::active_trusted_relays().await)
+            .await
+            .map_err(|e| VectorError::Nostr(e.to_string()))?;
         Ok(())
     }
 
@@ -614,11 +775,11 @@ impl VectorCore {
         ).tag(Tag::event(reference_event));
         for et in &emoji_tags {
             builder = builder.tag(Tag::custom(
-                TagKind::custom("emoji"),
+                "emoji",
                 [et.shortcode.clone(), et.url.clone()],
             ));
         }
-        let rumor = builder.build(my_public_key);
+        let rumor = builder.finalize_unsigned_with_id(my_public_key);
         let edit_id = rumor.id.ok_or(VectorError::Other("Failed to get edit rumor ID".into()))?.to_hex();
         let edit_ts_ms = rumor.created_at.as_secs() * 1000;
 
@@ -646,7 +807,13 @@ impl VectorCore {
         let self_wrap_session = state::SessionGuard::capture();
         tokio::spawn(async move {
             if !self_wrap_session.is_valid() { return; }
-            let _ = self_wrap_client.gift_wrap(&my_public_key, rumor, []).await;
+            let Ok(signer) = signer::active_signer() else { return };
+            if let Ok(wrap) = nostr_sdk::prelude::GiftWrapBuilder::new(my_public_key, rumor)
+                .finalize_async(&signer)
+                .await
+            {
+                let _ = self_wrap_client.send_event(&wrap).await;
+            }
         });
 
         Ok(edit_id)
@@ -727,10 +894,8 @@ impl VectorCore {
         }
         let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("bin").to_lowercase();
         let mime = crate::crypto::mime_from_extension(&extension);
-        let client = state::nostr_client().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
-        let signer = client
-            .signer()
-            .await
+        let _client = state::nostr_client().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
+        let signer = crate::signer::active_signer()
             .map_err(|e| VectorError::Other(format!("Signer unavailable: {e}")))?;
         let servers = crate::blossom_servers::compute_enabled_servers();
         if servers.is_empty() {
@@ -1307,15 +1472,15 @@ impl VectorCore {
             // live key material for a community that keeps rotating, so it must not linger.
             let expires_at = nostr_sdk::prelude::Timestamp::now().as_secs()
                 + crate::community::invite::DIRECT_INVITE_EXPIRY_SECS;
-            let expiry_tag = nostr_sdk::Tag::expiration(nostr_sdk::prelude::Timestamp::from_secs(expires_at));
-            let rumor = nostr_sdk::EventBuilder::new(
-                nostr_sdk::Kind::Custom(crate::community::v2::kind::DIRECT_INVITE),
+            let expiry_tag = nostr_sdk::prelude::Tag::expiration(nostr_sdk::prelude::Timestamp::from_secs(expires_at));
+            let rumor = nostr_sdk::prelude::EventBuilder::new(
+                nostr_sdk::prelude::Kind::Custom(crate::community::v2::kind::DIRECT_INVITE),
                 bundle_json,
             )
             .tag(expiry_tag.clone())
-            .build(my_pk);
-            let k_tag = nostr_sdk::Tag::custom(
-                nostr_sdk::TagKind::Custom("k".into()),
+            .finalize_unsigned_with_id(my_pk);
+            let k_tag = nostr_sdk::prelude::Tag::custom(
+                "k",
                 [crate::community::v2::kind::DIRECT_INVITE.to_string()],
             );
             if !session.is_valid() {
@@ -1335,7 +1500,7 @@ impl VectorCore {
         if !service::caller_has_permission(&community, crate::community::roles::Permissions::CREATE_INVITE) {
             return Err(VectorError::Other("You need the create-invite permission to invite someone".into()));
         }
-        let invitee_hex = nostr_sdk::PublicKey::parse(invitee_npub)
+        let invitee_hex = nostr_sdk::prelude::PublicKey::parse(invitee_npub)
             .map_err(|_| VectorError::Other("invalid npub".into()))?
             .to_hex();
         if crate::db::community::get_community_banlist(community_id)
@@ -1465,9 +1630,9 @@ impl VectorCore {
             &[],
         );
         let message_id = unsigned.id.ok_or_else(|| VectorError::Other("inner event has no id".into()))?.to_hex();
-        let client = state::nostr_client().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
-        let signer = client.signer().await.map_err(|e| VectorError::Other(format!("Signer unavailable: {e}")))?;
-        let inner = unsigned.sign(&signer).await.map_err(|e| VectorError::Other(format!("sign: {e}")))?;
+        let _client = state::nostr_client().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
+        let signer = crate::signer::active_signer().map_err(|e| VectorError::Other(format!("Signer unavailable: {e}")))?;
+        let inner = unsigned.finalize_async(&signer).await.map_err(|e| VectorError::Other(format!("sign: {e}")))?;
         let session = state::SessionGuard::capture();
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
         let outer = service::send_signed_message(&transport, &community, &channel, &inner)
@@ -1536,8 +1701,8 @@ impl VectorCore {
         let encrypted = crate::crypto::encrypt_data(&bytes, &params)?;
         let encrypted_size = encrypted.len() as u64;
 
-        let client = state::nostr_client().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
-        let signer = client.signer().await.map_err(|e| VectorError::Other(format!("Signer unavailable: {e}")))?;
+        let _client = state::nostr_client().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
+        let signer = crate::signer::active_signer().map_err(|e| VectorError::Other(format!("Signer unavailable: {e}")))?;
         let servers = crate::blossom_servers::compute_enabled_servers();
         if servers.is_empty() {
             return Err(VectorError::Other("No Blossom servers configured".into()));
@@ -1593,7 +1758,7 @@ impl VectorCore {
             stored_event::event_kind::COMMUNITY_MESSAGE, "", ms, None, &[], &imeta,
         );
         let message_id = unsigned.id.ok_or_else(|| VectorError::Other("inner event has no id".into()))?.to_hex();
-        let inner = unsigned.sign(&signer).await.map_err(|e| VectorError::Other(format!("sign: {e}")))?;
+        let inner = unsigned.finalize_async(&signer).await.map_err(|e| VectorError::Other(format!("sign: {e}")))?;
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(30));
         let outer = service::send_signed_message(&transport, &community, &channel, &inner)
             .await.map_err(VectorError::Other)?;
@@ -1770,8 +1935,8 @@ impl VectorCore {
         }
         // Layer 3 — best-effort attachment blob delete.
         if !attachment_urls.is_empty() {
-            if let Some(client) = state::nostr_client() {
-                if let Ok(signer) = client.signer().await {
+            if let Some(_client) = state::nostr_client() {
+                if let Ok(signer) = crate::signer::active_signer() {
                     crate::blossom::delete_blobs_best_effort(signer, attachment_urls);
                 }
             }
@@ -1812,9 +1977,9 @@ impl VectorCore {
         let unsigned = envelope::build_inner_typed(
             author_pk, &channel.id, channel.epoch, kind, content, ms, Some(target), emoji_tags,
         );
-        let client = state::nostr_client().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
-        let signer = client.signer().await.map_err(|e| VectorError::Other(format!("Signer unavailable: {e}")))?;
-        let inner = unsigned.sign(&signer).await.map_err(|e| VectorError::Other(format!("sign: {e}")))?;
+        let _client = state::nostr_client().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
+        let signer = crate::signer::active_signer().map_err(|e| VectorError::Other(format!("Signer unavailable: {e}")))?;
+        let inner = unsigned.finalize_async(&signer).await.map_err(|e| VectorError::Other(format!("sign: {e}")))?;
         let session = state::SessionGuard::capture();
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
         let outer = service::send_signed_message(&transport, &community, &channel, &inner)
@@ -2726,8 +2891,8 @@ impl VectorCore {
         log_info!("[SyncDMs] {} negentropy items, since_days={:?}", items.len(), since_days);
 
         // Dry-run negentropy: exchange fingerprints to identify missing events
-        let sync_opts = nostr_sdk::SyncOptions::new()
-            .direction(nostr_sdk::SyncDirection::Down)
+        let sync_opts = nostr_sdk::prelude::SyncOptions::new()
+            .direction(nostr_sdk::prelude::SyncDirection::Down)
             .initial_timeout(std::time::Duration::from_secs(10))
             .dry_run();
 
@@ -2748,7 +2913,7 @@ impl VectorCore {
             relay_futs.push(async move {
                 let result = tokio::time::timeout(
                     std::time::Duration::from_secs(10),
-                    relay.sync_with_items(f, i, &o),
+                    relay.sync(f).items(i).opts(o),
                 ).await;
                 (url, result)
             });
@@ -2785,13 +2950,17 @@ impl VectorCore {
 
         for batch in ids.chunks(BATCH_SIZE) {
             let f = Filter::new().ids(batch.to_vec()).kind(Kind::GiftWrap);
-            match client.stream_events_from(
-                relay_strs.clone(), f,
-                std::time::Duration::from_secs(30),
-            ).await {
+            match client
+                .stream_events(nostr_sdk::prelude::ReqTarget::manual(
+                    relay_strs.iter().cloned().map(|u| (u, vec![f.clone()])),
+                ))
+                .timeout(std::time::Duration::from_secs(30))
+                .await
+            {
                 Ok(stream) => {
                     let client_clone = client.clone();
                     let prepared_stream = stream
+                        .filter_map(|(_relay, res)| async move { res.ok() })
                         .map(move |event| {
                             let c = client_clone.clone();
                             tokio::spawn(async move {
@@ -2826,7 +2995,7 @@ impl VectorCore {
     ///
     /// Returns the subscription ID for use in a custom notification loop.
     /// For a complete listen-and-process loop, use [`listen()`](Self::listen) instead.
-    pub async fn subscribe_dms(&self) -> Result<nostr_sdk::SubscriptionId> {
+    pub async fn subscribe_dms(&self) -> Result<nostr_sdk::prelude::SubscriptionId> {
         use nostr_sdk::prelude::*;
         let client = state::nostr_client()
             .ok_or(VectorError::Other("Not connected".into()))?;
@@ -2838,9 +3007,9 @@ impl VectorCore {
             .kind(Kind::GiftWrap)
             .limit(0);
 
-        let output = client.subscribe(filter, None).await
+        let output = client.subscribe(filter).await
             .map_err(|e| VectorError::Nostr(e.to_string()))?;
-        Ok(output.val)
+        Ok(output.value)
     }
 
     /// Catch up every locally-held Community: fold control / re-foundings / rekeys / banlist and
@@ -3018,21 +3187,22 @@ impl VectorCore {
                             RelayStatus::Connected => {
                                 let probe = tokio::time::timeout(
                                     std::time::Duration::from_secs(10),
-                                    client_health.fetch_events_from(
-                                        vec![url.to_string()],
-                                        Filter::new().kind(Kind::Metadata).limit(1),
-                                        std::time::Duration::from_secs(8),
-                                    ),
+                                    client_health
+                                        .fetch_events(nostr_sdk::prelude::ReqTarget::single(
+                                            url.to_string(),
+                                            [Filter::new().kind(Kind::Metadata).limit(1)],
+                                        ))
+                                        .timeout(std::time::Duration::from_secs(8)),
                                 )
                                 .await;
                                 if !matches!(probe, Ok(Ok(_))) {
                                     let _ = relay.disconnect();
                                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                                    let _ = relay.try_connect(std::time::Duration::from_secs(10)).await;
+                                    let _ = relay.try_connect().timeout(crate::relay_connect_timeout(std::time::Duration::from_secs(10))).await;
                                 }
                             }
                             RelayStatus::Terminated | RelayStatus::Disconnected => {
-                                let _ = relay.try_connect(std::time::Duration::from_secs(10)).await;
+                                let _ = relay.try_connect().timeout(crate::relay_connect_timeout(std::time::Duration::from_secs(10))).await;
                             }
                             _ => {}
                         }
@@ -3044,20 +3214,23 @@ impl VectorCore {
 
         let client_for_closure = client.clone();
 
-        client.handle_notifications(move |notification| {
+        // 0.45 removed `handle_notifications`; drive the stream directly. It ends when
+        // the client shuts down, which is what stops this loop on `swap_session`.
+        let mut notifications = client.notifications();
+        while let Some(notification) = notifications.next().await {
             let handler = handler.clone();
             let c = client_for_closure.clone();
             let dm_sid = dm_sub_id.clone();
-            async move {
+            {
                 // Relay OKs feed the send pipeline: an OK that outlives the
                 // per-attempt wait still confirms delivery, and can rescue a
                 // message already marked Failed.
-                if let RelayPoolNotification::Message {
-                    message: nostr_sdk::RelayMessage::Ok { event_id, status, .. }, ..
-                } = &notification {
-                    sending::note_relay_ok(event_id, *status);
+                if let nostr_sdk::prelude::ClientNotification::Message { message, .. } = &notification {
+                    if let nostr_sdk::prelude::RelayMessage::Ok { event_id, status, .. } = &**message {
+                        sending::note_relay_ok(event_id, *status);
+                    }
                 }
-                if let RelayPoolNotification::Event { event, subscription_id, .. } = notification {
+                if let nostr_sdk::prelude::ClientNotification::Event { event, subscription_id, .. } = notification {
                     if subscription_id == dm_sid {
                         // DMs, files, reactions
                         let prepared = event_handler::prepare_event(*event, &c, my_pk).await;
@@ -3078,9 +3251,8 @@ impl VectorCore {
                         community::v2::realtime::dispatch_event(&session, *event, handler.clone()).await;
                     }
                 }
-                Ok(false)
             }
-        }).await.map_err(|e| VectorError::Nostr(e.to_string()))?;
+        }
 
         Ok(())
     }
@@ -3161,6 +3333,55 @@ impl VectorCore {
         // next account's outbound messages with A's theme shortcodes (leaking A's pack Blossom URLs). The
         // frontend re-registers the new account's theme, but only if it HAS one — clear to be safe.
         crate::emoji_packs::set_theme_emoji_tags(Vec::new());
+    }
+}
+
+#[cfg(all(test, feature = "tor", not(target_arch = "wasm32")))]
+mod transport_policy_tests {
+    use std::time::Duration;
+
+    /// ONE test covering proxy + budgets: the Tor preference is a process-global
+    /// atomic, so separate `#[test]` fns would race under the parallel runner.
+    #[test]
+    fn tor_transport_policy() {
+        let short = Duration::from_secs(5);
+        let long = Duration::from_secs(300);
+
+        // Tor off: connections may go direct, and every caller's clearnet budget
+        // passes through untouched so the common path is never slowed down.
+        crate::tor::set_tor_enabled_pref(false);
+        assert_eq!(super::tor_proxy_target(), None);
+        assert_eq!(super::relay_connect_timeout(short), short);
+        assert_eq!(super::relay_request_timeout(short), short);
+
+        // `RequiredButInactive` (Tor chosen, proxy not up yet) must raise the floor
+        // just like `Active`: that window is when connects are slowest, and treating
+        // it as clearnet is what tore relays down mid-handshake.
+        crate::tor::set_tor_enabled_pref(true);
+        assert!(matches!(
+            crate::tor::transport_state(),
+            crate::tor::TorTransportState::RequiredButInactive
+        ));
+        // THE leak invariant: `None` here means "connect direct". While Tor is the
+        // chosen transport it must never be None — least of all during bootstrap,
+        // which is exactly when a naive implementation falls through to direct.
+        // Silent failure with an IP disclosure as the cost, so it gets a permanent
+        // guard rather than a one-off manual check.
+        assert_eq!(
+            super::tor_proxy_target(),
+            Some(crate::tor::blackhole_proxy_addr()),
+            "Tor enabled but inactive must blackhole, never connect direct"
+        );
+        assert_eq!(super::relay_connect_timeout(short), super::TOR_RELAY_CONNECT_FLOOR);
+        assert_eq!(super::relay_request_timeout(short), super::TOR_RELAY_REQUEST_FLOOR);
+
+        // The floor only ever raises. A caller asking for longer than the floor has
+        // a reason to, and shortening it would abort operations that used to finish.
+        for tor in [true, false] {
+            crate::tor::set_tor_enabled_pref(tor);
+            assert_eq!(super::relay_connect_timeout(long), long, "connect, tor={tor}");
+            assert_eq!(super::relay_request_timeout(long), long, "request, tor={tor}");
+        }
     }
 }
 

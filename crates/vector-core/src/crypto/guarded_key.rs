@@ -309,7 +309,7 @@ impl GuardedKey {
     /// `others` is a slice of references to other active GuardedKey instances
     /// for cross-key protection during decoy writes.
     #[inline]
-    pub fn store_from_keys(&self, keys: &nostr_sdk::Keys, others: &[&GuardedKey]) {
+    pub fn store_from_keys(&self, keys: &nostr_sdk::prelude::Keys, others: &[&GuardedKey]) {
         let mut sk_bytes = keys.secret_key().secret_bytes();
         self.set(sk_bytes, others);
         sk_bytes.zeroize();
@@ -453,11 +453,11 @@ impl GuardedKey {
         self.active.load(Ordering::Acquire) != 0
     }
 
-    pub fn to_keys(&self) -> Option<nostr_sdk::Keys> {
+    pub fn to_keys(&self) -> Option<nostr_sdk::prelude::Keys> {
         let mut bytes = self.get()?;
-        let result = nostr_sdk::SecretKey::from_slice(&bytes);
+        let result = nostr_sdk::prelude::SecretKey::from_slice(&bytes);
         bytes.zeroize();
-        Some(nostr_sdk::Keys::new(result.ok()?))
+        Some(nostr_sdk::prelude::Keys::new(result.ok()?))
     }
 }
 
@@ -977,7 +977,7 @@ mod tests {
     fn store_from_keys_roundtrip() {
         let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         reset();
-        let keys = nostr_sdk::Keys::generate();
+        let keys = nostr_sdk::prelude::Keys::generate();
         let expected = keys.secret_key().secret_bytes();
         TEST_KEY_A.store_from_keys(&keys, &others_for_a());
         assert_eq!(TEST_KEY_A.get(), Some(expected));

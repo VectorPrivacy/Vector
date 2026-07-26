@@ -23,7 +23,7 @@
 //! `community::version::EDITION_LABEL`), which upstream froze verbatim.
 
 use hkdf::Hkdf;
-use nostr_sdk::nips::nip44::v2::ConversationKey;
+use nostr_sdk::prelude::nip44::v2::ConversationKey;
 use nostr_sdk::prelude::{Keys, PublicKey, SecretKey};
 use sha2::{Digest, Sha256};
 

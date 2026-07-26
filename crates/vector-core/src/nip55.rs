@@ -14,7 +14,7 @@
 //!   registered (desktop, CLI, tests), every op returns a clean runtime error —
 //!   never a compile-time platform stub, so a stray shared-call-site reference
 //!   can't break the desktop build.
-//! - [`Nip55Signer`] implements `NostrSigner` on top of the hook, so every
+//! - [`Nip55Signer`] implements `VectorSigner` on top of the hook, so every
 //!   existing `client.signer()` call site (DM seals, Blossom auth, Concord v2
 //!   identity ops) uses it agnostically with no changes.
 //!
@@ -24,10 +24,14 @@
 //! forking. Fail-closed: a signer returning an event authored by the wrong
 //! identity is rejected here, not silently published.
 
+use crate::event_ext::FinalizeUnsignedWithId;
+use nostr_sdk::prelude::{FinalizeUnsignedEvent};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{LazyLock, OnceLock};
 
 use nostr_sdk::prelude::*;
+
+use crate::signer::SignerError;
 
 // ============================================================================
 // Nip55Error — hook failure taxonomy
@@ -309,10 +313,10 @@ pub fn drain_nip55_state() {
 }
 
 // ============================================================================
-// Nip55Signer — NostrSigner over the platform hook
+// Nip55Signer — VectorSigner over the platform hook
 // ============================================================================
 
-/// A `NostrSigner` that routes every identity op to an external NIP-55 signer
+/// A `VectorSigner` that routes every identity op to an external NIP-55 signer
 /// over the platform hook. Cheap to clone (just a pubkey + a session
 /// generation snapshot).
 ///
@@ -449,19 +453,22 @@ impl Nip55Signer {
     }
 }
 
-impl NostrSigner for Nip55Signer {
-    fn backend(&self) -> SignerBackend<'_> {
-        SignerBackend::Custom(std::borrow::Cow::Borrowed("nip55"))
-    }
+impl AsyncGetPublicKey for Nip55Signer {
+    type Error = SignerError;
 
-    fn get_public_key<'a>(&'a self) -> BoxedFuture<'a, Result<PublicKey, SignerError>> {
+    fn get_public_key_async(&self) -> BoxedFuture<'_, Result<PublicKey, Self::Error>> {
         // Cached (review W6): NIP-55 `get_public_key` is a pairing-time Intent,
         // never a per-call hop. `my_pk` is resolved constantly on the hot path;
         // an IPC round-trip here would be catastrophic.
         Box::pin(async move { Ok(self.user_pubkey) })
     }
 
-    fn sign_event<'a>(&'a self, unsigned: UnsignedEvent) -> BoxedFuture<'a, Result<Event, SignerError>> {
+}
+
+impl AsyncSignEvent for Nip55Signer {
+    type Error = SignerError;
+
+    fn sign_event_async(&self, unsigned: UnsignedEvent) -> BoxedFuture<'_, Result<Event, Self::Error>> {
         Box::pin(async move {
             let event_json = unsigned.as_json();
             let user_hex = self.user_pubkey.to_hex();
@@ -487,11 +494,16 @@ impl NostrSigner for Nip55Signer {
         })
     }
 
-    fn nip04_encrypt<'a>(
+}
+
+impl AsyncNip04 for Nip55Signer {
+    type Error = SignerError;
+
+    fn nip04_encrypt_async<'a>(
         &'a self,
         public_key: &'a PublicKey,
         content: &'a str,
-    ) -> BoxedFuture<'a, Result<String, SignerError>> {
+    ) -> BoxedFuture<'a, Result<String, Self::Error>> {
         Box::pin(async move {
             let (result, _event) = self
                 .run("NIP04_ENCRYPT", "nip04_encrypt", content.to_string(), public_key.to_hex(), self.user_pubkey.to_hex())
@@ -500,11 +512,11 @@ impl NostrSigner for Nip55Signer {
         })
     }
 
-    fn nip04_decrypt<'a>(
+    fn nip04_decrypt_async<'a>(
         &'a self,
         public_key: &'a PublicKey,
         content: &'a str,
-    ) -> BoxedFuture<'a, Result<String, SignerError>> {
+    ) -> BoxedFuture<'a, Result<String, Self::Error>> {
         Box::pin(async move {
             let (result, _event) = self
                 .run("NIP04_DECRYPT", "nip04_decrypt", content.to_string(), public_key.to_hex(), self.user_pubkey.to_hex())
@@ -513,11 +525,16 @@ impl NostrSigner for Nip55Signer {
         })
     }
 
-    fn nip44_encrypt<'a>(
+}
+
+impl AsyncNip44 for Nip55Signer {
+    type Error = SignerError;
+
+    fn nip44_encrypt_async<'a>(
         &'a self,
         public_key: &'a PublicKey,
         content: &'a str,
-    ) -> BoxedFuture<'a, Result<String, SignerError>> {
+    ) -> BoxedFuture<'a, Result<String, Self::Error>> {
         Box::pin(async move {
             let (result, _event) = self
                 .run("NIP44_ENCRYPT", "nip44_encrypt", content.to_string(), public_key.to_hex(), self.user_pubkey.to_hex())
@@ -526,11 +543,11 @@ impl NostrSigner for Nip55Signer {
         })
     }
 
-    fn nip44_decrypt<'a>(
+    fn nip44_decrypt_async<'a>(
         &'a self,
         public_key: &'a PublicKey,
         content: &'a str,
-    ) -> BoxedFuture<'a, Result<String, SignerError>> {
+    ) -> BoxedFuture<'a, Result<String, Self::Error>> {
         Box::pin(async move {
             let (result, _event) = self
                 .run("NIP44_DECRYPT", "nip44_decrypt", content.to_string(), public_key.to_hex(), self.user_pubkey.to_hex())
@@ -622,7 +639,7 @@ mod tests {
         // must still resolve — it returns the cached identity, never an IPC hop.
         let keys = Keys::generate();
         let signer = Nip55Signer::new(keys.public_key());
-        let pk = signer.get_public_key().await.expect("cached pubkey resolves");
+        let pk = signer.get_public_key_async().await.expect("cached pubkey resolves");
         assert_eq!(pk, keys.public_key());
     }
 
@@ -675,8 +692,8 @@ mod tests {
         set_nip55_state(Nip55State::Idle);
         let fresh = Nip55Signer::new(keys.public_key());
         let unsigned = EventBuilder::text_note("hi")
-            .build(keys.public_key());
-        let err = fresh.sign_event(unsigned).await;
+            .finalize_unsigned_with_id(keys.public_key());
+        let err = fresh.sign_event_async(unsigned).await;
         assert!(err.is_err(), "no backend registered => sign must fail");
         assert_eq!(
             nip55_state(),

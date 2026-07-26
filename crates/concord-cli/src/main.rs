@@ -222,7 +222,7 @@ async fn print_relay(c: &vector_core::community::Community) {
     // A re-founding's coverage gate fetches over the shared pool, so a relay that's cheap in-tunnel but
     // expensive to (re)connect can still blow the budget after a reconnect — hence reporting both.
     {
-        use nostr_sdk::{Client, Filter, Kind};
+        use nostr_sdk::prelude::{Client, Filter, Kind};
         use std::time::{Duration, Instant};
         use vector_core::stored_event::event_kind::COMMUNITY_CONTROL;
         println!("    ── per-relay latency (fresh connection) ──");
@@ -230,11 +230,12 @@ async fn print_relay(c: &vector_core::community::Community) {
             let client = Client::default();
             let _ = client.add_relay(r.as_str()).await;
             let t0 = Instant::now();
-            client.try_connect(Duration::from_secs(15)).await;
+            client.try_connect().timeout(Duration::from_secs(15)).await;
             let connect_ms = t0.elapsed().as_millis();
             let filter = Filter::new().kind(Kind::Custom(COMMUNITY_CONTROL)).limit(1);
             let t1 = Instant::now();
-            let res = client.fetch_events_from(vec![r.clone()], filter, Duration::from_secs(15)).await;
+            let res = client.fetch_events(nostr_sdk::prelude::ReqTarget::single(r.clone(), [filter]))
+                .timeout(Duration::from_secs(15)).await;
             let fetch_ms = t1.elapsed().as_millis();
             let n = res.as_ref().map(|e| e.len()).unwrap_or(0);
             println!("      {r}\n        socket-connect {connect_ms:>6} ms   in-tunnel fetch {fetch_ms:>6} ms   ({n} ev)");
@@ -379,7 +380,7 @@ async fn print_relay(c: &vector_core::community::Community) {
 }
 
 /// Open MY blob in a rekey (the key it delivers to this account), or None if I'm not a recipient.
-fn peek_key(sk: &nostr_sdk::SecretKey, p: &vector_core::community::rekey::ParsedRekey) -> Option<[u8; 32]> {
+fn peek_key(sk: &nostr_sdk::prelude::SecretKey, p: &vector_core::community::rekey::ParsedRekey) -> Option<[u8; 32]> {
     use vector_core::community::{derive, rekey};
     let secret = rekey::rekey_pairwise_secret(sk, &p.rotator).ok()?;
     let loc = derive::recipient_pseudonym(&secret, p.scope, p.new_epoch).to_hex();
@@ -399,7 +400,7 @@ fn hexpref(b: &[u8]) -> String {
 /// old name": relay starvation (newer editions missing from every reachable relay) vs
 /// gap-quarantine (head present but a chain prerequisite missing).
 async fn print_editions(c: &vector_core::community::Community) {
-    use nostr_sdk::{Alphabet, Client, Filter, Kind, SingleLetterTag};
+    use nostr_sdk::prelude::{Alphabet, Client, Filter, Kind, SingleLetterTag};
     use std::time::Duration;
     use vector_core::stored_event::event_kind::COMMUNITY_CONTROL;
 
@@ -408,12 +409,13 @@ async fn print_editions(c: &vector_core::community::Community) {
     for r in &c.relays {
         let client = Client::default();
         let _ = client.add_relay(r.as_str()).await;
-        client.try_connect(Duration::from_secs(15)).await;
+        client.try_connect().timeout(Duration::from_secs(15)).await;
         let filter = Filter::new()
             .kind(Kind::Custom(COMMUNITY_CONTROL))
             .custom_tags(SingleLetterTag::lowercase(Alphabet::Z), vec![z.clone()])
             .limit(250);
-        let res = client.fetch_events_from(vec![r.clone()], filter, Duration::from_secs(15)).await;
+        let res = client.fetch_events(nostr_sdk::prelude::ReqTarget::single(r.clone(), [filter]))
+                .timeout(Duration::from_secs(15)).await;
         match res {
             Ok(events) => {
                 println!("    {r}  ({} events)", events.len());
@@ -474,7 +476,7 @@ fn resolve_account_npub(data_dir: &std::path::Path) -> Result<String, String> {
 /// each with my key, and reports which inner rumors are COMMUNITY_INVITE_BUNDLE (3304) — with sender,
 /// community, channel count and the rumor's own timestamp (the real send time; the wrap backdates).
 async fn probe_invites(since_hours: u64, from: Option<&str>) {
-    use nostr_sdk::{Filter, Kind, RelayUrl, Timestamp, ToBech32};
+    use nostr_sdk::prelude::{Filter, Kind, RelayUrl, Timestamp, ToBech32};
     use std::collections::{BTreeMap, HashSet};
     use std::time::Duration;
     use vector_core::stored_event::event_kind::COMMUNITY_INVITE_BUNDLE;
@@ -495,14 +497,14 @@ async fn probe_invites(since_hours: u64, from: Option<&str>) {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let since = Timestamp::from(now.saturating_sub(since_hours.saturating_mul(3600)));
     let from_pk = from.and_then(|s| {
-        nostr_sdk::PublicKey::parse(s).map_err(|e| eprintln!("bad --from {s}: {e}")).ok()
+        nostr_sdk::prelude::PublicKey::parse(s).map_err(|e| eprintln!("bad --from {s}: {e}")).ok()
     });
 
     // Relay set: my published inbox relays (where invites are delivered) ∪ trusted relays.
     let mut relays: Vec<RelayUrl> = vector_core::inbox_relays::trusted_relay_urls();
     {
         let f = Filter::new().author(me).kind(Kind::Custom(10050)).limit(1);
-        if let Ok(evs) = client.fetch_events(f, Duration::from_secs(8)).await {
+        if let Ok(evs) = client.fetch_events(f).timeout(Duration::from_secs(8)).await {
             if let Some(ev) = evs.into_iter().next() {
                 for t in ev.tags.iter() {
                     let s = t.as_slice();
@@ -527,7 +529,7 @@ async fn probe_invites(since_hours: u64, from: Option<&str>) {
     // Per-relay fetch so a delivery split is visible; union the gift wraps by id for unwrapping.
     // Relays cap a single response (~500), so page backwards by `until` until the window is exhausted —
     // otherwise a truncated relay could hide the very invite we're hunting (no silent caps).
-    let mut union: BTreeMap<nostr_sdk::EventId, nostr_sdk::Event> = BTreeMap::new();
+    let mut union: BTreeMap<nostr_sdk::prelude::EventId, nostr_sdk::prelude::Event> = BTreeMap::new();
     for r in &relays {
         let _ = client.add_relay(r.as_str()).await;
         let mut until: Option<Timestamp> = None;
@@ -538,7 +540,8 @@ async fn probe_invites(since_hours: u64, from: Option<&str>) {
             if let Some(u) = until {
                 f = f.until(u);
             }
-            let evs = client.fetch_events_from(vec![r.clone()], f, Duration::from_secs(12)).await.unwrap_or_default();
+            let evs = client.fetch_events(nostr_sdk::prelude::ReqTarget::single(r.clone(), [f]))
+                .timeout(Duration::from_secs(12)).await.unwrap_or_default();
             let n = evs.len();
             // Oldest in this page seeds the next page's `until` (one second before, to avoid re-fetching it).
             let oldest = evs.iter().map(|e| e.created_at).min();
@@ -560,10 +563,10 @@ async fn probe_invites(since_hours: u64, from: Option<&str>) {
     // Unwrap each, tally inner kinds, detail every invite bundle.
     let mut by_kind: BTreeMap<u16, usize> = BTreeMap::new();
     let mut undecryptable = 0usize;
-    let mut invites_found: Vec<(nostr_sdk::PublicKey, u64, vector_core::community::invite::CommunityInvite, nostr_sdk::EventId, u64)> = Vec::new();
-    let mut seen_senders: HashSet<nostr_sdk::PublicKey> = HashSet::new();
+    let mut invites_found: Vec<(nostr_sdk::prelude::PublicKey, u64, vector_core::community::invite::CommunityInvite, nostr_sdk::prelude::EventId, u64)> = Vec::new();
+    let mut seen_senders: HashSet<nostr_sdk::prelude::PublicKey> = HashSet::new();
     for ev in union.values() {
-        match nostr_sdk::nips::nip59::UnwrappedGift::from_gift_wrap(&keys, ev).await {
+        match nostr_sdk::prelude::nip59::UnwrappedGift::from_gift_wrap(&keys, ev) {
             Ok(g) => {
                 let k = g.rumor.kind.as_u16();
                 *by_kind.entry(k).or_default() += 1;

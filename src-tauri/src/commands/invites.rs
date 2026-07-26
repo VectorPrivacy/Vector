@@ -5,11 +5,11 @@
 //! - Tracking invited users
 //! - Special event badges (Guy Fawkes Day 2025)
 
-use std::borrow::Cow;
+use vector_core::tags::TagsExt;
 
 use nostr_sdk::prelude::*;
-use rand::{thread_rng, Rng};
-use rand::distributions::Alphanumeric;
+use ::rand::{thread_rng, Rng};
+use ::rand::distributions::Alphanumeric;
 
 use crate::{nostr_client, active_trusted_relays, PendingInviteAcceptance};
 use crate::db;
@@ -54,15 +54,16 @@ pub async fn get_or_create_invite_code() -> Result<String, String> {
         .limit(100);
 
     let mut events = client
-        .stream_events(filter, std::time::Duration::from_secs(10))
+        .stream_events(filter).timeout(std::time::Duration::from_secs(10))
         .await
         .map_err(|e| e.to_string())?;
 
     // Look for existing invite events
-    while let Some(event) = events.next().await {
+    while let Some((_relay, res)) = events.next().await {
+        let Ok(event) = res else { continue };
         if event.content == "vector_invite" {
             // Extract the r tag (invite code)
-            if let Some(r_tag) = event.tags.find(TagKind::Custom(Cow::Borrowed("r"))) {
+            if let Some(r_tag) = event.tags.find_kind("r") {
                 if let Some(code) = r_tag.content() {
                     // Store it locally
                     db::set_sql_setting("invite_code".to_string(), code.to_string())
@@ -78,11 +79,11 @@ pub async fn get_or_create_invite_code() -> Result<String, String> {
 
     // Create and publish the invite event
     let event_builder = EventBuilder::new(Kind::ApplicationSpecificData, "vector_invite")
-        .tag(Tag::custom(TagKind::d(), vec!["vector"]))
-        .tag(Tag::custom(TagKind::Custom("r".into()), vec![new_code.as_str()]));
+        .tag(Tag::custom("d", vec!["vector"]))
+        .tag(Tag::custom("r", vec![new_code.as_str()]));
 
     // Build the event
-    let event = client.sign_event_builder(event_builder).await.map_err(|e| e.to_string())?;
+    let event = vector_core::sign_builder(event_builder).await.map_err(|e| e.to_string())?;
 
     // Send only to trusted relays
     client.send_event_to(active_trusted_relays().await.into_iter(), &event).await.map_err(|e| e.to_string())?;
@@ -114,13 +115,15 @@ pub async fn accept_invite_code(invite_code: String) -> Result<String, String> {
 
     // Find the invite event
     let mut events = client
-        .stream_events_from(active_trusted_relays().await, filter, std::time::Duration::from_secs(10))
+        .stream_events(nostr_sdk::prelude::ReqTarget::manual(active_trusted_relays().await.into_iter().map(|u| (u, vec![filter.clone()]))))
+                .timeout(std::time::Duration::from_secs(10))
         .await
         .map_err(|e| e.to_string())?;
 
     let invite_event = {
-        let mut found: Option<nostr_sdk::Event> = None;
-        while let Some(event) = events.next().await {
+        let mut found: Option<nostr_sdk::prelude::Event> = None;
+        while let Some((_relay, res)) = events.next().await {
+        let Ok(event) = res else { continue };
             if event.content == "vector_invite" {
                 found = Some(event);
                 break;
@@ -174,15 +177,17 @@ pub async fn get_invited_users(npub: String) -> Result<u32, String> {
         .limit(100);
 
     let mut events = client
-        .stream_events_from(active_trusted_relays().await, filter, std::time::Duration::from_secs(10))
+        .stream_events(nostr_sdk::prelude::ReqTarget::manual(active_trusted_relays().await.into_iter().map(|u| (u, vec![filter.clone()]))))
+                .timeout(std::time::Duration::from_secs(10))
         .await
         .map_err(|e| e.to_string())?;
 
     // Find the invite event and extract the invite code
     let mut invite_code_opt = None;
-    while let Some(event) = events.next().await {
+    while let Some((_relay, res)) = events.next().await {
+        let Ok(event) = res else { continue };
         if event.content == "vector_invite" {
-            if let Some(tag) = event.tags.find(TagKind::Custom(Cow::Borrowed("r"))) {
+            if let Some(tag) = event.tags.find_kind("r") {
                 if let Some(content) = tag.content() {
                     invite_code_opt = Some(content.to_string());
                     break;
@@ -199,25 +204,20 @@ pub async fn get_invited_users(npub: String) -> Result<u32, String> {
         .limit(1000); // Allow fetching many acceptances
 
     let mut acceptance_events = client
-        .stream_events_from(active_trusted_relays().await, acceptance_filter, std::time::Duration::from_secs(10))
+        .stream_events(nostr_sdk::prelude::ReqTarget::manual(active_trusted_relays().await.into_iter().map(|u| (u, vec![acceptance_filter.clone()]))))
+                .timeout(std::time::Duration::from_secs(10))
         .await
         .map_err(|e| e.to_string())?;
 
     // Filter for acceptance events that reference our inviter and collect unique acceptors
     let mut unique_acceptors = std::collections::HashSet::new();
 
-    while let Some(event) = acceptance_events.next().await {
+    while let Some((_relay, res)) = acceptance_events.next().await {
+        let Ok(event) = res else { continue };
         if event.content == "vector_invite_accepted" {
             // Check if this acceptance references our inviter
-            let references_inviter = event.tags
-                .iter()
-                .any(|tag| {
-                    if let Some(TagStandard::PublicKey { public_key, .. }) = tag.as_standardized() {
-                        *public_key == inviter_pubkey
-                    } else {
-                        false
-                    }
-                });
+            // 0.45 dropped TagStandard; `Tags::public_keys` yields the parsed p-tags.
+            let references_inviter = event.tags.public_keys().any(|pk| pk == inviter_pubkey);
 
             if references_inviter {
                 unique_acceptors.insert(event.pubkey);

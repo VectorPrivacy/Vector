@@ -1,5 +1,6 @@
-use nostr_sdk::{NostrSigner, Url, Event, EventBuilder, Timestamp, JsonUtil};
-use nostr_sdk::hashes::{sha256::Hash as Sha256Hash, Hash};
+use crate::signer::VectorSigner;
+use nostr_sdk::prelude::{Event, FinalizeEventAsync, Timestamp, Url};
+use nostr::hashes::{sha256::Hash as Sha256Hash, Hash};
 use nostr_blossom::prelude::*;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
 use reqwest::{Body, StatusCode};
@@ -77,7 +78,7 @@ async fn build_auth_header<T>(
     hash: Sha256Hash,
 ) -> Result<HeaderValue, String>
 where
-    T: NostrSigner,
+    T: VectorSigner,
 {
     // Create Blossom authorization
     let expiration = Timestamp::now() + std::time::Duration::from_secs(300);
@@ -89,8 +90,8 @@ where
     );
 
     // Sign the authorization event
-    let auth_event: Event = EventBuilder::blossom_auth(auth)
-        .sign(signer)
+    let auth_event: Event = auth
+        .finalize_async(signer)
         .await
         .map_err(|e| format!("Failed to sign auth event: {}", e))?;
 
@@ -115,7 +116,7 @@ pub async fn upload_blob_with_progress<T>(
     cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<String, String>
 where
-    T: NostrSigner + Clone,
+    T: VectorSigner + Clone,
 {
     let retry_count = retry_count.unwrap_or(0);
     let retry_spacing = retry_spacing.unwrap_or(std::time::Duration::from_secs(1));
@@ -207,7 +208,7 @@ async fn upload_attempt<T>(
     cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<String, String>
 where
-    T: NostrSigner,
+    T: VectorSigner,
 {
     let upload_url = server_url.join("upload")
         .map_err(|e| format!("Invalid server URL: {}", e))?;
@@ -407,7 +408,7 @@ pub async fn upload_blob<T>(
     read_timeout: Option<std::time::Duration>,
 ) -> Result<String, String>
 where
-    T: NostrSigner,
+    T: VectorSigner,
 {
     let upload_url = server_url.join("upload")
         .map_err(|e| format!("Invalid server URL: {}", e))?;
@@ -478,7 +479,7 @@ pub async fn upload_blob_with_failover<T>(
     read_timeout: Option<std::time::Duration>,
 ) -> Result<String, String>
 where
-    T: NostrSigner + Clone,
+    T: VectorSigner + Clone,
 {
     let mut last_error = String::from("No servers available");
 
@@ -523,7 +524,7 @@ pub async fn upload_blob_with_progress_and_failover<T>(
     cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<String, String>
 where
-    T: NostrSigner + Clone,
+    T: VectorSigner + Clone,
 {
     let mut last_error = String::from("No servers available");
 
@@ -615,7 +616,7 @@ async fn build_delete_auth_header<T>(
     hash: Sha256Hash,
 ) -> Result<HeaderValue, String>
 where
-    T: NostrSigner,
+    T: VectorSigner,
 {
     let expiration = Timestamp::now() + std::time::Duration::from_secs(300);
     let auth = BlossomAuthorization::new(
@@ -625,8 +626,8 @@ where
         BlossomAuthorizationScope::BlobSha256Hashes(vec![hash]),
     );
 
-    let auth_event: Event = EventBuilder::blossom_auth(auth)
-        .sign(signer)
+    let auth_event: Event = auth
+        .finalize_async(signer)
         .await
         .map_err(|e| format!("Failed to sign auth event: {}", e))?;
 
@@ -646,7 +647,7 @@ pub async fn delete_blob<T>(
     hash: Sha256Hash,
 ) -> Result<(), String>
 where
-    T: NostrSigner + Clone,
+    T: VectorSigner + Clone,
 {
     let auth_header = build_delete_auth_header(&signer, hash).await?;
 
@@ -683,7 +684,7 @@ where
 /// drives sequencing + per-URL UI feedback.
 pub async fn delete_blob_by_url<T>(signer: T, url_str: &str) -> Result<(), String>
 where
-    T: NostrSigner + Clone,
+    T: VectorSigner + Clone,
 {
     let parsed = Url::parse(url_str)
         .map_err(|e| format!("Invalid Blossom URL: {}", e))?;
@@ -728,7 +729,7 @@ where
 /// the ciphertext from the server it was uploaded to.
 pub fn delete_blobs_best_effort<T>(signer: T, urls: Vec<String>)
 where
-    T: NostrSigner + Clone + Send + Sync + 'static,
+    T: VectorSigner + Clone + Send + Sync + 'static,
 {
     for url_str in urls {
         let url = match Url::parse(&url_str) {
@@ -774,7 +775,7 @@ pub async fn probe_servers_for_octet_stream<T>(
     session: crate::state::SessionGuard,
 ) -> Result<usize, String>
 where
-    T: NostrSigner + Clone,
+    T: VectorSigner + Clone,
 {
     use rand::RngCore;
     if !session.is_valid() { return Ok(0); }
@@ -958,7 +959,7 @@ mod hash_extract_tests {
 
     #[test]
     fn x_sha256_simd_hex_matches_lowerhex() {
-        use nostr_sdk::hashes::{sha256::Hash as Sha256Hash, Hash};
+        use nostr::hashes::{sha256::Hash as Sha256Hash, Hash};
         // The X-SHA-256 header swapped format!("{:x}") for the SIMD encoder; they MUST agree
         // byte-for-byte (sha256::Hash displays in forward order — a reversed-display hash type would
         // silently corrupt the upload header).

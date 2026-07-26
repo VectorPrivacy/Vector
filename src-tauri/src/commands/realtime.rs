@@ -4,6 +4,7 @@
 //! - Typing indicators
 //! - WebXDC peer advertisement for P2P Mini Apps
 
+use vector_core::event_ext::FinalizeUnsignedWithId;
 use nostr_sdk::prelude::*;
 
 use crate::{nostr_client, active_trusted_relays};
@@ -57,17 +58,17 @@ pub async fn send_webxdc_peer_advertisement(
             // Build the peer advertisement rumor (no expiry — peer-left signal handles cleanup)
             let rumor = EventBuilder::new(Kind::ApplicationSpecificData, "peer-advertisement")
                 .tag(Tag::public_key(pubkey))
-                .tag(Tag::custom(TagKind::d(), vec!["vector-webxdc-peer"]))
-                .tag(Tag::custom(TagKind::custom("webxdc-topic"), vec![topic_id]))
-                .tag(Tag::custom(TagKind::custom("webxdc-node-addr"), vec![node_addr]))
-                .build(my_public_key);
+                .tag(Tag::custom("d", vec!["vector-webxdc-peer"]))
+                .tag(Tag::custom("webxdc-topic", vec![topic_id]))
+                .tag(Tag::custom("webxdc-node-addr", vec![node_addr]))
+                .finalize_unsigned_with_id(my_public_key);
 
             let relays = active_trusted_relays().await;
             if !session.is_valid() {
                 return false;
             }
             // Gift Wrap and send to receiver via our Trusted Relays
-            match client.gift_wrap_to(relays.into_iter(), &pubkey, rumor, []).await {
+            match vector_core::send_gift_wrap(&client, relays.into_iter(), &pubkey, rumor, []).await {
                 Ok(_) => true,
                 Err(_) => false,
             }
@@ -94,15 +95,15 @@ pub async fn send_webxdc_peer_left(
         Ok(pubkey) => {
             let rumor = EventBuilder::new(Kind::ApplicationSpecificData, "peer-left")
                 .tag(Tag::public_key(pubkey))
-                .tag(Tag::custom(TagKind::d(), vec!["vector-webxdc-peer"]))
-                .tag(Tag::custom(TagKind::custom("webxdc-topic"), vec![topic_id]))
-                .build(my_public_key);
+                .tag(Tag::custom("d", vec!["vector-webxdc-peer"]))
+                .tag(Tag::custom("webxdc-topic", vec![topic_id]))
+                .finalize_unsigned_with_id(my_public_key);
 
             let relays = active_trusted_relays().await;
             if !session.is_valid() {
                 return false;
             }
-            match client.gift_wrap_to(relays.into_iter(), &pubkey, rumor, []).await {
+            match vector_core::send_gift_wrap(&client, relays.into_iter(), &pubkey, rumor, []).await {
                 Ok(_) => true,
                 Err(_) => false,
             }

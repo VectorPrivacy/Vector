@@ -6,6 +6,7 @@
 //! Each promo code is a "single-UTXO wallet" - a human-readable code that
 //! derives a private key through iterated SHA256 hashing (12.5M iterations).
 
+use vector_core::event_ext::FinalizeUnsignedWithId;
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Digest};
 use ripemd::Ripemd160;
@@ -1116,7 +1117,7 @@ pub async fn pivx_send_payment<R: Runtime>(
     amount_piv: f64,
 ) -> Result<String, String> {
     use nostr_sdk::prelude::*;
-    use std::borrow::Cow;
+    
 
     // Validate amount
     if amount_piv <= 0.0 {
@@ -1245,12 +1246,12 @@ pub async fn pivx_send_payment<R: Runtime>(
         let receiver_pubkey = PublicKey::from_bech32(&receiver).map_err(|e| e.to_string())?;
 
         let rumor = EventBuilder::new(Kind::ApplicationSpecificData, &content)
-            .tag(Tag::custom(TagKind::d(), vec!["pivx-payment"]))
-            .tag(Tag::custom(TagKind::Custom(Cow::Borrowed("gift-code")), vec![&send_promo.0]))
-            .tag(Tag::custom(TagKind::Custom(Cow::Borrowed("amount")), vec![&amount_sats.to_string()]))
-            .tag(Tag::custom(TagKind::Custom(Cow::Borrowed("address")), vec![&send_promo.1]))
+            .tag(Tag::custom("d", vec!["pivx-payment"]))
+            .tag(Tag::custom("gift-code", vec![&send_promo.0]))
+            .tag(Tag::custom("amount", vec![&amount_sats.to_string()]))
+            .tag(Tag::custom("address", vec![&send_promo.1]))
             .tag(Tag::public_key(receiver_pubkey))
-            .build(my_public_key);
+            .finalize_unsigned_with_id(my_public_key);
 
         let event_id = rumor.id.ok_or("Failed to get event ID")?.to_hex();
 
@@ -1263,7 +1264,7 @@ pub async fn pivx_send_payment<R: Runtime>(
         let self_wrap_session = vector_core::state::SessionGuard::capture();
         tokio::spawn(async move {
             if !self_wrap_session.is_valid() { return; }
-            let _ = self_wrap_client.gift_wrap(&my_public_key, rumor, []).await;
+            let _ = vector_core::send_gift_wrap(&self_wrap_client, Vec::<nostr_sdk::prelude::RelayUrl>::new(), &my_public_key, rumor, []).await;
         });
 
         event_id
@@ -1323,7 +1324,7 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
     gift_code: String,
 ) -> Result<String, String> {
     use nostr_sdk::prelude::*;
-    use std::borrow::Cow;
+    
 
     // Verify the promo exists and get its balance
     let promo_data: (String, f64) = {
@@ -1361,12 +1362,12 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
         // Build the PIVX payment rumor with p tag for recipient (needed for DM routing)
         // Include address tag so recipients can check balance without deriving keys
         let rumor = EventBuilder::new(Kind::ApplicationSpecificData, &content)
-            .tag(Tag::custom(TagKind::d(), vec!["pivx-payment"]))
-            .tag(Tag::custom(TagKind::Custom(Cow::Borrowed("gift-code")), vec![&gift_code]))
-            .tag(Tag::custom(TagKind::Custom(Cow::Borrowed("amount")), vec![&amount_sats.to_string()]))
-            .tag(Tag::custom(TagKind::Custom(Cow::Borrowed("address")), vec![&address]))
+            .tag(Tag::custom("d", vec!["pivx-payment"]))
+            .tag(Tag::custom("gift-code", vec![&gift_code]))
+            .tag(Tag::custom("amount", vec![&amount_sats.to_string()]))
+            .tag(Tag::custom("address", vec![&address]))
             .tag(Tag::public_key(receiver_pubkey))
-            .build(my_public_key);
+            .finalize_unsigned_with_id(my_public_key);
 
         let event_id = rumor.id.ok_or("Failed to get event ID")?.to_hex();
 
@@ -1380,7 +1381,7 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
         let self_wrap_session = vector_core::state::SessionGuard::capture();
         tokio::spawn(async move {
             if !self_wrap_session.is_valid() { return; }
-            let _ = self_wrap_client.gift_wrap(&my_public_key, rumor, []).await;
+            let _ = vector_core::send_gift_wrap(&self_wrap_client, Vec::<nostr_sdk::prelude::RelayUrl>::new(), &my_public_key, rumor, []).await;
         });
 
         event_id

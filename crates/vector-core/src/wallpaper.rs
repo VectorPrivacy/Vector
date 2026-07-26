@@ -25,6 +25,7 @@
 //!   content: "" (unused; metadata lives in tags)
 //! ```
 
+use crate::event_ext::FinalizeUnsignedWithId;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -323,10 +324,8 @@ pub async fn publish_wallpaper(chat_npub: &str, blur: u8, dim: u8) -> Result<(),
     let params = crypto::generate_encryption_params();
     let encrypted = crypto::encrypt_data(&bytes, &params)?;
 
-    let client = crate::state::nostr_client().ok_or("Not logged in")?;
-    let signer = client
-        .signer()
-        .await
+    let _client = crate::state::nostr_client().ok_or("Not logged in")?;
+    let signer = crate::signer::active_signer()
         .map_err(|e| format!("Signer: {}", e))?;
     let my_pk = crate::state::my_public_key().ok_or("Public key not set")?;
     // The chat the wallpaper belongs to, tagged on the rumor below. Without it,
@@ -378,39 +377,39 @@ pub async fn publish_wallpaper(chat_npub: &str, blur: u8, dim: u8) -> Result<(),
         // to the correct chat rather than defaulting to our self-chat.
         .tag(Tag::public_key(recipient_pk))
         .tag(Tag::custom(
-            TagKind::Custom("url".into()),
+            "url",
             vec![upload_url.clone()],
         ))
         .tag(Tag::custom(
-            TagKind::Custom("decryption-key".into()),
+            "decryption-key",
             vec![params.key.clone()],
         ))
         .tag(Tag::custom(
-            TagKind::Custom("decryption-nonce".into()),
+            "decryption-nonce",
             vec![params.nonce.clone()],
         ))
         .tag(Tag::custom(
-            TagKind::Custom("x".into()),
+            "x",
             vec![plaintext_hash.clone()],
         ))
         .tag(Tag::custom(
-            TagKind::Custom("m".into()),
+            "m",
             vec![mime.clone()],
         ))
         .tag(Tag::custom(
-            TagKind::Custom("size".into()),
+            "size",
             vec![encrypted.len().to_string()],
         ))
         .tag(Tag::custom(
-            TagKind::Custom("blur".into()),
+            "blur",
             vec![blur.to_string()],
         ))
         .tag(Tag::custom(
-            TagKind::Custom("dim".into()),
+            "dim",
             vec![dim.to_string()],
         ))
         .custom_created_at(Timestamp::from(created_at))
-        .build(my_pk);
+        .finalize_unsigned_with_id(my_pk);
 
     // SEND FIRST, commit on success. Wallpaper is a sync feature — if the
     // recipient (and our other devices) can't see it, there's no value in
@@ -704,8 +703,8 @@ pub async fn apply_received_wallpaper(
             .and_then(|pk| pk.to_bech32().ok())
             .unwrap_or_default();
         if !me_npub.is_empty() && prev_uploader == me_npub {
-            if let Some(client) = crate::state::nostr_client() {
-                if let Ok(signer) = client.signer().await {
+            if let Some(_client) = crate::state::nostr_client() {
+                if let Ok(signer) = crate::signer::active_signer() {
                     let prev_url_clone = prev_url.clone();
                     tokio::spawn(async move {
                         if let Err(e) =
@@ -788,8 +787,8 @@ async fn delete_prior_blob_if_ours(prev_url: &str, prev_uploader: &str) {
     if me_npub.is_empty() || prev_uploader != me_npub {
         return;
     }
-    if let Some(client) = crate::state::nostr_client() {
-        if let Ok(signer) = client.signer().await {
+    if let Some(_client) = crate::state::nostr_client() {
+        if let Ok(signer) = crate::signer::active_signer() {
             let prev_url = prev_url.to_string();
             tokio::spawn(async move {
                 if let Err(e) = crate::blossom::delete_blob_by_url(signer, &prev_url).await {
@@ -880,7 +879,7 @@ pub async fn remove_wallpaper(chat_npub: &str) -> Result<(), String> {
         .tag(Tag::identifier(WALLPAPER_DTAG_VALUE))
         .tag(Tag::public_key(recipient_pk))
         .custom_created_at(Timestamp::from(created_at))
-        .build(my_pk);
+        .finalize_unsigned_with_id(my_pk);
 
     let pending_id = format!("pending-wallpaper-rm-{}", created_at);
     let send_config = crate::sending::SendConfig {

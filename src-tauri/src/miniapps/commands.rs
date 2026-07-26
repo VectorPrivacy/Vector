@@ -1,5 +1,6 @@
 //! Tauri commands for Mini Apps
 
+use nostr_sdk::prelude::FinalizeEvent;
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use tauri::ipc::Channel;
@@ -1924,10 +1925,10 @@ pub async fn marketplace_publish_app(
 ) -> Result<String, Error> {
     use crate::{nostr_client, get_blossom_servers};
 
-    let client = nostr_client()
+    let _client = nostr_client()
         .ok_or_else(|| Error::Anyhow(anyhow::anyhow!("Nostr client not initialized")))?;
 
-    let signer = client.signer().await
+    let signer = vector_core::signer::active_signer()
         .map_err(|e| Error::Anyhow(anyhow::anyhow!("Failed to get signer: {}", e)))?;
 
     let blossom_servers = get_blossom_servers();

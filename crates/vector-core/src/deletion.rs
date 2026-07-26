@@ -14,6 +14,7 @@
 //! does not (and cannot) delete messages sent by others — those wraps
 //! were signed by ephemeral keys we never held.
 
+use crate::event_ext::FinalizeUnsignedWithId;
 use nostr_sdk::prelude::*;
 
 use crate::inbox_relays::{get_publish_tracker, send_gift_wrap};
@@ -105,7 +106,7 @@ pub async fn delete_own_dm(rumor_id: &EventId) -> Result<DeleteOutcome, String> 
                     matches!(chat.chat_type, crate::chat::ChatType::DirectMessage),
                     "delete_own_dm called on non-DM chat — caller bug"
                 );
-                let recipient = nostr_sdk::PublicKey::from_bech32(&chat.id).ok();
+                let recipient = nostr_sdk::prelude::PublicKey::from_bech32(&chat.id).ok();
                 (msg.attachments.clone(), recipient)
             }
             None => (Vec::new(), None),
@@ -184,7 +185,7 @@ pub async fn delete_own_dm(rumor_id: &EventId) -> Result<DeleteOutcome, String> 
     // signing with the NIP-46 client keypair returns 401).
     let mut blobs_dispatched = 0usize;
     if !attachment_urls.is_empty() {
-        if let Ok(signer) = client.signer().await {
+        if let Ok(signer) = crate::signer::active_signer() {
             blobs_dispatched = attachment_urls.len();
             crate::blossom::delete_blobs_best_effort(signer, attachment_urls);
         }
@@ -287,8 +288,8 @@ async fn delete_wrap_per_relay(
     let ephemeral_keys = Keys::new(secret);
     let deletion = match EventBuilder::new(Kind::EventDeletion, "")
         .tag(Tag::event(wrap_event_id))
-        .tag(Tag::custom(TagKind::custom("k"), ["1059"]))
-        .sign_with_keys(&ephemeral_keys)
+        .tag(Tag::custom("k", ["1059"]))
+        .finalize(&ephemeral_keys)
     {
         Ok(ev) => ev,
         Err(e) => {
@@ -463,7 +464,7 @@ async fn send_to_one_relay(client: &Client, url: &RelayUrl, event: &Event) -> bo
     /// Pause between rate-limit retries.
     const RATELIMIT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
 
-    let pool = client.pool();
+    let pool = client;
     let relays = pool.relays().await;
     let relay = match relays.get(url) {
         Some(r) => r.clone(),
@@ -574,7 +575,7 @@ fn extract_target_event_id(deletion: &Event) -> Option<EventId> {
 async fn verify_relay_dropped(client: &Client, url: &RelayUrl, wrap_event_id: &EventId) {
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-    let pool = client.pool();
+    let pool = client;
     let relays = pool.relays().await;
     let relay = match relays.get(url) {
         Some(r) => r.clone(),
@@ -583,11 +584,9 @@ async fn verify_relay_dropped(client: &Client, url: &RelayUrl, wrap_event_id: &E
 
     let filter = Filter::new().id(*wrap_event_id);
     match relay
-        .fetch_events(
-            filter,
-            std::time::Duration::from_secs(5),
-            ReqExitPolicy::ExitOnEOSE,
-        )
+        .fetch_events(filter)
+        .timeout(std::time::Duration::from_secs(5))
+        .policy(ReqExitPolicy::ExitOnEOSE)
         .await
     {
         Ok(events) => {
@@ -640,9 +639,9 @@ async fn publish_cooperative_hide(
     // after 30 days. The `k` lets the receiver remove the right thing.
     let rumor = EventBuilder::new(Kind::EventDeletion, "")
         .tag(Tag::event(*target_rumor_id))
-        .tag(Tag::custom(TagKind::custom("k"), [original_kind.to_string()]))
+        .tag(Tag::custom("k", [original_kind.to_string()]))
         .tag(Tag::expiration(Timestamp::from(expiration_ts)))
-        .build(my_pk);
+        .finalize_unsigned_with_id(my_pk);
 
     // Wrap and send to recipient. Also wrap and send to self so other
     // devices belonging to the user drop the message from their local

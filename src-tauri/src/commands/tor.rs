@@ -507,54 +507,41 @@ pub async fn tor_set_enabled(enabled: bool) -> Result<TorState, String> {
 /// Per-relay re-add achieves the same end (every socket is a fresh circuit
 /// through the new transport) without touching the Client's identity.
 #[cfg(feature = "tor")]
-async fn switch_relay_transport(tor_enabled: bool) -> Result<(), String> {
-    // ConnectionMode is re-exported from nostr-relay-pool via nostr-sdk::pool.
-    use nostr_sdk::pool::ConnectionMode;
-    use nostr_sdk::RelayUrl;
-
+async fn switch_relay_transport(_tor_enabled: bool) -> Result<(), String> {
     let client = match crate::nostr_client() {
         Some(c) => c,
         None => return Ok(()), // Client hasn't been built yet (e.g. pre-login). No-op.
     };
 
-    let new_mode = if tor_enabled {
-        match vector_core::tor::socks_addr() {
-            Some(addr) => ConnectionMode::proxy(addr),
-            // Failsafe: if the user wanted Tor but the service is somehow
-            // not up at this exact moment, route to the blackhole rather
-            // than direct. A relay that fails to connect is recoverable;
-            // a relay that leaks the user's IP is not.
-            None => ConnectionMode::proxy(vector_core::tor::blackhole_proxy_addr()),
-        }
-    } else {
-        ConnectionMode::Direct
-    };
+    // The client's `Proxy` resolves Tor state at every connection attempt (see
+    // `vector_core::apply_tor_proxy`), so a transport switch only needs the live
+    // sockets torn down — no re-registration, and the blackhole failsafe lives in
+    // that one closure instead of being duplicated here.
+    //
+    // `all()` deliberately: `relays()` is READ|WRITE-only, which would leave
+    // GOSSIP-only community/discovery relays on their old transport — i.e. still
+    // direct after the user switched Tor on.
+    let relays = client.relays().all().await;
+    log_info!("[Tor] cycling {} relay connection(s) onto new transport...", relays.len());
 
-    // Snapshot the current pool — URL + its existing RelayOptions clone — then
-    // mutate. We don't iterate-and-mutate concurrently because remove/add take
-    // the pool's internal lock.
-    let relays = client.relays().await;
-    let snapshots: Vec<(RelayUrl, nostr_sdk::RelayOptions)> = relays
-        .iter()
-        .map(|(url, relay)| (url.clone(), relay.opts().clone()))
-        .collect();
-
-    log_info!("[Tor] cycling {} relay connection(s) onto new transport...", snapshots.len());
-
-    for (url, opts) in snapshots {
-        // Take down the existing socket + drop the relay registration.
-        if let Err(e) = client.remove_relay(url.clone()).await {
-            log_warn!("[Tor] remove_relay({}) failed: {} — continuing", url, e);
-        }
-        // Re-add with the same options modulo connection_mode.
-        let new_opts = opts.connection_mode(new_mode.clone());
-        if let Err(e) = client.pool().add_relay(url.clone(), new_opts).await {
-            log_warn!("[Tor] re-add_relay({}) failed: {}", url, e);
-        }
+    // Reconnect via per-relay `try_connect`, never `client.connect()`: that marks every
+    // relay Pending before checking whether its old connection task has finished
+    // unwinding, and skips spawning a new one if it hasn't — wedging the relay in a
+    // status nothing can recover from.
+    let budget = vector_core::relay_connect_timeout(std::time::Duration::from_secs(15));
+    for (_url, relay) in &relays {
+        relay.disconnect();
     }
 
-    // Reconnect any relays the pool didn't auto-connect.
-    client.connect().await;
+    // Let the old connection tasks observe the terminate signal and exit. Reconnecting
+    // while one is still running gets the fresh socket dropped on arrival.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    futures_util::future::join_all(relays.into_values().map(|relay| async move {
+        let _ = relay.try_connect().timeout(budget).await;
+    }))
+    .await;
+
     log_info!("[Tor] relay transport switch complete");
     Ok(())
 }

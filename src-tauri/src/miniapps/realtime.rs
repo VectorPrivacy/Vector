@@ -8,6 +8,7 @@
 
 #![allow(dead_code)] // API functions that will be used as the feature matures
 
+use nostr_sdk::prelude::FinalizeEvent;
 use anyhow::{anyhow, bail, Context as _, Result};
 use fast_thumbhash::base91_encode;
 use futures_util::StreamExt;

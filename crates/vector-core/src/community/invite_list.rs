@@ -10,7 +10,8 @@
 //! is terminal (no leave/re-join race). The merged list is the UNION of every token each device minted,
 //! minus the union of revocations.
 
-use nostr_sdk::prelude::{Client, EventBuilder, Filter, Kind, NostrSigner, PublicKey, Tag};
+use nostr_sdk::prelude::AsyncNip44;
+use nostr_sdk::prelude::{Client, EventBuilder, Filter, Kind, PublicKey, Tag};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -188,18 +189,18 @@ fn our_last_publish() -> u64 {
 
 /// Decrypt a fetched self-list event to its JSON plaintext; a malformed/undecryptable payload degrades to
 /// empty (never an error that aborts a reconcile), matching the Community List's posture.
-async fn decrypt_self_event(client: &Client, my_pk: &PublicKey, event: &nostr_sdk::prelude::Event) -> String {
+async fn decrypt_self_event(_client: &Client, my_pk: &PublicKey, event: &nostr_sdk::prelude::Event) -> String {
     if event.content.is_empty() {
         return String::new();
     }
-    let signer = match client.signer().await {
+    let signer = match crate::signer::active_signer() {
         Ok(s) => s,
         Err(e) => {
             crate::log_warn!("[InviteList] signer unavailable for decrypt: {}", e);
             return String::new();
         }
     };
-    signer.nip44_decrypt(my_pk, &event.content).await.unwrap_or_else(|e| {
+    signer.nip44_decrypt_async(my_pk, &event.content).await.unwrap_or_else(|e| {
         crate::log_warn!("[InviteList] decrypt failed: {}", e);
         String::new()
     })
@@ -220,7 +221,7 @@ pub async fn fetch_self_lists(
         .limit(2);
 
     let events = client
-        .fetch_events(filter, std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
+        .fetch_events(filter).timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
         .await
         .unwrap_or_default();
 
@@ -232,7 +233,7 @@ pub async fn fetch_self_lists(
     let mut community_ev: Option<nostr_sdk::prelude::Event> = None;
     let mut invite_ev: Option<nostr_sdk::prelude::Event> = None;
     for ev in events {
-        let slot = match ev.tags.identifier() {
+        let slot = match ev.tags.identifier().as_deref() {
             Some(COMMUNITY_LIST_D_TAG) => &mut community_ev,
             Some(INVITE_LIST_D_TAG) => &mut invite_ev,
             _ => continue,
@@ -269,7 +270,7 @@ pub async fn fetch_invite_list(
         .identifier(INVITE_LIST_D_TAG)
         .limit(1);
     let events = client
-        .fetch_events(filter, std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
+        .fetch_events(filter).timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
         .await
         .unwrap_or_default();
     if !session.is_valid() {
@@ -298,15 +299,14 @@ pub async fn publish_invite_list(
     save_local_invite_list(&merged)?;
     hydrate_read_model(&merged);
 
-    let signer = client.signer().await.map_err(|e| format!("Signer unavailable: {}", e))?;
+    let signer = crate::signer::active_signer().map_err(|e| format!("Signer unavailable: {}", e))?;
     let content = signer
-        .nip44_encrypt(&my_pk, &merged.to_json())
+        .nip44_encrypt_async(&my_pk, &merged.to_json())
         .await
         .map_err(|e| format!("nip44 encrypt invite list: {}", e))?;
     let builder = EventBuilder::new(Kind::Custom(event_kind::APPLICATION_SPECIFIC), content)
         .tag(Tag::identifier(INVITE_LIST_D_TAG));
-    client
-        .send_event_builder(builder)
+    crate::sign_and_send(client, builder)
         .await
         .map_err(|e| format!("Failed to publish invite list (kind 30078): {}", e))?;
     crate::log_info!(

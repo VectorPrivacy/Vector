@@ -9,7 +9,7 @@
 //! separate path (metadata/roster), handled by the service refresh, not here.
 
 use nostr_sdk::prelude::PublicKey;
-use nostr_sdk::ToBech32;
+use nostr_sdk::prelude::ToBech32;
 
 use super::super::attachments::attachments_from_tags;
 use super::chat::{self, ChatEvent};
@@ -306,7 +306,7 @@ pub enum DispatchedV2 {
 /// guestbook presence) fire their callback inline here. Purely in-memory — so
 /// this stays offline-testable.
 pub fn dispatch_wrap(
-    wrap: &nostr_sdk::Event,
+    wrap: &nostr_sdk::prelude::Event,
     community: &CommunityV2,
     my_pubkey: &PublicKey,
     handler: &dyn InboundEventHandler,

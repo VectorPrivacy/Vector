@@ -63,14 +63,14 @@ pub(crate) async fn subscribe_self_sync() {
             vector_core::community::list::COMMUNITY_LIST_D_TAG.to_string(),
             vector_core::community::invite_list::INVITE_LIST_D_TAG.to_string(),
         ]);
-    match client.subscribe(self_lists_filter, None).await {
-        Ok(out) => new_ids.push(out.val),
+    match client.subscribe(self_lists_filter).await {
+        Ok(out) => new_ids.push(out.value),
         Err(e) => eprintln!("[self-sync] self-lists subscribe failed: {:?}", e),
     }
     // Emoji-pack List (replaceable kind 10030).
     let emoji_filter = Filter::new().author(my_pk).kind(Kind::Custom(10030));
-    match client.subscribe(emoji_filter, None).await {
-        Ok(out) => new_ids.push(out.val),
+    match client.subscribe(emoji_filter).await {
+        Ok(out) => new_ids.push(out.value),
         Err(e) => eprintln!("[self-sync] emoji-list subscribe failed: {:?}", e),
     }
 
@@ -79,7 +79,7 @@ pub(crate) async fn subscribe_self_sync() {
         std::mem::replace(&mut *ids, new_ids)
     };
     for id in displaced {
-        client.unsubscribe(&id).await;
+        let _ = client.unsubscribe(&id).await;
     }
 }
 
@@ -107,7 +107,7 @@ async fn handle_self_sync_event(session: &vector_core::state::SessionGuard, even
     match event.kind.as_u16() {
         k if k == vector_core::stored_event::event_kind::APPLICATION_SPECIFIC => {
             // Both lists are kind 30078 — route by `d`-tag.
-            let is_invite = event.tags.identifier()
+            let is_invite = event.tags.identifier().as_deref()
                 == Some(vector_core::community::invite_list::INVITE_LIST_D_TAG);
             tokio::spawn(async move {
                 if is_invite {
@@ -272,7 +272,7 @@ pub(crate) async fn show_community_notification(chat_id: &str, msg: &vector_core
 /// Whether `sender_npub` (bech32) is the owner or an admin of the community owning `channel_id`.
 /// Used only for @everyone authority; a lookup failure denies the bypass (fail-closed).
 fn community_sender_is_admin(channel_id: &str, sender_npub: &str) -> bool {
-    let Ok(sender_hex) = nostr_sdk::PublicKey::from_bech32(sender_npub).map(|pk| pk.to_hex()) else {
+    let Ok(sender_hex) = nostr_sdk::prelude::PublicKey::from_bech32(sender_npub).map(|pk| pk.to_hex()) else {
         return false;
     };
     let Ok(Some(community_id)) = vector_core::db::community::community_id_for_channel(channel_id) else {
@@ -379,13 +379,14 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
 
     // Notification loop: dispatch GiftWraps through Tauri's event handler,
     // Community messages through the Community handler.
-    match client
-        .handle_notifications(|notification| async {
-            // If the session has been swapped out from under us, exit the
-            // notification loop. Returning Ok(true) tells nostr-sdk to break.
-            if !session.is_valid() { return Ok(true); }
+    // 0.45 removed `handle_notifications`; drive the stream directly. It ends when
+    // the client shuts down, and the session check still breaks out on a swap.
+    let mut notifications = client.notifications();
+    while let Some(notification) = notifications.next().await {
+        {
+            if !session.is_valid() { break; }
             match notification {
-                RelayPoolNotification::Event { event, subscription_id, .. } => {
+                ClientNotification::Event { event, subscription_id, .. } => {
                     let k = event.kind.as_u16();
                     if subscription_id == gift_sub_id {
                         // DMs/files/reactions/edits (via tauri_commit_prepared_event)
@@ -406,21 +407,17 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                         handle_self_sync_event(&session, *event).await;
                     }
                 }
-                RelayPoolNotification::Message { message, .. } => {
+                ClientNotification::Message { message, .. } => {
                     // Relay OKs feed the send pipeline: an OK that outlives
                     // the per-attempt wait still confirms delivery, and can
                     // rescue a message already marked Failed.
-                    if let nostr_sdk::RelayMessage::Ok { event_id, status, .. } = message {
+                    if let nostr_sdk::prelude::RelayMessage::Ok { event_id, status, .. } = *message {
                         vector_core::sending::note_relay_ok(&event_id, status);
                     }
                 }
                 _ => {}
             }
-            Ok(false)
-        })
-        .await
-    {
-        Ok(_) => Ok(true),
-        Err(e) => Err(e.to_string()),
+        }
     }
+    Ok(true)
 }
