@@ -31,6 +31,35 @@ function isPrimaryChannelChat(chat) {
 }
 
 /**
+ * Whether a chat gets a row in the chat list — i.e. whether the user can SEE it.
+ *
+ * The single source of truth for "does this chat exist in the UI", shared by the row
+ * builder and by every unread indicator. Anything invisible here must not be counted
+ * anywhere, or an indicator lights for a chat the user cannot open to clear: a blocked
+ * DM or a sibling channel has no row, so its unread is unreachable.
+ *
+ * Keep this as the ONLY definition. The back-chevron dot previously had its own copy of
+ * these rules and drifted out of sync with the rows.
+ */
+function chatIsVisibleInList(chat) {
+    if (!chat) return false;
+    const isGroup = chatIsGroup(chat);
+    // Own profile lives in Bookmarks/Notes, not the list.
+    if (chat.id === strPubkey) return false;
+    if (isGroup) {
+        // A Community row with no owning community is a bare persistence anchor.
+        if (!chat.metadata?.custom_fields?.community_id) return false;
+        // Sibling channels stay synced and addressable but get no row of their own.
+        if (!isPrimaryChannelChat(chat)) return false;
+        return true;
+    }
+    // DMs appear once they have content, and blocked senders never appear.
+    if (chat.messages.length === 0) return false;
+    if (getProfile(chat.id)?.is_blocked) return false;
+    return true;
+}
+
+/**
  * Generate a hash representing the current state of all chats
  */
 function generateChatlistStateHash() {
@@ -107,30 +136,13 @@ function renderChatlist() {
 
     // Then render regular chats
     for (const chat of arrChats) {
-        // For groups, we show them even if they have no messages yet
-        // For DMs, we only show them if they have messages
-        if (!chatIsGroup(chat) && chat.messages.length === 0) continue;
-
-        // A Community row without its owning community_id is a bare persistence
-        // anchor (a channel row auto-created by the message persist).
-        if (chatIsGroup(chat) && !chat.metadata?.custom_fields?.community_id) continue;
-
-        // One row per community: a multi-channel community's other channels stay synced
-        // and addressable, they just don't each get a row of their own.
-        if (chatIsGroup(chat) && !isPrimaryChannelChat(chat)) continue;
+        // Visibility (own profile, bare anchors, sibling channels, empty or blocked DMs)
+        // is decided by `chatIsVisibleInList` so the unread indicators can share it.
+        if (!chatIsVisibleInList(chat)) continue;
 
         // Message-less community: lazy-load its latest membership event so the preview can show
         // "X has joined" instead of "No messages yet" (cached onto chat.lastSystemEvent).
         if (chatIsGroup(chat)) ensureCommunityPreviewActivity(chat);
-
-        // Do not render our own profile: it is accessible via the Bookmarks/Notes section
-        if (chat.id === strPubkey) continue;
-
-        // Hide DM chats with blocked users from the chat list
-        if (!chatIsGroup(chat)) {
-            const chatProfile = getProfile(chat.id);
-            if (chatProfile?.is_blocked) continue;
-        }
 
         const divContact = renderChat(chat, primaryColor);
         fragment.appendChild(divContact);

@@ -2751,16 +2751,10 @@ function updateChatBackNotification() {
     const hasOtherUnreads = arrChats.some(chat => {
         // Skip the currently open chat
         if (chat.id === strOpenChat) return false;
-        // Skip chats with no messages (same as chatlist rendering)
-        if (!chat.messages || chat.messages.length === 0) return false;
-        // Skip our own profile (bookmarks/notes)
-        if (chat.id === strPubkey) return false;
-        // Skip unsurfaced Community rows: a bare persistence anchor, or a sibling channel
-        // that the list doesn't give a row. Their unreads can't be visited from here, so
-        // they must never light the dot. Same test the list, the OS badge and the
-        // notification gate use (Chat::is_surfaced_community_channel backend-side).
-        if (chatIsGroup(chat) && !chat.metadata?.custom_fields?.community_id) return false;
-        if (chatIsGroup(chat) && !isPrimaryChannelChat(chat)) return false;
+        // Only chats the user can actually SEE and open count. `chatIsVisibleInList` is the
+        // list's own row test (bare anchors, sibling channels, empty DMs, blocked senders,
+        // own profile), so the dot can't light for something with no row to visit and clear.
+        if (!chatIsVisibleInList(chat)) return false;
         // Use the SAME badge count as the chatlist rows (computeRowBadgeCount: DB-authoritative
         // chat.unread, muted-aware) so the back dot can't light for a chat whose row shows nothing.
         // The raw countUnreadMessages walk can diverge from chat.unread on a windowed cache.
