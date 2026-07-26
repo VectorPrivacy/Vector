@@ -993,10 +993,11 @@ function renderEmojiPackSidebar() {
             plate.textContent = _packTitleInitial(pack);
             btn.appendChild(plate);
         }
-        // Right-click on desktop, long-press on Android — both open the
-        // Share / Remove menu.
-        attachLongPressContextMenu(btn, (x, y) => _showPackTabMenu(pack, x, y));
-        _installPackTabReorder(btn);
+        // Reorder-drag, long-press menu and rail scrolling all start as the same
+        // press, so ONE arbiter owns them — two independent handlers each with
+        // their own timers can't agree on who claimed the gesture. Right-click
+        // is wired inside it too.
+        _installPackTabGestures(btn, pack);
         sidebar.appendChild(btn);
     }
 
@@ -1017,19 +1018,95 @@ function renderEmojiPackSidebar() {
 // driven approach as the in-pack emoji reorder (Tauri swallows HTML5 drag
 // events); before/after is decided by the pointer's Y vs each tab's midpoint.
 let _packTabDragActive = false;
-function _installPackTabReorder(tab) {
+
+// Touch gesture budget for the pack rail. A pointer has to mean one of three
+// things and the only honest disambiguator is "did it move, and when":
+//   move early            → the rail scrolls (a rail of many packs must scroll)
+//   still at ARM, then move → reorder
+//   still at MENU         → context menu
+// Without the arm delay, the first 6px of an attempted scroll started a drag,
+// so a user with enough packs to need scrolling could never reach the ones
+// off-screen. Slop matches the long-press tolerance so the two agree on what
+// "held still" means.
+const _PT_ARM_MS = 180;
+const _PT_MENU_MS = 500;
+const _PT_SLOP_PX = 8;
+
+function _installPackTabGestures(tab, pack) {
+    // Desktop keeps its own affordance; long-press is the touch stand-in.
+    tab.addEventListener('contextmenu', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        _showPackTabMenu(pack, ev.clientX, ev.clientY);
+    });
+
     tab.addEventListener('pointerdown', (ev) => {
         if (ev.button !== 0) return;
         const startX = ev.clientX;
         const startY = ev.clientY;
+        const isTouch = ev.pointerType === 'touch';
         let dragging = false;
         let ghost = null;
         let offX = 0;
         let offY = 0;
+        // A mouse has a separate button for the menu, so it may drag at once.
+        let armed = !isTouch;
+        // Set once the gesture belongs to something else (scroll or menu).
+        let claimed = false;
+        let armTimer = null;
+        let menuTimer = null;
+
+        const clearTimers = () => {
+            if (armTimer) { clearTimeout(armTimer); armTimer = null; }
+            if (menuTimer) { clearTimeout(menuTimer); menuTimer = null; }
+        };
+        const disarm = () => {
+            armed = false;
+            tab.classList.remove('is-drag-armed');
+        };
+
+        if (isTouch) {
+            armTimer = setTimeout(() => {
+                armTimer = null;
+                armed = true;
+                tab.classList.add('is-drag-armed');
+                // Confirms "you may now drag" without stealing the gesture, so
+                // letting go still just selects the pack.
+                navigator.vibrate?.(8);
+            }, _PT_ARM_MS);
+            menuTimer = setTimeout(() => {
+                menuTimer = null;
+                claimed = true;
+                disarm();
+                teardown();
+                tab.dataset.suppressClick = '1';
+                navigator.vibrate?.(14);
+                _showPackTabMenu(pack, startX, startY);
+            }, _PT_MENU_MS);
+        }
+
+        // Only swallow the scroll once we're genuinely dragging. Registered
+        // non-passive because Android WebView defaults touchmove to passive,
+        // where preventDefault is ignored and the rail scrolls under the drag.
+        const onTouchMove = (te) => { if (dragging) te.preventDefault(); };
 
         const onMove = (mv) => {
             if (!dragging) {
-                if (Math.hypot(mv.clientX - startX, mv.clientY - startY) < _PC_DRAG_THRESHOLD_PX) return;
+                const dist = Math.hypot(mv.clientX - startX, mv.clientY - startY);
+                if (claimed) return;
+                if (!armed) {
+                    // Moved before the hold landed: this is a scroll. Stand down
+                    // completely so the rail pans natively.
+                    if (dist > _PT_SLOP_PX) {
+                        claimed = true;
+                        clearTimers();
+                        teardown();
+                    }
+                    return;
+                }
+                if (dist < _PC_DRAG_THRESHOLD_PX) return;
+                // Moving rules out the long-press menu.
+                clearTimers();
                 dragging = true;
                 _packTabDragActive = true;
                 tab.classList.add('is-dragging');
@@ -1055,13 +1132,24 @@ function _installPackTabReorder(tab) {
             _updatePackTabDropTarget(mv.clientY);
         };
 
-        const onUp = (up) => {
+        function teardown() {
             window.removeEventListener('pointermove', onMove);
             window.removeEventListener('pointerup', onUp);
             window.removeEventListener('pointercancel', onUp);
-            if (!dragging) return;
+            window.removeEventListener('touchmove', onTouchMove);
+        }
+
+        const onUp = (up) => {
+            clearTimers();
+            teardown();
+            if (!dragging) {
+                // Armed but released without moving: a plain tap on the pack.
+                disarm();
+                return;
+            }
             tab.dataset.suppressClick = '1';
             tab.classList.remove('is-dragging');
+            disarm();
             _packTabDragActive = false;
             if (ghost) ghost.remove();
             const target = _resolvePackTabDropTarget(up.clientY);
@@ -1072,6 +1160,7 @@ function _installPackTabReorder(tab) {
         window.addEventListener('pointermove', onMove);
         window.addEventListener('pointerup', onUp);
         window.addEventListener('pointercancel', onUp);
+        window.addEventListener('touchmove', onTouchMove, { passive: false });
     });
 }
 

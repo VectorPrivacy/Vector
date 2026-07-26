@@ -4499,6 +4499,15 @@ img.emoji-img-loading {
   user-select: none;
 }
 .emoji-pack-tab.is-dragging { opacity: 0.3; }
+
+/* The hold landed and a drag is now possible. Shown before any movement so the
+   gesture is legible: lift means "drag me", and letting go still just selects. */
+.emoji-pack-tab.is-drag-armed {
+  transform: scale(1.18);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+  transition: transform 120ms ease-out, box-shadow 120ms ease-out;
+  z-index: 3;
+}
 .emoji-pack-tab-ghost {
   opacity: 0.9;
   transform: scale(0.85);
