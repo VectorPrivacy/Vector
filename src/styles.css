@@ -3809,17 +3809,27 @@ body.chat-bg-disabled .chat-messages::before {
   opacity: 1;
 }
 
-/* Rectangular highlighter for active tab */
-.emoji-category-btn.active::before {
+/* Rectangular highlighter for active tab. Declared on the base class rather than
+   `.active` so it has something to animate from — a pseudo-element that only
+   exists while the class does is created and destroyed, never transitioned. */
+.emoji-category-btn::before {
   content: '';
   position: absolute;
   left: -12px;
   top: 50%;
-  transform: translateY(-50%);
+  transform: translateY(-50%) scaleY(0.35);
   width: 6px;
   height: 28px;
   background-color: var(--icon-color-primary);
   border-radius: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 130ms ease-out, transform 130ms ease-out;
+}
+
+.emoji-category-btn.active::before {
+  opacity: 1;
+  transform: translateY(-50%) scaleY(1);
 }
 
 .emoji-category-btn .icon {
@@ -4529,6 +4539,12 @@ img.emoji-img-loading {
   background-color: var(--icon-color-primary);
   box-shadow: 0 0 8px var(--icon-color-primary);
   pointer-events: none;
+  /* Reclaim ::before from the active-tab highlighter above, which would
+     otherwise leave this insertion line invisible and mis-transformed. */
+  width: auto;
+  opacity: 1;
+  transform: none;
+  transition: none;
 }
 .emoji-pack-tab.drop-above::before { top: -4px; }
 .emoji-pack-tab.drop-below::after  { bottom: -4px; }

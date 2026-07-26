@@ -4888,6 +4888,134 @@ emojiSearch.addEventListener('input', (e) => {
     }
 });
 
+// Scroll-spy for the rail: the highlight tracked clicks only, so scrolling the
+// emoji panel left it pointing at whatever was last tapped.
+//
+// Suppressed briefly after a tab click — that scroll is `behavior: 'smooth'`, and
+// following it would strobe the highlight through every section it passes on the
+// way to the one the user actually picked.
+let _emojiSpyMuteUntil = 0;
+let _emojiSpyFrame = 0;
+
+// Rail follow: ease toward a target scrollTop instead of handing each change to
+// `scrollIntoView({ behavior: 'smooth' })`. That restarts a fixed-duration
+// animation per section crossed, so a continuous scroll came out as a series of
+// discrete lurches. Lerping toward a target that can move mid-flight reads as one
+// fluid motion however fast the panel is scrolled.
+const _RAIL_EDGE_PAD_PX = 14;
+const _RAIL_LERP_PER_FRAME = 0.16;
+let _railTarget = null;
+let _railRaf = 0;
+let _railLastTs = 0;
+
+function _railStop() {
+    if (_railRaf) cancelAnimationFrame(_railRaf);
+    _railRaf = 0;
+    _railTarget = null;
+}
+
+function _railStep(ts) {
+    const rail = document.querySelector('.emoji-sidebar');
+    if (!rail || _railTarget === null) { _railStop(); return; }
+    // Frame-rate independent: the same glide on a 120Hz panel as on 60Hz.
+    const dt = _railLastTs ? Math.min(ts - _railLastTs, 64) : 16.67;
+    _railLastTs = ts;
+    const k = 1 - Math.pow(1 - _RAIL_LERP_PER_FRAME, dt / 16.67);
+
+    const delta = _railTarget - rail.scrollTop;
+    if (Math.abs(delta) < 0.5) {
+        rail.scrollTop = _railTarget;
+        _railStop();
+        return;
+    }
+    rail.scrollTop += delta * k;
+    _railRaf = requestAnimationFrame(_railStep);
+}
+
+// Minimal move that brings `tab` fully into the rail with a margin — the old
+// `block: 'nearest'` + `scroll-padding` behaviour, computed here now that we own
+// the animation, so the inset lives in one place instead of two.
+function _railFollow(tab) {
+    const rail = document.querySelector('.emoji-sidebar');
+    if (!rail) return;
+    const max = rail.scrollHeight - rail.clientHeight;
+    if (max <= 0) return;
+    const top = tab.offsetTop - _RAIL_EDGE_PAD_PX;
+    const bottom = tab.offsetTop + tab.offsetHeight + _RAIL_EDGE_PAD_PX;
+    const from = _railTarget ?? rail.scrollTop;
+
+    let target = from;
+    if (top < from) target = top;
+    else if (bottom > from + rail.clientHeight) target = bottom - rail.clientHeight;
+    target = Math.max(0, Math.min(target, max));
+    if (Math.abs(target - rail.scrollTop) < 0.5) return;
+
+    _railTarget = target;
+    if (!_railRaf) {
+        _railLastTs = 0;
+        _railRaf = requestAnimationFrame(_railStep);
+    }
+}
+
+function _tabForSection(section) {
+    if (section.classList.contains('emoji-pack-section')) {
+        const id = section.dataset.packId;
+        return id
+            ? document.querySelector(`.emoji-pack-tab[data-pack-id="${CSS.escape(id)}"]`)
+            : null;
+    }
+    // Stock sections are `#emoji-<category>` against `[data-category]` tabs.
+    const category = section.id?.startsWith('emoji-') ? section.id.slice(6) : '';
+    return category
+        ? document.querySelector(`.emoji-category-btn[data-category="${CSS.escape(category)}"]`)
+        : null;
+}
+
+function _syncActiveSectionTab() {
+    if (Date.now() < _emojiSpyMuteUntil) return;
+    const main = document.querySelector('.emoji-main');
+    // Creator mode hides every section, so there's nothing to track.
+    if (!main || _pc.open) return;
+    const sections = [...main.querySelectorAll('.emoji-section')]
+        .filter(s => !s.hidden && s.offsetParent !== null);
+    if (!sections.length) return;
+
+    // Detector line at the panel's CENTRE, not its top edge. Against the top, a
+    // one-pixel sliver of the outgoing section still counted as current while the
+    // next one filled the whole view. Sections stack contiguously, so the last one
+    // whose top is at or above the midpoint is the one occupying the centre — and
+    // it degrades correctly at the ends, where no section spans the midpoint.
+    const rect = main.getBoundingClientRect();
+    const mid = rect.top + rect.height / 2;
+    let current = sections[0];
+    for (const s of sections) {
+        if (s.getBoundingClientRect().top <= mid) current = s;
+        else break;
+    }
+
+    const tab = _tabForSection(current);
+    if (!tab || tab.classList.contains('active')) return;
+    document.querySelectorAll('.emoji-category-btn').forEach(b => {
+        b.classList.toggle('active', b === tab);
+    });
+    // The rail scrolls too, so a pack scrolled past off-rail would highlight
+    // invisibly. Only moves when the tab isn't comfortably in view.
+    _railFollow(tab);
+}
+
+// Grabbing the rail wins over an in-flight follow — never animate against the
+// user's own finger.
+document.querySelector('.emoji-sidebar')?.addEventListener('pointerdown', _railStop);
+document.querySelector('.emoji-sidebar')?.addEventListener('wheel', _railStop, { passive: true });
+
+document.querySelector('.emoji-main')?.addEventListener('scroll', () => {
+    if (_emojiSpyFrame) return;
+    _emojiSpyFrame = requestAnimationFrame(() => {
+        _emojiSpyFrame = 0;
+        _syncActiveSectionTab();
+    });
+}, { passive: true });
+
 // Delegated category-button click handler. Single source of truth for
 // both stock tabs (rendered at parse time) and pack tabs (appended at
 // runtime); the bare forEach binding only saw the stock three.
@@ -4926,7 +5054,12 @@ document.querySelector('.emoji-sidebar').addEventListener('click', async (e) => 
     // Pixel-accurate contain-intrinsic-size on every pack section (see
     // renderEmojiPackSections) means nothing resizes under the scroll, so a
     // single smooth scroll lands on target — no post-jump correction needed.
-    if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (section) {
+        // Hold the spy off while the smooth scroll travels, so the highlight
+        // stays on the tab that was clicked instead of chasing the animation.
+        _emojiSpyMuteUntil = Date.now() + 700;
+        section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
 });
 
 /**
