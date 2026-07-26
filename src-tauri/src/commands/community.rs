@@ -1529,6 +1529,21 @@ async fn dispatch_community_attachment_message(
                 let echoed = {
                     let mut state = vector_core::state::STATE.lock().await;
                     state.remove_message(&pending_id);
+                    // Re-adopt our local download state onto the echo. The echo is parsed by
+                    // the inbound path, which never claims `downloaded` (an arriving imeta
+                    // proves nothing about what's on disk) — but we wrote these plaintexts
+                    // ourselves moments ago. Without this the sender downloads its own upload
+                    // back from Blossom, which on a slow transport shows as a file that sits
+                    // in a downloading state for minutes after sending. The DB upsert already
+                    // applies this rule via `downloaded=MAX(...)`; STATE needs it too.
+                    for local in uploaded.iter().filter(|u| u.downloaded) {
+                        let path = local.path.clone();
+                        state.update_attachment(&channel_id, &real_id, &local.id, |a| {
+                            a.set_downloaded(true);
+                            a.set_downloading(false);
+                            a.path = path.clone().into_boxed_str();
+                        });
+                    }
                     state.find_message(&real_id).map(|(_, m)| m.clone())
                 };
                 if let Some(ref msg) = echoed {
