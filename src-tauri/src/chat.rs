@@ -89,8 +89,9 @@ pub async fn mark_as_read(chat_id: String, message_id: Option<String>) -> bool {
         // remainder, so a blind clear would be wrong. The full mark-all-read case reconciles to 0.
         crate::commands::messaging::reconcile_chat_unread(&chat_id).await;
 
-        // Read clears any lingering OS notification for this chat (in-app open / another device).
-        crate::services::notification_service::cancel_chat_notification(&chat_id);
+        // Read clears any lingering OS notification for this chat — but only if the user
+        // is actually looking; see `cancel_chat_notification_on_user_read`.
+        crate::services::notification_service::cancel_chat_notification_on_user_read(&chat_id);
 
         crate::commands::messaging::update_unread_counter(handle.clone()).await;
     }

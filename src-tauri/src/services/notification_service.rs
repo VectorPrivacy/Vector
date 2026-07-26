@@ -356,6 +356,24 @@ pub fn cancel_chat_notification(chat_id: &str) {
     let _ = chat_id;
 }
 
+/// [`cancel_chat_notification`] for a read the *user* performed, rather than one
+/// inferred from activity elsewhere.
+///
+/// While soft-backgrounded the frontend still runs, so a message arriving in the
+/// open chat fires its markAsRead and revokes the notification for that very
+/// message microseconds before it is posted. Cancelling also drops the chat's
+/// MessagingStyle history, so each notification shows a single message instead of
+/// the conversation. The user hasn't seen anything yet, so there is nothing to
+/// revoke: `nativeOnResume` clears the active chat's notification when they
+/// actually return.
+pub fn cancel_chat_notification_on_user_read(chat_id: &str) {
+    #[cfg(target_os = "android")]
+    if !crate::android::background_sync::is_activity_in_foreground() {
+        return;
+    }
+    cancel_chat_notification(chat_id);
+}
+
 /// Show an OS notification with generic notification data
 pub fn show_notification_generic(mut data: NotificationData) {
     // Apply the user's content-privacy preference up front so every platform
