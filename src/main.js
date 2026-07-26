@@ -3329,7 +3329,9 @@ async function setupRustListeners() {
 
     // Listen for Synchronisation Progress updates
     _on('sync_progress', (evt) => {
-        if (fInit) return;
+        // The quick phase runs inside boot, so gating the whole handler on `fInit`
+        // meant it never showed a bar for the fastest, most common sync. Only the
+        // layout reflow below needs the gate.
         const { mode, current, total } = evt.payload || {};
         if (mode === 'Syncing' && current && total) {
             // Determinate progress bar: fill left-to-right
@@ -3343,7 +3345,15 @@ async function setupRustListeners() {
                 domSyncLine.classList.add('active');
             }
         }
-        if (!strOpenChat) adjustSize();
+        if (!fInit && !strOpenChat) adjustSize();
+    });
+
+    // Every relay refused to reconcile AND the incremental read came back empty:
+    // the pool is unreachable, not the inbox empty. Without this the two are
+    // indistinguishable and a total sync failure looks like a quiet day.
+    _on('sync_unreachable', (evt) => {
+        const n = evt.payload?.relays ?? 0;
+        showToast(`Couldn't reach any of your ${n} relays, new messages may be missing`);
     });
 
     // Listen for Attachment Upload Progress events

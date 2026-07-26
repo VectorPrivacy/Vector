@@ -337,7 +337,7 @@ async fn reply(msg: &vector_sdk::IncomingMessage, text: &str) {
 /// fallback clients use to resolve an author they've never seen. Ditto-family
 /// community relays silently drop a stranger's kind-0 (accepted, never stored),
 /// so for a bot these indexers are the RELIABLE path to a rendered name+avatar.
-const PROFILE_INDEXERS: &[&str] = &["wss://purplepag.es", "wss://relay.nostr.band", "wss://relay.damus.io", "wss://nos.lol"];
+const PROFILE_INDEXERS: &[&str] = &["wss://purplepag.es", "wss://relay.nostr.band", "wss://nos.lol"];
 
 /// Community relays are pool-isolated from profile ops by design (the GOSSIP
 /// flag keeps pool-wide DM/profile publishes off them), so the kind-0 above

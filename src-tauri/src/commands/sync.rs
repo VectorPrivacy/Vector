@@ -508,6 +508,8 @@ pub async fn fetch_messages<R: Runtime>(
 
     let sync_start = std::time::Instant::now();
 
+    // Populated by the quick phase, consumed by the archive task below.
+    let mut hard_failed: Vec<RelayUrl> = Vec::new();
     let _dm_new_messages = async {
     let mut new_messages_count: u32 = 0;
 
@@ -570,9 +572,17 @@ pub async fn fetch_messages<R: Runtime>(
         });
     }
 
+    // Reconciliation has no event count to divide by, so drive the indeterminate
+    // pulse until the fetch below can report real progress.
+    let _ = handle.emit("sync_progress", serde_json::json!({ "mode": "Reconciling" }));
+
     // Drain until first successful reconciliation
     let mut primary_missing: Vec<EventId> = Vec::new();
     let mut primary_relay: Option<RelayUrl> = None;
+    // Relays that refused deterministically (query caps, no NIP-77, dropped
+    // connection) fail the same way on the archive's larger item set, so the
+    // archive skips them. A TIMEOUT is not deterministic — the archive's budget
+    // is 120s against this phase's 10s — so those stay eligible.
     while let Some((url, result)) = relay_futs.next().await {
         match result {
             Ok(Ok(recon)) => {
@@ -584,6 +594,7 @@ pub async fn fetch_messages<R: Runtime>(
             }
             Ok(Err(e)) => {
                 eprintln!("[Sync]   Relay {} failed: {}", url, e);
+                hard_failed.push(url);
             }
             Err(_) => {
                 eprintln!("[Sync]   Relay {} timed out (10s)", url);
@@ -659,6 +670,72 @@ pub async fn fetch_messages<R: Runtime>(
                 println!("[Sync][BG] Background sync complete");
             }
         });
+    }
+
+    // Phase 1b: every relay refused to reconcile. Negentropy is an optimisation,
+    // not the only way to read a mailbox, so rather than return an empty inbox we
+    // do one INCREMENTAL read — but a gift wrap only reveals its sender once
+    // decrypted, so an over-wide window costs real bandwidth for nothing.
+    //
+    // Bounded two ways: `since` starts at our newest held wrap minus NIP-59's
+    // 2-day backdating slack (the only window in which an already-seen-newer wrap
+    // can still arrive), floored at the 7-day quick window so a long absence can't
+    // widen it; and a hard `limit` caps the worst case. Anything older than that
+    // is the archive phase's job, not the boot path's.
+    if primary_relay.is_none() {
+        const NIP59_BACKDATE_SLACK: u64 = 2 * 24 * 3600;
+        const FALLBACK_LIMIT: usize = 256;
+        let newest_local = negentropy_items.iter().map(|(_, ts)| ts.as_secs()).max().unwrap_or(0);
+        let fallback_since = newest_local
+            .saturating_sub(NIP59_BACKDATE_SLACK)
+            .max(quick_since);
+        let fallback_filter = Filter::new()
+            .pubkey(my_public_key)
+            .kind(Kind::GiftWrap)
+            .since(Timestamp::from_secs(fallback_since))
+            .limit(FALLBACK_LIMIT);
+        println!("[Sync] No relay reconciled — incremental fetch since {} (limit {})",
+            fallback_since, FALLBACK_LIMIT);
+        let _ = handle.emit("sync_progress", serde_json::json!({ "mode": "Reconciling" }));
+
+        let relay_strs: Vec<String> = all_relays.iter().map(|(u, _)| u.to_string()).collect();
+        let fallback_inner = crate::services::event_handler::TauriEventHandler;
+        let fallback_batcher = vector_core::event_handler::BatchingPersist::new(&fallback_inner);
+        let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+        let mut fetched = 0u32;
+
+        match client.stream_events_from(
+            relay_strs, fallback_filter, std::time::Duration::from_secs(20),
+        ).await {
+            Ok(stream) => {
+                tokio::pin!(stream);
+                while let Some(event) = stream.next().await {
+                    if !quick_session.is_valid() { break; }
+                    if !seen.insert(event.id.to_bytes()) { continue; }
+                    fetched += 1;
+                    let prepared = vector_core::event_handler::prepare_event(
+                        event, &client, my_public_key,
+                    ).await;
+                    if crate::services::tauri_commit_prepared_event_with(prepared, false, &fallback_batcher).await {
+                        new_messages_count += 1;
+                    }
+                    if fallback_batcher.buffered() >= PERSIST_BATCH {
+                        fallback_batcher.flush(&quick_session).await;
+                    }
+                }
+                fallback_batcher.flush(&quick_session).await;
+                println!("[Sync] Incremental fetch: {} events seen, {} new", fetched, new_messages_count);
+            }
+            Err(e) => eprintln!("[Sync] Fallback fetch failed: {}", e),
+        }
+
+        // Nothing reconciled AND nothing read back: the pool is unreachable, not
+        // empty. Say so, otherwise this is indistinguishable from having no mail.
+        if fetched == 0 {
+            let _ = handle.emit("sync_unreachable", serde_json::json!({
+                "relays": all_relays.len(),
+            }));
+        }
     }
 
     // Phase 2: Fetch primary missing events (drives progress bar)
@@ -743,8 +820,17 @@ pub async fn fetch_messages<R: Runtime>(
         let quick_inner = crate::services::event_handler::TauriEventHandler;
         let batcher = vector_core::event_handler::BatchingPersist::new(&quick_inner);
 
+        let progress_total = primary_missing.len() as u32;
         while let Some(result) = prepared_stream.next().await {
             total_events += 1;
+            if total_events % 50 == 0 {
+                let _ = handle.emit("sync_progress", serde_json::json!({
+                    "mode": "Syncing",
+                    "current": total_events,
+                    "total": progress_total,
+                    "new_messages": new_messages_count,
+                }));
+            }
             if let Ok(prepared) = result {
                 // Extract timing metrics before commit consumes the prepared event
                 match &prepared {
@@ -847,6 +933,8 @@ pub async fn fetch_messages<R: Runtime>(
         // still burns relay bandwidth pointlessly and any post-sync
         // community sweep would run against the new account. Bail early on swap.
         let archive_session = vector_core::state::SessionGuard::capture();
+        let archive_skip: std::collections::HashSet<String> =
+            hard_failed.iter().map(|u| u.to_string()).collect();
         tokio::spawn(async move {
             if !archive_session.is_valid() { return; }
             let archive_start = std::time::Instant::now();
@@ -865,10 +953,24 @@ pub async fn fetch_messages<R: Runtime>(
                 .dry_run();
 
             let relay_map = bg_client.relays().await;
+            // A relay that refused the 7-day set refuses this larger one identically;
+            // asking again just burns the 120s budget. Timeouts are not in this set.
             let relays: Vec<(RelayUrl, Relay)> = relay_map.iter()
+                .filter(|(url, _)| !archive_skip.contains(&url.to_string()))
                 .map(|(url, relay)| (url.clone(), relay.clone()))
                 .collect();
             drop(relay_map);
+            if !archive_skip.is_empty() {
+                println!("[Sync] Archive: skipping {} relay(s) that refused the quick phase", archive_skip.len());
+            }
+            if relays.is_empty() {
+                println!("[Sync] Archive: no eligible relays, skipping");
+                let mut state = STATE.lock().await;
+                state.is_syncing = false;
+                drop(state);
+                let _ = handle_bg.emit("sync_finished", ());
+                return;
+            }
 
             let mut all_missing: std::collections::HashSet<EventId> = std::collections::HashSet::new();
             let mut futs = futures_util::stream::FuturesUnordered::new();

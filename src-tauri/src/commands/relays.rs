@@ -23,7 +23,6 @@ pub const DEFAULT_RELAYS: &[&str] = &[
     "wss://jskitty.com/nostr",        // TRUSTED_RELAY
     "wss://asia.vectorapp.io/nostr",  // TRUSTED_RELAY
     "wss://nostr.computingcache.com", // TRUSTED_RELAY
-    "wss://relay.damus.io",
 ];
 
 // ============================================================================

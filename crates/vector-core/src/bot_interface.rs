@@ -473,7 +473,7 @@ pub struct ChatBotCommands {
 /// unreachable or drops stranger events (Ditto does). Write side: the SDK
 /// publishes every bot's manifest here for the same reason.
 pub const DISCOVERY_RELAYS: &[&str] =
-    &["wss://purplepag.es", "wss://relay.nostr.band", "wss://relay.damus.io", "wss://nos.lol"];
+    &["wss://purplepag.es", "wss://relay.nostr.band", "wss://nos.lol"];
 
 /// What the composer's `/` picker renders, instantly answerable from local
 /// state. `fresh: false` means a background refetch was spawned — a
