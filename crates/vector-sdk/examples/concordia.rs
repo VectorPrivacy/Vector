@@ -364,7 +364,7 @@ async fn push_profile_to_communities() {
         let _ = client.add_relay(t).await;
     }
     client.connect().await;
-    match client.send_event_to(targets, &ev).await {
+    match client.send_event(&ev).to(targets).await {
         Ok(out) => println!("── profile pushed: stored on {} relay(s), refused by {}", out.success.len(), out.failed.len()),
         Err(e) => eprintln!("!! profile push failed: {e}"),
     }

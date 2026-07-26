@@ -1375,7 +1375,7 @@ pub async fn encrypt(input: String, password: Option<String>) -> String {
                 match vector_core::sign_builder(event_builder).await {
                     Ok(event) => {
                         // Send only to trusted relays
-                        match client.send_event_to(active_trusted_relays().await.into_iter(), &event).await {
+                        match client.send_event(&event).to(active_trusted_relays().await.into_iter()).await {
                             Ok(_) => println!("Successfully broadcast invite acceptance to trusted relays"),
                             Err(e) => eprintln!("Failed to broadcast invite acceptance: {}", e),
                         }
@@ -2044,7 +2044,7 @@ fn broadcast_pending_invite_if_any() {
         match vector_core::sign_builder(event_builder).await {
             Ok(event) => {
                 if !session.is_valid() { return; }
-                match client.send_event_to(active_trusted_relays().await.into_iter(), &event).await {
+                match client.send_event(&event).to(active_trusted_relays().await.into_iter()).await {
                     Ok(_) => println!("Successfully broadcast invite acceptance to trusted relays"),
                     Err(e) => eprintln!("Failed to broadcast invite acceptance: {}", e),
                 }

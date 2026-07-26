@@ -683,7 +683,8 @@ mod tests {
         //    key, before any assertion can panic and strand garbage on the relay.
         let mut cleanup_ok = true;
         for (ephemeral, outer) in &published {
-            let del = EventBuilder::delete(EventDeletionRequest::new().ids([outer.id]))
+            let del = EventDeletionRequest::new()
+                .ids([outer.id])
                 .finalize(ephemeral)
                 .expect("build deletion");
             if let Err(e) = transport.publish(&del, &relays).await {

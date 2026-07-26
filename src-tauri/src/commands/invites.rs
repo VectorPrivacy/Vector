@@ -86,7 +86,7 @@ pub async fn get_or_create_invite_code() -> Result<String, String> {
     let event = vector_core::sign_builder(event_builder).await.map_err(|e| e.to_string())?;
 
     // Send only to trusted relays
-    client.send_event_to(active_trusted_relays().await.into_iter(), &event).await.map_err(|e| e.to_string())?;
+    client.send_event(&event).to(active_trusted_relays().await.into_iter()).await.map_err(|e| e.to_string())?;
 
     // Store locally
     db::set_sql_setting("invite_code".to_string(), new_code.clone())
