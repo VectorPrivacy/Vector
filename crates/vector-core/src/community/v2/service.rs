@@ -3630,8 +3630,16 @@ fn apply_community_metadata(out: &mut CommunityV2, meta: control::CommunityMetad
         out.meta_extra = meta.extra;
         changed = true;
     }
-    if !meta.relays.is_empty() && out.relays != meta.relays {
-        out.relays = meta.relays;
+    // CAP on the way in. `cap_relays` is the truncate-on-read invariant for every
+    // other construction boundary, and the fold is a boundary like any other: an
+    // authorized editor is not a trusted one, and an oversize list costs every
+    // member a fan-out on each publish and the slowest of N on each fetch
+    // (CORD-02 §6 makes trimming explicitly a client's call). Compare against the
+    // CAPPED list too — against the raw one, an oversize edition never compares
+    // equal, so every fold would report a change and re-save forever.
+    let relays = crate::community::cap_relays(meta.relays);
+    if !relays.is_empty() && out.relays != relays {
+        out.relays = relays;
         changed = true;
     }
     changed
@@ -6461,6 +6469,36 @@ mod tests {
         let first = mint_or_reuse_rotation_key(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX, 1).unwrap();
         let second = mint_or_reuse_rotation_key(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX, 1).unwrap();
         assert_eq!(first, second, "a retry reuses the archived root, never double-mints");
+    }
+
+    #[tokio::test]
+    async fn a_folded_metadata_edition_cannot_push_the_relay_set_past_the_cap() {
+        // `cap_relays` is the truncate-on-read invariant everywhere else, and the
+        // fold is a boundary like any other: MANAGE_METADATA makes an editor
+        // authorized, not trusted. An oversize list costs every member a fan-out
+        // per publish and the slowest of N per fetch — and Armada caps at 5, so
+        // an uncapped fold also splits the two clients' operative sets.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Fanout", vec!["wss://a".into()], None).await.unwrap();
+
+        let many: Vec<String> = (0..30).map(|i| format!("wss://r{i}")).collect();
+        let meta = control::CommunityMetadata { name: "Fanout".into(), relays: many, ..Default::default() };
+        edit_community_metadata(&relay, &community, &meta).await.unwrap();
+
+        let updated = follow_control(&relay, &community, &SessionGuard::capture()).await.unwrap()
+            .expect("the metadata edition is folded");
+        assert_eq!(
+            updated.relays.len(),
+            crate::community::MAX_COMMUNITY_RELAYS,
+            "a folded relay list must be truncated, never adopted whole",
+        );
+
+        // …and the fold must SETTLE: comparing an oversize edition against the
+        // capped working set would never be equal, so every later fold would
+        // report a change and re-save forever.
+        let again = follow_control(&relay, &updated, &SessionGuard::capture()).await.unwrap();
+        assert!(again.is_none(), "re-folding the same oversize edition must be a no-op");
     }
 
     #[tokio::test]
