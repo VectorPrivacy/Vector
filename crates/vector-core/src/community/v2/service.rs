@@ -1480,10 +1480,37 @@ pub async fn kick_member<T: Transport + ?Sized>(transport: &T, community: &Commu
     ) {
         return Err("not authorized to kick this member".to_string());
     }
+    // CORD-04 §6 composition: a Kick is Role Removal THEN the directive — strip
+    // first, so the target's rank is gone before the departure lands. Without it a
+    // kicked admin leaves the memberlist still holding every management bit, and
+    // every client keeps honoring their control editions.
+    //
+    // SKIPPED (not refused) when the strip isn't ours to make: a revoke needs
+    // MANAGE_ROLES + strict outrank, and a KICK-only moderator still kicks — the
+    // target just keeps their rank until an authorized strip lands. Each layer
+    // validates on its own rule, so a missing one is a weaker removal, never a
+    // broken one. A strip we DO attempt and lose is a hard error: proceeding would
+    // publish a directive we know leaves rank behind.
+    let target_hex = target.to_hex();
+    let holds_roles = authority.roles.grants.iter().any(|g| g.member == target_hex && !g.role_ids.is_empty());
+    let may_strip = authority.roles.can_act_on_member(
+        &my_pk.to_hex(),
+        Some(&owner_hex),
+        &target_hex,
+        crate::community::roles::Permissions::MANAGE_ROLES,
+    );
+    if holds_roles && may_strip {
+        grant_roles(transport, community, target, Vec::new())
+            .await
+            .map_err(|e| format!("could not strip this member's roles before kicking: {e}"))?;
+        if !session.is_valid() {
+            return Err("account changed during kick".to_string());
+        }
+    }
     let at_ms = now_ms();
     let gb_group = super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
     // A Kick is an authority action, so it cites its Grant like any other
-    // (CORD-02 §8 / CORD-04 §5).
+    // (CORD-02 §5 / CORD-04 §5).
     let citation = my_authority_citation(community, &my_pk);
     let rumor = guestbook::build_kick_rumor(my_pk, *target, citation.as_ref(), at_ms);
     let (wrap, _) = guestbook::seal_guestbook_rumor_signed(&signer, my_pk, &rumor, &gb_group, Timestamp::from_secs(at_ms / 1000)).await
@@ -9356,6 +9383,35 @@ mod tests {
         let after = memberlist(&bed.relay, &community).await.unwrap();
         assert!(!after.contains(&member.keys.public_key()), "the kicked member leaves the fold");
         assert!(after.contains(&owner.keys.public_key()), "the owner remains");
+    }
+
+    #[tokio::test]
+    async fn kicking_an_admin_strips_their_roles_first() {
+        // CORD-04 §6 composition: Role Removal THEN the directive. Kicking without the
+        // strip leaves the target out of the memberlist but still holding every
+        // management bit, so every client keeps honoring their control editions.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Compose", bed.relays.clone(), None).await.unwrap();
+        let member_pk = member.keys.public_key();
+        let member_hex = member_pk.to_hex();
+        let owner_hex = owner.keys.public_key().to_hex();
+
+        grant_admin(&bed.relay, &community, &member_pk).await.unwrap();
+        assert!(fetch_authority(&bed.relay, &community).await.roles.is_admin(&member_hex));
+
+        kick_member(&bed.relay, &community, &member_pk).await.unwrap();
+
+        let view = fetch_authority(&bed.relay, &community).await;
+        assert!(!view.roles.is_admin(&member_hex), "the kick stripped their rank");
+        assert!(
+            !view.roles.is_authorized(&member_hex, Some(&owner_hex), Permissions::MANAGE_ROLES),
+            "a kicked admin holds no bit"
+        );
+        assert!(
+            !memberlist(&bed.relay, &community).await.unwrap().contains(&member_pk),
+            "and the directive still removed them"
+        );
     }
 
     #[tokio::test]

@@ -2656,12 +2656,26 @@ impl VectorCore {
     /// Cooperatively kick a member — they self-remove but can rejoin. Requires KICK + outrank.
     pub async fn kick_member(&self, community_id: &str, npub: &str) -> Result<()> {
         use crate::community::{service, transport::LiveTransport};
+        let session = crate::state::SessionGuard::capture();
         let pk = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| VectorError::Other("invalid npub".into()))?;
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
         if let Some(v2) = Self::load_v2_if_v2(community_id)? {
-            return crate::community::v2::service::kick_member(&transport, &v2, &pk)
+            crate::community::v2::service::kick_member(&transport, &v2, &pk)
                 .await
-                .map_err(VectorError::Other);
+                .map_err(VectorError::Other)?;
+            // Catch the local Guestbook up on our own Kick, so the memberlist read
+            // (which folds the STORE, not the network) drops them before this returns
+            // instead of waiting on the relay echo. The control fold follows because a
+            // Kick strips roles first (CORD-04 §6), which moves the roster too.
+            if session.is_valid() {
+                if let Ok(fresh) = crate::community::v2::service::sync_guestbook(&transport, &v2, &session).await {
+                    if !fresh.is_empty() {
+                        emit_event("community_refreshed", &serde_json::json!({ "community_id": community_id }));
+                    }
+                }
+            }
+            Self::converge_v2_authority(&transport, community_id, &session).await;
+            return Ok(());
         }
         let community = Self::load_community_hex(community_id)?;
         let channel = community.channels.first().ok_or_else(|| VectorError::Other("community has no channel".into()))?;

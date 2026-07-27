@@ -281,6 +281,10 @@ pub enum DispatchedV2 {
     Typing { channel_id: String, npub: String },
     /// A Guestbook join/leave for `npub`.
     Presence { npub: String, joined: bool },
+    /// A Guestbook Kick naming `target`. Returned unjudged: the store keeps the
+    /// raw rumor and the memberlist fold is what applies KICK authority, so the
+    /// realtime layer ingests it and re-folds rather than trusting the wrap.
+    Kick { target: PublicKey },
     /// A wrap on this community's Control Plane — its metadata/channel set may
     /// have changed. Recognized here (address match) but NOT folded: the fold
     /// needs the whole edition chain, so the realtime layer re-fetches + re-folds
@@ -443,8 +447,10 @@ fn dispatch_guestbook(ev: &guestbook::GuestbookEvent, community: &CommunityV2, h
             handler.on_community_presence(&chat_id, &npub, false, &event_id, at_ms / 1000, None, None);
             DispatchedV2::Presence { npub: npub.clone(), joined: false }
         }
-        // Kicks/snapshots aren't surfaced to the handler in the first cut.
-        GuestbookEntry::Kick { .. } | GuestbookEntry::Snapshot { .. } => DispatchedV2::Ignored,
+        // A Kick shapes the memberlist, not the feed — so no presence line, but it
+        // MUST reach the store or the target never leaves anyone's roster.
+        GuestbookEntry::Kick { target, .. } => DispatchedV2::Kick { target: *target },
+        GuestbookEntry::Snapshot { .. } => DispatchedV2::Ignored,
     }
 }
 
@@ -773,6 +779,39 @@ mod tests {
         // The REAL rumor id keys the line — an empty id would collapse every
         // distinct join into one dedup slot (first wins, the rest vanish).
         assert_eq!(seen[0].2, expected_id, "presence carries the join's own rumor id");
+    }
+
+    #[tokio::test]
+    async fn a_guestbook_kick_dispatches_its_target_and_raises_no_presence_line() {
+        // Routing regression: a Kick used to fall to `Ignored`, so realtime dropped it
+        // and the target never left anyone's memberlist (nor their own community).
+        use nostr_sdk::prelude::Timestamp;
+        use std::sync::Mutex as StdMutex;
+        let (_tmp, _guard, me) = init();
+        let relay = MemoryRelay::new();
+        let community = service::create_community(&relay, "Kicks", vec!["wss://r".into()], None).await.unwrap();
+
+        #[derive(Default)]
+        struct Capture(StdMutex<usize>);
+        impl InboundEventHandler for Capture {
+            fn on_community_presence(&self, _c: &str, _n: &str, _j: bool, _e: &str, _a: u64, _b: Option<&str>, _l: Option<&str>) {
+                *self.0.lock().unwrap() += 1;
+            }
+        }
+
+        let target = Keys::generate();
+        let gb = super::super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
+        let rumor = guestbook::build_kick_rumor(me.public_key(), target.public_key(), None, 5_000);
+        let (wrap, _) = super::super::guestbook::seal_guestbook_rumor(&rumor, &gb, &me, Timestamp::from_secs(5)).unwrap();
+
+        let cap = Capture::default();
+        let out = dispatch_wrap(&wrap, &community, &me.public_key(), &cap);
+        match out {
+            DispatchedV2::Kick { target: t } => assert_eq!(t, target.public_key(), "the kick names its target"),
+            other => panic!("a Kick must reach the store, got {other:?}"),
+        }
+        // A kick shapes the memberlist, not the feed.
+        assert_eq!(*cap.0.lock().unwrap(), 0, "a kick raises no presence line");
     }
 
     #[tokio::test]

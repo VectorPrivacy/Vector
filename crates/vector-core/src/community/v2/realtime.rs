@@ -438,6 +438,32 @@ pub async fn dispatch_event(session: &SessionGuard, event: Event, handler: Arc<d
                 }
                 return;
             }
+            inbound::DispatchedV2::Kick { target } => {
+                if !session.is_valid() {
+                    return;
+                }
+                let gb = derive::guestbook_group_key(&c.community_root, c.id(), c.root_epoch);
+                let Ok(opened) = super::stream::open_wrap(&event, &gb) else { return };
+                let Ok(ev) = super::guestbook::parse_guestbook_event(&opened) else { return };
+                if !super::service::ingest_guestbook_event(c, ev, event.created_at.as_secs()).unwrap_or(false) {
+                    return;
+                }
+                if !session.is_valid() {
+                    return;
+                }
+                let community_id = crate::simd::hex::bytes_to_hex_32(&c.id().0);
+                // Self-removal rides the AUTHORIZED fold, never the wrap: the store takes
+                // any Kick rumor, so acting on arrival would let any member evict anyone.
+                // Fail-closed — a kick our roster can't justify leaves us in place.
+                let evicted = my_pk == target
+                    && super::service::stored_memberlist(c).map(|m| !m.contains(&my_pk)).unwrap_or(false);
+                if evicted {
+                    handler.on_community_self_removed(&community_id);
+                } else {
+                    handler.on_community_refreshed(&community_id);
+                }
+                return;
+            }
             _ => return, // typing (and non-surfaced guestbook kinds) handled inline by the dispatcher.
         }
     }

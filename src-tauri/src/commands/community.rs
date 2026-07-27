@@ -585,11 +585,7 @@ pub async fn leave_community(community_id: String) -> Result<(), String> {
     let id_bytes = hex_to_id32(&community_id)?;
     // v2: guestbook Leave announce (facade) + shared local teardown.
     if is_v2_community(&community_id) {
-        let channel_ids: Vec<String> = vector_core::db::community::load_community_v2(&CommunityId(id_bytes))
-            .ok()
-            .flatten()
-            .map(|c| c.channels.iter().map(|ch| vector_core::simd::hex::bytes_to_hex_32(&ch.id.0)).collect())
-            .unwrap_or_default();
+        let channel_ids = community_channel_ids(&community_id);
         let _ = vector_core::VectorCore.leave_community(&community_id).await;
         if !session.is_valid() {
             return Ok(());
@@ -624,14 +620,37 @@ pub async fn leave_community(community_id: String) -> Result<(), String> {
 /// self-scrub of own past messages stays possible. Order matters — drop + refresh routes BEFORE the
 /// chat-row teardown, else an in-flight inbound message could route in and recreate a ghost chat after
 /// we'd deleted it. Shared by every self-removal trigger (voluntary leave, kick of us, ban-rekey exclusion).
+/// A community's channel-id hexes, protocol-agnostic. Every teardown path needs these to purge
+/// the chat rows + STATE entries, and a v2 hold is invisible to `load_community`.
+pub(crate) fn community_channel_ids(community_id: &str) -> Vec<String> {
+    let Ok(id_bytes) = hex_to_id32(community_id) else { return Vec::new() };
+    if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&CommunityId(id_bytes)) {
+        return c.channels.iter().map(|ch| vector_core::simd::hex::bytes_to_hex_32(&ch.id.0)).collect();
+    }
+    vector_core::db::community::load_community(&CommunityId(id_bytes))
+        .ok()
+        .flatten()
+        .map(|c| c.channels.iter().map(|ch| ch.id.to_hex()).collect())
+        .unwrap_or_default()
+}
+
+/// A community's relay set, protocol-agnostic (see [`community_channel_ids`]).
+fn community_relays_of(community_id: &str) -> Vec<String> {
+    let Ok(id_bytes) = hex_to_id32(community_id) else { return Vec::new() };
+    if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&CommunityId(id_bytes)) {
+        return c.relays.clone();
+    }
+    vector_core::db::community::load_community(&CommunityId(id_bytes))
+        .ok()
+        .flatten()
+        .map(|c| c.relays.clone())
+        .unwrap_or_default()
+}
+
 pub(crate) async fn teardown_community_local(community_id: &str, channel_ids: &[String], republish_list: bool) {
     // Capture this community's relays BEFORE deletion so we can drop any that no remaining community
     // needs — and that aren't the user's own relays — from the pool after the routes refresh.
-    let left_relays: Vec<String> = hex_to_id32(community_id)
-        .ok()
-        .and_then(|b| vector_core::db::community::load_community(&CommunityId(b)).ok().flatten())
-        .map(|c| c.relays.clone())
-        .unwrap_or_default();
+    let left_relays: Vec<String> = community_relays_of(community_id);
 
     let _ = vector_core::db::community::delete_community_retain_keys(community_id);
     // tombstone it out of the cross-device list. A LOCAL trigger (leave / observed-ban / kick)
@@ -679,11 +698,7 @@ async fn prune_orphaned_community_relays(left_relays: &[String]) {
 /// announce — it's involuntary), then tell the frontend so it silently closes the view. A ban differs
 /// from a kick only in that the banlist persists (re-detected → re-removed) and admins can't re-invite us.
 pub(crate) async fn self_remove_from_community(community_id: &str, republish_list: bool) {
-    let channel_ids: Vec<String> = hex_to_id32(community_id)
-        .ok()
-        .and_then(|b| vector_core::db::community::load_community(&CommunityId(b)).ok().flatten())
-        .map(|c| c.channels.iter().map(|ch| ch.id.to_hex()).collect())
-        .unwrap_or_default();
+    let channel_ids = community_channel_ids(community_id);
     teardown_community_local(community_id, &channel_ids, republish_list).await;
     vector_core::emit_event(
         "community_kicked",
