@@ -3156,8 +3156,14 @@ pub async fn follow_control<T: Transport + ?Sized>(
     }
     // Persist the authorized banlist content (retained/withholding folds carry None,
     // so the stored banlist is left intact — an anti-roster never silently un-bans).
+    let mut authority_changed = false;
     if let Some((banned, version)) = &authority.banlist_persist {
+        let mut before = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
         crate::db::community::set_community_banlist(&cid_hex, banned, *version as i64)?;
+        let mut after = banned.clone();
+        before.sort();
+        after.sort();
+        authority_changed |= before != after;
     }
     // Persist the authorized roster so capabilities/roles stay sync LOCAL reads
     // (v1 parity: the passive follow folds, reads never fetch). Guarded like v1's
@@ -3190,7 +3196,15 @@ pub async fn follow_control<T: Transport + ?Sized>(
     // `stored_complete` is trivially true with nothing stored, so without this the
     // first sync would cache a partial authority as its own baseline.
     if !truncated && !authority.gapped && stored_complete && newest_roster_at >= crate::db::community::get_community_roles_at(&cid_hex)? {
+        authority_changed |= stored != authority.roles;
         crate::db::community::set_community_roles(&cid_hex, &authority.roles, newest_roster_at)?;
+    }
+    // Roster/banlist moves are invisible in the returned community (they live in
+    // their own columns), so callers that key a refresh off `updated` would never
+    // repaint a promote/demote/ban. Announce from the single fold point — it covers
+    // realtime, boot catch-up and manual sync alike.
+    if authority_changed {
+        crate::emit_event("community_refreshed", &serde_json::json!({ "community_id": cid_hex }));
     }
     match fold.updated {
         Some(u) => {

@@ -2594,15 +2594,41 @@ impl VectorCore {
         Ok(serde_json::json!({ "owner": owner, "admins": admins }))
     }
 
+    /// Fold the v2 control plane back in right after publishing an authority change, so the
+    /// LOCAL roster/banlist — which is what every read is served from (crowns, in-chat tags,
+    /// capabilities, moderation gates) — is current by the time the call returns. `publish`
+    /// only returns once a relay ACKed, so this refetch sees our own edition; the fold
+    /// announces `community_refreshed` itself when the roster actually moved.
+    ///
+    /// Best-effort: the edition is already published, so a failed refold is a stale local
+    /// cache the next follow repairs, never a failed action.
+    async fn converge_v2_authority(
+        transport: &crate::community::transport::LiveTransport,
+        community_id: &str,
+        session: &crate::state::SessionGuard,
+    ) {
+        if !session.is_valid() {
+            return;
+        }
+        // Reload rather than reuse the caller's clone: the publish advanced edition floors,
+        // and a rekey/refound may have moved the control address under us.
+        if let Ok(Some(fresh)) = Self::load_v2_if_v2(community_id) {
+            let _ = crate::community::v2::service::follow_control(transport, &fresh, session).await;
+        }
+    }
+
     /// Grant a member the @admin role. Requires MANAGE_ROLES + outranking the role's position.
     pub async fn grant_admin(&self, community_id: &str, npub: &str) -> Result<()> {
         use crate::community::{service, transport::LiveTransport};
+        let session = crate::state::SessionGuard::capture();
         let member = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| VectorError::Other("invalid npub".into()))?;
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
         if let Some(v2) = Self::load_v2_if_v2(community_id)? {
-            return crate::community::v2::service::grant_admin(&transport, &v2, &member)
+            crate::community::v2::service::grant_admin(&transport, &v2, &member)
                 .await
-                .map_err(VectorError::Other);
+                .map_err(VectorError::Other)?;
+            Self::converge_v2_authority(&transport, community_id, &session).await;
+            return Ok(());
         }
         let community = Self::load_community_hex(community_id)?;
         let role_id = Self::admin_role_id_of(community_id)?;
@@ -2612,12 +2638,15 @@ impl VectorCore {
     /// Revoke a member's @admin role.
     pub async fn revoke_admin(&self, community_id: &str, npub: &str) -> Result<()> {
         use crate::community::{service, transport::LiveTransport};
+        let session = crate::state::SessionGuard::capture();
         let member = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| VectorError::Other("invalid npub".into()))?;
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
         if let Some(v2) = Self::load_v2_if_v2(community_id)? {
-            return crate::community::v2::service::revoke_admin(&transport, &v2, &member)
+            crate::community::v2::service::revoke_admin(&transport, &v2, &member)
                 .await
-                .map_err(VectorError::Other);
+                .map_err(VectorError::Other)?;
+            Self::converge_v2_authority(&transport, community_id, &session).await;
+            return Ok(());
         }
         let community = Self::load_community_hex(community_id)?;
         let role_id = Self::admin_role_id_of(community_id)?;
@@ -2643,6 +2672,7 @@ impl VectorCore {
     /// fires the read-cut rekey (needs a local key). Requires BAN + outrank.
     pub async fn set_member_banned(&self, community_id: &str, npub: &str, banned: bool) -> Result<()> {
         use crate::community::{service, transport::LiveTransport, CommunityId};
+        let session = crate::state::SessionGuard::capture();
         let pk = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| VectorError::Other("invalid npub".into()))?;
         let hex = pk.to_hex();
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
@@ -2666,6 +2696,7 @@ impl VectorCore {
                     crate::community::v2::service::grant_roles(&transport, &community, &pk, vec![]).await.map_err(VectorError::Other)?;
                     crate::community::v2::service::refound_community(&transport, &community, &[pk]).await.map_err(VectorError::Other)?;
                 }
+                Self::converge_v2_authority(&transport, community_id, &session).await;
                 return Ok(());
             }
         }

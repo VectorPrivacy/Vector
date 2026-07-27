@@ -2143,11 +2143,39 @@ async function loadCommunityRoles(communityId) {
     if (!communityId) return;
     let adminNpubs;
     try { adminNpubs = await invoke('get_community_admins', { communityId }); } catch (_) { return; }
+    applyCommunityAdmins(communityId, adminNpubs);
+}
+
+/**
+ * Cache a community's admin set onto its channel chats AND repaint the `admin` badges already
+ * rendered in the open channel. The badge is baked in at row-build time, so a promote/demote
+ * otherwise stayed visible until the chat was re-opened; a surgical pass keeps scroll position,
+ * which a full re-render would throw away mid-conversation.
+ */
+function applyCommunityAdmins(communityId, adminNpubs) {
     for (const c of arrChats) {
         if (c.chat_type === 'Community' && c.metadata?.custom_fields?.community_id === communityId) {
             c.metadata = c.metadata || {};
             c.metadata.admins = adminNpubs.slice();
         }
+    }
+    const open = arrChats.find(c => c.id === strOpenChat);
+    if (!open || open.metadata?.custom_fields?.community_id !== communityId) return;
+    const adminSet = new Set(adminNpubs);
+    for (const author of domChatMessages.querySelectorAll('.dmsg-author[data-npub]')) {
+        const header = author.parentElement;
+        if (!header) continue;
+        const existing = header.querySelector('.dmsg-author-badge.admin');
+        if (!adminSet.has(author.dataset.npub)) {
+            if (existing) existing.remove();
+            continue;
+        }
+        if (existing) continue;
+        const badge = document.createElement('span');
+        badge.classList.add('dmsg-author-badge', 'admin');
+        badge.textContent = 'admin';
+        // Same slot the renderer uses: after the name + bot marker, before the owner badge and time.
+        header.insertBefore(badge, header.querySelector('.dmsg-author-badge.owner, .dmsg-time'));
     }
 }
 
@@ -3111,7 +3139,8 @@ async function setupRustListeners() {
         // Re-render the open overview (re-fetches caps/members/banlist fresh) if it's this community.
         if (domGroupOverview.style.display !== 'none' && domGroupOverview.getAttribute('data-group-id') === communityId) {
             const chat = arrChats.find(c => c.metadata?.custom_fields?.community_id === communityId);
-            if (chat) renderCommunityOverview(chat);
+            // Live refresh, so an active member filter survives someone else's role/ban change.
+            if (chat) renderCommunityOverview(chat, true);
         }
         // Re-render the OPEN channel's header so a live metadata edit (name/description/icon) shows
         // immediately, not only after navigating away and back. The chatlist + overview refresh above.
@@ -9234,11 +9263,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         try { adminNpubs = await invoke('get_community_admins', { communityId }); } catch (_) {}
         // Cache admins onto this community's channel chats so message rendering can chip @everyone
         // from admin senders (owner is handled separately via owner_npub). Mirrors the group design.
-        for (const c of arrChats) {
-            if (c.chat_type === 'Community' && c.metadata?.custom_fields?.community_id === communityId) {
-                c.metadata.admins = adminNpubs.slice();
-            }
-        }
+        applyCommunityAdmins(communityId, adminNpubs);
         const iAmOwner = !!(myNpub && ownerNpub && myNpub === ownerNpub);
         // Per-member outrank for moderation, expressed in role-engine POSITIONS (owner = pos 0 via
         // ownerNpub, admin = pos 1 via adminNpubs, member = none). You may moderate a target you outrank:
@@ -9330,8 +9355,24 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                             crown.innerHTML = '<span class="icon icon-loading spin"></span>';
                             try {
                                 await invoke(makeAdmin ? 'grant_community_admin' : 'revoke_community_admin', { communityId, npub: m.npub });
-                                if (makeAdmin) { if (!adminNpubs.includes(m.npub)) adminNpubs.push(m.npub); }
-                                else { adminNpubs = adminNpubs.filter(n => n !== m.npub); }
+                                // Re-read the roster the backend settled on rather than assuming the
+                                // flip: a published edition the fold hasn't adopted yet would otherwise
+                                // show as done and silently revert on the next open.
+                                const settled = await invoke('get_community_admins', { communityId }).catch(() => null);
+                                if (settled) {
+                                    adminNpubs = settled;
+                                    if (settled.includes(m.npub) !== makeAdmin) {
+                                        showToast('Published, but not confirmed yet. It should apply shortly.');
+                                    }
+                                } else if (makeAdmin) {
+                                    if (!adminNpubs.includes(m.npub)) adminNpubs.push(m.npub);
+                                } else {
+                                    adminNpubs = adminNpubs.filter(n => n !== m.npub);
+                                }
+                                // Push the new set through the shared applier, not just this panel's
+                                // local copy: the in-chat tags read the cached roster, so a demote left
+                                // an "admin" badge sitting behind the overlay.
+                                applyCommunityAdmins(communityId, adminNpubs);
                                 renderMembers(searchEl?.value || '');
                                 // A rank change can flip moderation-hide verdicts — drop the toolbar cache.
                                 dmsgClearDeleteMetaCache();
