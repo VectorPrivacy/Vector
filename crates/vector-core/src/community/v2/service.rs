@@ -713,6 +713,12 @@ pub struct MintedLink {
     pub bundle_event: Event,
     pub link_signer: Keys,
     pub token: [u8; super::derive::TOKEN_LEN],
+    /// Unix ms, mirrored from the bundle. The Invite List is the creator's only
+    /// record of it, and the Registry prunes on it — the coordinate a member
+    /// folds carries no expiry, so a lapsed link the creator never pruned reads
+    /// as a live door forever (CORD-05 §4/§5).
+    pub expires_at_ms: Option<u64>,
+    pub label: Option<String>,
 }
 
 /// Mint a public invite link for this community: a fresh token + link keypair, the
@@ -740,7 +746,7 @@ pub async fn mint_public_link<T: Transport + ?Sized>(
         return Err("account changed before minting link".to_string());
     }
     transport.publish_durable(&bundle_event, &community.relays).await?;
-    let minted = MintedLink { url, bundle_event, link_signer, token };
+    let minted = MintedLink { url, bundle_event, link_signer, token, expires_at_ms, label: label.clone() };
     // Sync the link across the creator's devices (13303) + publish the Registry
     // (vsk-8) so members see the community is Public. Best-effort — the link works
     // without the sync.
@@ -791,13 +797,19 @@ async fn fetch_invite_list<T: Transport + ?Sized>(
     Ok(best.map(|(_, l)| l))
 }
 
-/// The creator's LIVE (non-tombstoned) link-signer pubkeys for one community — the
-/// Registry's content (CORD-05 §5), derived from the stored link secrets.
-fn live_signers_for(list: &invite::InviteList, community_id_hex: &str) -> Vec<PublicKey> {
+/// The creator's LIVE link-signer pubkeys for one community — the Registry's
+/// content (CORD-05 §5), derived from the stored link secrets.
+///
+/// Live means neither tombstoned nor EXPIRED. An expired link cannot be joined
+/// (`InviteBundle::expired`, CORD-05 §1), so leaving it in the Registry states
+/// a door that isn't there: the aggregate never empties, the community reads
+/// Public forever, and every gate hanging off that reading silently inverts.
+fn live_signers_for(list: &invite::InviteList, community_id_hex: &str, now_ms: u64) -> Vec<PublicKey> {
     let dead: std::collections::HashSet<&str> = list.tombstones.iter().map(|t| t.token.as_str()).collect();
     list.entries
         .iter()
         .filter(|e| e.community_id == community_id_hex && !dead.contains(e.token.as_str()))
+        .filter(|e| !e.expires_at.is_some_and(|exp| now_ms > exp))
         .filter_map(|e| Keys::parse(&e.signer_sk).ok().map(|k| k.public_key()))
         .collect()
 }
@@ -831,9 +843,9 @@ async fn record_minted_link<T: Transport + ?Sized>(transport: &T, community: &Co
             signer_sk: minted.link_signer.secret_key().to_secret_hex(),
             community_id: cid_hex.clone(),
             url: minted.url.clone(),
-            label: None,
+            label: minted.label.clone(),
             created_at: now_ms() / 1000,
-            expires_at: None,
+            expires_at: minted.expires_at_ms,
             extra: Default::default(),
         });
     }
@@ -842,7 +854,7 @@ async fn record_minted_link<T: Transport + ?Sized>(transport: &T, community: &Co
     }
     let event = invite::build_invite_list_event_signed(&signer, my_pk, &list).await.map_err(|e| e.to_string())?;
     transport.publish(&event, &community.relays).await?;
-    let signers = live_signers_for(&list, &cid_hex);
+    let signers = live_signers_for(&list, &cid_hex, now_ms());
     publish_invite_registry(transport, community, &session, &signers).await
 }
 
@@ -875,7 +887,7 @@ pub async fn revoke_public_link<T: Transport + ?Sized>(transport: &T, community:
     list.entries.retain(|e| e.token != token_hex);
     let event = invite::build_invite_list_event_signed(&signer, my_pk, &list).await.map_err(|e| e.to_string())?;
     transport.publish(&event, &community.relays).await?;
-    let signers = live_signers_for(&list, &cid_hex);
+    let signers = live_signers_for(&list, &cid_hex, now_ms());
     publish_invite_registry(transport, community, &session, &signers).await?;
     // Drop the local mirror row (sibling of the mint-time save) — only if still our session.
     if session.is_valid() {
@@ -917,9 +929,15 @@ pub async fn refresh_public_links<T: Transport + ?Sized>(transport: &T, communit
         return Ok(());
     };
     let creator = my_pk;
+    let now = now_ms();
     let dead: std::collections::HashSet<&str> = list.tombstones.iter().map(|t| t.token.as_str()).collect();
     for entry in &list.entries {
         if entry.community_id != cid_hex || dead.contains(entry.token.as_str()) || entry.token.len() != 2 * super::derive::TOKEN_LEN {
+            continue;
+        }
+        // An expired link can't be joined, so refreshing it just re-states a
+        // door that isn't there (CORD-05 §1/§5).
+        if entry.expires_at.is_some_and(|exp| now > exp) {
             continue;
         }
         let Ok(link_signer) = Keys::parse(&entry.signer_sk) else { continue };
@@ -933,6 +951,24 @@ pub async fn refresh_public_links<T: Transport + ?Sized>(transport: &T, communit
             let _ = transport.publish_durable(&event, &community.relays).await;
         }
     }
+    // Republish the Registry from the same pruned view. Expiry is the one way a
+    // link dies with no user action, so without a heal point here the aggregate
+    // never empties and the community reads Public long after its last door
+    // shut (CORD-05 §5). Idempotent when nothing lapsed.
+    //
+    // Only for a creator who actually minted here: one Invite List spans every
+    // community, so a member holding links ELSEWHERE would otherwise publish an
+    // empty Registry edition into this one on every rotation they adopt — a
+    // control-plane write, and a version bump, for a coordinate they never owned.
+    let mine_here = list.entries.iter().any(|e| e.community_id == cid_hex);
+    if !mine_here {
+        return Ok(());
+    }
+    let signers = live_signers_for(&list, &cid_hex, now);
+    if !session.is_valid() {
+        return Err("account changed during link refresh".to_string());
+    }
+    let _ = publish_invite_registry(transport, community, &session, &signers).await;
     Ok(())
 }
 
@@ -4110,6 +4146,14 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
         return Ok(RekeyFollow { updated: None, self_removed: false, dissolved: false });
     }
     crate::db::community::save_community_v2(&cur)?;
+    // Carry my own live links across the rotation someone ELSE performed
+    // (CORD-05 §2). The refounder refreshes only the bundles they can reach —
+    // their own — so without this every other creator's links keep vending the
+    // superseded root and drop new joiners onto a dead epoch, which is exactly
+    // the stranding the stable-URL refresh exists to prevent. Best-effort and
+    // idempotent: a creator with no links for this community returns early, and
+    // a failure only delays the heal until the next adoption or refound.
+    let _ = refresh_public_links(transport, &cur).await;
     Ok(RekeyFollow { updated: Some(cur), self_removed: false, dissolved: false })
 }
 
@@ -6305,6 +6349,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn adopting_someone_elses_rotation_refreshes_my_own_live_links() {
+        // CORD-05 §2: a link shared once keeps working across rotations, because
+        // its bundle is re-posted behind the same URL. The Refounder can only
+        // refresh the bundles they hold signer secrets for — their OWN — so
+        // every other creator has to heal their links when they ADOPT the
+        // rotation. Without that, an admin's links keep vending the superseded
+        // root and drop new joiners onto a dead epoch, which is precisely the
+        // stranding the stable-URL refresh exists to prevent.
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "LinkHeal", bed.relays.clone(), None).await.unwrap();
+        let rid = "b1".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &me.keys.public_key(), vec![rid], 1).await;
+
+        let bundle = bundle_of(&community, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined, &SessionGuard::capture()).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+
+        // I mint a link of my own at the CURRENT epoch.
+        let minted = mint_public_link(&bed.relay, &joined, "https://x", None, None).await.unwrap();
+        let vended_before = fetch_public_bundle(&bed.relay, &minted.url).await.unwrap();
+        assert_eq!(vended_before.root_epoch, 0, "my link vends the epoch I minted it at");
+
+        // The OWNER re-founds. Their refresh can't touch my bundle: only I hold
+        // its signer secret.
+        let new_root = [0xD4; 32];
+        publish_base_rotation(&bed.relay, &joined, &owner.keys, &[owner.keys.public_key(), me.keys.public_key()], &new_root, &joined.community_root).await;
+
+        let updated = follow_rekeys(&bed.relay, &joined, &SessionGuard::capture()).await.unwrap().updated
+            .expect("the owner's Refounding is adopted");
+        assert_eq!(updated.root_epoch, Epoch(1), "I advanced to the new epoch");
+
+        let vended_after = fetch_public_bundle(&bed.relay, &minted.url).await.unwrap();
+        assert_eq!(vended_after.root_epoch, 1, "my link must now vend the NEW epoch, not strand its joiners");
+        assert_eq!(
+            crate::simd::hex::hex_to_bytes_32(&vended_after.community_root),
+            new_root,
+            "and the new root behind the same URL",
+        );
+    }
+
+    #[tokio::test]
     async fn follow_rekeys_refuses_a_refounding_that_excludes_the_owner() {
         // Authority escalation: a BAN-admin can't use a Refounding to evict the
         // OWNER (no one outranks the owner). Excluding them makes the rotation
@@ -6371,6 +6461,70 @@ mod tests {
         let first = mint_or_reuse_rotation_key(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX, 1).unwrap();
         let second = mint_or_reuse_rotation_key(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX, 1).unwrap();
         assert_eq!(first, second, "a retry reuses the archived root, never double-mints");
+    }
+
+    #[tokio::test]
+    async fn adopting_a_rotation_writes_no_registry_where_i_never_minted() {
+        // One Invite List spans every community, so "I hold links" must never be
+        // read as "I hold links HERE". A member with links elsewhere adopting a
+        // rotation would otherwise publish an empty Registry edition into this
+        // community — a control-plane write and a version bump on a coordinate
+        // they never owned, every rotation, forever.
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let host = create_community(&bed.relay, "Host", bed.relays.clone(), None).await.unwrap();
+        let elsewhere = create_community(&bed.relay, "Elsewhere", bed.relays.clone(), None).await.unwrap();
+        let rid = "b2".repeat(32);
+        publish_role(&bed.relay, &host, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        publish_grant(&bed.relay, &host, &owner.keys, &me.keys.public_key(), vec![rid], 1).await;
+
+        let bundle = bundle_of(&host, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined, &SessionGuard::capture()).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+
+        // My only link lives in a DIFFERENT community.
+        mint_public_link(&bed.relay, &elsewhere, "https://other", None, None).await.unwrap();
+
+        let before = bed.relay.stored_count();
+        let new_root = [0xE1; 32];
+        publish_base_rotation(&bed.relay, &joined, &owner.keys, &[owner.keys.public_key(), me.keys.public_key()], &new_root, &joined.community_root).await;
+        let rotation_events = bed.relay.stored_count() - before;
+
+        let after_adopt = bed.relay.stored_count();
+        follow_rekeys(&bed.relay, &joined, &SessionGuard::capture()).await.unwrap();
+        assert_eq!(
+            bed.relay.stored_count(),
+            after_adopt,
+            "adopting a rotation must publish NOTHING when I minted no links here",
+        );
+        assert!(rotation_events > 0, "the rotation itself did publish (guards the counter)");
+    }
+
+    #[tokio::test]
+    async fn an_expired_link_stops_keeping_the_community_public() {
+        // CORD-05 §1/§5: expiry is the one way a link dies with no user action.
+        // A joiner is refused by `InviteBundle::expired`, so leaving the link in
+        // the Registry states a door that isn't there — the aggregate never
+        // empties and the community reads Public forever, silently inverting
+        // every gate that hangs off that reading.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Lapsing", vec!["wss://r".into()], None).await.unwrap();
+
+        // A link that lapsed a minute ago.
+        let past = now_ms() - 60_000;
+        mint_public_link(&relay, &community, "https://x", Some(past), None).await.unwrap();
+        assert!(
+            !community_is_public(&relay, &community).await,
+            "an already-expired link must never read as a live door",
+        );
+
+        // …and one that hasn't, to prove the filter isn't just dropping everything.
+        mint_public_link(&relay, &community, "https://y", Some(now_ms() + 600_000), None).await.unwrap();
+        assert!(community_is_public(&relay, &community).await, "an unexpired link is still live");
     }
 
     #[tokio::test]

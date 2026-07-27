@@ -1244,6 +1244,13 @@ pub(crate) mod memory {
             }
         }
 
+        /// Total stored events across every relay url — lets a test assert that a
+        /// code path published NOTHING, which an absence-of-effect check can't
+        /// express by fetching (an empty result also means "never published").
+        pub fn stored_count(&self) -> usize {
+            self.per_relay.lock().unwrap().values().map(|v| v.len()).sum()
+        }
+
         /// Open a live subscription: every subsequent publish/inject matching `query` is
         /// delivered — ephemerals included, which stream but are never stored.
         pub fn subscribe(&self, query: Query) -> tokio::sync::mpsc::UnboundedReceiver<Event> {
