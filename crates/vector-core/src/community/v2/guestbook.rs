@@ -510,15 +510,25 @@ pub fn complete_memberlist(
     coalesced: &BTreeMap<PublicKey, MemberState>,
     observed: &BTreeMap<PublicKey, u64>,
     banlist: &BTreeSet<PublicKey>,
+    banned_at: &BTreeMap<PublicKey, u64>,
 ) -> BTreeSet<PublicKey> {
+    // A Join or activity predating a member's most recent ban is STALE. A ban is a
+    // departure the Guestbook never records (the removal happens on the Control Plane),
+    // so without this an un-ban resurrects their old Join as a phantom member — listed
+    // in a community they hold no key to. Anything AFTER the ban is a genuine rejoin.
+    // `banned_at` is SECONDS, entry times are ms.
+    //
+    // A member offline across the whole ban→un-ban window never actually left; they are
+    // suppressed only until they next publish, and the observed path re-admits them.
+    let stale_pre_ban = |pk: &PublicKey, ms: u64| banned_at.get(pk).is_some_and(|at| ms <= at.saturating_mul(1000));
     let mut out = BTreeSet::new();
     for (pk, st) in coalesced {
-        if st.verdict == Verdict::Joined && !banlist.contains(pk) {
+        if st.verdict == Verdict::Joined && !banlist.contains(pk) && !stale_pre_ban(pk, st.at_ms) {
             out.insert(*pk);
         }
     }
     for (pk, seen_ms) in observed {
-        if banlist.contains(pk) {
+        if banlist.contains(pk) || stale_pre_ban(pk, *seen_ms) {
             continue;
         }
         match coalesced.get(pk) {
@@ -855,7 +865,7 @@ mod tests {
         // Old activity (pre-Leave) never resurrects; silent observed authors
         // ARE members; the banlist subtracts unconditionally.
         let observed: BTreeMap<PublicKey, u64> = [(left, 4_000), (silent, 100), (banned_observed, 9_000)].into();
-        let list = complete_memberlist(&coalesced, &observed, &banlist);
+        let list = complete_memberlist(&coalesced, &observed, &banlist, &BTreeMap::new());
         assert!(list.contains(&joined));
         assert!(list.contains(&silent), "an observed author with no guestbook state is present");
         assert!(!list.contains(&left), "activity OLDER than the leave does not resurrect");
@@ -864,11 +874,43 @@ mod tests {
 
         // Activity strictly newer than the departure re-enters them.
         let observed: BTreeMap<PublicKey, u64> = [(left, 6_000)].into();
-        let list = complete_memberlist(&coalesced, &observed, &banlist);
+        let list = complete_memberlist(&coalesced, &observed, &banlist, &BTreeMap::new());
         assert!(list.contains(&left));
         // Equal-to-departure is not "newer" — still out.
         let observed: BTreeMap<PublicKey, u64> = [(left, 5_000)].into();
-        assert!(!complete_memberlist(&coalesced, &observed, &banlist).contains(&left));
+        assert!(!complete_memberlist(&coalesced, &observed, &banlist, &BTreeMap::new()).contains(&left));
+    }
+
+    #[test]
+    fn an_unban_does_not_resurrect_a_pre_ban_join_or_activity() {
+        // The reported phantom: ban a member, un-ban them, and their old Join (or old
+        // messages) put them back in the memberlist of a community they hold no key to.
+        // CORD-02 §5 counts observation forward of the latest Leave, Kick OR Ban.
+        let (member, chatty) = (pk(), pk());
+        let coalesced = coalesce(&[join_ev(member, 1_000, 1), join_ev(chatty, 1_000, 2)], NOW, None, &always);
+        // Banned at t=5s (marks are SECONDS), then un-banned — so the banlist is empty.
+        let banned_at: BTreeMap<PublicKey, u64> = [(member, 5), (chatty, 5)].into();
+        let empty: BTreeSet<PublicKey> = BTreeSet::new();
+
+        let observed: BTreeMap<PublicKey, u64> = [(chatty, 4_000)].into();
+        let list = complete_memberlist(&coalesced, &observed, &empty, &banned_at);
+        assert!(!list.contains(&member), "a pre-ban Join must not survive the un-ban");
+        assert!(!list.contains(&chatty), "pre-ban activity must not survive the un-ban either");
+
+        // A genuine rejoin — anything strictly after the ban — brings them back.
+        let observed: BTreeMap<PublicKey, u64> = [(chatty, 6_000)].into();
+        assert!(
+            complete_memberlist(&coalesced, &observed, &empty, &banned_at).contains(&chatty),
+            "activity newer than the ban is a real rejoin"
+        );
+        let rejoined = coalesce(&[join_ev(member, 1_000, 1), join_ev(member, 6_000, 3)], NOW, None, &always);
+        assert!(
+            complete_memberlist(&rejoined, &BTreeMap::new(), &empty, &banned_at).contains(&member),
+            "a Join newer than the ban re-admits"
+        );
+        // Still banned (not yet un-banned) stays out regardless of the marks.
+        let banlist: BTreeSet<PublicKey> = [member].into();
+        assert!(!complete_memberlist(&rejoined, &BTreeMap::new(), &banlist, &banned_at).contains(&member));
     }
 
     #[test]

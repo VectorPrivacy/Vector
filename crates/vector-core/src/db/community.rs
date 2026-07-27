@@ -1312,6 +1312,53 @@ pub fn set_community_banlist(community_id: &str, banned_hex: &[String], at: i64)
     Ok(())
 }
 
+/// Per-npub ban marks: lowercase-hex npub → `created_at` (secs) of the newest AUTHORIZED
+/// banlist edition that named them. Retained past an un-ban on purpose — it is what stops a
+/// pre-ban Join resurrecting a phantom member (CORD-02 §5 counts observation forward of the
+/// latest Leave, Kick **or Ban**).
+pub fn get_community_ban_marks(community_id: &str) -> Result<std::collections::BTreeMap<String, u64>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let json: Option<String> = conn
+        .query_row(
+            "SELECT banlist_marks FROM communities WHERE community_id = ?1",
+            params![community_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("get ban marks: {e}"))?;
+    Ok(json.and_then(|j| serde_json::from_str(&dec_txt(&j)).ok()).unwrap_or_default())
+}
+
+/// MERGE fresh ban marks into the stored set, keeping the LATER time per npub and never
+/// dropping an npub. A fold only sees the editions still in its window, so replacing
+/// wholesale would forget every ban that has since aged out — precisely the history the
+/// suppression depends on.
+pub fn merge_community_ban_marks(community_id: &str, marks: &std::collections::BTreeMap<String, u64>) -> Result<bool, String> {
+    if marks.is_empty() {
+        return Ok(false);
+    }
+    let mut stored = get_community_ban_marks(community_id)?;
+    let mut changed = false;
+    for (npub, at) in marks {
+        let slot = stored.entry(npub.clone()).or_insert(0);
+        if *at > *slot {
+            *slot = *at;
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(false);
+    }
+    let json = enc_txt(&serde_json::to_string(&stored).map_err(|e| e.to_string())?)?;
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "UPDATE communities SET banlist_marks = ?1 WHERE community_id = ?2",
+        params![json, community_id],
+    )
+    .map_err(|e| format!("set ban marks: {e}"))?;
+    Ok(true)
+}
+
 /// The `created_at` (secs) of the banlist edition currently stored, or 0 if none. The version
 /// floor the rollback guard compares against.
 pub fn get_community_banlist_at(community_id: &str) -> Result<i64, String> {

@@ -1536,6 +1536,8 @@ pub struct AuthorityView {
     pub floored: std::collections::BTreeSet<String>,
     /// Authority entities (role/grant/banlist) that folded a head this fetch.
     pub head_entities: std::collections::BTreeSet<String>,
+    /// Ban history (npub hex → secs), outliving the ban so an un-ban raises no phantom.
+    pub banned_at: std::collections::BTreeMap<String, u64>,
 }
 
 /// Fetch + fold the community's current authority (CORD-04), paging older like
@@ -1600,6 +1602,7 @@ pub async fn fetch_authority<T: Transport + ?Sized>(transport: &T, community: &C
         gapped: a.gapped,
         floored: floors.keys().cloned().collect(),
         head_entities: a.heads.iter().map(|h| h.entity_hex.clone()).collect(),
+        banned_at: a.banned_at,
     }
 }
 
@@ -1674,6 +1677,7 @@ fn fold_members(
     mut observed: std::collections::BTreeMap<PublicKey, u64>,
     roles: &crate::community::roles::CommunityRoles,
     banlist: &std::collections::BTreeSet<PublicKey>,
+    banned_at: &std::collections::BTreeMap<PublicKey, u64>,
 ) -> Result<Vec<PublicKey>, String> {
     let owner = community.owner()?;
     let owner_hex = owner.to_hex();
@@ -1705,7 +1709,7 @@ fn fold_members(
         roles.can_act_on_member(&actor.to_hex(), Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::KICK)
     };
     let coalesced = guestbook::coalesce(events, now_ms(), snapshot_authority, &can_kick);
-    let mut members = guestbook::complete_memberlist(&coalesced, &observed, banlist);
+    let mut members = guestbook::complete_memberlist(&coalesced, &observed, banlist, banned_at);
     // The owner is a member by definition, independent of any fetched Join.
     if !banlist.contains(&owner) {
         members.insert(owner);
@@ -1779,7 +1783,14 @@ pub fn stored_memberlist(community: &CommunityV2) -> Result<Vec<PublicKey>, Stri
         .iter()
         .filter_map(|h| PublicKey::from_hex(h).ok())
         .collect();
-    fold_members(community, &events, observed, &roles, &banlist)
+    // Ban history outlives the banlist itself — see [`fold_members`]. Read from the store,
+    // since this path never folds editions.
+    let banned_at: std::collections::BTreeMap<PublicKey, u64> = crate::db::community::get_community_ban_marks(&cid_hex)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(h, at)| PublicKey::from_hex(&h).ok().map(|pk| (pk, at)))
+        .collect();
+    fold_members(community, &events, observed, &roles, &banlist, &banned_at)
 }
 
 /// Fold the Complete Memberlist from the Guestbook plane. The proven owner is
@@ -1809,7 +1820,23 @@ pub async fn memberlist<T: Transport + ?Sized>(transport: &T, community: &Commun
     // The authorized banlist, as pubkeys (a malformed hex entry is simply dropped).
     let banlist: std::collections::BTreeSet<PublicKey> =
         authority.banned.iter().filter_map(|h| PublicKey::from_hex(h).ok()).collect();
-    fold_members(community, &events, observed, &authority.roles, &banlist)
+    // Union the live fold's ban history with the stored marks: the fetch only reaches the
+    // editions still in its window, and a ban that aged out is exactly the one whose
+    // pre-ban Join would phantom.
+    let mut banned_at: std::collections::BTreeMap<PublicKey, u64> = crate::db::community::get_community_ban_marks(
+        &crate::simd::hex::bytes_to_hex_32(&community.id().0),
+    )
+    .unwrap_or_default()
+    .into_iter()
+    .filter_map(|(h, at)| PublicKey::from_hex(&h).ok().map(|pk| (pk, at)))
+    .collect();
+    for (h, at) in &authority.banned_at {
+        if let Ok(pk) = PublicKey::from_hex(h) {
+            let slot = banned_at.entry(pk).or_insert(0);
+            *slot = (*slot).max(*at);
+        }
+    }
+    fold_members(community, &events, observed, &authority.roles, &banlist, &banned_at)
 }
 
 // ── Dissolution (CORD-02 §9) ─────────────────────────────────────────────────
@@ -3184,6 +3211,10 @@ pub async fn follow_control<T: Transport + ?Sized>(
     // Persist the authorized banlist content (retained/withholding folds carry None,
     // so the stored banlist is left intact — an anti-roster never silently un-bans).
     let mut authority_changed = false;
+    // Ban marks MERGE (never replace): they must outlive both the ban and this window,
+    // so a later un-ban can't resurrect a pre-ban Join. Persisted even when the banlist
+    // itself was retained — the history is what the suppression reads.
+    let _ = crate::db::community::merge_community_ban_marks(&cid_hex, &authority.banned_at);
     if let Some((banned, version)) = &authority.banlist_persist {
         let mut before = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
         crate::db::community::set_community_banlist(&cid_hex, banned, *version as i64)?;
@@ -3414,13 +3445,24 @@ struct AuthoritySet {
     /// advanced the floor. `None` when the banlist was retained (no new authorized
     /// head) or is empty — the caller then leaves the stored banlist untouched.
     banlist_persist: Option<(Vec<String>, u64)>,
+    /// Ban HISTORY: npub hex → `created_at` (secs) of the newest authorized edition that
+    /// named them, across every edition in the window rather than just the head. Outlives
+    /// the ban itself so an un-ban can't resurrect a phantom (see [`fold_members`]).
+    banned_at: std::collections::BTreeMap<String, u64>,
 }
 
 impl AuthoritySet {
     /// Bootstrap authority for a community with no roster editions folded yet: only
     /// the owner is authorized (supreme), nobody banned.
     fn owner_only() -> Self {
-        AuthoritySet { roles: Default::default(), banned: Default::default(), heads: vec![], gapped: false, banlist_persist: None }
+        AuthoritySet {
+            roles: Default::default(),
+            banned: Default::default(),
+            heads: vec![],
+            gapped: false,
+            banlist_persist: None,
+            banned_at: Default::default(),
+        }
     }
 }
 
@@ -3536,6 +3578,21 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
                 .collect()
         })
         .unwrap_or_default();
+    // Ban history for phantom suppression: the newest AUTHORIZED edition naming each npub,
+    // over EVERY candidate rather than only the head — an un-ban replaces the head, so the
+    // head alone forgets the ban that the suppression exists to remember. The owner is
+    // skipped: they are never bannable, and a moderator listing them must not durably
+    // suppress them past the un-ban.
+    let mut banned_at: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    for p in &banlist_authored {
+        for t in super::roles::parse_banlist_content(&p.content).unwrap_or_default() {
+            if owner_hex.as_deref() == Some(t.as_str()) {
+                continue;
+            }
+            let slot = banned_at.entry(t).or_insert(0);
+            *slot = (*slot).max(p.created_at);
+        }
+    }
     let mut banlist_persist: Option<(Vec<String>, u64)> = None;
     let mut banlist_head: Option<FoldedHead> = None;
     let banned: std::collections::BTreeSet<String> = if banlist_authored.is_empty() {
@@ -3582,7 +3639,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
         authorized.grants.retain(|g| !g.role_ids.is_empty());
     }
 
-    AuthoritySet { roles: authorized, banned, heads, gapped, banlist_persist }
+    AuthoritySet { roles: authorized, banned, heads, gapped, banlist_persist, banned_at }
 }
 
 /// One candidate edition of a role/grant entity — the pool [`select_authorized`]

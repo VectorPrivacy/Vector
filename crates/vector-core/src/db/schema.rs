@@ -1055,5 +1055,30 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // =========================================================================
+    // Migration 79: Per-npub ban history for phantom-member suppression
+    // =========================================================================
+    // CORD-02 §5 counts observation FORWARD of a member's latest Leave, Kick OR
+    // BAN. The banlist alone is a timeless set, so lifting it let a pre-ban Join
+    // (or old message) resurrect the npub as a member of a community they hold no
+    // key to. Armada folds this from live control history; Vector caches the
+    // banlist, so the per-npub mark has to persist alongside it.
+    run_atomic_migration(conn, 79, "Per-npub ban marks (phantom-member suppression)", |tx| {
+        // Presence-checked, not blind: a build that briefly carried this column in the
+        // CREATE TABLE too would leave a DB holding the column with the migration rolled
+        // back, and a bare ALTER then fails on every boot forever with no way out.
+        let present: i32 = tx
+            .query_row("SELECT COUNT(*) FROM pragma_table_info('communities') WHERE name='banlist_marks'", [], |r| r.get(0))
+            .map_err(|e| format!("migration 79: {}", e))?;
+        if present == 0 {
+            tx.execute(
+                "ALTER TABLE communities ADD COLUMN banlist_marks TEXT NOT NULL DEFAULT '{}'",
+                [],
+            )
+            .map_err(|e| format!("migration 79: {}", e))?;
+        }
+        Ok(())
+    })?;
+
     Ok(())
 }
