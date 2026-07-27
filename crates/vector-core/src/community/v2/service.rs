@@ -3580,17 +3580,55 @@ fn select_authorized(
         let mut next_heads: Vec<FoldedHead> = Vec::new();
 
         for cands in role_cands.values() {
+            // Two gates, not one (CORD-04 §2). Minting at a position you outrank
+            // is necessary but not sufficient: an edition REPLACES the entity, so
+            // the author must also outrank the position standing before it.
+            // Without that, an admin at position 5 rewrites the position-1 role
+            // to position 9 — every check passes, since 9 is beneath them — and
+            // a role that outranked them is now beneath them, along with everyone
+            // holding it. Rank inversion by republish.
+            //
+            // The chain is replayed ASCENDING so each version is judged against
+            // the position its own predecessor established, then the highest
+            // admissible version wins (candidates arrive version-DESC, forks
+            // broken by lowest inner_id — preserved by walking version groups).
+            let mut admissible: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+            let mut standing: Option<u32> = None;
+            let mut i = cands.len();
+            while i > 0 {
+                let hi = i;
+                let ver = cands[i - 1].head.version;
+                while i > 0 && cands[i - 1].head.version == ver {
+                    i -= 1;
+                }
+                // One winner per version: fork siblings can't sidestep the gate.
+                for c in cands[i..hi].iter().rev() {
+                    let Some(role) = &c.role else { continue };
+                    let ah = c.author.to_hex();
+                    if excluded.contains(&ah) || role.position == 0 {
+                        continue;
+                    }
+                    if !accepted.can_act_on_position(&ah, owner_hex, role.position, Permissions::MANAGE_ROLES) {
+                        continue;
+                    }
+                    if let Some(prev) = standing {
+                        if !accepted.can_act_on_position(&ah, owner_hex, prev, Permissions::MANAGE_ROLES) {
+                            continue;
+                        }
+                    }
+                    admissible.insert(c.head.self_hash);
+                    standing = Some(role.position);
+                    break;
+                }
+            }
             for c in cands {
                 let Some(role) = &c.role else { continue };
-                let ah = c.author.to_hex();
-                if excluded.contains(&ah) {
+                if !admissible.contains(&c.head.self_hash) {
                     continue;
                 }
-                if role.position != 0 && accepted.can_act_on_position(&ah, owner_hex, role.position, Permissions::MANAGE_ROLES) {
-                    next.roles.push(role.clone());
-                    next_heads.push(c.head.clone());
-                    break; // highest authorized candidate for this entity
-                }
+                next.roles.push(role.clone());
+                next_heads.push(c.head.clone());
+                break; // highest admissible candidate for this entity
             }
         }
         for cands in grant_cands.values() {
@@ -6502,6 +6540,39 @@ mod tests {
         let first = mint_or_reuse_rotation_key(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX, 1).unwrap();
         let second = mint_or_reuse_rotation_key(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX, 1).unwrap();
         assert_eq!(first, second, "a retry reuses the archived root, never double-mints");
+    }
+
+    #[tokio::test]
+    async fn a_mid_rank_admin_cannot_demote_a_role_that_outranks_them() {
+        // CORD-04 §2 rank inversion. Minting at a position you outrank is
+        // necessary but NOT sufficient: an edition replaces the entity, so a
+        // gate that only reads the NEW position lets an admin at position 5
+        // rewrite the position-1 role to position 9. Every check passes (9 is
+        // beneath them), and the role that outranked them — plus everyone
+        // holding it — is now beneath them.
+        let (bed, owner, attacker) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Ranks", bed.relays.clone(), None).await.unwrap();
+
+        // A senior role at position 1, and a mid role at position 5 the attacker holds.
+        let senior = "a1".repeat(32);
+        let mid = "a5".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys,
+            &Role { role_id: senior.clone(), name: "Senior".into(), position: 1, permissions: Permissions(Permissions::BAN), scope: RoleScope::Server, color: 0 }, 1).await;
+        publish_role(&bed.relay, &community, &owner.keys,
+            &Role { role_id: mid.clone(), name: "Mid".into(), position: 5, permissions: Permissions(Permissions::MANAGE_ROLES), scope: RoleScope::Server, color: 0 }, 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &attacker.keys.public_key(), vec![mid.clone()], 1).await;
+
+        // The attacker republishes the SENIOR role, dropping it beneath themselves.
+        publish_role(&bed.relay, &community, &attacker.keys,
+            &Role { role_id: senior.clone(), name: "Senior".into(), position: 9, permissions: Permissions(Permissions::BAN), scope: RoleScope::Server, color: 0 }, 2).await;
+
+        let authority = fetch_authority(&bed.relay, &community).await;
+        let folded_senior = authority.roles.role(&senior).expect("the senior role survives the fold");
+        assert_eq!(
+            folded_senior.position, 1,
+            "a role may only be repositioned by someone who outranks where it STOOD, not just where it lands",
+        );
     }
 
     #[tokio::test]
