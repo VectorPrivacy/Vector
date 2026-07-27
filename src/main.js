@@ -9317,6 +9317,10 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                 // green for admins (matches the in-chat tags); a promotable member shows a faint crown
                 // on row-hover; everyone else gets the empty spacer. Clicking toggles the Admin role.
                 const isAdminMember = adminNpubs.includes(m.npub);
+                // Pins this row's controls visible for the duration of an action (see the
+                // .is-acting rules): without it the hover-reveal swallows the only progress
+                // signal the moment the pointer moves away.
+                const markActing = (busy) => row.classList.toggle('is-acting', busy);
                 const crownSlot = document.createElement('div');
                 crownSlot.className = 'member-crown-slot';
                 const buildCrown = (active, promote) => {
@@ -9350,6 +9354,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                                 false, '', 'vector_warning.svg');
                             if (!confirmed) return;
                             // Spinner on the crown through the publish + broadcast wait.
+                            markActing(true);
                             crown.classList.add('active');
                             crown.style.pointerEvents = 'none';
                             crown.innerHTML = '<span class="icon icon-loading spin"></span>';
@@ -9377,6 +9382,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                                 // A rank change can flip moderation-hide verdicts — drop the toolbar cache.
                                 dmsgClearDeleteMetaCache();
                             } catch (err) {
+                                markActing(false);
                                 crown.style.pointerEvents = '';
                                 crown.innerHTML = '<span class="icon icon-crown"></span>';
                                 crown.classList.toggle('active', isAdminMember);
@@ -9411,6 +9417,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                         e.stopPropagation();
                         const confirmed = await popupConfirm('Kick member', `Kick <b>${escapeHtml(display)}</b>? They'll be removed from the community but can rejoin with a new invite.`, false, '', 'vector_warning.svg');
                         if (!confirmed) return;
+                        markActing(true);
                         kickBtn.disabled = true;
                         kickBtn.innerHTML = '<span class="icon icon-loading spin"></span>Kicking';
                         try {
@@ -9421,6 +9428,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                             // Sync the "N members" subtext (the backend recorded the leave; this re-fetches).
                             refreshCommunityMemberCount(communityId, true);
                         } catch (err) {
+                            markActing(false);
                             kickBtn.disabled = false;
                             kickBtn.innerHTML = '<span class="icon icon-x"></span>Kick';
                             showToast(String(err));
@@ -9440,6 +9448,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                         if (!confirmed) return;
                         // Banning publishes to relays + rebuilds the subscription (a few seconds);
                         // show a spinner so the button isn't dead during the wait.
+                        markActing(true);
                         banBtn.disabled = true;
                         banBtn.innerHTML = '<span class="icon icon-loading spin"></span>Banning';
                         try {
@@ -9450,6 +9459,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                             // Sync the "N members" subtext (banned members are excluded by the fold).
                             refreshCommunityMemberCount(communityId, true);
                         } catch (err) {
+                            markActing(false);
                             banBtn.disabled = false;
                             banBtn.innerHTML = '<span class="icon icon-x-user"></span>Ban';
                             // A private-community ban can fail with the (long, important) bunker read-cut

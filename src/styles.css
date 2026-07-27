@@ -10878,6 +10878,14 @@ select:disabled:hover {
 .member-pick-row:hover .member-pick-admin.promote { opacity: 0.35; }
 .member-pick-admin.promote:hover { opacity: 0.75; }
 
+/* An action in flight pins its own indicator visible: the spinner is the ONLY signal that a
+   kick/ban/role change is still running, and the hover-reveal above would otherwise hide it the
+   moment the pointer leaves the row — reading as though nothing had happened. Must stay after the
+   hover rules; both sides carry equal specificity, so source order decides. */
+.member-pick-row.is-acting .member-pick-actions,
+.member-pick-row.is-acting .member-pick-admin,
+.member-pick-row.is-acting .member-pick-admin.promote { opacity: 1; }
+
 /* Group Overview Edit Controls */
 .group-editable {
   cursor: pointer;
