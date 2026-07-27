@@ -821,7 +821,7 @@ async fn publish_invite_registry<T: Transport + ?Sized>(transport: &T, community
     let my_pk = me_pk()?;
     let eid = super::derive::invite_links_locator(community.id(), &my_pk.to_bytes());
     let content = invite::build_registry_content(live_signers);
-    publish_control_edition(transport, community, session, vsk::INVITE_LINKS, &eid, &content, None).await
+    publish_control_edition(transport, community, session, vsk::INVITE_LINKS, &eid, &content).await
 }
 
 /// Record a freshly-minted public link across the creator's devices: append it to the
@@ -1469,8 +1469,7 @@ pub async fn kick_member<T: Transport + ?Sized>(transport: &T, community: &Commu
     let session = SessionGuard::capture();
     let signer = crate::signer::active_signer()?;
     let my_pk = me_pk()?;
-    // Fast local pre-check; readers re-verify independently. The `vac` citation
-    // rides with the deferred citation-completeness pass (owner needs none).
+    // Fast local pre-check; readers re-verify independently.
     let authority = fetch_authority(transport, community).await;
     let owner_hex = community.owner()?.to_hex();
     if !authority.roles.can_act_on_member(
@@ -1483,7 +1482,10 @@ pub async fn kick_member<T: Transport + ?Sized>(transport: &T, community: &Commu
     }
     let at_ms = now_ms();
     let gb_group = super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
-    let rumor = guestbook::build_kick_rumor(my_pk, *target, None, at_ms);
+    // A Kick is an authority action, so it cites its Grant like any other
+    // (CORD-02 §8 / CORD-04 §5).
+    let citation = my_authority_citation(community, &my_pk);
+    let rumor = guestbook::build_kick_rumor(my_pk, *target, citation.as_ref(), at_ms);
     let (wrap, _) = guestbook::seal_guestbook_rumor_signed(&signer, my_pk, &rumor, &gb_group, Timestamp::from_secs(at_ms / 1000)).await
         .map_err(|e| e.to_string())?;
     if !session.is_valid() {
@@ -2021,7 +2023,7 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
     }
     let base_group = super::derive::base_rekey_group_key(&community.community_root, cid, new_epoch);
     let base_chunks =
-        super::rekey::build_rekey_chunks(&signer, my_pk, &base_group, super::rekey::RekeyScope::Root, new_epoch, prev_epoch, &prev_commit, &base_blobs, at_secs)
+        super::rekey::build_rekey_chunks(&signer, my_pk, &base_group, super::rekey::RekeyScope::Root, new_epoch, prev_epoch, &prev_commit, &base_blobs, at_secs, my_authority_citation(community, &my_pk).as_ref())
             .await
             .map_err(|e| e.to_string())?;
 
@@ -2049,7 +2051,7 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
             );
         }
         let ch_group = super::derive::channel_rekey_group_key(&community.community_root, &ch.id, ch_new_epoch);
-        let ch_chunks = super::rekey::build_rekey_chunks(&signer, my_pk, &ch_group, super::rekey::RekeyScope::Channel(ch.id), ch_new_epoch, ch.epoch, &ch_prev_commit, &ch_blobs, at_secs)
+        let ch_chunks = super::rekey::build_rekey_chunks(&signer, my_pk, &ch_group, super::rekey::RekeyScope::Channel(ch.id), ch_new_epoch, ch.epoch, &ch_prev_commit, &ch_blobs, at_secs, my_authority_citation(community, &my_pk).as_ref())
             .await
             .map_err(|e| e.to_string())?;
         channel_updates.push((ch.id, ch_new_key, ch_new_epoch));
@@ -2257,7 +2259,7 @@ pub async fn refound_at_birth<T: Transport + ?Sized>(
     ];
     let base_group = super::derive::base_rekey_group_key(&community.community_root, cid, new_epoch);
     let base_chunks =
-        super::rekey::build_rekey_chunks(&signer, my_pk, &base_group, super::rekey::RekeyScope::Root, new_epoch, prev_epoch, &prev_commit, &base_blobs, at_secs)
+        super::rekey::build_rekey_chunks(&signer, my_pk, &base_group, super::rekey::RekeyScope::Root, new_epoch, prev_epoch, &prev_commit, &base_blobs, at_secs, my_authority_citation(community, &my_pk).as_ref())
             .await
             .map_err(|e| e.to_string())?;
     if !session.is_valid() {
@@ -2594,6 +2596,32 @@ pub async fn sync_community_list<T: Transport + ?Sized>(transport: &T, bootstrap
 /// reader's roster fold (CORD-04 §5: authority is rejection, not prevention), so this
 /// requires only a valid local signer; a well-behaved client checks its own rank
 /// first, but a reader drops an unauthorized edition regardless.
+/// This actor's authority citation for a control edition (CORD-04 §5): the head
+/// of their OWN Grant entity, pinned by coordinate + version + edition hash.
+///
+/// A SYNC FLOOR, not a verdict — a verifier refuses to act until it has synced
+/// at least this Grant, then resolves rank against its CURRENT roster, so a
+/// demoted admin is never grandfathered by an old-but-once-valid citation.
+///
+/// `None` for the owner (supreme, rank comes from the community id) and `None`
+/// when no Grant head is held — an actor who cannot cite has no rank to claim,
+/// and the edition is dropped by a conforming reader either way.
+fn my_authority_citation(
+    community: &CommunityV2,
+    actor: &PublicKey,
+) -> Option<crate::community::edition::AuthorityCitation> {
+    if community.owner().ok().as_ref() == Some(actor) {
+        return None;
+    }
+    let entity_id = super::derive::grant_locator(community.id(), &actor.to_bytes());
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let entity_hex = crate::simd::hex::bytes_to_hex_32(&entity_id);
+    crate::db::community::get_edition_head(&cid_hex, &entity_hex)
+        .ok()
+        .flatten()
+        .map(|(version, edition_hash)| crate::community::edition::AuthorityCitation { entity_id, version, edition_hash })
+}
+
 async fn publish_control_edition<T: Transport + ?Sized>(
     transport: &T,
     community: &CommunityV2,
@@ -2601,7 +2629,6 @@ async fn publish_control_edition<T: Transport + ?Sized>(
     vsk: &str,
     entity_id: &[u8; 32],
     content: &str,
-    citation: Option<&crate::community::edition::AuthorityCitation>,
 ) -> Result<(), String> {
     let signer = crate::signer::active_signer()?;
     let my_pk = me_pk()?;
@@ -2612,8 +2639,14 @@ async fn publish_control_edition<T: Transport + ?Sized>(
         Some((v, h)) => (v + 1, Some(h)),
         None => (1, None),
     };
+    // CORD-04 §5: a non-owner names the exact Grant edition it claims its rank
+    // under. Computed here rather than passed in — the citation is a property of
+    // WHO IS ACTING, identical for every entity kind, so deciding it per call
+    // site is nine chances to forget (and nine were, silently: every site passed
+    // None). The owner cites nothing; their rank is the community id itself.
+    let citation = my_authority_citation(community, &my_pk);
     let at = now_ms() / 1000;
-    let rumor = control::build_edition_rumor(my_pk, vsk, entity_id, version, prev.as_ref(), content, at, citation);
+    let rumor = control::build_edition_rumor(my_pk, vsk, entity_id, version, prev.as_ref(), content, at, citation.as_ref());
     let (wrap, _) = control::seal_control_edition_signed(&signer, my_pk, &rumor, &control, Timestamp::from_secs(at)).await.map_err(|e| e.to_string())?;
     if !session.is_valid() {
         return Err("account changed before control publish".to_string());
@@ -2641,7 +2674,7 @@ pub async fn set_role<T: Transport + ?Sized>(transport: &T, community: &Communit
     super::roles::validate_role(role)?;
     let content = super::roles::role_content_json(role)?;
     let role_id = crate::simd::hex::hex_to_bytes_32_checked(&role.role_id).ok_or("role_id must be 32-byte hex")?;
-    publish_control_edition(transport, community, &session, vsk::ROLE, &role_id, &content, None).await
+    publish_control_edition(transport, community, &session, vsk::ROLE, &role_id, &content).await
 }
 
 /// Grant or revoke a member's Roles (vsk 3, CORD-04 §2). Empty `role_ids` is a
@@ -2652,7 +2685,7 @@ pub async fn grant_roles<T: Transport + ?Sized>(transport: &T, community: &Commu
     let grant = crate::community::roles::MemberGrant { member: member.to_hex(), role_ids };
     let content = super::roles::grant_content_json(&grant)?;
     let eid = super::derive::grant_locator(community.id(), &member.to_bytes());
-    publish_control_edition(transport, community, &session, vsk::GRANT, &eid, &content, None).await
+    publish_control_edition(transport, community, &session, vsk::GRANT, &eid, &content).await
 }
 
 /// The community's @admin role id: the folded Server-scope ADMIN_ALL role when one
@@ -2773,7 +2806,7 @@ pub async fn set_banlist<T: Transport + ?Sized>(transport: &T, community: &Commu
     super::roles::validate_banlist(banned)?;
     let content = super::roles::banlist_content_json(banned)?;
     let eid = super::derive::banlist_locator(community.id());
-    publish_control_edition(transport, community, &session, vsk::BANLIST, &eid, &content, None).await
+    publish_control_edition(transport, community, &session, vsk::BANLIST, &eid, &content).await
 }
 
 /// Edit the community metadata (vsk 0, CORD-02 §6). Gated on the reader side by
@@ -2782,7 +2815,7 @@ pub async fn edit_community_metadata<T: Transport + ?Sized>(transport: &T, commu
     let session = SessionGuard::capture();
     control::validate_community_metadata(meta).map_err(|e| e.to_string())?;
     let content = serde_json::to_string(meta).map_err(|e| e.to_string())?;
-    publish_control_edition(transport, community, &session, vsk::COMMUNITY_METADATA, &community.id().0, &content, None).await
+    publish_control_edition(transport, community, &session, vsk::COMMUNITY_METADATA, &community.id().0, &content).await
 }
 
 /// Add or edit a channel's metadata (vsk 2, CORD-03 §2). `channel_id` is the
@@ -2804,7 +2837,7 @@ pub async fn edit_channel_metadata<T: Transport + ?Sized>(transport: &T, communi
     }
     control::validate_channel_metadata(meta).map_err(|e| e.to_string())?;
     let content = serde_json::to_string(meta).map_err(|e| e.to_string())?;
-    publish_control_edition(transport, community, &session, vsk::CHANNEL_METADATA, &channel_id.0, &content, None).await
+    publish_control_edition(transport, community, &session, vsk::CHANNEL_METADATA, &channel_id.0, &content).await
 }
 
 /// The local mirror of the reader's `MANAGE_CHANNELS` fold gate (CORD-03 §2): the
@@ -2857,7 +2890,7 @@ pub async fn create_public_channel_with_id<T: Transport + ?Sized>(transport: &T,
     let meta = control::ChannelMetadata { name: name.to_string(), private: false, voice: None, deleted: None, custom: None, extra: Default::default() };
     control::validate_channel_metadata(&meta).map_err(|e| e.to_string())?;
     let content = serde_json::to_string(&meta).map_err(|e| e.to_string())?;
-    publish_control_edition(transport, community, &session, vsk::CHANNEL_METADATA, &channel_id.0, &content, None).await?;
+    publish_control_edition(transport, community, &session, vsk::CHANNEL_METADATA, &channel_id.0, &content).await?;
     if !session.is_valid() {
         return Err("account changed during channel create".to_string());
     }
@@ -2938,7 +2971,7 @@ pub async fn create_private_channel_with_id<T: Transport + ?Sized>(transport: &T
     }
     let group = channel_rekey_group_key(&community.community_root, &channel_id, epoch);
     let at_secs = now_ms() / 1000;
-    let chunks = rekey::build_rekey_chunks(&signer, my_pk, &group, RekeyScope::Channel(channel_id), epoch, Epoch(0), &prev_commit, &blobs, at_secs)
+    let chunks = rekey::build_rekey_chunks(&signer, my_pk, &group, RekeyScope::Channel(channel_id), epoch, Epoch(0), &prev_commit, &blobs, at_secs, my_authority_citation(community, &my_pk).as_ref())
         .await
         .map_err(|e| e.to_string())?;
     if !session.is_valid() {
@@ -2947,7 +2980,7 @@ pub async fn create_private_channel_with_id<T: Transport + ?Sized>(transport: &T
     for c in &chunks {
         transport.publish_durable(c, &community.relays).await?;
     }
-    publish_control_edition(transport, community, &session, vsk::CHANNEL_METADATA, &channel_id.0, &content, None).await?;
+    publish_control_edition(transport, community, &session, vsk::CHANNEL_METADATA, &channel_id.0, &content).await?;
     if !session.is_valid() {
         return Err("account changed during channel create".to_string());
     }
@@ -2984,7 +3017,7 @@ pub async fn delete_channel<T: Transport + ?Sized>(transport: &T, community: &Co
     });
     meta.deleted = Some(true);
     let content = serde_json::to_string(&meta).map_err(|e| e.to_string())?;
-    publish_control_edition(transport, community, &session, vsk::CHANNEL_METADATA, &channel_id.0, &content, None).await?;
+    publish_control_edition(transport, community, &session, vsk::CHANNEL_METADATA, &channel_id.0, &content).await?;
     if !session.is_valid() {
         return Err("account changed during channel delete".to_string());
     }
@@ -6472,6 +6505,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_non_owner_admins_edition_cites_its_grant_and_the_owners_does_not() {
+        // CORD-04 §5. Armada's reader REQUIRES this on every non-owner control
+        // edition (`citationOk`: "a non-owner action MUST cite its grant"), so
+        // an uncited Vector admin's ban/role/channel edit was silently dropped
+        // by every Armada client — only the owner's actions crossed. The
+        // citation must name the actor's OWN grant coordinate, at the version
+        // and edition hash the verifier can match against a grant it holds.
+        let (bed, owner, admin) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Cited", bed.relays.clone(), None).await.unwrap();
+        let rid = "c1".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN | Permissions::MANAGE_METADATA), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &admin.keys.public_key(), vec![rid], 1).await;
+
+        // The owner's own edition carries NO citation: their rank is the id.
+        let owner_meta = control::CommunityMetadata { name: "By Owner".into(), relays: community.relays.clone(), ..Default::default() };
+        edit_community_metadata(&bed.relay, &community, &owner_meta).await.unwrap();
+        let owner_ed = fetch_control(&bed.relay, &community).await.into_iter()
+            .filter(|e| e.author == owner.keys.public_key() && e.vsk == vsk::COMMUNITY_METADATA)
+            .max_by_key(|e| e.version).expect("the owner's metadata edition");
+        assert!(owner_ed.authority.is_none(), "the owner cites nothing — rank comes from the community id");
+
+        // The admin JOINS and folds — the citation names the grant head their own
+        // client has actually synced, so the fold must have persisted it.
+        let bundle = bundle_of(&community, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&admin);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined, &SessionGuard::capture()).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        set_banlist(&bed.relay, &joined, &["ee".repeat(32)]).await.unwrap();
+
+        let ban_ed = fetch_control(&bed.relay, &joined).await.into_iter()
+            .find(|e| e.author == admin.keys.public_key() && e.vsk == vsk::BANLIST)
+            .expect("the admin's banlist edition");
+        let cite = ban_ed.authority.as_ref().expect("a non-owner MUST cite its grant");
+        assert_eq!(
+            cite.entity_id,
+            crate::community::v2::derive::grant_locator(community.id(), &admin.keys.public_key().to_bytes()),
+            "the citation must name the ACTOR'S OWN grant coordinate",
+        );
+        assert!(cite.version >= 1, "pinned to a real grant version");
+    }
+
+    #[tokio::test]
     async fn a_folded_metadata_edition_cannot_push_the_relay_set_past_the_cap() {
         // `cap_relays` is the truncate-on-read invariant everywhere else, and the
         // fold is a boundary like any other: MANAGE_METADATA makes an editor
@@ -7949,7 +8027,7 @@ mod tests {
             .iter()
             .map(|r| rekey::build_blob_local(rotator.secret_key(), &rotator.public_key().to_bytes(), r, RekeyScope::Root, new_epoch, new_root).unwrap())
             .collect();
-        let events = rekey::build_rekey_chunks_local(rotator, &group, RekeyScope::Root, new_epoch, prev_epoch, &prev_commit, &blobs, 2_000).unwrap();
+        let events = rekey::build_rekey_chunks_local(rotator, &group, RekeyScope::Root, new_epoch, prev_epoch, &prev_commit, &blobs, 2_000, None).unwrap();
         for e in &events {
             relay.publish(e, &community.relays).await.unwrap();
         }
@@ -8004,7 +8082,7 @@ mod tests {
         let prev_commit = super::super::derive::epoch_key_commitment(Epoch(0), &[0x44; 32]);
         let group = channel_rekey_group_key(&community.community_root, &priv_id, Epoch(1));
         let blob = rekey::build_blob_local(owner.secret_key(), &owner.public_key().to_bytes(), &owner.public_key(), RekeyScope::Channel(priv_id), Epoch(1), &new_key).unwrap();
-        let events = rekey::build_rekey_chunks_local(&owner, &group, RekeyScope::Channel(priv_id), Epoch(1), Epoch(0), &prev_commit, &[blob], 2_000).unwrap();
+        let events = rekey::build_rekey_chunks_local(&owner, &group, RekeyScope::Channel(priv_id), Epoch(1), Epoch(0), &prev_commit, &[blob], 2_000, None).unwrap();
         for e in &events {
             relay.publish(e, &community.relays).await.unwrap();
         }
@@ -8060,7 +8138,7 @@ mod tests {
         // Chunk 1 of a declared 2, carrying someone else's blob (not mine).
         let other = Keys::generate();
         let blob = rekey::build_blob_local(owner.secret_key(), &owner.public_key().to_bytes(), &other.public_key(), RekeyScope::Root, new_epoch, &[0xB3; 32]).unwrap();
-        let rumor = rekey::build_rekey_rumor(owner.public_key(), RekeyScope::Root, new_epoch, Epoch(0), &prev_commit, &[blob], 1, 2, 2_000).unwrap();
+        let rumor = rekey::build_rekey_rumor(owner.public_key(), RekeyScope::Root, new_epoch, Epoch(0), &prev_commit, &[blob], 1, 2, 2_000, None).unwrap();
         let (wrap, _) = rekey::seal_rekey_chunk(&rumor, &group, &owner, Timestamp::from_secs(2_000)).unwrap();
         relay.publish(&wrap, &community.relays).await.unwrap();
 
@@ -8117,7 +8195,7 @@ mod tests {
         let prev_commit = super::super::derive::epoch_key_commitment(Epoch(1), &key1);
         let group = channel_rekey_group_key(&root0, &priv_id, Epoch(2));
         let blob = rekey::build_blob_local(owner.secret_key(), &owner.public_key().to_bytes(), &owner.public_key(), RekeyScope::Channel(priv_id), Epoch(2), &key2).unwrap();
-        for e in rekey::build_rekey_chunks_local(&owner, &group, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &prev_commit, &[blob], 2_000).unwrap() {
+        for e in rekey::build_rekey_chunks_local(&owner, &group, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &prev_commit, &[blob], 2_000, None).unwrap() {
             relay.publish(&e, &community.relays).await.unwrap();
         }
 
@@ -8156,7 +8234,7 @@ mod tests {
         let pc1 = super::super::derive::epoch_key_commitment(Epoch(0), &community.community_root);
         let g1 = channel_rekey_group_key(&community.community_root, &priv_id, Epoch(1));
         let b1 = rekey::build_blob_local(owner.secret_key(), &owner.public_key().to_bytes(), &stranger.public_key(), RekeyScope::Channel(priv_id), Epoch(1), &key1).unwrap();
-        for e in rekey::build_rekey_chunks_local(&owner, &g1, RekeyScope::Channel(priv_id), Epoch(1), Epoch(0), &pc1, &[b1], 2_000).unwrap() {
+        for e in rekey::build_rekey_chunks_local(&owner, &g1, RekeyScope::Channel(priv_id), Epoch(1), Epoch(0), &pc1, &[b1], 2_000, None).unwrap() {
             relay.publish(&e, &community.relays).await.unwrap();
         }
         // Epoch 2: a later rotation includes ME (e.g. a removal-forced re-mint whose
@@ -8165,7 +8243,7 @@ mod tests {
         let pc2 = super::super::derive::epoch_key_commitment(Epoch(1), &key1);
         let g2 = channel_rekey_group_key(&community.community_root, &priv_id, Epoch(2));
         let b2 = rekey::build_blob_local(owner.secret_key(), &owner.public_key().to_bytes(), &owner.public_key(), RekeyScope::Channel(priv_id), Epoch(2), &key2).unwrap();
-        for e in rekey::build_rekey_chunks_local(&owner, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc2, &[b2], 2_100).unwrap() {
+        for e in rekey::build_rekey_chunks_local(&owner, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc2, &[b2], 2_100, None).unwrap() {
             relay.publish(&e, &community.relays).await.unwrap();
         }
 
@@ -8207,7 +8285,7 @@ mod tests {
         let g2 = channel_rekey_group_key(&community.community_root, &priv_id, Epoch(2));
         let me_pk = crate::state::MY_SECRET_KEY.to_keys().unwrap().public_key();
         let blob = rekey::build_blob_local(admin.secret_key(), &admin.public_key().to_bytes(), &me_pk, RekeyScope::Channel(priv_id), Epoch(2), &key2).unwrap();
-        for e in rekey::build_rekey_chunks_local(&admin, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob], 2_000).unwrap() {
+        for e in rekey::build_rekey_chunks_local(&admin, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob], 2_000, None).unwrap() {
             relay.publish(&e, &community.relays).await.unwrap();
         }
         let session = SessionGuard::capture();
@@ -8220,7 +8298,7 @@ mod tests {
         let pc3 = super::super::derive::epoch_key_commitment(Epoch(2), &key2);
         let g3 = channel_rekey_group_key(&updated.community_root, &priv_id, Epoch(3));
         let rb = rekey::build_blob_local(rogue.secret_key(), &rogue.public_key().to_bytes(), &me_pk, RekeyScope::Channel(priv_id), Epoch(3), &key3).unwrap();
-        for e in rekey::build_rekey_chunks_local(&rogue, &g3, RekeyScope::Channel(priv_id), Epoch(3), Epoch(2), &pc3, &[rb], 2_100).unwrap() {
+        for e in rekey::build_rekey_chunks_local(&rogue, &g3, RekeyScope::Channel(priv_id), Epoch(3), Epoch(2), &pc3, &[rb], 2_100, None).unwrap() {
             relay.publish(&e, &updated.relays).await.unwrap();
         }
         let follow = follow_rekeys(&relay, &updated, &session).await.unwrap();
@@ -8262,7 +8340,7 @@ mod tests {
         let pc = super::super::derive::epoch_key_commitment(Epoch(1), &key1);
         let g2 = channel_rekey_group_key(&held.community_root, &priv_id, Epoch(2));
         let pb = rekey::build_blob_local(peer.secret_key(), &peer.public_key().to_bytes(), &peer.public_key(), RekeyScope::Channel(priv_id), Epoch(2), &key2).unwrap();
-        for e in rekey::build_rekey_chunks_local(&peer, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[pb], 2_000).unwrap() {
+        for e in rekey::build_rekey_chunks_local(&peer, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[pb], 2_000, None).unwrap() {
             bed.relay.publish(&e, &held.relays).await.unwrap();
         }
         let session = SessionGuard::capture();
@@ -8275,7 +8353,7 @@ mod tests {
         let key3 = [0xA3; 32];
         let stranger = Keys::generate();
         let ob = rekey::build_blob_local(owner.keys.secret_key(), &owner.keys.public_key().to_bytes(), &stranger.public_key(), RekeyScope::Channel(priv_id), Epoch(2), &key3).unwrap();
-        for e in rekey::build_rekey_chunks_local(&owner.keys, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[ob], 2_100).unwrap() {
+        for e in rekey::build_rekey_chunks_local(&owner.keys, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[ob], 2_100, None).unwrap() {
             bed.relay.publish(&e, &held.relays).await.unwrap();
         }
         let follow = follow_rekeys(&bed.relay, &held, &session).await.unwrap();
@@ -8483,7 +8561,7 @@ mod tests {
         let prev_commit = super::super::derive::epoch_key_commitment(Epoch(0), &community.community_root);
         for i in 0..260u64 {
             let blob = rekey::build_blob_local(rogue.secret_key(), &rogue.public_key().to_bytes(), &rogue.public_key(), RekeyScope::Root, new_epoch, &[0xEE; 32]).unwrap();
-            let rumor = rekey::build_rekey_rumor(rogue.public_key(), RekeyScope::Root, new_epoch, Epoch(0), &prev_commit, &[blob], 1, 1, 3_000 + i).unwrap();
+            let rumor = rekey::build_rekey_rumor(rogue.public_key(), RekeyScope::Root, new_epoch, Epoch(0), &prev_commit, &[blob], 1, 1, 3_000 + i, None).unwrap();
             let (wrap, _) = rekey::seal_rekey_chunk(&rumor, &group, &rogue, Timestamp::from_secs(3_000 + i)).unwrap();
             relay.publish(&wrap, &community.relays).await.unwrap();
         }
@@ -8550,7 +8628,7 @@ mod tests {
         let key_b = [0xFB; 32]; // higher — a's must win regardless of publish order
         for (signer, k) in [(&a, &key_a), (&b, &key_b)] {
             let blob = rekey::build_blob_local(signer.secret_key(), &signer.public_key().to_bytes(), &me_pk, RekeyScope::Channel(priv_id), Epoch(2), k).unwrap();
-            for e in rekey::build_rekey_chunks_local(signer, &group, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob], 2_000).unwrap() {
+            for e in rekey::build_rekey_chunks_local(signer, &group, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob], 2_000, None).unwrap() {
                 relay.publish(&e, &community.relays).await.unwrap();
             }
         }
