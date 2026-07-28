@@ -11462,6 +11462,10 @@ select:disabled:hover {
   transition: none;
 }
 
+.image-viewer-image.no-anim {
+  transition: none !important;
+}
+
 .image-viewer-image.zoomed {
   cursor: grab;
 }
@@ -11485,6 +11489,38 @@ select:disabled:hover {
 
 .image-viewer-close:hover {
   background-color: #171717;
+}
+
+/* Viewer options — vertical column stacked below the close button */
+.image-viewer-controls {
+  position: absolute;
+  top: 70px; /* close btn: 20px top + 40px tall + 10px gap */
+  right: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 10001;
+}
+.image-viewer-ctrl-btn {
+  width: 40px;
+  height: 40px;
+  padding: 9px;
+  background-color: #17171770;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  transition: background-color 0.2s ease;
+}
+.image-viewer-ctrl-btn:hover {
+  background-color: #171717;
+}
+.image-viewer-ctrl-btn svg {
+  width: 100%;
+  height: 100%;
 }
 
 .image-viewer-close::before,

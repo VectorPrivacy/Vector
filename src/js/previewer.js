@@ -14,6 +14,7 @@ let zoomTip = null;
 let scale = 1;
 let translateX = 0;
 let translateY = 0;
+let rotation = 0; // quarter-turns in degrees (0/90/180/270), CCW via the rotate control
 let isDragging = false;
 let startX = 0;
 let startY = 0;
@@ -43,7 +44,17 @@ function createViewer() {
     const closeBtn = document.createElement('button');
     closeBtn.className = 'image-viewer-close';
     closeBtn.setAttribute('aria-label', 'Close');
-    
+
+    // Viewer options — a vertical column below the close button
+    const controls = document.createElement('div');
+    controls.className = 'image-viewer-controls';
+    const rotateBtn = document.createElement('button');
+    rotateBtn.className = 'image-viewer-ctrl-btn';
+    rotateBtn.setAttribute('aria-label', 'Rotate image');
+    rotateBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2 10C2 10 4.00498 7.26822 5.63384 5.63824C7.26269 4.00827 9.5136 3 12 3C16.9706 3 21 7.02944 21 12C21 16.9706 16.9706 21 12 21C7.89691 21 4.43511 18.2543 3.35177 14.5M2 10V4M2 10H8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    rotateBtn.addEventListener('click', rotateCCW);
+    controls.appendChild(rotateBtn);
+
     // Create zoom info
     zoomInfo = document.createElement('div');
     zoomInfo.className = 'image-viewer-zoom-info';
@@ -58,6 +69,7 @@ function createViewer() {
     viewerContainer.appendChild(viewerImage);
     viewerOverlay.appendChild(viewerContainer);
     viewerOverlay.appendChild(closeBtn);
+    viewerOverlay.appendChild(controls);
     viewerOverlay.appendChild(zoomInfo);
     viewerOverlay.appendChild(zoomTip);
     document.body.appendChild(viewerOverlay);
@@ -139,12 +151,43 @@ function createViewer() {
 }
 
 /**
- * Measure the base size of the image at scale 1
+ * Measure the base size of the image at scale 1.
+ * The rect is the VISUAL (post-rotation) box, so a quarter-turned image
+ * reports swapped axes — un-swap to keep base dims in the image's own space.
  */
 function measureBaseSize() {
     const rect = viewerImage.getBoundingClientRect();
-    baseWidth = rect.width / scale;
-    baseHeight = rect.height / scale;
+    const odd = (((rotation % 360) + 360) % 360) % 180 !== 0;
+    baseWidth = (odd ? rect.height : rect.width) / scale;
+    baseHeight = (odd ? rect.width : rect.height) / scale;
+}
+
+/**
+ * Rotate the image a quarter-turn counterclockwise. The angle ACCUMULATES
+ * (-90 each press, never normalized for the CSS emit) so consecutive turns
+ * always interpolate the short way round instead of snapping the long way.
+ */
+function rotateCCW() {
+    rotation -= 90;
+    updateTransform();
+}
+
+/**
+ * The corrective transform that puts the ROTATED image's visual top-left back at
+ * the local origin, so translateX/Y and the clamping math keep meaning
+ * "visual box position" at every rotation. Units are pre-scale (composed after
+ * scale(), so they ride the same scaling).
+ *
+ * ALWAYS emits the full translate+rotate pair: a transform list that changes
+ * shape between frames forces WebKit into matrix interpolation, which sweeps
+ * the image around wildly mid-transition.
+ */
+function rotationFix() {
+    const r = ((rotation % 360) + 360) % 360;
+    if (r === 90) return ` translate(${baseHeight}px, 0px) rotate(${rotation}deg)`;
+    if (r === 180) return ` translate(${baseWidth}px, ${baseHeight}px) rotate(${rotation}deg)`;
+    if (r === 270) return ` translate(0px, ${baseWidth}px) rotate(${rotation}deg)`;
+    return ` translate(0px, 0px) rotate(${rotation}deg)`;
 }
 
 /**
@@ -157,19 +200,34 @@ function openImageViewer(imageSrc) {
     scale = 1;
     translateX = 0;
     translateY = 0;
+    rotation = 0;
     isDragging = false;
     baseWidth = 0;
     baseHeight = 0;
     
-    // Set image
-    viewerImage.src = imageSrc;
-    viewerImage.style.transform = 'translate(0, 0) scale(1)';
-    
-    // Measure base size once image loads
+    // Hidden + unanimated until the first SETTLED frame: the image otherwise
+    // paints at the container's top-left and visibly slides to center through
+    // the transform transition once onload measures it.
+    viewerImage.classList.add('no-anim');
+    viewerImage.style.visibility = 'hidden';
+
+    // Measure base size once image loads (handlers before src — belt-and-braces
+    // against a cached image racing the load event)
     viewerImage.onload = () => {
         measureBaseSize();
         updateTransform();
+        void viewerImage.offsetWidth; // commit the settled transform before re-arming the transition
+        viewerImage.style.visibility = '';
+        viewerImage.classList.remove('no-anim');
     };
+    viewerImage.onerror = () => {
+        viewerImage.style.visibility = '';
+        viewerImage.classList.remove('no-anim');
+    };
+
+    // Set image
+    viewerImage.src = imageSrc;
+    viewerImage.style.transform = 'translate(0, 0) scale(1)';
     
     // Show overlay
     viewerOverlay.style.display = 'flex';
@@ -370,10 +428,12 @@ function handleTouchEnd(e) {
 function updateTransform() {
     const containerWidth = viewerContainer.clientWidth;
     const containerHeight = viewerContainer.clientHeight;
-    
-    // Use the base size (rendered size at scale 1) for calculations
-    const scaledWidth = baseWidth * scale;
-    const scaledHeight = baseHeight * scale;
+
+    // Use the base size (rendered size at scale 1) for calculations —
+    // a quarter-turned image occupies swapped axes on screen
+    const odd = (((rotation % 360) + 360) % 360) % 180 !== 0;
+    const scaledWidth = (odd ? baseHeight : baseWidth) * scale;
+    const scaledHeight = (odd ? baseWidth : baseHeight) * scale;
     
     // Calculate bounds - when image is smaller than container, we want to center it
     const minTranslateX = Math.min(0, containerWidth - scaledWidth);
@@ -395,7 +455,7 @@ function updateTransform() {
         translateY = Math.max(minTranslateY, Math.min(0, translateY));
     }
     
-    viewerImage.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale})`;
+    viewerImage.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale})${rotationFix()}`;
     viewerImage.classList.toggle('zoomed', scale > 1);
 }
 
