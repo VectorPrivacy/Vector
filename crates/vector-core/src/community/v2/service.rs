@@ -370,7 +370,7 @@ pub async fn moderation_delete<T: Transport + ?Sized>(
         return Err("you can't hide a message from a member who outranks you (or the owner)".to_string());
     }
     let at_ms = now_ms();
-    let citation = my_authority_citation(community, &author_pk);
+    let citation = required_authority_citation(community, &author_pk)?;
     let rumor = chat::build_delete_rumor(author_pk, channel_id, epoch, target_id_hex, target_kind, at_ms, citation.as_ref());
     publish_chat(transport, community, &session, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await
 }
@@ -1569,7 +1569,7 @@ pub async fn kick_member<T: Transport + ?Sized>(transport: &T, community: &Commu
     let gb_group = super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
     // A Kick is an authority action, so it cites its Grant like any other
     // (CORD-02 §5 / CORD-04 §5).
-    let citation = my_authority_citation(community, &my_pk);
+    let citation = required_authority_citation(community, &my_pk)?;
     let rumor = guestbook::build_kick_rumor(my_pk, *target, citation.as_ref(), at_ms);
     let (wrap, _) = guestbook::seal_guestbook_rumor_signed(&signer, my_pk, &rumor, &gb_group, Timestamp::from_secs(at_ms / 1000)).await
         .map_err(|e| e.to_string())?;
@@ -2924,6 +2924,25 @@ pub(super) fn citation_is_synced(
     crate::community::roster::authority_citation_satisfied(&head, Some(owner_hex), actor_hex, &grant_hex, citation)
 }
 
+/// [`my_authority_citation`], but refusing to emit an action every reader will
+/// drop (CORD-04 §5: an uncited non-owner action is not honored).
+///
+/// The citation is built from PERSISTED heads, which only `follow_control` writes
+/// — so an admin who hasn't folded yet (just promoted, or freshly restored) would
+/// otherwise publish uncited and have the action silently vanish on every client,
+/// with nothing shown locally. Failing here turns that into one retryable error.
+fn required_authority_citation(
+    community: &CommunityV2,
+    actor: &PublicKey,
+) -> Result<Option<crate::community::edition::AuthorityCitation>, String> {
+    if community.owner().ok().as_ref() == Some(actor) {
+        return Ok(None); // supreme, cites nothing
+    }
+    my_authority_citation(community, actor).map(Some).ok_or_else(|| {
+        "your admin rights aren't synced on this device yet — reopen the community and retry".to_string()
+    })
+}
+
 fn my_authority_citation(
     community: &CommunityV2,
     actor: &PublicKey,
@@ -2981,7 +3000,7 @@ async fn publish_control_edition<T: Transport + ?Sized>(
     // WHO IS ACTING, identical for every entity kind, so deciding it per call
     // site is nine chances to forget (and nine were, silently: every site passed
     // None). The owner cites nothing; their rank is the community id itself.
-    let citation = my_authority_citation(community, &my_pk);
+    let citation = required_authority_citation(community, &my_pk)?;
     let at = now_ms() / 1000;
     let rumor = control::build_edition_rumor(my_pk, vsk, entity_id, version, prev.as_ref(), content, at, citation.as_ref());
     let (wrap, _) = control::seal_control_edition_signed(&signer, my_pk, &rumor, &control, Timestamp::from_secs(at)).await.map_err(|e| e.to_string())?;
