@@ -173,9 +173,12 @@ async function loadMiniAppsHistory() {
                 animIndex++;
             }
 
-            // Add PIVX after the downloading apps
+            // Add PIVX after the downloading apps. When hidden (the fresh-install
+            // default, seeded at boot), it gets the same treatment as the history
+            // renderer: invisible until the search reveals it, click restores.
+            const pivxHiddenHere = localStorage.getItem('pivx_hidden') === 'true';
             const pivxBtn = document.createElement('button');
-            pivxBtn.className = 'attachment-panel-item animate-in';
+            pivxBtn.className = 'attachment-panel-item animate-in' + (pivxHiddenHere ? ' miniapp-disabled' : '');
             pivxBtn.id = 'attachment-panel-pivx';
             pivxBtn.draggable = false;
             pivxBtn.style.animationDelay = `${animIndex * staggerDelay}s`;
@@ -186,16 +189,26 @@ async function loadMiniAppsHistory() {
                 <span class="attachment-panel-label">PIVX</span>
             `;
             pivxBtn.dataset.appName = 'pivx';
-            pivxBtn.addEventListener('mouseenter', () => showGlobalTooltip('PIVX Wallet', pivxBtn));
+            if (pivxHiddenHere) {
+                pivxBtn.dataset.appHidden = 'true';
+                pivxBtn.style.display = 'none';
+            }
+            pivxBtn.addEventListener('mouseenter', () => showGlobalTooltip(pivxHiddenHere ? 'Restore PIVX Wallet' : 'PIVX Wallet', pivxBtn));
             pivxBtn.addEventListener('mouseleave', () => hideGlobalTooltip());
             pivxBtn.addEventListener('animationend', () => {
                 pivxBtn.classList.remove('animate-in');
                 pivxBtn.style.animationDelay = '';
             }, { once: true });
-            pivxBtn.onclick = () => {
+            pivxBtn.onclick = async () => {
                 if (miniAppsEditMode) return;
                 hideGlobalTooltip();
-                showPivxWalletPanel();
+                if (pivxHiddenHere) {
+                    localStorage.removeItem('pivx_hidden');
+                    await loadMiniAppsHistory();
+                    popupConfirm('PIVX Wallet Restored', 'The PIVX Wallet has been restored to your Mini Apps panel.', true);
+                } else {
+                    showPivxWalletPanel();
+                }
             };
             domMiniAppsGrid.appendChild(pivxBtn);
 

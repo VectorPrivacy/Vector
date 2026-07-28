@@ -999,41 +999,6 @@ pub async fn pivx_claim_from_message<R: Runtime>(
     }
 }
 
-/// Import an external promo code (add to our wallet)
-#[tauri::command]
-pub async fn pivx_import_promo<R: Runtime>(
-    handle: AppHandle<R>,
-    gift_code: String,
-) -> Result<PivxPromo, String> {
-    // Check if already exists
-    if promo_code_exists(&handle, &gift_code)? {
-        return Err("This promo code is already in your wallet".to_string());
-    }
-
-    // Derive keys
-    let privkey = derive_privkey_from_code(&gift_code);
-    let address = privkey_to_address(&privkey)?;
-
-    // Check balance
-    let balance = fetch_balance(&address).await.unwrap_or(0.0);
-
-    // Store in database
-    save_promo(&handle, &gift_code, &address, &privkey).await?;
-
-    let created_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-
-    Ok(PivxPromo {
-        gift_code,
-        address,
-        balance_piv: balance,
-        status: "active".to_string(),
-        created_at,
-    })
-}
-
 /// Refresh balances for all active promos
 /// Uses parallel batch fetching and caching for performance
 /// Pass force_refresh=true to bypass cache (e.g., after a transaction)

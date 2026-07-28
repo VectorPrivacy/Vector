@@ -13,6 +13,8 @@
         avatarSrc = () => null,      // (profile) => url | null
         makePlaceholder = () => document.createElement('div'), // () => the default-avatar element
         twemojify = () => {},
+        showTooltip = () => {},      // (text, anchorEl) => the app's global tooltip
+        hideTooltip = () => {},
         hoverBg = '',                // precomputed plain-gradient string for the row hover overlay
         profiles,   // store: reassigned when a pasted stranger's profile loads
         filter,
@@ -113,7 +115,18 @@
             {:else}
                 <div class="member-pick-avatar" use:placeholderInto></div>
             {/if}
-            <div class="compact-member-name" use:name={displayName(row.profile, row.npub)}></div>
+            <div class="member-pick-identity">
+                <div class="compact-member-name" use:name={displayName(row.profile, row.npub)}></div>
+                {#if row.profile?.bot}
+                    <span
+                        class="icon icon-bot member-pick-bot"
+                        role="img"
+                        aria-label="Bot"
+                        onmouseenter={(e) => showTooltip('Bot', e.currentTarget)}
+                        onmouseleave={() => hideTooltip()}
+                    ></span>
+                {/if}
+            </div>
             <div class="member-pick-indicator" class:selected={$selection.has(row.npub)}></div>
         </div>
     {/each}

@@ -11156,7 +11156,7 @@ select:disabled:hover {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  padding-top: 60px;
+  padding-top: 18px; /* no Back header — Cancel is the way out */
   min-height: 0;
 }
 
@@ -11181,6 +11181,10 @@ select:disabled:hover {
 .create-group-content .chat-new-content:first-child {
   margin-top: 0; /* Remove default margin since padding-top handles it */
   flex-shrink: 0; /* Don't shrink the title/input section */
+  /* The shared 50px side margins strangle the name row on narrow windows —
+     the row's own 15px padding is the panel's gutter */
+  margin-left: 0;
+  margin-right: 0;
 }
 
 .create-group-list {
@@ -11202,6 +11206,56 @@ select:disabled:hover {
   justify-content: center;
   flex-wrap: wrap;
   flex-shrink: 0;
+}
+.create-group-footer .btn {
+  flex: 1;
+  max-width: 220px;
+}
+/* Solid fill like popupConfirm's Confirm — the one primary action on the panel */
+#create-group-create-btn {
+  background-color: #58fcb3;
+  color: #000;
+  font-weight: 600;
+}
+#create-group-create-btn[disabled] {
+  opacity: 0.45;
+}
+
+/* Dim placeholders — hints, not content */
+#create-group-name::placeholder,
+#create-group-filter::placeholder,
+#cmt-npub::placeholder {
+  color: rgba(255, 255, 255, 0.35);
+}
+
+/* Solid subtle hover — not the gradient sweep the other pickers use */
+#create-group-list .member-pick-hover,
+#cmt-contacts .member-pick-hover {
+  background: rgba(255, 255, 255, 0.085);
+}
+
+/* Quiet until chosen: unselected boxes are gray, only a selection earns the green */
+#create-group-list .member-pick-indicator,
+#cmt-contacts .member-pick-indicator {
+  border-color: rgba(255, 255, 255, 0.28);
+}
+#create-group-list .member-pick-indicator.selected,
+#cmt-contacts .member-pick-indicator.selected {
+  border-color: var(--icon-color-primary);
+  background-color: var(--icon-color-primary);
+}
+
+/* Tighter header rhythm than the shared chat-new panels */
+.create-group-content .chat-new-title {
+  margin-top: 10px;
+}
+.create-group-content .chat-new-divider {
+  margin-bottom: 16px;
+  /* Re-inset: the section's 50px margins were zeroed for the name row.
+     width:auto — a 100% divider plus side margins bleeds off the panel edge. */
+  width: auto;
+  margin-left: 40px;
+  margin-right: 40px;
 }
 
 .create-group-footer .chat-contact-status {
@@ -11231,6 +11285,7 @@ select:disabled:hover {
   opacity: 1;
 }
 .create-group-avatar-placeholder {
+  /* The SVG carries its own disc — sizing it down would draw a second ring */
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -11255,27 +11310,55 @@ select:disabled:hover {
   justify-content: center;
 }
 .create-group-avatar-edit .icon {
-  font-size: 13px;
-  color: #fff;
+  width: 14px;
+  height: 14px;
+  background-color: var(--icon-color-primary);
 }
-.create-group-description {
+
+/* The centered flex column shrink-wraps children — the name row must span it */
+.create-group-name-row {
   width: 100%;
   box-sizing: border-box;
-  padding: 10px 12px;
+}
+
+/* Name field wraps the input so the requirement hint can sit inside it */
+.create-group-name-wrap {
+  position: relative;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.create-group-name-wrap .chat-new-input {
+  width: 100%;
+  box-sizing: border-box;
+  height: auto;
+  margin: 0; /* chat-input-container's 8px margins break alignment with the search box */
+  padding: 10px 86px 10px 12px; /* right inset: typed text never runs under the hint */
   background-color: transparent;
   border: 1px solid rgba(57, 57, 57, 0.5);
   border-radius: 8px;
   color: #fff;
-  font-size: 14px;
-  font-family: inherit;
-  resize: vertical;
-  min-height: 38px;
-  max-height: 100px;
+  font-size: 16px;
+}
+.create-group-name-required {
+  position: absolute;
+  right: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 12px;
+  font-weight: 600;
+  color: #ff2e88;
+  opacity: 0.9;
+  pointer-events: none;
+}
+/* The hint clears the moment a name exists */
+.create-group-name-wrap input:not(:placeholder-shown) + .create-group-name-required {
+  display: none;
 }
 
 /* Disable resize grip on touch devices (Android WebView renders it as a broken 1px dot) */
 @media (pointer: coarse) {
-  .create-group-description,
   .publish-app-field textarea {
     resize: none;
   }
@@ -17640,6 +17723,10 @@ body.profile-switcher-editing .profile-switcher-add {
 .modal-box .btn:disabled { opacity: 0.5; cursor: default; }
 /* ── Community invite modal ─────────────────────────────────────── */
 .cmt-modal { max-width: 480px; }
+/* Phones: slim the modal's own gutters too — with flat sections this is the only inset left */
+@media (max-width: 500px) {
+  .cmt-modal { padding: 18px 14px; }
+}
 
 .cmt-header { display: flex; align-items: center; gap: 13px; margin-bottom: 20px; }
 .cmt-header-icon {
@@ -17648,15 +17735,25 @@ body.profile-switcher-editing .profile-switcher-add {
   background: color-mix(in srgb, var(--accent-color, #59fcb3) 15%, transparent);
 }
 .cmt-header-icon .icon { background-color: var(--accent-color, #59fcb3); width: 23px; height: 23px; }
-.cmt-title { font-size: 18px; font-weight: 700; margin: 0; line-height: 1.2; }
-.cmt-subtitle { font-size: 13px; opacity: 0.5; margin: 3px 0 0; }
+/* min-width:0 lets the flex child shrink so the title can ellipsize instead of wrapping */
+.cmt-header-text { flex: 1; min-width: 0; }
+.cmt-title {
+  font-size: 18px; font-weight: 700; margin: 0; line-height: 1.1;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cmt-subtitle { font-size: 13px; opacity: 0.5; margin: 0; line-height: 1.3; }
 
 .cmt-section {
-  background: rgba(255, 255, 255, 0.025);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 13px;
-  padding: 15px 16px;
-  margin-bottom: 13px;
+  /* Flat, full-width sections: the old card chrome (bg + border + 16px side
+     padding) stacked a third gutter onto the overlay's and the modal's, squeezing
+     phone screens to ~240px of content. A hairline between sections keeps the
+     structure without the nesting. */
+  padding: 0;
+  margin-bottom: 18px;
+}
+.cmt-section + .cmt-section {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding-top: 16px;
 }
 .cmt-section-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 13px; }
 .cmt-section-head > .icon {
@@ -17755,6 +17852,17 @@ body.profile-switcher-editing .profile-switcher-add {
 /* Other creators' active-link counts (§10) — context for why the community is Public when you hold no links. */
 .cmt-others { margin: 0 0 10px; padding: 8px 10px; border-radius: 8px; background: rgba(255, 255, 255, 0.04); }
 .cmt-other-line { font-size: 12.5px; opacity: 0.6; margin: 0; padding: 1px 0; }
+/* Collapsed multi-creator state: a bare accent line, box chrome only when expanded.
+   Left inset mirrors the section head's icon column (17px icon + 10px gap) so the
+   line sits in the same text column as the description above it. */
+.cmt-others.collapsed { background: transparent; padding: 0 0 0 27px; }
+.cmt-others-toggle {
+  color: var(--accent-color, #59fcb3);
+  opacity: 0.9;
+  cursor: pointer;
+  width: fit-content;
+}
+.cmt-others-toggle:hover { text-decoration: underline; }
 
 .cmt-btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 7px;
@@ -17894,6 +18002,8 @@ body.profile-switcher-editing .profile-switcher-add {
   background: #0a0a0a;
   padding-top: 10px;
   margin-top: 2px;
+  /* Above scrolling content — the search icon's z-index otherwise paints over it */
+  z-index: 1;
 }
 /* Morphing CTA: gray "Done" (no selection) cross-fades to accent "Invite N" (selection > 0). The
    two faces are stacked; one slides+fades out while the other slides+fades in, background gray->accent. */

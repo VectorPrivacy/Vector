@@ -1110,14 +1110,12 @@ const domChatNewStartBtn = document.getElementById('chat-new-btn');
 
 // Create Group UI refs
 const domCreateGroup = document.getElementById('create-group');
-const domCreateGroupBackBtn = document.getElementById('create-group-back-text-btn');
 const domCreateGroupName = document.getElementById('create-group-name');
 const domCreateGroupFilter = document.getElementById('create-group-filter');
 const domCreateGroupList = document.getElementById('create-group-list');
 const domCreateGroupCreateBtn = document.getElementById('create-group-create-btn');
 const domCreateGroupCancelBtn = document.getElementById('create-group-cancel-btn');
 const domCreateGroupStatus = document.getElementById('create-group-status');
-const domCreateGroupDescription = document.getElementById('create-group-description');
 const domCreateGroupAvatarPicker = document.getElementById('create-group-avatar-picker');
 const domCreateGroupAvatarPreview = document.getElementById('create-group-avatar-preview');
 const domCreateGroupAvatarPlaceholder = document.getElementById('create-group-avatar-placeholder');
@@ -9282,25 +9280,19 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         const searchEl = domGroupMemberSearchInput;
         const myNpub = arrProfiles.find(p => p.mine)?.id;
         const ownerNpub = cf.owner_npub || null; // PROVEN owner (verified attestation), or null
-        // The panel is visible while this fetch runs (it can be network-bound), so
-        // swap any previous community's rows for a loading state up front.
-        membersEl.innerHTML = '<p class="cmt-empty" style="text-align:center;">Loading members…</p>';
-        let memberList = [];
-        try { memberList = await invoke('get_community_members', { communityId }); } catch (_) {}
-        // Cache the count for the header/overview subtext (the overview's own authoritative fetch).
-        communityMembersCache.set(communityId, memberList);
-        communityMemberCounts.set(communityId, memberList.length);
-        _communityCountLastFetch.set(communityId, Date.now());
-        domGroupOverviewStatus.textContent = communityMemberSubtext(communityId);
-        // Admins (members holding a management role) drive the gold crown. MVP: the OWNER elects /
-        // removes admins (no role hierarchy yet, so that's the only real promotion path). The
-        // backend authorizes on the MANAGE_ROLES permission (futureproof — `can_manage_community_roles`);
-        // the UI just exposes the toggle to the owner for now.
-        let adminNpubs = [];
-        try { adminNpubs = await invoke('get_community_admins', { communityId }); } catch (_) {}
-        // Cache admins onto this community's channel chats so message rendering can chip @everyone
-        // from admin senders (owner is handled separately via owner_npub). Mirrors the group design.
-        applyCommunityAdmins(communityId, adminNpubs);
+        // Cache-first: the last known roster paints instantly (no "Loading members…" flash
+        // on reopen); the authoritative fetches run AFTER that first render and re-render
+        // only on a real change. The loading state survives only for a community this
+        // session has never fetched.
+        const hadCache = communityMembersCache.has(communityId);
+        let memberList = communityMembersCache.get(communityId) || [];
+        // Admins ride the community's channel-chat metadata (applyCommunityAdmins) — the
+        // same session cache the in-chat tags read.
+        let adminNpubs = (chat.metadata?.admins || []).slice();
+        let bannedList = [];
+        if (!hadCache) {
+            membersEl.innerHTML = '<p class="cmt-empty" style="text-align:center;">Loading members…</p>';
+        }
         const iAmOwner = !!(myNpub && ownerNpub && myNpub === ownerNpub);
         // Per-member outrank for moderation, expressed in role-engine POSITIONS (owner = pos 0 via
         // ownerNpub, admin = pos 1 via adminNpubs, member = none). You may moderate a target you outrank:
@@ -9311,9 +9303,6 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
             if (iAmOwner) return true;                                   // pos 0 outranks all
             return !adminNpubs.includes(npub);                           // an admin outranks only non-admins
         };
-        // The banlist (for the unban list + to hide banned members), shown to anyone who can BAN.
-        let bannedList = [];
-        if (caps.ban) { try { bannedList = await invoke('get_community_banlist', { communityId }); } catch (_) {} }
 
         const renderMembers = (filterText = '') => {
             const f = (filterText || '').trim().toLowerCase();
@@ -9577,15 +9566,49 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                 }
             }
         };
-        // On a live refresh (preserveSearch), keep the active filter; on a fresh open, start clean.
-        renderMembers(preserveSearch && searchEl ? (searchEl.value || '') : '');
+        // On a live refresh (preserveSearch), keep the active filter; on a fresh open, start
+        // clean. The reset happens HERE (not after the fetches below) so every render in this
+        // pass reads a trustworthy filter value.
+        if (searchEl && !preserveSearch) searchEl.value = '';
+        if (hadCache) renderMembers(searchEl?.value || '');
+
+        // Authoritative fetches — AFTER the cached paint, so the panel opens fully rendered.
+        // A re-render fires only when the roster/admins/banlist actually differ from the
+        // cached paint (re-rendering identical rows would just flicker them).
+        const rosterPrint = () => JSON.stringify([
+            memberList.map(m => m.npub).sort(),
+            [...adminNpubs].sort(),
+            [...bannedList].sort(),
+        ]);
+        const cachedPrint = rosterPrint();
+        try { memberList = await invoke('get_community_members', { communityId }); } catch (_) {}
+        // Cache the count for the header/overview subtext (the overview's own authoritative fetch).
+        communityMembersCache.set(communityId, memberList);
+        communityMemberCounts.set(communityId, memberList.length);
+        _communityCountLastFetch.set(communityId, Date.now());
+        // Admins (members holding a management role) drive the gold crown. MVP: the OWNER elects /
+        // removes admins (no role hierarchy yet, so that's the only real promotion path). The
+        // backend authorizes on the MANAGE_ROLES permission (futureproof — `can_manage_community_roles`);
+        // the UI just exposes the toggle to the owner for now.
+        try { adminNpubs = await invoke('get_community_admins', { communityId }); } catch (_) {}
+        // Cache admins onto this community's channel chats so message rendering can chip @everyone
+        // from admin senders (owner is handled separately via owner_npub). Mirrors the group design.
+        applyCommunityAdmins(communityId, adminNpubs);
+        // The banlist (for the unban list), shown to anyone who can BAN.
+        if (caps.ban) { try { bannedList = await invoke('get_community_banlist', { communityId }); } catch (_) {} }
+        // The user may have switched to another community's overview mid-fetch — don't
+        // paint this one's roster (or subtext) over it. The panel carries the COMMUNITY
+        // id (re-tagged right after open for the realtime listener), never chat.id here.
+        if (domGroupOverview.getAttribute('data-group-id') !== communityId) return;
+        domGroupOverviewStatus.textContent = communityMemberSubtext(communityId);
+        if (!hadCache || rosterPrint() !== cachedPrint) renderMembers(searchEl?.value || '');
 
         // Resolve unknown member + banned-member profiles (name/avatar), then re-render once.
         const unknowns = [...memberList.map(m => m.npub), ...bannedList].filter(np => !arrProfiles.some(p => p.id === np) && !strangerProfileRequested.has(np));
         unknowns.forEach(np => strangerProfileRequested.add(np));
         if (unknowns.length) {
             Promise.allSettled(unknowns.map(np => invoke('load_profile', { npub: np }))).then(() => {
-                if (domGroupOverview.getAttribute('data-group-id') === chat.id) renderMembers(searchEl?.value || '');
+                if (domGroupOverview.getAttribute('data-group-id') === communityId) renderMembers(searchEl?.value || '');
             });
         }
 
@@ -9594,7 +9617,6 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
             // hovers orphaned above an empty member list.
             const searchContainer = searchEl.parentElement;
             if (searchContainer) searchContainer.style.display = memberList.length ? '' : 'none';
-            if (!preserveSearch) searchEl.value = '';
             searchEl.oninput = () => renderMembers(searchEl.value || '');
         }
     }
@@ -9780,7 +9802,10 @@ async function openCommunityInvitePanel(chat) {
                         <p class="cmt-section-desc">Pick contacts to invite, or paste an npub to add someone new.</p>
                     </div>
                 </div>
-                <input id="cmt-npub" type="text" placeholder="Search contacts or paste an npub..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+                <div class="emoji-search-container" style="padding: 0; background: transparent; margin-bottom: 8px; isolation: isolate;">
+                    <span class="emoji-search-icon icon icon-search"></span>
+                    <input id="cmt-npub" type="text" placeholder="Search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" style="flex: 1; box-sizing: border-box; margin: 0; padding: 10px 12px 10px 44px; background-color: transparent; border: 1px solid rgba(57, 57, 57, 0.5); border-radius: 8px; color: #fff; font-size: 16px;" />
+                </div>
                 <div id="cmt-contacts" class="cmt-contacts"></div>
             </section>
 
@@ -9798,8 +9823,10 @@ async function openCommunityInvitePanel(chat) {
         </div>
     `;
     overlay.appendChild(box);
-    document.body.appendChild(overlay);
-    pushBack('community-invite', dismiss);
+    // NOT attached yet — the whole panel is built and filled on this detached tree
+    // (links, mode pill, contact rows are all local-DB reads), then attached ONCE at
+    // the bottom of this function so the modal opens in a single paint, not a
+    // cascade of reflows as each fetch lands.
 
     const status = box.querySelector('#cmt-status');
     const linksDiv = box.querySelector('#cmt-links');
@@ -9856,11 +9883,30 @@ async function openCommunityInvitePanel(chat) {
         if (others.length) {
             const note = document.createElement('div');
             note.className = 'cmt-others';
-            for (const c of others) {
-                const line = document.createElement('p');
-                line.className = 'cmt-other-line';
-                line.textContent = `${systemEventName(c.npub)} has ${c.count} active invite link${c.count === 1 ? '' : 's'}`;
-                note.appendChild(line);
+            const expandLines = () => {
+                for (const c of others) {
+                    const line = document.createElement('p');
+                    line.className = 'cmt-other-line';
+                    line.textContent = `${systemEventName(c.npub)} has ${c.count} active invite link${c.count === 1 ? '' : 's'}`;
+                    note.appendChild(line);
+                }
+            };
+            if (others.length > 1) {
+                // Space-frugal for large communities: 2+ other creators collapse to one
+                // accent line; the per-creator breakdown appears on tap.
+                const total = others.reduce((n, c) => n + (c.count || 0), 0);
+                note.classList.add('collapsed');
+                const toggle = document.createElement('p');
+                toggle.className = 'cmt-other-line cmt-others-toggle';
+                toggle.textContent = `View ${total} other invite${total === 1 ? '' : 's'}`;
+                toggle.onclick = () => {
+                    toggle.remove();
+                    note.classList.remove('collapsed');
+                    expandLines();
+                };
+                note.appendChild(toggle);
+            } else {
+                expandLines();
             }
             linksDiv.appendChild(note);
         }
@@ -10007,9 +10053,11 @@ async function openCommunityInvitePanel(chat) {
         avatarSrc: (p) => (p ? getProfileAvatarSrc(p) : null) || null,
         makePlaceholder: () => createPlaceholderAvatar(false, 25),
         twemojify: (el) => twemojify(el),
+        showTooltip: (text, el) => showGlobalTooltip(text, el),
+        hideTooltip: () => hideGlobalTooltip(),
         // Plain hex+alpha gradient (like Create Group's mouseenter handler) — a cheap cached
         // layer. color-mix() here re-rasterized every frame under the opacity fade -> avatar flicker.
-        hoverBg: `linear-gradient(to right, ${getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim()}40, transparent)`,
+        hoverBg: 'rgba(255, 255, 255, 0.085)',
     });
     // The footer CTA morphs with the selection: gray "Done" (dismiss) when nothing's picked,
     // accent "Invite N" (send) once contacts are selected. The store drives its class + count.
@@ -10066,6 +10114,10 @@ async function openCommunityInvitePanel(chat) {
             setStatus(`Invited ${ok}, ${fail} failed.`, ok === 0);
         }
     };
+
+    // Fully rendered — attach in one paint (see the note at the top of this function).
+    document.body.appendChild(overlay);
+    pushBack('community-invite', dismiss);
 }
 
 
@@ -11186,6 +11238,19 @@ window.addEventListener("DOMContentLoaded", async () => {
                     // fall through to Create / Login as a last resort.
                     console.error('[Boot] Single-account auto-promote failed:', e);
                 }
+            }
+        }
+
+        // PIVX default flip: a FRESH install (no account has ever existed on this
+        // device) gets the wallet hidden until it's summoned via the Mini Apps
+        // search. A device that has run Vector before keeps its state — visible
+        // unless the user explicitly hid it. Stamped once, so deleting every
+        // account later never re-hides a wallet the user has been using.
+        if (!localStorage.getItem('pivx_default_applied')) {
+            localStorage.setItem('pivx_default_applied', 'true');
+            const everRan = account_exists || (loginPicker.accounts && loginPicker.accounts.length > 0);
+            if (!everRan && localStorage.getItem('pivx_hidden') === null) {
+                localStorage.setItem('pivx_hidden', 'true');
             }
         }
 
@@ -13176,11 +13241,6 @@ function renderCreateGroupList(filterText = '') {
         bgDiv.className = 'member-pick-hover';
         row.appendChild(bgDiv);
 
-        row.addEventListener('mouseenter', () => {
-            const primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
-            bgDiv.style.background = `linear-gradient(to right, ${primaryColor}40, transparent)`;
-        });
-
         const avatarSrc = profile ? getProfileAvatarSrc(profile) : null;
         const avatar = createAvatarImg(avatarSrc, 25, false);
         avatar.className = 'member-pick-avatar';
@@ -13299,7 +13359,6 @@ function openCreateGroup() {
     strCreateGroupAvatarPath = null;
     fCreateGroupAttempt = false;
     if (domCreateGroupName) domCreateGroupName.value = '';
-    if (domCreateGroupDescription) domCreateGroupDescription.value = '';
     if (domCreateGroupFilter) domCreateGroupFilter.value = '';
     if (domCreateGroupStatus) {
         domCreateGroupStatus.style.display = 'none';
@@ -13351,7 +13410,6 @@ async function closeCreateGroup() {
 (function wireCreateGroupUI() {
     if (!domCreateGroup) return;
 
-    domCreateGroupBackBtn.onclick = closeCreateGroup;
     domCreateGroupCancelBtn.onclick = closeCreateGroup;
 
     domCreateGroupName.oninput = () => updateCreateGroupValidation(true);
@@ -13409,8 +13467,6 @@ async function closeCreateGroup() {
         }
 
         try {
-            const description = (domCreateGroupDescription?.value || '').trim() || null;
-
             if (domCreateGroupStatus) domCreateGroupStatus.textContent = 'Creating...';
             // Single-channel Community: defaults the channel to "general" + trusted relays.
             const created = await invoke('create_community', { name, channelName: null, relays: null });
@@ -13423,7 +13479,7 @@ async function closeCreateGroup() {
             chat.metadata = chat.metadata || {};
             chat.metadata.custom_fields = chat.metadata.custom_fields || {};
             chat.metadata.custom_fields.name = name;
-            chat.metadata.custom_fields.description = description || '';
+            chat.metadata.custom_fields.description = '';
             chat.metadata.custom_fields.community_id = communityId;
             chat.metadata.custom_fields.is_owner = 'true';
             // Stamp the proven owner npub so the crown/Owner tag shows now, not after reload.
@@ -13445,13 +13501,8 @@ async function closeCreateGroup() {
             openChat(channelId);
             domCreateGroup.style.display = 'none';
 
-            // Persist description, then upload the avatar — both republish metadata, so chain
-            // them (no concurrent GroupRoot republish). Detached: the group is already visible.
+            // Detached: the group is already visible; the avatar upload must not delay it.
             (async () => {
-                if (description) {
-                    try { await invoke('update_community_metadata', { communityId, name: null, description }); }
-                    catch (err) { console.error('Set community description failed:', err); showToast('Community created, but the description failed to save'); }
-                }
                 // Upload the avatar BEFORE sending invites: the private invite bundle snapshots
                 // community.icon, so the icon must already be in the metadata for invitees to see the
                 // logo on their parked invite (not only after they join).
@@ -13488,7 +13539,7 @@ async function closeCreateGroup() {
                 domCreateGroupStatus.textContent = friendly;
             }
         } finally {
-            domCreateGroupCreateBtn.textContent = prevTxt || 'Create';
+            domCreateGroupCreateBtn.textContent = prevTxt || 'Create Group';
             updateCreateGroupValidation();
         }
     };

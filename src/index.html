@@ -1052,18 +1052,11 @@
         </div>
       </div>
       <div id="create-group" class="create-group-container" style="display: none;">
-        <div class="chat-new-header">
-          <div id="create-group-back-text-btn" class="btn chat-new-back-text-btn">
-            <span class="icon icon-chevron-double-left nav-icon"></span>
-            <p class="chat-new-back-text">Back</p>
-          </div>
-        </div>
-
         <div class="create-group-content">
           <center class="chat-new-content">
-            <h2 class="chat-new-title"><span class="icon icon-chats chat-new-icon" style="width: 50px; height: 30px; opacity: 0.7; display: inline-block; vertical-align: bottom;"></span>Create Group</h2>
+            <h2 class="chat-new-title"><span class="icon icon-chats chat-new-icon" style="width: 50px; height: 30px; opacity: 0.7; display: inline-block; vertical-align: bottom;"></span>Create New Group</h2>
             <hr class="divider chat-new-divider">
-            <div class="row" style="gap: 10px; align-items: center; padding: 0 15px;">
+            <div class="row create-group-name-row" style="gap: 12px; align-items: center; padding: 0 15px;">
               <div id="create-group-avatar-picker" class="create-group-avatar-picker" title="Choose group avatar">
                 <img id="create-group-avatar-preview" class="create-group-avatar-preview" style="display: none;" />
                 <img id="create-group-avatar-placeholder" class="create-group-avatar-placeholder" src="icons/group-placeholder.svg" />
@@ -1071,22 +1064,20 @@
                   <span id="create-group-avatar-edit-icon" class="icon icon-plus-circle"></span>
                 </div>
               </div>
-              <input id="create-group-name" placeholder="Group name..." maxlength="32" class="chat-input-container chat-new-input" />
-            </div>
-            <div style="padding: 0 15px; margin-top: 8px;">
-              <textarea id="create-group-description" placeholder="Group description (optional)" class="create-group-description" rows="2"></textarea>
+              <div class="create-group-name-wrap">
+                <input id="create-group-name" placeholder="Group Name..." maxlength="32" class="chat-input-container chat-new-input" />
+                <span class="create-group-name-required">Required*</span>
+              </div>
             </div>
           </center>
 
           <!-- Optional in-create direct invites: pick contacts (or paste an npub) to send a
                private invite to once the Community is created. Not the public-link system. -->
           <center id="create-group-members-section" class="chat-new-center-content" style="padding: 0 15px; box-sizing: border-box; width: 100%;">
-            <h2 class="chat-new-subtitle">Invite Members <span style="opacity: 0.55; font-weight: 400;">(optional)</span></h2>
-            <hr class="divider chat-new-subtitle-divider" style="width: 100%; max-width: 325px;">
-            <div class="chat-new-content" style="width: 100%; box-sizing: border-box; margin-left: 0;">
-              <div class="emoji-search-container" style="padding: 0; background: transparent;">
+            <div class="chat-new-content" style="width: 100%; box-sizing: border-box; margin-left: 0; margin-top: 12px;">
+              <div class="emoji-search-container" style="padding: 0; background: transparent; isolation: isolate;">
                 <span class="emoji-search-icon icon icon-search"></span>
-                <input id="create-group-filter" placeholder="Search or paste npub..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" style="padding: 10px 12px 10px 36px; background-color: transparent; border: 1px solid rgba(57, 57, 57, 0.5); border-radius: 8px; color: #fff; font-size: 16px;">
+                <input id="create-group-filter" placeholder="Search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" style="padding: 10px 12px 10px 44px; background-color: transparent; border: 1px solid rgba(57, 57, 57, 0.5); border-radius: 8px; color: #fff; font-size: 16px;">
               </div>
               <div id="create-group-list" class="create-group-list"></div>
             </div>
@@ -1094,7 +1085,7 @@
         </div>
 
         <div class="create-group-footer">
-          <button id="create-group-create-btn" class="btn accept-btn btn-bounce" disabled>Create</button>
+          <button id="create-group-create-btn" class="btn accept-btn btn-bounce" disabled>Create Group</button>
           <button id="create-group-cancel-btn" class="btn cancel-btn">Cancel</button>
           <p id="create-group-status" class="chat-contact-status" style="display: none; opacity: 0.8;"></p>
         </div>

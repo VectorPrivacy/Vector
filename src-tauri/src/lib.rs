@@ -682,7 +682,6 @@ pub fn run() {
             pivx::pivx_set_wallet_address,
             pivx::pivx_get_wallet_address,
             pivx::pivx_claim_from_message,
-            pivx::pivx_import_promo,
             pivx::pivx_refresh_balances,
             pivx::pivx_send_payment,
             pivx::pivx_send_existing_promo,
