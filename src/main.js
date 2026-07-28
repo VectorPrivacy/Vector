@@ -3535,6 +3535,20 @@ async function setupRustListeners() {
 
     // Listen for Attachment Download Results
     _on('attachment_download_result', async (evt) => {
+        // When an attachment is being updated (i.e: post-hashing ID change), we reference the original nonce-based hash via old_id, otherwise, we use ID, as nothing changed
+        const matchId = evt.payload?.old_id || evt.payload.id;
+
+        // Bookkeeping FIRST: if the message left the render window before this
+        // result arrived, the early returns below would otherwise strand these
+        // entries — and the auto-download dedup gate would then silently skip
+        // this attachment for the rest of the session.
+        downloadingAttachmentIds.delete(matchId);
+        downloadingAttachmentIds.delete(evt.payload.id);
+        for (const id of [matchId, evt.payload.id]) {
+            const lerp = downloadSpeedLerp.get(id);
+            if (lerp) { if (lerp.raf) cancelAnimationFrame(lerp.raf); downloadSpeedLerp.delete(id); }
+        }
+
         // Update the in-memory attachment (works for both DMs and Group Chats)
         let cChat = getChat(evt.payload.profile_id);
         if (!cChat) return;
@@ -3542,19 +3556,11 @@ async function setupRustListeners() {
         let cMsg = cChat.messages.find(m => m.id === evt.payload.msg_id);
         if (!cMsg) return;
 
-        // When an attachment is being updated (i.e: post-hashing ID change), we reference the original nonce-based hash via old_id, otherwise, we use ID, as nothing changed
-        const matchId = evt.payload?.old_id || evt.payload.id;
         let cAttachment = cMsg.attachments.find(a => a.id === matchId);
         if (!cAttachment) return;
 
         cAttachment.downloading = false;
         cAttachment.download_failed = false;
-        downloadingAttachmentIds.delete(matchId);
-        downloadingAttachmentIds.delete(evt.payload.id);
-        for (const id of [matchId, evt.payload.id]) {
-            const lerp = downloadSpeedLerp.get(id);
-            if (lerp) { if (lerp.raf) cancelAnimationFrame(lerp.raf); downloadSpeedLerp.delete(id); }
-        }
         if (evt.payload.success) {
             cAttachment.downloaded = true;
             // Update path from backend result (always has the correct file path)
@@ -3623,22 +3629,30 @@ async function setupRustListeners() {
                 softChatScroll();
             }
         } else {
-            // Download failed — mark as failed to prevent auto-download retry loop, then re-render
+            // Download failed — mark EVERY loaded copy failed first. The auto-download
+            // gate reads this flag, so it must flip even when the chat is closed or the
+            // row is outside the render window; gating the mark on the DOM would leave
+            // an unmarked copy free to re-trigger (or strand) the download later.
+            const failedMsgIds = [];
+            for (const msg of cChat.messages) {
+                let touched = false;
+                for (const att of msg.attachments) {
+                    if (att.id === matchId) {
+                        att.downloading = false;
+                        att.download_failed = true;
+                        touched = true;
+                    }
+                }
+                if (touched) failedMsgIds.push(msg.id);
+            }
+            // Then swap any painted rows over to the failed/retry rendering
             if (strOpenChat === evt.payload.profile_id) {
                 const profile = getProfile(evt.payload.profile_id);
-                for (const msg of cChat.messages) {
-                    const hasAtt = msg.attachments.some(a => a.id === matchId);
-                    if (hasAtt) {
-                        const domMsg = document.getElementById(msg.id);
-                        if (domMsg) {
-                            for (const att of msg.attachments) {
-                                if (att.id === matchId) {
-                                    att.downloading = false;
-                                    att.download_failed = true;
-                                }
-                            }
-                            domMsg.replaceWith(renderMessage(msg, profile, msg.id));
-                        }
+                for (const msgId of failedMsgIds) {
+                    const domMsg = document.getElementById(msgId);
+                    const memMsg = cChat.messages.find(m => m.id === msgId);
+                    if (domMsg && memMsg) {
+                        domMsg.replaceWith(renderMessage(memMsg, profile, msgId));
                     }
                 }
             }

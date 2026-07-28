@@ -19,7 +19,6 @@ use crate::state::nostr_client;
 pub const DEFAULT_BLOSSOM_SERVERS: &[&str] = &[
     "https://blossom.ditto.pub",
     "https://blossom.primal.net",
-    "https://nostr.download",
     "https://blossom.data.haus",
 ];
 

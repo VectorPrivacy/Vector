@@ -73,7 +73,11 @@ pub fn build_http_client_with_options(
     read_timeout: Option<std::time::Duration>,
     follow_redirects: bool,
 ) -> Result<reqwest::Client, String> {
-    let mut builder = reqwest::Client::builder().timeout(timeout);
+    let mut builder = reqwest::Client::builder()
+        .timeout(timeout)
+        // Bounded connect: a black-holed host (SYN swallowed, never refused) must
+        // fail in seconds instead of silently consuming the whole request budget.
+        .connect_timeout(std::time::Duration::from_secs(15));
     // Idle read timeout (opt-in): a server that accepts the connection but streams
     // nothing back for this long is treated as dead, so upload failover moves on fast
     // instead of waiting out the whole `timeout`. It resets on every received byte, so
@@ -109,6 +113,8 @@ pub fn build_http_client_with_options(
                 let proxy = reqwest::Proxy::all(&url)
                     .map_err(|e| format!("Tor proxy URL ({url}) invalid: {e}"))?;
                 builder = builder.proxy(proxy);
+                // Circuit builds to a fresh host legitimately take tens of seconds.
+                builder = builder.connect_timeout(std::time::Duration::from_secs(45));
             }
             crate::tor::TorTransportState::RequiredButInactive => {
                 // Tor failsafe: route to a blackhole so connections fail safe

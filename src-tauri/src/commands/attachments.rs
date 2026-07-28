@@ -252,14 +252,29 @@ fn ensure_path_in_download_dir(path: &str) -> Result<(), String> {
 /// Download and decrypt an attachment
 #[tauri::command]
 pub async fn download_attachment(npub: String, msg_id: String, attachment_id: String) -> bool {
+    let handle = TAURI_APP.get().unwrap();
+    // The UI raises its spinner on invoke and only lowers it on this event, so an
+    // exit that emits nothing spins forever with no progress and no error — and
+    // every retry (or reload) takes the same silent path. Any refusal must speak.
+    let fail = |reason: &str| {
+        handle.emit("attachment_download_result", serde_json::json!({
+            "profile_id": &npub,
+            "msg_id": &msg_id,
+            "id": &attachment_id,
+            "success": false,
+            "result": reason
+        })).ok();
+        false
+    };
+
     // Check global download deduplication — prevent multiple threads for the same file.
     // The RAII guard automatically removes the ID when this function returns (or panics).
     let _download_guard = match ActiveDownloadGuard::try_new(attachment_id.clone()).await {
         Some(guard) => guard,
-        None => return false, // Already downloading
+        // The in-flight download owns the outcome event; staying silent here would
+        // strand THIS caller's spinner if it's a duplicate of a stale render.
+        None => return fail("This file is already downloading"),
     };
-
-    let handle = TAURI_APP.get().unwrap();
 
     // Grab the attachment's metadata from STATE — the single read surface. On a
     // miss, refill STATE from the DB ONCE and retry: STATE is authoritative, the DB
@@ -283,7 +298,7 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                     if let Some(attachment) = message.attachments.iter_mut().find(|a| a.id_eq(&attachment_id)) {
                         // Check that we're not already downloading
                         if attachment.downloading() {
-                            return false;
+                            return fail("This file is already downloading");
                         }
 
                         // Check if file already exists on disk (downloaded but flag was wrong).
@@ -388,8 +403,13 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
         }
 
         // Missed even after a DB refill: the message genuinely isn't in the DB, or
-        // its attachment id doesn't match — nothing to download either way.
-        return false;
+        // its attachment id doesn't match — nothing to download either way. The UI
+        // is rendering it regardless, so say so instead of leaving a live spinner.
+        vector_core::log_warn!(
+            "[AttachmentDownload] not resolvable: chat {} msg {} attachment {} — rendered by the UI but absent from STATE and the DB",
+            &npub[..npub.len().min(12)], &msg_id[..msg_id.len().min(8)], &attachment_id[..attachment_id.len().min(8)]
+        );
+        return fail("Attachment not found — reopen the chat and retry");
         }
     };
 
@@ -400,30 +420,52 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
         "progress": 0
     })).unwrap();
 
-    // Download the file - no timeout, allow large downloads to complete
-    let encrypted_data = match net::download(&*attachment.url, handle, &attachment_hex_id, None).await {
-        Ok(data) => data,
-        Err(error) => {
-            vector_core::log_warn!(
-                "[AttachmentDownload] failed: {} (msg {}, attachment {}) url {}",
-                error, msg_id, attachment_id, &*attachment.url
-            );
-            // Handle download error
-            let mut state = STATE.lock().await;
-            state.update_attachment(&npub, &msg_id, &attachment_id, |att| {
-                att.set_downloading(false);
-                att.set_downloaded(false);
-            });
+    // Download the file. Transient network failures (dead connect, stalled or
+    // interrupted stream) retry with backoff — media servers flake; permanent
+    // refusals (blob gone, size cap) surface immediately.
+    let encrypted_data = {
+        let mut attempt: u32 = 0;
+        loop {
+            match net::download(&*attachment.url, handle, &attachment_hex_id, None).await {
+                Ok(data) => break data,
+                Err(error) => {
+                    attempt += 1;
+                    let permanent = matches!(
+                        error,
+                        "Media server returned an error status"
+                            | "File exceeds the maximum download size"
+                    );
+                    if !permanent && attempt < 3 {
+                        vector_core::log_warn!(
+                            "[AttachmentDownload] attempt {} failed for {} — retrying: {}",
+                            attempt, &*attachment.url, error
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(2 * attempt as u64)).await;
+                        continue;
+                    }
+                    vector_core::log_warn!(
+                        "[AttachmentDownload] failed: {} (msg {}, attachment {}) url {}",
+                        error, msg_id, attachment_id, &*attachment.url
+                    );
+                    // Handle download error
+                    let mut state = STATE.lock().await;
+                    state.update_attachment(&npub, &msg_id, &attachment_id, |att| {
+                        att.set_downloading(false);
+                        att.set_downloaded(false);
+                    });
+                    drop(state);
 
-            // Emit the error
-            handle.emit("attachment_download_result", serde_json::json!({
-                "profile_id": npub,
-                "msg_id": msg_id,
-                "id": attachment_id,
-                "success": false,
-                "result": error
-            })).unwrap();
-            return false;
+                    // Emit the error
+                    handle.emit("attachment_download_result", serde_json::json!({
+                        "profile_id": npub,
+                        "msg_id": msg_id,
+                        "id": attachment_id,
+                        "success": false,
+                        "result": error
+                    })).unwrap();
+                    return false;
+                }
+            }
         }
     };
 

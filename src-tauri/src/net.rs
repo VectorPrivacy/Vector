@@ -170,8 +170,12 @@ pub async fn download_with_reporter(
     // Route through vector-core so the Tor failsafe applies — blackhole when
     // Tor is enabled-but-inactive, proxy when Tor is up. Default to a long
     // timeout for downloads since we don't know the file size up front.
-    let client = vector_core::net::build_http_client(
+    // The idle read timeout kills a stalled body fast; it resets on every
+    // received byte, so slow-but-progressing transfers are unaffected.
+    let client = vector_core::net::build_http_client_with_options(
         timeout.unwrap_or_else(|| std::time::Duration::from_secs(300)),
+        Some(std::time::Duration::from_secs(30)),
+        true,
     )
     .map_err(|_| "Failed to create HTTP client")?;
 
