@@ -371,15 +371,17 @@ pub async fn fetch_messages<R: Runtime>(
 
                 state.db_loaded = true;
 
-                // Orphan sweep: a Community chat row whose communities row is GONE (partial
-                // teardown from older builds) renders as an un-deletable ghost — every community
-                // command starts at load_community and errors "not found". Drop STATE + DB rows.
+                // Orphan REPORT: a Community chat row whose communities row is GONE (partial
+                // teardown from older builds) renders as a ghost — every community command
+                // starts at load_community and errors "not found".
+                //
+                // Deliberately reports and never deletes. `delete_chat` drops the row AND its
+                // events, so any wrong verdict here is unrecoverable message loss, while the
+                // condition it fixes is a cosmetic row from teardown paths that now clean up
+                // properly. A permanent risk of that size does not buy a vanishing defect;
+                // if this ever fires, the log is the signal to fix the source (or to offer a
+                // user-initiated removal, which can't be triggered by a boot-time misread).
                 {
-                    // FAIL-SAFE: a read error must never be read as "not held". `delete_chat`
-                    // drops the row AND its events, so an empty or partial `held` set doesn't
-                    // just hide a community — it destroys its message history. An errored
-                    // enumeration therefore skips the sweep entirely and retries next boot;
-                    // keeping a ghost row for one more session costs nothing.
                     let mut held = std::collections::HashSet::new();
                     let mut trustworthy = true;
                     match vector_core::db::community::list_community_ids() {
@@ -413,11 +415,14 @@ pub async fn fetch_messages<R: Runtime>(
                         Vec::new()
                     };
                     if !orphans.is_empty() {
-                        println!("[Boot] pruning {} orphaned community chat row(s)", orphans.len());
-                        state.chats.retain(|c| !orphans.contains(&c.id));
-                        for id in &orphans {
-                            let _ = vector_core::db::chats::delete_chat(id);
-                        }
+                        // Truncated ids only — a full channel id plus its community membership
+                        // is exactly the correlation the planes exist to hide.
+                        let ids: Vec<&str> = orphans.iter().map(|id| &id[..id.len().min(8)]).collect();
+                        vector_core::log_warn!(
+                            "[Boot] {} community chat row(s) have no communities row: {:?} — reported, NOT removed",
+                            orphans.len(),
+                            ids
+                        );
                     }
                 }
 
