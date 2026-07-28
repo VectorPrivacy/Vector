@@ -2333,6 +2333,15 @@ impl VectorCore {
                 Err(e) => warnings.push(format!("v2 control follow failed: {e}")),
             }
         }
+        // Banned by the freshly-folded banlist: a removal just like the rotation
+        // exclusion above, and it arrives FIRST (CORD-04 §6 orders the Banlist edition
+        // before the Refounding), so keying removal solely off the rotation leaves a
+        // banned headless client running against a community that already dropped it.
+        if let Some(me) = crate::my_public_key() {
+            if crate::db::community::is_author_banned(&cid_hex, &me) && session.is_valid() {
+                let _ = crate::db::community::delete_community(&cid_hex);
+            }
+        }
         warnings
     }
 
@@ -3078,7 +3087,10 @@ impl VectorCore {
                 None => Vec::new(),
             };
             let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-            if let Ok(joined) = v2::sync_community_list(&transport, &bootstrap).await {
+            if let Ok(outcome) = v2::sync_community_list(&transport, &bootstrap).await {
+                // Headless: core already dropped the rows; a GUI shell additionally clears the
+                // chat rows + STATE via `removed` (see `ListSyncOutcome`).
+                let joined = outcome.joined;
                 for c in &joined {
                     if community::v2::realtime::follow_worker_running() {
                         community::v2::realtime::enqueue_follow(c.id());

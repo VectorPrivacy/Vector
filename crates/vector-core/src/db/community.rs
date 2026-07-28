@@ -787,6 +787,20 @@ pub fn delete_pending_invite(community_id: &str) -> Result<(), String> {
 }
 
 /// Whether an invite for this id is already parked (inbound dedup).
+/// When a parked invite ARRIVED (unix secs), or `None` if none is parked. The
+/// supersession key for the purge: an invite that arrived AFTER a removal is a genuine
+/// re-invite, not residue of the leave.
+pub fn pending_invite_received_at(community_id: &str) -> Result<Option<i64>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    conn.query_row(
+        "SELECT received_at FROM pending_community_invites WHERE community_id = ?1",
+        params![community_id],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(|e| format!("pending_invite_received_at: {e}"))
+}
+
 pub fn pending_invite_exists(community_id: &str) -> Result<bool, String> {
     let conn = super::get_db_connection_guard_static()?;
     let found: Option<i64> = conn

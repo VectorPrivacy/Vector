@@ -455,11 +455,29 @@ pub async fn dispatch_event(session: &SessionGuard, event: Event, handler: Arc<d
                 // Self-removal rides the AUTHORIZED fold, never the wrap: the store takes
                 // any Kick rumor, so acting on arrival would let any member evict anyone.
                 // Fail-closed — a kick our roster can't justify leaves us in place.
-                let evicted = my_pk == target
-                    && super::service::stored_memberlist(c).map(|m| !m.contains(&my_pk)).unwrap_or(false);
+                //
+                // The COALESCE verdict, not the memberlist: on a rejoin the store starts
+                // empty while the control fold has already re-derived our old ban mark, so
+                // the memberlist legitimately excludes us for the window before the
+                // Guestbook catches up. A stale Kick landing in that window would read as
+                // an authorized eviction. Coalescing asks only what our latest authorized
+                // entry is, so a fresh Join beats the old Kick and an empty store decides
+                // nothing.
+                let evicted = my_pk == target && super::service::stored_kick_verdict(c, &my_pk);
                 if evicted {
+                    // WARN, not info: `log_info!` is compiled out in release, and a
+                    // self-eviction is exactly the destructive, hard-to-diagnose event
+                    // that must leave a trace on a shipped build.
+                    crate::log_warn!(
+                        "[v2:teardown {}] KICK: the authorized guestbook fold rules us kicked",
+                        &community_id[..8.min(community_id.len())]
+                    );
                     handler.on_community_self_removed(&community_id);
                 } else {
+                    crate::log_debug!(
+                        "[v2:kick {}] declined: target={} is not ruled kicked by the fold",
+                        &community_id[..8.min(community_id.len())], &target.to_hex()[..8]
+                    );
                     handler.on_community_refreshed(&community_id);
                 }
                 return;
@@ -559,6 +577,7 @@ async fn follow_community(session: &SessionGuard, id: &CommunityId, handler: &dy
             if !session.is_valid() {
                 return;
             }
+            crate::log_warn!("[v2:teardown {}] DISSOLVED tombstone", &community_id[..8.min(community_id.len())]);
             handler.on_community_dissolved(&community_id);
             return;
         }
@@ -566,6 +585,7 @@ async fn follow_community(session: &SessionGuard, id: &CommunityId, handler: &dy
             if !session.is_valid() {
                 return;
             }
+            crate::log_warn!("[v2:teardown {}] REKEY EXCLUSION: an authorized rotation left us out", &community_id[..8.min(community_id.len())]);
             let _ = crate::db::community::delete_community(&community_id);
             refresh_subscription(&client).await;
             handler.on_community_self_removed(&community_id);
@@ -604,6 +624,25 @@ async fn follow_community(session: &SessionGuard, id: &CommunityId, handler: &dy
         // existed. Queue one more pass; it coalesces and converges (an unchanged
         // control fold doesn't re-queue).
         enqueue_follow(id);
+    }
+
+    // Banned by the banlist we just folded → self-remove NOW, not when the Refounding
+    // eventually lands. A Ban composes three layers (CORD-04 §6) and their guarantees
+    // arrive at different speeds: the Banlist edition is instant, the Refounding is
+    // "heavy and asynchronous" by design. Waiting on the rotation to notice our own
+    // removal left the target sitting in a community that had already dropped them from
+    // its member count — silenced, still looking joined. Checked unconditionally: a
+    // banlist-only change folds no document, so `follow_control` returns None for it.
+    // v1 has done this since it shipped (`am_i_banned` in its own realtime refresh).
+    if let Some(me) = crate::my_public_key() {
+        if crate::db::community::is_author_banned(&community_id, &me) {
+            if !session.is_valid() {
+                return;
+            }
+            crate::log_warn!("[v2:teardown {}] SELF-BAN: our npub is in the folded banlist", &community_id[..8.min(community_id.len())]);
+            handler.on_community_self_removed(&community_id);
+            return;
+        }
     }
 
     // Guestbook third: catch the membership store up from its cursor. Boot and

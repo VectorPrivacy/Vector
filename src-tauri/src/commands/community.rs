@@ -541,6 +541,74 @@ fn is_v2_community(community_id: &str) -> bool {
     })
 }
 
+/// Does a synced removal tombstone still bury a community we hold?
+///
+/// For v2, only if our hold PREDATES it. A hold created after the removal is a REJOIN,
+/// and tearing that down strands the community forever: the rejoin's membership never
+/// out-ranks the tombstone, so every boot removes it, the rejoin re-adds it, and the
+/// cycle spins — re-publishing a Join to the Guestbook each time. Same add-vs-remove
+/// rule the list itself already uses to decide presence.
+///
+/// v1 keeps its original semantics (held ⇒ honour the tombstone): it carries no local
+/// join time to compare against, and its teardown path isn't the one that loops.
+fn tombstone_still_applies(community_id: &str, removed_at: u64) -> bool {
+    let Ok(id_bytes) = hex_to_id32(community_id) else { return false };
+    let cid = CommunityId(id_bytes);
+    // v2 first — `load_community` also returns v2 rows (as v1 structs), so the order matters.
+    if let Ok(Some(v2)) = vector_core::db::community::load_community_v2(&cid) {
+        return v2.created_at_ms <= removed_at;
+    }
+    matches!(vector_core::db::community::load_community(&cid), Ok(Some(_)))
+}
+
+/// Re-run the v2 Community List sync: adopt anything newly listed, tear down anything a sibling
+/// device left. Shared by the boot reconcile and the LIVE kind-13302 self-sync subscription, so a
+/// join or leave on one device lands on the others without a reboot — the parity v1 has had since
+/// its list shipped (v1's is a d-tagged 30078 and was already in the self-sync filter set).
+pub(crate) async fn ingest_v2_community_list_update() {
+    use vector_core::community::{transport::LiveTransport, v2::service as v2};
+    let session = vector_core::state::SessionGuard::capture();
+    let bootstrap: Vec<String> = match vector_core::state::nostr_client() {
+        Some(client) => client.relays().await.keys().map(|r| r.to_string()).collect(),
+        None => return,
+    };
+    let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+    let Ok(outcome) = v2::sync_community_list(&transport, &bootstrap).await else { return };
+    // The fetches straddled awaits — never park account A's ids into account B's queue.
+    if !session.is_valid() {
+        return;
+    }
+    // A sibling device LEFT: core dropped the community + channel rows, but the chat row, its
+    // STATE entry and the live subscription are the shell's to clear. Skipping this leaves a
+    // ghost room in the list — present, unopenable, "0 Members" — pointing at nothing.
+    for (community_id, channel_ids) in &outcome.removed {
+        teardown_community_local_at(community_id, channel_ids, false, None).await;
+        vector_core::emit_event("community_kicked", &serde_json::json!({ "community_id": community_id }));
+    }
+    let joined = outcome.joined;
+    // Joining retires any parked invite for that community — otherwise the list shows an
+    // "accept/decline" row above the community you are already in. v1's list sync has always
+    // done this (`purge_stale_pending_invites`); the v2 adopt path never did, so an invite
+    // accepted on ANOTHER device stayed on this one forever.
+    if matches!(vector_core::db::community::purge_pending_invites_for_held_communities(), Ok(n) if n > 0) {
+        vector_core::emit_event("community_invites_purged", &serde_json::json!({}));
+    }
+    for c in &joined {
+        vector_core::community::v2::realtime::enqueue_follow(c.id());
+        // Tell the FRONTEND, exactly as v1's rehydrate does. Adoption registers the chat rows in
+        // STATE + the DB, but the live UI only learns of a new community through this event — so
+        // without it a community joined on another device is held, synced and invisible until the
+        // next restart, which reads as the cross-device sync being broken when it isn't.
+        vector_core::emit_event(
+            "community_surfaced",
+            &serde_json::to_value(summarize_v2(c)).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    if let Some(client) = vector_core::state::nostr_client() {
+        vector_core::community::v2::realtime::refresh_subscription(&client).await;
+    }
+}
+
 async fn set_member_banned(community_id: &str, npub: &str, banned: bool) -> Result<(), String> {
     // v2: banlist edition + grant-strip + refound (CORD-04 §6), all in the facade.
     if is_v2_community(community_id) {
@@ -648,6 +716,18 @@ fn community_relays_of(community_id: &str) -> Vec<String> {
 }
 
 pub(crate) async fn teardown_community_local(community_id: &str, channel_ids: &[String], republish_list: bool) {
+    teardown_community_local_at(community_id, channel_ids, republish_list, None).await
+}
+
+/// As [`teardown_community_local`], with the removal time we RECEIVED (`Some`) rather than
+/// the moment we noticed (`None`). See `tombstone_local_only_at`: re-stamping a received
+/// removal lets a long-offline device out-rank every other device's rejoin.
+pub(crate) async fn teardown_community_local_at(
+    community_id: &str,
+    channel_ids: &[String],
+    republish_list: bool,
+    removed_at: Option<u64>,
+) {
     // Capture this community's relays BEFORE deletion so we can drop any that no remaining community
     // needs — and that aren't the user's own relays — from the pool after the routes refresh.
     let left_relays: Vec<String> = community_relays_of(community_id);
@@ -659,7 +739,17 @@ pub(crate) async fn teardown_community_local(community_id: &str, channel_ids: &[
     if republish_list {
         vector_core::community::list::remove_membership(community_id);
     } else {
-        vector_core::community::list::tombstone_local_only(community_id);
+        // v1 ONLY. A v2 community owns its membership in the kind-13302 list: the leave path
+        // publishes its own tombstone there and `sync_community_list` tears it down on the
+        // other devices. Writing here as well deposited v2 tombstones into the v1 (30078)
+        // mirror, which can never gain a matching v2 entry — so that document read "removed"
+        // for every v2 community, permanently, and the boot sweep acted on it.
+        if !is_v2_community(community_id) {
+            match removed_at {
+                Some(at) => vector_core::community::list::tombstone_local_only_at(community_id, at),
+                None => vector_core::community::list::tombstone_local_only(community_id),
+            }
+        }
     }
     crate::services::subscription_handler::refresh_community_subscription().await;
     {
@@ -698,8 +788,22 @@ async fn prune_orphaned_community_relays(left_relays: &[String]) {
 /// announce — it's involuntary), then tell the frontend so it silently closes the view. A ban differs
 /// from a kick only in that the banlist persists (re-detected → re-removed) and admins can't re-invite us.
 pub(crate) async fn self_remove_from_community(community_id: &str, republish_list: bool) {
+    self_remove_from_community_at(community_id, republish_list, None).await
+}
+
+/// As [`self_remove_from_community`], preserving the removal time a SYNCED tombstone
+/// carried instead of minting a fresh one.
+pub(crate) async fn self_remove_from_community_at(
+    community_id: &str,
+    republish_list: bool,
+    removed_at: Option<u64>,
+) {
+    let proto = vector_core::db::community::community_protocol(
+        &CommunityId(hex_to_id32(community_id).unwrap_or_default())
+    ).ok().flatten();
+    println!("[teardown] self_remove_from_community {} proto={:?} republish={}", &community_id[..8.min(community_id.len())], proto, republish_list);
     let channel_ids = community_channel_ids(community_id);
-    teardown_community_local(community_id, &channel_ids, republish_list).await;
+    teardown_community_local_at(community_id, &channel_ids, republish_list, removed_at).await;
     vector_core::emit_event(
         "community_kicked",
         &serde_json::json!({ "community_id": community_id }),
@@ -2399,10 +2503,8 @@ pub(crate) async fn reconcile_community_list_boot() {
         if !session.is_valid() {
             return;
         }
-        if let Ok(b) = hex_to_id32(&t.community_id) {
-            if let Ok(Some(_)) = vector_core::db::community::load_community(&CommunityId(b)) {
-                self_remove_from_community(&t.community_id, false).await;
-            }
+        if tombstone_still_applies(&t.community_id, t.removed_at) {
+            self_remove_from_community_at(&t.community_id, false, Some(t.removed_at)).await;
         }
     }
     // Seed any community we hold in the DB but that predates the list feature (or was joined on a device that
@@ -2433,7 +2535,15 @@ pub(crate) async fn reconcile_community_list_boot() {
 fn purge_stale_pending_invites(tombstones: &[vector_core::community::list::CommunityRemoval]) {
     let mut purged_any = false;
     for t in tombstones {
-        if vector_core::db::community::pending_invite_exists(&t.community_id).unwrap_or(false) {
+        // SUPERSESSION, not a bare id match. Only a removal that POST-DATES the invite's arrival
+        // makes it stale ("I left after being invited"). A tombstone OLDER than the invite is a
+        // past leave the invite already superseded — ingest proved that with the honest inner
+        // `rumor_created_at` before parking it, so deleting on the id alone re-kills a fresh
+        // re-invite seconds after it renders. `received_at` is seconds; `removed_at` is ms.
+        let Ok(Some(received_at)) = vector_core::db::community::pending_invite_received_at(&t.community_id) else {
+            continue;
+        };
+        if (received_at.max(0) as u64).saturating_mul(1000) <= t.removed_at {
             let _ = vector_core::db::community::delete_pending_invite(&t.community_id);
             purged_any = true;
         }
@@ -2477,11 +2587,9 @@ pub(crate) async fn ingest_community_list_update(event: nostr_sdk::prelude::Even
     // A removal that arrived in this update buries a community we still hold locally — tear it down so all
     // devices converge (the merged list already dropped its entry; honor any fresh tombstone here).
     for t in &merged.tombstones {
-        if let Ok(b) = hex_to_id32(&t.community_id) {
-            if let Ok(Some(_)) = vector_core::db::community::load_community(&CommunityId(b)) {
-                // Receive path — tombstone local-only (we got here BY receiving the removal).
-                self_remove_from_community(&t.community_id, false).await;
-            }
+        // Receive path — tombstone local-only (we got here BY receiving the removal).
+        if tombstone_still_applies(&t.community_id, t.removed_at) {
+            self_remove_from_community_at(&t.community_id, false, Some(t.removed_at)).await;
         }
     }
     // page_messages = true: the live ingest path has NO boot sweep after it, so we must page the latest here
@@ -2776,27 +2884,11 @@ pub async fn sync_communities_boot() -> Result<(), String> {
             if !discovery_session.is_valid() {
                 return;
             }
-            use vector_core::community::{transport::LiveTransport, v2::service as v2};
-            let bootstrap: Vec<String> = match vector_core::state::nostr_client() {
-                Some(client) => client.relays().await.keys().map(|r| r.to_string()).collect(),
-                None => Vec::new(),
-            };
-            let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-            if let Ok(joined) = v2::sync_community_list(&transport, &bootstrap).await {
-                // The 12s+ fetch straddled a possible swap — a stale enqueue would
-                // park account A's community ids into account B's follow queue.
-                if !discovery_session.is_valid() {
-                    return;
-                }
-                for c in &joined {
-                    vector_core::community::v2::realtime::enqueue_follow(c.id());
-                }
-                if !joined.is_empty() {
-                    if let Some(client) = vector_core::state::nostr_client() {
-                        vector_core::community::v2::realtime::refresh_subscription(&client).await;
-                    }
-                }
-            }
+            // ONE implementation shared with the live kind-13302 self-sync: adopt, follow,
+            // resubscribe, and SURFACE to the UI. This reconcile is backgrounded and lands
+            // AFTER `init_finished`, so a community adopted here needs the same frontend
+            // notification a live update does — duplicating the loop is how they drifted.
+            ingest_v2_community_list_update().await;
             vector_core::log_info!("[Boot] community list reconcile (background) in {:?}", t.elapsed());
         });
     }

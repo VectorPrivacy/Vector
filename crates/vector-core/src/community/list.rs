@@ -534,9 +534,14 @@ pub fn republish_community_list_debounced() {
 
 /// Seed the local mirror from communities ALREADY persisted in the DB but missing from the list — the ones
 /// joined BEFORE this feature shipped (so they never hit `add_membership`), or on a device that predates
-/// it. Idempotent: a community already listed is skipped; a tombstoned one is resurrected (we still hold it
-/// in the DB, so we ARE a member). Run at boot before the publish so existing memberships sync too. Does NOT
-/// republish itself — the caller's `publish_community_list` pushes the seeded list out.
+/// it. Idempotent: a community already listed is skipped, and a TOMBSTONED one is skipped too (a leave must
+/// not be undone by the mere presence of a DB row). Run at boot before the publish so existing memberships
+/// sync too. Does NOT republish itself — the caller's `publish_community_list` pushes the seeded list out.
+///
+/// NOTE the consequence: this is the generic self-heal, and it cannot repair a hold whose membership never
+/// reached the list. A rejoin that failed to record leaves a tombstone with no entry, and nothing here will
+/// re-assert it — the ACTIVE writers (`add_membership` / the v2 republish) are the only paths that can, so
+/// their failures must stay loud rather than silent.
 pub fn backfill_from_db() {
     let ids = match crate::db::community::list_community_ids() {
         Ok(ids) => ids,
@@ -552,11 +557,24 @@ pub fn backfill_from_db() {
         if list.contains(&hex) {
             continue; // already listed
         }
+        // V1 ONLY. This seeds v1-shaped entries (`seed: CommunityInvite`) into the kind-30078
+        // list; a v2 membership is a `JoinMaterial` in the kind-13302 list and is republished by
+        // `v2::service::republish_community_list`. Seeding a v2 community here would publish a
+        // malformed entry that no reader can rehydrate. (Teardown writes its tombstone through
+        // the v1 path for BOTH protocols, so v2 ids DO appear in this document's tombstones —
+        // which is why they reach this loop at all.)
+        if matches!(crate::db::community::community_protocol(&id), Ok(Some(crate::community::ConcordProtocol::V2))) {
+            continue;
+        }
         // Don't RESURRECT a community we left: a tombstone means we removed it, but a DB row may linger (a
         // teardown that didn't fully run, or a sibling's leave we folded but haven't torn down yet). Re-adding
         // it here (with `added_at = now`, which beats the tombstone) would silently undo the leave on every
         // device. The boot reconcile tears the stale row down separately.
         if list.tombstones.iter().any(|t| t.community_id == hex) {
+            crate::log_warn!(
+                "[CommunityList] backfill: holding {} but it is TOMBSTONED — not re-seeding (a rejoin must re-record it through the active path)",
+                &hex[..8.min(hex.len())]
+            );
             continue;
         }
         if let Ok(Some(community)) = crate::db::community::load_community(&id) {
@@ -609,8 +627,22 @@ pub fn remove_membership(community_id: &str) {
 /// published the removal). Republishing here would just re-echo our own event over the live self-sync
 /// subscription. The local mirror is updated so a later local mutation/boot still carries the tombstone.
 pub fn tombstone_local_only(community_id: &str) {
+    tombstone_local_only_at(community_id, now_ms())
+}
+
+/// As [`tombstone_local_only`], but records an EXPLICIT removal time — the one we
+/// RECEIVED, never `now`.
+///
+/// A receive-path teardown is not a new removal, it is the same removal reaching this
+/// device. Re-stamping it `now` re-dates history: a device that was offline through a
+/// leave-then-rejoin comes back, honours the old tombstone (correctly — its own hold
+/// predates it), and in tearing down mints a tombstone newer than every other device's
+/// REJOIN. That fresh timestamp then out-ranks the rejoin everywhere and evicts a member
+/// who is genuinely joined. Preserving the received time keeps the add-vs-remove
+/// comparison honest on every device.
+pub fn tombstone_local_only_at(community_id: &str, removed_at: u64) {
     let mut list = load_local_list();
-    list.remove(community_id, now_ms());
+    list.remove(community_id, removed_at);
     if let Err(e) = save_local_list(&list) {
         crate::log_warn!("[CommunityList] local-only tombstone save failed: {}", e);
     }

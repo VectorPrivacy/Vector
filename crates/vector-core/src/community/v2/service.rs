@@ -114,8 +114,15 @@ pub async fn create_community<T: Transport + ?Sized>(
         let _ = transport.publish_durable(&join_wrap, &community.relays).await;
     }
 
-    // Sync the new membership across devices (CORD-02 §8) — best-effort.
-    let _ = republish_community_list(transport, Some(community.id())).await;
+    // Sync the new membership across devices (CORD-02 §8), durably — see the join path.
+    match republish_community_list(transport, Some(community.id())).await {
+        Ok(true) => {}
+        Ok(false) => republish_community_list_durable(Some(*community.id())),
+        Err(e) => {
+            crate::log_warn!("[CommunityList] failed to record this community across devices ({}) — retrying", e);
+            republish_community_list_durable(Some(*community.id()));
+        }
+    }
     Ok(community)
 }
 
@@ -1167,8 +1174,17 @@ async fn accept_bundle<T: Transport + ?Sized>(
         let _ = transport.publish(&join_wrap, &community.relays).await;
     }
 
-    // Record the membership across devices (CORD-02 §8) — best-effort.
-    let _ = republish_community_list(transport, Some(community.id())).await;
+    // Record the membership across devices (CORD-02 §8). The inline attempt covers the
+    // happy path; anything else hands off to the durable retry, because an unrecorded
+    // join is what strands a community behind a stale tombstone.
+    match republish_community_list(transport, Some(community.id())).await {
+        Ok(true) => {}
+        Ok(false) => republish_community_list_durable(Some(*community.id())),
+        Err(e) => {
+            crate::log_warn!("[CommunityList] failed to record this join across devices ({}) — retrying", e);
+            republish_community_list_durable(Some(*community.id()));
+        }
+    }
     Ok(community)
 }
 
@@ -1715,6 +1731,33 @@ fn fold_members(
         members.insert(owner);
     }
     Ok(members.into_iter().collect())
+}
+
+/// Did the AUTHORIZED Guestbook coalesce rule `member` KICKED, per the stored plane?
+///
+/// This is the only sound basis for acting on a kick against ourselves. The
+/// memberlist is the wrong question: it also folds the banlist, the ban marks and
+/// observed authors, so a member whose Guestbook hasn't caught up yet — a REJOIN,
+/// where the store starts empty while the control fold has already re-derived their
+/// old ban mark — is absent from it while being perfectly joined. Coalescing asks
+/// only "what is the latest authorized entry for this npub", so a fresh Join
+/// supersedes an old Kick and an empty store yields no verdict at all.
+pub fn stored_kick_verdict(community: &CommunityV2, member: &PublicKey) -> bool {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let Ok((events, _cursor)) = crate::db::community::get_guestbook(&cid_hex) else {
+        return false;
+    };
+    let Ok(owner) = community.owner() else { return false };
+    let owner_hex = owner.to_hex();
+    let roles = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+    let snapshot_authority = (community.root_epoch.0 > 0).then_some(&owner);
+    let can_kick = |actor: &PublicKey, target: &PublicKey| {
+        roles.can_act_on_member(&actor.to_hex(), Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::KICK)
+    };
+    matches!(
+        guestbook::coalesce(&events, now_ms(), snapshot_authority, &can_kick).get(member),
+        Some(st) if st.verdict == guestbook::Verdict::Kicked
+    )
 }
 
 /// Catch the persisted Guestbook up from its stored cursor (a fresh hold seeds
@@ -2515,20 +2558,37 @@ async fn fetch_community_list<T: Transport + ?Sized>(transport: &T, relays: &[St
 /// has tombstoned is left tombstoned (a sibling device's leave is NOT undone just
 /// because we joined something else — the W1 resurrection hole). Idempotent;
 /// best-effort — a list-publish failure never fails the membership change itself.
-pub async fn republish_community_list<T: Transport + ?Sized>(transport: &T, just_joined: Option<&crate::community::CommunityId>) -> Result<(), String> {
+/// Returns `Ok(true)` when the list was PUBLISHED, `Ok(false)` when the attempt was
+/// skipped without failing the caller (a failed remote fetch — see below). Callers that
+/// need the membership to actually land use [`republish_community_list_durable`].
+pub async fn republish_community_list<T: Transport + ?Sized>(transport: &T, just_joined: Option<&crate::community::CommunityId>) -> Result<bool, String> {
     let session = SessionGuard::capture();
     let signer = crate::signer::active_signer()?;
     let my_pk = me_pk()?;
     let relays = held_v2_relays();
     if relays.is_empty() {
-        return Ok(()); // nothing held → nothing to sync
+        return Ok(false); // nothing held → nothing to sync
     }
     // A FAILED remote fetch must not drive this replaceable-event write: publishing
     // a list built without the remote seeds would drop older-epoch backfill anchors
     // and re-stamp add-times (the W2 seed-regression + a resurrection window).
     let remote = match fetch_community_list(transport, &relays).await {
         Ok(r) => r.unwrap_or_default(),
-        Err(_) => return Ok(()),
+        Err(e) => {
+            // SILENT-SKIP HAZARD: bailing is correct (publishing a list built without the
+            // remote seeds drops backfill anchors), but the membership this call was meant
+            // to record is now simply unrecorded. A join that lands here leaves a community
+            // held locally with no list entry — and if it also carries an older tombstone,
+            // nothing ever out-ranks it again. Say so loudly; `Ok(())` keeps it non-fatal.
+            crate::log_warn!(
+                "[CommunityList] republish SKIPPED (remote fetch failed: {}){}",
+                e,
+                just_joined
+                    .map(|c| format!(" — the join of {} is NOT recorded across devices", &crate::simd::hex::bytes_to_hex_32(&c.0)[..8]))
+                    .unwrap_or_default()
+            );
+            return Ok(false);
+        }
     };
     let just_joined_hex = just_joined.map(|c| crate::simd::hex::bytes_to_hex_32(&c.0));
     let now = now_ms();
@@ -2543,13 +2603,36 @@ pub async fn republish_community_list<T: Transport + ?Sized>(transport: &T, just
         // A held community the remote has tombstoned (a sibling device left it) that
         // we are NOT currently (re)joining stays LEFT — don't re-add it, or joining a
         // different community would silently undo the leave everywhere.
-        if !is_join && !remote.is_live(&cid_hex) && remote.tombstones.iter().any(|t| t.community_id == cid_hex) {
+        //
+        // UNLESS our hold POST-DATES the removal. A rejoin whose membership never
+        // reached the list (this publish is best-effort — a failed remote fetch
+        // silently skips it) leaves a tombstone with no entry, and nothing can ever
+        // out-rank it again: every boot the list sync reads "removed", tears the
+        // community down, the rejoin re-adds it, and it loops forever. Our own hold
+        // is first-hand evidence of membership, so let it settle the tie by the same
+        // add-vs-remove rule the list already uses everywhere else.
+        let tombstoned_at = remote
+            .tombstones
+            .iter()
+            .find(|t| t.community_id == cid_hex)
+            .map(|t| t.removed_at)
+            .unwrap_or(0);
+        let held_since = c.created_at_ms;
+        if !is_join && !remote.is_live(&cid_hex) && tombstoned_at > 0 && held_since <= tombstoned_at {
+            crate::log_warn!(
+                "[CommunityList] holding {} but NOT recording it: a tombstone at {} post-dates our hold ({}) — treated as a leave from another device",
+                &cid_hex[..8], tombstoned_at, held_since
+            );
             continue;
         }
         // Keep an already-live entry's add time (no churn); the joined community (or a
-        // genuinely-new one) stamps `now` so a re-join beats a stale tombstone.
+        // genuinely-new one) stamps `now` so a re-join beats a stale tombstone. A hold
+        // that outlived a tombstone re-asserts itself at its own join time, which is
+        // already newer than the removal.
         let added_at = if remote.is_live(&cid_hex) && !is_join {
             remote.entries.iter().find(|e| e.community_id == cid_hex).map(|e| e.added_at).unwrap_or(now)
+        } else if !is_join && tombstoned_at > 0 {
+            held_since
         } else {
             now
         };
@@ -2562,7 +2645,59 @@ pub async fn republish_community_list<T: Transport + ?Sized>(transport: &T, just
     if !session.is_valid() {
         return Err("account changed during community-list publish".to_string());
     }
-    transport.publish(&event, &relays).await
+    if let Err(e) = transport.publish(&event, &relays).await {
+        crate::log_warn!("[CommunityList] publish FAILED ({}) — memberships stay local-only until the next edit", e);
+        return Err(e);
+    }
+    Ok(true)
+}
+
+/// Retry budget for [`republish_community_list_durable`]. An unrecorded membership is
+/// invisible to the user and self-heals only on their NEXT join, so ride out a relay
+/// blip rather than a single shot. Bounded: a permanently dead relay set gives up
+/// instead of spinning.
+const LIST_REPUBLISH_BACKOFF_SECS: [u64; 6] = [2, 5, 15, 45, 120, 300];
+
+/// Record a membership across devices DURABLY: retry in the background until the list
+/// actually lands.
+///
+/// [`republish_community_list`] must never fail a join, and it deliberately publishes
+/// NOTHING when the remote fetch fails (a list built without the remote seeds would drop
+/// other devices' entries). One shot at that means a relay blip during a join leaves the
+/// membership unrecorded until the user happens to join something else — and if a stale
+/// tombstone out-ranks it, the community is stranded until a manual leave+rejoin.
+///
+/// Non-blocking. Skipped entirely without a live client (headless/unit tests drive the
+/// generic fn directly). The `SessionGuard` is captured BEFORE the spawn and re-checked
+/// before every attempt, so an account swap mid-backoff can't publish A's list from B.
+pub fn republish_community_list_durable(just_joined: Option<crate::community::CommunityId>) {
+    if crate::state::nostr_client().is_none() {
+        return;
+    }
+    let session = SessionGuard::capture();
+    tokio::spawn(async move {
+        for (attempt, wait) in LIST_REPUBLISH_BACKOFF_SECS.iter().enumerate() {
+            if !session.is_valid() {
+                return;
+            }
+            let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+            match republish_community_list(&transport, just_joined.as_ref()).await {
+                Ok(true) => {
+                    if attempt > 0 {
+                        crate::log_info!("[CommunityList] membership recorded on retry #{}", attempt);
+                    }
+                    return;
+                }
+                Ok(false) => {} // skipped (remote fetch failed) — already logged; retry
+                Err(e) => crate::log_warn!("[CommunityList] republish attempt #{} failed: {}", attempt, e),
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(*wait)).await;
+        }
+        crate::log_warn!(
+            "[CommunityList] gave up recording membership after {} attempts — it will re-record on the next join/leave",
+            LIST_REPUBLISH_BACKOFF_SECS.len()
+        );
+    });
 }
 
 /// Record a permanent leave tombstone for `community_id` in the 13302, published to
@@ -2591,37 +2726,65 @@ async fn tombstone_community_list<T: Transport + ?Sized>(transport: &T, communit
 /// a fresh device), and JOIN every live entry not already held — reconstructing the
 /// community from its join material and re-verifying the owner root. Returns the
 /// newly-rehydrated communities (so the caller can subscribe + notify).
-pub async fn sync_community_list<T: Transport + ?Sized>(transport: &T, bootstrap_relays: &[String]) -> Result<Vec<CommunityV2>, String> {
+/// What one Community-List sync changed locally.
+pub struct ListSyncOutcome {
+    /// Communities newly adopted from the list (already persisted + chat-registered).
+    pub joined: Vec<CommunityV2>,
+    /// Communities a sibling device LEFT, as `(community_id_hex, channel_id_hexes)`.
+    ///
+    /// The rows are already gone here, so the ids are captured BEFORE deletion: the caller
+    /// still has to finish the local teardown (chat rows, STATE, the live subscription),
+    /// and it can't look them up afterwards. Deleting the community while leaving its chat
+    /// row behind is what produces a ghost "0 Members" room pointing at nothing.
+    pub removed: Vec<(String, Vec<String>)>,
+}
+
+pub async fn sync_community_list<T: Transport + ?Sized>(transport: &T, bootstrap_relays: &[String]) -> Result<ListSyncOutcome, String> {
     let session = SessionGuard::capture();
     let mut relays = held_v2_relays();
     relays.extend(bootstrap_relays.iter().cloned());
     relays.sort();
     relays.dedup();
     if relays.is_empty() {
-        return Ok(vec![]);
+        return Ok(ListSyncOutcome { joined: vec![], removed: vec![] });
     }
     let list = match fetch_community_list(transport, &relays).await {
         Ok(Some(l)) => l,
-        Ok(None) | Err(_) => return Ok(vec![]),
+        Ok(None) | Err(_) => return Ok(ListSyncOutcome { joined: vec![], removed: vec![] }),
     };
     // Receive-side teardown (the counterpart to the republish tombstone guard):
     // a community this device still holds but the synced list shows TOMBSTONED (a
     // sibling device left it) and NOT live gets torn down here, so a leave on one
     // device propagates to the others. A re-join would have re-added it live
     // (beating the tombstone), so is_live short-circuits the honest case.
+    let mut removed: Vec<(String, Vec<String>)> = Vec::new();
     for t in &list.tombstones {
         if list.is_live(&t.community_id) {
             continue;
         }
         let Some(cid) = crate::simd::hex::hex_to_bytes_32_checked(&t.community_id) else { continue };
         let id = crate::community::CommunityId(cid);
-        if crate::db::community::load_community_v2(&id).ok().flatten().is_none() {
+        let Some(held) = crate::db::community::load_community_v2(&id).ok().flatten() else {
             continue; // not held — nothing to tear down
+        };
+        // `is_live` above assumes a rejoin re-added an entry, but recording that entry is
+        // best-effort: a relay blip at join time leaves the tombstone unopposed forever, and
+        // this would then delete the community on every sync. So let the LOCAL hold break the
+        // tie too — a hold created after the removal IS the rejoin, whether or not its entry
+        // ever reached the list. Same rule the v1 sweep uses.
+        if held.created_at_ms > t.removed_at {
+            crate::log_warn!(
+                "[CommunityList] {} is tombstoned at {} but our hold ({}) post-dates it — treating as a rejoin, not tearing down",
+                &t.community_id[..8], t.removed_at, held.created_at_ms
+            );
+            continue;
         }
         if !session.is_valid() {
             return Err("account changed during community-list sync".to_string());
         }
+        let channel_ids: Vec<String> = held.channels.iter().map(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0)).collect();
         let _ = crate::db::community::delete_community(&t.community_id);
+        removed.push((t.community_id.clone(), channel_ids));
     }
     let mut joined = Vec::new();
     for entry in list.live_entries() {
@@ -2639,7 +2802,7 @@ pub async fn sync_community_list<T: Transport + ?Sized>(transport: &T, bootstrap
             joined.push(community);
         }
     }
-    Ok(joined)
+    Ok(ListSyncOutcome { joined, removed })
 }
 
 // ── Control edition authoring (CORD-04 roles / CORD-02 §6 / CORD-03 §2) ──────
@@ -6239,7 +6402,7 @@ mod tests {
         crate::db::community::delete_community(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap();
         assert!(crate::db::community::load_community_v2(community.id()).unwrap().is_none());
 
-        let rehydrated = sync_community_list(&relay, &relays).await.unwrap();
+        let rehydrated = sync_community_list(&relay, &relays).await.unwrap().joined;
         assert_eq!(rehydrated.len(), 1, "the left-behind membership rehydrates");
         assert_eq!(rehydrated[0].id().0, community.id().0);
         assert!(crate::db::community::load_community_v2(community.id()).unwrap().is_some(), "and is now held locally");
@@ -6253,7 +6416,7 @@ mod tests {
         let community = create_community(&relay, "Left", relays.clone(), None).await.unwrap();
         leave_community(&relay, &community).await.unwrap(); // tombstones the 13302 + deletes
 
-        let rehydrated = sync_community_list(&relay, &relays).await.unwrap();
+        let rehydrated = sync_community_list(&relay, &relays).await.unwrap().joined;
         assert!(rehydrated.is_empty(), "a tombstoned membership is not rejoined on sync");
     }
 
@@ -9440,6 +9603,46 @@ mod tests {
         let after = memberlist(&bed.relay, &community).await.unwrap();
         assert!(!after.contains(&member.keys.public_key()), "the kicked member leaves the fold");
         assert!(after.contains(&owner.keys.public_key()), "the owner remains");
+    }
+
+    #[tokio::test]
+    async fn a_rejoin_survives_a_stale_kick_and_an_uncaught_up_store() {
+        // The self-eviction race: on a REJOIN the guestbook store starts empty while the
+        // control fold has already re-derived the member's old ban mark, so the MEMBERLIST
+        // legitimately excludes them for that window. A stale Kick landing there used to
+        // read as an authorized eviction and the client nuked its own community.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Rejoin", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let (o, m) = (owner.keys.public_key(), member.keys.public_key());
+        let join = |at: u64, id: u8| guestbook::GuestbookEvent {
+            rumor_id: [id; 32],
+            entry: guestbook::GuestbookEntry::Join { member: m, invited_by: None, at_ms: at },
+        };
+        let kick = |at: u64, id: u8| guestbook::GuestbookEvent {
+            rumor_id: [id; 32],
+            entry: guestbook::GuestbookEntry::Kick { actor: o, target: m, citation: None, at_ms: at },
+        };
+
+        // An authorized kick after their join stands.
+        crate::db::community::set_guestbook(&cid_hex, &[join(1_000, 1), kick(2_000, 2)], 2).unwrap();
+        assert!(stored_kick_verdict(&community, &m), "an authorized kick after the join is honored");
+
+        // A rejoin supersedes it — latest entry wins (CORD-02 §5).
+        crate::db::community::set_guestbook(&cid_hex, &[join(1_000, 1), kick(2_000, 2), join(3_000, 3)], 3).unwrap();
+        assert!(!stored_kick_verdict(&community, &m), "a Join newer than the kick clears the verdict");
+
+        // The catch-up window itself: nothing folded yet decides nothing.
+        crate::db::community::set_guestbook(&cid_hex, &[], 0).unwrap();
+        assert!(!stored_kick_verdict(&community, &m), "an empty store is not an eviction");
+
+        // And the memberlist is NOT a substitute: with the store empty it excludes them,
+        // which is exactly the false positive this verdict replaced.
+        assert!(
+            !stored_memberlist(&community).unwrap().contains(&m),
+            "the memberlist excludes an un-caught-up member — why it can't gate a kick"
+        );
     }
 
     #[tokio::test]

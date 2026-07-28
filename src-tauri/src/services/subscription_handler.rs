@@ -67,6 +67,16 @@ pub(crate) async fn subscribe_self_sync() {
         Ok(out) => new_ids.push(out.value),
         Err(e) => eprintln!("[self-sync] self-lists subscribe failed: {:?}", e),
     }
+    // v2 Community List (replaceable kind 13302, CORD-02 §8). Its own kind, so it needs its
+    // own filter — v1's list is a d-tagged 30078 above. Without this a v2 join/leave only
+    // reached the other devices on their next BOOT, while v1 had been instant since it shipped.
+    let v2_list_filter = Filter::new()
+        .author(my_pk)
+        .kind(Kind::Custom(vector_core::community::v2::kind::COMMUNITY_LIST));
+    match client.subscribe(v2_list_filter).await {
+        Ok(out) => new_ids.push(out.value),
+        Err(e) => eprintln!("[self-sync] v2 community-list subscribe failed: {:?}", e),
+    }
     // Emoji-pack List (replaceable kind 10030).
     let emoji_filter = Filter::new().author(my_pk).kind(Kind::Custom(10030));
     match client.subscribe(emoji_filter).await {
@@ -115,6 +125,13 @@ async fn handle_self_sync_event(session: &vector_core::state::SessionGuard, even
                 } else {
                     crate::commands::community::ingest_community_list_update(event).await;
                 }
+            });
+        }
+        k if k == vector_core::community::v2::kind::COMMUNITY_LIST => {
+            // Re-run the same sync the boot path uses: it adopts newly-listed communities and
+            // tears down ones a sibling device left. Spawned — it runs several relay fetches.
+            tokio::spawn(async move {
+                crate::commands::community::ingest_v2_community_list_update().await;
             });
         }
         10030 => {

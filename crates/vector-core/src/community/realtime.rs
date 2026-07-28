@@ -379,6 +379,7 @@ pub async fn dispatch_event(
         }
         Some(inbound::IncomingEvent::Kicked { community_id })
         | Some(inbound::IncomingEvent::SelfLeft { community_id }) => {
+            crate::log_warn!("[v1:teardown {}] INBOUND Kicked/SelfLeft on the v1 channel plane", &community_id[..8.min(community_id.len())]);
             // The handler owns teardown (the GUI prunes chats/relays + republishes the list; a
             // headless consumer can call `teardown_local`). Core only routes + notifies here.
             handler.on_community_self_removed(&community_id);
@@ -420,7 +421,10 @@ pub async fn refresh_control(community_id: String, handler: Arc<dyn InboundEvent
     // excluded us is a removal → tear down locally.
     if let Ok(c) = service::catch_up_server_root(&bt, &community).await {
         if !session.is_valid() { return; }
-        if c.removed { handler.on_community_self_removed(&community_id); return; }
+        if c.removed {
+            crate::log_warn!("[v1:teardown {}] catch_up_server_root says REMOVED (v1 rekey walk)", &community_id[..8.min(community_id.len())]);
+            handler.on_community_self_removed(&community_id); return;
+        }
     }
     if !session.is_valid() { return; }
     let community = crate::db::community::load_community(&CommunityId(id_bytes)).ok().flatten().unwrap_or(community);
@@ -429,6 +433,7 @@ pub async fn refresh_control(community_id: String, handler: Arc<dyn InboundEvent
     // Banned by the just-folded banlist → torn down, nothing more to do.
     if let Some(c) = crate::db::community::load_community(&CommunityId(id_bytes)).ok().flatten() {
         if service::am_i_banned(&c) {
+            crate::log_warn!("[v1:teardown {}] am_i_banned on the v1 refresh path", &community_id[..8.min(community_id.len())]);
             handler.on_community_self_removed(&community_id);
             return;
         }
