@@ -68,11 +68,11 @@ pub fn test_release_drive_claim(cid: &str) {
     DRIVE_INFLIGHT.lock().unwrap_or_else(|e| e.into_inner()).remove(cid);
 }
 
-/// When the owner-side migration wizard unlocks: 2026-07-30 00:00:00 UTC. Gates ONLY the
+/// When the owner-side migration wizard unlocks: 2026-08-04 00:00:00 UTC. Gates ONLY the
 /// wizard (UI row + command entry); the member-side machinery is live from release day, so
 /// a migration performed by a lock-bypassing build still carries every member along. A
 /// coordination gate, not a security gate.
-pub const MIGRATION_UNLOCK_AT: u64 = 1_785_369_600;
+pub const MIGRATION_UNLOCK_AT: u64 = 1_785_801_600;
 
 /// Bound on the whole tombstone content string before any parse. The outer NIP-44 seal
 /// caps its plaintext at 65535 bytes, so anything larger is garbage by construction.
