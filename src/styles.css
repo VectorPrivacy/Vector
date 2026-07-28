@@ -11195,8 +11195,6 @@ select:disabled:hover {
   box-sizing: border-box;
   min-height: 0; /* Critical for flex children with overflow */
   padding: 6px;
-  border-radius: 8px;
-  border: 1px solid rgba(57, 57, 57, 0.5);
 }
 
 .create-group-footer {
@@ -11258,9 +11256,44 @@ select:disabled:hover {
   margin-right: 40px;
 }
 
+/* Status line rides ABOVE the buttons and reveals smoothly (mirrors .cmt-status):
+   content-driven — JS only sets textContent, empty collapses shut. */
 .create-group-footer .chat-contact-status {
   width: 100%;
   text-align: center;
+  font-size: 13px;
+  font-style: normal;
+  opacity: 0;
+  max-height: 0;
+  margin: 0;
+  overflow: hidden;
+  transition: max-height 0.25s ease, opacity 0.2s ease, margin 0.25s ease;
+}
+.create-group-footer .chat-contact-status:not(:empty) {
+  opacity: 0.85;
+  max-height: 60px;
+  margin: 0 0 8px;
+}
+/* Selection-counter pill: two-user glyph + count in a soft capsule */
+.create-group-selection-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 14px 5px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+}
+.cg-pill-glyph {
+  position: relative; /* the absolute base .icon fills THIS box, not an ancestor */
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+.cg-pill-glyph .icon {
+  width: 100%;
+  height: 100%;
+  background-color: var(--icon-color-primary);
 }
 
 /* Create Group Avatar Picker */
@@ -11285,11 +11318,15 @@ select:disabled:hover {
   opacity: 1;
 }
 .create-group-avatar-placeholder {
-  /* The SVG carries its own disc — sizing it down would draw a second ring */
+  /* The SVG carries its own disc — sizing it down would draw a second ring.
+     Grayed until a real image is picked; the mint accent belongs to the (+). */
   width: 100%;
   height: 100%;
   object-fit: cover;
   border-radius: 50%;
+  /* contrast<1 pulls toward mid-gray: lifts the near-black disc into a visible
+     gray while dimming the mint glyph — two tones from one shared SVG */
+  filter: grayscale(1) contrast(0.7) brightness(0.5);
 }
 .create-group-avatar-preview {
   width: 100%;
@@ -11299,19 +11336,19 @@ select:disabled:hover {
 }
 .create-group-avatar-edit {
   position: absolute;
-  bottom: 2px;
-  right: 2px;
-  width: 22px;
-  height: 22px;
+  bottom: -1px;
+  right: -1px;
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
-  background-color: rgba(0, 0, 0, 0.7);
+  background-color: rgba(0, 0, 0, 0.85);
   display: flex;
   align-items: center;
   justify-content: center;
 }
 .create-group-avatar-edit .icon {
-  width: 14px;
-  height: 14px;
+  width: 19px;
+  height: 19px;
   background-color: var(--icon-color-primary);
 }
 
@@ -11349,12 +11386,14 @@ select:disabled:hover {
   font-size: 12px;
   font-weight: 600;
   color: #ff2e88;
-  opacity: 0.9;
+  opacity: 0;
+  transition: opacity 0.2s ease;
   pointer-events: none;
 }
-/* The hint clears the moment a name exists */
-.create-group-name-wrap input:not(:placeholder-shown) + .create-group-name-required {
-  display: none;
+/* The hint surfaces only once members are picked (JS toggles .needs-name) while
+   the name is still empty — and fades the moment a name exists */
+.create-group-name-wrap.needs-name input:placeholder-shown + .create-group-name-required {
+  opacity: 0.9;
 }
 
 /* Disable resize grip on touch devices (Android WebView renders it as a broken 1px dot) */

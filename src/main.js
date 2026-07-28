@@ -13157,11 +13157,6 @@ let arrSelectedGroupMembers = [];
 let arrSelectedGroupAdmins = [];
 /** Path to the selected group avatar image file (null if none selected) */
 let strCreateGroupAvatarPath = null;
-/**
- * Tracks whether the user attempted to create the group.
- * Used to only show inline validation after an explicit attempt.
- */
-let fCreateGroupAttempt = false;
 
 
 /**
@@ -13265,7 +13260,8 @@ function renderCreateGroupList(filterText = '') {
             } else {
                 arrSelectedGroupMembers.push(npub);
             }
-            updateCreateGroupValidation(true);
+            updateCreateGroupValidation();
+            updateCreateGroupSelectionStatus();
             const currentFilter = domCreateGroupFilter?.value || '';
             renderCreateGroupList(currentFilter);
         });
@@ -13312,9 +13308,10 @@ function renderCreateGroupList(filterText = '') {
 }
 
 /**
- * Enable/disable Create button and show inline hint
+ * Enable/disable the Create button (the Required* tag on the name field is the
+ * only "name missing" signal — no inline hint).
  */
-function updateCreateGroupValidation(showInline = false) {
+function updateCreateGroupValidation() {
     if (!domCreateGroupCreateBtn) return;
     // A Community needs only a name — picking contacts to invite is optional, so there's
     // no member-selection requirement.
@@ -13326,19 +13323,20 @@ function updateCreateGroupValidation(showInline = false) {
     } else {
         domCreateGroupCreateBtn.setAttribute('disabled', '');
     }
+}
 
-    // Only show status after an explicit attempt, or when forced via parameter
-    const shouldShow = showInline || fCreateGroupAttempt;
-
-    if (domCreateGroupStatus) {
-        if (shouldShow && !nameOk) {
-            domCreateGroupStatus.style.display = '';
-            domCreateGroupStatus.textContent = 'A name is required';
-        } else {
-            domCreateGroupStatus.style.display = 'none';
-            domCreateGroupStatus.textContent = '';
-        }
-    }
+/**
+ * The footer status doubles as a selection counter — a "{N} User[s] Selected"
+ * pill — sliding open/shut with the selection. Create progress/errors overwrite it.
+ */
+function updateCreateGroupSelectionStatus() {
+    const n = arrSelectedGroupMembers.length;
+    // The Required* hint earns its urgency only once members are picked without a name.
+    document.querySelector('.create-group-name-wrap')?.classList.toggle('needs-name', n > 0);
+    if (!domCreateGroupStatus) return;
+    domCreateGroupStatus.innerHTML = n
+        ? `<span class="create-group-selection-pill"><span class="cg-pill-glyph"><span class="icon icon-users-multi"></span></span>${n} User${n === 1 ? '' : 's'} Selected</span>`
+        : '';
 }
 
 /**
@@ -13357,13 +13355,9 @@ function openCreateGroup() {
     arrSelectedGroupMembers = [];
     arrSelectedGroupAdmins = [];
     strCreateGroupAvatarPath = null;
-    fCreateGroupAttempt = false;
     if (domCreateGroupName) domCreateGroupName.value = '';
     if (domCreateGroupFilter) domCreateGroupFilter.value = '';
-    if (domCreateGroupStatus) {
-        domCreateGroupStatus.style.display = 'none';
-        domCreateGroupStatus.textContent = '';
-    }
+    updateCreateGroupSelectionStatus(); // clears the pill + the needs-name hint state
     // Reset avatar picker
     if (domCreateGroupAvatarPreview) {
         domCreateGroupAvatarPreview.style.display = 'none';
@@ -13389,7 +13383,6 @@ function openCreateGroup() {
 async function closeCreateGroup() {
     popBack('create-group');
     domCreateGroup.style.display = 'none';
-    fCreateGroupAttempt = false;
 
     // Restore navbar to follow the same flow as "Start New Chat" close (see closeChat())
     domNavbar.style.display = '';
@@ -13412,7 +13405,7 @@ async function closeCreateGroup() {
 
     domCreateGroupCancelBtn.onclick = closeCreateGroup;
 
-    domCreateGroupName.oninput = () => updateCreateGroupValidation(true);
+    domCreateGroupName.oninput = () => updateCreateGroupValidation();
     domCreateGroupFilter.oninput = (e) => renderCreateGroupList(e.target.value || '');
 
     // Avatar picker: open file dialog on click
@@ -13444,14 +13437,9 @@ async function closeCreateGroup() {
 
     domCreateGroupCreateBtn.onclick = async () => {
         const name = (domCreateGroupName?.value || '').trim();
+        if (!name) return; // the button is disabled without a name; belt-and-braces
 
-        // Mark that the user attempted to create
-        fCreateGroupAttempt = true;
 
-        if (!name) {
-            updateCreateGroupValidation(true);
-            return;
-        }
 
         // Snapshot the picked direct-invite contacts now — openCreateGroup resets the array.
         const inviteeNpubs = [...arrSelectedGroupMembers];
@@ -13461,10 +13449,7 @@ async function closeCreateGroup() {
         domCreateGroupCreateBtn.textContent = 'Creating...';
         domCreateGroupCreateBtn.disabled = true;
 
-        if (domCreateGroupStatus) {
-            domCreateGroupStatus.style.display = '';
-            domCreateGroupStatus.textContent = 'Preparing devices...';
-        }
+        if (domCreateGroupStatus) domCreateGroupStatus.textContent = 'Preparing devices...';
 
         try {
             if (domCreateGroupStatus) domCreateGroupStatus.textContent = 'Creating...';
@@ -13534,10 +13519,7 @@ async function closeCreateGroup() {
         } catch (e) {
             const friendly = typeof e === 'string' ? e : (e?.message || e || '').toString();
             popupConfirm('Community creation failed', friendly, true, '', 'vector_warning.svg');
-            if (domCreateGroupStatus) {
-                domCreateGroupStatus.style.display = '';
-                domCreateGroupStatus.textContent = friendly;
-            }
+            if (domCreateGroupStatus) domCreateGroupStatus.textContent = friendly;
         } finally {
             domCreateGroupCreateBtn.textContent = prevTxt || 'Create Group';
             updateCreateGroupValidation();
