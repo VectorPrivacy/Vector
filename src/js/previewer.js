@@ -20,6 +20,7 @@ let startX = 0;
 let startY = 0;
 let lastTouchDistance = 0;
 let zoomInfoTimeout = null;
+let wheelSettleTimer = null;
 let baseWidth = 0;
 let baseHeight = 0;
 
@@ -163,12 +164,25 @@ function measureBaseSize() {
 }
 
 /**
+ * Center the image's visual box in the container at the current scale/rotation.
+ */
+function centerImage() {
+    const odd = (((rotation % 360) + 360) % 360) % 180 !== 0;
+    const effW = (odd ? baseHeight : baseWidth) * scale;
+    const effH = (odd ? baseWidth : baseHeight) * scale;
+    translateX = (viewerContainer.clientWidth - effW) / 2;
+    translateY = (viewerContainer.clientHeight - effH) / 2;
+}
+
+/**
  * Rotate the image a quarter-turn counterclockwise. The angle ACCUMULATES
  * (-90 each press, never normalized for the CSS emit) so consecutive turns
  * always interpolate the short way round instead of snapping the long way.
+ * A rotation recenters — the axes swap, so the old position is meaningless.
  */
 function rotateCCW() {
     rotation -= 90;
+    centerImage();
     updateTransform();
 }
 
@@ -215,6 +229,7 @@ function openImageViewer(imageSrc) {
     // against a cached image racing the load event)
     viewerImage.onload = () => {
         measureBaseSize();
+        centerImage(); // updateTransform only clamps now — centering is explicit
         updateTransform();
         void viewerImage.offsetWidth; // commit the settled transform before re-arming the transition
         viewerImage.style.visibility = '';
@@ -277,9 +292,20 @@ function handleKeyDown(e) {
  */
 function handleWheel(e) {
     e.preventDefault();
-    
-    const delta = e.deltaY > 0 ? 0.9 : 1.1;
-    const newScale = Math.min(Math.max(0.5, scale * delta), 5);
+
+    // Continuous-input zoom: scale by the event's ACTUAL delta. A trackpad pinch
+    // streams tiny, sign-noisy deltas — a fixed ±10% per event turned that into
+    // rapid back-and-forth lurching. Exponential mapping makes tiny deltas tiny
+    // steps; the clamp keeps one notch of a classic wheel near the old step size.
+    const dy = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 160 : 1);
+    const factor = Math.min(1.15, Math.max(0.87, Math.exp(-dy * 0.0035)));
+    const newScale = Math.min(Math.max(0.5, scale * factor), 5);
+
+    // The 0.1s transition fights a high-frequency stream (every event retargets
+    // the animation → rubber-banding). Off while zooming, re-armed once quiet.
+    viewerImage.classList.add('no-anim');
+    clearTimeout(wheelSettleTimer);
+    wheelSettleTimer = setTimeout(() => viewerImage.classList.remove('no-anim'), 150);
     
     // Get cursor position relative to the container
     const containerRect = viewerContainer.getBoundingClientRect();
@@ -348,6 +374,8 @@ function handleTouchStart(e) {
         // Stop dragging when pinching starts
         isDragging = false;
         viewerImage.classList.remove('dragging');
+        // Pinch is a continuous stream too — the transition would rubber-band it
+        viewerImage.classList.add('no-anim');
         // Two touches - prepare for pinch zoom
         e.preventDefault();
         const touch1 = e.touches[0];
@@ -415,6 +443,7 @@ function handleTouchMove(e) {
 function handleTouchEnd(e) {
     if (e.touches.length < 2) {
         lastTouchDistance = 0;
+        viewerImage.classList.remove('no-anim');
     }
     if (e.touches.length === 0) {
         isDragging = false;
@@ -435,24 +464,26 @@ function updateTransform() {
     const scaledWidth = (odd ? baseHeight : baseWidth) * scale;
     const scaledHeight = (odd ? baseWidth : baseHeight) * scale;
     
-    // Calculate bounds - when image is smaller than container, we want to center it
-    const minTranslateX = Math.min(0, containerWidth - scaledWidth);
-    const minTranslateY = Math.min(0, containerHeight - scaledHeight);
-    
+    // Per-axis: at rest (scale <= 1) a fitting axis snaps to center; while zoomed
+    // in it only CLAMPS to stay on-screen — force-centering here was overwriting
+    // the cursor-anchored position on every wheel/pinch event, so zoom always
+    // gravitated to the middle instead of the cursor.
+    const atRest = scale <= 1;
     if (scaledWidth <= containerWidth) {
-        // Keep the image centered when it is smaller than the container
-        translateX = (containerWidth - scaledWidth) / 2;
+        translateX = atRest
+            ? (containerWidth - scaledWidth) / 2
+            : Math.max(0, Math.min(containerWidth - scaledWidth, translateX));
     } else {
-        // Clamp translation so image doesn't go off-screen
-        translateX = Math.max(minTranslateX, Math.min(0, translateX));
+        // Overflowing axis: clamp so no gap opens at either edge
+        translateX = Math.max(containerWidth - scaledWidth, Math.min(0, translateX));
     }
-    
+
     if (scaledHeight <= containerHeight) {
-        // Keep the image centered when it is smaller than the container
-        translateY = (containerHeight - scaledHeight) / 2;
+        translateY = atRest
+            ? (containerHeight - scaledHeight) / 2
+            : Math.max(0, Math.min(containerHeight - scaledHeight, translateY));
     } else {
-        // Clamp translation so image doesn't go off-screen
-        translateY = Math.max(minTranslateY, Math.min(0, translateY));
+        translateY = Math.max(containerHeight - scaledHeight, Math.min(0, translateY));
     }
     
     viewerImage.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale})${rotationFix()}`;
