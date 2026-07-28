@@ -3806,7 +3806,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
                     // Bind: the content's role_id IS the coordinate; position 0 is the owner's.
                     if let Some(role) = super::roles::parse_role_content(&p.content) {
                         if role.role_id == entity_hex && role.position != 0 {
-                            role_cands.entry(entity_hex.clone()).or_default().push(AuthorityCand { role: Some(role), grant: None, author: p.author, head });
+                            role_cands.entry(entity_hex.clone()).or_default().push(AuthorityCand { role: Some(role), grant: None, author: p.author, head, citation: p.authority.clone() });
                         }
                     }
                 }
@@ -3815,7 +3815,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
                         if let Some(member) = crate::simd::hex::hex_to_bytes_32_checked(&grant.member) {
                             if super::derive::grant_locator(cid, &member) == *eid {
                                 grant.role_ids.truncate(super::roles::MAX_ROLES_PER_MEMBER);
-                                grant_cands.entry(entity_hex.clone()).or_default().push(AuthorityCand { role: None, grant: Some(grant), author: p.author, head });
+                                grant_cands.entry(entity_hex.clone()).or_default().push(AuthorityCand { role: None, grant: Some(grant), author: p.author, head, citation: p.authority.clone() });
                             }
                         }
                     }
@@ -3831,7 +3831,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
     let empty: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     // Preliminary roster (bans not yet applied) — the authority view the banlist head
     // is judged against.
-    let (prelim, _) = select_authorized(&role_cands, &grant_cands, owner_hex.as_deref(), &empty);
+    let (prelim, _) = select_authorized(cid, &role_cands, &grant_cands, owner_hex.as_deref(), &empty);
 
     // Banlist (CORD-04 §4), folded AUTHORITY-aware so its two anti-roster hazards are
     // both closed:
@@ -3905,7 +3905,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
     // Final roster (CORD-04 §4: a banned npub vanishes — every edition it authored is
     // dropped, and a grant TO a banned member carries no rank). Re-run selection with
     // the banned set excluded so a banned admin loses authority.
-    let (mut authorized, mut heads) = select_authorized(&role_cands, &grant_cands, owner_hex.as_deref(), &banned);
+    let (mut authorized, mut heads) = select_authorized(cid, &role_cands, &grant_cands, owner_hex.as_deref(), &banned);
     if let Some(bh) = banlist_head {
         heads.push(bh);
     }
@@ -3932,6 +3932,42 @@ struct AuthorityCand {
     grant: Option<crate::community::roles::MemberGrant>,
     author: PublicKey,
     head: FoldedHead,
+    /// The `vac` this edition carried (CORD-04 §5). `None` for an owner edition
+    /// (supreme, cites nothing) or an uncited one — the latter is refused.
+    citation: Option<crate::community::edition::AuthorityCitation>,
+}
+
+/// CORD-04 §5 sync floor, resolved against the heads THIS fold pass has accepted.
+///
+/// Deliberately not the persisted-head helper the kick/hide paths use: this IS the
+/// pass that establishes those heads, so an external floor would refuse every
+/// non-owner edition on a bootstrap and the roster could never fold. Same rule the
+/// spec gives for a dangling `prev` across a Refounding — a fresh joiner takes the
+/// authority-verified head as its baseline, a tracking client fails closed per
+/// entity — applied to the citation instead of the chain link.
+fn citation_ok_in_fold(
+    cid: &crate::community::CommunityId,
+    heads: &[FoldedHead],
+    owner_hex: Option<&str>,
+    author: &PublicKey,
+    citation: Option<&crate::community::edition::AuthorityCitation>,
+) -> bool {
+    let actor_hex = author.to_hex();
+    if owner_hex == Some(actor_hex.as_str()) {
+        return true;
+    }
+    let grant_hex = crate::simd::hex::bytes_to_hex_32(&super::derive::grant_locator(cid, &author.to_bytes()));
+    let as_entity: Vec<crate::community::roster::EntityHead> = heads
+        .iter()
+        .map(|h| crate::community::roster::EntityHead {
+            entity_hex: h.entity_hex.clone(),
+            version: h.version,
+            self_hash: h.self_hash,
+            inner_id: h.inner_id,
+            citation: None,
+        })
+        .collect();
+    crate::community::roster::authority_citation_satisfied(&as_entity, owner_hex, &actor_hex, &grant_hex, citation)
 }
 
 /// The owner-seeded delegation fixpoint (CORD-04 §1/§2), author-AWARE: per entity it
@@ -3943,6 +3979,7 @@ struct AuthorityCand {
 /// authorized roster plus the per-entity heads of the SELECTED editions (the floor
 /// advances only to authorized heads — an unauthorized forgery never poisons it).
 fn select_authorized(
+    cid: &crate::community::CommunityId,
     role_cands: &std::collections::BTreeMap<String, Vec<AuthorityCand>>,
     grant_cands: &std::collections::BTreeMap<String, Vec<AuthorityCand>>,
     owner_hex: Option<&str>,
@@ -3997,6 +4034,9 @@ fn select_authorized(
                             continue;
                         }
                     }
+                    if !citation_ok_in_fold(cid, &heads, owner_hex, &c.author, c.citation.as_ref()) {
+                        continue;
+                    }
                     admissible.insert(c.head.self_hash);
                     standing = Some(role.position);
                     break;
@@ -4023,6 +4063,9 @@ fn select_authorized(
                 // accepted roster) AND the member — the escalation defense (CORD-04 §2).
                 let positions: Option<Vec<u32>> = grant.role_ids.iter().map(|rid| accepted.role(rid).map(|r| r.position)).collect();
                 let Some(positions) = positions else { continue };
+                if !citation_ok_in_fold(cid, &heads, owner_hex, &c.author, c.citation.as_ref()) {
+                    continue;
+                }
                 if positions.iter().all(|p| accepted.can_act_on_position(&ah, owner_hex, *p, Permissions::MANAGE_ROLES))
                     && accepted.can_act_on_member(&ah, owner_hex, &grant.member, Permissions::MANAGE_ROLES)
                 {
@@ -8479,7 +8522,7 @@ mod tests {
             .iter()
             .map(|r| rekey::build_blob_local(rotator.secret_key(), &rotator.public_key().to_bytes(), r, RekeyScope::Root, new_epoch, new_root).unwrap())
             .collect();
-        let events = rekey::build_rekey_chunks_local(rotator, &group, RekeyScope::Root, new_epoch, prev_epoch, &prev_commit, &blobs, 2_000, None).unwrap();
+        let events = rekey::build_rekey_chunks_local(rotator, &group, RekeyScope::Root, new_epoch, prev_epoch, &prev_commit, &blobs, 2_000, my_authority_citation(community, &rotator.public_key()).as_ref()).unwrap();
         for e in &events {
             relay.publish(e, &community.relays).await.unwrap();
         }
@@ -8737,7 +8780,7 @@ mod tests {
         let g2 = channel_rekey_group_key(&community.community_root, &priv_id, Epoch(2));
         let me_pk = crate::state::MY_SECRET_KEY.to_keys().unwrap().public_key();
         let blob = rekey::build_blob_local(admin.secret_key(), &admin.public_key().to_bytes(), &me_pk, RekeyScope::Channel(priv_id), Epoch(2), &key2).unwrap();
-        for e in rekey::build_rekey_chunks_local(&admin, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob], 2_000, None).unwrap() {
+        for e in rekey::build_rekey_chunks_local(&admin, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob], 2_000, my_authority_citation(&community, &admin.public_key()).as_ref()).unwrap() {
             relay.publish(&e, &community.relays).await.unwrap();
         }
         let session = SessionGuard::capture();
@@ -8792,7 +8835,7 @@ mod tests {
         let pc = super::super::derive::epoch_key_commitment(Epoch(1), &key1);
         let g2 = channel_rekey_group_key(&held.community_root, &priv_id, Epoch(2));
         let pb = rekey::build_blob_local(peer.secret_key(), &peer.public_key().to_bytes(), &peer.public_key(), RekeyScope::Channel(priv_id), Epoch(2), &key2).unwrap();
-        for e in rekey::build_rekey_chunks_local(&peer, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[pb], 2_000, None).unwrap() {
+        for e in rekey::build_rekey_chunks_local(&peer, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[pb], 2_000, my_authority_citation(&held, &peer.public_key()).as_ref()).unwrap() {
             bed.relay.publish(&e, &held.relays).await.unwrap();
         }
         let session = SessionGuard::capture();
@@ -9080,7 +9123,7 @@ mod tests {
         let key_b = [0xFB; 32]; // higher — a's must win regardless of publish order
         for (signer, k) in [(&a, &key_a), (&b, &key_b)] {
             let blob = rekey::build_blob_local(signer.secret_key(), &signer.public_key().to_bytes(), &me_pk, RekeyScope::Channel(priv_id), Epoch(2), k).unwrap();
-            for e in rekey::build_rekey_chunks_local(signer, &group, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob], 2_000, None).unwrap() {
+            for e in rekey::build_rekey_chunks_local(signer, &group, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob], 2_000, my_authority_citation(&community, &signer.public_key()).as_ref()).unwrap() {
                 relay.publish(&e, &community.relays).await.unwrap();
             }
         }
@@ -9762,6 +9805,75 @@ mod tests {
         assert!(
             !stored_memberlist(&community).unwrap().contains(&m),
             "the memberlist excludes an un-caught-up member — why it can't gate a kick"
+        );
+    }
+
+    /// Publish an edition CITING a specific grant version (CORD-04 §5's `vac`).
+    async fn publish_grant_citing(
+        relay: &MemoryRelay,
+        community: &CommunityV2,
+        signer: &Keys,
+        member: &PublicKey,
+        role_ids: Vec<String>,
+        version: u64,
+        citation: Option<&crate::community::edition::AuthorityCitation>,
+    ) {
+        let group = control_group_key(&community.community_root, community.id(), community.root_epoch);
+        let eid = crate::community::v2::derive::grant_locator(community.id(), &member.to_bytes());
+        let prev = head_hash_on_relay(relay, community, &eid).await;
+        let grant = MemberGrant { member: member.to_hex(), role_ids };
+        let content = crate::community::v2::roles::grant_content_json(&grant).unwrap();
+        let rumor = control::build_edition_rumor(signer.public_key(), vsk::GRANT, &eid, version, prev.as_ref(), &content, 1_000, citation);
+        let (wrap, _) = control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(1_000)).unwrap();
+        relay.publish(&wrap, &community.relays).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_uncited_admin_edition_is_not_folded_but_a_cited_one_is() {
+        // CORD-04 §5 on the CONTROL PLANE: "a verifier won't act on the edition
+        // until it has synced at least that Grant". The citation resolves against
+        // the heads THIS fold accepted — an external floor would refuse every
+        // non-owner edition on a bootstrap and the roster could never fold.
+        let (bed, owner, admin) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Cited", bed.relays.clone(), None).await.unwrap();
+        let admin_pk = admin.keys.public_key();
+        let rid = "c3".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::admin().0), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &admin_pk, vec![rid.clone()], 1).await;
+
+        // The admin grants a bystander, citing NOTHING.
+        // A LOWER role (position 5) — an admin at position 1 may grant beneath
+        // themselves but never at their own rank (equal cannot act on equal).
+        let low_rid = "c4".repeat(32);
+        let mut low = admin_role(&low_rid, Permissions::admin().0);
+        low.position = 5;
+        publish_role(&bed.relay, &community, &owner.keys, &low, 1).await;
+
+        let bystander = Keys::generate().public_key();
+        publish_grant_citing(&bed.relay, &community, &admin.keys, &bystander, vec![low_rid.clone()], 1, None).await;
+        let view = fetch_authority(&bed.relay, &community).await;
+        assert!(
+            !view.roles.grants.iter().any(|g| g.member == bystander.to_hex()),
+            "an uncited non-owner edition is not folded"
+        );
+        // The owner's own editions still fold — supreme cites nothing.
+        assert!(view.roles.is_admin(&admin_pk.to_hex()), "the owner-authored grant folds");
+
+        // Same edition, now citing the admin's real grant: honored. (follow_control
+        // is what PERSISTS the folded heads a citation is built from.)
+        let _ = follow_control(&bed.relay, &community, &SessionGuard::capture()).await;
+        let entity_id = crate::community::v2::derive::grant_locator(community.id(), &admin_pk.to_bytes());
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let entity_hex = crate::simd::hex::bytes_to_hex_32(&entity_id);
+        let (version, edition_hash) = crate::db::community::get_edition_head(&cid_hex, &entity_hex).unwrap().unwrap();
+        let cite = crate::community::edition::AuthorityCitation { entity_id, version, edition_hash };
+        publish_grant_citing(&bed.relay, &community, &admin.keys, &bystander, vec![low_rid], 2, Some(&cite)).await;
+
+        let view = fetch_authority(&bed.relay, &community).await;
+        assert!(
+            view.roles.grants.iter().any(|g| g.member == bystander.to_hex()),
+            "the same edition WITH its synced citation folds"
         );
     }
 

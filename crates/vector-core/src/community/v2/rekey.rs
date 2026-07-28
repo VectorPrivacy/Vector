@@ -331,6 +331,9 @@ pub struct RekeyChunk {
     /// This chunk's `(i, n)` — 1-based, `i <= n`.
     pub chunk: (u32, u32),
     pub blobs: Vec<RekeyBlob>,
+    /// The rotator's `vac` (CORD-06 §Authority: "a rotation cites the Grant it
+    /// acts under like any authority action"). `None` when the owner rotates.
+    pub citation: Option<crate::community::edition::AuthorityCitation>,
 }
 
 /// The key that groups chunks of ONE rotation: `(rotator, scope_id, new_epoch,
@@ -528,6 +531,7 @@ pub fn parse_rekey_chunk(opened: &OpenedStream) -> Result<RekeyChunk, RekeyError
         prev_commit,
         chunk: (chunk_i, chunk_n),
         blobs,
+        citation: crate::community::edition::AuthorityCitation::from_tags(&rumor.tags),
     })
 }
 
@@ -580,6 +584,9 @@ pub struct Rotation {
     pub declared_chunks: u32,
     /// Distinct chunk indices actually held.
     pub held_chunks: std::collections::BTreeSet<u32>,
+    /// The rotator's `vac`, taken from the first chunk seen (every chunk of one
+    /// rotation carries the same citation — they share a signer and an action).
+    pub citation: Option<crate::community::edition::AuthorityCitation>,
 }
 
 impl Rotation {
@@ -625,6 +632,7 @@ pub fn collect_rotations(chunks: &[RekeyChunk]) -> Vec<Rotation> {
             blobs: Vec::new(),
             declared_chunks: c.chunk.1,
             held_chunks: std::collections::BTreeSet::new(),
+            citation: c.citation.clone(),
         });
         if entry.held_chunks.insert(c.chunk.0) {
             entry.blobs.extend(c.blobs.iter().cloned());
@@ -1012,6 +1020,7 @@ mod tests {
             prev_commit: epoch_key_commitment(Epoch(prev_epoch), prev_key),
             chunk: (i, n),
             blobs,
+            citation: None,
         }
     }
 
