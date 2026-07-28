@@ -4430,6 +4430,17 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
     let roster = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
     let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
     let me_hex = my_pk.to_hex();
+    // CORD-06 §Authority: "a rotation cites the Grant it acts under like any
+    // authority action (CORD-04's `vac`), so a just-demoted admin's rotation is
+    // never honored by a lagging client." Persisted heads ARE the right floor
+    // here (unlike the roster fold, which must resolve in-pass): a rotation is
+    // judged against a roster we already folded, and `follow_control` — v2's only
+    // roster writer — persists the heads in the same pass it writes the roster.
+    // A joiner who sees a rotation before folding control simply parks it and
+    // heals on the next follow, which runs control first.
+    let cited_ok = |rot: &rekey::Rotation| -> bool {
+        citation_is_synced(&cid_hex, &owner_hex, &rot.rotator.to_hex(), rot.citation.as_ref())
+    };
     let channel_rotator_ok = |rotator: &PublicKey| -> bool {
         if *rotator == owner {
             return true;
@@ -4526,7 +4537,7 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
             // Recoverable via a fresh bundle; an insider with MANAGE_CHANNELS can
             // exclude the member outright anyway, so the marginal harm is the wedge
             // outliving their demotion.
-            match advance_scope(&batches, RekeyScope::Channel(cid), &channel_rotator_ok, &channel_rotator_outranks_me, &|_r: &rekey::Rotation| true, &signer, &my_xonly, next).await {
+            match advance_scope(&batches, RekeyScope::Channel(cid), &channel_rotator_ok, &channel_rotator_outranks_me, &cited_ok, &signer, &my_xonly, next).await {
                 Advance::Adopt { new_key } => {
                     if let Some(ch) = cur.channels.iter_mut().find(|c| c.id.0 == cid.0) {
                         ch.key = Some(new_key);
@@ -4585,6 +4596,12 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
             let base_admissible = |r: &rekey::Rotation| -> bool {
                 if r.rotator == owner {
                     return true; // the owner is supreme.
+                }
+                // Uncited (or citing a Grant we haven't synced) → skip entirely:
+                // neither adopt nor conclude a removal, exactly like an
+                // unauthorized rotation. It parks and heals on the next follow.
+                if !cited_ok(r) {
+                    return false;
                 }
                 let rotator_hex = r.rotator.to_hex();
                 let has_blob = |xonly: &[u8; 32]| {
@@ -8772,7 +8789,7 @@ mod tests {
             roles: vec![role.clone()],
             grants: vec![MemberGrant { member: admin.public_key().to_hex(), role_ids: vec![role.role_id.clone()] }],
         };
-        crate::db::community::set_community_roles(&cid_hex, &roster, 1_000).unwrap();
+        seed_roster_with_heads(&community, &roster, 1_000);
 
         // The ADMIN rotates the channel 1 → 2, delivering to me: adopted.
         let key2 = [0x92; 32];
@@ -9088,6 +9105,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_uncited_admin_rotation_is_not_adopted() {
+        // CORD-06 §Authority: "a rotation cites the Grant it acts under like any
+        // authority action, so a just-demoted admin's rotation is never honored by
+        // a lagging client." An uncited rotation is skipped entirely — neither
+        // adopted nor allowed to conclude a removal.
+        use crate::community::roles::{CommunityRoles, MemberGrant, Role};
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let mut community = create_community(&relay, "Uncited", vec!["wss://r".into()], None).await.unwrap();
+        let priv_id = ChannelId([0x8A; 32]);
+        let key1 = [0x93; 32];
+        add_private_channel(&mut community, priv_id, key1, Epoch(1));
+
+        let admin = Keys::generate();
+        let role = Role::admin("cf".repeat(32));
+        let roster = CommunityRoles {
+            roles: vec![role.clone()],
+            grants: vec![MemberGrant { member: admin.public_key().to_hex(), role_ids: vec![role.role_id.clone()] }],
+        };
+        seed_roster_with_heads(&community, &roster, 1_000);
+
+        let key2 = [0x94; 32];
+        let pc = super::super::derive::epoch_key_commitment(Epoch(1), &key1);
+        let g2 = channel_rekey_group_key(&community.community_root, &priv_id, Epoch(2));
+        let me_pk = crate::state::MY_SECRET_KEY.to_keys().unwrap().public_key();
+        let blob = rekey::build_blob_local(admin.secret_key(), &admin.public_key().to_bytes(), &me_pk, RekeyScope::Channel(priv_id), Epoch(2), &key2).unwrap();
+        // Authorized admin, correct continuity, my blob present — but NO citation.
+        for e in rekey::build_rekey_chunks_local(&admin, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob], 2_000, None).unwrap() {
+            relay.publish(&e, &community.relays).await.unwrap();
+        }
+
+        let out = follow_rekeys(&relay, &community, &SessionGuard::capture()).await.unwrap();
+        assert!(out.updated.is_none(), "an uncited rotation is not adopted");
+
+        // The SAME rotation, cited, is adopted — proving the refusal was the
+        // citation and not the rank or the continuity.
+        let cited = my_authority_citation(&community, &admin.public_key());
+        assert!(cited.is_some(), "the seeded head yields a citation");
+        let blob2 = rekey::build_blob_local(admin.secret_key(), &admin.public_key().to_bytes(), &me_pk, RekeyScope::Channel(priv_id), Epoch(2), &key2).unwrap();
+        for e in rekey::build_rekey_chunks_local(&admin, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob2], 2_100, cited.as_ref()).unwrap() {
+            relay.publish(&e, &community.relays).await.unwrap();
+        }
+        let out = follow_rekeys(&relay, &community, &SessionGuard::capture()).await.unwrap();
+        assert!(out.updated.is_some(), "the cited rotation IS adopted");
+    }
+
+    #[tokio::test]
     async fn two_admins_racing_a_channel_rotation_converge_on_one_key() {
         // CORD-06 §Failure-and-races: two DISTINCT authorized rotators mint the
         // same channel epoch concurrently (reachable — both hold MANAGE_CHANNELS).
@@ -9112,7 +9176,7 @@ mod tests {
             roles: vec![role.clone()],
             grants: [&a, &b].iter().map(|k| MemberGrant { member: k.public_key().to_hex(), role_ids: vec![role.role_id.clone()] }).collect(),
         };
-        crate::db::community::set_community_roles(&cid_hex, &roster, 1_000).unwrap();
+        seed_roster_with_heads(&community, &roster, 1_000);
 
         // Both rotate 1 → 2, each delivering their OWN fresh key to me, off the
         // same prevcommit — a genuine same-epoch fork.
@@ -9806,6 +9870,21 @@ mod tests {
             !stored_memberlist(&community).unwrap().contains(&m),
             "the memberlist excludes an un-caught-up member — why it can't gate a kick"
         );
+    }
+
+    /// Seed a roster the way production does: `follow_control` writes the roster
+    /// AND the folded edition heads in one pass, so a citation against a grant is
+    /// resolvable. Seeding the roster alone yields a client that can never satisfy
+    /// any `vac` — a shape no v2 production path produces.
+    fn seed_roster_with_heads(community: &CommunityV2, roster: &crate::community::roles::CommunityRoles, at: i64) {
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        crate::db::community::set_community_roles(&cid_hex, roster, at).unwrap();
+        for g in &roster.grants {
+            let Some(m) = crate::simd::hex::hex_to_bytes_32_checked(&g.member) else { continue };
+            let eid = super::super::derive::grant_locator(community.id(), &m);
+            let entity_hex = crate::simd::hex::bytes_to_hex_32(&eid);
+            crate::db::community::set_edition_head_at_epoch(&cid_hex, &entity_hex, 1, &[0xA1; 32], &[0xA2; 32], community.root_epoch.0).unwrap();
+        }
     }
 
     /// Publish an edition CITING a specific grant version (CORD-04 §5's `vac`).
