@@ -3338,16 +3338,19 @@ async function setupRustListeners() {
         // Mark sync as complete - this allows real-time messages to be cached
         fSyncComplete = true;
         
-        // Fade out the sync line
-        domSyncLine.classList.remove('active', 'progress');
-        domSyncLine.style.removeProperty('--sync-progress');
+        // Retract to the centre — the mirror of the reveal. `progress` is kept for
+        // the duration so the bar doesn't flash back to full width before shrinking
+        // (dropping the mask restores the whole line instantly); only `active` goes,
+        // to stop the pulse.
+        domSyncLine.classList.remove('active');
         domSyncLine.classList.add('fade-out');
 
-        // Wait for fade animation to complete, then reset
+        // Matches the 0.4s retract — clearing early left the class dangling mid-animation.
         setTimeout(() => {
-            domSyncLine.classList.remove('fade-out');
+            domSyncLine.classList.remove('fade-out', 'progress');
+            domSyncLine.style.removeProperty('--sync-progress');
             if (!strOpenChat) adjustSize();
-        }, 300);
+        }, 400);
     });
 
     // Listen for Synchronisation Progress updates
@@ -3356,17 +3359,19 @@ async function setupRustListeners() {
         // meant it never showed a bar for the fastest, most common sync. Only the
         // layout reflow below needs the gate.
         const { mode, current, total } = evt.payload || {};
+        // `active` is the centre reveal and carries BOTH modes — a determinate sync
+        // (the common one, since the quick phase runs inside boot) used to jump
+        // straight to `progress` and grow out of the left edge instead.
+        domSyncLine.classList.remove('fade-out');
+        domSyncLine.classList.add('active');
         if (mode === 'Syncing' && current && total) {
-            // Determinate progress bar: fill left-to-right
-            domSyncLine.classList.remove('active', 'fade-out');
+            // Determinate: fill left-to-right within the revealed line (mask).
             domSyncLine.classList.add('progress');
             domSyncLine.style.setProperty('--sync-progress', Math.min(current / total, 1));
         } else {
-            // Indeterminate pulse (reconciliation phase — total unknown)
-            if (!domSyncLine.classList.contains('active')) {
-                domSyncLine.classList.remove('fade-out', 'progress');
-                domSyncLine.classList.add('active');
-            }
+            // Indeterminate pulse (reconciliation phase — total unknown).
+            domSyncLine.classList.remove('progress');
+            domSyncLine.style.removeProperty('--sync-progress');
         }
         if (!fInit && !strOpenChat) adjustSize();
     });

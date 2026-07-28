@@ -9506,11 +9506,21 @@ select:disabled:hover {
   animation: pulse-sync 1.5s ease-in-out infinite 0.4s;
 }
 
+/* Determinate fill rides a MASK, not the transform — `scaleX` stays reserved for
+   the centre reveal/retract, so a determinate sync still opens from the middle
+   instead of growing out of the left edge. `mask-size` is animatable; a
+   gradient colour-stop driven by the variable is not. */
 .sync-line.progress {
-  transform-origin: left;
-  transform: scaleX(var(--sync-progress, 0));
   animation: none;
-  transition: transform 0.3s ease-out;
+  -webkit-mask-image: linear-gradient(#000, #000);
+  mask-image: linear-gradient(#000, #000);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-size: calc(var(--sync-progress, 0) * 100%) 100%;
+  mask-size: calc(var(--sync-progress, 0) * 100%) 100%;
+  transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1),
+              -webkit-mask-size 0.3s ease-out,
+              mask-size 0.3s ease-out;
 }
 
 .sync-line.fade-out {
