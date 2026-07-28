@@ -1074,18 +1074,13 @@ pub(crate) fn proven_owner_hex(community: &Community) -> Option<String> {
 /// (`publish_owner_hide`) and the UI affordance (`get_message_delete_options`) call it, so the
 /// button shown can never disagree with what the publish will actually allow.
 pub fn can_moderation_hide(community: &Community, actor_hex: &str, author_hex: &str) -> bool {
-    // Normalize both identities to hex first. Callers pass a message's stored npub, which Concord
-    // persists as BECH32 (`opened.author.to_bech32()`), whereas the owner (`proven_owner_hex`) and the
-    // roster grants are keyed by lowercase HEX. A raw bech32 author matched NEITHER — it skipped
-    // owner-protection (`owner_hex == target_hex` is hex≠bech32) AND missed the roster position lookup
-    // (defaulting to u32::MAX, the lowest rank), so an admin wrongly "outranked" and could hide the
-    // owner. The enforcing `apply_delete` path avoids this by normalizing the same way (PublicKey::parse).
-    let to_hex = |s: &str| nostr_sdk::prelude::PublicKey::parse(s).map(|pk| pk.to_hex()).unwrap_or_else(|_| s.to_string());
-    let actor = to_hex(actor_hex);
-    let author = to_hex(author_hex);
-    let owner = proven_owner_hex(community);
+    // The owner comes from the in-hand struct rather than a re-read, but everything after it is the
+    // shared predicate — a v2 row loaded through this v1 struct carries no attestation, and resolving
+    // its owner as None both strips the owner's supremacy and exposes them as a target.
+    let owner = proven_owner_hex(community)
+        .or_else(|| super::moderation::owner_hex(&community.id.to_hex()));
     let roster = crate::db::community::get_community_roles(&community.id.to_hex()).unwrap_or_default();
-    roster.can_act_on_member(&actor, owner.as_deref(), &author, super::roles::Permissions::MANAGE_MESSAGES)
+    super::moderation::can_hide(owner.as_deref(), &roster, actor_hex, author_hex)
 }
 
 /// Rekey-plane authority with §6 banlist precedence: a positive authority

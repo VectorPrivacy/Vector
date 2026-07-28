@@ -212,9 +212,14 @@ pub fn build_reaction_rumor(
     stream::build_rumor_ms(kind::REACTION, author, emoji_content, tags, at_ms)
 }
 
-/// Build a kind-5 delete rumor (NIP-09): `e` = the author's OWN rumor id,
-/// `k` = its kind. Semantic within the plane only — members stop rendering;
-/// the wrap ciphertext on relays needs a separate NIP-09 scrub by its `p` tag.
+/// Build a kind-5 delete rumor (NIP-09): `e` = the target rumor id, `k` = its
+/// kind. Semantic within the plane only — members stop rendering; the wrap
+/// ciphertext on relays needs a separate NIP-09 scrub by its `p` tag.
+///
+/// `citation` is the moderator's `vac` (CORD-04 §5) when this deletes SOMEONE
+/// ELSE's message: peers resolve the removal against that exact Grant version.
+/// A self-delete carries none, and neither does the owner (supreme, no grant to
+/// cite) — so an absent `vac` never widens what a delete may reach.
 pub fn build_delete_rumor(
     author: PublicKey,
     channel_id: &ChannelId,
@@ -222,6 +227,7 @@ pub fn build_delete_rumor(
     target_rumor_id_hex: &str,
     target_kind: u16,
     at_ms: u64,
+    citation: Option<&crate::community::edition::AuthorityCitation>,
 ) -> UnsignedEvent {
     let mut tags = stream::channel_binding_tags(channel_id, epoch);
     tags.push(Tag::custom("e", [target_rumor_id_hex.to_string()]));
@@ -229,6 +235,9 @@ pub fn build_delete_rumor(
         "k",
         [target_kind.to_string()],
     ));
+    if let Some(c) = citation {
+        tags.push(c.to_tag());
+    }
     stream::build_rumor_ms(kind::DELETE, author, "", tags, at_ms)
 }
 
@@ -882,7 +891,7 @@ mod tests {
     #[test]
     fn delete_round_trip_and_optional_target_kind() {
         let author = Keys::generate();
-        let rumor = build_delete_rumor(author.public_key(), &chan(), Epoch(0), &"cd".repeat(32), kind::MESSAGE, AT);
+        let rumor = build_delete_rumor(author.public_key(), &chan(), Epoch(0), &"cd".repeat(32), kind::MESSAGE, AT, None);
         let ChatEvent::Delete { target, target_kind, .. } = open(&seal(&rumor, &author)).unwrap() else {
             panic!("expected a Delete");
         };

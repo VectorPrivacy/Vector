@@ -2235,6 +2235,11 @@ pub async fn debug_v2_community_state(community_id: String) -> Result<serde_json
         .into_iter()
         .map(|p| p.to_hex())
         .collect();
+    // The live sub's ACTUAL author set vs this community's derived planes: a
+    // rotation that outran the re-subscribe shows here as sub_covers=false —
+    // otherwise it only shows as silently missing live events.
+    let subscribed = vector_core::community::v2::realtime::subscribed_author_set().await;
+    let sub_covers = plane_authors.iter().all(|a| subscribed.contains(a));
     let floors: Vec<serde_json::Value> = vector_core::db::community::get_all_edition_heads_epoched(&cid_hex)
         .unwrap_or_default()
         .into_iter()
@@ -2253,6 +2258,8 @@ pub async fn debug_v2_community_state(community_id: String) -> Result<serde_json
         "relays": c.relays,
         "channels": channels,
         "plane_authors": plane_authors,
+        "sub_covers": sub_covers,
+        "subscribed_authors": subscribed,
         "edition_floors": floors,
         "guestbook": { "events": guestbook_events.len(), "cursor": guestbook_cursor },
     }))
@@ -3135,54 +3142,16 @@ pub async fn revoke_reaction(reaction_id: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Owner moderation-hide: permanently hide ANY member's message (cooperative — honest clients
-/// drop it because the 3305 carries the owner's real-npub signature, re-verified against the roster).
-/// No undo. Owner-only (enforced by `publish_owner_hide` via the roster MANAGE_MESSAGES check).
+/// Moderation-hide: permanently remove ANY member's message you hold authority over
+/// (cooperative — honest clients drop it because the delete carries the actor's real-npub
+/// signature, re-verified against the roster). No undo. Gated on MANAGE_MESSAGES + a strict
+/// outrank in vector-core, which both protocols share.
 #[tauri::command]
 pub async fn hide_community_message(channel_id: String, message_id: String) -> Result<(), String> {
-    let session = vector_core::state::SessionGuard::capture();
-    if !session.is_valid() {
-        return Err("account changed during hide".to_string());
-    }
-    let community_id = vector_core::db::community::community_id_for_channel(&channel_id)?
-        .ok_or("Unknown Community channel")?;
-    let id_bytes = hex_to_id32(&community_id)?;
-    // v2 owner-hide needs a moderation grammar peers enforce (a follow-up); the
-    // v1 hide event would seal undecryptable garbage onto the v2 plane. Fail
-    // closed rather than pretend it propagated.
-    if is_v2_community(&community_id) {
-        return Err("Hiding messages is not available in this community yet.".to_string());
-    }
-    let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
-        .ok_or("Community not found")?;
-    let channel = community
-        .channels
-        .iter()
-        .find(|c| c.id.to_hex() == channel_id)
-        .ok_or("Channel not found in Community")?
-        .clone();
-    let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-    vector_core::community::service::publish_owner_hide(&transport, &community, &channel, &message_id).await?;
-    // Drop locally + tell the UI (idempotent — the cooperative echo may already have removed it).
-    // Re-check after the multi-second publish so a mid-flight account swap can't delete from the
-    // swapped-in account's STATE/DB.
-    if !session.is_valid() {
-        return Err("account changed during hide".to_string());
-    }
-    let removed_chat = {
-        let mut state = vector_core::state::STATE.lock().await;
-        state.remove_message(&message_id).map(|(cid, _)| cid)
-    };
-    let _ = crate::db::delete_event(&message_id).await;
-    vector_core::emit_event(
-        "message_removed",
-        &serde_json::json!({
-            "id": &message_id,
-            "chat_id": removed_chat.as_deref().unwrap_or(&channel_id),
-            "reason": "hidden"
-        }),
-    );
-    Ok(())
+    vector_core::VectorCore
+        .hide_community_message(&channel_id, &message_id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Persist + surface a Community presence (join/leave) as a `MemberJoined`/`MemberLeft`

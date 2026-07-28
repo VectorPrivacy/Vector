@@ -69,6 +69,14 @@ pub(crate) fn follow_lock(id: &CommunityId) -> Arc<Mutex<()>> {
     V2_FOLLOW_LOCKS.lock().unwrap().entry(id.0).or_default().clone()
 }
 
+/// The author set the live v2 subscription CURRENTLY carries (sorted hex).
+/// Diagnostics: comparing this against the freshly-derived plane authors is the
+/// one-glance test for "did a rotation leave this client subscribed to a dead
+/// epoch" — the failure that otherwise only shows up as silent missing events.
+pub async fn subscribed_author_set() -> Vec<String> {
+    V2_SUB_SET.lock().await.clone()
+}
+
 /// Diagnostics: run the three follow stages once for `id` UNDER the follow lock
 /// (so it can't race the worker into a whole-row clobber) and return each
 /// stage's outcome as a display string. Reloads freshly-persisted state between

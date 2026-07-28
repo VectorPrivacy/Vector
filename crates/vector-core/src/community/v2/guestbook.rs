@@ -417,7 +417,7 @@ pub fn coalesce(
     events: &[GuestbookEvent],
     now_ms: u64,
     snapshot_authority: Option<&PublicKey>,
-    can_kick: &dyn Fn(&PublicKey, &PublicKey) -> bool,
+    can_kick: &dyn Fn(&PublicKey, &PublicKey, Option<&AuthorityCitation>) -> bool,
 ) -> BTreeMap<PublicKey, MemberState> {
     let horizon = now_ms.saturating_add(MAX_FUTURE_MS);
     let mut fold: BTreeMap<PublicKey, MemberState> = BTreeMap::new();
@@ -449,8 +449,8 @@ pub fn coalesce(
                     rumor_id: ev.rumor_id,
                 },
             ),
-            GuestbookEntry::Kick { actor, target, at_ms, .. } => {
-                if !can_kick(actor, target) {
+            GuestbookEntry::Kick { actor, target, at_ms, citation } => {
+                if !can_kick(actor, target, citation.as_ref()) {
                     continue;
                 }
                 apply(
@@ -562,7 +562,7 @@ mod tests {
         Keys::generate().public_key()
     }
 
-    fn always(_: &PublicKey, _: &PublicKey) -> bool {
+    fn always(_: &PublicKey, _: &PublicKey, _: Option<&AuthorityCitation>) -> bool {
         true
     }
 
@@ -775,10 +775,10 @@ mod tests {
         let m = pk();
         let evs = [join_ev(m, 1_000, 1), kick_ev(admin, m, 2_000, 2)];
 
-        let denied = coalesce(&evs, NOW, None, &|_, _| false);
+        let denied = coalesce(&evs, NOW, None, &|_, _, _| false);
         assert_eq!(denied.get(&m).unwrap().verdict, Verdict::Joined, "unauthorized kick is ignored");
 
-        let granted = coalesce(&evs, NOW, None, &|actor, target| *actor == admin && *target == m);
+        let granted = coalesce(&evs, NOW, None, &|actor, target, _| *actor == admin && *target == m);
         let st = granted.get(&m).unwrap();
         assert_eq!(st.verdict, Verdict::Kicked);
         assert_eq!(st.at_ms, 2_000);

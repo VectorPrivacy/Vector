@@ -1148,6 +1148,18 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                                 // Communities re-sync on reconnect too (NIP-17 parity). Debounced full
                                 // sweep — coalesces a multi-relay reconnect burst into one sweep.
                                 crate::commands::community::trigger_community_reconnect_resync();
+                                // A catch-up fetch is not a subscription: Vector owns reconnects
+                                // (`reconnect(false)`), so the fresh socket carries no live sub and
+                                // only an AUTH-gating relay's challenge re-sent one. Without this
+                                // every stream on a plain relay (DMs, self-sync lists, v1 + v2
+                                // communities) goes silent after its first drop.
+                                if let (Some(client), Ok(relay_url)) =
+                                    (vector_core::state::nostr_client(), nostr_sdk::prelude::RelayUrl::parse(&url_str))
+                                {
+                                    tokio::spawn(async move {
+                                        vector_core::resubscribe_relay_after_reconnect(&client, &relay_url).await;
+                                    });
+                                }
                             }
                         }
                         _ => {}

@@ -343,6 +343,39 @@ fn with_breaker_at<R>(
 }
 
 /// Is `url` inside a trip cooldown right now?
+/// Drop targets whose socket cannot progress without external intervention.
+///
+/// With pool auto-reconnect OFF (Vector owns reconnects), a relay sitting in
+/// `Terminated`/`Shutdown`/`Banned` will not move until the reconcile loop
+/// revives it — it is physically incapable of answering THIS call, so waiting
+/// out its per-relay budget yields the same nothing as skipping it. This is not
+/// the breaker's job: the breaker judges relays that ANSWER badly and must not
+/// shrink a Quorum/Full evidence denominator; a dead socket was never part of
+/// the reachable denominator to begin with. `Connecting`/`Pending`/unknown stay
+/// eligible (a just-added relay may finish its handshake mid-fetch), and an
+/// all-dead set falls back to the full list so the honest-timeout error paths
+/// still run.
+fn drop_unrevivable(targets: Vec<String>, is_unrevivable: impl Fn(&str) -> bool) -> Vec<String> {
+    let alive: Vec<String> = targets.iter().filter(|r| !is_unrevivable(r)).cloned().collect();
+    if alive.is_empty() {
+        targets
+    } else {
+        alive
+    }
+}
+
+/// [`drop_unrevivable`] against a live pool's current statuses.
+async fn drop_unrevivable_targets(client: &Client, targets: Vec<String>) -> Vec<String> {
+    use nostr_sdk::prelude::RelayStatus;
+    let pool = client.relays().all().await;
+    drop_unrevivable(targets, |r| {
+        RelayUrl::parse(r)
+            .ok()
+            .and_then(|u| pool.get(&u).map(|rl| matches!(rl.status(), RelayStatus::Terminated | RelayStatus::Shutdown | RelayStatus::Banned)))
+            .unwrap_or(false)
+    })
+}
+
 fn breaker_tripped(url: &str) -> bool {
     breaker_tripped_at(crate::state::current_session_generation(), url)
 }
@@ -841,6 +874,11 @@ impl LiveTransport {
                 targets.push(r.clone());
             }
         }
+        // Even a Full drain skips a DEAD socket: with pool auto-reconnect off, a
+        // Terminated relay cannot answer this call no matter how long we wait, so
+        // its timeout buys byte-identical evidence to skipping it — and paid per
+        // PAGE, it is what stretched one dead relay into a minute-long rotation.
+        targets = drop_unrevivable_targets(&client, targets).await;
 
         // Fast tier: skip tripped relays outright (pure bandwidth save — the
         // evidence bar is ≥1 success either way, and the union self-heals).
@@ -1023,6 +1061,8 @@ impl Transport for LiveTransport {
         let timeout = self.timeout;
         let mut targets: Vec<String> = Vec::new();
         for r in relays { if !targets.contains(r) { targets.push(r.clone()); } }
+        // A dead socket can't ACK and won't be revived mid-send — don't spawn at it.
+        targets = drop_unrevivable_targets(&client, targets).await;
         // Fan out one send per relay and RETURN on the first ACK — never wait for the slowest relay (a
         // distant/ratelimited one must not gate a reaction/edit/message). Each send is SPAWNED, so the rest
         // keep delivering to every relay after we return (dropping a JoinHandle detaches, it doesn't abort).
@@ -1117,6 +1157,11 @@ impl Transport for LiveTransport {
             client
         };
 
+        // This walk is SERIAL, so a dead socket taxes every page its full budget;
+        // judged against the PLANE pool's statuses (a separate client — nothing
+        // revives its members, so an unrevivable one here is dead for good).
+        let targets = drop_unrevivable_targets(&client, targets).await;
+
         let mut result: Vec<Event> = Vec::new();
         let mut seen: std::collections::HashSet<EventId> = std::collections::HashSet::new();
         let mut successes = 0usize;
@@ -1167,7 +1212,11 @@ impl Transport for LiveTransport {
         let mut acked_any = false;
         let _ = tokio::time::timeout(CONFIRM_WINDOW, async {
             loop {
-                let sends = pending.iter().cloned().map(|r| {
+                // Per ROUND, not from `pending`: a dead socket stays pending (the
+                // reconcile loop may revive it before the stragglers give up) but a
+                // confirm round must not spend its budget on a relay that cannot ACK.
+                let round = drop_unrevivable_targets(&client, pending.clone()).await;
+                let sends = round.iter().cloned().map(|r| {
                     let client = &client;
                     let event = &event;
                     Box::pin(async move {
@@ -1398,6 +1447,24 @@ pub(crate) mod memory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Dead-socket target filtering ──────────────────────────────────────────
+
+    #[test]
+    fn a_dead_socket_is_skipped_but_a_connecting_or_unknown_one_is_not() {
+        let targets: Vec<String> = ["wss://dead", "wss://connecting", "wss://unknown"].map(String::from).into();
+        let out = drop_unrevivable(targets, |r| r == "wss://dead");
+        assert_eq!(out, ["wss://connecting", "wss://unknown"].map(String::from).to_vec());
+    }
+
+    #[test]
+    fn an_all_dead_set_falls_back_to_the_full_list() {
+        // Offline (or a status race) must keep the honest-timeout error paths —
+        // an instant empty-target "success" would read as a confident empty.
+        let targets: Vec<String> = ["wss://a", "wss://b"].map(String::from).into();
+        let out = drop_unrevivable(targets.clone(), |_| true);
+        assert_eq!(out, targets);
+    }
 
     // ── Tor gate (community publish over a not-yet-bootstrapped Tor) ──────────
     // Hermetic: drives `wait_until_tor_ready` with an injected predicate, so no

@@ -3985,13 +3985,31 @@ async function setupRustListeners() {
                 proceduralScrollState.renderedMessageCount++;
                 proceduralScrollState.totalMessageCount++;
             } else {
-                // Not a tail-append (seeked away, or an OLDER history-echo insert). No DOM
-                // row. A genuine newest arrival below a seeked window bumps the scroll-down
-                // badge; an older insert is pure data.
+                // Not a tail-append. Two very different cases share this branch:
+                // an older HISTORY-ECHO beyond the window (pure data, no DOM), and a
+                // LIVE arrival that sorts mid-window — a peer whose clock lags stamps
+                // behind our own sends, and CORD orders by sender stamp. The latter
+                // MUST paint, or the message is invisible until the chat reopens.
+                const range = _currentWindowRange();
+                const midWindowLive = !newMessage.mine
+                    && atTail
+                    && chatPinnedToBottom
+                    && range && newIdx > range[0] && newIdx < range[1];
+                if (midWindowLive) {
+                    const repaintChat = chat.id;
+                    (async () => {
+                        await renderWindow(range[0], range[1]);
+                        if (strOpenChat !== repaintChat) return;
+                        windowAtTail = true;
+                        scrollToBottom(domChatMessages, false);
+                    })();
+                    rendered = true;
+                    proceduralScrollState.renderedMessageCount++;
+                }
                 proceduralScrollState.totalMessageCount++;
                 const winMsgs = _windowMessages();
                 const newestIdx = (winMsgs?.length || chat.messages.length) - 1;
-                if (!newMessage.mine && newIdx === newestIdx) incrementUnreadBelow();
+                if (!newMessage.mine && !midWindowLive && newIdx === newestIdx) incrementUnreadBelow();
             }
             // Open chat + pinned + window actually visible = user saw it
             // land. Tabbed-out arrivals stay unread until refocus, even when

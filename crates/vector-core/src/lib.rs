@@ -163,6 +163,36 @@ impl ClientRelayExt for nostr_sdk::prelude::Client {
     }
 }
 
+/// Re-send every live subscription this relay is supposed to carry, after VECTOR
+/// reconnected it.
+///
+/// Vector owns every reconnect (`add_managed_relay` ⇒ `reconnect(false)`), and the
+/// pool re-applies live subs only inside its own retry path — which is exactly the
+/// path that was turned off. So a dropped socket comes back carrying NOTHING, and a
+/// catch-up fetch is not a subscription: the data lands once and then the stream is
+/// silent forever. Only an AUTH-gating relay healed, via its post-challenge re-send.
+///
+/// Driven off the pool's own subscription table rather than a list of known
+/// subscriptions, so a future subscription is covered without touching this. Only
+/// ids the pool already associates with `relay` are re-sent, so a relay-targeted
+/// subscription is never widened onto a relay it deliberately excluded. Same-id
+/// REQs are idempotent.
+pub async fn resubscribe_relay_after_reconnect(
+    client: &nostr_sdk::prelude::Client,
+    relay: &nostr_sdk::prelude::RelayUrl,
+) {
+    for (id, per_relay) in client.subscriptions().await {
+        let Some(filters) = per_relay.get(relay) else { continue };
+        if filters.is_empty() {
+            continue;
+        }
+        let _ = client
+            .subscribe(nostr_sdk::prelude::ReqTarget::single(relay.clone(), filters.clone()))
+            .with_id(id)
+            .await;
+    }
+}
+
 /// Minimum a relay connect attempt gets while Tor is on.
 ///
 /// Circuit construction dominates the handshake and routinely runs tens of
@@ -1457,16 +1487,24 @@ impl VectorCore {
         if let Some(Some(crate::community::ConcordProtocol::V2)) =
             crate::db::community::community_protocol(&cid).ok()
         {
-            let community = crate::db::community::load_community_v2(&cid)
-                .map_err(VectorError::Other)?
-                .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
             let recipient = nostr_sdk::prelude::PublicKey::parse(invitee_npub)
                 .map_err(|e| VectorError::Other(format!("bad invitee npub: {e}")))?;
             let client = crate::state::nostr_client().ok_or_else(|| VectorError::Other("Not connected".into()))?;
             // Gift-wrap the 3313 Direct-Invite rumor (the bundle JSON) to the RECIPIENT'S
             // inbox relays (kind-10050) — a not-yet-member sees it on their DM sub;
             // the community relays wouldn't reach them. `#k=3313` per CORD-05 §6.
-            let bundle = crate::community::v2::service::bundle_of(&community, Some(my_pk), None, None);
+            //
+            // Load + snapshot UNDER the rotation lock: a bundle minted while a Ban's
+            // refound is mid-rotation carries the root being buried, and its joiner
+            // lands on a dead epoch only to self-evict on the rekey exclusion.
+            let bundle = {
+                let lock = crate::community::v2::realtime::follow_lock(&cid);
+                let _rotation = lock.lock().await;
+                let community = crate::db::community::load_community_v2(&cid)
+                    .map_err(VectorError::Other)?
+                    .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
+                crate::community::v2::service::bundle_of(&community, Some(my_pk), None, None)
+            };
             let bundle_json = serde_json::to_string(&bundle).map_err(|e| VectorError::Other(e.to_string()))?;
             // Same 24h NIP-40 expiry as v1 (invite::DIRECT_INVITE_EXPIRY_SECS): a bundle is
             // live key material for a community that keeps rotating, so it must not linger.
@@ -1953,6 +1991,78 @@ impl VectorCore {
         let _ = crate::db::events::delete_event(message_id).await;
         traits::emit_event_json("message_removed", serde_json::json!({
             "id": message_id, "chat_id": removed_chat.as_deref().unwrap_or(&channel_id), "reason": "deleted",
+        }));
+        Ok(())
+    }
+
+    /// Moderation-hide someone ELSE's community message under `MANAGE_MESSAGES`
+    /// (CORD-04 §3/§5). Protocol-agnostic: v2 seals the same kind-5 its authors
+    /// use, v1 publishes its 3305 tombstone; both re-derive the actor's authority
+    /// from the signed inner against the folded Roster, so this is an authority
+    /// claim peers verify, never a local suppression.
+    pub async fn hide_community_message(&self, channel_id: &str, message_id: &str) -> Result<()> {
+        use crate::community::transport::LiveTransport;
+        let session = state::SessionGuard::capture();
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+
+        // You can only moderate a message you can see: the author resolves from
+        // STATE, then the store for a row that has paged out of the window.
+        let author_npub = {
+            let st = state::STATE.lock().await;
+            st.find_message(message_id).and_then(|(_, m)| m.npub)
+        };
+        let author_npub = match author_npub {
+            Some(n) => n,
+            None => crate::db::events::event_author(message_id)
+                .ok()
+                .flatten()
+                .ok_or_else(|| VectorError::Other("can't resolve the target message's author".into()))?,
+        };
+        let author = nostr_sdk::prelude::PublicKey::parse(&author_npub)
+            .map_err(|_| VectorError::Other("target message has an unreadable author".into()))?;
+
+        if let Some(id) = self.v2_community_for_channel(channel_id)? {
+            let community = crate::db::community::load_community_v2(&id)
+                .map_err(VectorError::Other)?
+                .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
+            let ch = crate::community::ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
+            crate::community::v2::service::moderation_delete(
+                &transport, &community, &ch, message_id, crate::community::v2::kind::MESSAGE, &author,
+            )
+            .await
+            .map_err(VectorError::Other)?;
+        } else {
+            let cid = crate::db::community::community_id_for_channel(channel_id)
+                .map_err(VectorError::Other)?
+                .ok_or_else(|| VectorError::Other("unknown community channel".into()))?;
+            let community = crate::db::community::load_community(&crate::community::CommunityId(
+                crate::simd::hex::hex_to_bytes_32(&cid),
+            ))
+            .map_err(VectorError::Other)?
+            .ok_or_else(|| VectorError::Other("community not found".into()))?;
+            let channel = community
+                .channels
+                .iter()
+                .find(|c| c.id.to_hex() == channel_id)
+                .cloned()
+                .ok_or_else(|| VectorError::Other("channel not found in community".into()))?;
+            crate::community::service::publish_owner_hide(&transport, &community, &channel, message_id)
+                .await
+                .map_err(VectorError::Other)?;
+        }
+
+        // The publish straddled a multi-second await; a swap must not strip the
+        // message from the swapped-in account's STATE + DB (message_id is global).
+        if !session.is_valid() {
+            return Ok(());
+        }
+        let removed_chat = {
+            let mut st = state::STATE.lock().await;
+            st.remove_message(message_id).map(|(cid, _)| cid)
+        };
+        let _ = crate::db::events::delete_event(message_id).await;
+        traits::emit_event_json("message_removed", serde_json::json!({
+            "id": message_id, "chat_id": removed_chat.as_deref().unwrap_or(channel_id), "reason": "hidden",
         }));
         Ok(())
     }
@@ -2623,6 +2733,18 @@ impl VectorCore {
         // and a rekey/refound may have moved the control address under us.
         if let Ok(Some(fresh)) = Self::load_v2_if_v2(community_id) {
             let _ = crate::community::v2::service::follow_control(transport, &fresh, session).await;
+            // Membership is part of the view being converged: an unban must
+            // re-fetch the Guestbook, because a Join that legally raced the ban
+            // window may exist only on the relays — and our own just-published
+            // edition doesn't echo back to trigger a follow.
+            if let Ok(added) = crate::community::v2::service::sync_guestbook(transport, &fresh, session).await {
+                if !added.is_empty() && session.is_valid() {
+                    traits::emit_event_json(
+                        "community_refreshed",
+                        serde_json::json!({ "community_id": community_id }),
+                    );
+                }
+            }
         }
     }
 
@@ -2711,12 +2833,25 @@ impl VectorCore {
         if community_id.len() == 64 {
             let cid = CommunityId(crate::simd::hex::hex_to_bytes_32(community_id));
             if let Some(Some(crate::community::ConcordProtocol::V2)) = crate::db::community::community_protocol(&cid).ok() {
-                let community = crate::db::community::load_community_v2(&cid)
-                    .map_err(VectorError::Other)?
-                    .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
-                crate::community::v2::service::set_banlist(&transport, &community, &list).await.map_err(VectorError::Other)?;
+                // Rotation barrier: a Ban's refound holds this lock for its whole
+                // multi-publish rotation while the row still names the OLD root. An
+                // unban/reban clicked in that window must WAIT and then load the
+                // post-commit root — unlocked, it publishes the edit to the epoch
+                // being buried, where no reader will ever fold it. Dropped before
+                // `refound_community`, which re-acquires it (non-reentrant).
+                let community = {
+                    let lock = crate::community::v2::realtime::follow_lock(&cid);
+                    let _rotation = lock.lock().await;
+                    let community = crate::db::community::load_community_v2(&cid)
+                        .map_err(VectorError::Other)?
+                        .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
+                    crate::community::v2::service::set_banlist(&transport, &community, &list).await.map_err(VectorError::Other)?;
+                    if banned {
+                        crate::community::v2::service::grant_roles(&transport, &community, &pk, vec![]).await.map_err(VectorError::Other)?;
+                    }
+                    community
+                };
                 if banned {
-                    crate::community::v2::service::grant_roles(&transport, &community, &pk, vec![]).await.map_err(VectorError::Other)?;
                     crate::community::v2::service::refound_community(&transport, &community, &[pk]).await.map_err(VectorError::Other)?;
                 }
                 Self::converge_v2_authority(&transport, community_id, &session).await;

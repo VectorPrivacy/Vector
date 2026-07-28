@@ -225,6 +225,20 @@ pub fn advance_channel_epoch(
 /// `server_root_key`) iff `new_epoch` exceeds the current base epoch (monotonic, compared in RUST). A
 /// caught-up OLDER base epoch is archived (its control/base history stays decryptable) but never
 /// regresses the head. Returns whether the head advanced.
+/// The community row's CURRENT base epoch — the cheap freshness probe a
+/// root-derived write compares its in-hand struct against.
+pub fn get_server_root_epoch(community_id: &str) -> Result<Option<u64>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    conn.query_row(
+        "SELECT server_root_epoch FROM communities WHERE community_id = ?1",
+        params![community_id],
+        |r| r.get::<_, i64>(0),
+    )
+    .optional()
+    .map(|v| v.map(|e| e as u64))
+    .map_err(|e| format!("get server root epoch: {e}"))
+}
+
 pub fn advance_server_root_epoch(community_id: &str, new_epoch: u64, new_root: &[u8; 32]) -> Result<bool, String> {
     let conn = super::get_write_connection_guard_static()?;
     let tx = conn.unchecked_transaction().map_err(|e| format!("advance server root tx: {e}"))?;

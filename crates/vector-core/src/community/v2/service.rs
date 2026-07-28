@@ -333,7 +333,45 @@ pub async fn send_delete<T: Transport + ?Sized>(
 ) -> Result<String, String> {
     let (author_pk, group, epoch, session) = chat_send_context(community, channel_id)?;
     let at_ms = now_ms();
-    let rumor = chat::build_delete_rumor(author_pk, channel_id, epoch, target_id_hex, target_kind, at_ms);
+    let rumor = chat::build_delete_rumor(author_pk, channel_id, epoch, target_id_hex, target_kind, at_ms, None);
+    publish_chat(transport, community, &session, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await
+}
+
+/// Moderation-hide: remove SOMEONE ELSE's message under `MANAGE_MESSAGES`
+/// (CORD-04 §3/§5). Same kind-5 the author's own delete uses — CORD defines no
+/// separate hide, the authority is what differs, and every reader re-derives it
+/// from the seal's real npub against the folded Roster.
+///
+/// Gated locally against the same predicate peers enforce, so the button can't
+/// promise what the plane will refuse; a non-owner cites the Grant it acts under.
+/// `target_author` comes from the caller's resident copy — you can only moderate
+/// a message you can see.
+pub async fn moderation_delete<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    channel_id: &ChannelId,
+    target_id_hex: &str,
+    target_kind: u16,
+    target_author: &PublicKey,
+) -> Result<String, String> {
+    let (author_pk, group, epoch, session) = chat_send_context(community, channel_id)?;
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    if crate::db::community::get_community_dissolved(&cid_hex).unwrap_or(false) {
+        return Err("this community is dissolved — it accepts no new moderation actions".to_string());
+    }
+    let owner_hex = community.owner()?.to_hex();
+    let roster = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+    if !crate::community::moderation::can_hide(
+        Some(&owner_hex),
+        &roster,
+        &author_pk.to_hex(),
+        &target_author.to_hex(),
+    ) {
+        return Err("you can't hide a message from a member who outranks you (or the owner)".to_string());
+    }
+    let at_ms = now_ms();
+    let citation = my_authority_citation(community, &author_pk);
+    let rumor = chat::build_delete_rumor(author_pk, channel_id, epoch, target_id_hex, target_kind, at_ms, citation.as_ref());
     publish_chat(transport, community, &session, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await
 }
 
@@ -701,6 +739,9 @@ pub async fn send_direct_invite<T: Transport + ?Sized>(
     label: Option<String>,
 ) -> Result<Event, String> {
     let session = SessionGuard::capture();
+    // A stale bundle is worse than a stale edit: it hands the joiner keys to a
+    // buried epoch, and their client later self-evicts on the rekey exclusion.
+    assert_current_root(community)?;
     let signer = crate::signer::active_signer()?;
     let inviter_pk = me_pk()?;
     let bundle = bundle_of(community, Some(inviter_pk), expires_at_ms, label);
@@ -1483,6 +1524,7 @@ pub async fn leave_community<T: Transport + ?Sized>(transport: &T, community: &C
 /// rejoin with a fresh invite — cryptographic severance is the ban/refound path.
 pub async fn kick_member<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, target: &PublicKey) -> Result<(), String> {
     let session = SessionGuard::capture();
+    assert_current_root(community)?;
     let signer = crate::signer::active_signer()?;
     let my_pk = me_pk()?;
     // Fast local pre-check; readers re-verify independently.
@@ -1697,6 +1739,7 @@ fn fold_members(
 ) -> Result<Vec<PublicKey>, String> {
     let owner = community.owner()?;
     let owner_hex = owner.to_hex();
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
 
     // CONSENSUS-COMPLETE backstop: every member the folded roster GRANTS a role to
     // is provably a member (a Grant binds member_xonly, CORD-02 A.6) — count them
@@ -1719,10 +1762,13 @@ fn fold_members(
     // here, so a non-owner admin's refound drops silent survivors (incl. migration roster seeds)
     // until they re-post. Binding the minting rotator into snapshot authority is a spec change.
     let snapshot_authority = (community.root_epoch.0 > 0).then_some(&owner);
-    // Kick authority (CORD-04 §6): the signer must hold KICK AND strictly outrank the
-    // target (the owner is supreme; equal cannot kick equal).
-    let can_kick = |actor: &PublicKey, target: &PublicKey| {
-        roles.can_act_on_member(&actor.to_hex(), Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::KICK)
+    // Kick authority (CORD-04 §5/§6): the signer must cite a Grant we've synced AND
+    // hold KICK AND strictly outrank the target (the owner is supreme; equal cannot
+    // kick equal).
+    let can_kick = |actor: &PublicKey, target: &PublicKey, citation: Option<&crate::community::edition::AuthorityCitation>| {
+        let actor_hex = actor.to_hex();
+        citation_is_synced(&cid_hex, &owner_hex, &actor_hex, citation)
+            && roles.can_act_on_member(&actor_hex, Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::KICK)
     };
     let coalesced = guestbook::coalesce(events, now_ms(), snapshot_authority, &can_kick);
     let mut members = guestbook::complete_memberlist(&coalesced, &observed, banlist, banned_at);
@@ -1751,8 +1797,10 @@ pub fn stored_kick_verdict(community: &CommunityV2, member: &PublicKey) -> bool 
     let owner_hex = owner.to_hex();
     let roles = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
     let snapshot_authority = (community.root_epoch.0 > 0).then_some(&owner);
-    let can_kick = |actor: &PublicKey, target: &PublicKey| {
-        roles.can_act_on_member(&actor.to_hex(), Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::KICK)
+    let can_kick = |actor: &PublicKey, target: &PublicKey, citation: Option<&crate::community::edition::AuthorityCitation>| {
+        let actor_hex = actor.to_hex();
+        citation_is_synced(&cid_hex, &owner_hex, &actor_hex, citation)
+            && roles.can_act_on_member(&actor_hex, Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::KICK)
     };
     matches!(
         guestbook::coalesce(&events, now_ms(), snapshot_authority, &can_kick).get(member),
@@ -2208,6 +2256,14 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
     crate::db::community::advance_server_root_epoch(&cid_hex, new_epoch.0, &new_root)?;
     for (h, _) in &carried {
         crate::db::community::set_edition_head_at_epoch(&cid_hex, &h.entity_hex, h.version, &h.self_hash, &h.inner_id, new_epoch.0)?;
+    }
+    // Re-subscribe NOW: the rotation changed every plane author, and the live sub
+    // still carries the OLD epoch's set. Members adopt via the follow worker
+    // (which refreshes); the REFOUNDER has no such path — without this, the very
+    // client that performed the ban goes deaf to the new epoch (a rejoin lands on
+    // the relays and never arrives live).
+    if let Some(client) = crate::state::nostr_client() {
+        super::realtime::refresh_subscription(&client).await;
     }
     // Refresh any live public links so their bundles carry the NEW root behind the
     // same URL (a link shared once survives the rotation, CORD-05 §2). Idempotent,
@@ -2823,6 +2879,51 @@ pub async fn sync_community_list<T: Transport + ?Sized>(transport: &T, bootstrap
 /// `None` for the owner (supreme, rank comes from the community id) and `None`
 /// when no Grant head is held — an actor who cannot cite has no rank to claim,
 /// and the edition is dropped by a conforming reader either way.
+/// The verify half of [`my_authority_citation`] (CORD-04 §5): does the actor's
+/// cited Grant prove authority we have actually SYNCED? The owner is supreme and
+/// cites nothing. A non-owner MUST cite, and we must hold that Grant at ≥ the
+/// cited version with the cited hash at the tip — else fail closed, because
+/// honoring an action whose authority we can't confirm is exactly how a demoted
+/// moderator keeps moderating.
+///
+/// Completeness only: the permission + outrank is the separate roster check, so a
+/// since-demoted actor is refused there (refuse-superseded). An action citing a
+/// version we haven't synced parks and is re-judged on the next roster sync — the
+/// sync path can't escalate to a blocking fetch.
+pub(super) fn citation_is_synced(
+    cid_hex: &str,
+    owner_hex: &str,
+    actor_hex: &str,
+    citation: Option<&crate::community::edition::AuthorityCitation>,
+) -> bool {
+    if owner_hex == actor_hex {
+        return true;
+    }
+    if citation.is_none() {
+        return false;
+    }
+    let cid_bytes = crate::simd::hex::hex_to_bytes_32(cid_hex);
+    let actor_bytes = crate::simd::hex::hex_to_bytes_32(actor_hex);
+    let grant_hex = crate::simd::hex::bytes_to_hex_32(&super::derive::grant_locator(
+        &crate::community::CommunityId(cid_bytes),
+        &actor_bytes,
+    ));
+    let head: Vec<crate::community::roster::EntityHead> =
+        crate::db::community::get_edition_head(cid_hex, &grant_hex)
+            .ok()
+            .flatten()
+            .map(|(version, self_hash)| crate::community::roster::EntityHead {
+                entity_hex: grant_hex.clone(),
+                version,
+                self_hash,
+                inner_id: [0u8; 32],
+                citation: None,
+            })
+            .into_iter()
+            .collect();
+    crate::community::roster::authority_citation_satisfied(&head, Some(owner_hex), actor_hex, &grant_hex, citation)
+}
+
 fn my_authority_citation(
     community: &CommunityV2,
     actor: &PublicKey,
@@ -2839,6 +2940,24 @@ fn my_authority_citation(
         .map(|(version, edition_hash)| crate::community::edition::AuthorityCitation { entity_id, version, edition_hash })
 }
 
+/// Refuse a root-derived write whose in-hand struct predates a rotation.
+///
+/// A Ban's refound buries the old root while the caller's `CommunityV2` still
+/// points at it; publishing there lands on a plane nobody folds — the action
+/// "succeeds" and silently never happened (an unban that doesn't unban, an
+/// invite that strands its joiner on a dead epoch). Failing loudly instead lets
+/// the caller reload and retry against the living root.
+fn assert_current_root(community: &CommunityV2) -> Result<(), String> {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    match crate::db::community::get_server_root_epoch(&cid_hex)? {
+        Some(held) if held != community.root_epoch.0 => Err(format!(
+            "the community re-founded mid-action (epoch {} -> {held}); retry",
+            community.root_epoch.0
+        )),
+        _ => Ok(()), // no row = a not-yet-persisted create; nothing newer to defer to
+    }
+}
+
 async fn publish_control_edition<T: Transport + ?Sized>(
     transport: &T,
     community: &CommunityV2,
@@ -2847,6 +2966,7 @@ async fn publish_control_edition<T: Transport + ?Sized>(
     entity_id: &[u8; 32],
     content: &str,
 ) -> Result<(), String> {
+    assert_current_root(community)?;
     let signer = crate::signer::active_signer()?;
     let my_pk = me_pk()?;
     let control = control_group_key(&community.community_root, community.id(), community.root_epoch);
@@ -9642,6 +9762,120 @@ mod tests {
         assert!(
             !stored_memberlist(&community).unwrap().contains(&m),
             "the memberlist excludes an un-caught-up member — why it can't gate a kick"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_join_landing_inside_the_ban_window_survives_the_unban() {
+        // The invite is deliberately ungated, so a fresh Join can arrive seconds
+        // BEFORE the unban edition. It must reach the store (banned = a fold
+        // verdict, not a storage verdict) so the unban resurrects the member —
+        // dropped at ingest, they stayed invisible forever.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Window", bed.relays.clone(), None).await.unwrap();
+        let member_pk = member.keys.public_key();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+
+        // Locally banned (edition folded at t=1000s), with the outliving mark.
+        crate::db::community::set_community_banlist(&cid_hex, &[member_pk.to_hex()], 1_000).unwrap();
+        crate::db::community::merge_community_ban_marks(&cid_hex, &[(member_pk.to_hex(), 1_000u64)].into_iter().collect()).unwrap();
+
+        // Their Join lands 60s after the ban mark, while the banlist still says banned.
+        let join = guestbook::GuestbookEvent {
+            rumor_id: [9u8; 32],
+            entry: guestbook::GuestbookEntry::Join { member: member_pk, invited_by: None, at_ms: 1_060_000 },
+        };
+        assert!(ingest_guestbook_event(&community, join, 1_060).unwrap(), "stored while banned");
+        assert!(
+            !stored_memberlist(&community).unwrap().contains(&member_pk),
+            "while banned, the fold keeps them out"
+        );
+
+        // The unban folds: same store, no refetch needed — the Join resurrects them.
+        crate::db::community::set_community_banlist(&cid_hex, &[], 2_000).unwrap();
+        assert!(
+            stored_memberlist(&community).unwrap().contains(&member_pk),
+            "after the unban the raced Join makes them a member again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_root_admin_write_is_refused_not_misdirected() {
+        // The ban→unban race: a Ban's refound buries the old root over several
+        // publishes while a concurrently-issued command still holds the
+        // pre-commit struct. That unban used to land on the buried control
+        // plane — "succeeding" while no reader would ever fold it — and a
+        // concurrently-minted invite stranded its joiner on the dead epoch.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Race", bed.relays.clone(), None).await.unwrap();
+        let member_pk = member.keys.public_key();
+
+        set_banlist(&bed.relay, &community, &[member_pk.to_hex()]).await.unwrap();
+        let _rotated = refound_community(&bed.relay, &community, &[member_pk]).await.unwrap();
+
+        // The stale-struct unban is REFUSED (retryable), never misdirected.
+        let err = set_banlist(&bed.relay, &community, &[]).await.unwrap_err();
+        assert!(err.contains("re-founded"), "unban: {err}");
+        // A stale invite must not mint dead-epoch key material.
+        let err = send_direct_invite(&bed.relay, &community, &member_pk, None, None).await.unwrap_err();
+        assert!(err.contains("re-founded"), "invite: {err}");
+        // Neither is a kick allowed to ride the buried guestbook.
+        let err = kick_member(&bed.relay, &community, &member_pk).await.unwrap_err();
+        assert!(err.contains("re-founded"), "kick: {err}");
+
+        // The retry path: a fresh load lands the unban on the LIVING plane.
+        let fresh = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        set_banlist(&bed.relay, &fresh, &[]).await.unwrap();
+        let view = fetch_authority(&bed.relay, &fresh).await;
+        assert!(view.banned.is_empty(), "the retried unban actually unbans");
+    }
+
+    #[tokio::test]
+    async fn an_uncited_kick_from_an_admin_is_not_honored() {
+        // CORD-04 §5: a non-owner authority action must name the Grant it acts
+        // under, and the reader refuses until it holds that Grant. Emitting the
+        // `vac` without checking it buys nothing — a demoted admin's kick would
+        // still land on any client that hadn't synced the demotion.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Uncited", bed.relays.clone(), None).await.unwrap();
+        let admin = Keys::generate();
+        let member_pk = member.keys.public_key();
+        grant_admin(&bed.relay, &community, &admin.public_key()).await.unwrap();
+
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let view = fetch_authority(&bed.relay, &community).await;
+        crate::db::community::set_community_roles(&cid_hex, &view.roles, 1_000).unwrap();
+
+        let entity_id = super::super::derive::grant_locator(community.id(), &admin.public_key().to_bytes());
+        let entity_hex = crate::simd::hex::bytes_to_hex_32(&entity_id);
+        let (version, edition_hash) = crate::db::community::get_edition_head(&cid_hex, &entity_hex).unwrap().unwrap();
+        let cite = crate::community::edition::AuthorityCitation { entity_id, version, edition_hash };
+
+        let joined = guestbook::GuestbookEvent {
+            rumor_id: [1u8; 32],
+            entry: guestbook::GuestbookEntry::Join { member: member_pk, invited_by: None, at_ms: 1_000 },
+        };
+        let kick = |citation, id: u8, at| guestbook::GuestbookEvent {
+            rumor_id: [id; 32],
+            entry: guestbook::GuestbookEntry::Kick { actor: admin.public_key(), target: member_pk, citation, at_ms: at },
+        };
+        let roles = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        let empty_bans = std::collections::BTreeSet::new();
+        let empty_marks = std::collections::BTreeMap::new();
+        let fold = |evs: &[guestbook::GuestbookEvent]| {
+            fold_members(&community, evs, Default::default(), &roles, &empty_bans, &empty_marks).unwrap()
+        };
+
+        assert!(
+            fold(&[joined.clone(), kick(None, 2, 2_000)]).contains(&member_pk),
+            "an uncited kick from an admin is not honored"
+        );
+        assert!(
+            !fold(&[joined, kick(Some(cite), 3, 3_000)]).contains(&member_pk),
+            "the same kick WITH its synced citation removes them"
         );
     }
 

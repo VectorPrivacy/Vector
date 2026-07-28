@@ -165,15 +165,20 @@ pub struct MessageDeleteOptions {
     pub can_admin_hide: bool,
 }
 
-/// Load the owning Community of a channel. `Ok(None)` is a confident "not a
-/// community channel" (or none stored locally); `Err(())` means a store read
-/// failed, so no confident verdict exists.
-fn load_community_for_channel(chat_id: &str) -> Result<Option<vector_core::community::Community>, ()> {
+/// A channel's moderation context: the proven owner (whichever protocol proves it)
+/// plus the folded roster. Resolved once per community and reused across the page,
+/// since a bulk verdict judges every row against the same authority.
+///
+/// `Ok(None)` is a confident "not a community channel"; `Err(())` means a store
+/// read failed, so no confident verdict exists.
+type ModerationContext = (Option<String>, vector_core::community::roles::CommunityRoles);
+
+fn moderation_context_for_channel(chat_id: &str) -> Result<Option<ModerationContext>, ()> {
     let Some(cid) = vector_core::db::community::community_id_for_channel(chat_id).map_err(|_| ())? else {
         return Ok(None);
     };
-    let bytes = vector_core::simd::hex::hex_to_bytes_32(&cid);
-    vector_core::db::community::load_community(&vector_core::community::CommunityId(bytes)).map_err(|_| ())
+    let roster = vector_core::db::community::get_community_roles(&cid).map_err(|_| ())?;
+    Ok(Some((vector_core::community::moderation::owner_hex(&cid), roster)))
 }
 
 /// Shared resolver behind `get_message_delete_options` and
@@ -233,32 +238,32 @@ async fn resolve_delete_options(
     }
 
     let me_pk = vector_core::state::my_public_key();
-    // Memoise community loads across the batch (channel_id → load outcome). The memo keeps
-    // Err distinct from Ok(None): a failed read must omit the verdict (below), not cache a
+    // Memoise the moderation context across the batch (channel_id → owner + roster). The memo
+    // keeps Err distinct from Ok(None): a failed read must omit the verdict (below), not cache a
     // confident "no community" for every row of the channel.
-    let mut community_cache: HashMap<String, Result<Option<vector_core::community::Community>, ()>> =
-        HashMap::new();
+    let mut community_cache: HashMap<String, Result<Option<ModerationContext>, ()>> = HashMap::new();
     let mut out = HashMap::with_capacity(ctxs.len());
 
     for (id, ctx) in ctxs {
         // Moderation-hide: on someone ELSE's Community message, offer "Hide" iff we hold the
         // authority to actually publish it — MANAGE_MESSAGES + outrank the author (owner OR
-        // admin). Mirrors the publish gate via the same shared `can_moderation_hide`, so the
-        // button can't disagree with what the publish allows. A paged-out row (chat type
-        // unknown) resolves through the same community lookup; non-community chats yield None.
+        // admin). Same predicate the publish gate and every receiving peer run, so the button
+        // can't disagree with what the plane will honor. A paged-out row (chat type unknown)
+        // resolves through the same lookup; non-community chats yield None.
         let maybe_community = matches!(ctx.chat_type, Some(ChatType::Community)) || ctx.chat_type.is_none();
         let can_admin_hide = if !ctx.mine && maybe_community {
             match (ctx.author.as_deref(), &me_pk) {
                 (Some(author_hex), Some(me)) => {
                     let community = community_cache
                         .entry(ctx.chat_id.clone())
-                        .or_insert_with(|| load_community_for_channel(&ctx.chat_id));
+                        .or_insert_with(|| moderation_context_for_channel(&ctx.chat_id));
                     match community {
                         // Transient store failure: omit rather than cache a false "no Hide".
                         Err(()) => continue,
                         Ok(None) => false,
-                        Ok(Some(c)) => vector_core::community::service::can_moderation_hide(
-                            c,
+                        Ok(Some((owner, roster))) => vector_core::community::moderation::can_hide(
+                            owner.as_deref(),
+                            roster,
                             &me.to_hex(),
                             author_hex,
                         ),
