@@ -422,6 +422,34 @@ pub fn wizard_unlocked(now_secs: u64) -> bool {
     now_secs >= MIGRATION_UNLOCK_AT
 }
 
+/// The post-timelock door for FRESH v1 joins, probe-first. Pre-unlock, or a community we
+/// already hold (re-accept / cross-device rehydrate), passes locally. Post-unlock a fresh
+/// join passes ONLY when the rotation-stable dissolved coordinate carries the proven
+/// owner's migration pointer — that join is the permanent on-ramp (save → carrier fold
+/// seals → drive lands the joiner in the v2 twin). A live v1 community, an unprovable
+/// owner, or a relay miss all refuse: fail-closed, a retry beats onboarding a fresh user
+/// onto the legacy protocol. Every v1 join door (Tauri direct + public accepts, facade
+/// direct + public accepts) must call this before persisting anything.
+pub async fn gate_fresh_v1_join<T: Transport + ?Sized>(
+    transport: &T,
+    community: &Community,
+    now_secs: u64,
+) -> Result<(), String> {
+    if now_secs < MIGRATION_UNLOCK_AT {
+        return Ok(());
+    }
+    if matches!(crate::db::community::load_community(&community.id), Ok(Some(_))) {
+        return Ok(());
+    }
+    if let Some(owner) = super::service::proven_owner_hex(community) {
+        let records = super::service::dissolved_tombstone_records(transport, community).await;
+        if select_pointer(&records, &owner).is_some() {
+            return Ok(());
+        }
+    }
+    Err("This community still uses the legacy protocol and can no longer be joined. Ask the owner to upgrade it to Concord v2 and share a fresh invite.".to_string())
+}
+
 /// The UI state ladder for a v1 community's migration row, in priority order. Pure so the
 /// ordering is testable: `in_progress` MUST outrank `dissolved`, because the owner's own
 /// carrier self-fold seals v1 while the flip is still pending — exactly the window the

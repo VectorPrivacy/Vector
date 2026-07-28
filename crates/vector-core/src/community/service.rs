@@ -7443,6 +7443,54 @@ mod tests {
         assert!(crate::db::community::load_community(&fresh.id).unwrap().is_some());
     }
 
+    /// The post-timelock door (#349). Past the wizard unlock a FRESH v1 join needs the
+    /// owner's migration carrier at the dissolved coordinate (the permanent on-ramp into
+    /// the v2 twin); a live v1 community refuses. Pre-unlock joins and held communities
+    /// (re-accept / cross-device rehydrate) pass locally without a probe.
+    #[tokio::test]
+    async fn a_fresh_v1_join_past_the_timelock_needs_a_migration_carrier() {
+        let (_tmp, _guard) = init_test_db();
+        let relay = MemoryRelay::new();
+        let unlock = crate::community::migration::MIGRATION_UNLOCK_AT;
+
+        let owner_keys = Keys::generate();
+        become_local(&owner_keys);
+        let owned = attested_community("Legacy", "general", vec!["wss://r1".into()]);
+        let invite = crate::community::invite::build_invite(&owned);
+        let member_view = crate::community::invite::accept_invite(&invite).expect("decode");
+
+        crate::community::migration::gate_fresh_v1_join(&relay, &member_view, unlock - 1)
+            .await
+            .expect("pre-unlock fresh join passes without a probe");
+
+        let err = crate::community::migration::gate_fresh_v1_join(&relay, &member_view, unlock)
+            .await
+            .unwrap_err();
+        assert!(err.contains("legacy protocol"), "a live v1 community refuses post-unlock, got: {err}");
+
+        // The owner publishes the migration carrier; the same fresh join is now the v2 on-ramp.
+        let sp = crate::community::migration::MigrationSignpost {
+            v2_community_id: "ab".repeat(32),
+            owner_xonly: owner_keys.public_key().to_hex(),
+            owner_salt: "cd".repeat(32),
+            relays: vec!["wss://r1".into()],
+            name: "Legacy".into(),
+            primary_channel: owned.channels[0].id.to_hex(),
+            root_epoch: 0,
+        };
+        let content = crate::community::migration::build_migration_content(&sp, None).unwrap();
+        publish_migration_carrier(&relay, &owned, &content).await.expect("carrier lands");
+        crate::community::migration::gate_fresh_v1_join(&relay, &member_view, unlock)
+            .await
+            .expect("a carrier-bearing community stays joinable (v2 on-ramp)");
+
+        // Held exemption: once the community is ours, the door never blocks a re-entry.
+        crate::db::community::save_community(&member_view).unwrap();
+        crate::community::migration::gate_fresh_v1_join(&relay, &member_view, unlock)
+            .await
+            .expect("a held community passes post-unlock");
+    }
+
     /// The management doors save the caller's v1 struct on success (same blind UPSERT), so they
     /// carry the same fence — and refuse BEFORE publishing, so no orphan edition hits the relays.
     #[tokio::test]

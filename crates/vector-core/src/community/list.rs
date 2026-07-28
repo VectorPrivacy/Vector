@@ -722,6 +722,8 @@ pub async fn rehydrate_community_from_seed<T: super::transport::Transport + ?Siz
     // `catch_up_server_root` below is then one cheap probe (or walks forward if `current` is itself stale);
     // prior-epoch keys are archived quietly by `backfill_history_from_seed`. For a legacy/never-re-founded entry
     // `current()` == `seed`, so this is the full from-genesis walk and the backfill is a no-op.
+    // Deliberately NOT behind `migration::gate_fresh_v1_join`: this replays a membership the
+    // user already holds on a sibling device — cross-device sync, not a fresh on-ramp.
     let community = super::service::accept_invite(entry.current())?;
     if !session.is_valid() {
         // Session swapped: the DB pool may now be another account's — do NOT delete (it'd hit the wrong DB).

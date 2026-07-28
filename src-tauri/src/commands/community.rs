@@ -3570,6 +3570,13 @@ pub async fn accept_community_invite(community_id: String) -> Result<CommunitySu
     }
     let invite = CommunityInvite::from_json(&bundle_json)?;
 
+    // Post-timelock door: a FRESH v1 join must present a migration carrier (then it's
+    // the on-ramp into the v2 twin) or it is refused. Decode-only view — nothing
+    // persists unless the gate passes.
+    let probe_view = vector_core::community::invite::accept_invite(&invite)?;
+    let gate_transport = LiveTransport::with_timeout(Duration::from_secs(12));
+    vector_core::community::migration::gate_fresh_v1_join(&gate_transport, &probe_view, now_secs()).await?;
+
     // Guarded save (caps + owner/authority-collision checks + its own SessionGuard). On
     // error the pending row is untouched.
     let community = vector_core::community::service::accept_invite(&invite)?;
@@ -4129,6 +4136,10 @@ pub async fn accept_public_invite(url: String) -> Result<CommunitySummary, Strin
     let (relays, token) = parse_invite_url(&url).map_err(|e| e.to_string())?;
     let transport = LiveTransport::with_timeout(Duration::from_secs(12));
     let bundle = service::fetch_public_invite(&transport, &relays, &token).await?;
+    // Post-timelock door: a FRESH v1 join needs a migration carrier (the v2 on-ramp)
+    // or it is refused (see accept_community_invite).
+    let probe_view = vector_core::community::invite::accept_invite(&bundle.join)?;
+    vector_core::community::migration::gate_fresh_v1_join(&transport, &probe_view, now_secs()).await?;
     if !session.is_valid() {
         return Err("account changed during invite accept".to_string());
     }

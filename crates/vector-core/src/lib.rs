@@ -1201,6 +1201,12 @@ impl VectorCore {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
+        // Post-timelock door: a FRESH v1 join needs a migration carrier (the v2 on-ramp)
+        // or it is refused. Decode-only view — nothing persists unless the gate passes.
+        let probe_view = crate::community::invite::accept_invite(&bundle.join).map_err(VectorError::Other)?;
+        crate::community::migration::gate_fresh_v1_join(&transport, &probe_view, now)
+            .await
+            .map_err(VectorError::Other)?;
         let community = service::accept_public_invite(&bundle, now).map_err(VectorError::Other)?;
         // Attribute our join presence to the link we used (creator + label) so the owner's per-link
         // counter ticks. Mirrors the desktop public-join path.
@@ -1278,6 +1284,16 @@ impl VectorCore {
         use crate::community::invite::{accept_invite, CommunityInvite};
         let invite = CommunityInvite::from_json(&bundle_json).map_err(VectorError::Other)?;
         let community = accept_invite(&invite).map_err(VectorError::Other)?;
+        // Post-timelock door: a FRESH v1 join needs a migration carrier (the v2 on-ramp) or it
+        // is refused — before finalize persists anything. The migrated fence inside
+        // finalize_member_join still wins for held communities.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        crate::community::migration::gate_fresh_v1_join(&transport, &community, now)
+            .await
+            .map_err(VectorError::Other)?;
         // Private invites carry no public-link label; the inviter attribution metric is link-only.
         let summary = self.finalize_member_join(community, &transport, None).await?;
         let _ = crate::db::community::delete_pending_invite(community_id);
