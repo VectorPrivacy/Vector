@@ -446,6 +446,42 @@ impl PackAddress {
     }
 }
 
+/// Mint the SHAREABLE form of a pack naddr: the same coordinate plus up to 3
+/// relay hints naming the pack's own home. A pack lives on its AUTHOR's write
+/// relays (NIP-65), never the sharer's — a subscribed pack must not get the
+/// sharer's personal set stamped onto it. An author with no published kind
+/// 10002 falls back to this client's pool, which is where an own pack was
+/// published and where a subscribed one was actually seen.
+pub async fn share_naddr(naddr: &str) -> Result<String, String> {
+    let coordinate = match Nip19::from_bech32(naddr) {
+        Ok(Nip19::Coordinate(c)) => c.coordinate,
+        _ => return Err("not a pack naddr".to_string()),
+    };
+    if coordinate.kind != Kind::Custom(KIND_EMOJI_SET) {
+        return Err("not an emoji pack coordinate".to_string());
+    }
+    let client = nostr_client().ok_or_else(|| "Nostr client not initialized".to_string())?;
+    let mut relays = fetch_author_write_relays(&client, coordinate.public_key).await;
+    if relays.is_empty() {
+        // Write-capable pool relays only: GOSSIP-only community relays are
+        // foreign infrastructure a pack never publishes to.
+        relays = client
+            .relays()
+            .await
+            .into_iter()
+            .filter(|(_, r)| r.capabilities().load().can_write())
+            .map(|(url, _)| url)
+            .collect();
+    }
+    relays.truncate(3);
+    if relays.is_empty() {
+        return Ok(naddr.to_string());
+    }
+    Nip19::Coordinate(Nip19Coordinate { coordinate, relays })
+        .to_bech32()
+        .map_err(|e| format!("encode naddr: {}", e))
+}
+
 /// Encode a pack `addr` (`kind:pubkey:identifier`) into a NIP-19
 /// `naddr1...` bech32 string. Used by the share-pack flow to put a
 /// portable reference on the user's clipboard.

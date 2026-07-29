@@ -21,6 +21,13 @@ pub async fn list_emoji_packs() -> Result<Vec<EmojiPack>, String> {
     emoji_packs::load_all_packs()
 }
 
+/// The shareable form of a pack naddr: same coordinate, plus relay hints
+/// naming the pack's own home (the author's NIP-65 write relays).
+#[tauri::command]
+pub async fn get_pack_share_naddr(naddr: String) -> Result<String, String> {
+    emoji_packs::share_naddr(&naddr).await
+}
+
 /// Re-fetch the user's kind 10030 list and every referenced pack,
 /// updating the local mirror in place. Returns the freshly hydrated
 /// pack list so the frontend can swap atomically.

@@ -741,6 +741,7 @@ pub fn run() {
             commands::account::skip_encryption,
             // Emoji pack commands (commands/emoji_packs.rs)
             commands::emoji_packs::list_emoji_packs,
+            commands::emoji_packs::get_pack_share_naddr,
             commands::emoji_packs::refresh_emoji_packs,
             commands::emoji_packs::fetch_emoji_pack_by_naddr,
             commands::emoji_packs::get_theme_emoji_pack,

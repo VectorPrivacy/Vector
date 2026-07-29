@@ -894,8 +894,8 @@ async function _sharePackToClipboard(pack) {
         // Share as a vectorapp.io URL — friends without Vector get a
         // working web preview, friends with Vector get the OS-level
         // deep-link interception that pops the Pack Details modal.
-        // pack.id IS the naddr; no IPC round-trip needed to derive it.
-        const url = `https://vectorapp.io/emojis/pack/${pack.id}`;
+        // Relay hints ride the shared naddr; the canonical pack.id stays bare.
+        const url = `https://vectorapp.io/emojis/pack/${await _shareNaddr(pack.id)}`;
         await navigator.clipboard.writeText(url);
         if (typeof showToast === 'function') showToast('Copied to Clipboard');
         // Close the picker so the user lands back in their chat ready
@@ -1486,6 +1486,21 @@ function _naddrKind(naddr) {
 }
 
 /**
+ * The shareable form of a pack naddr: same coordinate, plus relay hints
+ * naming the PACK's home (the author's NIP-65 write relays — a subscribed
+ * pack does not live on the sharer's relays). The canonical hint-less `id`
+ * stays the cache/identity key; hints are minted per-share. Falls back to
+ * the bare naddr on any failure.
+ */
+async function _shareNaddr(naddr) {
+    try {
+        return await window.__TAURI__.core.invoke('get_pack_share_naddr', { naddr });
+    } catch {
+        return naddr;
+    }
+}
+
+/**
  * Strip every emoji-pack reference (bare naddr, `nostr:` URI, or
  * vectorapp.io share URL) from `text` so the in-chat preview card
  * carries the share affordance and the raw text doesn't double up as
@@ -1915,13 +1930,13 @@ function _buildPackPreviewThumbs(left, pack) {
     grid.attachVisibilityObserver(null);   // viewport-rooted
 }
 
-function _onPackPreviewCopyClick(btn, card) {
+async function _onPackPreviewCopyClick(btn, card) {
     const naddr = card.dataset.naddr;
     if (!naddr) return;
     // Copy the shareable vectorapp.io URL (matches the "Share Pack" action),
     // not the bare naddr — the URL gives a web preview on other platforms and
     // the OS deep-link interception for Vector users.
-    const shareUrl = `https://vectorapp.io/emojis/pack/${naddr}`;
+    const shareUrl = `https://vectorapp.io/emojis/pack/${await _shareNaddr(naddr)}`;
     navigator.clipboard.writeText(shareUrl).then(() => {
         const icon = btn.querySelector('.icon');
         if (!icon) return;

@@ -150,6 +150,7 @@
     "allow-cancel-nip55-session",
     "allow-is-external-signer-installed",
     "allow-list-emoji-packs",
+    "allow-get-pack-share-naddr",
     "allow-refresh-emoji-packs",
     "allow-fetch-emoji-pack-by-naddr",
     "allow-get-theme-emoji-pack",

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-pack-share-naddr"
+description = "Enables the get_pack_share_naddr command without any pre-configured scope."
+commands.allow = ["get_pack_share_naddr"]
+
+[[permission]]
+identifier = "deny-get-pack-share-naddr"
+description = "Denies the get_pack_share_naddr command without any pre-configured scope."
+commands.deny = ["get_pack_share_naddr"]
