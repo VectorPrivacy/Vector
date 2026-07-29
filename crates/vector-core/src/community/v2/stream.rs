@@ -172,31 +172,33 @@ pub fn split_ms(at_ms: u64) -> (u64, u16) {
 /// silent default, so this scans every occurrence of the tag name directly.
 pub fn resolve_ms_strict(rumor: &UnsignedEvent) -> Result<u64, StreamError> {
     let secs = rumor.created_at.as_secs();
-    let mut offset: Option<u64> = None;
-    for t in rumor.tags.iter() {
+    // FIRST occurrence wins, matching Armada (and NIP-01's usual convention for
+    // a repeated tag). Rejecting a duplicate outright is defensible in
+    // isolation, but it made the two clients disagree on whether the EVENT
+    // EXISTS — one folding it, the other dropping it — and `ms` is the ordering
+    // basis for message order, Guestbook recency and List tiebreaks, so that
+    // divergence reached membership. It costs nothing to concede: `ms` is the
+    // publisher's own value, so a second tag grants an attacker no reach they
+    // did not already have with a single one.
+    let Some(raw) = rumor.tags.iter().find_map(|t| {
         let s = t.as_slice();
-        if s.first().map(|k| k.as_str()) != Some(TAG_MS) {
-            continue;
-        }
-        if offset.is_some() {
-            // A second ms occurrence (valued or not) is ambiguous.
-            return Err(StreamError::BadMs);
-        }
-        // Present but valueless, or not a lone 0..=999 decimal without leading
-        // zeros — malformed. Digit-only FIRST: `u64::from_str` would otherwise
-        // accept a leading `+` ("+5", "+000"), a second byte-encoding a strict peer
-        // rejects — the exact cross-impl divergence this gate exists to prevent.
-        let raw = s.get(1).ok_or(StreamError::BadMs)?;
-        if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(StreamError::BadMs);
-        }
-        let n: u64 = raw.parse().map_err(|_| StreamError::BadMs)?;
-        if n > 999 || (raw.len() > 1 && raw.starts_with('0')) {
-            return Err(StreamError::BadMs);
-        }
-        offset = Some(n);
+        (s.first().map(|k| k.as_str()) == Some(TAG_MS)).then(|| s.get(1).cloned())
+    }) else {
+        return Ok(secs.saturating_mul(1000));
+    };
+    // Present but valueless, or not a lone 0..=999 decimal without leading
+    // zeros — malformed. Digit-only FIRST: `u64::from_str` would otherwise
+    // accept a leading `+` ("+5", "+000"), a second byte-encoding a strict peer
+    // rejects — the exact cross-impl divergence this gate exists to prevent.
+    let raw = raw.ok_or(StreamError::BadMs)?;
+    if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(StreamError::BadMs);
     }
-    Ok(secs.saturating_mul(1000).saturating_add(offset.unwrap_or(0)))
+    let n: u64 = raw.parse().map_err(|_| StreamError::BadMs)?;
+    if n > 999 || (raw.len() > 1 && raw.starts_with('0')) {
+        return Err(StreamError::BadMs);
+    }
+    Ok(secs.saturating_mul(1000).saturating_add(n))
 }
 
 // ── build side ───────────────────────────────────────────────────────────────
@@ -641,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn a_valueless_or_duplicated_ms_tag_is_malformed_not_silently_zero() {
+    fn a_valueless_ms_tag_is_malformed_and_a_duplicate_takes_the_first() {
         // A present-but-valueless ["ms"] must be BadMs, not treated as absent (a
         // silent offset-0 default would honor a rumor a spec-strict peer drops).
         let author = Keys::generate();
@@ -653,8 +655,8 @@ mod tests {
             1_000,
         );
         assert!(matches!(resolve_ms_strict(&bare), Err(StreamError::BadMs)));
-        // A valued ms plus a valueless one must not let the valued one win — two
-        // ms occurrences are ambiguous.
+        // A valueless FIRST occurrence is still malformed: first-wins picks it,
+        // and it carries no value to interpret. A later valued tag can't rescue it.
         let two = build_rumor_secs(
             kind::MESSAGE,
             author.public_key(),
@@ -666,7 +668,12 @@ mod tests {
             1_000,
         );
         assert!(matches!(resolve_ms_strict(&two), Err(StreamError::BadMs)));
-        // Two valued ms tags are also ambiguous.
+        // Two VALUED ms tags: the first wins, matching Armada. Rejecting the
+        // rumor instead made the two clients disagree on whether the event
+        // exists — and `ms` orders messages, Guestbook recency and List
+        // tiebreaks, so that reached membership. Conceding costs nothing: `ms`
+        // is the publisher's own value, so a second tag buys an attacker no
+        // reach a single one didn't already give them.
         let two_valued = build_rumor_secs(
             kind::MESSAGE,
             author.public_key(),
@@ -677,7 +684,28 @@ mod tests {
             ],
             1_000,
         );
-        assert!(matches!(resolve_ms_strict(&two_valued), Err(StreamError::BadMs)));
+        assert_eq!(resolve_ms_strict(&two_valued).unwrap(), 1_000_001, "the FIRST ms wins");
+    }
+
+    #[test]
+    fn a_citation_version_must_be_plain_digits() {
+        // CORD-01 §5: a tag number rides as its decimal form. `u64::from_str`
+        // accepts a leading `+`, which Armada's digit check rejects — so an
+        // action citing "+5" would be honored by one client and parked by the
+        // other. Same guard `resolve_ms_strict` already applies to `ms`.
+        let eid = "ab".repeat(32);
+        let hash = "cd".repeat(32);
+        let cite = |v: &str| {
+            let tags = nostr_sdk::prelude::Tags::from_list(vec![Tag::custom(
+                "vac",
+                [eid.clone(), v.to_string(), hash.clone()],
+            )]);
+            crate::community::edition::AuthorityCitation::from_tags(&tags)
+        };
+        assert!(cite("5").is_some(), "a plain decimal is the shape the spec names");
+        assert!(cite("+5").is_none(), "a leading plus is not decimal form");
+        assert!(cite("").is_none());
+        assert!(cite("5x").is_none());
     }
 
     #[test]

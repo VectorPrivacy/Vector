@@ -71,6 +71,14 @@ impl AuthorityCitation {
         if !valid_hex(&s.0) || !valid_hex(&s.2) {
             return None;
         }
+        // Digit-only BEFORE the parse: CORD-01 §5 says a tag number rides as its
+        // decimal form, and `u64::from_str` accepts a leading `+` ("+5") that a
+        // digit-checking peer rejects — so the two would disagree on whether a
+        // citation exists at all, one honoring the action and the other parking
+        // it. Same guard `resolve_ms_strict` already applies to `ms`.
+        if s.1.is_empty() || !s.1.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
         Some(AuthorityCitation {
             entity_id: crate::simd::hex::hex_to_bytes_32(&s.0),
             version: s.1.parse().ok()?,
