@@ -12,7 +12,25 @@
 /// bytes from a screenshot, etc.) or on a platform not yet wired.
 #[tauri::command]
 pub async fn read_clipboard_files() -> Result<Vec<String>, String> {
-    read_clipboard_files_impl()
+    // Clipboard managers (macOS pasteboard history, Windows history tools)
+    // re-serve a copied file as a `file://` URI STRING where the native formats
+    // normally carry plain paths. Every consumer downstream expects a
+    // filesystem path, so normalize at this one shared boundary — an
+    // unparseable URI passes through untouched rather than vanishing.
+    Ok(read_clipboard_files_impl()?
+        .into_iter()
+        .map(|s| {
+            if s.starts_with("file://") {
+                tauri::Url::parse(&s)
+                    .ok()
+                    .and_then(|u| u.to_file_path().ok())
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or(s)
+            } else {
+                s
+            }
+        })
+        .collect())
 }
 
 #[cfg(target_os = "macos")]

@@ -555,6 +555,7 @@ pub fn run() {
             message::clear_compression_cache,
             message::send_cached_compressed_file,
             message::is_directory,
+            message::read_image_preview,
             message::zip_directory,
             message::cleanup_zip,
             message::react_to_message,

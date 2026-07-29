@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-read-image-preview"
+description = "Enables the read_image_preview command without any pre-configured scope."
+commands.allow = ["read_image_preview"]
+
+[[permission]]
+identifier = "deny-read-image-preview"
+description = "Denies the read_image_preview command without any pre-configured scope."
+commands.deny = ["read_image_preview"]

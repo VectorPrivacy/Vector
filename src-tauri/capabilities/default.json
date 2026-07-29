@@ -320,6 +320,7 @@
     "allow-rekey-encryption",
     "allow-verify-credential",
     "allow-is-directory",
+    "allow-read-image-preview",
     "allow-zip-directory",
     "allow-cleanup-zip",
     "allow-audio-probe",
