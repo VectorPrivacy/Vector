@@ -73,6 +73,26 @@ pub async fn is_scanning() -> bool {
 // Message Sync Commands
 // ============================================================================
 
+/// One bounded retry for AUTH-gating relays (Ditto and kin): the FIRST gated
+/// request per connection is rejected `auth-required` while the relay issues
+/// its NIP-42 challenge; the client's authenticator answers it in the
+/// background, so a short-delay retry succeeds. Anything else (including a
+/// second auth refusal) propagates unchanged.
+async fn with_auth_retry<T, E, F, Fut>(mut op: F) -> Result<T, E>
+where
+    E: std::fmt::Display,
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    match op().await {
+        Err(e) if e.to_string().contains("auth-required") => {
+            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+            op().await
+        }
+        other => other,
+    }
+}
+
 /// Fetch messages from relays and sync to local state
 ///
 /// Uses NIP-77 negentropy set reconciliation:
@@ -151,7 +171,9 @@ pub async fn fetch_messages<R: Runtime>(
             // Keeps the original 7s of slack over the inner budget, so the inner
             // error surfaces instead of this blunt outer timeout.
             neg_budget + std::time::Duration::from_secs(7),
-            relay.sync(filter).items(items).opts(sync_opts.clone()),
+            with_auth_retry(|| async {
+                relay.sync(filter.clone()).items(items.clone()).opts(sync_opts.clone()).await
+            }),
         ).await;
 
         let missing_ids: Vec<EventId> = match recon_result {
@@ -586,7 +608,9 @@ pub async fn fetch_messages<R: Runtime>(
         relay_futs.push(async move {
             let result = tokio::time::timeout(
                 neg_budget + std::time::Duration::from_secs(5),
-                relay.sync(f).items(items).opts(opts.clone()),
+                with_auth_retry(|| async {
+                    relay.sync(f.clone()).items(items.clone()).opts(opts.clone()).await
+                }),
             ).await;
             (url, result)
         });
@@ -1004,7 +1028,9 @@ pub async fn fetch_messages<R: Runtime>(
                 futs.push(async move {
                     let result = tokio::time::timeout(
                         std::time::Duration::from_secs(120),
-                        relay.sync(f).items(i).opts(o.clone()),
+                        with_auth_retry(|| async {
+                            relay.sync(f.clone()).items(i.clone()).opts(o.clone()).await
+                        }),
                     ).await;
                     (url, result)
                 });

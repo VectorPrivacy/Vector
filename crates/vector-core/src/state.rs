@@ -64,6 +64,11 @@ pub static TRUSTED_RELAYS: &[&str] = &[
     "wss://jskitty.com/nostr",
     "wss://asia.vectorapp.io/nostr",
     "wss://nostr.computingcache.com",
+    // Also listed in DISCOVERY_READ_ONLY_RELAYS: Ditto once ack'd stranger
+    // kind-10050 writes with OK true and silently dropped them, so it must
+    // never count toward the relay-list freshness anchor. General traffic
+    // (DMs, communities) is unrestricted per its NIP-11.
+    "wss://relay.ditto.pub",
 ];
 
 /// Discovery Relays: widely-used indexers queried/written for relay-list

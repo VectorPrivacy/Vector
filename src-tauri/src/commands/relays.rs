@@ -19,12 +19,10 @@ use vector_core::ClientRelayExt;
 // Constants
 // ============================================================================
 
-/// Default relays that come pre-configured
-pub const DEFAULT_RELAYS: &[&str] = &[
-    "wss://jskitty.com/nostr",        // TRUSTED_RELAY
-    "wss://asia.vectorapp.io/nostr",  // TRUSTED_RELAY
-    "wss://nostr.computingcache.com", // TRUSTED_RELAY
-];
+/// Default relays that come pre-configured. Re-exported from vector-core's
+/// TRUSTED_RELAYS — this was a hand-maintained copy of that list, which is
+/// exactly how a new default relay ended up invisible to the settings screen.
+pub use vector_core::state::TRUSTED_RELAYS as DEFAULT_RELAYS;
 
 // ============================================================================
 // Types
