@@ -4513,13 +4513,14 @@ img.emoji-img-loading {
 .emoji-creator-cell.drop-after::after  { right: -4px; }
 
 /* Equipped-pack sidebar drag-to-reorder (vertical list). */
-/* touch-action: none — the sidebar scrolls vertically, so without this the
-   browser claims a finger drag for scrolling before our reorder threshold
-   trips (no ghost, no drop marker, hold falls through to the context menu).
-   Suppress native image/text drag too, so a slow press starts our reorder
-   instead of grabbing the raw icon (WKWebView + desktop). */
+/* pan-y — `none` forbade the browser from panning at all, so the rail could not
+   be scrolled by a finger starting on a pack tab (which is most of the rail).
+   Vertical panning stays native; the gesture arbiter flips this to `none` inline
+   the moment a drag ARMS — legal because arming requires a still finger, so no
+   pan has begun yet (mirrors the creator grid's fix). Native image/text drag
+   stays suppressed so a slow press starts our reorder, not an icon grab. */
 .emoji-pack-tab {
-  touch-action: none;
+  touch-action: pan-y;
 }
 .emoji-pack-tab,
 .emoji-pack-tab img {
@@ -4546,7 +4547,12 @@ img.emoji-img-loading {
 }
 .emoji-pack-tab.drop-above,
 .emoji-pack-tab.drop-below { position: relative; }
-.emoji-pack-tab.drop-above::before,
+/* BOTH markers ride ::after — ::before belongs to the active-tab highlighter.
+   Sharing it made every un-marked tab flash the left active bar for 130ms as
+   the drop line moved off it (the hijacked opacity:1 faded out through the
+   highlighter's own transition). The two classes never coexist on one tab, so
+   one pseudo covers both edges. */
+.emoji-pack-tab.drop-above::after,
 .emoji-pack-tab.drop-below::after {
   content: '';
   position: absolute;
@@ -4557,15 +4563,9 @@ img.emoji-img-loading {
   background-color: var(--icon-color-primary);
   box-shadow: 0 0 8px var(--icon-color-primary);
   pointer-events: none;
-  /* Reclaim ::before from the active-tab highlighter above, which would
-     otherwise leave this insertion line invisible and mis-transformed. */
-  width: auto;
-  opacity: 1;
-  transform: none;
-  transition: none;
 }
-.emoji-pack-tab.drop-above::before { top: -4px; }
-.emoji-pack-tab.drop-below::after  { bottom: -4px; }
+.emoji-pack-tab.drop-above::after { top: -4px; }
+.emoji-pack-tab.drop-below::after { bottom: -4px; }
 .emoji-creator-cell img {
   width: 70%;
   height: 70%;

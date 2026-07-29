@@ -1031,6 +1031,10 @@ let _packTabDragActive = false;
 const _PT_ARM_MS = 180;
 const _PT_MENU_MS = 500;
 const _PT_SLOP_PX = 8;
+// Menu → drag promotion threshold. Deliberately larger than the plain drag
+// threshold: the wobble of a finger lifting off must not dismiss a menu the
+// user held for, while a decisive pull clearly means "actually, drag it".
+const _PT_MENU_DRAG_PX = 14;
 
 /**
  * Arbitrate the three things one press can mean on a list that both scrolls and
@@ -1067,8 +1071,10 @@ function installReorderGestures(el, h) {
         let dragging = false;
         // A mouse has a separate button for the menu, so it may drag at once.
         let armed = !isTouch;
-        // Set once the gesture belongs to something else (scroll or menu).
+        // Set once the gesture belongs to something else (a scroll).
         let claimed = false;
+        // The long-press menu is showing but the finger is still down.
+        let menuOpen = false;
         let armTimer = null;
         let menuTimer = null;
 
@@ -1099,12 +1105,14 @@ function installReorderGestures(el, h) {
             }, _PT_ARM_MS);
             menuTimer = setTimeout(() => {
                 menuTimer = null;
-                claimed = true;
-                disarm();
-                teardown();
+                menuOpen = true;
                 el.dataset.suppressClick = '1';
                 navigator.vibrate?.(14);
                 h.onMenu(startX, startY);
+                // The gesture stays live (listeners + touch-action untouched): the
+                // held press may still PROMOTE to a drag — moving past
+                // _PT_MENU_DRAG_PX closes the menu and starts dragging — while
+                // simply lifting leaves the menu open for interaction.
             }, _PT_MENU_MS);
         }
 
@@ -1117,6 +1125,17 @@ function installReorderGestures(el, h) {
             if (!dragging) {
                 if (claimed) return;
                 const dist = Math.hypot(mv.clientX - startX, mv.clientY - startY);
+                if (menuOpen) {
+                    // Menu → drag promotion: a decisive pull while still holding
+                    // closes the menu and hands the press to the reorder drag.
+                    if (dist < _PT_MENU_DRAG_PX) return;
+                    h.closeMenu?.();
+                    menuOpen = false;
+                    dragging = true;
+                    h.onDragStart(mv);
+                    h.onDragMove(mv);
+                    return;
+                }
                 if (!armed) {
                     // Moved before the hold landed: a scroll. Stand down so the
                     // list pans natively.
@@ -1159,6 +1178,45 @@ function installReorderGestures(el, h) {
     });
 }
 
+// Auto-scroll while a pack drag sits at (or past) the rail's vertical edges,
+// so a long rail can be traversed in one drag instead of drag-scroll-drag hops.
+// Speed is proportional to the overshoot (gentle just inside the edge, capped
+// well below flick speed); the loop self-terminates when the pointer returns
+// inside the band, the rail hits its end, or the drag ends.
+const _PT_AUTOSCROLL_ZONE_PX = 14;
+const _PT_AUTOSCROLL_MAX_PX = 9; // per frame
+let _packRailAutoRaf = null;
+let _packRailDragY = 0;
+
+function _packRailAutoScrollTick() {
+    _packRailAutoRaf = null;
+    const sidebar = document.querySelector('.emoji-sidebar');
+    if (!sidebar || !_packTabDragActive) return;
+    const r = sidebar.getBoundingClientRect();
+    let v = 0;
+    if (_packRailDragY < r.top + _PT_AUTOSCROLL_ZONE_PX) {
+        v = -Math.min(_PT_AUTOSCROLL_MAX_PX, (r.top + _PT_AUTOSCROLL_ZONE_PX - _packRailDragY) * 0.25);
+    } else if (_packRailDragY > r.bottom - _PT_AUTOSCROLL_ZONE_PX) {
+        v = Math.min(_PT_AUTOSCROLL_MAX_PX, (_packRailDragY - (r.bottom - _PT_AUTOSCROLL_ZONE_PX)) * 0.25);
+    }
+    if (!v) return;
+    const before = sidebar.scrollTop;
+    sidebar.scrollTop = before + v;
+    if (sidebar.scrollTop === before) return; // rail end reached
+    // The tabs moved under a still pointer — keep the drop marker honest.
+    _updatePackTabDropTarget(_packRailDragY);
+    _packRailAutoRaf = requestAnimationFrame(_packRailAutoScrollTick);
+}
+
+function _packRailAutoScroll(y) {
+    _packRailDragY = y;
+    if (!_packRailAutoRaf) _packRailAutoRaf = requestAnimationFrame(_packRailAutoScrollTick);
+}
+
+function _packRailAutoScrollStop() {
+    if (_packRailAutoRaf) { cancelAnimationFrame(_packRailAutoRaf); _packRailAutoRaf = null; }
+}
+
 function _installPackTabGestures(tab, pack) {
     let ghost = null;
     let offX = 0;
@@ -1167,6 +1225,7 @@ function _installPackTabGestures(tab, pack) {
     installReorderGestures(tab, {
         armClass: 'is-drag-armed',
         onMenu: (x, y) => _showPackTabMenu(pack, x, y),
+        closeMenu: () => hideContextMenu(),
         onDragStart: () => {
             _packTabDragActive = true;
             tab.classList.add('is-dragging');
@@ -1191,8 +1250,10 @@ function _installPackTabGestures(tab, pack) {
                 ghost.style.top = `${mv.clientY - offY}px`;
             }
             _updatePackTabDropTarget(mv.clientY);
+            _packRailAutoScroll(mv.clientY);
         },
         onDragEnd: (up) => {
+            _packRailAutoScrollStop();
             tab.dataset.suppressClick = '1';
             tab.classList.remove('is-dragging');
             _packTabDragActive = false;
