@@ -1129,6 +1129,7 @@ async fn accept_bundle<T: Transport + ?Sized>(
     session: &SessionGuard,
     bundle: &CommunityInvite,
     invited_by: Option<PublicKey>,
+    announce_join: bool,
 ) -> Result<CommunityV2, String> {
     let signer = crate::signer::active_signer()?;
     let my_pk = me_pk()?;
@@ -1139,6 +1140,9 @@ async fn accept_bundle<T: Transport + ?Sized>(
     }
     // `from_bundle` re-validates bounds + the owner commitment fail-closed.
     let community = CommunityV2::from_bundle(bundle, at_ms)?;
+    // Captured before the save below: a re-accept of a held community must not
+    // re-announce a membership this account already declared.
+    let already_held = crate::db::community::load_community_v2(community.id()).ok().flatten().is_some();
 
     // Authenticate the delivered community_root before trusting it. The owner
     // commitment proves WHO the owner is, but community_root (and channel keys) are
@@ -1204,15 +1208,21 @@ async fn accept_bundle<T: Transport + ?Sized>(
     }
 
     // Announce our Guestbook Join, echoing the invite attribution when present.
-    let attribution = invited_by
-        .map(|p| p.to_hex())
-        .or_else(|| bundle.creator_npub.clone())
-        .zip(Some(bundle.label.clone().unwrap_or_default()));
-    let attr_ref = attribution.as_ref().map(|(c, l)| (c.as_str(), l.as_str()));
-    let gb_group = super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
-    let join_rumor = guestbook::build_join_rumor(my_pk, attr_ref, at_ms);
-    if let Ok((join_wrap, _)) = guestbook::seal_guestbook_rumor_signed(&signer, my_pk, &join_rumor, &gb_group, Timestamp::from_secs(at_ms / 1000)).await {
-        let _ = transport.publish(&join_wrap, &community.relays).await;
+    // Only an ACTUAL join speaks: a re-accept of a held community, or a
+    // cross-device key sync (announce_join=false), is not a membership event —
+    // the account's original Join already stands in the guestbook, and every
+    // re-publish renders as "<user> has joined" spam for the whole community.
+    if announce_join && !already_held {
+        let attribution = invited_by
+            .map(|p| p.to_hex())
+            .or_else(|| bundle.creator_npub.clone())
+            .zip(Some(bundle.label.clone().unwrap_or_default()));
+        let attr_ref = attribution.as_ref().map(|(c, l)| (c.as_str(), l.as_str()));
+        let gb_group = super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
+        let join_rumor = guestbook::build_join_rumor(my_pk, attr_ref, at_ms);
+        if let Ok((join_wrap, _)) = guestbook::seal_guestbook_rumor_signed(&signer, my_pk, &join_rumor, &gb_group, Timestamp::from_secs(at_ms / 1000)).await {
+            let _ = transport.publish(&join_wrap, &community.relays).await;
+        }
     }
 
     // Record the membership across devices (CORD-02 §8). The inline attempt covers the
@@ -1408,7 +1418,7 @@ pub async fn accept_direct_invite<T: Transport + ?Sized>(transport: &T, wrap: &E
     let session = SessionGuard::capture();
     let signer = crate::signer::active_signer()?;
     let (inviter, bundle) = invite::unwrap_direct_invite_signed(&signer, wrap).await.map_err(|e| e.to_string())?;
-    accept_bundle(transport, &session, &bundle, Some(inviter)).await
+    accept_bundle(transport, &session, &bundle, Some(inviter), true).await
 }
 
 /// Accept a PARKED Direct Invite from its stored bundle JSON (the wrap was already
@@ -1424,7 +1434,7 @@ pub async fn accept_parked_invite<T: Transport + ?Sized>(
     let session = SessionGuard::capture();
     let bundle = CommunityInvite::from_bundle_json(bundle_json).map_err(|e| e.to_string())?;
     let invited_by = inviter_hex.and_then(|h| PublicKey::parse(h).ok());
-    accept_bundle(transport, &session, &bundle, invited_by).await
+    accept_bundle(transport, &session, &bundle, invited_by, true).await
 }
 
 /// Accept v2 JoinMaterial recovered from a v1→v2 migration dissolution payload (`m`). The
@@ -1438,7 +1448,7 @@ pub async fn accept_migration_material<T: Transport + ?Sized>(
 ) -> Result<CommunityV2, String> {
     let session = SessionGuard::capture();
     let bundle = material_to_invite(jm);
-    accept_bundle(transport, &session, &bundle, None).await
+    accept_bundle(transport, &session, &bundle, None, true).await
 }
 
 /// Fetch + decrypt the newest Live bundle at a public link's coordinate
@@ -1575,7 +1585,7 @@ pub async fn accept_public_link<T: Transport + ?Sized>(transport: &T, url: &str)
     if !session.is_valid() {
         return Err("account changed during join".to_string());
     }
-    accept_bundle(transport, &session, &bundle, None).await
+    accept_bundle(transport, &session, &bundle, None, true).await
 }
 
 /// Leave a community: publish a Guestbook Leave and tear down the local hold.
@@ -2938,9 +2948,11 @@ pub async fn sync_community_list<T: Transport + ?Sized>(transport: &T, bootstrap
             return Err("account changed during community-list sync".to_string());
         }
         // The material IS a bundle; accept_bundle re-verifies the owner root, saves,
-        // seeds floors, and announces our Join (idempotent for an existing member).
+        // and seeds floors. NO Guestbook Join: this device is receiving keys the
+        // account already holds elsewhere — the membership was announced when it
+        // actually joined, and a key sync is not a membership event.
         let bundle = material_to_invite(&entry.current);
-        if let Ok(community) = accept_bundle(transport, &session, &bundle, None).await {
+        if let Ok(community) = accept_bundle(transport, &session, &bundle, None, false).await {
             joined.push(community);
         }
     }
@@ -9471,8 +9483,39 @@ mod tests {
         bed.swap_to(&member);
         let bundle = bundle_of(&rotated, None, None, None);
         let session = SessionGuard::capture();
-        let joined = accept_bundle(&bed.relay, &session, &bundle, None).await.unwrap();
+        let joined = accept_bundle(&bed.relay, &session, &bundle, None, true).await.unwrap();
         assert_eq!(joined.root_epoch, Epoch(1), "the rotated root is adopted");
+    }
+
+    #[tokio::test]
+    async fn only_an_actual_join_publishes_a_guestbook_join() {
+        // A Guestbook Join is a member's own word that they JOINED. A re-accept of
+        // a held community and a cross-device key sync (announce_join=false) must
+        // both stay silent — each re-publish renders as "<user> has joined" spam.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Quiet", bed.relays.clone(), None).await.unwrap();
+
+        let gb_pk = super::super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch).pk_hex();
+        async fn gb_count(relay: &MemoryRelay, gb_pk: &str, relays: &[String]) -> usize {
+            let q = Query { kinds: vec![stream::KIND_WRAP], authors: vec![gb_pk.to_string()], ..Default::default() };
+            relay.fetch(&q, relays).await.map(|v| v.len()).unwrap_or(0)
+        }
+        let baseline = gb_count(&bed.relay, &gb_pk, &bed.relays).await; // the owner's creation Join
+
+        bed.swap_to(&member);
+        let bundle = bundle_of(&community, None, None, None);
+        let session = SessionGuard::capture();
+        accept_bundle(&bed.relay, &session, &bundle, None, true).await.unwrap();
+        assert_eq!(gb_count(&bed.relay, &gb_pk, &bed.relays).await, baseline + 1, "a first join announces exactly once");
+
+        accept_bundle(&bed.relay, &session, &bundle, None, true).await.unwrap();
+        assert_eq!(gb_count(&bed.relay, &gb_pk, &bed.relays).await, baseline + 1, "a re-accept of a held community stays silent");
+
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        crate::db::community::delete_community(&cid_hex).unwrap();
+        accept_bundle(&bed.relay, &session, &bundle, None, false).await.unwrap();
+        assert_eq!(gb_count(&bed.relay, &gb_pk, &bed.relays).await, baseline + 1, "a cross-device key sync is not a membership event");
     }
 
     #[tokio::test]
@@ -9492,7 +9535,7 @@ mod tests {
         bed.swap_to(&member);
         let bundle = bundle_of(&rotated, None, None, None);
         let session = SessionGuard::capture();
-        let err = accept_bundle(&bed.relay, &session, &bundle, None).await.unwrap_err();
+        let err = accept_bundle(&bed.relay, &session, &bundle, None, true).await.unwrap_err();
         assert!(err.contains("could not verify"), "no owner-signed edition → refuse: {err}");
     }
 
@@ -9514,7 +9557,7 @@ mod tests {
         bed.swap_to(&member);
         let bundle = bundle_of(&fake, None, None, None);
         let session = SessionGuard::capture();
-        let err = accept_bundle(&bed.relay, &session, &bundle, None).await.unwrap_err();
+        let err = accept_bundle(&bed.relay, &session, &bundle, None, true).await.unwrap_err();
         assert!(err.contains("could not verify"), "epoch 0 demands the owner genesis: {err}");
     }
 
