@@ -1116,10 +1116,16 @@ function installReorderGestures(el, h) {
             }, _PT_MENU_MS);
         }
 
-        // Only swallow the scroll once we're genuinely dragging. Non-passive
-        // because Android WebView defaults touchmove to passive, where
-        // preventDefault is ignored and the list scrolls under the drag.
-        const onTouchMove = (te) => { if (dragging) te.preventDefault(); };
+        // Swallow the scroll once the gesture is OURS — armed, menu open, or
+        // dragging. The browser latches its pan-y right at TOUCHSTART (the
+        // inline touch-action flip at arm doesn't re-latch mid-gesture), so any
+        // un-prevented vertical move in the armed/menu windows lets the native
+        // pan claim the gesture and pointercancel us — which killed menu→drag
+        // promotion in every direction except pure-horizontal. Before the arm
+        // lands, moves stay unprevented so a quick swipe scrolls natively.
+        // Non-passive because Android WebView defaults touchmove to passive,
+        // where preventDefault is ignored and the list scrolls under the drag.
+        const onTouchMove = (te) => { if (dragging || armed || menuOpen) te.preventDefault(); };
 
         const onMove = (mv) => {
             if (!dragging) {
