@@ -5384,6 +5384,9 @@ async function login(skipAnimations = false) {
                 // Catch a share that landed between the cold-start poll and now (the live listener
                 // skips events while fInit was still true).
                 consumePendingShare();
+                // Same window exists for deep links: drain any action stored while
+                // fInit gated the live listener.
+                invoke('get_pending_deep_link').then(a => { if (a) executeDeepLinkAction(a); }).catch(() => {});
 
                 // Render the chatlist
                 console.time('[Boot] showMainUI:renderChatlist');
@@ -10807,9 +10810,13 @@ window.addEventListener("DOMContentLoaded", async () => {
             console.log('Deep link received before login, Rust backend has stored it');
             return;
         }
-        
-        // User is logged in, execute the action immediately
-        await executeDeepLinkAction(evt.payload);
+
+        // Consume through the pending slot (returns the stored action and CLEARS it):
+        // executing evt.payload directly would leave the pending copy behind to
+        // replay as a stale action on the next boot, and a double-delivered URL
+        // (event + cold-start catch) would run twice.
+        const action = await invoke('get_pending_deep_link').catch(() => null);
+        if (action) await executeDeepLinkAction(action);
     });
 
     // Inbound share from another app (Android share sheet). If not logged in yet,
@@ -11135,6 +11142,9 @@ window.addEventListener("DOMContentLoaded", async () => {
                 // Catch a share that landed between the cold-start poll and now (the live listener
                 // skips events while fInit was still true).
                 consumePendingShare();
+                // Same window exists for deep links: drain any action stored while
+                // fInit gated the live listener.
+                invoke('get_pending_deep_link').then(a => { if (a) executeDeepLinkAction(a); }).catch(() => {});
 
                 // Render the chatlist
                 renderChatlist();

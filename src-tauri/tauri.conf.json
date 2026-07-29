@@ -94,7 +94,8 @@
         "schemes": ["vector"]
       },
       "mobile": [
-        { "host": "vectorapp.io", "pathPrefix": ["/profile"] }
+        { "host": "vectorapp.io", "pathPrefix": ["/profile", "/invite", "/emojis"] },
+        { "scheme": ["vector"] }
       ]
     }
   }
