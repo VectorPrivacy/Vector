@@ -688,6 +688,18 @@ mod tests {
     }
 
     #[test]
+    fn tag_numbers_are_spec_shaped_decimals() {
+        use crate::community::edition::is_tag_decimal;
+        // CORD-01 §5: "its decimal form with no leading zeros".
+        for good in ["4", "0", "1099511627776"] {
+            assert!(is_tag_decimal(good), "{good:?} is decimal form");
+        }
+        for bad in ["04", "007", "00", "+4", "-4", "0x4", "1e2", " 4", "4 ", "", "4.0"] {
+            assert!(!is_tag_decimal(bad), "{bad:?} is NOT decimal form");
+        }
+    }
+
+    #[test]
     fn a_citation_version_must_be_plain_digits() {
         // CORD-01 §5: a tag number rides as its decimal form. `u64::from_str`
         // accepts a leading `+`, which Armada's digit check rejects — so an
@@ -706,6 +718,7 @@ mod tests {
         assert!(cite("+5").is_none(), "a leading plus is not decimal form");
         assert!(cite("").is_none());
         assert!(cite("5x").is_none());
+        assert!(cite("05").is_none(), "no leading zeros (CORD-01 §5)");
     }
 
     #[test]

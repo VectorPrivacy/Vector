@@ -32,6 +32,17 @@ const PROTOCOL_VERSION: &str = "1";
 /// the OWNER acts (supreme, no grant to cite).
 pub const TAG_AUTHORITY_CITATION: &str = "vac";
 
+/// CORD-01 §5: a tag number rides as "its decimal form with no leading zeros".
+/// So `"4"` and `"0"` are the shape; `"04"`, `"+4"` and `""` are not.
+/// `u64::from_str` accepts a leading `+` and any number of leading zeros, and a
+/// peer that doesn't would drop an event we honored — a divergence neither side
+/// can see, because a declined parse is never logged.
+pub fn is_tag_decimal(raw: &str) -> bool {
+    !raw.is_empty()
+        && raw.bytes().all(|b| b.is_ascii_digit())
+        && !(raw.len() > 1 && raw.starts_with('0'))
+}
+
 /// The pinned authority an actor claims for an action (mechanism a). Points at the actor's own
 /// authorizing edition (their Grant — or a RoleMetadata for a role-position claim) by stable
 /// coordinate + the exact version/hash, so the verifier resolves authority against that frozen point,
@@ -76,7 +87,7 @@ impl AuthorityCitation {
         // digit-checking peer rejects — so the two would disagree on whether a
         // citation exists at all, one honoring the action and the other parking
         // it. Same guard `resolve_ms_strict` already applies to `ms`.
-        if s.1.is_empty() || !s.1.bytes().all(|b| b.is_ascii_digit()) {
+        if !is_tag_decimal(&s.1) {
             return None;
         }
         Some(AuthorityCitation {
@@ -184,7 +195,7 @@ pub fn parse_edition_inner(inner: &Event) -> Result<ParsedEdition, EditionError>
     // Digit-only: `u64::from_str` accepts a leading `+`, so "+5"/"5" would fold to
     // one version as distinct signed inners (a convergence fork). Shared v1/v2 grammar.
     let ev_raw = get(TAG_EVERSION).ok_or(EditionError::MissingField("ev"))?;
-    if ev_raw.is_empty() || !ev_raw.bytes().all(|b| b.is_ascii_digit()) {
+    if !is_tag_decimal(&ev_raw) {
         return Err(EditionError::BadField("ev"));
     }
     let version: u64 = ev_raw.parse().map_err(|_| EditionError::BadField("ev"))?;

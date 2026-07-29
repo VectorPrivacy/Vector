@@ -682,10 +682,13 @@ fn unique_tag(rumor: &UnsignedEvent, name: &'static str) -> Result<Option<String
 }
 
 fn parse_u64(rumor: &UnsignedEvent, name: &'static str) -> Result<u64, RekeyError> {
-    unique_tag(rumor, name)?
-        .ok_or(RekeyError::BadTag(name))?
-        .parse::<u64>()
-        .map_err(|_| RekeyError::BadTag(name))
+    let raw = unique_tag(rumor, name)?.ok_or(RekeyError::BadTag(name))?;
+    // Spec-shaped decimal, not a bare `parse` — that takes "+2" and "02" as
+    // epochs a stricter peer refuses (CORD-01 §5).
+    if !crate::community::edition::is_tag_decimal(&raw) {
+        return Err(RekeyError::BadTag(name));
+    }
+    raw.parse::<u64>().map_err(|_| RekeyError::BadTag(name))
 }
 
 fn parse_chunk(rumor: &UnsignedEvent) -> Result<(u32, u32), RekeyError> {
@@ -694,6 +697,9 @@ fn parse_chunk(rumor: &UnsignedEvent) -> Result<(u32, u32), RekeyError> {
         let s = t.as_slice();
         if s.len() >= 3 && s[0] == TAG_CHUNK {
             if found.is_some() {
+                return Err(RekeyError::BadTag(TAG_CHUNK));
+            }
+            if !crate::community::edition::is_tag_decimal(&s[1]) || !crate::community::edition::is_tag_decimal(&s[2]) {
                 return Err(RekeyError::BadTag(TAG_CHUNK));
             }
             let i: u32 = s[1].parse().map_err(|_| RekeyError::BadTag(TAG_CHUNK))?;

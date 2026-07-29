@@ -176,10 +176,7 @@ pub fn parse_edition_rumor(rumor: &UnsignedEvent) -> Result<ParsedEdition, Contr
     // same-version convergence fork a strict peer (which drops the padded form)
     // resolves differently. Reject any non-canonical decimal, matching the `ms` rule.
     let ev_raw = get(TAG_EVERSION).ok_or(ControlError::Edition(EditionError::MissingField("ev")))?;
-    if ev_raw.is_empty()
-        || !ev_raw.bytes().all(|b| b.is_ascii_digit())
-        || (ev_raw.len() > 1 && ev_raw.starts_with('0'))
-    {
+    if !crate::community::edition::is_tag_decimal(&ev_raw) {
         return Err(ControlError::Edition(EditionError::BadField("ev")));
     }
     let version: u64 = ev_raw.parse().map_err(|_| ControlError::Edition(EditionError::BadField("ev")))?;
