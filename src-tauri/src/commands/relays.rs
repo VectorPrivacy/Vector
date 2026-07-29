@@ -366,6 +366,17 @@ pub async fn get_relay_metrics(url: String) -> Result<RelayMetrics, String> {
     Ok(metrics)
 }
 
+/// Flip vector-core's runtime log threshold (trace|debug|info|warn|error|off) —
+/// the live counterpart of the VECTOR_LOG launch env, for in-session diagnostics.
+#[tauri::command]
+pub async fn set_log_level(level: String) -> Result<(), String> {
+    if vector_core::logging::set_log_level_str(&level) {
+        Ok(())
+    } else {
+        Err(format!("unknown log level: {level}"))
+    }
+}
+
 /// Get logs for a relay
 #[tauri::command]
 pub async fn get_relay_logs(url: String) -> Result<Vec<RelayLog>, String> {

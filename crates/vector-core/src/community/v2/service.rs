@@ -1238,9 +1238,13 @@ async fn accept_bundle<T: Transport + ?Sized>(
 /// owner commitment still "verifies". The defense: the owner's genesis metadata
 /// edition (vsk-0, `eid == community_id`) only opens under the AUTHENTIC root — an
 /// attacker can't forge the owner's seal — so its presence on the control plane
-/// derived from the delivered root proves that root. Fail-closed: no owner genesis
-/// (forged invite, or relays unreachable) → refuse to join. On success, folds the
-/// owner's authoritative editions to heal a bundle that misclassified a channel.
+/// derived from the delivered root proves that root. On a ROTATED plane (epoch > 0)
+/// the compaction may have carried an admin-signed metadata head instead (CORD-06
+/// re-wraps heads with their original signatures), so the anchor there is the
+/// community-bound metadata head plus any owner-signed edition under the same root.
+/// Fail-closed: no anchor (forged invite, or relays unreachable) → refuse to join.
+/// On success, folds the owner's authoritative editions to heal a bundle that
+/// misclassified a channel.
 async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
     transport: &T,
     community: CommunityV2,
@@ -1282,46 +1286,97 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
     let mut editions: Vec<ParsedEdition> = Vec::new();
     let mut all_editions: Vec<ParsedEdition> = Vec::new();
     let mut found_genesis = false;
-    let mut until: Option<u64> = Some(FAR_FUTURE_SECS);
-    let mut seen_wraps: std::collections::HashSet<nostr_sdk::prelude::EventId> = std::collections::HashSet::new();
-    for _ in 0..MAX_PAGES {
-        let query = Query {
-            kinds: vec![stream::KIND_WRAP],
-            authors: vec![control_pk.clone()],
-            until,
-            limit: Some(PAGE),
-            ..Default::default()
-        };
-        let wraps = transport.fetch(&query, &community.relays).await?;
-        // INCLUSIVE `until` + wrap-id dedup: a `-1` step can skip same-second
-        // siblings at a page boundary (and the genesis with them); re-served
-        // boundary events are free, and no-new-events means exhausted.
-        let mut oldest = u64::MAX;
-        let mut fresh = 0usize;
-        for w in &wraps {
-            if !seen_wraps.insert(w.id) {
-                continue;
-            }
-            fresh += 1;
-            oldest = oldest.min(w.created_at.as_secs());
-            if let Ok((ed, _)) = control::open_control_edition(w, &control) {
-                if ed.author == owner {
-                    if ed.vsk == vsk::COMMUNITY_METADATA && ed.entity_id == community.id().0 {
-                        found_genesis = true;
-                    }
-                    editions.push(ed.clone());
+    // Rotated planes (CORD-06): compaction re-wraps each entity's CURRENT head with
+    // its ORIGINAL signature, so if an admin last edited the metadata the plane holds
+    // no owner-signed vsk-0 at all — the strict genesis anchor is unsatisfiable there.
+    // Fallback pair for epoch > 0: the community-bound metadata head (any signer) PLUS
+    // at least one owner-signed edition opened under this root. A non-member forger
+    // can produce neither; the sibling-community rewrap residual this reopens is the
+    // same class the spec defers to root-in-id binding.
+    let mut compacted_metadata = false;
+    crate::log_debug!(
+        "[JoinVerify] control_pk={} root_epoch={:?} relays={:?}",
+        &control_pk[..12], community.root_epoch, community.relays
+    );
+    let anchored = |found_genesis: bool, compacted_metadata: bool, owner_editions: usize, epoch: Epoch| {
+        found_genesis || (epoch.0 > 0 && compacted_metadata && owner_editions > 0)
+    };
+    for attempt in 0..2 {
+        editions.clear();
+        all_editions.clear();
+        compacted_metadata = false;
+        let mut until: Option<u64> = Some(FAR_FUTURE_SECS);
+        let mut seen_wraps: std::collections::HashSet<nostr_sdk::prelude::EventId> = std::collections::HashSet::new();
+        for page_no in 0..MAX_PAGES {
+            let query = Query {
+                kinds: vec![stream::KIND_WRAP],
+                authors: vec![control_pk.clone()],
+                until,
+                limit: Some(PAGE),
+                ..Default::default()
+            };
+            let wraps = transport.fetch(&query, &community.relays).await?;
+            crate::log_trace!(
+                "[JoinVerify] attempt {} page {}: fetched {} wraps",
+                attempt, page_no, wraps.len()
+            );
+            // INCLUSIVE `until` + wrap-id dedup: a `-1` step can skip same-second
+            // siblings at a page boundary (and the genesis with them); re-served
+            // boundary events are free, and no-new-events means exhausted.
+            let mut oldest = u64::MAX;
+            let mut fresh = 0usize;
+            for w in &wraps {
+                if !seen_wraps.insert(w.id) {
+                    continue;
                 }
-                // Any-author set for the join-time authority fold below: the banlist head
-                // may be admin-signed, and its authority chains to the owner regardless.
-                all_editions.push(ed);
+                fresh += 1;
+                oldest = oldest.min(w.created_at.as_secs());
+                if let Ok((ed, _)) = control::open_control_edition(w, &control) {
+                    crate::log_trace!(
+                        "[JoinVerify] edition vsk={} eid={} owner={} at={}",
+                        ed.vsk, crate::simd::hex::bytes_to_hex_32(&ed.entity_id)[..12].to_string(),
+                        ed.author == owner, w.created_at.as_secs()
+                    );
+                    if ed.vsk == vsk::COMMUNITY_METADATA && ed.entity_id == community.id().0 {
+                        if ed.author == owner {
+                            found_genesis = true;
+                        } else {
+                            compacted_metadata = true;
+                        }
+                    }
+                    if ed.author == owner {
+                        editions.push(ed.clone());
+                    }
+                    // Any-author set for the join-time authority fold below: the banlist head
+                    // may be admin-signed, and its authority chains to the owner regardless.
+                    all_editions.push(ed);
+                }
+            }
+            crate::log_debug!(
+                "[JoinVerify] attempt {} page {}: fresh={} opened_owner={} opened_any={} genesis={} compacted={}",
+                attempt, page_no, fresh, editions.len(), all_editions.len(), found_genesis, compacted_metadata
+            );
+            if anchored(found_genesis, compacted_metadata, editions.len(), community.root_epoch) || fresh == 0 {
+                break; // authenticated, or the relay is exhausted.
+            }
+            until = Some(oldest);
+        }
+        if anchored(found_genesis, compacted_metadata, editions.len(), community.root_epoch) {
+            break;
+        }
+        if attempt == 0 {
+            // AUTH-gating relays: the first walk's REQ triggers the NIP-42 challenge,
+            // but nostr-sdk's own retry re-auths as the USER key — which doesn't
+            // satisfy a stream-authors gate — and can land before the responder's
+            // stream-key auth settles, reading the plane back EMPTY. Replay the
+            // remembered challenges for every registered stream key, then walk once
+            // more on the settled connection.
+            if let Some(client) = crate::state::nostr_client() {
+                super::streamauth::prime_auth(&client, &community.relays).await;
             }
         }
-        if found_genesis || fresh == 0 {
-            break; // authenticated (the owner genesis), or the relay is exhausted.
-        }
-        until = Some(oldest);
     }
-    if !found_genesis {
+    if !anchored(found_genesis, compacted_metadata, editions.len(), community.root_epoch) {
         return Err(
             "could not verify this community from its relays (the invite may be forged, the relays are unreachable, or the control plane is being flooded); not joining"
                 .to_string(),
@@ -1408,7 +1463,17 @@ pub async fn fetch_public_bundle<T: Transport + ?Sized>(transport: &T, url: &str
     } else {
         parsed.bootstrap_relays.clone()
     };
-    let events = transport.fetch(&query, &relays).await?;
+    // One bounded retry: a join fired while the pool is still warming (bootstrap
+    // relays mid-handshake, routine during boot contention) reads back a transport
+    // error, not an absent bundle. The pool add already happened on the first try,
+    // so wait for a socket rather than guessing with a fixed sleep.
+    let events = match transport.fetch(&query, &relays).await {
+        Ok(evs) => evs,
+        Err(_) => {
+            wait_for_bootstrap_relay(&relays).await;
+            transport.fetch(&query, &relays).await?
+        }
+    };
     let bundle_key = super::derive::invite_bundle_key(&parsed.token);
 
     // Scan EVERY event: a tombstone beats a Live unconditionally (order-independent).
@@ -1426,6 +1491,27 @@ pub async fn fetch_public_bundle<T: Transport + ?Sized>(transport: &T, url: &str
         }
     }
     newest_live.map(|(_, b)| b).ok_or_else(|| "invite bundle not found on relays".to_string())
+}
+
+/// Wait — bounded — for ANY of the targets to report Connected before a retry:
+/// the fetch's own warm path bounds its connect wait tighter than a cold TLS
+/// handshake takes under boot contention.
+async fn wait_for_bootstrap_relay(relays: &[String]) {
+    let Some(client) = crate::state::nostr_client() else { return };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+    loop {
+        for url in relays {
+            if let Ok(Some(relay)) = client.relay(url).await {
+                if relay.status() == nostr_sdk::prelude::RelayStatus::Connected {
+                    return;
+                }
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    }
 }
 
 /// The most recent owner-root verification a PREVIEW completed, handed to a join
@@ -9362,6 +9448,74 @@ mod tests {
             crate::db::community::load_community_v2(community.id()).unwrap().is_none(),
             "a rejected join persists nothing"
         );
+    }
+
+    #[tokio::test]
+    async fn accept_verifies_a_rotated_plane_whose_metadata_head_is_admin_signed() {
+        // CORD-06 compaction re-wraps CURRENT heads with their original signatures,
+        // so a rotated plane whose metadata an admin last edited carries no
+        // owner-signed vsk-0. The join anchor there is the community-bound metadata
+        // head plus any owner-signed edition under the same root.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Rotated", bed.relays.clone(), None).await.unwrap();
+        let general = community.channels[0].id;
+
+        let mut rotated = community.clone();
+        rotated.community_root = [0x5A; 32];
+        rotated.root_epoch = Epoch(1);
+        let admin = Keys::generate();
+        publish_community_meta(&bed.relay, &rotated, &admin, "Rotated", 3).await;
+        publish_channel_edition(&bed.relay, &rotated, &owner.keys, &general, "general", false, 2, false).await;
+
+        bed.swap_to(&member);
+        let bundle = bundle_of(&rotated, None, None, None);
+        let session = SessionGuard::capture();
+        let joined = accept_bundle(&bed.relay, &session, &bundle, None).await.unwrap();
+        assert_eq!(joined.root_epoch, Epoch(1), "the rotated root is adopted");
+    }
+
+    #[tokio::test]
+    async fn accept_refuses_a_rotated_plane_with_no_owner_signed_edition() {
+        // The fallback's second half is load-bearing: a community-bound metadata
+        // head alone is self-signable by anyone who knows the (public) community_id.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "NoOwner", bed.relays.clone(), None).await.unwrap();
+
+        let mut rotated = community.clone();
+        rotated.community_root = [0x5B; 32];
+        rotated.root_epoch = Epoch(1);
+        let attacker = Keys::generate();
+        publish_community_meta(&bed.relay, &rotated, &attacker, "NoOwner", 3).await;
+
+        bed.swap_to(&member);
+        let bundle = bundle_of(&rotated, None, None, None);
+        let session = SessionGuard::capture();
+        let err = accept_bundle(&bed.relay, &session, &bundle, None).await.unwrap_err();
+        assert!(err.contains("could not verify"), "no owner-signed edition → refuse: {err}");
+    }
+
+    #[tokio::test]
+    async fn accept_requires_the_strict_owner_genesis_on_an_epoch_zero_plane() {
+        // The fallback applies to rotated planes only: at epoch 0 the spec guarantees
+        // an owner-signed genesis, so owner material without it stays insufficient.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Strict", bed.relays.clone(), None).await.unwrap();
+        let general = community.channels[0].id;
+
+        let mut fake = community.clone();
+        fake.community_root = [0x5C; 32]; // epoch stays 0
+        let admin = Keys::generate();
+        publish_community_meta(&bed.relay, &fake, &admin, "Strict", 2).await;
+        publish_channel_edition(&bed.relay, &fake, &owner.keys, &general, "general", false, 2, false).await;
+
+        bed.swap_to(&member);
+        let bundle = bundle_of(&fake, None, None, None);
+        let session = SessionGuard::capture();
+        let err = accept_bundle(&bed.relay, &session, &bundle, None).await.unwrap_err();
+        assert!(err.contains("could not verify"), "epoch 0 demands the owner genesis: {err}");
     }
 
     #[tokio::test]

@@ -195,6 +195,7 @@
     "allow-validate-relay-url-cmd",
     "allow-get-relay-metrics",
     "allow-get-relay-logs",
+    "allow-set-log-level",
     "allow-monitor-relay-connections",
     "allow-start-typing",
     "allow-send-webxdc-peer-advertisement",

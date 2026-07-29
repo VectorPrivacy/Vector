@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-log-level"
+description = "Enables the set_log_level command without any pre-configured scope."
+commands.allow = ["set_log_level"]
+
+[[permission]]
+identifier = "deny-set-log-level"
+description = "Denies the set_log_level command without any pre-configured scope."
+commands.deny = ["set_log_level"]

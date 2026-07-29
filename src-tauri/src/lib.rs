@@ -790,6 +790,7 @@ pub fn run() {
             commands::relays::validate_relay_url_cmd,
             commands::relays::get_relay_metrics,
             commands::relays::get_relay_logs,
+            commands::relays::set_log_level,
             commands::relays::monitor_relay_connections,
             // Attachment commands (commands/attachments.rs)
             commands::attachments::generate_thumbhash_preview,
