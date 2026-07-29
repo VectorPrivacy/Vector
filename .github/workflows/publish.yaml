@@ -212,14 +212,23 @@ jobs:
           mv "$OUT/app-universal-universal-release.apk"   "$OUT/Vector.apk"
           ls -lh "$OUT"/Vector*.apk
 
+      # Upload-only via the gh CLI: it must never PATCH release fields. The old
+      # softprops step carried `draft: true`, and once the release was published
+      # the (floating) @v2 action started trying to flip it BACK to draft — an
+      # operation the Actions token is refused ("Resource not accessible by
+      # integration"), failing the whole job. Uploading assets works on drafts
+      # and published releases alike; the create branch only covers the race
+      # where this job outruns every desktop job on a brand-new version.
       - name: Upload APKs to Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ steps.get_version.outputs.VERSION }}
-          files: |
-            src-tauri/gen/android/app/build/outputs/apk/universal/release/Vector.apk
-            src-tauri/gen/android/app/build/outputs/apk/universal/release/Vector-arm64-v8a.apk
-            src-tauri/gen/android/app/build/outputs/apk/universal/release/Vector-armeabi-v7a.apk
-          draft: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v${{ steps.get_version.outputs.VERSION }}"
+          if ! gh release list --repo "$GITHUB_REPOSITORY" --limit 30 --json tagName --jq '.[].tagName' | grep -qx "$TAG"; then
+            gh release create "$TAG" --draft --title "Vector $TAG" --repo "$GITHUB_REPOSITORY"
+          fi
+          gh release upload "$TAG" \
+            src-tauri/gen/android/app/build/outputs/apk/universal/release/Vector.apk \
+            src-tauri/gen/android/app/build/outputs/apk/universal/release/Vector-arm64-v8a.apk \
+            src-tauri/gen/android/app/build/outputs/apk/universal/release/Vector-armeabi-v7a.apk \
+            --clobber --repo "$GITHUB_REPOSITORY"
