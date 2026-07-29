@@ -3671,7 +3671,12 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
                 let author = e.author.to_hex();
                 // A banned npub's edits are dropped (CORD-04 §4), even if they still
                 // held a bit via a not-yet-stripped grant.
-                !authority.banned.contains(&author) && authority.roles.is_authorized(&author, owner_hex.as_deref(), required)
+                !authority.banned.contains(&author)
+                    && authority.roles.is_authorized(&author, owner_hex.as_deref(), required)
+                    // …and the CORD-04 §5 sync floor. Resolved against the Grant heads
+                    // this same fold settled, so it works on a bootstrap where no
+                    // persisted head exists yet.
+                    && citation_ok_in_fold(community.id(), &authority.heads, owner_hex.as_deref(), &e.author, e.authority.as_ref())
             })
             .collect();
         if authed.is_empty() {
@@ -3850,7 +3855,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
     let empty: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     // Preliminary roster (bans not yet applied) — the authority view the banlist head
     // is judged against.
-    let (prelim, _) = select_authorized(cid, &role_cands, &grant_cands, owner_hex.as_deref(), &empty);
+    let (prelim, prelim_heads) = select_authorized(cid, &role_cands, &grant_cands, owner_hex.as_deref(), &empty);
 
     // Banlist (CORD-04 §4), folded AUTHORITY-aware so its two anti-roster hazards are
     // both closed:
@@ -3875,7 +3880,9 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
                 .copied()
                 .filter(|e| {
                     let ah = e.author.to_hex();
-                    !banned_authors.contains(ah.as_str()) && prelim.is_authorized(&ah, owner_hex.as_deref(), Permissions::BAN)
+                    !banned_authors.contains(ah.as_str())
+                        && prelim.is_authorized(&ah, owner_hex.as_deref(), Permissions::BAN)
+                        && citation_ok_in_fold(cid, &prelim_heads, owner_hex.as_deref(), &e.author, e.authority.as_ref())
                 })
                 .collect()
         })
@@ -6080,6 +6087,33 @@ mod tests {
         head.map(|(_, h)| h)
     }
 
+    /// The `vac` a non-owner signer must attach, read off the Grant they were
+    /// given on the relay (CORD-04 §5). The owner cites nothing. Mirrors what a
+    /// real client does via `my_authority_citation`, so the fixtures publish the
+    /// shape Vector actually emits.
+    async fn cite_on_relay(
+        relay: &MemoryRelay,
+        community: &CommunityV2,
+        signer: &Keys,
+    ) -> Option<crate::community::edition::AuthorityCitation> {
+        if community.owner().ok() == Some(signer.public_key()) {
+            return None;
+        }
+        let entity_id = crate::community::v2::derive::grant_locator(community.id(), &signer.public_key().to_bytes());
+        let group = control_group_key(&community.community_root, community.id(), community.root_epoch);
+        let query = Query { kinds: vec![stream::KIND_WRAP], authors: vec![group.pk_hex()], limit: Some(500), ..Default::default() };
+        let wraps = relay.fetch(&query, &community.relays).await.ok()?;
+        let mut head: Option<(u64, [u8; 32])> = None;
+        for w in &wraps {
+            if let Ok((ed, _)) = control::open_control_edition(w, &group) {
+                if ed.entity_id == entity_id && head.is_none_or(|(v, _)| ed.version > v) {
+                    head = Some((ed.version, ed.self_hash));
+                }
+            }
+        }
+        head.map(|(version, edition_hash)| crate::community::edition::AuthorityCitation { entity_id, version, edition_hash })
+    }
+
     async fn publish_channel_edition(
         relay: &MemoryRelay,
         community: &CommunityV2,
@@ -6112,7 +6146,8 @@ mod tests {
         let prev = head_hash_on_relay(relay, community, &community.id().0).await;
         let meta = control::CommunityMetadata { name: name.into(), ..Default::default() };
         let content = serde_json::to_string(&meta).unwrap();
-        let rumor = control::build_edition_rumor(signer.public_key(), vsk::COMMUNITY_METADATA, &community.id().0, version, prev.as_ref(), &content, at_secs, None);
+        let cite = cite_on_relay(relay, community, signer).await;
+        let rumor = control::build_edition_rumor(signer.public_key(), vsk::COMMUNITY_METADATA, &community.id().0, version, prev.as_ref(), &content, at_secs, cite.as_ref());
         let (wrap, _) = control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(at_secs)).unwrap();
         relay.publish(&wrap, &community.relays).await.unwrap();
     }
@@ -6186,7 +6221,8 @@ mod tests {
         let role_id = crate::simd::hex::hex_to_bytes_32_checked(&role.role_id).unwrap();
         let prev = head_hash_on_relay(relay, community, &role_id).await;
         let content = crate::community::v2::roles::role_content_json(role).unwrap();
-        let rumor = control::build_edition_rumor(signer.public_key(), vsk::ROLE, &role_id, version, prev.as_ref(), &content, 1_000, None);
+        let cite = cite_on_relay(relay, community, signer).await;
+        let rumor = control::build_edition_rumor(signer.public_key(), vsk::ROLE, &role_id, version, prev.as_ref(), &content, 1_000, cite.as_ref());
         let (wrap, _) = control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(1_000)).unwrap();
         relay.publish(&wrap, &community.relays).await.unwrap();
     }
@@ -6198,7 +6234,8 @@ mod tests {
         let prev = head_hash_on_relay(relay, community, &eid).await;
         let grant = MemberGrant { member: member.to_hex(), role_ids };
         let content = crate::community::v2::roles::grant_content_json(&grant).unwrap();
-        let rumor = control::build_edition_rumor(signer.public_key(), vsk::GRANT, &eid, version, prev.as_ref(), &content, 1_000, None);
+        let cite = cite_on_relay(relay, community, signer).await;
+        let rumor = control::build_edition_rumor(signer.public_key(), vsk::GRANT, &eid, version, prev.as_ref(), &content, 1_000, cite.as_ref());
         let (wrap, _) = control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(1_000)).unwrap();
         relay.publish(&wrap, &community.relays).await.unwrap();
     }
@@ -6209,7 +6246,8 @@ mod tests {
         let eid = crate::community::v2::derive::banlist_locator(community.id());
         let prev = head_hash_on_relay(relay, community, &eid).await;
         let content = crate::community::v2::roles::banlist_content_json(banned).unwrap();
-        let rumor = control::build_edition_rumor(signer.public_key(), vsk::BANLIST, &eid, version, prev.as_ref(), &content, 1_000, None);
+        let cite = cite_on_relay(relay, community, signer).await;
+        let rumor = control::build_edition_rumor(signer.public_key(), vsk::BANLIST, &eid, version, prev.as_ref(), &content, 1_000, cite.as_ref());
         let (wrap, _) = control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(1_000)).unwrap();
         relay.publish(&wrap, &community.relays).await.unwrap();
     }
@@ -6437,6 +6475,56 @@ mod tests {
         follow_control(&relay2, &community, &session).await.unwrap();
         let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
         assert!(roster.is_admin(&a.to_hex()) && roster.is_admin(&b.to_hex()), "a floored-but-unfetched role retains the stored roster");
+    }
+
+    #[tokio::test]
+    async fn an_uncited_metadata_or_banlist_edition_is_dropped() {
+        // CORD-04 §5 covers EVERY control entity, not just the delegation chain.
+        // Vector already gated roles and grants in-fold; metadata, channels and
+        // the banlist resolved on permission alone, so a client one sweep behind
+        // honored an edit from an admin whose demotion it had not read yet.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Base", vec!["wss://r".into()], None).await.unwrap();
+        let admin = Keys::generate();
+        let rid = "a7".repeat(32);
+        publish_role(&relay, &community, &owner, &admin_role(&rid, Permissions::MANAGE_METADATA | Permissions::BAN), 1).await;
+        publish_grant(&relay, &community, &owner, &admin.public_key(), vec![rid], 1).await;
+
+        // The admin acts WITHOUT citing (what every pre-citation client emitted).
+        let group = control_group_key(&community.community_root, community.id(), community.root_epoch);
+        let meta = control::CommunityMetadata { name: "Uncited Rename".into(), ..Default::default() };
+        let rumor = control::build_edition_rumor(
+            admin.public_key(), vsk::COMMUNITY_METADATA, &community.id().0, 2,
+            head_hash_on_relay(&relay, &community, &community.id().0).await.as_ref(),
+            &serde_json::to_string(&meta).unwrap(), 1_000, None,
+        );
+        let (wrap, _) = control::seal_control_edition(&rumor, &group, &admin, Timestamp::from_secs(1_000)).unwrap();
+        relay.publish(&wrap, &community.relays).await.unwrap();
+
+        let ban_eid = crate::community::v2::derive::banlist_locator(community.id());
+        let victim = Keys::generate().public_key().to_hex();
+        let ban_rumor = control::build_edition_rumor(
+            admin.public_key(), vsk::BANLIST, &ban_eid, 1, None,
+            &serde_json::to_string(&vec![victim.clone()]).unwrap(), 1_000, None,
+        );
+        let (ban_wrap, _) = control::seal_control_edition(&ban_rumor, &group, &admin, Timestamp::from_secs(1_000)).unwrap();
+        relay.publish(&ban_wrap, &community.relays).await.unwrap();
+
+        let session = SessionGuard::capture();
+        let updated = follow_control(&relay, &community, &session).await.unwrap();
+        assert!(
+            updated.as_ref().is_none_or(|c| c.name != "Uncited Rename"),
+            "an uncited metadata edit must not be honored",
+        );
+        let authority = fetch_authority(&relay, &community).await;
+        assert!(!authority.banned.contains(&victim), "an uncited banlist edition must not be honored");
+        // The positive case (this same admin, citing, lands) is
+        // `an_authorized_admin_edits_metadata_but_a_demoted_one_cannot` — its
+        // helper cites, so it proves the gate is the CITATION and not the
+        // permission. Re-proving it here would need a fresh chain anyway: a
+        // cited edition chaining onto the rejected one above is gapped, not
+        // refused.
     }
 
     #[tokio::test]
