@@ -723,7 +723,36 @@ fn decode_audio_file_raw(path: &Path) -> Result<(Vec<f32>, u32, usize), String> 
 
 /// WAV fast path for the audio engine (no target_rate decimation, just decode)
 pub fn wav_fast_decode_for_engine(bytes: &[u8]) -> Option<(Vec<f32>, u32)> {
+    // MONO ONLY: this fast path serves voice notes. A stereo WAV must take
+    // the streaming path so playback keeps its stereo field instead of the
+    // downmix below (transcription callers still want the mono mix).
+    if wav_channel_count(bytes)? != 1 {
+        return None;
+    }
     wav_fast_decode(bytes, 0) // target_rate=0 disables fused decimation path
+}
+
+/// Channel count from a WAV's fmt chunk, None for non-WAV/malformed input.
+fn wav_channel_count(bytes: &[u8]) -> Option<u16> {
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return None;
+    }
+    let mut pos = 12;
+    while pos + 8 <= bytes.len() {
+        let chunk_id = &bytes[pos..pos + 4];
+        let chunk_size = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().ok()?) as usize;
+        if chunk_id == b"fmt " {
+            if chunk_size < 16 || pos + 8 + 16 > bytes.len() {
+                return None;
+            }
+            return Some(u16::from_le_bytes([bytes[pos + 10], bytes[pos + 11]]));
+        }
+        pos += 8 + chunk_size;
+        if chunk_size % 2 != 0 {
+            pos += 1;
+        }
+    }
+    None
 }
 
 

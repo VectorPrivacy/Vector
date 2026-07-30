@@ -75,10 +75,11 @@ struct SharedState {
 struct AudioSource {
     #[allow(dead_code)]
     id: u32,
-    samples: Vec<f32>,           // decoded mono samples (at source_sample_rate)
+    samples: Vec<f32>,           // decoded samples at source_sample_rate; interleaved when src_channels == 2
+    src_channels: usize,         // 1 (voice/oneshots) or 2 (music keeps its stereo field)
     source_sample_rate: u32,     // native sample rate of the audio
     rate_ratio: f64,             // source_sample_rate / device_sample_rate
-    position: f64,               // current position in source samples (fractional for interpolation)
+    position: f64,               // current position in source FRAMES (fractional for interpolation)
     playing: bool,
     volume: f32,                 // 0.0–1.0
     duration_ms: u64,            // estimated until decode completes, then actual
@@ -89,7 +90,7 @@ struct AudioSource {
 
 /// Active crossfade state: blends old position out while new position fades in
 struct Crossfade {
-    old_position: f64,   // playback position before seek (in source samples, fractional)
+    old_position: f64,   // playback position before seek (in source frames, fractional)
     remaining: u32,      // device-rate samples left in crossfade
 }
 
@@ -267,12 +268,15 @@ impl AudioEngine {
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
         let rate_ratio = sample_rate as f64 / self.shared.device_sample_rate as f64;
         let duration_ms = if sample_rate > 0 { est_frames * 1000 / sample_rate as u64 } else { 0 };
+        // Music keeps its stereo field; >2ch sources carry front L/R.
+        let src_channels = channels.min(2).max(1);
 
         self.evict_if_needed();
 
         let source = AudioSource {
             id,
-            samples: Vec::with_capacity(est_frames as usize),
+            samples: Vec::with_capacity(est_frames as usize * src_channels),
+            src_channels,
             source_sample_rate: sample_rate,
             rate_ratio,
             position: 0.0,
@@ -350,6 +354,7 @@ impl AudioEngine {
         let source = AudioSource {
             id,
             samples,
+            src_channels: 1,
             source_sample_rate: sample_rate,
             rate_ratio,
             position: 0.0,
@@ -380,8 +385,10 @@ impl AudioEngine {
         let mut sources = self.shared.sources.lock().map_err(|_| "Lock poisoned")?;
         let source = sources.get_mut(&id).ok_or("Source not found")?;
         // Auto-rewind if at end (so replay works without explicit seek)
-        // Mixer stops when pos_floor + 1 >= samples.len(), so position ends at len-1
-        if source.decode_complete && (source.position as usize) + 1 >= source.samples.len() {
+        // Mixer stops when frame pos+1 isn't fully decoded, so position ends near the last frame
+        if source.decode_complete
+            && ((source.position as usize) + 2) * source.src_channels > source.samples.len()
+        {
             source.position = 0.0;
         }
         source.playing = true;
@@ -402,19 +409,22 @@ impl AudioEngine {
     pub fn seek(&self, id: u32, position_ms: u64) -> Result<(), String> {
         let mut sources = self.shared.sources.lock().map_err(|_| "Lock poisoned")?;
         let source = sources.get_mut(&id).ok_or("Source not found")?;
-        let sample_pos = position_ms as f64 * source.source_sample_rate as f64 / 1000.0;
+        let frame_pos = position_ms as f64 * source.source_sample_rate as f64 / 1000.0;
         let old_position = source.position;
         // During streaming decode, allow seeking beyond decoded data — the mixer
         // outputs silence until decode catches up. For fully-decoded sources,
         // clamp to file length to prevent seeking past the end.
+        let frames_len = (source.samples.len() / source.src_channels) as f64;
         source.position = if source.decode_complete {
-            sample_pos.min(source.samples.len() as f64)
+            frame_pos.min(frames_len)
         } else {
-            sample_pos
+            frame_pos
         };
         // Only crossfade if the new position has decoded audio to blend into.
         // Seeking beyond decoded data during streaming → no crossfade (just silence).
-        if source.playing && (source.position as usize) + 1 < source.samples.len() {
+        if source.playing
+            && ((source.position as usize) + 2) * source.src_channels <= source.samples.len()
+        {
             source.crossfade = Some(Crossfade {
                 old_position,
                 remaining: CROSSFADE_SAMPLES,
@@ -457,6 +467,7 @@ impl AudioEngine {
         let source = AudioSource {
             id,
             samples,
+            src_channels: 1,
             source_sample_rate: self.shared.device_sample_rate,
             rate_ratio: 1.0, // already at device rate
             position: 0.0,
@@ -604,12 +615,14 @@ fn mixer_callback(output: &mut [f32], shared: &SharedState, channels: usize) {
         if !source.playing {
             continue;
         }
+        let src_ch = source.src_channels;
 
         for frame in output.chunks_mut(channels) {
             let pos_floor = source.position as usize;
 
-            // Need at least one sample beyond current position for interpolation
-            if pos_floor + 1 >= source.samples.len() {
+            // Interpolation reads frames pos_floor and pos_floor+1 — both must
+            // be fully decoded (frame-aligned in the interleaved buffer).
+            if (pos_floor + 2) * src_ch > source.samples.len() {
                 if source.decode_complete {
                     // True end of file
                     source.playing = false;
@@ -622,38 +635,60 @@ fn mixer_callback(output: &mut [f32], shared: &SharedState, channels: usize) {
                 break;
             }
 
-            // Linear interpolation between adjacent samples for rate conversion
             let frac = (source.position - pos_floor as f64) as f32;
-            let s0 = source.samples[pos_floor];
-            let s1 = source.samples[pos_floor + 1];
-            let new_sample = s0 + (s1 - s0) * frac;
+            let base0 = pos_floor * src_ch;
+            let base1 = base0 + src_ch;
 
-            let sample = if let Some(ref mut xfade) = source.crossfade {
-                // Crossfade: blend old position (fading out) with new position (fading in)
+            // Crossfade bookkeeping advances once per FRAME; each channel then
+            // blends against the same old position. Mode: 2 = interpolate,
+            // 1 = flat tail sample, 0 = past the end (silence).
+            let (xf_t, xf_base, xf_frac, xf_mode) = if let Some(ref mut xfade) = source.crossfade {
                 let t = xfade.remaining as f32 / CROSSFADE_SAMPLES as f32;
                 let old_floor = xfade.old_position as usize;
-                let old_sample = if old_floor + 1 < source.samples.len() {
-                    let old_frac = (xfade.old_position - old_floor as f64) as f32;
-                    let os0 = source.samples[old_floor];
-                    let os1 = source.samples[old_floor + 1];
-                    os0 + (os1 - os0) * old_frac
-                } else if old_floor < source.samples.len() {
-                    source.samples[old_floor]
+                let old_frac = (xfade.old_position - old_floor as f64) as f32;
+                let mode: u8 = if (old_floor + 2) * src_ch <= source.samples.len() {
+                    2
+                } else if (old_floor + 1) * src_ch <= source.samples.len() {
+                    1
                 } else {
-                    0.0
+                    0
                 };
+                let base = old_floor * src_ch;
                 xfade.old_position += source.rate_ratio;
                 xfade.remaining -= 1;
-                if xfade.remaining == 0 {
+                let active = xfade.remaining > 0;
+                if !active {
                     source.crossfade = None;
                 }
-                (old_sample * t + new_sample * (1.0 - t)) * source.volume
+                (t, base, old_frac, Some(mode))
             } else {
-                new_sample * source.volume
+                (0.0, 0, 0.0, None)
             };
 
-            for ch in frame.iter_mut() {
-                *ch += sample;
+            for (out_ch, out) in frame.iter_mut().enumerate() {
+                // Mono duplicates everywhere; stereo maps L/R, extra device
+                // channels ride the last source channel.
+                let c = out_ch.min(src_ch - 1);
+                let s0 = source.samples[base0 + c];
+                let s1 = source.samples[base1 + c];
+                let new_sample = s0 + (s1 - s0) * frac;
+
+                let sample = match xf_mode {
+                    Some(mode) => {
+                        let old_sample = match mode {
+                            2 => {
+                                let os0 = source.samples[xf_base + c];
+                                let os1 = source.samples[xf_base + src_ch + c];
+                                os0 + (os1 - os0) * xf_frac
+                            }
+                            1 => source.samples[xf_base + c],
+                            _ => 0.0,
+                        };
+                        (old_sample * xf_t + new_sample * (1.0 - xf_t)) * source.volume
+                    }
+                    None => new_sample * source.volume,
+                };
+                *out += sample;
             }
             source.position += source.rate_ratio;
         }
@@ -824,11 +859,15 @@ fn stream_decode_worker(
                     buf.copy_interleaved_ref(audio_buf);
                     let samples = buf.samples();
                     if channels > 1 {
+                        // Playback keeps the stereo field (front L/R on >2ch
+                        // sources); the FFT/duration accumulator stays a mono
+                        // mix. Whole frames only, so a batch flush can never
+                        // split an interleaved pair.
                         for chunk in samples.chunks_exact(channels) {
+                            batch.push(chunk[0]);
+                            batch.push(chunk[1]);
                             let sum: f32 = chunk.iter().sum();
-                            let mono = sum / channels as f32;
-                            batch.push(mono);
-                            all_decoded.push(mono);
+                            all_decoded.push(sum / channels as f32);
                         }
                     } else {
                         batch.extend_from_slice(samples);
