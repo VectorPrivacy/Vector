@@ -558,9 +558,22 @@ impl VectorBot {
 
     /// Download a received attachment and decrypt it to plaintext bytes (fetches the encrypted blob
     /// from its Blossom URL, then AES-decrypts with the attachment's embedded key + nonce). Find
-    /// attachments on `msg.message.attachments`.
+    /// attachments on `msg.message.attachments`. Prefer
+    /// [`download_attachment_from`](Self::download_attachment_from) when you have the message —
+    /// knowing the author unlocks an extra recovery path for dead links.
     pub async fn download_attachment(&self, attachment: &Attachment) -> Result<Vec<u8>> {
         self.core.download_attachment(attachment).await
+    }
+
+    /// [`download_attachment`](Self::download_attachment) with the full source walk: the primary
+    /// URL, then any mirrors the sender embedded, then the same content-address on each server the
+    /// author advertises (BUD-03) — pass `msg.message.npub` as `author_npub`.
+    pub async fn download_attachment_from(
+        &self,
+        attachment: &Attachment,
+        author_npub: Option<&str>,
+    ) -> Result<Vec<u8>> {
+        self.core.download_attachment_from(attachment, author_npub).await
     }
 
     /// Upload a local image (avatar, banner, …) to Blossom and return its public URL. Unlike

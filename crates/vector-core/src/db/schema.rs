@@ -1080,5 +1080,20 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // =========================================================================
+    // Migration 80: Attachment mirror URLs (BUD-04 fallbacks)
+    // =========================================================================
+    // NIP-17 / imeta `fallback` sources: the same ciphertext mirrored on other
+    // Blossom servers, tried in order when the primary URL dies. Space-joined
+    // (URLs cannot contain spaces); empty = no mirrors.
+    run_atomic_migration(conn, 80, "Attachment fallback URLs (Blossom mirrors)", |tx| {
+        tx.execute(
+            "ALTER TABLE attachments ADD COLUMN fallback_urls TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .map_err(|e| format!("migration 80: {}", e))?;
+        Ok(())
+    })?;
+
     Ok(())
 }

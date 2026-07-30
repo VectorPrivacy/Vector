@@ -566,6 +566,7 @@ mod tests {
             webxdc_topic: None,
             group_id: None,
             original_hash: Some("a".repeat(64)),
+            fallback_urls: Vec::new(),
         };
         let imetas = vec![
             super::super::attachments::attachment_to_imeta(&mk("photo.png", "png", true)),

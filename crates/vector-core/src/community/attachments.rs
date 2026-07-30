@@ -42,6 +42,10 @@ pub fn attachment_to_imeta(att: &Attachment) -> Tag {
     if let Some(topic) = att.webxdc_topic.as_deref().filter(|t| !t.is_empty()) {
         fields.push(format!("webxdc-topic {}", topic));
     }
+    // Mirrors of the same ciphertext (NIP-92 `fallback` convention).
+    for fb in &att.fallback_urls {
+        fields.push(format!("fallback {}", fb));
+    }
     Tag::custom(IMETA, fields)
 }
 
@@ -50,6 +54,15 @@ pub fn attachment_to_imeta(att: &Attachment) -> Tag {
 fn field<'a>(entries: &'a [String], key: &str) -> Option<&'a str> {
     entries.iter().find_map(|e| {
         e.strip_prefix(key)
+            .and_then(|rest| rest.strip_prefix(' '))
+    })
+}
+
+/// Every value of a repeatable `key value` field, in tag order.
+fn fields_all<'a>(entries: &'a [String], key: &str) -> impl Iterator<Item = &'a str> + 'a {
+    let key = key.to_string();
+    entries.iter().filter_map(move |e| {
+        e.strip_prefix(key.as_str())
             .and_then(|rest| rest.strip_prefix(' '))
     })
 }
@@ -138,6 +151,23 @@ pub fn attachment_from_imeta(tag: &Tag, download_dir: &Path) -> Option<Attachmen
         .filter(|t| t.len() == 52 && t.bytes().all(|b| b.is_ascii_uppercase() || (b'2'..=b'7').contains(&b)))
         .map(|t| t.to_string());
 
+    // `fallback` mirrors: same ciphertext on other hosts. Author-controlled —
+    // https-only, deduped against the primary and each other, capped.
+    let mut fallback_urls: Vec<String> = Vec::new();
+    for fb in fields_all(body, "fallback") {
+        if !fb.starts_with("https://")
+            || fb.contains(char::is_whitespace)
+            || fb == url
+            || fallback_urls.iter().any(|f| f == fb)
+        {
+            continue;
+        }
+        fallback_urls.push(fb.to_string());
+        if fallback_urls.len() >= 4 {
+            break;
+        }
+    }
+
     Some(Attachment {
         id: basis,
         key,
@@ -153,6 +183,7 @@ pub fn attachment_from_imeta(tag: &Tag, download_dir: &Path) -> Option<Attachmen
         webxdc_topic,
         group_id: None, // Community attachments use explicit key/nonce (NIP-17 technique).
         original_hash,
+        fallback_urls,
     })
 }
 
@@ -219,7 +250,36 @@ mod tests {
             webxdc_topic: None,
             group_id: None,
             original_hash: Some("a".repeat(64)),
+            fallback_urls: Vec::new(),
         }
+    }
+
+    #[test]
+    fn imeta_fallback_mirrors_roundtrip() {
+        let dir = std::env::temp_dir();
+        let mut att = sample("pic.png", "png", false);
+        att.fallback_urls = vec![
+            "https://mirror-one.example/abc".to_string(),
+            "https://mirror-two.example/abc".to_string(),
+        ];
+        let parsed = attachment_from_imeta(&attachment_to_imeta(&att), &dir).unwrap();
+        assert_eq!(parsed.fallback_urls, att.fallback_urls);
+    }
+
+    #[test]
+    fn imeta_fallback_filters_junk() {
+        // Author-controlled entries: primary dups, non-https schemes and
+        // repeated mirrors are dropped, not propagated.
+        let dir = std::env::temp_dir();
+        let att = sample("pic.png", "png", false);
+        let mut entries: Vec<String> = attachment_to_imeta(&att).as_slice()[1..].to_vec();
+        entries.push(format!("fallback {}", att.url));
+        entries.push("fallback http://insecure.example/abc".to_string());
+        entries.push("fallback https://sneaky.example/a b".to_string());
+        entries.push("fallback https://mirror.example/abc".to_string());
+        entries.push("fallback https://mirror.example/abc".to_string());
+        let parsed = attachment_from_imeta(&Tag::custom(IMETA, entries), &dir).unwrap();
+        assert_eq!(parsed.fallback_urls, vec!["https://mirror.example/abc".to_string()]);
     }
 
     #[test]
@@ -390,6 +450,7 @@ mod tests {
             webxdc_topic: None,
             group_id: None,
             original_hash: Some("c".repeat(64)),
+            fallback_urls: Vec::new(),
         };
         let parsed = attachment_from_imeta(&attachment_to_imeta(&att), &dir).expect("parses");
         // The parsed key/nonce (straight off the imeta) must decrypt the ciphertext.

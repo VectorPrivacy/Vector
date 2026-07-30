@@ -342,6 +342,113 @@ pub async fn fetch_and_merge_own_list(
     Ok(customs_added)
 }
 
+// ============================================================================
+// BUD-03 foreign lists — hash-swap fallback source
+// ============================================================================
+
+/// author hex → (servers, fetched_at). Public network data keyed by FOREIGN
+/// pubkey, so it's account-agnostic and survives swaps safely. Empty lists
+/// cache too — a sender with no 10063 mustn't be re-queried per broken blob.
+static USER_SERVER_LIST_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, (Vec<String>, std::time::Instant)>>,
+> = std::sync::LazyLock::new(Default::default);
+const USER_SERVER_LIST_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+const USER_SERVER_LIST_MAX: usize = 8;
+
+/// Fetch another user's BUD-03 kind 10063 server list (cached, TTL 15 min).
+/// Feeds the download hash-swap: any of these servers may hold a blob whose
+/// embedded URLs have all died. Network failure returns empty WITHOUT
+/// caching, so a relay blip doesn't blind us for the TTL.
+pub async fn fetch_user_server_list(client: &Client, author: PublicKey) -> Vec<String> {
+    let key = author.to_hex();
+    if let Ok(cache) = USER_SERVER_LIST_CACHE.lock() {
+        if let Some((servers, at)) = cache.get(&key) {
+            if at.elapsed() < USER_SERVER_LIST_TTL {
+                return servers.clone();
+            }
+        }
+    }
+
+    let filter = Filter::new()
+        .author(author)
+        .kind(Kind::Custom(10063))
+        .limit(1);
+    let events = match client
+        .fetch_events(filter)
+        .timeout(std::time::Duration::from_secs(8))
+        .await
+    {
+        Ok(e) => e,
+        Err(e) => {
+            crate::log_debug!("[BlossomServers] foreign 10063 fetch failed for {}: {}", key, e);
+            return Vec::new();
+        }
+    };
+
+    let servers: Vec<String> = events
+        .into_iter()
+        .max_by_key(|e| e.created_at)
+        .map(|event| {
+            event
+                .tags
+                .iter()
+                .filter_map(|t| {
+                    if t.kind() == "server" {
+                        t.content()
+                            .and_then(|s| validate_url(s).ok())
+                            // Foreign lists must be https — never fetch a
+                            // stranger's ciphertext over cleartext.
+                            .filter(|u| u.starts_with("https://"))
+                    } else {
+                        None
+                    }
+                })
+                .take(USER_SERVER_LIST_MAX)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if servers.is_empty() {
+        // Ok-but-empty is ambiguous while disconnected (Ok ≠ EOSE): a relay
+        // blip must not cache "author has no servers" for the whole TTL.
+        let any_connected = client
+            .relays()
+            .await
+            .values()
+            .any(|r| r.status() == RelayStatus::Connected);
+        if !any_connected {
+            return servers;
+        }
+    }
+
+    if let Ok(mut cache) = USER_SERVER_LIST_CACHE.lock() {
+        // Unbounded growth guard: an old entry per author is tiny, but a
+        // hostile sync could touch thousands — cap and clear wholesale.
+        if cache.len() > 512 {
+            cache.clear();
+        }
+        cache.insert(key, (servers.clone(), std::time::Instant::now()));
+    }
+    servers
+}
+
+/// Server list whose content-addresses may plausibly hold an author's blob:
+/// the local enabled list for own blobs (the local list IS the author's list,
+/// no network needed), the author's kind 10063 otherwise.
+pub async fn author_swap_servers(author_npub: Option<&str>, is_own_blob: bool) -> Vec<String> {
+    let me = crate::state::my_public_key().and_then(|pk| pk.to_bech32().ok());
+    if is_own_blob || (author_npub.is_some() && author_npub == me.as_deref()) {
+        return compute_enabled_servers();
+    }
+    let Some(author) = author_npub else {
+        return Vec::new();
+    };
+    match (crate::state::nostr_client(), PublicKey::parse(author)) {
+        (Some(client), Ok(pk)) => fetch_user_server_list(&client, pk).await,
+        _ => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

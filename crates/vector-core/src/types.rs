@@ -302,6 +302,10 @@ pub struct Attachment {
     pub group_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub original_hash: Option<String>,
+    /// Mirror URLs serving the same ciphertext (NIP-17 / imeta `fallback`),
+    /// tried in order when the primary `url` fails.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub fallback_urls: Vec<String>,
 }
 
 impl Default for Attachment {
@@ -321,7 +325,19 @@ impl Default for Attachment {
             webxdc_topic: None,
             group_id: None,
             original_hash: None,
+            fallback_urls: Vec::new(),
         }
+    }
+}
+
+impl Attachment {
+    /// Every remote URL holding this attachment's blob: the primary plus each
+    /// mirror the send fanned out to. Deletion must sweep ALL of them — a
+    /// surviving mirror keeps the "deleted" file alive.
+    pub fn all_urls(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.url.as_str())
+            .chain(self.fallback_urls.iter().map(String::as_str))
+            .filter(|u| !u.is_empty())
     }
 }
 
@@ -740,6 +756,7 @@ mod tests {
             webxdc_topic: Some("game".to_string()),
             group_id: Some("g1".to_string()),
             original_hash: Some("sha256hash".to_string()),
+            fallback_urls: Vec::new(),
         };
 
         let json = serde_json::to_string(&att).expect("serialize should succeed");

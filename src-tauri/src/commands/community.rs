@@ -1348,6 +1348,7 @@ async fn process_outbound_community_attachment_bytes(
         webxdc_topic,
         group_id: None,
         original_hash: Some(plaintext_hash),
+        fallback_urls: Vec::new(), // filled by the post-upload mirror fan-out
     };
     Ok(PreparedCommunityAttachment { attachment, encrypted, mime })
 }
@@ -1603,6 +1604,24 @@ async fn dispatch_community_attachment_message(
             });
         }
         callback.on_upload_complete(&channel_id, &pending_id, &attachment.id, &upload_url);
+
+        // BUD-04 mirror fan-out: bounded, best-effort. Verified mirrors ride
+        // the imeta as `fallback` sources; zero mirrors never fails the send.
+        let mirror_urls = vector_core::blossom::mirror_blob_to_servers(
+            signer.clone(),
+            &upload_url,
+            servers.clone(),
+            2,
+            Duration::from_secs(5),
+        )
+        .await;
+        if !mirror_urls.is_empty() {
+            attachment.fallback_urls = mirror_urls.clone();
+            let mut state = vector_core::state::STATE.lock().await;
+            state.update_attachment(&channel_id, &pending_id, &attachment.id, |a| {
+                a.fallback_urls = Some(mirror_urls.iter().map(|s| s.as_str().into()).collect());
+            });
+        }
         uploaded.push(attachment);
     }
 
@@ -3009,8 +3028,7 @@ pub async fn delete_community_message(message_id: String) -> Result<(), String> 
                 chat.id.clone(),
                 msg.attachments
                     .iter()
-                    .filter(|a| !a.url.is_empty())
-                    .map(|a| a.url.clone())
+                    .flat_map(|a| a.all_urls().map(str::to_string))
                     .collect::<Vec<_>>(),
             ),
             None => return Err("message not found (already deleted?)".to_string()),

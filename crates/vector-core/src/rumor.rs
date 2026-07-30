@@ -490,6 +490,29 @@ fn process_file_attachment(
         .filter(|t| t.len() == 52 && t.bytes().all(|b| b.is_ascii_uppercase() || (b'2'..=b'7').contains(&b)))
         .map(|s| s.to_string());
 
+    // NIP-17 `fallback` mirrors: the same ciphertext on other hosts, tried in
+    // order when the primary URL dies. Sender-controlled data — https-only,
+    // deduped against the primary and each other, capped.
+    let mut fallback_urls: Vec<String> = Vec::new();
+    for tag in rumor.tags.iter() {
+        let parts = tag.as_slice();
+        if parts.first().map(String::as_str) != Some("fallback") {
+            continue;
+        }
+        let Some(u) = parts.get(1) else { continue };
+        if !u.starts_with("https://")
+            || u.contains(char::is_whitespace)
+            || *u == content_url
+            || fallback_urls.contains(u)
+        {
+            continue;
+        }
+        fallback_urls.push(u.clone());
+        if fallback_urls.len() >= 4 {
+            break;
+        }
+    }
+
     // Create the attachment
     let attachment = Attachment {
         id: file_hash.clone(),
@@ -506,6 +529,7 @@ fn process_file_attachment(
         webxdc_topic,
         group_id: None,       // Kind 15 attachments use explicit key/nonce
         original_hash: original_file_hash, // ox tag value (original file hash)
+        fallback_urls,
     };
 
     let emoji_tags = crate::types::EmojiTag::extract_from_tags(rumor.tags.iter());
@@ -1446,6 +1470,40 @@ mod tests {
                 assert_eq!(att.name, "photo.jpg");
                 assert_eq!(att.size, 12345);
                 assert!(!att.downloaded);
+            }
+            _ => panic!("Expected FileAttachment"),
+        }
+    }
+
+    #[test]
+    fn test_file_attachment_fallback_mirrors() {
+        let keys = test_keypair();
+        let ox_hash = "deadbeef".repeat(8);
+        let t = tags(vec![
+            custom_tag("decryption-key", &["aabbccdd"]),
+            custom_tag("decryption-nonce", &["11223344"]),
+            custom_tag("ox", &[&ox_hash]),
+            custom_tag("file-type", &["image/jpeg"]),
+            custom_tag("fallback", &["https://mirror-one.example/deadbeef.jpg"]),
+            // Junk a sender could stuff in: primary dup, plain http,
+            // whitespace smuggle, mirror dup.
+            custom_tag("fallback", &["https://blossom.example/deadbeef.jpg"]),
+            custom_tag("fallback", &["http://insecure.example/deadbeef.jpg"]),
+            custom_tag("fallback", &["https://sneaky.example/a b.jpg"]),
+            custom_tag("fallback", &["https://mirror-one.example/deadbeef.jpg"]),
+            custom_tag("fallback", &["https://mirror-two.example/deadbeef.jpg"]),
+        ]);
+        let rumor = make_rumor(&keys, Kind::from_u16(15), "https://blossom.example/deadbeef.jpg", t);
+        let ctx = dm_context(&keys);
+        let result = process_rumor(rumor, ctx, &temp_dir()).unwrap();
+
+        match result {
+            RumorProcessingResult::FileAttachment(msg) => {
+                let att = &msg.attachments[0];
+                assert_eq!(att.fallback_urls, vec![
+                    "https://mirror-one.example/deadbeef.jpg".to_string(),
+                    "https://mirror-two.example/deadbeef.jpg".to_string(),
+                ]);
             }
             _ => panic!("Expected FileAttachment"),
         }

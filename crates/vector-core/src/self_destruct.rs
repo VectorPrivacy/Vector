@@ -134,8 +134,7 @@ pub async fn sweep_expired() -> Option<u64> {
             if mine {
                 let urls: Vec<String> = unique
                     .iter()
-                    .map(|a| a.url.to_string())
-                    .filter(|u| !u.is_empty())
+                    .flat_map(|a| a.all_urls().map(str::to_string))
                     .collect();
                 if !urls.is_empty() {
                     if let Some(ref _client) = client {

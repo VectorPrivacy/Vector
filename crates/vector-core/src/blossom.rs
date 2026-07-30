@@ -724,13 +724,9 @@ where
     }
 }
 
-/// Parse a Blossom blob URL into (origin, hash) and DELETE that blob.
-/// Awaitable single-URL variant of `delete_blobs_best_effort` — caller
-/// drives sequencing + per-URL UI feedback.
-pub async fn delete_blob_by_url<T>(signer: T, url_str: &str) -> Result<(), String>
-where
-    T: VectorSigner + Clone,
-{
+/// Parse a Blossom blob URL into its server origin and SHA-256 hash
+/// (last non-empty path segment, optional `.ext` stripped).
+pub fn parse_blob_url(url_str: &str) -> Result<(Url, Sha256Hash), String> {
     let parsed = Url::parse(url_str)
         .map_err(|e| format!("Invalid Blossom URL: {}", e))?;
     let last_segment = parsed
@@ -740,11 +736,21 @@ where
     let hash_str = last_segment.split('.').next().unwrap_or("");
     let hash = Sha256Hash::from_str(hash_str)
         .map_err(|e| format!("Path is not a SHA-256 hash: {}", e))?;
-
     let mut origin = parsed.clone();
     origin.set_path("/");
     origin.set_query(None);
     origin.set_fragment(None);
+    Ok((origin, hash))
+}
+
+/// Parse a Blossom blob URL into (origin, hash) and DELETE that blob.
+/// Awaitable single-URL variant of `delete_blobs_best_effort` — caller
+/// drives sequencing + per-URL UI feedback.
+pub async fn delete_blob_by_url<T>(signer: T, url_str: &str) -> Result<(), String>
+where
+    T: VectorSigner + Clone,
+{
+    let (origin, hash) = parse_blob_url(url_str)?;
 
     crate::log_info!("[Blossom] DELETE {} from {}", hash, origin);
     // Hard ceiling — a black-holed server must not hang the caller's
@@ -767,6 +773,161 @@ where
             Err(msg)
         }
     }
+}
+
+/// Derive BUD-03 hash-swap candidates: the same content-address on each of
+/// `servers`. Blossom URLs are `<origin>/<sha256>[.ext]`, so any server in
+/// the author's list may serve a blob whose embedded URLs have all died.
+/// Servers matching `primary_url`'s origin (already tried) are skipped.
+pub fn hash_swap_candidates(primary_url: &str, servers: &[String]) -> Vec<String> {
+    let Ok((primary_origin, hash)) = parse_blob_url(primary_url) else {
+        return Vec::new();
+    };
+    // Extension from the parsed path segment, never the raw string — a raw
+    // rsplit would drag the query/fragment along into every derived URL.
+    let ext = Url::parse(primary_url)
+        .ok()
+        .and_then(|u| {
+            u.path_segments()
+                .and_then(|segs| segs.rev().find(|s| !s.is_empty()).map(|s| s.to_string()))
+        })
+        .and_then(|leaf| leaf.split_once('.').map(|(_, e)| e.to_string()))
+        .filter(|e| !e.is_empty() && e.len() <= 8 && e.bytes().all(|b| b.is_ascii_alphanumeric()));
+    let leaf = match ext {
+        Some(e) => format!("{}.{}", hash, e),
+        None => hash.to_string(),
+    };
+    servers
+        .iter()
+        .filter_map(|s| {
+            let base = Url::parse(&format!("{}/", s.trim_end_matches('/'))).ok()?;
+            if base.origin() == primary_origin.origin() {
+                return None;
+            }
+            base.join(&leaf).ok().map(|u| u.to_string())
+        })
+        .collect()
+}
+
+/// BUD-04: ask `target_server` to mirror the blob at `source_url` by pulling
+/// it server-to-server (the client sends one small JSON request, never the
+/// bytes). Authorized by the same hash-scoped upload event as a direct
+/// upload. The mirror's ACK gets the same serve-check as an upload ACK.
+/// Returns the mirror's URL for the blob.
+pub async fn mirror_blob<T>(signer: T, target_server: &Url, source_url: &str) -> Result<String, String>
+where
+    T: VectorSigner + Clone,
+{
+    let (source_origin, hash) = parse_blob_url(source_url)?;
+    if target_server.origin() == source_origin.origin() {
+        return Err("Mirror target is the source server".to_string());
+    }
+    let auth_header = build_auth_header(&signer, hash).await?;
+    let mirror_url = target_server
+        .join("mirror")
+        .map_err(|e| format!("Invalid mirror URL: {}", e))?;
+
+    let client = crate::net::build_http_client(std::time::Duration::from_secs(30))?;
+    let response = client
+        .put(mirror_url)
+        .header(AUTHORIZATION, auth_header)
+        .header(CONTENT_TYPE, "application/json")
+        .body(format!("{{\"url\":{}}}", serde_json::to_string(source_url).map_err(|e| e.to_string())?))
+        .send()
+        .await
+        .map_err(|e| format!("Mirror request failed: {}", e))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_else(|_| "<no body>".into());
+        return Err(format!("Mirror failed with status {}: {}", status, body));
+    }
+    let descriptor: BlobDescriptor = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse mirror response: {}", e))?;
+    if descriptor.sha256 != hash {
+        return Err(format!(
+            "[INTEGRITY] {} mirrored a different hash (returned {}, expected {})",
+            target_server, descriptor.sha256, hash,
+        ));
+    }
+    let url = descriptor.url.to_string();
+    // BUD-04: the mirror serves the blob ITSELF. A descriptor pointing at a
+    // foreign origin, a downgraded scheme, or carrying a query string is a
+    // protocol violation (or a tracking beacon) — never embed it in messages.
+    let same_origin = Url::parse(&url)
+        .map(|u| u.origin() == target_server.origin() && u.query().is_none())
+        .unwrap_or(false);
+    if !same_origin {
+        return Err(format!("{} returned a foreign descriptor URL: {}", target_server, url));
+    }
+    if !uploaded_blob_serves(&url).await {
+        return Err(format!("{} ACKed the mirror but does not serve it", target_server));
+    }
+    Ok(url)
+}
+
+/// Best-effort BUD-04 fan-out: mirror `source_url` onto up to `max_mirrors`
+/// of the user's other servers, concurrently, under one wall-clock `budget`.
+/// Returns only the mirror URLs that verifiably serve — the caller embeds
+/// these as NIP-17 / imeta `fallback` sources. Never fails the send: an
+/// empty Vec just means the message ships with no fallbacks.
+pub async fn mirror_blob_to_servers<T>(
+    signer: T,
+    source_url: &str,
+    server_urls: Vec<String>,
+    max_mirrors: usize,
+    budget: std::time::Duration,
+) -> Vec<String>
+where
+    T: VectorSigner + Clone,
+{
+    let source_origin = match parse_blob_url(source_url) {
+        Ok((origin, _)) => origin,
+        Err(e) => {
+            crate::log_debug!("[Blossom Mirror] unparseable source {}: {}", source_url, e);
+            return Vec::new();
+        }
+    };
+    let targets: Vec<Url> = server_urls
+        .iter()
+        .filter_map(|s| Url::parse(s).ok())
+        .filter(|u| u.origin() != source_origin.origin())
+        .take(max_mirrors)
+        .collect();
+    if targets.is_empty() {
+        return Vec::new();
+    }
+
+    let futures = targets.into_iter().map(|target| {
+        let signer = signer.clone();
+        let source = source_url.to_string();
+        async move {
+            // Per-target budget: a hung server cancels only itself. A mirror
+            // that completed must keep its result — an unrecorded live copy
+            // is invisible to every future deletion sweep.
+            match tokio::time::timeout(budget, mirror_blob(signer, &target, &source)).await {
+                Ok(Ok(url)) => {
+                    crate::log_info!("[Blossom Mirror] {} now serves {}", target, url);
+                    Some(url)
+                }
+                Ok(Err(e)) => {
+                    crate::log_debug!("[Blossom Mirror] {} refused: {}", target, e);
+                    None
+                }
+                Err(_) => {
+                    crate::log_debug!("[Blossom Mirror] {} exceeded {:?} budget", target, budget);
+                    None
+                }
+            }
+        }
+    });
+    futures_util::future::join_all(futures)
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 /// Fire-and-forget DELETE for each parseable blob URL. Pairs with
@@ -967,6 +1128,43 @@ mod parse_status_tests {
     #[test]
     fn returns_none_when_absent() {
         assert_eq!(parse_status_from_error("network error: timeout"), None);
+    }
+}
+
+#[cfg(test)]
+mod hash_swap_tests {
+    use super::hash_swap_candidates;
+
+    const HASH: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+
+    #[test]
+    fn derives_clean_leaves_and_skips_the_source_origin() {
+        // Query + fragment on the primary must NOT leak into derived URLs,
+        // the source origin is skipped, junk servers are dropped.
+        let primary = format!("https://a.example/{}.png?utm=track#frag", HASH);
+        let servers = vec![
+            "https://a.example".to_string(),
+            "https://b.example".to_string(),
+            "not a url".to_string(),
+        ];
+        assert_eq!(
+            hash_swap_candidates(&primary, &servers),
+            vec![format!("https://b.example/{}.png", HASH)],
+        );
+    }
+
+    #[test]
+    fn extensionless_primary_yields_the_bare_hash() {
+        let primary = format!("https://a.example/{}", HASH);
+        assert_eq!(
+            hash_swap_candidates(&primary, &["https://b.example/".to_string()]),
+            vec![format!("https://b.example/{}", HASH)],
+        );
+    }
+
+    #[test]
+    fn unparseable_primary_yields_nothing() {
+        assert!(hash_swap_candidates("https://a.example/not-a-hash.png", &["https://b.example".to_string()]).is_empty());
     }
 }
 

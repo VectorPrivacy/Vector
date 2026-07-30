@@ -892,6 +892,25 @@ pub async fn send_file_dm(
     }
     callback.on_upload_complete(receiver_npub, &pending_id, &file_hash, &upload_url);
 
+    // BUD-04 mirror fan-out: bounded, best-effort. Verified mirrors ride the
+    // rumor as NIP-17 `fallback` tags so the message survives its primary
+    // host dying later; zero mirrors never delays or fails the send.
+    let mirror_urls = crate::blossom::mirror_blob_to_servers(
+        signer.clone(),
+        &upload_url,
+        crate::state::get_blossom_servers(),
+        2,
+        std::time::Duration::from_secs(5),
+    ).await;
+    if !mirror_urls.is_empty() {
+        let mut state = STATE.lock().await;
+        state.update_message(&pending_id, |msg| {
+            if let Some(att) = msg.attachments.last_mut() {
+                att.fallback_urls = Some(mirror_urls.iter().map(|s| s.as_str().into()).collect());
+            }
+        });
+    }
+
     // Build Kind 15
     let mut file_rumor = EventBuilder::new(Kind::from_u16(15), &upload_url)
         .tag(Tag::public_key(receiver))
@@ -901,6 +920,9 @@ pub async fn send_file_dm(
         .tag(Tag::custom("decryption-key", [params.key.as_str()]))
         .tag(Tag::custom("decryption-nonce", [params.nonce.as_str()]))
         .tag(Tag::custom("ox", [file_hash.clone()]));
+    for fb in &mirror_urls {
+        file_rumor = file_rumor.tag(Tag::custom("fallback", [fb.as_str()]));
+    }
     if !filename.is_empty() {
         file_rumor = file_rumor.tag(Tag::custom("name", [filename]));
     }

@@ -673,6 +673,8 @@ pub struct CompactAttachment {
     pub original_hash: Option<Box<[u8; 32]>>,
     /// WebXDC topic (Mini Apps only - very rare)
     pub webxdc_topic: Option<Box<str>>,
+    /// Mirror URLs for the same ciphertext (None = no mirrors, the common case)
+    pub fallback_urls: Option<Box<[Box<str>]>>,
     /// Original filename (e.g. "memories.zip"). Empty = fallback to {hash}.{ext}
     pub name: Box<str>,
 }
@@ -742,6 +744,8 @@ impl CompactAttachment {
             group_id: att.group_id.as_ref().map(|s| Box::new(hex_to_bytes_32(s))),
             original_hash: att.original_hash.as_ref().map(|s| Box::new(hex_to_bytes_32(s))),
             webxdc_topic: att.webxdc_topic.clone().map(|s| s.into_boxed_str()),
+            fallback_urls: (!att.fallback_urls.is_empty())
+                .then(|| att.fallback_urls.iter().map(|s| s.as_str().into()).collect()),
             name: att.name.clone().into_boxed_str(),
         }
     }
@@ -766,6 +770,8 @@ impl CompactAttachment {
             group_id: att.group_id.map(|s| Box::new(hex_to_bytes_32(&s))),
             original_hash: att.original_hash.map(|s| Box::new(hex_to_bytes_32(&s))),
             webxdc_topic: att.webxdc_topic.map(|s| s.into_boxed_str()),
+            fallback_urls: (!att.fallback_urls.is_empty())
+                .then(|| att.fallback_urls.into_iter().map(|s| s.into_boxed_str()).collect()),
             name: att.name.into_boxed_str(),
         }
     }
@@ -787,6 +793,11 @@ impl CompactAttachment {
             webxdc_topic: self.webxdc_topic.as_ref().map(|s| s.to_string()),
             group_id: self.group_id.as_ref().map(|b| bytes_to_hex_32(b)),
             original_hash: self.original_hash.as_ref().map(|b| bytes_to_hex_32(b)),
+            fallback_urls: self
+                .fallback_urls
+                .as_deref()
+                .map(|urls| urls.iter().map(|u| u.to_string()).collect())
+                .unwrap_or_default(),
         }
     }
 }
@@ -3110,6 +3121,7 @@ mod tests {
                 webxdc_topic: None,
                 group_id: None,
                 original_hash: None,
+                fallback_urls: Vec::new(),
             }],
             reactions: vec![Reaction {
                 id: "dddd000000000000000000000000000000000000000000000000000000000000".into(),
@@ -3431,6 +3443,7 @@ mod tests {
             webxdc_topic: None,
             group_id: None,
             original_hash: None,
+            fallback_urls: Vec::new(),
         };
 
         let compact = CompactAttachment::from_attachment(&att);
@@ -3465,6 +3478,7 @@ mod tests {
             webxdc_topic: None,
             group_id: None,
             original_hash: None,
+            fallback_urls: Vec::new(),
         };
         let att_clone = att.clone();
 
@@ -3575,6 +3589,7 @@ mod tests {
             webxdc_topic: Some("game-state".into()),
             group_id: Some("cccc000000000000000000000000000000000000000000000000000000000000".into()),
             original_hash: Some("dddd000000000000000000000000000000000000000000000000000000000000".into()),
+            fallback_urls: Vec::new(),
         };
 
         let compact = CompactAttachment::from_attachment(&att);

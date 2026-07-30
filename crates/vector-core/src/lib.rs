@@ -589,37 +589,105 @@ impl VectorCore {
 
     /// Download a received attachment and decrypt it to plaintext bytes. Fetches the encrypted blob
     /// from its Blossom URL (SSRF/Tor-aware client, size-capped) and AES-decrypts with the
-    /// attachment's embedded key + nonce.
+    /// attachment's embedded key + nonce. Walks the primary URL then any BUD-04 `fallback`
+    /// mirrors (same ciphertext on other hosts) until one serves. Prefer
+    /// [`download_attachment_from`](Self::download_attachment_from) when the message author is
+    /// known — it adds the BUD-03 hash-swap over the author's advertised servers.
     pub async fn download_attachment(&self, attachment: &Attachment) -> Result<Vec<u8>> {
+        self.download_attachment_from(attachment, None).await
+    }
+
+    /// [`download_attachment`](Self::download_attachment) with the full source walk: primary URL →
+    /// embedded `fallback` mirrors → BUD-03 hash-swap (the same content-address on each of the
+    /// author's kind-10063 servers). `author_npub` is the message author (your own npub for your
+    /// own messages); `None` skips the hash-swap stage.
+    pub async fn download_attachment_from(
+        &self,
+        attachment: &Attachment,
+        author_npub: Option<&str>,
+    ) -> Result<Vec<u8>> {
         use futures_util::StreamExt;
         const MAX_DOWNLOAD: usize = 256 * 1024 * 1024;
         if attachment.url.is_empty() {
             return Err(VectorError::Other("attachment has no URL".into()));
         }
-        // SSRF guard: the URL is attacker-controlled (off an inbound message). build_http_client only
-        // validates redirect HOPS, not the initial request — so validate it here (matches the native
-        // download path). With Tor off this is the only egress guard.
-        crate::net::validate_url_not_private(&attachment.url)
-            .map_err(|e| VectorError::Other(e.to_string()))?;
         let client = crate::net::build_http_client(std::time::Duration::from_secs(120)).map_err(VectorError::Other)?;
-        let resp = client.get(&attachment.url).send().await
-            .map_err(|e| VectorError::Other(format!("download: {e}")))?;
-        if !resp.status().is_success() {
-            return Err(VectorError::Other(format!("download failed: HTTP {}", resp.status())));
-        }
-        // Stream with a cap so a hostile/oversized blob can't OOM the process.
-        let mut encrypted: Vec<u8> = Vec::with_capacity(
-            resp.content_length().map(|l| (l as usize).min(MAX_DOWNLOAD)).unwrap_or(64 * 1024),
-        );
-        let mut stream = resp.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| VectorError::Other(format!("read body: {e}")))?;
-            if encrypted.len() + chunk.len() > MAX_DOWNLOAD {
-                return Err(VectorError::Other("attachment exceeds 256 MiB cap".into()));
+        let mut last_err = String::from("download failed");
+        let mut candidates: Vec<String> = vec![attachment.url.clone()];
+        candidates.extend(attachment.fallback_urls.iter().cloned());
+        let mut hash_swap_tried = false;
+        let mut i = 0;
+        'sources: while i < candidates.len() {
+            let url = candidates[i].clone();
+            i += 1;
+            // One-time last resort once every embedded source has failed: the author's advertised
+            // servers may hold the blob under the same content-address.
+            let extend_with_swap = |candidates: &mut Vec<String>, servers: &[String]| {
+                let extra = crate::blossom::hash_swap_candidates(&attachment.url, servers);
+                for c in extra {
+                    if !candidates.contains(&c) {
+                        candidates.push(c);
+                    }
+                }
+            };
+            macro_rules! next_source {
+                () => {{
+                    if i == candidates.len() && !hash_swap_tried {
+                        hash_swap_tried = true;
+                        let servers = crate::blossom_servers::author_swap_servers(author_npub, false).await;
+                        extend_with_swap(&mut candidates, &servers);
+                    }
+                    continue 'sources;
+                }};
             }
-            encrypted.extend_from_slice(&chunk);
+            // SSRF guard: URLs are attacker-controlled (off an inbound message). build_http_client
+            // only validates redirect HOPS, not the initial request — so validate each source here
+            // (matches the native download path). With Tor off this is the only egress guard.
+            if let Err(e) = crate::net::validate_url_not_private(&url) {
+                last_err = e.to_string();
+                next_source!();
+            }
+            let resp = match client.get(&url).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    last_err = format!("download: {e}");
+                    next_source!();
+                }
+            };
+            if !resp.status().is_success() {
+                last_err = format!("download failed: HTTP {}", resp.status());
+                next_source!();
+            }
+            // Stream with a cap so a hostile/oversized blob can't OOM the process. The cap is
+            // permanent — every mirror serves the same blob, so don't bother trying the next.
+            let mut encrypted: Vec<u8> = Vec::with_capacity(
+                resp.content_length().map(|l| (l as usize).min(MAX_DOWNLOAD)).unwrap_or(64 * 1024),
+            );
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = match chunk {
+                    Ok(c) => c,
+                    Err(e) => {
+                        last_err = format!("read body: {e}");
+                        next_source!();
+                    }
+                };
+                if encrypted.len() + chunk.len() > MAX_DOWNLOAD {
+                    return Err(VectorError::Other("attachment exceeds 256 MiB cap".into()));
+                }
+                encrypted.extend_from_slice(&chunk);
+            }
+            match crate::crypto::decrypt_data(&encrypted, &attachment.key, &attachment.nonce) {
+                Ok(plain) => return Ok(plain),
+                Err(e) => {
+                    // A host serving wrong bytes under the right URL must not
+                    // veto sources still holding the real ciphertext.
+                    last_err = format!("decrypt: {e}");
+                    next_source!();
+                }
+            }
         }
-        crate::crypto::decrypt_data(&encrypted, &attachment.key, &attachment.nonce).map_err(VectorError::Other)
+        Err(VectorError::Other(last_err))
     }
 
     /// Send a NIP-17 gift-wrapped file attachment DM.
@@ -1961,7 +2029,7 @@ impl VectorCore {
         let attachment_urls: Vec<String> = {
             let st = state::STATE.lock().await;
             st.find_message(message_id)
-                .map(|(_, msg)| msg.attachments.iter().filter(|a| !a.url.is_empty()).map(|a| a.url.clone()).collect())
+                .map(|(_, msg)| msg.attachments.iter().flat_map(|a| a.all_urls().map(str::to_string)).collect())
                 .unwrap_or_default()
         };
 

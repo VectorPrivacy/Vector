@@ -253,6 +253,10 @@ fn ensure_path_in_download_dir(path: &str) -> Result<(), String> {
 #[tauri::command]
 pub async fn download_attachment(npub: String, msg_id: String, attachment_id: String) -> bool {
     let handle = TAURI_APP.get().unwrap();
+    // The multi-source walk (mirrors + hash-swap) can run for minutes against
+    // dead hosts — an account swap mid-walk must never write this account's
+    // download into the swapped-in account's STATE/DB.
+    let session = vector_core::state::SessionGuard::capture();
     // The UI raises its spinner on invoke and only lowers it on this event, so an
     // exit that emits nothing spins forever with no progress and no error — and
     // every retry (or reload) takes the same silent path. Any refusal must speak.
@@ -280,12 +284,14 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
     // miss, refill STATE from the DB ONCE and retry: STATE is authoritative, the DB
     // is consulted only to repopulate it. So a message that reached the UI without a
     // STATE hydration still downloads instead of hanging on a spinner.
-    let attachment = {
+    let (attachment, msg_is_mine, msg_author_npub) = {
         let mut refilled = false;
         loop {
         let mut state = STATE.lock().await;
 
-        // Find the message and attachment in chats
+        // Find the message and attachment in chats. Alongside the attachment,
+        // capture whose blob this is (mine / author npub) — the BUD-03
+        // hash-swap needs to know whose server list can plausibly hold it.
         let mut found_attachment = None;
         // Find target chat index first (immutable scan)
         let target_idx = state.chats.iter().position(|chat| match &chat.chat_type {
@@ -295,6 +301,8 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
         // Then mutably access only that chat
         if let Some(chat) = target_idx.map(|i| &mut state.chats[i]) {
                 if let Some(message) = chat.messages.find_by_hex_id_mut(&msg_id) {
+                    let msg_mine = message.is_mine();
+                    let msg_npub_idx = message.npub_idx;
                     if let Some(attachment) = message.attachments.iter_mut().find(|a| a.id_eq(&attachment_id)) {
                         // Check that we're not already downloading
                         if attachment.downloading() {
@@ -377,13 +385,14 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
 
                         // Enable the downloading flag to prevent re-calls
                         attachment.set_downloading(true);
-                        found_attachment = Some(attachment.clone());
+                        found_attachment = Some((attachment.clone(), msg_mine, msg_npub_idx));
                     }
                 }
         }
 
-        if let Some(att) = found_attachment {
-            break att;
+        if let Some((att, mine, npub_idx)) = found_attachment {
+            let author = state.interner.resolve(npub_idx).map(|s| s.to_string());
+            break (att, mine, author);
         }
         drop(state);
 
@@ -420,51 +429,111 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
         "progress": 0
     })).unwrap();
 
-    // Download the file. Transient network failures (dead connect, stalled or
-    // interrupted stream) retry with backoff — media servers flake; permanent
-    // refusals (blob gone, size cap) surface immediately.
+    // Download the file: primary URL first, then any BUD-04 mirrors carried as
+    // `fallback` sources — the same ciphertext on other hosts. Per source,
+    // transient network failures (dead connect, stalled or interrupted stream)
+    // retry with backoff — media servers flake; permanent refusals (blob gone,
+    // size cap) advance to the next source immediately.
     let encrypted_data = {
-        let mut attempt: u32 = 0;
-        loop {
-            match net::download(&*attachment.url, handle, &attachment_hex_id, None).await {
-                Ok(data) => break data,
-                Err(error) => {
-                    attempt += 1;
-                    let permanent = matches!(
-                        error,
-                        "Media server returned an error status"
-                            | "File exceeds the maximum download size"
-                    );
-                    if !permanent && attempt < 3 {
-                        vector_core::log_warn!(
-                            "[AttachmentDownload] attempt {} failed for {} — retrying: {}",
-                            attempt, &*attachment.url, error
-                        );
-                        tokio::time::sleep(std::time::Duration::from_secs(2 * attempt as u64)).await;
-                        continue;
+        let mut candidates: Vec<String> = vec![attachment.url.to_string()];
+        if let Some(fbs) = attachment.fallback_urls.as_deref() {
+            candidates.extend(fbs.iter().map(|u| u.to_string()));
+        }
+        let mut data: Option<Vec<u8>> = None;
+        let mut last_error = "Download failed";
+        let mut hash_swap_tried = false;
+        let mut i = 0;
+        while i < candidates.len() {
+            let url = candidates[i].clone();
+            let mut attempt: u32 = 0;
+            let exhausted = loop {
+                match net::download(&url, handle, &attachment_hex_id, None).await {
+                    Ok(d) => {
+                        data = Some(d);
+                        break false;
                     }
-                    vector_core::log_warn!(
-                        "[AttachmentDownload] failed: {} (msg {}, attachment {}) url {}",
-                        error, msg_id, attachment_id, &*attachment.url
-                    );
-                    // Handle download error
-                    let mut state = STATE.lock().await;
-                    state.update_attachment(&npub, &msg_id, &attachment_id, |att| {
-                        att.set_downloading(false);
-                        att.set_downloaded(false);
-                    });
-                    drop(state);
-
-                    // Emit the error
-                    handle.emit("attachment_download_result", serde_json::json!({
-                        "profile_id": npub,
-                        "msg_id": msg_id,
-                        "id": attachment_id,
-                        "success": false,
-                        "result": error
-                    })).unwrap();
-                    return false;
+                    Err(error) => {
+                        attempt += 1;
+                        last_error = error;
+                        let permanent = matches!(
+                            error,
+                            "Media server returned an error status"
+                                | "File exceeds the maximum download size"
+                        );
+                        if !permanent && attempt < 3 {
+                            vector_core::log_warn!(
+                                "[AttachmentDownload] attempt {} failed for {} — retrying: {}",
+                                attempt, url, error
+                            );
+                            tokio::time::sleep(std::time::Duration::from_secs(2 * attempt as u64)).await;
+                            continue;
+                        }
+                        break true;
+                    }
                 }
+            };
+            if !exhausted {
+                break;
+            }
+            i += 1;
+            if i == candidates.len() && !hash_swap_tried {
+                hash_swap_tried = true;
+                if !session.is_valid() {
+                    break;
+                }
+                // BUD-03 hash-swap, the last resort: every embedded URL died,
+                // but the author's advertised servers may still hold the blob
+                // under the same content-address. DMs resolve the author to
+                // the chat partner (message npub is None in 1:1 chats).
+                let servers = vector_core::blossom_servers::author_swap_servers(
+                    Some(msg_author_npub.as_deref().unwrap_or(&npub)),
+                    msg_is_mine,
+                )
+                .await;
+                let extra = vector_core::blossom::hash_swap_candidates(&attachment.url, &servers);
+                let fresh: Vec<String> = extra
+                    .into_iter()
+                    .filter(|c| !candidates.iter().any(|e| e == c))
+                    .collect();
+                if !fresh.is_empty() {
+                    vector_core::log_warn!(
+                        "[AttachmentDownload] all {} embedded source(s) dead — hash-swapping onto {} author server(s)",
+                        candidates.len(), fresh.len()
+                    );
+                    candidates.extend(fresh);
+                }
+            } else if i < candidates.len() {
+                vector_core::log_warn!(
+                    "[AttachmentDownload] source {}/{} exhausted ({}) — trying mirror: {}",
+                    i, candidates.len(), last_error, candidates[i]
+                );
+            }
+        }
+        let total_sources = candidates.len();
+        match data {
+            Some(d) => d,
+            None => {
+                vector_core::log_warn!(
+                    "[AttachmentDownload] failed: {} (msg {}, attachment {}) after {} source(s), url {}",
+                    last_error, msg_id, attachment_id, total_sources, &*attachment.url
+                );
+                // Handle download error
+                let mut state = STATE.lock().await;
+                state.update_attachment(&npub, &msg_id, &attachment_id, |att| {
+                    att.set_downloading(false);
+                    att.set_downloaded(false);
+                });
+                drop(state);
+
+                // Emit the error
+                handle.emit("attachment_download_result", serde_json::json!({
+                    "profile_id": npub,
+                    "msg_id": msg_id,
+                    "id": attachment_id,
+                    "success": false,
+                    "result": last_error
+                })).unwrap();
+                return false;
             }
         }
     };
@@ -496,6 +565,9 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
     let result = decrypt_and_save_attachment(handle, &encrypted_data, &attachment_for_decrypt).await;
 
     // Process the result
+    if !session.is_valid() {
+        return false;
+    }
     match result {
         Err(error) => {
             // Check if this is a corrupted attachment (decryption failure)
@@ -566,12 +638,17 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
 
                 // Persist updated message/attachment metadata to the database
                 if let Some(handle) = TAURI_APP.get() {
-                    // Find and save only the updated message (convert to Message for serialization)
-                    let updated_chat = state.get_chat(&npub).unwrap();
-                    let chat_id = updated_chat.id().clone();
-                    let updated_message = updated_chat.messages.find_by_hex_id(&msg_id)
-                        .map(|m| m.to_message(&state.interner))
-                        .unwrap();
+                    // Chat/message can vanish mid-download (deletion race, swap
+                    // remnants) — skip persistence rather than panic.
+                    let found = state.get_chat(&npub).and_then(|chat| {
+                        let chat_id = chat.id().clone();
+                        chat.messages.find_by_hex_id(&msg_id)
+                            .map(|m| (chat_id, m.to_message(&state.interner)))
+                    });
+                    let Some((chat_id, updated_message)) = found else {
+                        drop(state);
+                        return true;
+                    };
 
                     // Update the frontend state
                     handle.emit("message_update", serde_json::json!({
@@ -619,6 +696,9 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                     // Drop the STATE lock before performing async I/O
                     drop(state);
 
+                    if !session.is_valid() {
+                        return true;
+                    }
                     let _ = db::save_message(&npub, &updated_message).await;
 
                     // Backfill other messages with the same attachment hash

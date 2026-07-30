@@ -127,11 +127,11 @@ pub async fn delete_own_dm(rumor_id: &EventId) -> Result<DeleteOutcome, String> 
     // Local cache nuke (canonicalize + managed-dir-only inside helper).
     delete_cached_attachment_files(&unique_attachments);
 
-    // Blossom URLs derived from the filtered (refcount-aware) set.
+    // Blossom URLs derived from the filtered (refcount-aware) set — the
+    // primary plus every mirror (same hash, other origins).
     let attachment_urls: Vec<String> = unique_attachments
         .iter()
-        .map(|a| a.url.to_string())
-        .filter(|u| !u.is_empty())
+        .flat_map(|a| a.all_urls().map(str::to_string))
         .collect();
 
     let wraps_total = keys.len();

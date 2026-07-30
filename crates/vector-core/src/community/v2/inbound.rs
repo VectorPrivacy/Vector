@@ -939,6 +939,7 @@ mod tests {
             webxdc_topic: None,
             group_id: None,
             original_hash: Some("b".repeat(64)),
+            fallback_urls: Vec::new(),
         };
         let imeta = crate::community::attachments::attachment_to_imeta(&attachment);
         let member = Keys::generate();

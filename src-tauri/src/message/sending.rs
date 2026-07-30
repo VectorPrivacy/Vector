@@ -484,9 +484,10 @@ pub async fn delete_failed_message(message_id: String) -> Result<(), String> {
                 }
             }
         }
-        // Best-effort: free any blob already uploaded before the wrap failed.
+        // Best-effort: free any blob already uploaded before the wrap failed,
+        // mirrors included.
         let remote_urls: Vec<String> = msg.attachments.iter()
-            .filter_map(|a| if a.url.is_empty() { None } else { Some(a.url.to_string()) })
+            .flat_map(|a| a.all_urls().map(str::to_string))
             .collect();
         if !remote_urls.is_empty() {
             // Best-effort blob cleanup — route through the active client
