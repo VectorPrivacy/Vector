@@ -3047,6 +3047,13 @@ function humanizeUploadError(raw) {
  */
 const pendingUploadProgress = new Map();
 
+// In-flight optimistic reaction adds (msg id -> [{id, author_id, emoji, at}]).
+// message_update re-applies these over an incoming payload so a spree's earlier
+// echo can't visually un-react a later click; entries drop once their own echo
+// confirms them (or after the TTL if the send died without an error).
+const pendingReactions = new Map();
+const PENDING_REACTION_TTL_MS = 10000;
+
 function applyPendingUploadProgress(spinner, pendingId) {
     const progress = pendingUploadProgress.get(pendingId);
     if (progress !== undefined) {
@@ -4078,6 +4085,24 @@ async function setupRustListeners() {
 
         // Update it
         cChat.messages[nMsgIdx] = evt.payload.message;
+
+        // Re-apply in-flight optimistic reactions this echo predates: during a
+        // spree, click #1's echo must not visually un-react click #2. Entries the
+        // payload confirms (or that expired) drop; the rest ride the incoming
+        // message until their own echo arrives.
+        const inflight = pendingReactions.get(evt.payload.old_id);
+        if (inflight) {
+            const now = Date.now();
+            const still = inflight.filter(p =>
+                now - p.at < PENDING_REACTION_TTL_MS &&
+                !evt.payload.message.reactions.some(r => r.author_id === p.author_id && r.emoji === p.emoji)
+            );
+            for (const p of still) {
+                evt.payload.message.reactions.push({ id: p.id, reference_id: evt.payload.message.id, author_id: p.author_id, emoji: p.emoji });
+            }
+            if (still.length) pendingReactions.set(evt.payload.old_id, still);
+            else pendingReactions.delete(evt.payload.old_id);
+        }
         
         // Also update the event cache
         // This is important for pending->sent transitions where the ID changes
@@ -12915,15 +12940,36 @@ document.addEventListener('click', (e) => {
                 if (!cMsg) continue;
                 const mine = cMsg.reactions.find(r => r.emoji === emoji && r.author_id === strPubkey);
                 if (mine) {
-                    // Already reacted → revoke. The backend optimistically removes the reaction
-                    // and emits message_update, so the chip refreshes without local bookkeeping.
-                    invoke('revoke_reaction', { reactionId: mine.id })
-                        .catch(err => console.error('revoke_reaction failed:', err));
+                    // A provisional entry means our add is still in flight — swallow the
+                    // click (debounce) rather than revoke an id the backend never issued.
+                    if (!String(mine.id).startsWith('pending-react-')) {
+                        // Already reacted → revoke. The backend optimistically removes the reaction
+                        // and emits message_update, so the chip refreshes without local bookkeeping.
+                        invoke('revoke_reaction', { reactionId: mine.id })
+                            .catch(err => console.error('revoke_reaction failed:', err));
+                    }
                 } else {
                     // Not yet reacted → add. Mark + optimistic count roll to debounce double-clicks.
                     clickedReaction.setAttribute('data-reacted', 'true');
                     _dmsgRollReactionCount(clickedReaction, _dmsgReactionCount(clickedReaction) + 1);
-                    reactToMessageRouted(msgId, cChat.id, emoji);
+                    // Mirror the bump into STATE as a provisional: during a rapid spree the
+                    // echo for an EARLIER click re-renders this row from a snapshot that
+                    // predates this click, and without the provisional that repaint visibly
+                    // un-reacts the chip until our own echo lands.
+                    const provisional = { id: `pending-react-${Date.now()}`, reference_id: msgId, author_id: strPubkey, emoji, at: Date.now() };
+                    cMsg.reactions.push({ id: provisional.id, reference_id: msgId, author_id: strPubkey, emoji });
+                    const inflight = pendingReactions.get(msgId) || [];
+                    inflight.push(provisional);
+                    pendingReactions.set(msgId, inflight);
+                    reactToMessageRouted(msgId, cChat.id, emoji).catch(() => {
+                        // The send failed: retract the provisional and the chip bump.
+                        const l = (pendingReactions.get(msgId) || []).filter(p => p.id !== provisional.id);
+                        if (l.length) pendingReactions.set(msgId, l); else pendingReactions.delete(msgId);
+                        const i = cMsg.reactions.findIndex(r => r.id === provisional.id);
+                        if (i !== -1) cMsg.reactions.splice(i, 1);
+                        clickedReaction.removeAttribute('data-reacted');
+                        _dmsgRollReactionCount(clickedReaction, Math.max(0, _dmsgReactionCount(clickedReaction) - 1));
+                    });
                 }
                 break;
             }

@@ -11,7 +11,7 @@ let reactionLongPressed = false;
 let reactionHoverTip = null;
 let reactionHoverTimer = null;
 let reactionHoverEl = null; // currently armed reaction; null when nothing hovered
-const REACTION_HOVER_DELAY_MS = 250;
+const REACTION_HOVER_DELAY_MS = 500;
 const REACTION_HOVER_NAMES_VISIBLE = 3;
 
 /**
@@ -230,7 +230,7 @@ function cancelReactionLongPress() {
     }
 }
 
-// Hover summary (desktop only). Uses a 250ms delay so brief cursor flyovers
+// Hover summary (desktop only). Uses a 500ms delay so brief cursor flyovers
 // don't fire the tip. mousein/mouseout via mouseover/mouseout (capture-style)
 // because mouseenter/mouseleave don't bubble.
 document.addEventListener('mouseover', (e) => {

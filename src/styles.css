@@ -2938,7 +2938,7 @@ body.chat-bg-disabled .chat-messages::before {
   top: 1px;
 }
 
-/* Reaction hover summary (desktop, ~250ms). Right-click expands into the full
+/* Reaction hover summary (desktop, ~500ms). Right-click expands into the full
    .reaction-details-popup below. */
 .reaction-hover-tip {
   position: fixed;
@@ -16927,12 +16927,17 @@ textarea.command-part-input {
   vertical-align: middle;
 }
 /* Rolling reaction counter — the count lives in a clipped box so a change can
-   slide the old number out (up on +, down on −) while the new slides in. */
+   slide the old number out (up on +, down on −) while the new slides in.
+   Tabular digits + a one-digit floor: every single-digit count occupies the
+   exact same box, so 1→2 never resizes the chip or rewraps the row. */
 .dmsg-reactions .reaction-count {
   position: relative;
   display: inline-block;
   overflow: hidden;
   line-height: 1;
+  font-variant-numeric: tabular-nums;
+  min-width: 1ch;
+  text-align: center;
 }
 .dmsg-reactions .rc-value {
   display: block;
