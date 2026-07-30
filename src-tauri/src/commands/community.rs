@@ -2888,7 +2888,9 @@ pub async fn sync_communities_boot() -> Result<(), String> {
 
     // One coalesced control probe BEFORE the channel sweep — the unchanged
     // majority of communities then skip their per-community control chain.
+    let probe_start = std::time::Instant::now();
     run_control_probe(&session).await;
+    println!("[Boot] community control probe in {:?}", probe_start.elapsed());
     if !session.is_valid() {
         return Ok(());
     }
@@ -2993,13 +2995,24 @@ pub async fn sync_communities_boot() -> Result<(), String> {
     futures_util::stream::iter(channels)
         .map(|cid| async move {
             if session.is_valid() {
-                let _ = sync_community_channel(cid, None, None).await;
+                let t = std::time::Instant::now();
+                let new = sync_community_channel(cid.clone(), None, None)
+                    .await
+                    .map(|r| r.new_messages)
+                    .unwrap_or(0);
+                // Truncated id only — full channel ids correlate planes.
+                println!(
+                    "[Boot]   channel {}…: {} new in {:?}",
+                    &cid[..8.min(cid.len())],
+                    new,
+                    t.elapsed()
+                );
             }
         })
         .buffer_unordered(BOOT_SYNC_WINDOW)
         .collect::<Vec<()>>()
         .await;
-    vector_core::log_info!(
+    println!(
         "[Boot] community channel sweep: {} channel(s) in {:?}",
         channel_count,
         boot_start.elapsed()
