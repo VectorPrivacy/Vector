@@ -66,6 +66,7 @@
     "allow-clear-compression-cache",
     "allow-send-cached-compressed-file",
     "allow-get-or-cache-image",
+    "allow-verify-remote-media",
     "allow-clear-image-cache",
     "allow-get-image-cache-stats",
     "allow-cache-url-image",

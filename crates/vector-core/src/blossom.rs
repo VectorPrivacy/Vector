@@ -465,6 +465,34 @@ where
     }
 }
 
+/// Post-upload liveness gate: confirm the server actually SERVES the blob it
+/// just ACKed. Some servers 2xx an upload they dedupe against a stale index
+/// or quietly drop — the ACK is worthless, only a cache-cold fetch tells the
+/// truth. A definitive 404/410 (after a short grace retry) fails the server;
+/// anything else passes, so a flaky HEAD can't sink a good upload.
+async fn uploaded_blob_serves(url: &str) -> bool {
+    let client = match crate::net::build_http_client(std::time::Duration::from_secs(10)) {
+        Ok(c) => c,
+        Err(_) => return true,
+    };
+    for attempt in 0..2 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        match client.head(url).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                if status == StatusCode::NOT_FOUND || status == StatusCode::GONE {
+                    continue;
+                }
+                return true;
+            }
+            Err(_) => return true,
+        }
+    }
+    false
+}
+
 /// Upload to multiple Blossom servers with failover, in input order.
 ///
 /// **Does NOT participate in the capability cache.** Used by the
@@ -498,6 +526,14 @@ where
 
         match upload_blob(signer.clone(), &server_url, file_data.clone(), mime_type, read_timeout).await {
             Ok(url) => {
+                if !uploaded_blob_serves(&url).await {
+                    crate::log_warn!(
+                        "[Blossom Error] {} ACKed the upload but does not serve {} — failing over",
+                        server_url_str, url,
+                    );
+                    last_error = format!("{} accepted the upload but the blob is not retrievable", server_url_str);
+                    continue;
+                }
                 crate::log_info!("[Blossom] Upload successful to: {}", server_url_str);
                 return Ok(url);
             }
@@ -566,6 +602,15 @@ where
             cancel_flag.clone(),
         ).await {
             Ok(url) => {
+                if !uploaded_blob_serves(&url).await {
+                    crate::log_warn!(
+                        "[Blossom Error] {} ACKed the upload but does not serve {} — failing over",
+                        server_url_str, url,
+                    );
+                    last_error = format!("{} accepted the upload but the blob is not retrievable", server_url_str);
+                    let _ = progress_callback(Some(0), Some(0));
+                    continue;
+                }
                 crate::log_info!("[Blossom] Upload successful to: {}", server_url_str);
                 if let Err(err) = crate::blossom_capabilities::record_accepted(
                     server_url_str, mime_for_routing, is_encrypted, size_bytes, upload_session,

@@ -2897,6 +2897,66 @@ const _pc = {
     dirty: false,            // tracks unsaved changes for auto-save on exit
 };
 
+// Remote URLs whose host definitively deleted the file (404/410). The editor
+// renders from the local cache, which keeps serving bytes the host removed
+// long ago — so the creator's own device needs an explicit remote probe to
+// see the damage every cache-cold client already sees.
+const _pcDeadUrls = new Set();
+
+function _pcGoneMessage() {
+    return emojiUnavailableMessage('404 not found').replace(/<br\s*\/?>/gi, ' ');
+}
+
+function _pcMarkCellBroken(cell, message) {
+    cell.classList.add('emoji-creator-cell-broken');
+    cell.title = message;
+}
+
+/** Probe the pack's remote media past the warm cache and mark dead cells.
+ *  Only a definitive 404/410 marks anything — a flaky host stays quiet. */
+async function _pcVerifyRemoteMedia() {
+    const packId = _pc.editingId;
+    const urls = _pc.emojis.map(e => e.url).filter(u => _isCacheableEmojiUrl(u));
+    if (_isCacheableEmojiUrl(_pc.logoUrl)) urls.push(_pc.logoUrl);
+    if (!urls.length) return;
+    let results;
+    try {
+        results = await invoke('verify_remote_media', { urls });
+    } catch (e) {
+        console.warn('[pack-creator] remote media verify failed:', e);
+        return;
+    }
+    const gone = results.filter(r => r.gone);
+    if (!gone.length) return;
+    for (const r of gone) _pcDeadUrls.add(r.url);
+    // The editor may have closed or switched packs while we probed.
+    if (!_pc.open || _pc.editingId !== packId) return;
+    // Mark in place rather than re-rendering — a re-render mid-drag would
+    // yank cells out from under the pointer.
+    const grid = document.getElementById('emoji-creator-grid');
+    if (grid) {
+        grid.querySelectorAll('.emoji-creator-cell').forEach(cell => {
+            const e = _pc.emojis[Number(cell.dataset.idx)];
+            if (e && e.url && _pcDeadUrls.has(e.url)) _pcMarkCellBroken(cell, _pcGoneMessage());
+        });
+    }
+    if (_pcDeadUrls.has(_pc.logoUrl)) _pcRenderLogo();
+}
+
+/** URLs a blob cleanup must NOT delete: Blossom is content-addressed, so a
+ *  removed cell's queued URL can be the very blob a re-add of identical
+ *  bytes just published, or a blob another pack shares. Extras carry the
+ *  just-published pack's URLs (arrEmojiPacks is stale at drain time). */
+function _pcLiveBlobUrls(extras = []) {
+    const live = new Set(extras.filter(Boolean));
+    for (const p of arrEmojiPacks) {
+        if (p.id === _pc.editingId) continue;
+        for (const em of (p.emojis || [])) if (em.url) live.add(em.url);
+        if (p.image_url) live.add(p.image_url);
+    }
+    return live;
+}
+
 function openEmojiPackCreator(id) {
     const editingPack = id ? arrEmojiPacks.find(p => p.id === id) : null;
     // Creating a new pack while at the equipped-pack cap would be
@@ -2909,6 +2969,7 @@ function openEmojiPackCreator(id) {
     }
 
     _pcRevokeBlobUrls();
+    _pcDeadUrls.clear();
     _pc.open = true;
     _pc.saving = false;
     _pc.dirty = false;
@@ -2933,6 +2994,7 @@ function openEmojiPackCreator(id) {
     }
     _pcShowView(true);
     _pcSyncDom();
+    if (editingPack) _pcVerifyRemoteMedia();
     // Reset the scroll container to the top — without this, opening
     // edit mode for a pack while the picker was already scrolled to
     // that pack's section leaves the creator showing its grid bottom
@@ -3028,6 +3090,8 @@ function _pcRenderLogo() {
     const btn = document.getElementById('emoji-creator-logo');
     if (!btn) return;
     btn.innerHTML = '';
+    btn.classList.remove('emoji-creator-cell-broken');
+    btn.title = '';
     if (_pc.logoBlobUrl) {
         // Local preview of an in-progress upload — blob: URL is safe.
         const img = document.createElement('img');
@@ -3042,6 +3106,9 @@ function _pcRenderLogo() {
         bindCachedEmojiImg(img, _pc.logoUrl, 'emoji_pack_icon');
         btn.appendChild(img);
         btn.classList.add('has-image');
+        const logoDead = _pcDeadUrls.has(_pc.logoUrl);
+        btn.classList.toggle('emoji-creator-cell-broken', logoDead);
+        btn.title = logoDead ? 'This pack icon is no longer available (it may have been deleted).' : '';
     } else {
         btn.innerHTML = '<span class="icon icon-image"></span>';
         btn.classList.remove('has-image');
@@ -3072,9 +3139,9 @@ function _pcRenderGrid() {
             // The editor must NEVER hide a failed emoji — the creator has to see it's broken and
             // remove/replace it. Mark the cell broken (reason on hover); keep it and its controls.
             bindCachedEmojiImg(img, e.url, 'emoji', (el, reason) => {
-                cell.classList.add('emoji-creator-cell-broken');
-                cell.title = emojiUnavailableMessage(reason).replace(/<br\s*\/?>/gi, ' ');
+                _pcMarkCellBroken(cell, emojiUnavailableMessage(reason).replace(/<br\s*\/?>/gi, ' '));
             });
+            if (_pcDeadUrls.has(e.url)) _pcMarkCellBroken(cell, _pcGoneMessage());
         }
         img.alt = `:${e.shortcode}:`;
         img.draggable = false;
@@ -4259,7 +4326,8 @@ async function _pcSave() {
         // evict each URL from the emoji cache memo on success so a stale
         // local path can't outlive its deleted Blossom file.
         if (_pc.pendingBlobDeletes.length > 0) {
-            const queue = _pc.pendingBlobDeletes.slice();
+            const live = _pcLiveBlobUrls(emojis.map(x => x.url).concat(logoUrl ? [logoUrl] : []));
+            const queue = _pc.pendingBlobDeletes.filter(url => !live.has(url));
             _pc.pendingBlobDeletes = [];
             Promise.allSettled(queue.map(async url => {
                 try {
@@ -4347,8 +4415,10 @@ async function _pcDelete() {
         if (!discard) return;
         // Sweep anything a failed save already pushed to Blossom, so bailing out
         // can't strand orphan blobs. Best-effort and unblocking.
+        const liveElsewhere = _pcLiveBlobUrls();
         const orphans = _pc.emojis.map(e => e.url).filter(Boolean)
-            .concat(_pc.pendingBlobDeletes, _pc.logoUrl ? [_pc.logoUrl] : []);
+            .concat(_pc.pendingBlobDeletes, _pc.logoUrl ? [_pc.logoUrl] : [])
+            .filter(url => !liveElsewhere.has(url));
         _pc.pendingBlobDeletes = [];
         if (orphans.length) {
             Promise.allSettled(orphans.map(url =>
@@ -4383,14 +4453,16 @@ async function _pcDelete() {
     // current _pc.emojis (what's on screen) rather than arrEmojiPacks
     // because the user may have removed cells in this edit session that
     // haven't been re-published yet — those files should still die.
+    // Blobs another pack shares (content-addressed dedup) must survive.
+    const liveElsewhere = _pcLiveBlobUrls();
     const cellOps = _pc.emojis
         .map((e, idx) => ({ idx, url: e.url }))
-        .filter(op => Boolean(op.url));
-    const logoUrl = _pc.logoUrl || '';
+        .filter(op => Boolean(op.url) && !liveElsewhere.has(op.url));
+    const logoUrl = (_pc.logoUrl && !liveElsewhere.has(_pc.logoUrl)) ? _pc.logoUrl : '';
     // Any URLs queued for cleanup (× removals + replaced logo) get
     // swept here too so a "delete pack" run after an unsaved edit still
     // tears down those orphans.
-    const pendingExtras = _pc.pendingBlobDeletes.slice();
+    const pendingExtras = _pc.pendingBlobDeletes.filter(url => !liveElsewhere.has(url));
     _pc.pendingBlobDeletes = [];
 
     // Full-panel overlay survives the whole flow so the user gets a
