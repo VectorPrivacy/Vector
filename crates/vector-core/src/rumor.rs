@@ -299,6 +299,11 @@ fn process_text_message(
 
     // Create the message
     let expiration = extract_nip40_expiration(&rumor);
+    // NIP-40: an event arriving already expired is dropped on receipt — it
+    // must never render or persist.
+    if already_expired(expiration) {
+        return Ok(RumorProcessingResult::Ignored);
+    }
     let msg = Message {
         expiration,
         id: rumor.id.to_hex(),
@@ -538,6 +543,10 @@ fn process_file_attachment(
 
     // Create the message with attachment
     let expiration = extract_nip40_expiration(&rumor);
+    // NIP-40: an event arriving already expired is dropped on receipt.
+    if already_expired(expiration) {
+        return Ok(RumorProcessingResult::Ignored);
+    }
     let msg = Message {
         expiration,
         id: rumor.id.to_hex(),
@@ -594,6 +603,17 @@ fn extract_nip40_expiration(rumor: &RumorEvent) -> Option<u64> {
             None
         }
     })
+}
+
+/// NIP-40: true when the tag's expiry already lies in the past at receipt.
+fn already_expired(expiration: Option<u64>) -> bool {
+    match expiration {
+        Some(exp) => std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| exp <= d.as_secs())
+            .unwrap_or(false),
+        None => false,
+    }
 }
 
 fn process_deletion(
@@ -1311,6 +1331,55 @@ mod tests {
         let result = process_rumor(rumor, ctx, &temp_dir()).unwrap();
 
         assert!(matches!(result, RumorProcessingResult::Ignored));
+    }
+
+    // ========================================================================
+    // NIP-40 receipt-drop tests
+    // ========================================================================
+
+    #[test]
+    fn test_expired_text_message_is_dropped_on_receipt() {
+        let keys = test_keypair();
+        let t = tags(vec![Tag::expiration(Timestamp::from_secs(1000000000))]);
+        let rumor = make_rumor(&keys, Kind::PrivateDirectMessage, "too late", t);
+        let ctx = dm_context(&keys);
+        let result = process_rumor(rumor, ctx, &temp_dir()).unwrap();
+        assert!(matches!(result, RumorProcessingResult::Ignored));
+    }
+
+    #[test]
+    fn test_expired_file_message_is_dropped_on_receipt() {
+        let keys = test_keypair();
+        let ox_hash = "deadbeef".repeat(8);
+        let t = tags(vec![
+            custom_tag("decryption-key", &["aabbccdd"]),
+            custom_tag("decryption-nonce", &["11223344"]),
+            custom_tag("ox", &[&ox_hash]),
+            custom_tag("file-type", &["image/jpeg"]),
+            Tag::expiration(Timestamp::from_secs(1000000000)),
+        ]);
+        let rumor = make_rumor(&keys, Kind::from_u16(15), "https://blossom.example/deadbeef.jpg", t);
+        let ctx = dm_context(&keys);
+        let result = process_rumor(rumor, ctx, &temp_dir()).unwrap();
+        assert!(matches!(result, RumorProcessingResult::Ignored));
+    }
+
+    #[test]
+    fn test_future_expiration_still_processes() {
+        let keys = test_keypair();
+        let future_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap()
+            .as_secs() + 600;
+        let t = tags(vec![Tag::expiration(Timestamp::from_secs(future_ts))]);
+        let rumor = make_rumor(&keys, Kind::PrivateDirectMessage, "still alive", t);
+        let ctx = dm_context(&keys);
+        let result = process_rumor(rumor, ctx, &temp_dir()).unwrap();
+        match result {
+            RumorProcessingResult::TextMessage(msg) => {
+                assert_eq!(msg.expiration, Some(future_ts));
+            }
+            _ => panic!("Expected TextMessage"),
+        }
     }
 
     // ========================================================================

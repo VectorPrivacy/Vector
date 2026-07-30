@@ -1277,6 +1277,11 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
         });
     }
 
+    // Rows whose NIP-40 expiry passed while out of STATE (app closed, chat
+    // unopened) must never reach a renderer — strip them here, at the single
+    // DB→Message chokepoint, and purge their remnants in the background.
+    crate::self_destruct::strip_expired(&mut messages);
+
     // Step 5: Reply context
     let reply_ids: Vec<String> = messages.iter()
         .filter(|m| !m.replied_to.is_empty())
@@ -1568,6 +1573,13 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
                 msg.replied_to_attachment_extension = ctx.extension.clone();
             }
         }
+    }
+
+    // An expired self-destruct as a chat's last message must not flash in the
+    // chat list — strip + background-purge; the preview shows empty until the
+    // next boot resolves the prior message, same as a mid-session sweep.
+    for msgs in result.values_mut() {
+        crate::self_destruct::strip_expired(msgs);
     }
 
     Ok(result)
