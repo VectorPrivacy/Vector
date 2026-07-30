@@ -138,12 +138,20 @@ impl<'a> BatchingPersist<'a> {
     /// account's DB — their wrappers stay unledgered, so negentropy re-delivers them when
     /// the original account returns.
     pub async fn flush(&self, session: &crate::state::SessionGuard) -> usize {
+        self.try_flush(session).await.unwrap_or(0)
+    }
+
+    /// [`Self::flush`], but a persist failure is distinguishable from "nothing
+    /// to write" — callers that gate follow-on effects on the ledger actually
+    /// holding the batch (reconcile-cursor births) need the difference: an
+    /// advance over an unledgered batch skips those events forever.
+    pub async fn try_flush(&self, session: &crate::state::SessionGuard) -> Result<usize, String> {
         let mut drained: Vec<BufferedDm> = match self.buf.lock() {
             Ok(mut b) => b.drain(..).collect(),
-            Err(_) => return 0,
+            Err(_) => return Ok(0),
         };
         if drained.is_empty() || !session.is_valid() {
-            return 0;
+            return Ok(0);
         }
         // A deletion may have landed (live subscription or this stream) while an entry sat
         // buffered: its delete_event no-ops on the not-yet-written row, so persisting the
@@ -154,7 +162,7 @@ impl<'a> BatchingPersist<'a> {
         // where the DB dedup sees the (still-deleted) state cleanly.
         drained.retain(|e| !crate::state::was_message_deleted(&e.msg.id));
         if drained.is_empty() {
-            return 0;
+            return Ok(0);
         }
         // Group by chat preserving first-seen chat order + per-chat arrival order.
         let mut groups: Vec<(String, Vec<(&Message, Option<([u8; 32], u64)>)>)> = Vec::new();
@@ -165,10 +173,10 @@ impl<'a> BatchingPersist<'a> {
             }
         }
         match crate::db::events::save_messages_batch_multi(&groups, Some(session)).await {
-            Ok(n) => n,
+            Ok(n) => Ok(n),
             Err(e) => {
                 crate::log_warn!("[Sync] batched persist failed ({} msgs): {}", drained.len(), e);
-                0
+                Err(e)
             }
         }
     }

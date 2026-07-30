@@ -1095,5 +1095,20 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // =========================================================================
+    // Migration 81: window index for the dedup-cache preload
+    // =========================================================================
+    // The preload reads processed_wrappers bounded by the reconcile cursors;
+    // without this index the bounded query still scans the full ledger.
+    run_atomic_migration(conn, 81, "processed_wrappers window index", |tx| {
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS idx_processed_wrappers_window \
+             ON processed_wrappers(transport, wrapper_created_at)",
+            [],
+        )
+        .map_err(|e| format!("migration 81: {}", e))?;
+        Ok(())
+    })?;
+
     Ok(())
 }

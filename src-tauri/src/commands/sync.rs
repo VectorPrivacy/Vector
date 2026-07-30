@@ -22,6 +22,13 @@ use crate::{
 /// the per-commit transaction overhead amortized.
 const PERSIST_BATCH: usize = 100;
 
+/// NIP-59 backdates gift-wrap `created_at` up to 2 days; any "since newest held
+/// wrap" window must include that slack or backdated wraps slip past it.
+const NIP59_BACKDATE_SLACK: u64 = 2 * 24 * 3600;
+
+/// Hard cap for windowed REQ catch-ups (reconcile fallback + no-NIP-77 relays).
+const FALLBACK_LIMIT: usize = 256;
+
 // ============================================================================
 // Profile Sync Commands
 // ============================================================================
@@ -93,6 +100,66 @@ where
     }
 }
 
+/// Windowed incremental REQ catch-up — the sync path for relays that can't
+/// negentropy, and the recovery path when no relay reconciles. Same
+/// prepare → commit pipeline as the reconcile fetches, bounded by `since` and
+/// [`FALLBACK_LIMIT`]. Returns (events seen, new messages).
+async fn windowed_req_catchup(
+    client: &Client,
+    relay_urls: Vec<String>,
+    my_public_key: PublicKey,
+    since_secs: u64,
+    is_new: bool,
+    session: &vector_core::state::SessionGuard,
+) -> (u32, u32) {
+    let filter = Filter::new()
+        .pubkey(my_public_key)
+        .kind(Kind::GiftWrap)
+        .since(Timestamp::from_secs(since_secs))
+        .limit(FALLBACK_LIMIT);
+    let inner = crate::services::event_handler::TauriEventHandler;
+    let batcher = vector_core::event_handler::BatchingPersist::new(&inner);
+    let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+    let (mut fetched, mut new_count) = (0u32, 0u32);
+
+    match client.stream_events(nostr_sdk::prelude::ReqTarget::manual(
+        relay_urls.into_iter().map(|u| (u, vec![filter.clone()])),
+    ))
+    .timeout(vector_core::relay_request_timeout(std::time::Duration::from_secs(20)))
+    .await {
+        Ok(stream) => {
+            tokio::pin!(stream);
+            while let Some((_relay, res)) = stream.next().await {
+                let Ok(event) = res else { continue };
+                if !session.is_valid() { break; }
+                if !seen.insert(event.id.to_bytes()) { continue; }
+                fetched += 1;
+                let prepared = vector_core::event_handler::prepare_event(
+                    event, client, my_public_key,
+                ).await;
+                if crate::services::tauri_commit_prepared_event_with(prepared, is_new, &batcher).await {
+                    new_count += 1;
+                }
+                if batcher.buffered() >= PERSIST_BATCH {
+                    batcher.flush(session).await;
+                }
+            }
+            batcher.flush(session).await;
+        }
+        Err(e) => eprintln!("[Sync] REQ catch-up failed: {}", e),
+    }
+    (fetched, new_count)
+}
+
+/// Free the sync-window dedup cache. EVERY completion path must call this —
+/// a skipped dump leaves the cache resident until the next boot.
+async fn dump_wrapper_cache() {
+    let mut cache = WRAPPER_ID_CACHE.lock().await;
+    let cache_size = cache.len();
+    cache.clear();
+    println!("[Sync] Dumped wrapper cache (~{} KB freed)", (cache_size * 35) / 1024);
+}
+
 /// Fetch messages from relays and sync to local state
 ///
 /// Uses NIP-77 negentropy set reconciliation:
@@ -147,9 +214,29 @@ pub async fn fetch_messages<R: Runtime>(
         // reconcile so a swap during it invalidates the whole fetch+commit pipeline.
         let recon_session = vector_core::state::SessionGuard::capture();
 
-        // Load negentropy items — use 2-day window for fast reconnection sync
+        // A fresh no-NIP-77 verdict means reconciling is doomed — catch up with
+        // a windowed REQ so the reconnect still recovers missed messages.
+        if vector_core::negentropy::neg_supported_cached(&url) == Some(false) {
+            let since = Timestamp::now().as_secs().saturating_sub(NIP59_BACKDATE_SLACK);
+            let (fetched, new) = windowed_req_catchup(
+                &client, vec![url.clone()], my_public_key, since, true, &recon_session,
+            ).await;
+            println!("[Sync] Single-relay {} REQ catch-up (no NIP-77): {} events, {} new",
+                url, fetched, new);
+            return;
+        }
+
+        // Load negentropy items — 2-day window for fast reconnection sync,
+        // stretched back to the relay's cursor after a longer outage.
         let all_items = db::load_negentropy_items().unwrap_or_default();
-        let quick_since = Timestamp::now().as_secs().saturating_sub(2 * 24 * 3600);
+        let recon_anchor = Timestamp::now().as_secs();
+        let cursor = vector_core::negentropy::reconcile_cursor(&url);
+        let quick_since = {
+            let base = recon_anchor.saturating_sub(2 * 24 * 3600);
+            cursor
+                .map(|c| c.saturating_sub(NIP59_BACKDATE_SLACK).min(base))
+                .unwrap_or(base)
+        };
         let items: Vec<(EventId, Timestamp)> = all_items.iter()
             .filter(|(_, ts)| ts.as_secs() >= quick_since)
             .cloned()
@@ -181,10 +268,31 @@ pub async fn fetch_messages<R: Runtime>(
                 let ids: Vec<EventId> = recon.remote.into_iter().collect();
                 println!("[Sync] Single-relay {} reconciled in {:?}: {} missing",
                     url, recon_start.elapsed(), ids.len());
+                if recon_session.is_valid() {
+                    vector_core::negentropy::record_neg_support(&url, true);
+                    if ids.is_empty() && cursor.is_some() {
+                        vector_core::negentropy::advance_reconcile_cursor(&url, recon_anchor, &recon_session);
+                    }
+                }
                 ids
             }
             Ok(Err(e)) => {
                 eprintln!("[Sync] Single-relay {} negentropy failed: {}", url, e);
+                let connected = relay.status() == RelayStatus::Connected;
+                if recon_session.is_valid()
+                    && vector_core::negentropy::classify_neg_sync_error(&e.to_string(), connected)
+                        == Some(false)
+                {
+                    println!("[Sync] {} marked no-NIP-77 for 24h", url);
+                    vector_core::negentropy::record_neg_support(&url, false);
+                    // Don't lose this reconnect's catch-up window to the verdict.
+                    let since = Timestamp::now().as_secs().saturating_sub(NIP59_BACKDATE_SLACK);
+                    let (fetched, new) = windowed_req_catchup(
+                        &client, vec![url.clone()], my_public_key, since, true, &recon_session,
+                    ).await;
+                    println!("[Sync] Single-relay {} REQ catch-up: {} events, {} new",
+                        url, fetched, new);
+                }
                 return;
             }
             Err(_) => {
@@ -199,7 +307,7 @@ pub async fn fetch_messages<R: Runtime>(
             let recon_batcher = vector_core::event_handler::BatchingPersist::new(&recon_inner);
             const BATCH_SIZE: usize = 500;
             for batch in missing_ids.chunks(BATCH_SIZE) {
-                let f = Filter::new().ids(batch.to_vec()).kind(Kind::GiftWrap);
+                let f = Filter::new().ids(batch.to_vec()).kind(Kind::GiftWrap).pubkey(my_public_key);
                 match client.stream_events(nostr_sdk::prelude::ReqTarget::manual(vec![url.clone()].into_iter().map(|u| (u, vec![f.clone()]))))
                 .timeout(std::time::Duration::from_secs(30),
                 ).await {
@@ -507,23 +615,58 @@ pub async fn fetch_messages<R: Runtime>(
                 crate::miniapps::marketplace::preload_marketplace_cache().await;
             });
 
-            // Preload wrapper IDs for sync deduplication (non-blocking)
-            // DB fallback in handle_event ensures correctness if this completes after sync starts
+            // Preload wrapper IDs for sync deduplication (non-blocking).
+            // Bounded to what the planned reconciles can touch: cursored relays
+            // reconcile only from (cursor − slack), so the full-history load is
+            // justified solely by a bootstrap candidate (NEG-capable relay with
+            // no cursor). Older wraps that still arrive dedup through the DB
+            // fallback in handle_event.
             let wrapper_session = vector_core::state::SessionGuard::capture();
+            let wrapper_client = client.clone();
             tokio::spawn(async move {
                 let t = std::time::Instant::now();
+                let mut full_load = false;
+                let mut bound = Timestamp::now().as_secs().saturating_sub(7 * 24 * 3600);
+                for url in wrapper_client.relays().await.keys() {
+                    let u = url.as_str();
+                    // No-NIP-77 relays only ever get windowed REQs — they can
+                    // neither bootstrap nor widen the bound.
+                    if vector_core::negentropy::neg_supported_cached(u) == Some(false) {
+                        continue;
+                    }
+                    match vector_core::negentropy::reconcile_cursor(u) {
+                        Some(c) => bound = bound.min(c.saturating_sub(NIP59_BACKDATE_SLACK)),
+                        None => {
+                            full_load = true;
+                            break;
+                        }
+                    }
+                }
                 let event_wrappers = db::load_recent_wrapper_ids(30).await.unwrap_or_default();
-                let processed_wrappers = db::load_processed_wrappers().unwrap_or_default();
+                let processed_wrappers = if full_load {
+                    db::load_processed_wrappers().unwrap_or_default()
+                } else {
+                    db::load_processed_wrappers_since(bound).unwrap_or_default()
+                };
                 // Re-validate after the DB reads — a swap mid-boot must not repopulate the
                 // just-cleared cache with the prior account's wrapper ids.
                 if !wrapper_session.is_valid() { return; }
+                // Fast cursor boots can finish before this load completes;
+                // populating then would leave the cache resident with nobody
+                // left to dump it.
+                if !STATE.lock().await.is_syncing { return; }
                 let mut cache = WRAPPER_ID_CACHE.lock().await;
                 let total = event_wrappers.len() + processed_wrappers.len();
                 cache.load(event_wrappers);
                 for w in processed_wrappers {
                     cache.insert(w);
                 }
-                println!("[Sync] wrapper_id cache loaded: {} entries ({:?})", total, t.elapsed());
+                println!(
+                    "[Sync] wrapper_id cache loaded: {} entries{} ({:?})",
+                    total,
+                    if full_load { " (full — bootstrap pending)" } else { "" },
+                    t.elapsed()
+                );
             });
 
             state.is_syncing = true;
@@ -550,6 +693,17 @@ pub async fn fetch_messages<R: Runtime>(
 
     // Populated by the quick phase, consumed by the archive task below.
     let mut hard_failed: Vec<RelayUrl> = Vec::new();
+    // Fires with the straggler drain's hard failures once every quick-race
+    // attempt has resolved — the archive holds its relay-list build on this.
+    let mut bg_drain_rx: Option<tokio::sync::oneshot::Receiver<Vec<String>>> = None;
+    // Dry-run negentropy budget — Tor-aware, shared by the primary race, the
+    // straggler pass, and the archive's wait on their verdicts.
+    let neg_budget = vector_core::relay_request_timeout(std::time::Duration::from_secs(10));
+    // Connection gate for sync attempts: an unreachable relay costs this, not
+    // a negentropy initial_timeout. Tor floors it at the request floor (there
+    // the connection genuinely IS the slow part), capped by the race budget.
+    let connect_allowance = vector_core::relay_request_timeout(std::time::Duration::from_secs(3))
+        .min(neg_budget + std::time::Duration::from_secs(5));
     let _dm_new_messages = async {
     let mut new_messages_count: u32 = 0;
 
@@ -566,6 +720,9 @@ pub async fn fetch_messages<R: Runtime>(
     // Quick phase: last 7 days — small item set for near-instant reconciliation.
     // Shows recent offline messages within ~1s. Full archive sync runs in background after.
     let quick_since = Timestamp::now().as_secs().saturating_sub(7 * 24 * 3600);
+    // Cursor anchor: captured BEFORE any reconcile begins, so an advance to it
+    // can never claim coverage of events that arrived mid-sync.
+    let sync_anchor = Timestamp::now().as_secs();
     let quick_items: Vec<(EventId, Timestamp)> = negentropy_items.iter()
         .filter(|(_, ts)| ts.as_secs() >= quick_since)
         .cloned()
@@ -576,10 +733,8 @@ pub async fn fetch_messages<R: Runtime>(
         .since(Timestamp::from_secs(quick_since));
     println!("[Sync] Quick phase: {} items (last 7d), full: {}", quick_items.len(), negentropy_items.len());
 
-    // Dry-run negentropy reconciliation — exchange fingerprints only
+    // Dry-run negentropy reconciliation — exchange fingerprints only.
     // This identifies which events the relay has that we don't, without transferring data.
-    // Tor-aware: shared by the primary race and the background straggler pass below.
-    let neg_budget = vector_core::relay_request_timeout(std::time::Duration::from_secs(10));
     let sync_opts = nostr_sdk::prelude::SyncOptions::new()
         .direction(nostr_sdk::prelude::SyncDirection::Down)
         .initial_timeout(neg_budget)
@@ -594,25 +749,93 @@ pub async fn fetch_messages<R: Runtime>(
         .map(|(url, relay)| (url.clone(), relay.clone()))
         .collect();
     drop(relay_map);
-    println!("[Sync] Racing {} relay(s) for negentropy reconciliation", all_relays.len());
 
-    // Phase 1: Race all relays — first to reconcile drives the primary sync.
-    // Stragglers continue in the background and fill gaps if they have unique events.
+    // Split on the cached NIP-77 verdict: a no-NEG relay burns its full timeout
+    // in every phase for nothing, so it takes a windowed REQ instead.
+    let (neg_relays, req_relays): (Vec<(RelayUrl, Relay)>, Vec<(RelayUrl, Relay)>) =
+        all_relays.into_iter().partition(|(url, _)| {
+            vector_core::negentropy::neg_supported_cached(url.as_str()) != Some(false)
+        });
+    println!("[Sync] Racing {} relay(s) for negentropy reconciliation ({} on REQ path)",
+        neg_relays.len(), req_relays.len());
+
+    let newest_local = negentropy_items.iter().map(|(_, ts)| ts.as_secs()).max().unwrap_or(0);
+
+    // No-NIP-77 relays still contribute recent messages: a bounded REQ from the
+    // newest held wrap (minus NIP-59 backdating slack), in parallel with the race.
+    if !req_relays.is_empty() {
+        let req_urls: Vec<String> = req_relays.iter().map(|(u, _)| u.to_string()).collect();
+        let req_since = newest_local.saturating_sub(NIP59_BACKDATE_SLACK).max(quick_since);
+        if neg_relays.is_empty() {
+            // The REQ path IS the whole quick sync — run it inline so its
+            // outcome drives the unreachable signal (an all-no-NEG pool that
+            // is fully down must not read as "no mail").
+            let (fetched, new) = windowed_req_catchup(
+                &client, req_urls, my_public_key, req_since, false, &quick_session,
+            ).await;
+            new_messages_count += new;
+            println!("[Sync][REQ] no-NIP-77 relays: {} events seen, {} new", fetched, new);
+            if fetched == 0 {
+                let _ = handle.emit("sync_unreachable", serde_json::json!({
+                    "relays": req_relays.len(),
+                }));
+            }
+        } else {
+            let req_client = client.clone();
+            let req_session = vector_core::state::SessionGuard::capture();
+            tokio::spawn(async move {
+                if !req_session.is_valid() { return; }
+                let (fetched, new) = windowed_req_catchup(
+                    &req_client, req_urls, my_public_key, req_since, false, &req_session,
+                ).await;
+                println!("[Sync][REQ] no-NIP-77 relays: {} events seen, {} new", fetched, new);
+            });
+        }
+    }
+
+    // Phase 1: Race the NEG-capable relays — first to reconcile drives the primary
+    // sync. Stragglers continue in the background and fill gaps if they have unique events.
     let mut relay_futs = futures_util::stream::FuturesUnordered::new();
-    for (url, relay) in &all_relays {
+    for (url, relay) in &neg_relays {
         let url = url.clone();
         let relay = relay.clone();
-        let f = filter.clone();
-        let items = quick_items.clone();
+        // Stretch the window back to this relay's cursor (minus NIP-59 slack):
+        // an absence longer than the 7-day floor still syncs in one quick pass
+        // instead of leaving a hole for the archive to find.
+        let cursor = vector_core::negentropy::reconcile_cursor(url.as_str());
+        let had_cursor = cursor.is_some();
+        let since_r = cursor
+            .map(|c| c.saturating_sub(NIP59_BACKDATE_SLACK).min(quick_since))
+            .unwrap_or(quick_since);
+        let (f, items) = if since_r == quick_since {
+            (filter.clone(), quick_items.clone())
+        } else {
+            println!("[Sync] {} window stretched to cursor (since {})", url, since_r);
+            let f = Filter::new()
+                .pubkey(my_public_key)
+                .kind(Kind::GiftWrap)
+                .since(Timestamp::from_secs(since_r));
+            let items: Vec<(EventId, Timestamp)> = negentropy_items.iter()
+                .filter(|(_, ts)| ts.as_secs() >= since_r)
+                .cloned()
+                .collect();
+            (f, items)
+        };
         let opts = sync_opts.clone();
         relay_futs.push(async move {
+            if !vector_core::negentropy::wait_connected(&relay, connect_allowance).await {
+                return (url, None, false, had_cursor);
+            }
             let result = tokio::time::timeout(
                 neg_budget + std::time::Duration::from_secs(5),
                 with_auth_retry(|| async {
                     relay.sync(f.clone()).items(items.clone()).opts(opts.clone()).await
                 }),
             ).await;
-            (url, result)
+            // Read AFTER the attempt: classification needs to know whether the
+            // relay was live while it stayed silent.
+            let connected = relay.status() == RelayStatus::Connected;
+            (url, Some(result), connected, had_cursor)
         });
     }
 
@@ -626,22 +849,49 @@ pub async fn fetch_messages<R: Runtime>(
     // Relays that refused deterministically (query caps, no NIP-77, dropped
     // connection) fail the same way on the archive's larger item set, so the
     // archive skips them. A TIMEOUT is not deterministic — the archive's budget
-    // is 120s against this phase's 10s — so those stay eligible.
-    while let Some((url, result)) = relay_futs.next().await {
+    // is minutes against this phase's 10s — so those stay eligible.
+    while let Some((url, result, connected, had_cursor)) = relay_futs.next().await {
+        let Some(result) = result else {
+            eprintln!("[Sync]   Relay {} skipped: not connected", url);
+            continue;
+        };
         match result {
             Ok(Ok(recon)) => {
+                // Zero missing = ledger and relay agree through the window —
+                // the only proof a cursor may advance on. (Cursor birth is the
+                // archive bootstrap's job; a windowed pass can't vouch further
+                // back than its own window.)
+                if recon.remote.is_empty() && had_cursor && quick_session.is_valid() {
+                    vector_core::negentropy::advance_reconcile_cursor(url.as_str(), sync_anchor, &quick_session);
+                }
                 primary_missing = recon.remote.into_iter().collect();
                 println!("[Sync] {} reconciled in {:?}: {} missing events",
                     url, reconcile_start.elapsed(), primary_missing.len());
+                if quick_session.is_valid() {
+                    vector_core::negentropy::record_neg_support(url.as_str(), true);
+                }
                 primary_relay = Some(url);
                 break;
             }
             Ok(Err(e)) => {
                 eprintln!("[Sync]   Relay {} failed: {}", url, e);
-                hard_failed.push(url);
+                let es = e.to_string();
+                if quick_session.is_valid()
+                    && vector_core::negentropy::classify_neg_sync_error(&es, connected)
+                        == Some(false)
+                {
+                    println!("[Sync] {} marked no-NIP-77 for 24h", url);
+                    vector_core::negentropy::record_neg_support(url.as_str(), false);
+                }
+                // Transient failures (still connecting, dropped socket, silent
+                // timeout) say nothing about the archive attempt — connected
+                // silence reaches the archive through the cache mark instead.
+                if !vector_core::negentropy::is_transient_sync_error(&es) {
+                    hard_failed.push(url);
+                }
             }
             Err(_) => {
-                eprintln!("[Sync]   Relay {} timed out after {:?}", url, neg_budget);
+                eprintln!("[Sync]   Relay {} timed out after {:?}", url, neg_budget + std::time::Duration::from_secs(5));
             }
         }
     }
@@ -650,14 +900,24 @@ pub async fn fetch_messages<R: Runtime>(
     if primary_relay.is_some() && !relay_futs.is_empty() {
         let primary_set: std::collections::HashSet<EventId> = primary_missing.iter().copied().collect();
         let bg_client = client.clone();
+        let (drain_tx, drain_rx) = tokio::sync::oneshot::channel::<Vec<String>>();
+        bg_drain_rx = Some(drain_rx);
         // Pin to the session that scheduled this fetch — see archive task.
         let straggler_session = vector_core::state::SessionGuard::capture();
         tokio::spawn(async move {
             if !straggler_session.is_valid() { return; }
+            let mut bg_hard_failed: Vec<String> = Vec::new();
             let mut extra_ids: Vec<EventId> = Vec::new();
-            while let Some((url, result)) = relay_futs.next().await {
+            while let Some((url, result, connected, had_cursor)) = relay_futs.next().await {
+                let Some(result) = result else {
+                    eprintln!("[Sync][BG] {} skipped: not connected", url);
+                    continue;
+                };
                 match result {
                     Ok(Ok(recon)) => {
+                        if recon.remote.is_empty() && had_cursor && straggler_session.is_valid() {
+                            vector_core::negentropy::advance_reconcile_cursor(url.as_str(), sync_anchor, &straggler_session);
+                        }
                         let new: Vec<EventId> = recon.remote.into_iter()
                             .filter(|id| !primary_set.contains(id))
                             .collect();
@@ -667,11 +927,33 @@ pub async fn fetch_messages<R: Runtime>(
                         } else {
                             println!("[Sync][BG] {} reconciled: 0 additional", url);
                         }
+                        if straggler_session.is_valid() {
+                            vector_core::negentropy::record_neg_support(url.as_str(), true);
+                        }
                     }
-                    Ok(Err(e)) => eprintln!("[Sync][BG] {} failed: {}", url, e),
-                    Err(_) => eprintln!("[Sync][BG] {} timed out after {:?}", url, neg_budget),
+                    Ok(Err(e)) => {
+                        eprintln!("[Sync][BG] {} failed: {}", url, e);
+                        let es = e.to_string();
+                        if straggler_session.is_valid()
+                            && vector_core::negentropy::classify_neg_sync_error(&es, connected)
+                                == Some(false)
+                        {
+                            println!("[Sync][BG] {} marked no-NIP-77 for 24h", url);
+                            vector_core::negentropy::record_neg_support(url.as_str(), false);
+                        }
+                        // Only deterministic refusals repeat on the archive's
+                        // larger item set — a relay that was merely slow to
+                        // connect must stay eligible for it.
+                        if !vector_core::negentropy::is_transient_sync_error(&es) {
+                            bg_hard_failed.push(url.to_string());
+                        }
+                    }
+                    Err(_) => eprintln!("[Sync][BG] {} timed out after {:?}", url, neg_budget + std::time::Duration::from_secs(5)),
                 }
             }
+
+            // Every straggler has resolved — release the archive's relay-list build.
+            let _ = drain_tx.send(bg_hard_failed);
 
             // Fetch + process any extra events found by background relays
             if !extra_ids.is_empty() {
@@ -682,7 +964,7 @@ pub async fn fetch_messages<R: Runtime>(
                 let bg_batcher = vector_core::event_handler::BatchingPersist::new(&bg_inner);
                 const BG_BATCH: usize = 500;
                 for batch in extra_ids.chunks(BG_BATCH) {
-                    let f = Filter::new().ids(batch.to_vec()).kind(Kind::GiftWrap);
+                    let f = Filter::new().ids(batch.to_vec()).kind(Kind::GiftWrap).pubkey(my_public_key);
                     match bg_client.stream_events(nostr_sdk::prelude::ReqTarget::manual(relay_strs.clone().into_iter().map(|u| (u, vec![f.clone()]))))
                 .timeout(std::time::Duration::from_secs(30),
                     ).await {
@@ -726,59 +1008,27 @@ pub async fn fetch_messages<R: Runtime>(
     // can still arrive), floored at the 7-day quick window so a long absence can't
     // widen it; and a hard `limit` caps the worst case. Anything older than that
     // is the archive phase's job, not the boot path's.
-    if primary_relay.is_none() {
-        const NIP59_BACKDATE_SLACK: u64 = 2 * 24 * 3600;
-        const FALLBACK_LIMIT: usize = 256;
-        let newest_local = negentropy_items.iter().map(|(_, ts)| ts.as_secs()).max().unwrap_or(0);
+    if primary_relay.is_none() && !neg_relays.is_empty() {
         let fallback_since = newest_local
             .saturating_sub(NIP59_BACKDATE_SLACK)
             .max(quick_since);
-        let fallback_filter = Filter::new()
-            .pubkey(my_public_key)
-            .kind(Kind::GiftWrap)
-            .since(Timestamp::from_secs(fallback_since))
-            .limit(FALLBACK_LIMIT);
         println!("[Sync] No relay reconciled — incremental fetch since {} (limit {})",
             fallback_since, FALLBACK_LIMIT);
         let _ = handle.emit("sync_progress", serde_json::json!({ "mode": "Reconciling" }));
 
-        let relay_strs: Vec<String> = all_relays.iter().map(|(u, _)| u.to_string()).collect();
-        let fallback_inner = crate::services::event_handler::TauriEventHandler;
-        let fallback_batcher = vector_core::event_handler::BatchingPersist::new(&fallback_inner);
-        let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
-        let mut fetched = 0u32;
-
-        match client.stream_events(nostr_sdk::prelude::ReqTarget::manual(relay_strs.into_iter().map(|u| (u, vec![fallback_filter.clone()]))))
-                .timeout(std::time::Duration::from_secs(20),
-        ).await {
-            Ok(stream) => {
-                tokio::pin!(stream);
-                while let Some((_relay, res)) = stream.next().await {
-                                let Ok(event) = res else { continue };
-                    if !quick_session.is_valid() { break; }
-                    if !seen.insert(event.id.to_bytes()) { continue; }
-                    fetched += 1;
-                    let prepared = vector_core::event_handler::prepare_event(
-                        event, &client, my_public_key,
-                    ).await;
-                    if crate::services::tauri_commit_prepared_event_with(prepared, false, &fallback_batcher).await {
-                        new_messages_count += 1;
-                    }
-                    if fallback_batcher.buffered() >= PERSIST_BATCH {
-                        fallback_batcher.flush(&quick_session).await;
-                    }
-                }
-                fallback_batcher.flush(&quick_session).await;
-                println!("[Sync] Incremental fetch: {} events seen, {} new", fetched, new_messages_count);
-            }
-            Err(e) => eprintln!("[Sync] Fallback fetch failed: {}", e),
-        }
+        let relay_strs: Vec<String> = neg_relays.iter().map(|(u, _)| u.to_string()).collect();
+        let (fetched, new) = windowed_req_catchup(
+            &client, relay_strs, my_public_key, fallback_since, false, &quick_session,
+        ).await;
+        new_messages_count += new;
+        println!("[Sync] Incremental fetch: {} events seen, {} new", fetched, new_messages_count);
 
         // Nothing reconciled AND nothing read back: the pool is unreachable, not
-        // empty. Say so, otherwise this is indistinguishable from having no mail.
-        if fetched == 0 {
+        // empty. Say so — unless REQ-path relays exist, whose parallel catch-up
+        // may be landing messages this count can't see.
+        if fetched == 0 && req_relays.is_empty() {
             let _ = handle.emit("sync_unreachable", serde_json::json!({
-                "relays": all_relays.len(),
+                "relays": neg_relays.len(),
             }));
         }
     }
@@ -805,7 +1055,10 @@ pub async fn fetch_messages<R: Runtime>(
             let sem = sem.clone();
             fetch_handles.push(tokio::spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
-                let f = Filter::new().ids(batch_ids).kind(Kind::GiftWrap);
+                // The #p is not redundant: Ditto refuses gift-wrap REQs that
+                // carry neither authors nor #p, even on an authed connection —
+                // an ids-only fetch silently returns nothing there.
+                let f = Filter::new().ids(batch_ids).kind(Kind::GiftWrap).pubkey(my_public_key);
                 match c.stream_events(nostr_sdk::prelude::ReqTarget::manual(vec![relay].into_iter().map(|u| (u, vec![f.clone()]))))
                 .timeout(std::time::Duration::from_secs(5),
                 ).await {
@@ -985,31 +1238,45 @@ pub async fn fetch_messages<R: Runtime>(
             let archive_start = std::time::Instant::now();
             let mut archive_new = 0u32;
 
-            // Reload items (includes anything saved during quick phase)
-            let items = db::load_negentropy_items().unwrap_or_default();
-            println!("[Sync] Archive: negentropy with {} items", items.len());
-
-            let filter = Filter::new()
-                .pubkey(my_public_key)
-                .kind(Kind::GiftWrap);
-            let opts = nostr_sdk::prelude::SyncOptions::new()
-                .direction(nostr_sdk::prelude::SyncDirection::Down)
-                .initial_timeout(std::time::Duration::from_secs(45))
-                .dry_run();
-
+            // The archive is a BOOTSTRAP, not a routine phase: a relay with a
+            // reconcile cursor was already covered by the quick pass (whose
+            // window stretches back to that cursor), so only cursor-less
+            // relays ever justify a full-history reconcile. When none exist,
+            // sync completes right here — no gate wait, no 150k-item exchange.
             let relay_map = bg_client.relays().await;
-            // A relay that refused the 7-day set refuses this larger one identically;
-            // asking again just burns the 120s budget. Timeouts are not in this set.
-            let relays: Vec<(RelayUrl, Relay)> = relay_map.iter()
-                .filter(|(url, _)| !archive_skip.contains(&url.to_string()))
+            let established = relay_map.keys()
+                .any(|u| vector_core::negentropy::reconcile_cursor(u.as_str()).is_some());
+            let candidates: Vec<(RelayUrl, Relay)> = relay_map.iter()
+                .filter(|(url, _)| {
+                    // Cursor-less AND NEG-capable — a no-NIP-77 relay can never
+                    // bootstrap this way, so it must not keep the phase alive.
+                    vector_core::negentropy::reconcile_cursor(url.as_str()).is_none()
+                        && vector_core::negentropy::neg_supported_cached(url.as_str()) != Some(false)
+                })
                 .map(|(url, relay)| (url.clone(), relay.clone()))
                 .collect();
             drop(relay_map);
-            if !archive_skip.is_empty() {
-                println!("[Sync] Archive: skipping {} relay(s) that refused the quick phase", archive_skip.len());
+
+            // Established accounts (any relay already cursored) never hold the
+            // "syncing" state on a bootstrap: those exist for NEW relays and
+            // run silently — one doomed candidate must not pin the UI for 45s.
+            // A FRESH install keeps gating: there the bootstrap IS the initial
+            // sync and drives the progress bar.
+            let mut completed_early = false;
+            if established && !candidates.is_empty() {
+                {
+                    let mut state = STATE.lock().await;
+                    state.is_syncing = false;
+                }
+                let _ = handle_bg.emit("sync_finished", ());
+                completed_early = true;
+                println!("[Sync] Sync complete — {} relay bootstrap(s) continue in background",
+                    candidates.len());
             }
-            if relays.is_empty() {
-                println!("[Sync] Archive: no eligible relays, skipping");
+
+            if candidates.is_empty() {
+                println!("[Sync] Archive: no bootstrap candidates (all relays cursored or no-NIP-77)");
+                dump_wrapper_cache().await;
                 let mut state = STATE.lock().await;
                 state.is_syncing = false;
                 drop(state);
@@ -1017,7 +1284,85 @@ pub async fn fetch_messages<R: Runtime>(
                 return;
             }
 
+            // Hold the relay-list build until every quick-race straggler has
+            // resolved: their verdicts (no-NIP-77 marks, deterministic refusals)
+            // are what make the skips below real — the race breaks on its winner
+            // long before any loser fails, so building eagerly would consult a
+            // cache that hasn't been written yet. Bounded by the stragglers'
+            // own outer budget; a healthy pool releases this in a second or two.
+            let mut archive_skip = archive_skip;
+            if let Some(rx) = bg_drain_rx {
+                // Bound covers the stragglers' true worst case: connect
+                // allowance + inner budget + outer slack (under Tor the
+                // allowance alone is 30s — a shorter gate expires early every
+                // time and the verdicts never reach this skip-list).
+                if let Ok(Ok(bg_failed)) = tokio::time::timeout(
+                    connect_allowance + neg_budget + std::time::Duration::from_secs(7),
+                    rx,
+                ).await {
+                    archive_skip.extend(bg_failed);
+                }
+            }
+            if !archive_session.is_valid() { return; }
+
+            // Reload items (includes anything saved during quick phase)
+            let items = db::load_negentropy_items().unwrap_or_default();
+            println!("[Sync] Archive: negentropy with {} items", items.len());
+
+            let filter = Filter::new()
+                .pubkey(my_public_key)
+                .kind(Kind::GiftWrap);
+            // Generous budgets ON PURPOSE: a bootstrap's first NEG frame is the
+            // relay walking its entire matching set to build fingerprints — a
+            // slow box can need minutes. Killing it early means paying that
+            // walk every boot and never banking the cursor that would end the
+            // retries; one slow completion is strictly cheaper. The UI never
+            // waits on this (established accounts complete before the drain,
+            // fresh installs detach stragglers after the first success).
+            let opts = nostr_sdk::prelude::SyncOptions::new()
+                .direction(nostr_sdk::prelude::SyncDirection::Down)
+                .initial_timeout(std::time::Duration::from_secs(300))
+                .dry_run();
+
+            // No-NIP-77 relays would silently burn the full bootstrap budget here —
+            // the single biggest boot-time waster this phase ever had.
+            let no_neg: std::collections::HashSet<String> = candidates.iter()
+                .filter(|(u, _)| vector_core::negentropy::neg_supported_cached(u.as_str()) == Some(false))
+                .map(|(u, _)| u.to_string())
+                .collect();
+            // A relay that refused the 7-day set refuses this larger one identically;
+            // asking again just burns the bootstrap budget. Timeouts are not in this set.
+            let relays: Vec<(RelayUrl, Relay)> = candidates.into_iter()
+                .filter(|(url, _)| {
+                    let u = url.to_string();
+                    !archive_skip.contains(&u) && !no_neg.contains(&u)
+                })
+                .collect();
+            if !archive_skip.is_empty() {
+                println!("[Sync] Archive: skipping {} relay(s) that refused the quick phase", archive_skip.len());
+            }
+            if !no_neg.is_empty() {
+                println!("[Sync] Archive: skipping {} no-NIP-77 relay(s): {:?}",
+                    no_neg.len(), no_neg);
+            }
+            if relays.is_empty() {
+                println!("[Sync] Archive: no eligible relays, skipping");
+                dump_wrapper_cache().await;
+                if !completed_early {
+                    let mut state = STATE.lock().await;
+                    state.is_syncing = false;
+                    drop(state);
+                    let _ = handle_bg.emit("sync_finished", ());
+                }
+                return;
+            }
+
+            // Anchor before any reconcile begins — see the quick phase's twin.
+            let archive_anchor = Timestamp::now().as_secs();
             let mut all_missing: std::collections::HashSet<EventId> = std::collections::HashSet::new();
+            // Reconciled clean but reported missing events: their first cursor
+            // is only earned once every requested event arrives AND persists.
+            let mut cursor_pending: Vec<String> = Vec::new();
             let mut futs = futures_util::stream::FuturesUnordered::new();
             for (url, relay) in &relays {
                 let url = url.clone();
@@ -1026,26 +1371,168 @@ pub async fn fetch_messages<R: Runtime>(
                 let i = items.clone();
                 let o = opts.clone();
                 futs.push(async move {
-                    let result = tokio::time::timeout(
-                        std::time::Duration::from_secs(120),
+                    if !vector_core::negentropy::wait_connected(&relay, connect_allowance).await {
+                        return (url, None);
+                    }
+                    let mut result = tokio::time::timeout(
+                        std::time::Duration::from_secs(480),
                         with_auth_retry(|| async {
                             relay.sync(f.clone()).items(i.clone()).opts(o.clone()).await
                         }),
                     ).await;
-                    (url, result)
+                    // A broadcast-lag kill lands AFTER the relay paid its
+                    // tree-build; one immediate retry rides the now-warm cache
+                    // instead of forfeiting minutes of server work.
+                    if matches!(&result, Ok(Err(e)) if e.to_string().contains("lagged")) {
+                        println!("[Sync] Archive: {} lagged — retrying once on the warm cache", url);
+                        result = tokio::time::timeout(
+                            std::time::Duration::from_secs(480),
+                            with_auth_retry(|| async {
+                                relay.sync(f.clone()).items(i.clone()).opts(o.clone()).await
+                            }),
+                        ).await;
+                    }
+                    (url, Some(result))
                 });
             }
 
-            while let Some((url, result)) = futs.next().await {
+            // Drain with a grace window: once ONE relay has reconciled, the
+            // rest get 10s to land before they detach to the background — a
+            // single relay stalling on its first frame must not hold
+            // sync_finished (and the whole "syncing" UI) hostage for 45s+.
+            const ARCHIVE_STRAGGLER_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+            let mut first_success: Option<std::time::Instant> = None;
+            loop {
+                let next = match first_success {
+                    Some(t0) => {
+                        let Some(left) = ARCHIVE_STRAGGLER_GRACE.checked_sub(t0.elapsed()) else { break };
+                        match tokio::time::timeout(left, futs.next()).await {
+                            Ok(n) => n,
+                            Err(_) => break,
+                        }
+                    }
+                    None => futs.next().await,
+                };
+                let Some((url, result)) = next else { break };
+                let Some(result) = result else {
+                    eprintln!("[Sync] Archive: {} skipped: not connected", url);
+                    continue;
+                };
                 match result {
                     Ok(Ok(recon)) => {
                         let count = recon.remote.len();
-                        all_missing.extend(recon.remote);
                         println!("[Sync] Archive: {} reconciled: {} missing", url, count);
+                        if archive_session.is_valid() {
+                            vector_core::negentropy::record_neg_support(url.as_str(), true);
+                            if count == 0 {
+                                // Full history verified against the ledger —
+                                // this relay's cursor is born here.
+                                vector_core::negentropy::advance_reconcile_cursor(url.as_str(), archive_anchor, &archive_session);
+                            } else {
+                                cursor_pending.push(url.to_string());
+                            }
+                        }
+                        all_missing.extend(recon.remote);
+                        first_success.get_or_insert_with(std::time::Instant::now);
                     }
-                    Ok(Err(e)) => eprintln!("[Sync] Archive: {} failed: {}", url, e),
-                    Err(_) => eprintln!("[Sync] Archive: {} timed out (120s)", url),
+                    Ok(Err(e)) => {
+                        eprintln!("[Sync] Archive: {} failed: {}", url, e);
+                        // `connected: false` — a full-history reconcile can
+                        // legitimately outrun its timeout, so only the SDK's
+                        // deterministic refusals classify here.
+                        if archive_session.is_valid()
+                            && vector_core::negentropy::classify_neg_sync_error(&e.to_string(), false)
+                                == Some(false)
+                        {
+                            println!("[Sync] Archive: {} marked no-NIP-77 for 24h", url);
+                            vector_core::negentropy::record_neg_support(url.as_str(), false);
+                        }
+                    }
+                    Err(_) => eprintln!("[Sync] Archive: {} timed out (bootstrap budget)", url),
                 }
+            }
+
+            // Detach unresolved stragglers — their finds still land through the
+            // same prepare → commit pipeline (wrapper-cache dedup has a DB
+            // fallback after the cache dump), they just stop gating completion.
+            if !futs.is_empty() {
+                println!("[Sync] Archive: detaching {} straggler relay(s)", futs.len());
+                let det_client = bg_client.clone();
+                let det_session = vector_core::state::SessionGuard::capture();
+                let primary_set: std::collections::HashSet<EventId> =
+                    all_missing.iter().copied().collect();
+                tokio::spawn(async move {
+                    if !det_session.is_valid() { return; }
+                    let mut extra: Vec<EventId> = Vec::new();
+                    while let Some((url, result)) = futs.next().await {
+                        let Some(result) = result else {
+                            eprintln!("[Sync][BG] Archive straggler {} skipped: not connected", url);
+                            continue;
+                        };
+                        match result {
+                            Ok(Ok(recon)) => {
+                                if det_session.is_valid() {
+                                    vector_core::negentropy::record_neg_support(url.as_str(), true);
+                                    // Cursor birth only on the zero-missing proof;
+                                    // a straggler that found events spans two fetch
+                                    // pipelines, so it re-bootstraps next boot.
+                                    if recon.remote.is_empty() {
+                                        vector_core::negentropy::advance_reconcile_cursor(url.as_str(), archive_anchor, &det_session);
+                                    }
+                                }
+                                let new: Vec<EventId> = recon.remote.into_iter()
+                                    .filter(|id| !primary_set.contains(id))
+                                    .collect();
+                                println!("[Sync][BG] Archive straggler {}: {} additional missing", url, new.len());
+                                extra.extend(new);
+                            }
+                            Ok(Err(e)) => {
+                                eprintln!("[Sync][BG] Archive straggler {} failed: {}", url, e);
+                                if det_session.is_valid()
+                                    && vector_core::negentropy::classify_neg_sync_error(&e.to_string(), false)
+                                        == Some(false)
+                                {
+                                    vector_core::negentropy::record_neg_support(url.as_str(), false);
+                                }
+                            }
+                            Err(_) => eprintln!("[Sync][BG] Archive straggler {} timed out (bootstrap budget)", url),
+                        }
+                    }
+                    if extra.is_empty() { return; }
+
+                    println!("[Sync][BG] Fetching {} events from archive stragglers", extra.len());
+                    let relay_strs: Vec<String> = det_client.relays().await.keys()
+                        .map(|u| u.to_string()).collect();
+                    let det_inner = crate::services::event_handler::TauriEventHandler;
+                    let det_batcher = vector_core::event_handler::BatchingPersist::new(&det_inner);
+                    for batch in extra.chunks(500) {
+                        let f = Filter::new().ids(batch.to_vec()).kind(Kind::GiftWrap).pubkey(my_public_key);
+                        match det_client.stream_events(nostr_sdk::prelude::ReqTarget::manual(
+                            relay_strs.clone().into_iter().map(|u| (u, vec![f.clone()])),
+                        ))
+                        .timeout(std::time::Duration::from_secs(30))
+                        .await {
+                            Ok(stream) => {
+                                tokio::pin!(stream);
+                                while let Some((_relay, res)) = stream.next().await {
+                                    let Ok(event) = res else { continue };
+                                    if !det_session.is_valid() { return; }
+                                    let prepared = vector_core::event_handler::prepare_event(
+                                        event, &det_client, my_public_key,
+                                    ).await;
+                                    crate::services::tauri_commit_prepared_event_with(prepared, false, &det_batcher).await;
+                                    if det_batcher.buffered() >= PERSIST_BATCH {
+                                        det_batcher.flush(&det_session).await;
+                                    }
+                                }
+                            }
+                            Err(e) => eprintln!("[Sync][BG] Archive straggler fetch error: {}", e),
+                        }
+                        if !det_session.is_valid() { return; }
+                    }
+                    det_batcher.flush(&det_session).await;
+                    println!("[Sync][BG] Archive stragglers complete");
+                });
             }
 
             if !all_missing.is_empty() {
@@ -1058,8 +1545,17 @@ pub async fn fetch_messages<R: Runtime>(
                 let archive_batcher = vector_core::event_handler::BatchingPersist::new(&archive_inner);
                 const BATCH: usize = 500;
                 let mut processed = 0u32;
+                // Receipt is only counted for REQUESTED ids: the pool-wide
+                // fetch can yield off-filter events (any of our other wraps
+                // passes kind+#p on a sloppy relay), and those must not pad
+                // the coverage proof for a relay whose events never arrived.
+                let want: std::collections::HashSet<EventId> = ids.iter().copied().collect();
+                let mut received: std::collections::HashSet<EventId> = std::collections::HashSet::new();
+                // A cursor born over an unledgered batch skips those events
+                // forever — a failed flush must veto the birth below.
+                let mut flushes_ok = true;
                 for batch in ids.chunks(BATCH) {
-                    let f = Filter::new().ids(batch.to_vec()).kind(Kind::GiftWrap);
+                    let f = Filter::new().ids(batch.to_vec()).kind(Kind::GiftWrap).pubkey(my_public_key);
                     match bg_client.stream_events(nostr_sdk::prelude::ReqTarget::manual(relay_strs.clone().into_iter().map(|u| (u, vec![f.clone()]))))
                 .timeout(std::time::Duration::from_secs(30),
                     ).await {
@@ -1068,6 +1564,9 @@ pub async fn fetch_messages<R: Runtime>(
                             while let Some((_relay, res)) = stream.next().await {
                                 let Ok(event) = res else { continue };
                                 if !archive_session.is_valid() { return; }
+                                if want.contains(&event.id) {
+                                    received.insert(event.id);
+                                }
                                 let prepared = vector_core::event_handler::prepare_event(
                                     event, &bg_client, my_public_key,
                                 ).await;
@@ -1084,7 +1583,7 @@ pub async fn fetch_messages<R: Runtime>(
                                     archive_new += 1;
                                 }
                                 if archive_batcher.buffered() >= PERSIST_BATCH {
-                                    archive_batcher.flush(&archive_session).await;
+                                    flushes_ok &= archive_batcher.try_flush(&archive_session).await.is_ok();
                                 }
                             }
                         }
@@ -1092,7 +1591,20 @@ pub async fn fetch_messages<R: Runtime>(
                     }
                     if !archive_session.is_valid() { return; }
                 }
-                archive_batcher.flush(&archive_session).await;
+                flushes_ok &= archive_batcher.try_flush(&archive_session).await.is_ok();
+
+                // Bootstrap cursors are earned only when every requested event
+                // arrived AND every batch landed: commit/skip both ledger the
+                // wrapper, but only through a flush that succeeded — a birth
+                // over a lost batch would skip those events forever.
+                if archive_session.is_valid() && flushes_ok && received.len() == ids.len() {
+                    for u in &cursor_pending {
+                        vector_core::negentropy::advance_reconcile_cursor(u, archive_anchor, &archive_session);
+                    }
+                } else if !cursor_pending.is_empty() {
+                    println!("[Sync] Archive: {}/{} received, flushes_ok={} — cursor birth deferred to next boot",
+                        received.len(), ids.len(), flushes_ok);
+                }
             } else {
                 println!("[Sync] Archive: no missing events");
             }
@@ -1107,19 +1619,15 @@ pub async fn fetch_messages<R: Runtime>(
             println!("[Sync] ════════════════════════════════════════════");
 
             // Clear the wrapper_id cache — only needed during sync for dedup
-            {
-                let mut cache = WRAPPER_ID_CACHE.lock().await;
-                let cache_size = cache.len();
-                cache.clear();
-                println!("[Sync] Dumped wrapper cache (~{} KB freed)", (cache_size * 35) / 1024);
-            }
+            dump_wrapper_cache().await;
 
-            {
-                let mut state = STATE.lock().await;
-                state.is_syncing = false;
+            if !completed_early {
+                {
+                    let mut state = STATE.lock().await;
+                    state.is_syncing = false;
+                }
+                let _ = handle_bg.emit("sync_finished", ());
             }
-
-            let _ = handle_bg.emit("sync_finished", ());
 
             // Resolve + cache our own badges AFTER boot/init settles — not during.
             // The claim's holding relay (often the user's own) is saturated through

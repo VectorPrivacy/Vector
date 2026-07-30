@@ -3169,13 +3169,27 @@ impl VectorCore {
             .initial_timeout(std::time::Duration::from_secs(10))
             .dry_run();
 
-        // Race all relays — first to reconcile drives the fetch
+        // Race all relays — first to reconcile drives the fetch. Relays with a
+        // fresh no-NIP-77 verdict skip the doomed reconcile and get a bounded
+        // REQ pass below instead.
         let relay_map = client.relays().await;
-        let all_relays: Vec<(RelayUrl, Relay)> = relay_map.iter()
-            .map(|(url, relay)| (url.clone(), relay.clone()))
-            .collect();
+        let (all_relays, no_neg_relays): (Vec<(RelayUrl, Relay)>, Vec<(RelayUrl, Relay)>) =
+            relay_map.iter()
+                .map(|(url, relay)| (url.clone(), relay.clone()))
+                .partition(|(url, _)| negentropy::neg_supported_cached(url.as_str()) != Some(false));
         drop(relay_map);
+        let skipped_no_neg: Vec<String> = no_neg_relays.iter().map(|(u, _)| u.to_string()).collect();
+        if !skipped_no_neg.is_empty() {
+            log_info!("[SyncDMs] {} relay(s) on REQ path (no NIP-77)", skipped_no_neg.len());
+        }
 
+        // Tor-aware like the GUI path — a fixed clearnet budget over Tor makes
+        // a healthy relay's slow first frame look like connected-silence and
+        // earns it a false 24h no-NEG verdict in the shared account KV.
+        let neg_budget = relay_request_timeout(std::time::Duration::from_secs(10));
+        let neg_outer = neg_budget + std::time::Duration::from_secs(5);
+        let connect_allowance = relay_request_timeout(std::time::Duration::from_secs(3))
+            .min(neg_outer);
         let mut relay_futs = futures_util::stream::FuturesUnordered::new();
         for (url, relay) in &all_relays {
             let url = url.clone();
@@ -3184,31 +3198,90 @@ impl VectorCore {
             let i = items.clone();
             let o = sync_opts.clone();
             relay_futs.push(async move {
+                if !negentropy::wait_connected(&relay, connect_allowance).await {
+                    return (url, None, false);
+                }
+                // Outer slack over the initial_timeout so the SDK's error
+                // (which distinguishes refusal from silence) surfaces first.
                 let result = tokio::time::timeout(
-                    std::time::Duration::from_secs(10),
+                    neg_outer,
                     relay.sync(f).items(i).opts(o),
                 ).await;
-                (url, result)
+                let connected = relay.status() == RelayStatus::Connected;
+                (url, Some(result), connected)
             });
         }
 
         // Collect missing IDs from all relays
+        let cap_session = state::SessionGuard::capture();
         let mut all_missing: std::collections::HashSet<EventId> = std::collections::HashSet::new();
-        while let Some((url, result)) = relay_futs.next().await {
+        while let Some((url, result, connected)) = relay_futs.next().await {
+            let Some(result) = result else {
+                log_warn!("[SyncDMs] {} skipped: not connected", url);
+                continue;
+            };
             match result {
                 Ok(Ok(recon)) => {
                     let count = recon.remote.len();
                     all_missing.extend(recon.remote);
                     log_info!("[SyncDMs] {} reconciled: {} missing", url, count);
+                    if cap_session.is_valid() {
+                        negentropy::record_neg_support(url.as_str(), true);
+                    }
                 }
-                Ok(Err(e)) => log_warn!("[SyncDMs] {} failed: {}", url, e),
-                Err(_) => log_warn!("[SyncDMs] {} timed out (10s)", url),
+                Ok(Err(e)) => {
+                    log_warn!("[SyncDMs] {} failed: {}", url, e);
+                    if cap_session.is_valid()
+                        && negentropy::classify_neg_sync_error(&e.to_string(), connected) == Some(false)
+                    {
+                        log_info!("[SyncDMs] {} marked no-NIP-77 for 24h", url);
+                        negentropy::record_neg_support(url.as_str(), false);
+                    }
+                }
+                Err(_) => log_warn!("[SyncDMs] {} timed out ({:?})", url, neg_outer),
+            }
+        }
+
+        let mut total_events = 0u32;
+        let mut new_messages = 0u32;
+
+        // No-NIP-77 relays still contribute: one bounded REQ over the same
+        // filter. The 500-event cap keeps a `since_days: None` call from
+        // pulling a whole mailbox — deep history is negentropy's job on the
+        // relays that speak it.
+        if !skipped_no_neg.is_empty() {
+            let req_filter = filter.clone().limit(500);
+            match client
+                .stream_events(nostr_sdk::prelude::ReqTarget::manual(
+                    skipped_no_neg.iter().cloned().map(|u| (u, vec![req_filter.clone()])),
+                ))
+                .timeout(std::time::Duration::from_secs(20))
+                .await
+            {
+                Ok(stream) => {
+                    let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+                    tokio::pin!(stream);
+                    while let Some((_relay, res)) = stream.next().await {
+                        let Ok(event) = res else { continue };
+                        // Straddles the stream: a swap mid-drain must not push
+                        // the old account's wrappers through the new account's
+                        // pipeline (ErrorSkip would ledger them there).
+                        if !cap_session.is_valid() { break; }
+                        if !seen.insert(event.id.to_bytes()) { continue; }
+                        total_events += 1;
+                        let prepared = event_handler::prepare_event(event, &client, my_pk).await;
+                        if event_handler::commit_prepared_event(prepared, false, handler).await {
+                            new_messages += 1;
+                        }
+                    }
+                }
+                Err(e) => log_warn!("[SyncDMs] REQ pass failed: {}", e),
             }
         }
 
         if all_missing.is_empty() {
             log_info!("[SyncDMs] No missing events");
-            return Ok((0, 0));
+            return Ok((total_events, new_messages));
         }
 
         // Fetch missing events in batches
@@ -3217,12 +3290,12 @@ impl VectorCore {
         let relay_strs: Vec<String> = client.relays().await.keys()
             .map(|u| u.to_string()).collect();
 
-        let mut total_events = 0u32;
-        let mut new_messages = 0u32;
         const BATCH_SIZE: usize = 500;
 
         for batch in ids.chunks(BATCH_SIZE) {
-            let f = Filter::new().ids(batch.to_vec()).kind(Kind::GiftWrap);
+            // The #p is not redundant: Ditto refuses gift-wrap REQs that carry
+            // neither authors nor #p, even authed — ids-only returns nothing.
+            let f = Filter::new().ids(batch.to_vec()).kind(Kind::GiftWrap).pubkey(my_pk);
             match client
                 .stream_events(nostr_sdk::prelude::ReqTarget::manual(
                     relay_strs.iter().cloned().map(|u| (u, vec![f.clone()])),

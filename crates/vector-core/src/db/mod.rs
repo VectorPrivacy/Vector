@@ -27,7 +27,7 @@ pub mod community;
 pub mod bots;
 
 pub use settings::{
-    get_sql_setting, set_sql_setting, get_pkey, set_pkey, get_seed, set_seed, remove_setting,
+    get_sql_setting, set_sql_setting, advance_u64_setting, get_pkey, set_pkey, get_seed, set_seed, remove_setting,
     get_signer_type, set_signer_type,
     get_bunker_url, set_bunker_url,
     get_bunker_remote_pubkey, set_bunker_remote_pubkey,

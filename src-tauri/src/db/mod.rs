@@ -56,7 +56,7 @@ pub async fn get_messages_around(chat_id: &str, anchor_id: &str, before: usize, 
 }
 // Wrapper tracking — sync functions re-exported directly
 pub use vector_core::db::wrappers::{
-    save_processed_wrapper, load_processed_wrappers, load_negentropy_items,
+    save_processed_wrapper, load_processed_wrappers, load_processed_wrappers_since, load_negentropy_items,
 };
 pub async fn load_recent_wrapper_ids(days: u64) -> Result<Vec<[u8; 32]>, String> {
     vector_core::db::wrappers::load_recent_wrapper_ids(days)

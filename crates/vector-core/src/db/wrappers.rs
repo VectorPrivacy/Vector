@@ -71,6 +71,31 @@ pub fn load_processed_wrappers() -> Result<Vec<[u8; 32]>, String> {
     Ok(rows.flatten().collect())
 }
 
+/// [`load_processed_wrappers`] bounded to `wrapper_created_at >= since_secs` —
+/// the dedup cache only needs the window the planned reconciles can touch;
+/// anything older that still arrives dedups through the DB fallback.
+pub fn load_processed_wrappers_since(since_secs: u64) -> Result<Vec<[u8; 32]>, String> {
+    let conn = match super::get_db_connection_guard_static() {
+        Ok(c) => c,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let mut stmt = conn.prepare(
+        "SELECT wrapper_id FROM processed_wrappers WHERE transport = 0 AND wrapper_created_at >= ?1",
+    ).map_err(|e| format!("Failed to prepare processed_wrappers query: {}", e))?;
+    let rows = stmt.query_map(rusqlite::params![since_secs as i64], |row| {
+        let blob: Vec<u8> = row.get(0)?;
+        if blob.len() == 32 {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&blob);
+            Ok(arr)
+        } else {
+            Err(rusqlite::Error::InvalidParameterCount(blob.len(), 32))
+        }
+    }).map_err(|e| format!("Failed to query processed_wrappers: {}", e))?;
+
+    Ok(rows.flatten().collect())
+}
+
 /// Load recent wrapper IDs from events table (last N days) as raw bytes.
 pub fn load_recent_wrapper_ids(days: u64) -> Result<Vec<[u8; 32]>, String> {
     let conn = match super::get_db_connection_guard_static() {

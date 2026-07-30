@@ -21,6 +21,21 @@ pub fn set_sql_setting(key: String, value: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Monotonically advance a numeric setting in ONE statement — the stored
+/// value only ever grows. For reconcile cursors and similar floors, where a
+/// read-modify-write window would let a stale or concurrent writer regress
+/// the value.
+pub fn advance_u64_setting(key: String, value: u64) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value
+         WHERE CAST(excluded.value AS INTEGER) > CAST(value AS INTEGER)",
+        rusqlite::params![key, value.to_string()],
+    ).map_err(|e| format!("Failed to advance setting: {}", e))?;
+    Ok(())
+}
+
 /// Remove a setting by key.
 pub fn remove_setting(key: &str) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
