@@ -2883,16 +2883,178 @@ async fn run_control_probe(session: &vector_core::state::SessionGuard) {
 
 #[tauri::command]
 pub async fn sync_communities_boot() -> Result<(), String> {
+    // One pipeline at a time: a relay reconnect mid-boot re-triggers this whole
+    // run, doubling the volley and probes (the sweep's page claims absorb the
+    // twins, but the repeated work is real). A run that arrives while one is
+    // active is redundant — the active run reads the same relays.
+    static SWEEP_IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static RERUN_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if SWEEP_IN_FLIGHT.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        // Don't DROP the trigger: channels the active run fetched before this
+        // caller's relay came up never saw its gap events — queue one rerun.
+        RERUN_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        println!("[Boot] community sync already in flight — queuing a follow-up run");
+        return Ok(());
+    }
+    struct SweepClaim;
+    impl Drop for SweepClaim {
+        fn drop(&mut self) {
+            SWEEP_IN_FLIGHT.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let _claim = SweepClaim;
+
     let session = vector_core::state::SessionGuard::capture();
     let boot_start = std::time::Instant::now();
 
-    // One coalesced control probe BEFORE the channel sweep — the unchanged
-    // majority of communities then skip their per-community control chain.
-    let probe_start = std::time::Instant::now();
-    run_control_probe(&session).await;
-    println!("[Boot] community control probe in {:?}", probe_start.elapsed());
+    // Newest-message time per chat: the volley's since-bounds AND the sweep's
+    // activity ordering (one DB read shared by both).
+    let last_msgs = crate::db::get_all_chats_last_messages().await.unwrap_or_default();
+    let activity = |cid: &str| -> u64 {
+        last_msgs.get(cid).and_then(|v| v.first().map(|m| m.at)).unwrap_or(0)
+    };
+
+    // Held v2 communities: re-register chat rows (cheap, DB-only) BEFORE the
+    // volley so painted messages land on restored community chats. Follows
+    // queue AFTER the volley — the rapid pass gets the network to itself.
+    for c in vector_core::community::v2::realtime::load_held_v2() {
+        vector_core::VectorCore.register_v2_chats(&c, &session).await;
+    }
     if !session.is_valid() {
         return Ok(());
+    }
+
+    // ── Volley Sync (chat-plane paint) ∥ control probe ───────────────────────────────
+    // The volley paints every v2 channel's latest page from stored epoch
+    // state (CONCORD_CHAT_PLANE_VOLLEY_DESIGN.md); the probe readies the v1
+    // fast path. Neither depends on the other — run them together so the v1
+    // hot lane below starts at probe-done, not probe-after-volley.
+    let mut hot_v1: Vec<(String, u64)> = Vec::new();
+    {
+        let volley_start = std::time::Instant::now();
+        const VOLLEY_SINCE_SLACK_SECS: u64 = 3600;
+        let mut with_activity: Vec<(vector_core::community::v2::volley::PaintTarget, u64)> = Vec::new();
+        for id in vector_core::db::community::list_community_ids()? {
+            match vector_core::db::community::community_protocol(&id).ok().flatten() {
+                Some(vector_core::community::ConcordProtocol::V2) => {
+                    if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&id) {
+                        for ch in &c.channels {
+                            let cid = vector_core::simd::hex::bytes_to_hex_32(&ch.id.0);
+                            let at = activity(&cid);
+                            let since = (at > 0)
+                                .then(|| (at / 1000).saturating_sub(VOLLEY_SINCE_SLACK_SECS));
+                            with_activity.push((
+                                vector_core::community::v2::volley::PaintTarget {
+                                    community_id: vector_core::community::CommunityId(id.0),
+                                    channel_hex: cid,
+                                    since,
+                                },
+                                at,
+                            ));
+                        }
+                    }
+                }
+                _ => {
+                    if let Ok(Some(community)) = vector_core::db::community::load_community(&id) {
+                        for ch in &community.channels {
+                            let cid = ch.id.to_hex();
+                            let at = activity(&cid);
+                            hot_v1.push((cid, at));
+                        }
+                    }
+                }
+            }
+        }
+        with_activity.sort_by(|a, b| b.1.cmp(&a.1));
+        let volley_count = with_activity.len();
+        let targets: Vec<_> = with_activity.into_iter().map(|(t, _)| t).collect();
+
+        let ((painted, stats), _) = tokio::join!(
+            vector_core::community::v2::volley::paint_all(targets),
+            async {
+                let probe_start = std::time::Instant::now();
+                run_control_probe(&session).await;
+                println!("[Boot] community control probe in {:?}", probe_start.elapsed());
+            }
+        );
+        let total: usize = painted.iter().map(|(_, n)| n).sum();
+        for (cid, n) in &painted {
+            println!("[Boot]   volley {}…: {} new", &cid[..8.min(cid.len())], n);
+        }
+        println!(
+            "[Boot] Volley Sync: {} channel(s), {} new in {:?} (batch {}ev/{}ms, fallback {}ev/{}ms)",
+            volley_count,
+            total,
+            volley_start.elapsed(),
+            stats.batch_events,
+            stats.batch_ms,
+            stats.fallback_events,
+            stats.fallback_ms
+        );
+    }
+    if !session.is_valid() {
+        return Ok(());
+    }
+
+    // ── v1 hot lane ──────────────────────────────────────────────────────
+    // The most recently active v1 channels take the full (probe-cheapened)
+    // chain NOW, wide — the busiest communities must not queue behind sixty
+    // quiet channels in the 6-wide sweep.
+    const HOT_V1_MAX: usize = 12;
+    const HOT_V1_WINDOW_MS: u64 = 14 * 24 * 3600 * 1000;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    hot_v1.sort_by(|a, b| b.1.cmp(&a.1));
+    hot_v1.retain(|(_, at)| *at > 0 && now_ms.saturating_sub(*at) <= HOT_V1_WINDOW_MS);
+    hot_v1.truncate(HOT_V1_MAX);
+    // The sweep skips only channels the lane actually SYNCED — an errored
+    // lane sync must still get its normal sweep pass.
+    let mut hot_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if !hot_v1.is_empty() {
+        let hot_start = std::time::Instant::now();
+        let hot_count = hot_v1.len();
+        let done: Vec<Option<String>> = futures_util::stream::iter(hot_v1)
+            .map(|(cid, _)| async move {
+                if !session.is_valid() {
+                    return None;
+                }
+                let t = std::time::Instant::now();
+                match sync_community_channel(cid.clone(), None, None).await {
+                    Ok(r) => {
+                        if r.new_messages > 0 {
+                            println!(
+                                "[Boot]   hot v1 {}…: {} new in {:?}",
+                                &cid[..8.min(cid.len())],
+                                r.new_messages,
+                                t.elapsed()
+                            );
+                        }
+                        Some(cid)
+                    }
+                    Err(_) => None,
+                }
+            })
+            .buffer_unordered(HOT_V1_MAX)
+            .collect()
+            .await;
+        hot_set.extend(done.into_iter().flatten());
+        println!(
+            "[Boot] v1 hot lane: {} channel(s) in {:?}",
+            hot_count,
+            hot_start.elapsed()
+        );
+    }
+    if !session.is_valid() {
+        return Ok(());
+    }
+
+    // Verification follows queue AFTER the whole chat paint (volley + hot
+    // lane) BY OWNER RULING: boot exists to deliver message data; ban data
+    // rides seconds behind and retro-hide revokes anything it invalidates.
+    for c in vector_core::community::v2::realtime::load_held_v2() {
+        vector_core::community::v2::realtime::enqueue_follow(c.id());
     }
 
     // Cross-device discovery runs CONCURRENTLY with the channel sweep — the v1
@@ -2938,22 +3100,6 @@ pub async fn sync_communities_boot() -> Result<(), String> {
         });
     }
 
-    // Held v2 communities: re-register chat rows (cheap, DB-only — restores the
-    // community metadata over any bare persist-anchor row) + queue their follows.
-    for c in vector_core::community::v2::realtime::load_held_v2() {
-        vector_core::VectorCore.register_v2_chats(&c, &session).await;
-        vector_core::community::v2::realtime::enqueue_follow(c.id());
-    }
-    if !session.is_valid() {
-        return Ok(());
-    }
-
-    // Newest-message time per chat, for activity ordering.
-    let last_msgs = crate::db::get_all_chats_last_messages().await.unwrap_or_default();
-    let activity = |cid: &str| -> u64 {
-        last_msgs.get(cid).and_then(|v| v.first().map(|m| m.at)).unwrap_or(0)
-    };
-
     // Flatten every joined Community's channels (protocol-agnostic: a v2 community
     // must load through its own reader, not the v1 one).
     let mut channels: Vec<String> = Vec::new();
@@ -2975,6 +3121,8 @@ pub async fn sync_communities_boot() -> Result<(), String> {
             }
         }
     }
+    // Hot-lane channels already ran the full chain — don't re-queue them.
+    channels.retain(|c| !hot_set.contains(c));
     // Most-recent-activity first.
     channels.sort_by(|a, b| activity(b).cmp(&activity(a)));
 
@@ -3017,7 +3165,27 @@ pub async fn sync_communities_boot() -> Result<(), String> {
         channel_count,
         boot_start.elapsed()
     );
+    drop(_claim);
+    if RERUN_REQUESTED.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        respawn_community_sync();
+    }
     Ok(())
+}
+
+/// One queued re-run of the boot sweep (a reconnect landed mid-run). Boxed to
+/// break the recursive-future Send inference; the guard inside the new run
+/// still serializes against any racing caller.
+fn respawn_community_sync() {
+    let session = vector_core::state::SessionGuard::capture();
+    tokio::spawn(async move {
+        if !session.is_valid() {
+            return;
+        }
+        let fut: std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), String>> + Send>,
+        > = Box::pin(sync_communities_boot());
+        let _ = fut.await;
+    });
 }
 
 /// Delete one of the local user's own Community messages. NIP-09-deletes the outer

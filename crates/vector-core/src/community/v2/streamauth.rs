@@ -205,6 +205,15 @@ pub fn ensure_responder(client: &Client) {
             if let ClientNotification::Message { relay_url, message } = n {
                 if let nostr_sdk::prelude::RelayMessage::Auth { challenge } = *message {
                     let challenge = challenge.into_owned();
+                    // Durable capability fact: this relay gates reads behind
+                    // NIP-42 (the boot volley routes fallbacks by it). Write
+                    // once — a challenge-spamming relay must not drive DB
+                    // writes at frame rate on the notification loop.
+                    let gate_key =
+                        format!("auth_gate:{}", relay_url.as_str().trim_end_matches('/'));
+                    if crate::db::get_sql_setting(gate_key.clone()).ok().flatten().is_none() {
+                        let _ = crate::db::set_sql_setting(gate_key, "1".to_string());
+                    }
                     let fresh_connection = remember_challenge(&relay_url, &challenge);
                     if !is_empty() {
                         authenticate_streams(&client, &relay_url, &challenge).await;

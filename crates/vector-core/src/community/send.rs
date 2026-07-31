@@ -215,10 +215,11 @@ pub async fn fetch_channel_page<T: Transport + ?Sized>(
         // z_tags, above), and back-pagination passes `None` here.
         since,
         limit: Some(limit),
-        // Latest pages are positive-data reads. Older pages (`until` set) are
-        // force-promoted to Full by the transport — the history-start latch
-        // needs the completest union the reachable relays allow.
-        evidence: Evidence::Fast,
+        // Latest pages are positive-data reads and ride Fast. Older pages
+        // request Full HERE (no transport floor does it anymore): this is the
+        // one fetch whose short result latches "history starts here", and an
+        // absence verdict trusts only the completest reachable union.
+        evidence: if until.is_some() { Evidence::Full } else { Evidence::Fast },
         ..Default::default()
     };
     transport.fetch(&query, &community.relays).await

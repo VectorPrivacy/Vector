@@ -535,7 +535,7 @@ pub async fn fetch_channel<T: Transport + ?Sized>(
     channel_id: &ChannelId,
     limit: usize,
 ) -> Result<Vec<FetchedEvent>, String> {
-    fetch_channel_history(transport, community, channel_id, limit, 1, |_| true).await
+    fetch_channel_history(transport, community, channel_id, limit, 1, None, crate::community::transport::Evidence::Quorum, |_| true).await
 }
 
 /// Walk a channel's history newest-first (CORD-03 §3 "clients load a Channel
@@ -557,6 +557,8 @@ pub async fn fetch_channel_history<T: Transport + ?Sized>(
     channel_id: &ChannelId,
     page: usize,
     max_pages: usize,
+    since: Option<u64>,
+    evidence: crate::community::transport::Evidence,
     mut keep_paging: impl FnMut(&[FetchedEvent]) -> bool,
 ) -> Result<Vec<FetchedEvent>, String> {
     // Guards the opportunistic scrub-key heals below — the fetch loop straddles
@@ -609,8 +611,10 @@ pub async fn fetch_channel_history<T: Transport + ?Sized>(
             let q = Query {
                 kinds: vec![stream::KIND_WRAP],
                 authors: vec![plane.pk_hex()],
+                since,
                 until,
                 limit: Some(page),
+                evidence,
                 ..Default::default()
             };
             if let Ok(evs) = transport.fetch_plane(plane.keys(), &q, &community.relays).await {
@@ -1049,11 +1053,15 @@ pub async fn community_is_public<T: Transport + ?Sized>(transport: &T, community
     let mut oldest: Option<u64> = None;
     let mut until: Option<u64> = None;
     for page in 0..COMPACT_MAX_PAGES {
+        // Quorum, DECLARED (the until→Full transport floor is gone): these
+        // control reads tolerate a partial union — their fold semantics are
+        // fail-safe on gaps (seeded banlists, withheld roster cache).
         let query = Query {
             kinds: vec![stream::KIND_WRAP],
             authors: vec![control.pk_hex()],
             until,
             limit: Some(FOLLOW_PAGE),
+            evidence: crate::community::transport::Evidence::Quorum,
             ..Default::default()
         };
         let Ok(wraps) = transport.fetch(&query, &community.relays).await else { return true };
@@ -1282,10 +1290,11 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
     // T's genesis onto a fake root to MITM another T-joiner — is closed only by
     // binding the root into community_id (protocol, deferred).
     //
-    // Seed `until` with a FAR-FUTURE constant (NOT now-based): `until.is_some()` takes
-    // the transport's AUTHORITATIVE drain-ALL-relays path (an open `until` returns only
-    // a fast relay's partial window and misses a genesis on a lagging relay — routine
-    // over Tor), while a constant beyond any real created_at clips NOTHING — so neither
+    // Seed `until` with a FAR-FUTURE constant (NOT now-based), and request
+    // Evidence::Full EXPLICITLY below: this walk draws an ABSENCE verdict (no
+    // owner-signed genesis ⇒ reject), which trusts only the completest union —
+    // an open partial window misses a genesis on a lagging relay (routine over
+    // Tor). A constant beyond any real created_at clips NOTHING — so neither
     // a clock-skewed future-dated genesis nor a >1h-slow-clock joiner is excluded (a
     // now-based bound could clip either). Break on an EMPTY page (a short page is a
     // relay cap). A forged root walks to exhaustion and rejects; a flood/deep plane
@@ -1323,6 +1332,7 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
                 authors: vec![control_pk.clone()],
                 until,
                 limit: Some(PAGE),
+                evidence: crate::community::transport::Evidence::Full,
                 ..Default::default()
             };
             let wraps = transport.fetch(&query, &community.relays).await?;
@@ -1720,11 +1730,15 @@ pub async fn fetch_authority<T: Transport + ?Sized>(transport: &T, community: &C
     // silently un-ban on withheld data.
     let mut a = fold_authority(community, &[], &floors);
     for _ in 0..FOLLOW_MAX_PAGES {
+        // Quorum, DECLARED (the until→Full transport floor is gone): these
+        // control reads tolerate a partial union — their fold semantics are
+        // fail-safe on gaps (seeded banlists, withheld roster cache).
         let query = Query {
             kinds: vec![stream::KIND_WRAP],
             authors: vec![control.pk_hex()],
             until,
             limit: Some(FOLLOW_PAGE),
+            evidence: crate::community::transport::Evidence::Quorum,
             ..Default::default()
         };
         let Ok(wraps) = transport.fetch(&query, &community.relays).await else { break };
@@ -1785,7 +1799,9 @@ async fn fetch_guestbook_events<T: Transport + ?Sized>(
     let mut until: Option<u64> = None;
     let mut oldest: Option<u64> = None;
     for _ in 0..GB_MAX_PAGES {
-        let query = Query { kinds: vec![stream::KIND_WRAP], authors: vec![gb_group.pk_hex()], until, limit: Some(GB_PAGE), ..Default::default() };
+        // Full: this set becomes the refound's recipient list — a member's
+        // Join visible only on a minority relay must not be severed.
+        let query = Query { kinds: vec![stream::KIND_WRAP], authors: vec![gb_group.pk_hex()], until, limit: Some(GB_PAGE), evidence: crate::community::transport::Evidence::Full, ..Default::default() };
         let wraps = transport.fetch(&query, &community.relays).await?;
         let mut fresh = 0usize;
         for wrap in &wraps {
@@ -2155,11 +2171,15 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
     // coverage test, so stopping there could compact it away.
     let mut truncated = false;
     for page in 0..COMPACT_MAX_PAGES {
+        // Full: compaction re-wraps the head set it can SEE — a control
+        // edition (a ban head) reachable only on a minority relay must not be
+        // compacted away by a partial union.
         let query = Query {
             kinds: vec![stream::KIND_WRAP],
             authors: vec![current_control.pk_hex()],
             until,
             limit: Some(FOLLOW_PAGE),
+            evidence: crate::community::transport::Evidence::Full,
             ..Default::default()
         };
         let wraps = transport.fetch(&query, &community.relays).await?;
@@ -2444,7 +2464,7 @@ pub async fn refound_at_birth<T: Transport + ?Sized>(
     // Exhaustion, not coverage — see the sibling read in `refound_community`.
     let mut truncated = false;
     for page in 0..COMPACT_MAX_PAGES {
-        let query = Query { kinds: vec![stream::KIND_WRAP], authors: vec![current_control.pk_hex()], until, limit: Some(FOLLOW_PAGE), ..Default::default() };
+        let query = Query { kinds: vec![stream::KIND_WRAP], authors: vec![current_control.pk_hex()], until, limit: Some(FOLLOW_PAGE), evidence: crate::community::transport::Evidence::Full, ..Default::default() };
         let wraps = transport.fetch(&query, &community.relays).await?;
         let mut fresh = 0usize;
         for w in &wraps {
@@ -3541,11 +3561,15 @@ pub async fn follow_control<T: Transport + ?Sized>(
     // device's baseline is the one step that outlives the round.
     let mut truncated = true;
     for _ in 0..FOLLOW_MAX_PAGES {
+        // Quorum, DECLARED (the until→Full transport floor is gone): these
+        // control reads tolerate a partial union — their fold semantics are
+        // fail-safe on gaps (seeded banlists, withheld roster cache).
         let query = Query {
             kinds: vec![stream::KIND_WRAP],
             authors: vec![control.pk_hex()],
             until,
             limit: Some(FOLLOW_PAGE),
+            evidence: crate::community::transport::Evidence::Quorum,
             ..Default::default()
         };
         let wraps = transport.fetch(&query, &community.relays).await?;
@@ -8139,7 +8163,7 @@ mod tests {
         let general = community.channels[0].id;
         flood_general(&relay, &community, &owner, 120, 10_000).await;
 
-        let all = fetch_channel_history(&relay, &community, &general, 50, 8, |_| true).await.unwrap();
+        let all = fetch_channel_history(&relay, &community, &general, 50, 8, None, crate::community::transport::Evidence::Quorum, |_| true).await.unwrap();
         assert_eq!(all.len(), 120, "the walk pages the whole burst");
         // Oldest→newest, no duplicates.
         let contents: Vec<String> = all.iter().map(|f| f.event.opened().rumor.content.clone()).collect();
@@ -8164,7 +8188,7 @@ mod tests {
 
         // The caller says "I hold everything" after the first page — no deeper fetch.
         let mut pages = 0usize;
-        let got = fetch_channel_history(&relay, &community, &general, 50, 8, |_| {
+        let got = fetch_channel_history(&relay, &community, &general, 50, 8, None, crate::community::transport::Evidence::Quorum, |_| {
             pages += 1;
             false
         })
@@ -8190,7 +8214,7 @@ mod tests {
             let (wrap, _) = chat::seal_chat_rumor(&rumor, &group, &owner, Timestamp::from_secs(5_000), false).unwrap();
             relay.publish(&wrap, &community.relays).await.unwrap();
         }
-        let got = fetch_channel_history(&relay, &community, &general, 25, 8, |_| true).await.unwrap();
+        let got = fetch_channel_history(&relay, &community, &general, 25, 8, None, crate::community::transport::Evidence::Quorum, |_| true).await.unwrap();
         assert!(got.len() >= 25, "at least the relay page is read");
         assert!(got.len() <= 60, "sane bound");
         // Termination is the assertion: reaching here means the wall didn't loop.

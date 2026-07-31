@@ -2221,7 +2221,14 @@ impl VectorCore {
             } else {
                 Self::v2_inline_follow(&id).await
             };
-            let new = Self::v2_backfill_channel(&id, channel_id, limit).await;
+            // Deepest catch-up walk: pages × page-size bounds one reconnect's fetch.
+            // Chat plane = fetch ASAP. NOTE: fetch_plane does not consult the
+            // evidence tier yet (#370) — until it does, the transport-seconds
+            // bound is the effective limit; the declared Fast records intent.
+            let new = Self::v2_backfill_channel(
+                &id, channel_id, limit, 8, None,
+                crate::community::transport::Evidence::Fast, 12,
+            ).await;
             return Ok((new, warnings));
         }
         let (community, _) = self.resolve_channel(channel_id)?;
@@ -2546,10 +2553,20 @@ impl VectorCore {
     /// still catches the whole gap instead of only the newest `limit`. Reuses the v2
     /// inbound bridge (dedup + STATE aggregate) + the v1 save path. Returns the count of
     /// brand-new messages applied. Best-effort: a fetch failure is 0.
-    async fn v2_backfill_channel(id: &crate::community::CommunityId, channel_id: &str, limit: usize) -> usize {
+    /// Reconnect/boot catch-up for one v2 channel: fetches the newest pages
+    /// and PAGES backwards until it reaches messages it already holds, then
+    /// ingests through the shared pipeline. The boot volley fetches its own
+    /// batches and shares only [`Self::v2_ingest_chat_page`].
+    async fn v2_backfill_channel(
+        id: &crate::community::CommunityId,
+        channel_id: &str,
+        limit: usize,
+        max_pages: usize,
+        since: Option<u64>,
+        evidence: crate::community::transport::Evidence,
+        transport_secs: u64,
+    ) -> usize {
         use crate::community::v2::inbound::{apply_chat_to_state, ChatPersist};
-        /// Deepest catch-up walk: pages × page-size bounds one reconnect's fetch.
-        const MAX_BACKFILL_PAGES: usize = 8;
         // Guard straddles the fetch: a swap mid-fetch must not persist account A's chat
         // into account B's STATE/DB (the message ids are global).
         let session = state::SessionGuard::capture();
@@ -2562,13 +2579,15 @@ impl VectorCore {
         }
         let Ok(Some(community)) = crate::db::community::load_community_v2(id) else { return 0 };
         let ch = crate::community::ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
-        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(transport_secs));
         let Ok(page) = crate::community::v2::service::fetch_channel_history(
             &transport,
             &community,
             &ch,
             limit.max(50),
-            MAX_BACKFILL_PAGES,
+            max_pages,
+            since,
+            evidence,
             // Keep paging while a page still contains a MESSAGE we don't hold; a page
             // whose messages are all known means we've reached our own history. Only
             // message kinds get their own rows (reactions/edits fold into their
@@ -2590,6 +2609,19 @@ impl VectorCore {
         else {
             return 0;
         };
+        Self::v2_ingest_chat_page(channel_id, my_pk, session, page).await
+    }
+
+    /// Ingest a fetched chat page: STATE apply, batched persist with delete
+    /// barriers, then UI surfacing — shared by the reconnect backfill and the
+    /// boot volley's batched paint path.
+    pub(crate) async fn v2_ingest_chat_page(
+        channel_id: &str,
+        my_pk: nostr_sdk::prelude::PublicKey,
+        session: crate::state::SessionGuard,
+        page: Vec<crate::community::v2::service::FetchedEvent>,
+    ) -> usize {
+        use crate::community::v2::inbound::{apply_chat_to_state, ChatPersist};
         let mut new = 0usize;
         // Pass 1 — apply to STATE (per-item lock) and COLLECT outcomes in wire order.
         let mut outcomes: Vec<ChatPersist> = Vec::with_capacity(page.len());

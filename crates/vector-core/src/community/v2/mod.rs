@@ -25,6 +25,7 @@ pub mod inbound;
 pub mod invite;
 pub mod list;
 pub mod realtime;
+pub mod volley;
 pub mod rekey;
 pub mod roles;
 pub mod service;

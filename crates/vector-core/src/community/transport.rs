@@ -411,15 +411,13 @@ fn breaker_record_at(generation: u64, url: &str, success: bool, full_budget: boo
     })
 }
 
-/// `until` forces Full — a back-page verdict (the history-start latch) trusts
-/// "nothing older than the cursor" only against the completest union the
-/// reachable relay set allows. A floor in the transport, not trust in callers.
+/// Callers own their evidence tier. The chat plane is flat, linear data — an
+/// event exists or it doesn't — so no transport floor promotes its reads.
+/// Every site that draws a completeness-sensitive conclusion from an `until`
+/// walk (the v1 history-start latch, join-verify's genesis anchor, refound
+/// compaction, guestbook folds) REQUESTS Full explicitly at its own Query.
 fn effective_evidence(query: &Query) -> Evidence {
-    if query.until.is_some() {
-        Evidence::Full
-    } else {
-        query.evidence
-    }
+    query.evidence
 }
 
 // ── Plane connection pool (fetch_plane) ─────────────────────────────────────
@@ -783,7 +781,7 @@ impl LiveTransport {
     /// the pool doesn't hold yet is added idempotently (mirrors what the realtime subscription does), then
     /// `connect()` kicks it without disturbing the already-connected majority. Never shut this client down:
     /// it is shared. Errors only if there is no client yet or every relay url was invalid.
-    async fn warm_client(relays: &[String], connect_timeout: std::time::Duration) -> Result<Client, String> {
+    pub(crate) async fn warm_client(relays: &[String], connect_timeout: std::time::Duration) -> Result<Client, String> {
         if relays.is_empty() {
             return Err("community has no relays configured".to_string());
         }
@@ -1915,12 +1913,12 @@ mod tests {
     // ── The evidence floor ───────────────────────────────────────────────────
 
     #[test]
-    fn until_forces_full_evidence_and_default_is_quorum() {
+    fn declared_evidence_stands_and_default_is_quorum() {
         assert_eq!(Query::default().evidence, Evidence::Quorum, "unclassified sites get Quorum");
         assert_eq!(
             effective_evidence(&Query { until: Some(1), evidence: Evidence::Fast, ..Default::default() }),
-            Evidence::Full,
-            "a back-page can never ride Fast — the history-start latch needs the full union"
+            Evidence::Fast,
+            "chat pagination rides its declared tier — absence verdicts request Full themselves"
         );
         assert_eq!(
             effective_evidence(&Query { evidence: Evidence::Fast, ..Default::default() }),
