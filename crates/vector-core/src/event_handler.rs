@@ -476,7 +476,7 @@ pub async fn prepare_event(
 /// invite has no held id for the exists-guard to match). The sender's
 /// declared deadline is honored when EARLIER; the rumor-age lifetime is the
 /// ceiling either way. One hour of slack absorbs sender clock skew.
-const DIRECT_INVITE_LIFETIME_SECS: u64 = 24 * 3600 + 3600;
+pub const DIRECT_INVITE_LIFETIME_SECS: u64 = 24 * 3600 + 3600;
 
 fn expired_invite(expires_at: u64, rumor_created_at: u64) -> bool {
     let now = nostr_sdk::prelude::Timestamp::now().as_secs();

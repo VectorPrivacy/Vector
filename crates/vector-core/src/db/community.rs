@@ -729,15 +729,22 @@ pub fn purge_pending_invites_for_held_communities() -> Result<usize, String> {
     Ok(n)
 }
 
-/// Drop parked invites whose sender-declared NIP-40 expiry has passed. Reads already hide
-/// them; this reclaims the rows (and keeps the newest-wins cap honest). Rows with no declared
-/// expiry are never touched. Returns the count purged.
+/// Drop parked invites past their sender-declared NIP-40 expiry OR past the
+/// recipient-enforced 24h lifetime (measured from park time — conservative,
+/// since parking postdates sending). The lifetime leg is what clears rows
+/// parked by builds that predate the ingest-time rule: a machine dormant for
+/// a month otherwise boots into a page of fossil invites no other culler can
+/// touch (no declared expiry, never held, never tombstoned). Returns the
+/// count purged.
 pub fn purge_expired_pending_invites() -> Result<usize, String> {
     let conn = super::get_write_connection_guard_static()?;
+    let now = now_secs();
     let n = conn
         .execute(
-            "DELETE FROM pending_community_invites WHERE expires_at != 0 AND expires_at <= ?1",
-            params![now_secs()],
+            "DELETE FROM pending_community_invites
+              WHERE (expires_at != 0 AND expires_at <= ?1)
+                 OR received_at <= ?2",
+            params![now, now - crate::event_handler::DIRECT_INVITE_LIFETIME_SECS as i64],
         )
         .map_err(|e| format!("purge expired pending invites: {e}"))?;
     Ok(n)
@@ -750,12 +757,14 @@ pub fn list_pending_invites() -> Result<Vec<PendingCommunityInvite>, String> {
         .prepare(
             "SELECT community_id, bundle_json, inviter_npub, received_at, expires_at
                FROM pending_community_invites
-              WHERE expires_at = 0 OR expires_at > ?1
+              WHERE (expires_at = 0 OR expires_at > ?1)
+                AND received_at > ?2
               ORDER BY received_at DESC",
         )
         .map_err(|e| e.to_string())?;
+    let now = now_secs();
     let rows = stmt
-        .query_map(params![now_secs()], |r| {
+        .query_map(params![now, now - crate::event_handler::DIRECT_INVITE_LIFETIME_SECS as i64], |r| {
             Ok(PendingCommunityInvite {
                 community_id: r.get(0)?,
                 bundle_json: dec_txt(&r.get::<_, String>(1)?),

@@ -2960,6 +2960,21 @@ pub async fn sync_communities_boot() -> Result<(), String> {
     let session = vector_core::state::SessionGuard::capture();
     let boot_start = std::time::Instant::now();
 
+    // Parked-invite hygiene FIRST, unconditionally: a dormant machine may boot
+    // with months of fossils that only the lifetime rule can cull (no declared
+    // expiry, never held, never tombstoned) — and the list-sync purges only
+    // run when a 13302 actually arrives.
+    if let Ok(n) = vector_core::db::community::purge_expired_pending_invites() {
+        if n > 0 {
+            println!("[Boot] purged {} stale pending invite(s)", n);
+        }
+    }
+    if let Ok(n) = vector_core::db::community::purge_pending_invites_for_held_communities() {
+        if n > 0 {
+            println!("[Boot] purged {} pending invite(s) for held communities", n);
+        }
+    }
+
     // Newest-message time per chat: the volley's since-bounds AND the sweep's
     // activity ordering (one DB read shared by both).
     let last_msgs = crate::db::get_all_chats_last_messages().await.unwrap_or_default();
