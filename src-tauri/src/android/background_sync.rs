@@ -415,11 +415,19 @@ fn run_standalone_sync_loop(data_dir: &str) {
             }
         }
 
-        // Subscribe to GiftWraps addressed to us (DMs, files)
-        // limit(0) = only new events going forward (real-time streaming)
+        // Subscribe to GiftWraps addressed to us (DMs, files).
+        // limit(0) = only new events going forward — but a relay that
+        // mishandles it (or a reconnect re-REQ) can replay stored history,
+        // and the locked-account arm below has no ledger to dedup against
+        // across service restarts. The `since` bound caps any replay at the
+        // NIP-59 backdating window instead of the whole mailbox.
+        let sub_since = nostr_sdk::prelude::Timestamp::now()
+            .as_secs()
+            .saturating_sub(2 * 24 * 3600);
         let giftwrap_filter = Filter::new()
             .pubkey(my_public_key)
             .kind(Kind::GiftWrap)
+            .since(nostr_sdk::prelude::Timestamp::from_secs(sub_since))
             .limit(0);
 
         let gift_sub_id = match client.subscribe(giftwrap_filter).await {
@@ -545,8 +553,23 @@ fn run_standalone_sync_loop(data_dir: &str) {
                             (*event).clone(), true, &client, my_public_key
                         ).await;
                     } else {
-                        // Encrypted account — can't decrypt, but we know something arrived
-                        post_notification_jni("Vector", "You have a new message", None, None, None, None, None);
+                        // Encrypted account — can't decrypt, but we know something
+                        // arrived. THROTTLED: without a ledger this arm can't tell
+                        // new mail from a relay's replay, and the Kotlin side
+                        // collapses these into one row — re-posting faster than
+                        // once per window is pure churn.
+                        const LOCKED_NOTIFY_GAP_SECS: u64 = 30;
+                        static LAST_LOCKED_NOTIFY: std::sync::atomic::AtomicU64 =
+                            std::sync::atomic::AtomicU64::new(0);
+                        let now = nostr_sdk::prelude::Timestamp::now().as_secs();
+                        let last = LAST_LOCKED_NOTIFY.load(Ordering::Relaxed);
+                        if now.saturating_sub(last) >= LOCKED_NOTIFY_GAP_SECS
+                            && LAST_LOCKED_NOTIFY
+                                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                                .is_ok()
+                        {
+                            post_notification_jni("Vector", "You have new messages", None, None, None, None, None);
+                        }
                     }
 
                     // Cap the seen set to prevent unbounded memory growth
