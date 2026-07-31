@@ -319,14 +319,25 @@ pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Res
 
 /// Block a user by npub.
 #[tauri::command]
-pub async fn block_user(npub: String) -> bool {
-    vector_core::profile::sync::block_user(npub, &crate::profile_sync::TauriProfileSyncHandler).await
+pub async fn block_user<R: tauri::Runtime>(handle: tauri::AppHandle<R>, npub: String) -> bool {
+    let ok = vector_core::profile::sync::block_user(npub, &crate::profile_sync::TauriProfileSyncHandler).await;
+    // The unread sum already excludes blocked chats — but nothing recounts
+    // until the next message event, so the OS badge kept showing the blocked
+    // chat's unreads. Refresh immediately on the flip (both directions).
+    if ok {
+        crate::commands::messaging::update_unread_counter(handle).await;
+    }
+    ok
 }
 
 /// Unblock a user by npub.
 #[tauri::command]
-pub async fn unblock_user(npub: String) -> bool {
-    vector_core::profile::sync::unblock_user(npub, &crate::profile_sync::TauriProfileSyncHandler).await
+pub async fn unblock_user<R: tauri::Runtime>(handle: tauri::AppHandle<R>, npub: String) -> bool {
+    let ok = vector_core::profile::sync::unblock_user(npub, &crate::profile_sync::TauriProfileSyncHandler).await;
+    if ok {
+        crate::commands::messaging::update_unread_counter(handle).await;
+    }
+    ok
 }
 
 /// Returns all blocked profiles.
