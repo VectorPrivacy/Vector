@@ -11888,12 +11888,16 @@ window.addEventListener("DOMContentLoaded", async () => {
     document.onpaste = async (evt) => {
         if (strOpenChat) {
             const dt = evt.clipboardData;
-            // clipboardData is only valid during synchronous dispatch — capture the
-            // image item + its blob NOW, since the await below would invalidate it.
+            // clipboardData is only valid during synchronous dispatch — capture any
+            // file item + its blob NOW, since the await below would invalidate it.
+            // ANY file kind, not just images: when the native path read fails (a
+            // clipboard held by another process, a manager that dropped CF_HDROP),
+            // the in-band blob is the universal fallback and carries a real name.
             const arrItems = Array.from(dt?.items || []);
-            const imageItem = arrItems.find(item => item.type.startsWith('image/'));
-            const imageBlob = imageItem ? imageItem.getAsFile() : null;
-            const imageType = imageItem ? imageItem.type : '';
+            const fileItem = arrItems.find(item => item.kind === 'file')
+                || arrItems.find(item => item.type.startsWith('image/'));
+            const fileBlob = fileItem ? fileItem.getAsFile() : null;
+            const fileMime = fileItem ? fileItem.type : '';
 
             // A file copy (Finder/Explorer) also carries a text representation of the
             // path, so the default paste inserts the filename into the input. We must
@@ -11903,7 +11907,7 @@ window.addEventListener("DOMContentLoaded", async () => {
             const hasFile = (dt?.files && dt.files.length > 0)
                 || arrItems.some(it => it.kind === 'file')
                 || dtTypes.includes('Files');
-            if (hasFile || imageBlob) evt.preventDefault();
+            if (hasFile || fileBlob) evt.preventDefault();
 
             // Snapshot the composer so we can scrub any filename text that still
             // slipped in (e.g. a folder copy whose sync signal we couldn't read).
@@ -11939,33 +11943,40 @@ window.addEventListener("DOMContentLoaded", async () => {
                 console.warn('[paste] native file read failed, falling back to image bytes:', e);
             }
 
-            // Fall back to raw image bytes (screenshot data with no file reference).
-            if (imageBlob) {
+            // Fall back to the in-band blob: screenshot bytes, or a copied file
+            // whose native path read failed (its content still rides the event).
+            if (fileBlob) {
                 restoreInput();
 
                 // Read the blob as bytes
-                const arrayBuffer = await imageBlob.arrayBuffer();
+                const arrayBuffer = await fileBlob.arrayBuffer();
                 const bytes = new Uint8Array(arrayBuffer);
 
-                // Determine file extension from MIME type
-                const mimeType = imageType;
+                // Prefer the blob's real filename; synthesize one from the MIME
+                // type only for anonymous data (screenshots).
                 let ext = 'png'; // Default
-                if (mimeType.includes('jpeg') || mimeType.includes('jpg')) {
+                if (fileMime.includes('jpeg') || fileMime.includes('jpg')) {
                     ext = 'jpg';
-                } else if (mimeType.includes('gif')) {
+                } else if (fileMime.includes('gif')) {
                     ext = 'gif';
-                } else if (mimeType.includes('webp')) {
+                } else if (fileMime.includes('webp')) {
                     ext = 'webp';
-                } else if (mimeType.includes('png')) {
+                } else if (fileMime.includes('png')) {
                     ext = 'png';
-                } else if (mimeType.includes('tiff')) {
+                } else if (fileMime.includes('tiff')) {
                     ext = 'tiff';
-                } else if (mimeType.includes('bmp')) {
+                } else if (fileMime.includes('bmp')) {
                     ext = 'bmp';
+                } else if (!fileMime.startsWith('image/')) {
+                    ext = 'bin';
                 }
-
-                // Generate a filename
-                const fileName = `pasted_image.${ext}`;
+                let fileName = `pasted_image.${ext}`;
+                if (fileBlob.name && fileBlob.name.includes('.')) {
+                    fileName = fileBlob.name;
+                    ext = fileBlob.name.split('.').pop().toLowerCase();
+                } else if (fileBlob.name) {
+                    fileName = fileBlob.name;
+                }
 
                 // Get reply reference before opening preview
                 const strReplyRef = strCurrentReplyReference;
