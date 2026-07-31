@@ -3292,6 +3292,31 @@ pub async fn edit_community_metadata<T: Transport + ?Sized>(transport: &T, commu
     publish_control_edition(transport, community, &session, vsk::COMMUNITY_METADATA, &community.id().0, &content).await
 }
 
+/// Persist a freshly-published icon/banner onto the held row and return the fresh
+/// row. Reloads under the community's follow lock: `save_community_v2` is a
+/// whole-row save that prunes channels absent from the passed struct, so writing
+/// a stale pre-upload copy would drop rows a concurrent fold just landed.
+pub async fn persist_community_image(
+    id: &crate::community::CommunityId,
+    img: control::ImageRef,
+    is_banner: bool,
+    session: &SessionGuard,
+) -> Option<CommunityV2> {
+    let lock = super::realtime::follow_lock(id);
+    let _guard = lock.lock().await;
+    if !session.is_valid() {
+        return None;
+    }
+    let mut fresh = crate::db::community::load_community_v2(id).ok()??;
+    if is_banner {
+        fresh.banner = Some(img);
+    } else {
+        fresh.icon = Some(img);
+    }
+    crate::db::community::save_community_v2(&fresh).ok()?;
+    Some(fresh)
+}
+
 /// Add or edit a channel's metadata (vsk 2, CORD-03 §2). `channel_id` is the
 /// coordinate. Gated on the reader side by `MANAGE_CHANNELS`.
 pub async fn edit_channel_metadata<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel_id: &ChannelId, meta: &control::ChannelMetadata) -> Result<(), String> {

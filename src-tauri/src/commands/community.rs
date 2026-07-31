@@ -2951,6 +2951,12 @@ pub async fn sync_communities_boot() -> Result<(), String> {
     impl Drop for SweepClaim {
         fn drop(&mut self) {
             SWEEP_IN_FLIGHT.store(false, std::sync::atomic::Ordering::SeqCst);
+            // Honor a queued rerun on EVERY exit path: an early return (account
+            // swap, propagated error) must not strand the trigger until the
+            // next reconnect. The respawned run captures its own fresh session.
+            if RERUN_REQUESTED.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                respawn_community_sync();
+            }
         }
     }
     let _claim = SweepClaim;
@@ -3085,10 +3091,6 @@ pub async fn sync_communities_boot() -> Result<(), String> {
     if !session.is_valid() {
         return Ok(());
     }
-
-    if !session.is_valid() {
-        return Ok(());
-    }
     let hot_set = hot_lane_result;
 
     // Verification follows queue AFTER the whole chat paint (volley + hot
@@ -3207,9 +3209,6 @@ pub async fn sync_communities_boot() -> Result<(), String> {
         boot_start.elapsed()
     );
     drop(_claim);
-    if RERUN_REQUESTED.swap(false, std::sync::atomic::Ordering::SeqCst) {
-        respawn_community_sync();
-    }
     Ok(())
 }
 
@@ -3217,8 +3216,13 @@ pub async fn sync_communities_boot() -> Result<(), String> {
 /// break the recursive-future Send inference; the guard inside the new run
 /// still serializes against any racing caller.
 fn respawn_community_sync() {
+    // Callable from SweepClaim::Drop — a drop during runtime teardown must
+    // not panic in tokio::spawn, so bail when no runtime context exists.
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
     let session = vector_core::state::SessionGuard::capture();
-    tokio::spawn(async move {
+    handle.spawn(async move {
         if !session.is_valid() {
             return;
         }
@@ -4214,14 +4218,14 @@ pub async fn set_community_image(
         }
         let transport = LiveTransport::with_timeout(Duration::from_secs(12));
         vector_core::community::v2::service::edit_community_metadata(&transport, &v2, &meta).await?;
-        if session.is_valid() {
-            let mut updated = v2;
-            if is_banner {
-                updated.banner = Some(img_ref);
-            } else {
-                updated.icon = Some(img_ref);
-            }
-            let _ = vector_core::db::community::save_community_v2(&updated);
+        if let Some(updated) = vector_core::community::v2::service::persist_community_image(
+            v2.id(),
+            img_ref,
+            is_banner,
+            &session,
+        )
+        .await
+        {
             vector_core::VectorCore.register_v2_chats(&updated, &session).await;
         }
         return Ok(());
