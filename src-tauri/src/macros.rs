@@ -8,12 +8,8 @@
 
 macro_rules! log_error {
     ($($arg:tt)*) => {{
-        let _secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
         let msg = format!($($arg)*);
-        let line = format!("[ERROR {:02}:{:02}:{:02}Z] {}", (_secs / 3600) % 24, (_secs / 60) % 60, _secs % 60, &msg);
+        let line = format!("[{} ERROR] {}", vector_core::logging::timestamp_utc(), &msg);
         eprintln!("{}", &line);
         $crate::append_vector_log(&line);
         // Notify user that an error occurred (details are in Settings > Copy Logs)

@@ -79,15 +79,9 @@ macro_rules! log_net_fail {
         if $crate::logging::level_enabled($crate::logging::LEVEL_WARN) {
             eprintln!("[WARN] {}", &msg);
         }
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
         $crate::logging::persist(&format!(
-            "[WARN {:02}:{:02}:{:02}Z] {}",
-            (secs / 3600) % 24,
-            (secs / 60) % 60,
-            secs % 60,
+            "[{} WARN] {}",
+            $crate::logging::timestamp_utc(),
             &msg
         ));
     }};
@@ -105,15 +99,9 @@ macro_rules! log_net_info {
         if $crate::logging::level_enabled($crate::logging::LEVEL_INFO) {
             eprintln!("[INFO] {}", &msg);
         }
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
         $crate::logging::persist(&format!(
-            "[INFO {:02}:{:02}:{:02}Z] {}",
-            (secs / 3600) % 24,
-            (secs / 60) % 60,
-            secs % 60,
+            "[{} INFO] {}",
+            $crate::logging::timestamp_utc(),
             &msg
         ));
     }};
