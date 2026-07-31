@@ -496,14 +496,14 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                     .filter(|c| !candidates.iter().any(|e| e == c))
                     .collect();
                 if !fresh.is_empty() {
-                    vector_core::log_warn!(
+                    vector_core::log_net_fail!(
                         "[AttachmentDownload] all {} embedded source(s) dead — hash-swapping onto {} author server(s)",
                         candidates.len(), fresh.len()
                     );
                     candidates.extend(fresh);
                 }
             } else if i < candidates.len() {
-                vector_core::log_warn!(
+                vector_core::log_net_fail!(
                     "[AttachmentDownload] source {}/{} exhausted ({}) — trying mirror: {}",
                     i, candidates.len(), last_error, candidates[i]
                 );
@@ -513,7 +513,7 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
         match data {
             Some(d) => d,
             None => {
-                vector_core::log_warn!(
+                vector_core::log_net_fail!(
                     "[AttachmentDownload] failed: {} (msg {}, attachment {}) after {} source(s), url {}",
                     last_error, msg_id, attachment_id, total_sources, &*attachment.url
                 );
@@ -540,7 +540,7 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
 
     // Check if we got a reasonable amount of data
     if encrypted_data.len() < 16 {
-        eprintln!("Downloaded file too small: {} bytes for attachment {}", encrypted_data.len(), attachment_id);
+        vector_core::log_net_fail!("[AttachmentDownload] file too small: {} bytes (attachment {})", encrypted_data.len(), attachment_id);
         let mut state = STATE.lock().await;
         state.update_attachment(&npub, &msg_id, &attachment_id, |att| {
             att.set_downloading(false);

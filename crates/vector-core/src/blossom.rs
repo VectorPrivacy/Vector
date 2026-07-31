@@ -392,7 +392,7 @@ where
             (true, Some(r))  => r,
             (true, None)     => "Unknown error".to_string(),
         };
-        crate::log_warn!("[Blossom Error] Upload failed with status {}: {}", status, display);
+        crate::log_net_fail!("[Blossom] upload rejected: HTTP {} — {}", status, display);
         Err(format!("Upload failed with status {}: {}", status, display))
     }
 }
@@ -487,9 +487,13 @@ async fn uploaded_blob_serves(url: &str) -> bool {
                 }
                 return true;
             }
-            Err(_) => return true,
+            Err(_) => {
+                crate::log_net_info!("[Blossom] {} unreachable for post-upload verify — assuming stored", url);
+                return true;
+            }
         }
     }
+    crate::log_net_fail!("[Blossom] {} ACKed the upload but serves 404/410 — treating as dropped", url);
     false
 }
 
@@ -515,7 +519,7 @@ where
         let server_url = match Url::parse(server_url_str) {
             Ok(url) => url,
             Err(e) => {
-                crate::log_warn!("[Blossom Error] Invalid server URL '{}': {}", server_url_str, e);
+                crate::log_net_fail!("[Blossom] invalid server URL '{}': {}", server_url_str, e);
                 last_error = format!("Invalid server URL: {}", e);
                 continue;
             }
@@ -534,16 +538,17 @@ where
                     last_error = format!("{} accepted the upload but the blob is not retrievable", server_url_str);
                     continue;
                 }
-                crate::log_info!("[Blossom] Upload successful to: {}", server_url_str);
+                crate::log_net_info!("[Blossom] upload OK via {}", server_url_str);
                 return Ok(url);
             }
             Err(e) => {
-                crate::log_warn!("[Blossom Error] Upload failed to {}: {}", server_url_str, e);
+                crate::log_net_fail!("[Blossom] upload failed to {}: {}", server_url_str, e);
                 last_error = e;
             }
         }
     }
 
+    crate::log_net_fail!("[Blossom] ALL servers failed; last error: {}", last_error);
     Err(format!("All Blossom servers failed. Last error: {}", last_error))
 }
 
@@ -582,7 +587,7 @@ where
         let server_url = match Url::parse(server_url_str) {
             Ok(url) => url,
             Err(e) => {
-                crate::log_warn!("[Blossom Error] Invalid server URL '{}': {}", server_url_str, e);
+                crate::log_net_fail!("[Blossom] invalid server URL '{}': {}", server_url_str, e);
                 last_error = format!("Invalid server URL: {}", e);
                 continue;
             }
@@ -611,7 +616,7 @@ where
                     let _ = progress_callback(Some(0), Some(0));
                     continue;
                 }
-                crate::log_info!("[Blossom] Upload successful to: {}", server_url_str);
+                crate::log_net_info!("[Blossom] upload OK via {}", server_url_str);
                 if let Err(err) = crate::blossom_capabilities::record_accepted(
                     server_url_str, mime_for_routing, is_encrypted, size_bytes, upload_session,
                 ) {
@@ -623,7 +628,7 @@ where
                 if e == "Upload cancelled" {
                     return Err(e);
                 }
-                crate::log_warn!("[Blossom Error] Upload failed to {}: {}", server_url_str, e);
+                crate::log_net_fail!("[Blossom] upload failed to {}: {}", server_url_str, e);
                 let status = parse_status_from_error(&e);
                 // `[INTEGRITY]` = server stored a different hash (transformed the
                 // blob); route around it exactly like a hard MIME rejection.
@@ -648,6 +653,7 @@ where
         }
     }
 
+    crate::log_net_fail!("[Blossom] ALL servers failed; last error: {}", last_error);
     Err(format!("All Blossom servers failed. Last error: {}", last_error))
 }
 
@@ -909,15 +915,15 @@ where
             // is invisible to every future deletion sweep.
             match tokio::time::timeout(budget, mirror_blob(signer, &target, &source)).await {
                 Ok(Ok(url)) => {
-                    crate::log_info!("[Blossom Mirror] {} now serves {}", target, url);
+                    crate::log_net_info!("[Blossom Mirror] {} now serves {}", target, url);
                     Some(url)
                 }
                 Ok(Err(e)) => {
-                    crate::log_debug!("[Blossom Mirror] {} refused: {}", target, e);
+                    crate::log_net_fail!("[Blossom Mirror] {} refused: {}", target, e);
                     None
                 }
                 Err(_) => {
-                    crate::log_debug!("[Blossom Mirror] {} exceeded {:?} budget", target, budget);
+                    crate::log_net_fail!("[Blossom Mirror] {} exceeded {:?} budget", target, budget);
                     None
                 }
             }

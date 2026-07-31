@@ -65,3 +65,56 @@ macro_rules! log_warn {
         }
     }};
 }
+
+/// Network-failure log: a WARN that ALSO lands in the app's persistent log
+/// (Settings > Copy Logs) via the registered sink — for upload/download/
+/// mirror failures the user may need to report long after the console
+/// scrolled away. No toast: fallbacks often succeed right after.
+#[macro_export]
+macro_rules! log_net_fail {
+    ($($arg:tt)*) => {{
+        let msg = format!($($arg)*);
+        // Console print matches log_warn! exactly (level-gated); persistence
+        // is unconditional — the log file exists for after-the-fact diagnosis.
+        if $crate::logging::level_enabled($crate::logging::LEVEL_WARN) {
+            eprintln!("[WARN] {}", &msg);
+        }
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        $crate::logging::persist(&format!(
+            "[WARN {:02}:{:02}:{:02}Z] {}",
+            (secs / 3600) % 24,
+            (secs / 60) % 60,
+            secs % 60,
+            &msg
+        ));
+    }};
+}
+
+/// Network-milestone log: persisted like [`log_net_fail!`] but INFO-toned —
+/// which server won an upload, which fallback served a download, mirror
+/// results. Persisted even in release (where `log_info!` compiles out):
+/// the persistent log exists precisely for release-build diagnosis.
+#[macro_export]
+macro_rules! log_net_info {
+    ($($arg:tt)*) => {{
+        let msg = format!($($arg)*);
+        #[cfg(debug_assertions)]
+        if $crate::logging::level_enabled($crate::logging::LEVEL_INFO) {
+            eprintln!("[INFO] {}", &msg);
+        }
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        $crate::logging::persist(&format!(
+            "[INFO {:02}:{:02}:{:02}Z] {}",
+            (secs / 3600) % 24,
+            (secs / 60) % 60,
+            secs % 60,
+            &msg
+        ));
+    }};
+}

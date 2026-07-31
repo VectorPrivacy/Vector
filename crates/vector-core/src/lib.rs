@@ -632,6 +632,7 @@ impl VectorCore {
             };
             macro_rules! next_source {
                 () => {{
+                    log_net_fail!("[Download] source failed ({}): {}", url, last_err);
                     if i == candidates.len() && !hash_swap_tried {
                         hash_swap_tried = true;
                         let servers = crate::blossom_servers::author_swap_servers(author_npub, false).await;
@@ -678,7 +679,12 @@ impl VectorCore {
                 encrypted.extend_from_slice(&chunk);
             }
             match crate::crypto::decrypt_data(&encrypted, &attachment.key, &attachment.nonce) {
-                Ok(plain) => return Ok(plain),
+                Ok(plain) => {
+                    if i > 1 {
+                        log_net_info!("[Download] fallback source {}/{} served {}", i, candidates.len(), url);
+                    }
+                    return Ok(plain);
+                }
                 Err(e) => {
                     // A host serving wrong bytes under the right URL must not
                     // veto sources still holding the real ciphertext.
@@ -687,6 +693,7 @@ impl VectorCore {
                 }
             }
         }
+        log_net_fail!("[Download] all {} source(s) failed for {}: {}", candidates.len(), attachment.url, last_err);
         Err(VectorError::Other(last_err))
     }
 

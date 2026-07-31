@@ -428,6 +428,10 @@ pub fn run() {
 
             // Bridge vector-core's EventEmitter to Tauri's emit system
             vector_core::set_event_emitter(Box::new(TauriEventEmitter));
+            // Route vector-core's failure-class logs (log_net_fail!/log_net_info!)
+            // into the user-copyable vector.log — Copy Logs must tell the whole
+            // blossom story, and most of it happens inside vector-core.
+            vector_core::logging::set_persist_sink(|line| append_vector_log(line));
 
             // Register the Android NIP-55 (Amber) signer backend so keyless
             // offline accounts can sign/encrypt/decrypt over local IPC.
@@ -901,4 +905,24 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Append one line to the user-copyable `vector.log` (Settings > Copy Logs),
+/// trimming to keep the file bounded. Shared by `log_error!` and the
+/// vector-core persist sink.
+pub fn append_vector_log(line: &str) {
+    if let Ok(data_dir) = account_manager::get_app_data_dir() {
+        let log_path = data_dir.join("vector.log");
+        if let Ok(existing) = std::fs::read_to_string(&log_path) {
+            let lines: Vec<&str> = existing.lines().collect();
+            if lines.len() > 1000 {
+                let trimmed = lines[lines.len() - 900..].join("\n");
+                let _ = std::fs::write(&log_path, trimmed);
+            }
+        }
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+            let _ = writeln!(f, "{}", line);
+        }
+    }
 }

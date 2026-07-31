@@ -73,3 +73,24 @@ pub fn set_log_level_str(s: &str) -> bool {
         None => false,
     }
 }
+
+// ── Persistent-log sink ──────────────────────────────────────────────────
+// The GUI keeps a user-copyable log file (Settings > Copy Logs); vector-core
+// can't write it directly (no Tauri, no data-dir knowledge), so the shell
+// registers a sink at startup and failure-class messages route through it.
+// Unregistered (CLI/SDK/tests) = stderr only, exactly as before.
+
+static PERSIST_SINK: std::sync::OnceLock<Box<dyn Fn(&str) + Send + Sync>> =
+    std::sync::OnceLock::new();
+
+/// Register the shell's persistent-log writer. First registration wins.
+pub fn set_persist_sink(sink: impl Fn(&str) + Send + Sync + 'static) {
+    let _ = PERSIST_SINK.set(Box::new(sink));
+}
+
+/// Route a pre-formatted line to the persistent log, if a sink is registered.
+pub fn persist(line: &str) {
+    if let Some(sink) = PERSIST_SINK.get() {
+        sink(line);
+    }
+}

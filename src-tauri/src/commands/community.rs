@@ -1590,6 +1590,7 @@ async fn dispatch_community_attachment_message(
         {
             Ok(url) => url,
             Err(e) => {
+                vector_core::log_net_fail!("[Community Upload] attachment upload failed (channel {}…): {}", &channel_id[..8.min(channel_id.len())], e);
                 let _ = mark_attachment_send_failed(&callback, &channel_id, &pending_id).await;
                 return Err(format!("Upload failed: {e}"));
             }
