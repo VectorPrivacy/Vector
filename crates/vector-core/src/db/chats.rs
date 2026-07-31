@@ -123,6 +123,21 @@ pub fn get_all_chats() -> Result<Vec<SlimChatDB>, String> {
 }
 
 /// Upsert a chat to the database.
+/// Clear a chat's read marker to never-read. The [`save_slim_chat`] upsert
+/// deliberately refuses to regress `last_read` to empty (a partially-hydrated
+/// STATE chat would otherwise wipe the stored position), so a DELIBERATE
+/// clear — Mark as Unread on a chat whose only message is the target — must
+/// come through here or it silently no-ops.
+pub fn clear_chat_last_read(chat_identifier: &str) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "UPDATE chats SET last_read = '' WHERE chat_identifier = ?1",
+        rusqlite::params![chat_identifier],
+    )
+    .map_err(|e| format!("clear_chat_last_read: {e}"))?;
+    Ok(())
+}
+
 pub fn save_slim_chat(slim_chat: &SlimChatDB) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
 

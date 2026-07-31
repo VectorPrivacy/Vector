@@ -2815,7 +2815,17 @@ function findLatestContactMessage(messages, maxAt = Infinity) {
     return null;
 }
 
-function markAsRead(chat, message) {
+function markAsRead(chat, message, explicit = false) {
+    // A chat the user just marked unread stays unread until they open it or
+    // explicitly mark it read — otherwise the ambient sweeps (focus, repaint,
+    // scroll) undo the action instantly, which reads as a flicker.
+    if (chat && isChatUnreadLatched(chat.id)) {
+        if (explicit || chat.id === strOpenChat) {
+            clearChatUnreadLatch(chat.id);
+        } else {
+            return;
+        }
+    }
     // If we have a chat, and we haven't already marked as read, update its last_read and notify backend
     if (chat && message.id !== chat.last_read) {
         chat.last_read = message.id;
@@ -2835,9 +2845,9 @@ function markAsRead(chat, message) {
  *  window tail. The tail can be a system event (kind 30078), and pinning last_read there gives the
  *  unread query a row it can't anchor on, wedging the badge at a permanent 99+. No-op when the
  *  window holds no contact message (nothing non-mine can be unread). Used by the jump/reveal paths. */
-function markChatCaughtUp(chat) {
+function markChatCaughtUp(chat, explicit = false) {
     const caughtUp = findLatestContactMessage(chat?.messages);
-    if (caughtUp) markAsRead(chat, caughtUp);
+    if (caughtUp) markAsRead(chat, caughtUp, explicit);
 }
 
 /** True when the chat's newest conversational message is from the other side (not us, not a
@@ -2864,9 +2874,21 @@ async function markChatUnread(chat) {
     // Mark as Read isn't skipped by markAsRead's "already at last_read" guard.
     chat.last_read = lastRead;
     chat.unread = Math.max(1, chat.unread || 0);
+    // Latch the deliberate retreat: the closed chat still gets auto-marked by
+    // list repaints / window-focus sweeps, which would instantly undo it. The
+    // latch clears the moment the user actually opens the chat.
+    setChatUnreadLatch(chat.id);
     renderChatlist();
     refreshUnreadCounts();
 }
+
+/** Chats the user explicitly marked unread. While latched, the ambient
+ *  auto-mark-read paths (focus regain, scroll-to-bottom, list repaint) leave
+ *  the chat alone — only OPENING it counts as reading. */
+const setChatsMarkedUnread = new Set();
+function setChatUnreadLatch(chatId) { if (chatId) setChatsMarkedUnread.add(chatId); }
+function clearChatUnreadLatch(chatId) { if (chatId) setChatsMarkedUnread.delete(chatId); }
+function isChatUnreadLatched(chatId) { return setChatsMarkedUnread.has(chatId); }
 
 /** Leave a community you don't own, from the chat-list context menu. Confirms,
  *  calls leave_community, then drops its channels locally and repaints — mirrors
@@ -8483,6 +8505,8 @@ async function openChat(contact) {
     // chat.last_read so the OS badge clears immediately on entering the chat.
     const lastReadOnOpen = chat?.last_read || '';
     const unreadOnOpen = chat?.unread || 0;   // snapshot before the open-time markAsRead zeroes it
+    // Opening IS reading — release any explicit mark-unread latch.
+    clearChatUnreadLatch(chat?.id);
     if (chat?.messages?.length) {
         const latestNonMine = findLatestContactMessage(chat.messages);
         if (latestNonMine) markAsRead(chat, latestNonMine);

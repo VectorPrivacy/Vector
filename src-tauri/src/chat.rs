@@ -111,9 +111,9 @@ pub async fn mark_as_unread(chat_id: String) -> Option<String> {
     // never writes account A's last_read into account B's chat.
     let session = vector_core::state::SessionGuard::capture();
 
-    let (last_read, last_read_hex) = match compute_unread_anchor(&chat_id).await {
-        Ok(UnreadMark::Anchor(id)) => (encode_message_id(&id), id),
-        Ok(UnreadMark::Clear) => ([0u8; 32], String::new()),
+    let (last_read, last_read_hex, is_clear) = match compute_unread_anchor(&chat_id).await {
+        Ok(UnreadMark::Anchor(id)) => (encode_message_id(&id), id, false),
+        Ok(UnreadMark::Clear) => ([0u8; 32], String::new(), true),
         Ok(UnreadMark::NoOp) | Err(_) => return None,
     };
 
@@ -128,6 +128,16 @@ pub async fn mark_as_unread(chat_id: String) -> Option<String> {
         crate::db::chats::SlimChatDB::from_chat(&state.chats[idx], &state.interner)
     };
     let _ = crate::db::chats::save_slim_chat(slim).await;
+    // A Clear (the chat's ONLY message is the one being surfaced) can't ride
+    // the upsert — it refuses empty markers by design — so take the dedicated
+    // clear path or the row keeps its old marker and the badge snaps back.
+    if is_clear {
+        let cid = chat_id.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            vector_core::db::chats::clear_chat_last_read(&cid)
+        })
+        .await;
+    }
 
     // The retreat surfaces the newest contact message again, so reconcile the exact remainder.
     crate::commands::messaging::reconcile_chat_unread(&chat_id).await;

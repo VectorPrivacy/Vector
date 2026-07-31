@@ -216,7 +216,7 @@ function _showChatRowContextMenu(chat, isGroup, nUnread, x, y) {
         items.push({
             label: 'Mark as Read',
             icon: 'check',
-            onClick: () => { markChatCaughtUp(chat); renderChatlist(); },
+            onClick: () => { markChatCaughtUp(chat, /* explicit */ true); renderChatlist(); },
         });
     } else if (!chat.muted && chatCanMarkUnread(chat)) {
         // Muted chats never show an unread badge, so offering it there would be a silent no-op.
