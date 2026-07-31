@@ -469,11 +469,52 @@ pub async fn prepare_event(
 /// negentropy fetch queued events for commit), bail before any STATE /
 /// DB write. Centralized so individual spawn sites (sync.rs fetch_messages,
 /// archive task, sync_dms, subscription_handler) don't have to wrap.
-/// Whether a parked-invite candidate is already past the sender's NIP-40 deadline.
-/// `0` means the sender declared none, which stays permanent — an invite whose sender never
-/// promised a deadline is not ours to revoke.
-fn expired_invite(expires_at: u64) -> bool {
-    expires_at != 0 && expires_at <= nostr_sdk::prelude::Timestamp::now().as_secs()
+/// Direct Invites live 24 hours BY DESIGN, and the RECIPIENT enforces it: a
+/// sender that omits the NIP-40 tag (older clients, other implementations)
+/// must not mint a permanent invite, and an archive sync that resurrects a
+/// months-old wrap must not park a ghost (a re-founded community's stale
+/// invite has no held id for the exists-guard to match). The sender's
+/// declared deadline is honored when EARLIER; the rumor-age lifetime is the
+/// ceiling either way. One hour of slack absorbs sender clock skew.
+const DIRECT_INVITE_LIFETIME_SECS: u64 = 24 * 3600 + 3600;
+
+fn expired_invite(expires_at: u64, rumor_created_at: u64) -> bool {
+    let now = nostr_sdk::prelude::Timestamp::now().as_secs();
+    if expires_at != 0 && expires_at <= now {
+        return true;
+    }
+    rumor_created_at.saturating_add(DIRECT_INVITE_LIFETIME_SECS) <= now
+}
+
+#[cfg(test)]
+mod invite_expiry_tests {
+    use super::*;
+
+    fn now() -> u64 {
+        nostr_sdk::prelude::Timestamp::now().as_secs()
+    }
+
+    #[test]
+    fn declared_deadline_is_honored() {
+        assert!(expired_invite(now() - 10, now()));
+        assert!(!expired_invite(now() + 3600, now()));
+    }
+
+    #[test]
+    fn tagless_invites_die_at_the_recipient_lifetime() {
+        // Fresh, no tag: parks.
+        assert!(!expired_invite(0, now() - 3600));
+        // A day-and-slack old, no tag: never parks — the class the archive
+        // recovery resurrected (months-old invite to a re-founded community).
+        assert!(expired_invite(0, now() - DIRECT_INVITE_LIFETIME_SECS));
+        assert!(expired_invite(0, now() - 90 * 24 * 3600));
+    }
+
+    #[test]
+    fn lifetime_caps_a_generous_declared_deadline() {
+        // Sender promised a week — the recipient's 24h ceiling still wins.
+        assert!(expired_invite(now() + 7 * 24 * 3600, now() - DIRECT_INVITE_LIFETIME_SECS));
+    }
 }
 
 pub async fn commit_prepared_event(
@@ -642,10 +683,10 @@ pub async fn commit_prepared_event(
                 return false;
             }
 
-            // Already past the sender's NIP-40 deadline (a catch-up sync of a stale wrap, or a
-            // relay that ignores expiry): never park it. Relays only stop DELIVERING an expired
-            // invite; a parked row would outlive the deadline locally.
-            if expired_invite(expires_at) {
+            // Past the sender's deadline OR past the recipient-enforced 24h
+            // lifetime (a catch-up sync of a stale wrap, a relay that ignores
+            // expiry, a sender that never set the tag): never park it.
+            if expired_invite(expires_at, rumor_created_at) {
                 return false;
             }
 
@@ -722,8 +763,8 @@ pub async fn commit_prepared_event(
             if is_mine {
                 return false;
             }
-            // Past the sender's NIP-40 deadline — see the v1 arm.
-            if expired_invite(expires_at) {
+            // Past the sender's deadline or the 24h lifetime — see the v1 arm.
+            if expired_invite(expires_at, rumor_created_at) {
                 return false;
             }
             // Idempotency on the INNER community_id (already validated hex), not the
