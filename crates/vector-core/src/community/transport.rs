@@ -553,6 +553,76 @@ fn demotion_allowed() -> bool {
     }
 }
 
+/// Dial every held community's relay set on the shared warm client, ahead of
+/// first use — the volley otherwise pays the TLS/WS dial (and the gating
+/// relay's NIP-42 challenge round) inside its own wall time. Fire-and-forget.
+/// Session-gated between the per-account DB reads and the shared-client
+/// mutation: a swap mid-read must not warm account A's relays under B.
+pub async fn prewarm_held_communities(session: crate::state::SessionGuard) {
+    let mut relays: Vec<String> = Vec::new();
+    for id in crate::db::community::list_community_ids().unwrap_or_default() {
+        match crate::db::community::community_protocol(&id).ok().flatten() {
+            Some(crate::community::ConcordProtocol::V2) => {
+                if let Ok(Some(c)) = crate::db::community::load_community_v2(&id) {
+                    relays.extend(c.relays.iter().cloned());
+                }
+            }
+            _ => {
+                if let Ok(Some(c)) = crate::db::community::load_community(&id) {
+                    relays.extend(c.relays.iter().cloned());
+                }
+            }
+        }
+    }
+    relays.sort();
+    relays.dedup();
+    if relays.is_empty() || !session.is_valid() {
+        return;
+    }
+    let Ok(client) = LiveTransport::warm_client(&relays, std::time::Duration::from_secs(4)).await
+    else {
+        return;
+    };
+    // Elicit each relay's NIP-42 challenge NOW: a gating relay challenges on
+    // the first gated REQ (never on connect), and challenges are
+    // per-connection — without this the volley's priming pays the full
+    // challenge round inside its own wall time every boot. The responder
+    // remembers the challenge; the volley's prime then replays it instantly.
+    crate::community::v2::streamauth::ensure_responder(&client);
+    let probe = Keys::generate();
+    let filter = Query {
+        kinds: vec![crate::community::v2::stream::KIND_WRAP],
+        authors: vec![probe.public_key().to_hex()],
+        limit: Some(1),
+        ..Default::default()
+    }
+    .to_filter();
+    let mut elicits = futures_util::stream::FuturesUnordered::new();
+    for r in &relays {
+        let c = client.clone();
+        let f = filter.clone();
+        let r = r.clone();
+        elicits.push(async move {
+            let _ = fetch_relay_eose_filters(&c, &r, vec![f], std::time::Duration::from_secs(3)).await;
+        });
+    }
+    use futures_util::StreamExt;
+    while elicits.next().await.is_some() {}
+}
+
+/// Why a genuine-EOSE read failed — callers that retry must not treat a
+/// burned deadline like an AUTH-gate CLOSED (the retry exists for the
+/// latter; repeating the former doubles a dead relay's cost).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EoseFail {
+    /// The relay CLOSED the REQ (includes auth-required).
+    Closed,
+    /// The deadline elapsed without an EOSE.
+    Deadline,
+    /// No usable connection (lookup/send failure, shutdown, stream end).
+    Gone,
+}
+
 /// Fetch one relay to GENUINE EOSE, or fail. `Client::fetch_events_from` (and
 /// the whole nostr-sdk 0.44 fetch stack) returns `Ok(collected)` on timeout,
 /// disconnect, and relay-CLOSED alike — success does NOT mean EOSE, which would
@@ -569,19 +639,49 @@ pub async fn fetch_relay_eose(
     filter: Filter,
     timeout: std::time::Duration,
 ) -> Result<Vec<Event>, ()> {
-    let relay = client.relay(url).await.map_err(|_| ())?.ok_or(())?;
+    fetch_relay_eose_filters(client, url, vec![filter], timeout).await.map_err(|_| ())
+}
+
+/// [`fetch_relay_eose`] for a multi-filter REQ (one frame, many filters — the
+/// batched-volley shape). Raw REQ/CLOSE frames: the subscribe builder takes a
+/// single filter, and the auto-close bookkeeping is unnecessary for a one-shot
+/// read we close ourselves on every exit.
+pub async fn fetch_relay_eose_filters(
+    client: &Client,
+    url: &str,
+    filters: Vec<Filter>,
+    timeout: std::time::Duration,
+) -> Result<Vec<Event>, EoseFail> {
+    let relay = client.relay(url).await.map_err(|_| EoseFail::Gone)?.ok_or(EoseFail::Gone)?;
     // Subscribe to notifications BEFORE the REQ so the EOSE can't slip past.
     let mut notifications = relay.notifications();
     let sub_id = SubscriptionId::generate();
-    let auto_close = SubscribeAutoCloseOptions::default()
-        .exit_policy(ReqExitPolicy::ExitOnEOSE)
-        .timeout(Some(timeout));
+    // Close on every exit — this REQ bypasses the pool's subscription map.
+    // Constructed BEFORE the send: cancellation during the send await must
+    // not leave a queued REQ unguarded (a CLOSE for a never-sent REQ is
+    // harmless). Drop can't await, so the CLOSE rides a detached task; all
+    // callers drop on runtime threads (a JNI-thread drop would silently skip
+    // the CLOSE, not panic).
+    struct CloseGuard(Relay, SubscriptionId);
+    impl Drop for CloseGuard {
+        fn drop(&mut self) {
+            let relay = self.0.clone();
+            let id = self.1.clone();
+            tokio::spawn(async move {
+                let _ = relay
+                    .send_msg(nostr_sdk::prelude::ClientMessage::Close(std::borrow::Cow::Owned(id)))
+                    .await;
+            });
+        }
+    }
+    let _close = CloseGuard(relay.clone(), sub_id.clone());
     relay
-        .subscribe(filter)
-        .with_id(sub_id.clone())
-        .close_on(auto_close)
+        .send_msg(nostr_sdk::prelude::ClientMessage::Req {
+            subscription_id: std::borrow::Cow::Borrowed(&sub_id),
+            filters: filters.into_iter().map(std::borrow::Cow::Owned).collect(),
+        })
         .await
-        .map_err(|_| ())?;
+        .map_err(|_| EoseFail::Gone)?;
     let deadline = tokio::time::Instant::now() + timeout;
     let mut events: Vec<Event> = Vec::new();
     let mut seen: std::collections::HashSet<EventId> = std::collections::HashSet::new();
@@ -591,8 +691,8 @@ pub async fn fetch_relay_eose(
         // failure rather than a false EOSE.
         let notification = match tokio::time::timeout_at(deadline, notifications.next()).await {
             Ok(Some(n)) => n,
-            Ok(None) => return Err(()),
-            Err(_) => return Err(()), // deadline: timeout is NOT EOSE
+            Ok(None) => return Err(EoseFail::Gone),
+            Err(_) => return Err(EoseFail::Deadline), // timeout is NOT EOSE
         };
         match notification {
             RelayNotification::Event { subscription_id, event } if subscription_id == sub_id => {
@@ -608,14 +708,14 @@ pub async fn fetch_relay_eose(
                 }
                 RelayMessage::EndOfStoredEvents(id) if *id == sub_id => return Ok(events),
                 RelayMessage::Closed { subscription_id, .. } if *subscription_id == sub_id => {
-                    return Err(()); // relay refused the REQ (incl. auth-required)
+                    return Err(EoseFail::Closed); // refused (incl. auth-required)
                 }
                 _ => {}
             },
             RelayNotification::RelayStatus { status }
                 if status == nostr_sdk::prelude::RelayStatus::Shutdown =>
             {
-                return Err(());
+                return Err(EoseFail::Gone);
             }
             _ => {}
         }

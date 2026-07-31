@@ -1156,7 +1156,29 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                                 });
                                 // Communities re-sync on reconnect too (NIP-17 parity). Debounced full
                                 // sweep — coalesces a multi-relay reconnect burst into one sweep.
-                                crate::commands::community::trigger_community_reconnect_resync();
+                                // Discovery-MODE relays (kind-10050 indexers that are not also
+                                // default relays — mirrors the pool-add rule) hold no community
+                                // planes: their reconnects must not queue a full sweep. A relay
+                                // whose pooled flags include READ is a real user/default relay
+                                // regardless of list membership and keeps its resync.
+                                let norm = vector_core::inbox_relays::normalize_relay_url(&url_str);
+                                let has_read = if let Some(client) = vector_core::state::nostr_client() {
+                                    matches!(
+                                        client.relay(&url_str).await,
+                                        Ok(Some(r)) if r.capabilities().has_read()
+                                    )
+                                } else {
+                                    false
+                                };
+                                let discovery_only = !has_read
+                                    && vector_core::state::discovery_relay_iter()
+                                        .any(|d| vector_core::inbox_relays::normalize_relay_url(d) == norm)
+                                    && !DEFAULT_RELAYS
+                                        .iter()
+                                        .any(|d| vector_core::inbox_relays::normalize_relay_url(d) == norm);
+                                if !discovery_only {
+                                    crate::commands::community::trigger_community_reconnect_resync();
+                                }
                                 // A catch-up fetch is not a subscription: Vector owns reconnects
                                 // (`reconnect(false)`), so the fresh socket carries no live sub and
                                 // only an AUTH-gating relay's challenge re-sent one. Without this

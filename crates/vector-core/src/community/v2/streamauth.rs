@@ -209,8 +209,10 @@ pub fn ensure_responder(client: &Client) {
                     // NIP-42 (the boot volley routes fallbacks by it). Write
                     // once — a challenge-spamming relay must not drive DB
                     // writes at frame rate on the notification loop.
-                    let gate_key =
-                        format!("auth_gate:{}", relay_url.as_str().trim_end_matches('/'));
+                    let gate_key = format!(
+                        "auth_gate:{}",
+                        crate::inbox_relays::normalize_relay_url(relay_url.as_str())
+                    );
                     if crate::db::get_sql_setting(gate_key.clone()).ok().flatten().is_none() {
                         let _ = crate::db::set_sql_setting(gate_key, "1".to_string());
                     }

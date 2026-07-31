@@ -2881,6 +2881,56 @@ async fn run_control_probe(session: &vector_core::state::SessionGuard) {
     );
 }
 
+/// The v1 hot lane: the most recently active v1 channels take the full
+/// (probe-cheapened) chain wide-open, in parallel with the volley — the
+/// busiest communities must not queue behind sixty quiet channels in the
+/// 6-wide sweep. Returns SUCCESSES only (an errored lane sync must still get
+/// its normal sweep pass).
+async fn run_hot_v1_lane(
+    hot_v1: Vec<String>,
+    session: &vector_core::state::SessionGuard,
+) -> std::collections::HashSet<String> {
+    use futures_util::stream::StreamExt;
+    let mut hot_set = std::collections::HashSet::new();
+    if hot_v1.is_empty() {
+        return hot_set;
+    }
+    let hot_start = std::time::Instant::now();
+    let hot_count = hot_v1.len();
+    let session = *session;
+    let done: Vec<Option<String>> = futures_util::stream::iter(hot_v1)
+        .map(|cid| async move {
+            if !session.is_valid() {
+                return None;
+            }
+            let t = std::time::Instant::now();
+            match sync_community_channel(cid.clone(), None, None).await {
+                Ok(r) => {
+                    if r.new_messages > 0 {
+                        println!(
+                            "[Boot]   hot v1 {}…: {} new in {:?}",
+                            &cid[..8.min(cid.len())],
+                            r.new_messages,
+                            t.elapsed()
+                        );
+                    }
+                    Some(cid)
+                }
+                Err(_) => None,
+            }
+        })
+        .buffer_unordered(hot_count.max(1))
+        .collect()
+        .await;
+    hot_set.extend(done.into_iter().flatten());
+    println!(
+        "[Boot] v1 hot lane: {} channel(s) in {:?}",
+        hot_count,
+        hot_start.elapsed()
+    );
+    hot_set
+}
+
 #[tauri::command]
 pub async fn sync_communities_boot() -> Result<(), String> {
     // One pipeline at a time: a relay reconnect mid-boot re-triggers this whole
@@ -2903,6 +2953,9 @@ pub async fn sync_communities_boot() -> Result<(), String> {
         }
     }
     let _claim = SweepClaim;
+    // A fresh full run satisfies any rerun queued before it started (and an
+    // early-return run must not leave a stale latch for the next account).
+    RERUN_REQUESTED.store(false, std::sync::atomic::Ordering::SeqCst);
 
     let session = vector_core::state::SessionGuard::capture();
     let boot_start = std::time::Instant::now();
@@ -2923,6 +2976,11 @@ pub async fn sync_communities_boot() -> Result<(), String> {
     if !session.is_valid() {
         return Ok(());
     }
+
+    // v1 hot-lane result (successes only), filled on the probe branch of the
+    // paint join below.
+    #[allow(unused_assignments)]
+    let mut hot_lane_result: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // ── Volley Sync (chat-plane paint) ∥ control probe ───────────────────────────────
     // The volley paints every v2 channel's latest page from stored epoch
@@ -2969,14 +3027,30 @@ pub async fn sync_communities_boot() -> Result<(), String> {
         let volley_count = with_activity.len();
         let targets: Vec<_> = with_activity.into_iter().map(|(t, _)| t).collect();
 
-        let ((painted, stats), _) = tokio::join!(
+        const HOT_V1_MAX: usize = 12;
+        const HOT_V1_WINDOW_MS: u64 = 14 * 24 * 3600 * 1000;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        hot_v1.sort_by(|a, b| b.1.cmp(&a.1));
+        hot_v1.retain(|(_, at)| *at > 0 && now_ms.saturating_sub(*at) <= HOT_V1_WINDOW_MS);
+        hot_v1.truncate(HOT_V1_MAX);
+        let hot_v1_input: Vec<String> = hot_v1.iter().map(|(c, _)| c.clone()).collect();
+
+        let ((painted, stats), lane_set) = tokio::join!(
             vector_core::community::v2::volley::paint_all(targets),
             async {
                 let probe_start = std::time::Instant::now();
                 run_control_probe(&session).await;
                 println!("[Boot] community control probe in {:?}", probe_start.elapsed());
+                // v1 hot lane starts the moment the probe lands — in PARALLEL
+                // with the volley (both are paint work; waiting out the
+                // volley cost v1's hottest channels ~3s for nothing).
+                run_hot_v1_lane(hot_v1_input, &session).await
             }
         );
+        hot_lane_result = lane_set;
         let total: usize = painted.iter().map(|(_, n)| n).sum();
         for (cid, n) in &painted {
             println!("[Boot]   volley {}…: {} new", &cid[..8.min(cid.len())], n);
@@ -2996,59 +3070,10 @@ pub async fn sync_communities_boot() -> Result<(), String> {
         return Ok(());
     }
 
-    // ── v1 hot lane ──────────────────────────────────────────────────────
-    // The most recently active v1 channels take the full (probe-cheapened)
-    // chain NOW, wide — the busiest communities must not queue behind sixty
-    // quiet channels in the 6-wide sweep.
-    const HOT_V1_MAX: usize = 12;
-    const HOT_V1_WINDOW_MS: u64 = 14 * 24 * 3600 * 1000;
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    hot_v1.sort_by(|a, b| b.1.cmp(&a.1));
-    hot_v1.retain(|(_, at)| *at > 0 && now_ms.saturating_sub(*at) <= HOT_V1_WINDOW_MS);
-    hot_v1.truncate(HOT_V1_MAX);
-    // The sweep skips only channels the lane actually SYNCED — an errored
-    // lane sync must still get its normal sweep pass.
-    let mut hot_set: std::collections::HashSet<String> = std::collections::HashSet::new();
-    if !hot_v1.is_empty() {
-        let hot_start = std::time::Instant::now();
-        let hot_count = hot_v1.len();
-        let done: Vec<Option<String>> = futures_util::stream::iter(hot_v1)
-            .map(|(cid, _)| async move {
-                if !session.is_valid() {
-                    return None;
-                }
-                let t = std::time::Instant::now();
-                match sync_community_channel(cid.clone(), None, None).await {
-                    Ok(r) => {
-                        if r.new_messages > 0 {
-                            println!(
-                                "[Boot]   hot v1 {}…: {} new in {:?}",
-                                &cid[..8.min(cid.len())],
-                                r.new_messages,
-                                t.elapsed()
-                            );
-                        }
-                        Some(cid)
-                    }
-                    Err(_) => None,
-                }
-            })
-            .buffer_unordered(HOT_V1_MAX)
-            .collect()
-            .await;
-        hot_set.extend(done.into_iter().flatten());
-        println!(
-            "[Boot] v1 hot lane: {} channel(s) in {:?}",
-            hot_count,
-            hot_start.elapsed()
-        );
-    }
     if !session.is_valid() {
         return Ok(());
     }
+    let hot_set = hot_lane_result;
 
     // Verification follows queue AFTER the whole chat paint (volley + hot
     // lane) BY OWNER RULING: boot exists to deliver message data; ban data

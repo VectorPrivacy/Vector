@@ -50,10 +50,13 @@ struct Job {
 /// Learned from live NIP-42 challenges (streamauth records the KV): a gating
 /// relay answers batch REQs with silence no matter what it holds.
 fn relay_auth_gating(url: &str) -> bool {
-    crate::db::get_sql_setting(format!("auth_gate:{}", url.trim_end_matches('/')))
-        .ok()
-        .flatten()
-        .is_some()
+    crate::db::get_sql_setting(format!(
+        "auth_gate:{}",
+        crate::inbox_relays::normalize_relay_url(url)
+    ))
+    .ok()
+    .flatten()
+    .is_some()
 }
 
 /// The subset of `relays` currently CONNECTED on the shared client, waiting up
@@ -202,6 +205,11 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
         by_set.entry(j.relay_set).or_default().push(i);
     }
     let batch_start = std::time::Instant::now();
+    // Register every job's plane key BEFORE any relay contact: gating relays
+    // serve a multi-author REQ only when EVERY author is authed on the
+    // connection (proven live: all-authed → EOSE; partial → CLOSED), and the
+    // responder auths exactly the registered set.
+    crate::community::v2::streamauth::register(jobs.iter().map(|j| j.group.keys().clone()));
     let shared = LiveTransport::warm_client(
         relay_sets.iter().flat_map(|r| r.iter().cloned()).collect::<Vec<_>>().as_slice(),
         std::time::Duration::from_secs(4),
@@ -238,40 +246,80 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
         let client = shared.clone();
         fetches.push(async move {
             let Some(client) = client else {
-                return (set, Vec::new(), Vec::new());
+                return (set, Vec::new(), Vec::new(), false);
             };
             let live =
                 connected_targets(&client, &relays, std::time::Duration::from_millis(2500)).await;
             if live.is_empty() {
-                return (set, live, Vec::new());
+                return (set, live, Vec::new(), false);
+            }
+            // Prime the AUTH gate on live gating relays so the mass batch is
+            // served there too — priming must be COMPLETE before the REQ (one
+            // unauthenticated plane fails the whole filter set).
+            let gating_live: Vec<String> = live
+                .iter()
+                .filter(|r| relay_auth_gating(r))
+                .cloned()
+                .collect();
+            if !gating_live.is_empty() {
+                crate::community::v2::streamauth::prime_auth(&client, &gating_live).await;
             }
             let mut evs: Vec<Event> = Vec::new();
-            let mut per = FuturesUnordered::new();
-            for chunk in &chunks {
-                for r in &live {
-                    let c = client.clone();
+            // Bounded width: chunk×relay all-at-once can blow past a relay's
+            // subscription cap (strfry default 20) alongside the DM walk,
+            // realtime subs, and the hot lane — overflow CLOSEs read as
+            // coverage failure and trigger the very fallback this avoids.
+            let client_ref = &client;
+            let mut per = futures_util::stream::iter(chunks.iter().flat_map(|chunk| {
+                live.iter().map(move |r| {
+                    let c = client_ref.clone();
                     let f = chunk.clone();
                     let r = r.clone();
-                    per.push(async move {
-                        c.fetch_events(ReqTarget::single(r, f)).timeout(fetch_budget).await
-                    });
-                }
-            }
-            while let Some(res) = per.next().await {
+                    async move {
+                        let res = crate::community::transport::fetch_relay_eose_filters(
+                            &c, &r, f, fetch_budget,
+                        )
+                        .await;
+                        (r, res)
+                    }
+                })
+            }).collect::<Vec<_>>())
+            .buffer_unordered(6);
+            // The set is COVERED only when EVERY live relay EOSE'd every
+            // chunk — then batch silence is authoritative everywhere. One
+            // open relay's EOSE must not mask a gating relay whose priming
+            // failed (its CLOSED hides events only it holds); any shortfall
+            // keeps the per-plane fallback in play for this set.
+            let mut ok_chunks: HashMap<String, usize> = HashMap::new();
+            while let Some((r, res)) = per.next().await {
                 if let Ok(batch) = res {
+                    *ok_chunks.entry(r).or_insert(0) += 1;
                     evs.extend(batch);
                 }
             }
-            (set, live, evs)
+            let covered = !live.is_empty()
+                && live
+                    .iter()
+                    .all(|r| ok_chunks.get(r).copied().unwrap_or(0) == chunks.len());
+            (set, live, evs, covered)
         });
     }
 
-    // Route each wrap to its job by plane author as sets complete.
+    // Route each wrap to its job by plane author as sets complete, and
+    // INGEST each set's pages immediately — the hottest channels paint the
+    // moment their batch lands instead of waiting out the slowest set and
+    // the fallback stage.
     let mut live_by_set: HashMap<usize, Vec<String>> = HashMap::new();
+    let mut covered_sets: HashSet<usize> = HashSet::new();
     let mut seen_wraps: HashSet<EventId> = HashSet::new();
-    let mut pages: HashMap<usize, Vec<FetchedEvent>> = HashMap::new();
-    while let Some((set, live, evs)) = fetches.next().await {
+    let mut ingested: HashSet<usize> = HashSet::new();
+    let mut painted: Vec<(String, usize)> = Vec::new();
+    while let Some((set, live, evs, covered)) = fetches.next().await {
         live_by_set.insert(set, live);
+        if covered {
+            covered_sets.insert(set);
+        }
+        let mut pages: HashMap<usize, Vec<FetchedEvent>> = HashMap::new();
         for wrap in evs {
             if !seen_wraps.insert(wrap.id) {
                 continue;
@@ -281,6 +329,23 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
             if let Ok(event) = chat::open_chat_event(&wrap, &j.group, &j.channel_id, j.epoch) {
                 stats.batch_events += 1;
                 pages.entry(job_idx).or_default().push(FetchedEvent { event, epoch: j.epoch });
+            }
+        }
+        for (job_idx, mut page) in pages {
+            if !session.is_valid() {
+                return (painted, stats);
+            }
+            page.sort_by_key(|f| f.event.opened().at_ms);
+            let new = crate::VectorCore::v2_ingest_chat_page(
+                &jobs[job_idx].channel_hex,
+                my_pk,
+                session,
+                page,
+            )
+            .await;
+            ingested.insert(job_idx);
+            if new > 0 {
+                painted.push((jobs[job_idx].channel_hex.clone(), new));
             }
         }
     }
@@ -305,7 +370,12 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
         .iter()
         .enumerate()
         .filter(|(idx, j)| {
-            if pages.contains_key(idx) {
+            if ingested.contains(idx) {
+                return false;
+            }
+            // A covered set's batch silence IS the answer (a relay we authed
+            // against EOSE'd every chunk): quiet channel, nothing to confirm.
+            if covered_sets.contains(&j.relay_set) {
                 return false;
             }
             // NO live relay: nothing can answer at any price — the reconnect
@@ -358,6 +428,7 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
         .buffer_unordered(24)
         .collect()
         .await;
+    let mut fb_pages: HashMap<usize, Vec<FetchedEvent>> = HashMap::new();
     for (job_idx, evs) in fallback_pages {
         let j = &jobs[job_idx];
         for wrap in evs {
@@ -369,14 +440,11 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
             }
             if let Ok(event) = chat::open_chat_event(&wrap, &j.group, &j.channel_id, j.epoch) {
                 stats.fallback_events += 1;
-                pages.entry(job_idx).or_default().push(FetchedEvent { event, epoch: j.epoch });
+                fb_pages.entry(job_idx).or_default().push(FetchedEvent { event, epoch: j.epoch });
             }
         }
     }
-    stats.fallback_ms = fallback_start.elapsed().as_millis();
-
-    let mut painted: Vec<(String, usize)> = Vec::new();
-    for (job_idx, mut page) in pages {
+    for (job_idx, mut page) in fb_pages {
         if !session.is_valid() {
             break;
         }
@@ -392,5 +460,6 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
             painted.push((jobs[job_idx].channel_hex.clone(), new));
         }
     }
+    stats.fallback_ms = fallback_start.elapsed().as_millis();
     (painted, stats)
 }
