@@ -1087,6 +1087,12 @@ function _dmsgRenderDownloadingAttachment(target, msg, sender, isGroupChat, cAtt
     }
 }
 
+/** Failed-download label: carries the backend's reason so a red box is diagnosable at a glance. */
+function _dmsgDownloadFailedText(cAttachment) {
+    const reason = (cAttachment.download_error || '').slice(0, 64);
+    return reason ? `Failed: ${reason} · Tap to Retry` : 'Download Failed · Tap to Retry';
+}
+
 function _dmsgRenderUndownloadedAttachment(target, msg, sender, isGroupChat, cAttachment, isRevealedBlockedMsg) {
     const willAutoDownload = AUTO_DOWNLOAD_ENABLED && !isRevealedBlockedMsg && cAttachment.size > 0
         && cAttachment.size <= MAX_AUTO_DOWNLOAD_BYTES && !cAttachment.download_failed;
@@ -1124,7 +1130,7 @@ function _dmsgRenderUndownloadedAttachment(target, msg, sender, isGroupChat, cAt
                     iDownload.setAttribute('msg', msg.id);
                     iDownload.classList.add('btn');
                     iDownload.textContent = cAttachment.download_failed
-                        ? 'Download Failed · Tap to Retry'
+                        ? _dmsgDownloadFailedText(cAttachment)
                         : `Download ${cAttachment.extension.toUpperCase()} (${strSize})`;
                     iDownload.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background-color:rgba(0,0,0,0.8);padding:8px 15px;border-radius:6px;color:white;cursor:pointer;font-size:12px;white-space:nowrap;text-align:center;max-width:90%;overflow:hidden;text-overflow:ellipsis;';
                     container.appendChild(iDownload);
@@ -1147,7 +1153,7 @@ function _dmsgRenderUndownloadedAttachment(target, msg, sender, isGroupChat, cAt
                 const fallbackState = willAutoDownload ? 'downloading' : 'download';
                 const { fileDiv: fallbackDiv, statusSpan: fallbackStatus } = createFileBox(cAttachment, fallbackState);
                 if (cAttachment.download_failed && fallbackStatus) {
-                    fallbackStatus.innerText = 'Download Failed · Tap to Retry';
+                    fallbackStatus.innerText = _dmsgDownloadFailedText(cAttachment);
                 }
                 if (!willAutoDownload) {
                     fallbackDiv.addEventListener('click', () => {
@@ -1159,7 +1165,7 @@ function _dmsgRenderUndownloadedAttachment(target, msg, sender, isGroupChat, cAt
     } else if (!willAutoDownload) {
         const { fileDiv: dlFileDiv, statusSpan: dlStatus } = createFileBox(cAttachment, 'download');
         if (cAttachment.download_failed && dlStatus) {
-            dlStatus.innerText = 'Download Failed · Tap to Retry';
+            dlStatus.innerText = _dmsgDownloadFailedText(cAttachment);
         }
         dlFileDiv.addEventListener('click', () => {
             startAttachmentDownload(cAttachment, msg, isGroupChat, strOpenChat, sender);

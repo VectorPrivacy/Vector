@@ -749,6 +749,14 @@ pub fn parse_blob_url(url_str: &str) -> Result<(Url, Sha256Hash), String> {
     Ok((origin, hash))
 }
 
+/// Verify a downloaded body against its URL's content address.
+/// `Some(true)` = bytes match the blob hash, `Some(false)` = the source served
+/// the wrong bytes, `None` = the URL carries no content address to check.
+pub fn verify_blob_content(url_str: &str, bytes: &[u8]) -> Option<bool> {
+    let (_, expected) = parse_blob_url(url_str).ok()?;
+    Some(Sha256Hash::hash(bytes) == expected)
+}
+
 /// Parse a Blossom blob URL into (origin, hash) and DELETE that blob.
 /// Awaitable single-URL variant of `delete_blobs_best_effort` — caller
 /// drives sequencing + per-URL UI feedback.

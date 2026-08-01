@@ -3660,6 +3660,10 @@ async function setupRustListeners() {
             // gate reads this flag, so it must flip even when the chat is closed or the
             // row is outside the render window; gating the mark on the DOM would leave
             // an unmarked copy free to re-trigger (or strand) the download later.
+            // The backend's reason string rides along: the UI renders it and the
+            // console keeps it, so a failure is never just a generic red box.
+            const failReason = typeof evt.payload.result === 'string' ? evt.payload.result : '';
+            console.error(`[AttachmentDownload] ${matchId} failed: ${failReason}`);
             const failedMsgIds = [];
             for (const msg of cChat.messages) {
                 let touched = false;
@@ -3667,6 +3671,7 @@ async function setupRustListeners() {
                     if (att.id === matchId) {
                         att.downloading = false;
                         att.download_failed = true;
+                        att.download_error = failReason;
                         touched = true;
                     }
                 }
@@ -7942,6 +7947,7 @@ function startAttachmentDownload(cAttachment, msg, isGroupChat, strOpenChat, sen
     if (downloadingAttachmentIds.has(cAttachment.id)) return;
     downloadingAttachmentIds.add(cAttachment.id);
     cAttachment.download_failed = false;
+    cAttachment.download_error = '';
     const downloadNpub = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
     invoke('download_attachment', { npub: downloadNpub, msgId: msg.id, attachmentId: cAttachment.id })
         .catch(() => downloadingAttachmentIds.delete(cAttachment.id));
