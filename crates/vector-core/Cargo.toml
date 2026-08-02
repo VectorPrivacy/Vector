@@ -1,6 +1,6 @@
 [package]
 name = "vector-core"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 description = "Core library for Vector — the single source of truth for all Vector clients, SDKs, and interfaces."
 license = "MIT"
@@ -19,10 +19,15 @@ categories = ["network-programming", "cryptography", "asynchronous"]
 # NIP features live on `nostr` now: 0.45 dropped `all-nips` and every `nipXX`
 # feature from nostr-sdk, and the sdk enables only std/rand/os-rng on `nostr`.
 # Cargo unifies these across the workspace, so this is the one place they're set.
-nostr = { version = "0.45.0-alpha.5", features = ["nip04", "nip06", "nip44", "nip46", "nip59", "rand", "os-rng"] }
-nostr-sdk = "0.45.0-alpha.5"
-nostr-blossom = "0.45.0-alpha.5"
-nostr-connect = "0.45.0-alpha.5"
+
+# EXACT-pinned (=) across the whole nostr family: the alphas are not
+# inter-compatible, and a caret range lets a fresh consumer resolve a MIXED
+# set (alpha.8 core with alpha.5 siblings fails to compile). Bump all four
+# together or not at all.
+nostr = { version = "=0.45.0-alpha.5", features = ["nip04", "nip06", "nip44", "nip46", "nip59", "rand", "os-rng"] }
+nostr-sdk = "=0.45.0-alpha.5"
+nostr-blossom = "=0.45.0-alpha.5"
+nostr-connect = "=0.45.0-alpha.5"
 bip39 = { version = "2.2.2", features = ["rand"] }
 
 # Database
