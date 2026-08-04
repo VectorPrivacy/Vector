@@ -19,7 +19,9 @@ use crate::{Profile, account_manager, db, crypto};
 /// Prevents debug_hot_reload_sync from using partial state preloaded by standalone background sync.
 pub(crate) static FULL_SESSION_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
-/// Whether a full foreground login has completed this process.
+/// Whether a full foreground login has completed this process. Read only by
+/// the Android biometric path, which stands down when a session already exists.
+#[cfg(target_os = "android")]
 pub(crate) fn full_session_initialized() -> bool {
     FULL_SESSION_INITIALIZED.load(std::sync::atomic::Ordering::Acquire)
 }

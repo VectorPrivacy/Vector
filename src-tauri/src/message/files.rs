@@ -7,7 +7,6 @@
 //! - Android file handling
 
 use std::sync::Arc;
-use nostr_sdk::prelude::*;
 use tokio::sync::Mutex as TokioMutex;
 use std::sync::LazyLock;
 

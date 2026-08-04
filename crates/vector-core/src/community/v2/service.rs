@@ -11,7 +11,6 @@
 //! rekey locator public + its blobs pairwise NIP-44, so unlike v1 there is no
 //! raw-ECDH exception).
 
-use nostr_sdk::prelude::{FinalizeEvent, FinalizeEventAsync, FinalizeUnsignedEvent};
 use nostr_sdk::prelude::{Event, Keys, PublicKey, Timestamp};
 
 use super::super::transport::{Query, Transport};
@@ -25,7 +24,6 @@ use super::rekey::{self, Continuity, RekeyScope};
 use super::{guestbook, stream, vsk};
 use crate::community::edition::ParsedEdition;
 use crate::state::SessionGuard;
-use crate::ClientRelayExt;
 
 /// The active signer for v2 authority actions: the live client's signer — which
 /// covers a NIP-46 bunker / NIP-55 offline signer — falling back to the local
@@ -4997,6 +4995,8 @@ async fn advance_scope<S: crate::signer::VectorSigner + ?Sized>(
 
 #[cfg(test)]
 mod tests {
+    use crate::ClientRelayExt;
+    use nostr_sdk::prelude::FinalizeEvent;
     use super::super::super::transport::memory::MemoryRelay;
     use super::*;
     use crate::community::roles::{MemberGrant, Permissions, Role, RoleScope};
@@ -7815,7 +7815,7 @@ mod tests {
     #[ignore]
     async fn live_e2e_two_accounts() {
         use crate::community::transport::LiveTransport;
-        use nostr_sdk::prelude::{ClientBuilder, RelayOptions, ToBech32};
+        use nostr_sdk::prelude::ToBech32;
 
         let relay = std::env::var("VECTOR_E2E_RELAY").unwrap_or_else(|_| "wss://jskitty.com/nostr".to_string());
         let relays = vec![relay.clone()];
@@ -9037,7 +9037,6 @@ mod tests {
 
         // Persist a roster granting `admin` the Admin role (MANAGE_CHANNELS ⊂ ADMIN_ALL).
         let admin = Keys::generate();
-        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
         let role = Role::admin("aa".repeat(32));
         let roster = CommunityRoles {
             roles: vec![role.clone()],
@@ -9424,7 +9423,6 @@ mod tests {
 
         // Two admins (a, b) both hold the Admin role; I hold the channel key.
         let (a, b) = (Keys::generate(), Keys::generate());
-        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
         let role = Role::admin("ce".repeat(32));
         let roster = CommunityRoles {
             roles: vec![role.clone()],

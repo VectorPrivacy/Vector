@@ -4,7 +4,6 @@
 //! called by the Kotlin code (MiniAppManager, MiniAppIpc, MiniAppWebViewClient)
 //! and routed to the appropriate Rust handlers.
 
-use nostr_sdk::prelude::{FinalizeEvent, FinalizeEventAsync, FinalizeUnsignedEvent};
 use jni::objects::{JClass, JString};
 use jni::sys::{jint, jstring, jobject};
 use jni::JNIEnv;

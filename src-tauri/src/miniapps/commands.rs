@@ -1,6 +1,5 @@
 //! Tauri commands for Mini Apps
 
-use nostr_sdk::prelude::FinalizeEvent;
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use tauri::ipc::Channel;

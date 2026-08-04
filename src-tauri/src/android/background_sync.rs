@@ -888,7 +888,6 @@ async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey, bool, Op
         logcat(&format!("Bootstrapped client for {}...",
             &my_public_key.to_bech32().unwrap_or_default()[..20.min(my_public_key.to_bech32().unwrap_or_default().len())]));
 
-        let public_key_for_signer = keys.public_key();
         MY_SECRET_KEY.store_from_keys(&keys, &[&ENCRYPTION_KEY]);
 
         let client = vector_core::nostr_client_builder()

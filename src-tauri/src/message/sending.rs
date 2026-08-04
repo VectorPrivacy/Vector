@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
 use std::sync::LazyLock;
-use nostr_sdk::prelude::*;
 use tauri::{AppHandle, Emitter, Runtime};
 
 /// Cancel flags for in-progress uploads, keyed by pending message ID.

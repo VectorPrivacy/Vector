@@ -1,4 +1,3 @@
-use nostr_sdk::prelude::FinalizeEvent;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};

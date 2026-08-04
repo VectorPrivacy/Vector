@@ -10,8 +10,6 @@
 //! envelope: ChaCha20 if the account has a password, plaintext if it
 //! doesn't (passwordless accounts are unencrypted by design).
 
-use crate::event_ext::FinalizeUnsignedWithId;
-use nostr_sdk::prelude::{FinalizeEvent, FinalizeUnsignedEvent};
 use nostr_sdk::prelude::*;
 use rusqlite::{params, OptionalExtension};
 
@@ -317,6 +315,7 @@ pub fn prune_stale_resend_payloads(max_age_secs: i64) -> Result<usize, String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::event_ext::FinalizeUnsignedWithId;
     use super::*;
 
     static TEST_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(81000);

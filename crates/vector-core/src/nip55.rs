@@ -24,8 +24,6 @@
 //! forking. Fail-closed: a signer returning an event authored by the wrong
 //! identity is rejected here, not silently published.
 
-use crate::event_ext::FinalizeUnsignedWithId;
-use nostr_sdk::prelude::{FinalizeUnsignedEvent};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{LazyLock, OnceLock};
 
@@ -592,6 +590,7 @@ pub async fn nip55_pair() -> Result<(PublicKey, String), String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::event_ext::FinalizeUnsignedWithId;
     use super::*;
 
     #[test]

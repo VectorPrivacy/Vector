@@ -3,7 +3,6 @@
 //! (`build_message`) is separated from the STATE mutation (`ingest_message`) so the
 //! conversion is unit-testable without any global state.
 
-use nostr_sdk::prelude::{FinalizeEvent, FinalizeUnsignedEvent};
 use nostr_sdk::prelude::{Event, PublicKey};
 use nostr_sdk::prelude::ToBech32;
 
@@ -647,6 +646,7 @@ pub fn route_incoming(
 
 #[cfg(test)]
 mod tests {
+    use nostr_sdk::prelude::FinalizeEvent;
     use super::*;
     use crate::community::derive::channel_pseudonym;
     use std::collections::HashMap;

@@ -19,7 +19,6 @@
 //!     ([`super::derive::verify_community_id`]), not an attestation event —
 //!     vsk 7 is retired.
 
-use nostr_sdk::prelude::{FinalizeEvent, FinalizeUnsignedEvent};
 use nostr_sdk::prelude::{Event, Keys, PublicKey, Tag, Timestamp, UnsignedEvent};
 use serde::{Deserialize, Serialize};
 
@@ -456,6 +455,7 @@ pub async fn genesis_signed_with_primary<S: crate::signer::VectorSigner + ?Sized
 
 #[cfg(test)]
 mod tests {
+    use nostr_sdk::prelude::FinalizeEvent;
     use super::super::super::edition::build_edition_inner;
     use super::*;
 

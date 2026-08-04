@@ -1,4 +1,3 @@
-use nostr_sdk::prelude::*;
 use tauri::Manager;
 
 #[macro_use]

@@ -1,6 +1,5 @@
 //! State management for Mini App instances
 
-use nostr_sdk::prelude::FinalizeEvent;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;

@@ -2573,7 +2573,6 @@ impl VectorCore {
         evidence: crate::community::transport::Evidence,
         transport_secs: u64,
     ) -> usize {
-        use crate::community::v2::inbound::{apply_chat_to_state, ChatPersist};
         // Guard straddles the fetch: a swap mid-fetch must not persist account A's chat
         // into account B's STATE/DB (the message ids are global).
         let session = state::SessionGuard::capture();

@@ -11,7 +11,6 @@
 //! (32-byte raw key vs 60-byte ciphertext; `looks_encrypted` for text) let a half-migrated DB
 //! read back correctly, so the toggle/PIN-rekey flows and the one-time backfill are safe to re-run.
 
-use nostr_sdk::prelude::{FinalizeEvent, FinalizeUnsignedEvent};
 use nostr_sdk::prelude::{Keys, PublicKey, SecretKey};
 use nostr_sdk::prelude::ToBech32;
 use rusqlite::{params, OptionalExtension};
@@ -2477,6 +2476,7 @@ pub fn set_guestbook(
 
 #[cfg(test)]
 mod tests {
+    use nostr_sdk::prelude::FinalizeEvent;
     use super::*;
 
     static TEST_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
