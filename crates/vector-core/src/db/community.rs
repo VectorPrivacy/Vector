@@ -1952,11 +1952,14 @@ pub fn set_migration_checked(community_id: &str) -> Result<(), String> {
 pub fn set_migration_ledger(v1_community_id: &str, v2_community_id: &str, phase: i64, twin_json: &str) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
     let wrapped = enc_txt(twin_json)?;
+    // Stamp every write: a row parked mid-ladder is the crash-resume signal, and
+    // without a time it can't say whether that crash was seconds or weeks ago.
+    let now = now_secs();
     conn.execute(
         "INSERT INTO community_migrations (community_id, v2_community_id, phase, twin, updated_at)
-         VALUES (?1, ?2, ?3, ?4, 0)
-         ON CONFLICT(community_id) DO UPDATE SET v2_community_id=?2, phase=?3, twin=?4",
-        params![v1_community_id, v2_community_id, phase, wrapped],
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(community_id) DO UPDATE SET v2_community_id=?2, phase=?3, twin=?4, updated_at=?5",
+        params![v1_community_id, v2_community_id, phase, wrapped, now],
     )
     .map_err(|e| format!("set migration ledger: {e}"))?;
     Ok(())
