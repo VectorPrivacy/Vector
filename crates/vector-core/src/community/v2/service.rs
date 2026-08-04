@@ -871,7 +871,33 @@ async fn publish_invite_registry<T: Transport + ?Sized>(transport: &T, community
     let my_pk = me_pk()?;
     let eid = super::derive::invite_links_locator(community.id(), &my_pk.to_bytes());
     let content = invite::build_registry_content(live_signers);
-    publish_control_edition(transport, community, session, vsk::INVITE_LINKS, &eid, &content).await
+    publish_control_edition(transport, community, session, vsk::INVITE_LINKS, &eid, &content).await?;
+    // Refresh the cache from the PLANE, not from `live_signers`: the column aggregates
+    // every creator, so writing only mine would clobber theirs, and a union could never
+    // shrink — retiring the last link would leave the community reading Public forever.
+    refresh_invite_registry_cache(transport, community, session).await;
+    Ok(())
+}
+
+/// Re-fold the whole invite Registry and cache it, so Public/Private stays a sync
+/// LOCAL read. Silent no-op when the plane can't be read whole — a partial fold
+/// would under-state Public, leaving a live link open behind a ban.
+async fn refresh_invite_registry_cache<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, session: &SessionGuard) {
+    let Ok(owner) = community.owner() else { return };
+    let Some(editions) = fetch_control_plane_whole(transport, community).await else { return };
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, f)| f.0 == community.root_epoch.0)
+        .map(|(entity, f)| (entity, (f.1, f.2, f.3)))
+        .collect();
+    let authority = fold_authority(community, &editions, &floors);
+    let sets = live_invite_link_sets(community.id(), &owner.to_hex(), &editions, &authority, &floors);
+    if session.is_valid() {
+        let _ = crate::db::community::set_community_invite_registry(&cid_hex, &flatten_link_sets(&sets));
+        let _ = crate::db::community::replace_invite_link_sets(&cid_hex, &sets);
+    }
 }
 
 /// Record a freshly-minted public link across the creator's devices: append it to the
@@ -1027,10 +1053,11 @@ pub async fn refresh_public_links<T: Transport + ?Sized>(transport: &T, communit
 /// coordinate) into an aggregate live-link set — non-empty ⇒ a live link exists ⇒
 /// Public; empty ⇒ Private. Retiring the last link is what flips it back.
 pub async fn community_is_public<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> bool {
-    use crate::community::roles::Permissions;
-    use std::collections::BTreeMap;
     let Ok(owner) = community.owner() else { return false };
-    let owner_hex = owner.to_hex();
+    // Truncation fails toward Public: over-stating it only makes a caller take the
+    // stronger remedy (privatise + re-found + reissue), while under-stating it
+    // leaves a live link open behind a ban.
+    let Some(editions) = fetch_control_plane_whole(transport, community).await else { return true };
     let cid = community.id();
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&cid.0);
     let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex)
@@ -1039,13 +1066,17 @@ pub async fn community_is_public<T: Transport + ?Sized>(transport: &T, community
         .filter(|(_, f)| f.0 == community.root_epoch.0)
         .map(|(entity, f)| (entity, (f.1, f.2, f.3)))
         .collect();
-    let control = control_group_key(&community.community_root, cid, community.root_epoch);
-    // WHOLE plane, not the newest page. Public-vs-Private is decided by whether any
-    // live invite link exists, so a registry pushed out of a single window reads as
-    // retired — and any member can push it out, since the plane key comes from the
-    // community root they hold. Truncation fails toward Public: over-stating it only
-    // makes a caller take the stronger remedy (privatise + re-found + reissue), while
-    // under-stating it leaves a live link open behind a ban.
+    let authority = fold_authority(community, &editions, &floors);
+    !live_invite_link_sets(cid, &owner.to_hex(), &editions, &authority, &floors).is_empty()
+}
+
+/// Page the WHOLE control plane, not the newest window: a registry pushed out of a
+/// single page reads as retired, and any member can push it out since the plane key
+/// comes from the community root they hold. `None` = it could NOT be read whole
+/// (transport failure, same-second wall, pager depth), so a caller must not mistake
+/// an empty fold for absence.
+async fn fetch_control_plane_whole<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Option<Vec<ParsedEdition>> {
+    let control = control_group_key(&community.community_root, community.id(), community.root_epoch);
     let mut editions: Vec<ParsedEdition> = Vec::new();
     let mut seen_wraps: std::collections::HashSet<nostr_sdk::prelude::EventId> = std::collections::HashSet::new();
     let mut oldest: Option<u64> = None;
@@ -1062,7 +1093,7 @@ pub async fn community_is_public<T: Transport + ?Sized>(transport: &T, community
             evidence: crate::community::transport::Evidence::Quorum,
             ..Default::default()
         };
-        let Ok(wraps) = transport.fetch(&query, &community.relays).await else { return true };
+        let Ok(wraps) = transport.fetch(&query, &community.relays).await else { return None };
         let mut fresh = 0usize;
         for w in &wraps {
             if !seen_wraps.insert(w.id) {
@@ -1079,23 +1110,38 @@ pub async fn community_is_public<T: Transport + ?Sized>(transport: &T, community
         }
         if fresh == 0 {
             if wraps.len() >= FOLLOW_PAGE {
-                return true; // same-second wall: the plane can't be read whole
+                return None; // same-second wall: the plane can't be read whole
             }
-            break;
+            return Some(editions);
         }
         until = oldest;
         if page + 1 == COMPACT_MAX_PAGES {
-            return true;
+            return None;
         }
     }
-    let authority = fold_authority(community, &editions, &floors);
+    Some(editions)
+}
 
+/// The live link coordinates PER AUTHORISED CREATOR across every Registry (vsk-8);
+/// non-empty ⇒ the Community is Public, and the per-creator split is what drives
+/// "X has N active invite links". Pure over an already-fetched edition set so the
+/// on-demand probe and the control follow fold it identically.
+fn live_invite_link_sets(
+    cid: &crate::community::CommunityId,
+    owner_hex: &str,
+    editions: &[ParsedEdition],
+    authority: &AuthoritySet,
+    floors: &Floors,
+) -> Vec<crate::db::community::InviteLinkSetRow> {
+    use crate::community::roles::Permissions;
+    use std::collections::BTreeMap;
     let mut by_eid: BTreeMap<[u8; 32], Vec<&ParsedEdition>> = BTreeMap::new();
-    for e in &editions {
+    for e in editions {
         if e.vsk == vsk::INVITE_LINKS {
             by_eid.entry(e.entity_id).or_default().push(e);
         }
     }
+    let mut sets: Vec<crate::db::community::InviteLinkSetRow> = Vec::new();
     for (eid, group) in &by_eid {
         // Authority BEFORE the fold, matching `apply_control_fold`. `fold_head`
         // picks an equal-version winner author-blind (lowest inner id, which an
@@ -1109,7 +1155,7 @@ pub async fn community_is_public<T: Transport + ?Sized>(transport: &T, community
                 let author = p.author.to_hex();
                 // The creator must hold CREATE_INVITE, not be banned, AND own this coordinate.
                 !authority.banned.contains(&author)
-                    && authority.roles.is_authorized(&author, Some(&owner_hex), Permissions::CREATE_INVITE)
+                    && authority.roles.is_authorized(&author, Some(owner_hex), Permissions::CREATE_INVITE)
                     && super::derive::invite_links_locator(cid, &p.author.to_bytes()) == *eid
             })
             .collect();
@@ -1118,11 +1164,25 @@ pub async fn community_is_public<T: Transport + ?Sized>(transport: &T, community
         }
         let fold_eds: Vec<version::Edition> = authed.iter().map(|p| p.to_fold_edition()).collect();
         let (Some(hi), _) = fold_head(&fold_eds, floors.get(&crate::simd::hex::bytes_to_hex_32(eid))) else { continue };
-        if invite::parse_registry_content(&authed[hi].content).map(|s| !s.is_empty()).unwrap_or(false) {
-            return true;
+        if let Ok(signers) = invite::parse_registry_content(&authed[hi].content) {
+            if signers.is_empty() {
+                continue; // a creator who retired every link is absent, not a zero row
+            }
+            sets.push(crate::db::community::InviteLinkSetRow {
+                creator_hex: authed[hi].author.to_hex(),
+                locators: signers.iter().map(|p| p.to_hex()).collect(),
+            });
         }
     }
-    false
+    sets
+}
+
+/// Flatten per-creator sets into the aggregate the `invite_registry` column holds.
+fn flatten_link_sets(sets: &[crate::db::community::InviteLinkSetRow]) -> Vec<String> {
+    let mut flat: Vec<String> = sets.iter().flat_map(|s| s.locators.iter().cloned()).collect();
+    flat.sort();
+    flat.dedup();
+    flat
 }
 
 /// Accept an already-unwrapped bundle: verify the owner commitment AND that the
@@ -3703,6 +3763,26 @@ pub async fn follow_control<T: Transport + ?Sized>(
     if !truncated && !authority.gapped && stored_complete && newest_roster_at >= crate::db::community::get_community_roles_at(&cid_hex)? {
         authority_changed |= stored != authority.roles;
         crate::db::community::set_community_roles(&cid_hex, &authority.roles, newest_roster_at)?;
+    }
+    // Cache the folded invite Registry so Public/Private stays a sync LOCAL read
+    // (v1 parity — `invite_registry` is the column every caller reads). Gated like
+    // the roster: a truncated or gapped window folds an empty registry out of mere
+    // absence, and persisting that under-states Public — the unsafe direction, since
+    // it leaves a live link open behind a ban.
+    if !truncated && !authority.gapped && !fold.gapped {
+        if let Ok(owner) = community.owner() {
+            let sets = live_invite_link_sets(community.id(), &owner.to_hex(), &editions, &authority, &floors);
+            let live = flatten_link_sets(&sets);
+            let mut before = crate::db::community::get_community_invite_registry(&cid_hex).unwrap_or_default();
+            before.sort();
+            if before != live {
+                crate::db::community::set_community_invite_registry(&cid_hex, &live)?;
+                authority_changed = true;
+            }
+            // The per-creator split drives "X has N active invite links" and the
+            // first-link-flips-Public confirm; it lives in its own table.
+            crate::db::community::replace_invite_link_sets(&cid_hex, &sets)?;
+        }
     }
     // Roster/banlist moves are invisible in the returned community (they live in
     // their own columns), so callers that key a refresh off `updated` would never
@@ -7428,6 +7508,35 @@ mod tests {
         assert!(!community_is_public(&relay, &community).await, "retiring the last link makes it Private again");
         let after = fetch_invite_list(&relay, &community.relays).await.unwrap().unwrap();
         assert!(after.entries.is_empty() && after.tombstones.len() == 1, "the link is tombstoned in the invite list");
+    }
+
+    #[tokio::test]
+    async fn the_registry_is_cached_locally_so_public_private_is_a_sync_read() {
+        // Every caller reads the `invite_registry` COLUMN, never the async fold. v2
+        // published the Registry to the plane but never mirrored it locally, so every
+        // v2 community read Private no matter how many live links it had.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Cached", vec!["wss://r".into()], None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let cached = || crate::db::community::get_community_invite_registry(&cid_hex).unwrap();
+        // The per-creator split is a SEPARATE table, and it drives the "first link flips
+        // the community Public" confirm — an empty one re-asks on every later link.
+        let per_creator = || crate::db::community::get_invite_link_sets(&cid_hex).unwrap();
+        assert!(cached().is_empty(), "a fresh community caches an empty registry");
+        assert!(per_creator().is_empty(), "…and no per-creator sets");
+
+        let minted = mint_public_link(&relay, &community, "https://x", None, None).await.unwrap();
+        assert!(!cached().is_empty(), "minting caches the registry, so the UI reads Public without folding");
+        let sets = per_creator();
+        assert_eq!(sets.len(), 1, "the minting creator gets a set");
+        assert_eq!(sets[0].locators.len(), 1, "carrying exactly their one live link");
+
+        // Both caches must SHRINK too — a union-only mirror would strand it Public.
+        let token_hex = crate::simd::hex::bytes_to_hex_16(&minted.token);
+        revoke_public_link(&relay, &community, &token_hex).await.unwrap();
+        assert!(cached().is_empty(), "retiring the last link empties the cache back to Private");
+        assert!(per_creator().is_empty(), "…and clears the per-creator sets");
     }
 
     #[tokio::test]

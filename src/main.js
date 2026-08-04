@@ -10087,8 +10087,8 @@ async function openCommunityInvitePanel(chat) {
     // click crosses the Public⇄Private boundary. The mode is the folded registry, NOT just my own links —
     // another admin's live link keeps the community Public even when I hold none.
     let currentLinkCount = 0;     // MY own links — LOCAL DB, never lags a fresh create/revoke
-    let globalLinkCount = 0;      // every creator's links combined (drives empty-state copy)
     let otherCreatorLinkCount = 0; // OTHER creators' links per the folded registry (the remote part)
+    let communityIsPublic = false; // the folded mode itself — the ONLY thing the Public⇄Private confirm may gate on
     const renderLinks = async () => {
         linksDiv.innerHTML = '';
         let links = [];
@@ -10097,10 +10097,10 @@ async function openCommunityInvitePanel(chat) {
         // §10 computed mode + per-creator breakdown from the folded registry (the authoritative source).
         let summary = { is_public: links.length > 0, creators: [] };
         try { summary = await invoke('get_community_invite_summary', { communityId }); } catch (_) {}
-        globalLinkCount = (summary.creators || []).reduce((n, c) => n + (c.count || 0), 0);
         otherCreatorLinkCount = (summary.creators || [])
             .filter(c => c.npub !== strPubkey)
             .reduce((n, c) => n + (c.count || 0), 0);
+        communityIsPublic = !!summary.is_public;
         const modeEl = box.querySelector('#cmt-mode');
         if (modeEl) {
             const pub = !!summary.is_public;
@@ -10235,8 +10235,10 @@ async function openCommunityInvitePanel(chat) {
         const btn = e.currentTarget; // capture before await — currentTarget is null after it
         // The FIRST link ANYWHERE (across all creators) flips a private community to Public (anyone with the
         // link can join). Confirm that boundary crossing; if it's already Public (someone holds a link), a
-        // new link doesn't change the mode, so skip the warning.
-        if (globalLinkCount === 0) {
+        // new link doesn't change the mode, so skip the warning. Gate on the folded MODE, never on a derived
+        // count: the per-creator breakdown drops any creator whose npub won't parse, so it can read 0 while
+        // the community is genuinely Public — and then this warns on a boundary that isn't being crossed.
+        if (!communityIsPublic) {
             const ok = await popupConfirm('Make community public?',
                 'Creating an invite link makes this community <b>public</b>: anyone with the link can join. You can make it private again later by revoking every link.',
                 false, '', 'vector_warning.svg', '', 'Make public');
