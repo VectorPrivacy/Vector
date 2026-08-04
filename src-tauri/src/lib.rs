@@ -753,6 +753,12 @@ pub fn run() {
             // Account commands (commands/account.rs)
             commands::account::login,
             commands::account::login_from_stored_key,
+            commands::biometric::biometric_status,
+            commands::biometric::switch_to_biometric,
+            commands::encryption::switch_to_credential,
+            commands::biometric::biometric_login,
+            commands::biometric::setup_encryption_biometric,
+            commands::biometric::enable_encryption_biometric,
             commands::account::connect_bunker,
             commands::account::start_nostrconnect_session,
             commands::account::cancel_bunker_session,

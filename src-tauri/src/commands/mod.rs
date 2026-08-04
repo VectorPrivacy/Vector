@@ -18,6 +18,7 @@ pub mod sync;
 pub mod relays;
 pub mod attachments;
 pub mod account;
+pub mod biometric;
 pub mod system;
 pub mod invites;
 pub mod media;

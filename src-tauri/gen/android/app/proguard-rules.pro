@@ -99,3 +99,8 @@
 # release builds hit NoSuchMethodError the moment the login screen probes for a
 # signer.
 -keep class io.vectorapp.ExternalSigner { *; }
+
+# Keep BiometricUnlock (Keystore-wrapped Local Encryption). Same JNI shape as
+# ExternalSigner: statics invoked from Rust, nativeOnBiometricResult must keep
+# its exact name for the native symbol to bind.
+-keep class io.vectorapp.BiometricUnlock { *; }

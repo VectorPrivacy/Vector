@@ -6092,12 +6092,135 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
     let pinAbortController = null;
     let passwordAbortController = null;
 
+    // Android biometric fast-path. Auto-fires AT MOST once per unlock-screen
+    // mount; a cancel lands the user on the PIN/password pad and only the
+    // button re-triggers — never a render loop.
+    const domBiometricBtn = document.getElementById('login-biometric-btn');
+    let biometricBusy = false;
+    // True once the unlock button was offered this mount; processing states
+    // hide it and settled states bring it back (account switching included).
+    let biometricOffered = false;
+    // One login dispatch per screen, whoever gets there first. Deliberately a
+    // plain latch and nothing more: the credential path must NEVER be gated on
+    // biometric state, or a stuck flag leaves the user with a dead PIN pad.
+    let loginDispatched = false;
+    function setBiometricBtnVisible(visible) {
+        if (domBiometricBtn && biometricOffered) {
+            domBiometricBtn.style.display = visible ? '' : 'none';
+        }
+    }
+
     // If unlocking, go straight to the appropriate input
     if (fUnlock) {
         startCredentialEntry(chosenSecurityType);
     } else {
         // New account setup — show security type selection first
         showSecurityTypeSelector();
+    }
+
+    if (domBiometricBtn) domBiometricBtn.style.display = 'none';
+    if (fUnlock && platformFeatures.os === 'android') {
+        offerBiometricUnlock();
+    }
+    async function offerBiometricUnlock() {
+        let status;
+        try {
+            status = await invoke('biometric_status');
+        } catch (e) {
+            return;
+        }
+        if (!status.enrolled) {
+            // A biometric-only account with no enrollment means the hardware
+            // key died (or the DB was restored to a new device): recovery.
+            if (chosenSecurityType === 'biometric') showBiometricRecovery();
+            return;
+        }
+        // The OS tells us its own words for what the sheet will ask for
+        // ("Use fingerprint", "Use screen lock", ...) — Android never exposes
+        // the credential type itself, but this is the honest next best.
+        if (status.label) {
+            const lbl = document.getElementById('login-biometric-label');
+            if (lbl) lbl.textContent = status.label;
+            if (chosenSecurityType === 'biometric') {
+                domLoginEncryptTitle.textContent = status.label + ' to unlock Vector';
+            }
+        }
+        if (domBiometricBtn) {
+            biometricOffered = true;
+            domBiometricBtn.style.display = '';
+            domBiometricBtn.onclick = () => attemptBiometricUnlock();
+        }
+        // Auto-fire on mount: an enrolled account is biometric-ONLY (the modes
+        // are mutually exclusive), so there is no credential pad for the prompt
+        // to race. Once per mount — a cancel leaves the button for a manual
+        // retry and never re-fires on its own.
+        if (chosenSecurityType === 'biometric') attemptBiometricUnlock();
+    }
+
+    async function showBiometricRecovery() {
+        domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
+        domLoginEncryptTitle.textContent = 'Device security changed';
+        if (domBiometricBtn) domBiometricBtn.style.display = 'none';
+        const yes = await popupConfirm(
+            'Device Security Changed',
+            'This device\'s encrypted data can no longer be unlocked: its hardware key was invalidated (screen lock removed, or the data was moved to a new device).<br><br><b>Reset this device and sign in with your keys to restore from the network.</b>',
+            false, '', 'vector_warning.svg'
+        );
+        if (yes) {
+            try { await invoke('logout'); } catch (e) { console.error('[Biometric] recovery logout failed:', e); }
+            window.location.reload();
+        }
+    }
+
+    async function attemptBiometricUnlock() {
+        if (biometricBusy || loginDispatched) return;
+        biometricBusy = true;
+        // The prompt sheet overlays the pad; once it passes, the backend emits
+        // biometric_unlocked and the title flips to the processing state while
+        // the real login (relays, sync) runs.
+        let unlisten = null;
+        try {
+            unlisten = await window.__TAURI__.event.once('biometric_unlocked', () => {
+                if (loginDispatched) return;
+                domLoginEncryptTitle.textContent = 'Decrypting your keys...';
+                domLoginEncryptTitle.classList.add('startup-subtext-gradient');
+                setBiometricBtnVisible(false);
+                if (typeof loginPicker !== 'undefined') loginPicker.hide();
+            });
+            const npub = await runWithTorBootstrapStatus(() => invoke('biometric_login'));
+            // A typed credential already drove the login — don't start a second.
+            if (loginDispatched) return;
+            loginDispatched = true;
+            strPubkey = npub;
+            login();
+        } catch (e) {
+            const msg = String(e);
+            domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
+            if (msg.includes('BIOMETRIC_INVALIDATED')) {
+                biometricOffered = false;
+                if (domBiometricBtn) domBiometricBtn.style.display = 'none';
+                if (chosenSecurityType === 'biometric') {
+                    showBiometricRecovery();
+                } else {
+                    domLoginEncryptTitle.textContent = 'Biometrics changed. Enter your '
+                        + (chosenSecurityType === 'password' ? 'password' : 'PIN') + '.';
+                }
+            } else if (msg.includes('BIOMETRIC_UNAVAILABLE')) {
+                if (chosenSecurityType === 'biometric') {
+                    domLoginEncryptTitle.textContent = 'Unlock unavailable right now. Restart Vector and try again.';
+                }
+            } else if (!msg.includes('BIOMETRIC_CANCELLED')
+                && !msg.includes('BIOMETRIC_NOT_ENROLLED')) {
+                console.error('[Biometric] unlock failed:', msg);
+            }
+            setBiometricBtnVisible(true);
+        } finally {
+            // Unconditional: delegate paths resolve without the event ever
+            // firing, which would otherwise leak the listener for the webview
+            // lifetime. Unlistening an already-fired once() is a no-op.
+            if (unlisten) { try { unlisten(); } catch (_) {} }
+            biometricBusy = false;
+        }
     }
 
     /** Show the security type selection phase */
@@ -6123,6 +6246,44 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
             domLoginEncryptTypeSelect.style.display = 'none';
             startCredentialEntry('password');
         };
+
+        // Biometric-only mode (Android 11+ with capable hardware): a generated
+        // 256-bit credential nobody ever knows, unlocked solely by the OS.
+        const btnBiometric = document.getElementById('security-type-biometric');
+        if (btnBiometric && platformFeatures.os === 'android') {
+            invoke('biometric_status')
+                .then(s => {
+                    if (!s.supported) return;
+                    btnBiometric.style.display = '';
+                    // The OS's own wording for what the user will actually see
+                    // on the sheet ("Use fingerprint" / "Use screen lock").
+                    if (s.label) btnBiometric.textContent = s.label;
+                    // Two highlighted choices now — the label above them agrees.
+                    const rec = document.querySelector('.security-type-recommended');
+                    if (rec) rec.textContent = '*Recommended Options';
+                })
+                .catch(() => {});
+            btnBiometric.onclick = async () => {
+                if (!(await confirmBiometricOnlyWarning())) return;
+                domLoginEncryptTypeSelect.style.display = 'none';
+                document.querySelector('.login-encrypt-header').style.display = '';
+                document.querySelector('.login-lock-icon').style.display = 'none';
+                domLoginEncryptTitle.textContent = 'Setting up your account...';
+                domLoginEncryptTitle.classList.add('startup-subtext-gradient');
+                try {
+                    await invoke('setup_encryption_biometric');
+                    login();
+                } catch (e) {
+                    domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
+                    const msg = String(e);
+                    if (!msg.includes('BIOMETRIC_CANCELLED')) {
+                        await popupConfirm('Could not enable biometrics', escapeHtml(msg), true);
+                    }
+                    document.querySelector('.login-encrypt-header').style.display = 'none';
+                    domLoginEncryptTypeSelect.style.display = '';
+                }
+            };
+        }
 
         btnSkip.onclick = async () => {
             // Skip encryption — backend stores the key in plaintext (key never crosses IPC)
@@ -6150,7 +6311,13 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
     function startCredentialEntry(type) {
         // Re-show lock icon header (hidden during type selector phase)
         document.querySelector('.login-encrypt-header').style.display = '';
-        if (type === 'password') {
+        if (type === 'biometric') {
+            // Biometric-only account: no credential to type. The auto-fire
+            // below owns the unlock; a dead enrollment routes to recovery.
+            domLoginEncryptPinRow.style.display = 'none';
+            domLoginEncryptPassword.style.display = 'none';
+            domLoginEncryptTitle.textContent = 'Unlock with Biometrics';
+        } else if (type === 'password') {
             startPasswordFlow();
         } else {
             startPinFlow();
@@ -6186,6 +6353,7 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
             if (isProcessing) {
                 domLoginEncryptTitle.classList.add('startup-subtext-gradient');
                 pinRow.style.display = 'none';
+                setBiometricBtnVisible(false);
                 // Past the point of no return — backend is decrypting or
                 // encrypting against THIS account. Mid-flight account swap
                 // would race the in-progress crypto and bind the wrong
@@ -6194,6 +6362,7 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
             } else {
                 domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
                 pinRow.style.display = '';
+                setBiometricBtnVisible(true);
                 // Back to input state. On the unlock path, re-show the
                 // picker so a wrong-PIN retry can swap accounts. On the
                 // new-account setup path (fUnlock=false) the picker was
@@ -6247,6 +6416,7 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                         const npub = await runWithTorBootstrapStatus(() =>
                             invoke("login_from_stored_key", { password: currentPinString })
                         );
+                        loginDispatched = true;
                         strPubkey = npub;
                         login();
                     } catch (e) {
@@ -6369,11 +6539,13 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
             if (isProcessing) {
                 domLoginEncryptTitle.classList.add('startup-subtext-gradient');
                 domLoginEncryptPassword.style.display = 'none';
+                setBiometricBtnVisible(false);
                 // Past the point of no return — see PIN flow.
                 if (typeof loginPicker !== 'undefined') loginPicker.hide();
             } else {
                 domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
                 domLoginEncryptPassword.style.display = '';
+                setBiometricBtnVisible(true);
                 // See PIN flow for the rationale.
                 if (fUnlock && typeof loginPicker !== 'undefined'
                     && loginPicker.accounts && loginPicker.accounts.length >= 2) {
@@ -6421,6 +6593,7 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                     const npub = await runWithTorBootstrapStatus(() =>
                         invoke("login_from_stored_key", { password })
                     );
+                    loginDispatched = true;
                     strPubkey = npub;
                     login();
                 } catch (e) {

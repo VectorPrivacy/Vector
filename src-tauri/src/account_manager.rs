@@ -655,6 +655,8 @@ pub async fn reset_session() {
     vector_core::clear_pending_nip55_setup();
     #[cfg(target_os = "android")]
     crate::android::external_signer::on_session_reset();
+    #[cfg(target_os = "android")]
+    crate::android::biometric::on_session_reset();
 
     // In-memory state owned by vector-core's globals.
     {

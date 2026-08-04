@@ -2480,6 +2480,178 @@ async function initEncryptionSettings() {
     // Set up Tauri event listeners for migration progress
     setupMigrationEventListeners();
 
+    // Unlock-method row (mode display + switch)
+    await initUnlockMethodRow();
+}
+
+/**
+ * The one warning biometric-only mode ships with: removing the device's
+ * screen lock destroys the hardware key that guards this device's data.
+ * Everything else (new fingerprints, changed PIN) is safe and silent.
+ */
+async function confirmBiometricOnlyWarning() {
+    return await popupConfirm(
+        'Before you continue',
+        'Vector will be protected by your device\'s screen lock: fingerprint, face, or device PIN.<br><br>' +
+        '<b>Do not remove your phone\'s screen lock without first disabling Local Encryption in Vector</b>, ' +
+        'or this device loses access to its encrypted data and you will need to sign in with your keys again.<br><br>' +
+        'Changing your PIN or adding fingerprints is always safe.',
+        false, '', 'vector_warning.svg'
+    );
+}
+
+/** Re-sync the encryption toggle from backend truth after a state-desync refusal. */
+async function resyncEncryptionToggle() {
+    try {
+        const st = await invoke('get_encryption_status', { npub: null });
+        fEncryptionEnabled = st.enabled;
+        fSecurityType = st.security_type || 'pin';
+        const t = document.getElementById('security-encryption-toggle');
+        if (t) t.checked = st.enabled;
+        updateChangeCredentialButton();
+        if (window.__refreshUnlockMethodRow) window.__refreshUnlockMethodRow();
+    } catch (e) { /* keep last known state */ }
+}
+
+/**
+ * Enable Local Encryption in biometric-only mode (generated credential,
+ * hardware-wrapped). Shared by the Local Encryption toggle's offer and a
+ * direct tap on the Biometric Unlock row. Returns true on success.
+ */
+async function enableBiometricOnlyEncryption() {
+    if (!(await confirmBiometricOnlyWarning())) return false;
+    // Set BEFORE the invoke: encryption_migration_complete fires from inside
+    // the command, and its refresh must read the new type, not the stale one.
+    const prevSecurityType = fSecurityType;
+    fSecurityType = 'biometric';
+    showMigrationModal(true);
+    try {
+        await invoke('enable_encryption_biometric');
+        updateChangeCredentialButton();
+        return true;
+    } catch (e) {
+        fSecurityType = prevSecurityType;
+        hideMigrationModal();
+        const msg = String(e);
+        if (msg.includes('already enabled') || msg.includes('already in progress')) {
+            await resyncEncryptionToggle();
+        } else if (!msg.includes('BIOMETRIC_CANCELLED')) {
+            await popupConfirm('Encryption Failed', escapeHtml(msg), true);
+        }
+        return false;
+    }
+}
+
+/**
+ * Unlock-method row: shows which credential guards this account and switches
+ * between the two MUTUALLY EXCLUSIVE modes — OS-backed (biometrics/device
+ * credential) or Vector-backed (PIN/password). Never both: one credential
+ * means one login path. Switching re-keys the store in memory (the same
+ * engine as Change PIN), so plaintext never touches disk.
+ */
+async function initUnlockMethodRow() {
+    const row = document.getElementById('unlock-method-container');
+    const label = document.getElementById('unlock-method-label');
+    const btn = document.getElementById('unlock-method-switch');
+    const infoBtn = document.getElementById('unlock-method-info');
+    if (!row || !label || !btn) return;
+
+    let bioSupported = false;
+    if (platformFeatures.os === 'android') {
+        try {
+            const st = await invoke('biometric_status');
+            bioSupported = !!st.supported;
+        } catch (e) { /* leave unsupported */ }
+    }
+
+    window.__refreshUnlockMethodRow = () => {
+        const isBio = fSecurityType === 'biometric';
+        // Hidden when encryption is off (nothing to unlock) or when the device
+        // can't do biometrics and we're already on a credential (no alternative).
+        row.style.display = fEncryptionEnabled && (bioSupported || isBio) ? '' : 'none';
+        label.textContent = isBio
+            ? 'Unlock: Biometrics'
+            : `Unlock: ${fSecurityType === 'password' ? 'Password' : 'PIN'}`;
+        btn.textContent = isBio ? 'Use PIN' : 'Use Biometrics';
+    };
+    window.__refreshUnlockMethodRow();
+
+    if (!btn.dataset.unlockBound) {
+        btn.dataset.unlockBound = '1';
+        btn.addEventListener('click', async () => {
+            if (fMigrationInProgress) return;
+            if (fSecurityType === 'biometric') {
+                await switchToCredentialMode();
+            } else {
+                await switchToBiometricMode();
+            }
+        });
+        if (infoBtn) {
+            infoBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                popupConfirm(
+                    'Unlock Method',
+                    'Your local data is always encrypted. This chooses what unlocks it:<br><br>' +
+                    '<b>Biometrics</b> uses your device security (fingerprint, face, or device PIN) with a key held in hardware.<br><br>' +
+                    '<b>PIN or Password</b> uses a credential you type and remember.',
+                    true,
+                    '',
+                    'vector-check.svg'
+                );
+            });
+        }
+    }
+}
+
+/** Vector-backed to OS-backed. The prompt happens before anything commits. */
+async function switchToBiometricMode() {
+    if (!(await confirmBiometricOnlyWarning())) return;
+    const prev = fSecurityType;
+    fSecurityType = 'biometric';
+    fMigrationRekeying = true;
+    showMigrationModal(true);
+    try {
+        await invoke('switch_to_biometric');
+        updateChangeCredentialButton();
+        if (window.__refreshUnlockMethodRow) window.__refreshUnlockMethodRow();
+    } catch (e) {
+        fSecurityType = prev;
+        fMigrationRekeying = false;
+        hideMigrationModal();
+        const msg = String(e);
+        if (!msg.includes('BIOMETRIC_CANCELLED')) {
+            await popupConfirm('Could not switch', escapeHtml(msg), true);
+        }
+        if (window.__refreshUnlockMethodRow) window.__refreshUnlockMethodRow();
+    }
+}
+
+/** OS-backed to Vector-backed. Needs a NEW credential, never the old one. */
+async function switchToCredentialMode() {
+    const result = await promptSecurityCredential(
+        'Switch to PIN or Password',
+        'Choose the credential that will unlock Vector from now on. There is no recovery if you forget it!'
+    );
+    if (!result) return;
+    const prev = fSecurityType;
+    fSecurityType = result.securityType;
+    fMigrationRekeying = true;
+    showMigrationModal(true);
+    try {
+        await invoke('switch_to_credential', {
+            credential: result.credential,
+            securityType: result.securityType,
+        });
+        updateChangeCredentialButton();
+        if (window.__refreshUnlockMethodRow) window.__refreshUnlockMethodRow();
+    } catch (e) {
+        fSecurityType = prev;
+        fMigrationRekeying = false;
+        hideMigrationModal();
+        await popupConfirm('Could not switch', escapeHtml(String(e)), true);
+        if (window.__refreshUnlockMethodRow) window.__refreshUnlockMethodRow();
+    }
 }
 
 /**
@@ -2488,7 +2660,9 @@ async function initEncryptionSettings() {
 function updateChangeCredentialButton() {
     const container = document.getElementById('change-pin-container');
     if (!container) return;
-    if (fEncryptionEnabled) {
+    // Biometric accounts have no typeable credential to change; the
+    // unlock-method row switches them instead.
+    if (fEncryptionEnabled && fSecurityType !== 'biometric') {
         container.style.display = '';
         domSettingsChangePinLabel.textContent = fSecurityType === 'password' ? 'Change Password' : 'Change PIN';
     } else {
@@ -2536,6 +2710,25 @@ async function handleEncryptionToggleChange(e) {
  * @param {HTMLInputElement} toggle - The toggle element
  */
 async function handleEnableEncryption(toggle) {
+    // Android with capable hardware: offer biometric-only mode first — a
+    // generated credential nobody knows, unlocked solely by the OS.
+    if (platformFeatures.os === 'android') {
+        let bs = null;
+        try { bs = await invoke('biometric_status'); } catch (e) {}
+        if (bs && bs.supported) {
+            const useBio = await popupConfirm(
+                'Protect with Biometrics?',
+                'Unlock Vector with your fingerprint, face, or device PIN. No Vector PIN to remember.<br><br>Choose Cancel to set a PIN or Password instead.',
+                false, '', 'vector-check.svg', '', 'Use Biometrics'
+            );
+            if (useBio) {
+                const ok = await enableBiometricOnlyEncryption();
+                if (!ok) toggle.checked = false;
+                return;
+            }
+        }
+    }
+
     // Ask user to choose security type
     const result = await promptSecurityCredential('Set Up Encryption', 'Choose how to protect your local data. There is no recovery if you forget!');
 
@@ -2548,8 +2741,8 @@ async function handleEnableEncryption(toggle) {
     showMigrationModal(true);
 
     try {
-        await invoke('enable_encryption', { credential: result.credential, securityType: result.securityType });
         fSecurityType = result.securityType;
+        await invoke('enable_encryption', { credential: result.credential, securityType: result.securityType });
         updateChangeCredentialButton();
     } catch (e) {
         hideMigrationModal();
@@ -2928,7 +3121,10 @@ async function setupMigrationEventListeners() {
         // Update local state
         fEncryptionEnabled = document.getElementById('security-encryption-toggle').checked;
         updateChangeCredentialButton();
-        showToast(wasRekeying ? 'Credential changed' : wasEncrypting ? 'Encryption enabled' : 'Encryption disabled');
+        if (window.__refreshUnlockMethodRow) window.__refreshUnlockMethodRow();
+        showToast(wasRekeying
+            ? (fSecurityType === 'biometric' ? 'Now unlocking with biometrics' : 'Unlock method updated')
+            : wasEncrypting ? 'Encryption enabled' : 'Encryption disabled');
     });
 }
 

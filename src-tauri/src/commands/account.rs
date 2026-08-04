@@ -19,6 +19,11 @@ use crate::{Profile, account_manager, db, crypto};
 /// Prevents debug_hot_reload_sync from using partial state preloaded by standalone background sync.
 pub(crate) static FULL_SESSION_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
+/// Whether a full foreground login has completed this process.
+pub(crate) fn full_session_initialized() -> bool {
+    FULL_SESSION_INITIALIZED.load(std::sync::atomic::Ordering::Acquire)
+}
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -756,6 +761,8 @@ async fn clear_pending_nip55_session() {
     vector_core::drain_nip55_state();
     #[cfg(target_os = "android")]
     crate::android::external_signer::on_session_reset();
+    #[cfg(target_os = "android")]
+    crate::android::biometric::on_session_reset();
     // NIP-55 holds no secret vault, but a prior local/bunker staging on this
     // process could have left ENCRYPTION_KEY / MY_SECRET_KEY populated.
     MY_SECRET_KEY.clear(&[&crate::ENCRYPTION_KEY]);
@@ -1501,10 +1508,15 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
         if let Some(pwd) = password {
             let key_bytes = crypto::hash_pass(pwd).await;
             crate::ENCRYPTION_KEY.set(key_bytes, &[&MY_SECRET_KEY]);
-            // A keyless account has no pkey whose failed decrypt would reject a
-            // wrong PIN, so verify against the canary written at setup. Without
-            // this a wrong PIN is silently accepted and every at-rest write this
-            // session is encrypted under the wrong key (split-key corruption).
+        }
+        // A keyless account has no pkey whose failed decrypt would reject a
+        // wrong key, so verify against the canary written at setup. Checked
+        // whenever the vault holds a key — from the password above, a
+        // biometric unlock, or ANY other priming path: this command is
+        // independently callable, so the wrong-key rejection must live at
+        // the sink. An unverified vault key would silently encrypt every
+        // at-rest write this session under it (split-key corruption).
+        if crate::ENCRYPTION_KEY.has_key() {
             if let Ok(Some(stored)) = vector_core::db::get_sql_setting("nip55_pin_check".to_string()) {
                 let ok = matches!(
                     crate::crypto::maybe_decrypt(stored).await,
@@ -1552,6 +1564,11 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
             crate::ENCRYPTION_KEY.set(key_bytes, &[&MY_SECRET_KEY]);
             crypto::internal_decrypt(stored_pkey, Some(pwd)).await
                 .map_err(|_| "Incorrect password".to_string())?
+        } else if !stored_pkey.starts_with("nsec1") && crate::ENCRYPTION_KEY.has_key() {
+            // Vault-primed login (biometric unlock): the caller installed and
+            // verified the derived key, so decrypt with the vault directly.
+            crypto::internal_decrypt(stored_pkey, None).await
+                .map_err(|_| "Stored key does not match the unlocked vault".to_string())?
         } else {
             stored_pkey
         };
@@ -1725,6 +1742,7 @@ pub async fn setup_encryption<R: Runtime>(
     handle: AppHandle<R>,
     password: String,
     security_type: String,
+    biometric_wrap: Option<String>,
 ) -> Result<(), String> {
     use zeroize::{Zeroize, Zeroizing};
 
@@ -1777,13 +1795,21 @@ pub async fn setup_encryption<R: Runtime>(
         if !session.is_valid() {
             return Err("Account changed during setup. Please try again.".into());
         }
-        vector_core::db::commit_nip55_account_setup(&user_pk_hex, &package, true, Some(&security_type))?;
+        // The canary (a keyless account's only wrong-PIN detector) rides the
+        // commit transaction. Encrypted with the raw derived key: the vault is
+        // set, but encryption_enabled only flips true inside the commit, so
+        // maybe_encrypt would pass it through as plaintext here.
+        let canary = {
+            let mut k: [u8; 32] = crate::ENCRYPTION_KEY.get()
+                .ok_or("Encryption key vanished during setup")?;
+            let c = crate::crypto::encrypt_with_key(NIP55_PIN_CANARY, &k);
+            use zeroize::Zeroize as _;
+            k.zeroize();
+            c
+        };
+        vector_core::db::commit_nip55_account_setup(&user_pk_hex, &package, true, Some(&security_type), biometric_wrap.as_deref(), Some(&canary))?;
         vector_core::clear_pending_nip55_setup();
         crate::state::set_encryption_enabled(true);
-        // Persist a PIN canary (encrypted under the derived key) so boot can
-        // reject a wrong PIN — a keyless account has no pkey to do it implicitly.
-        let canary = crate::crypto::maybe_encrypt(NIP55_PIN_CANARY.to_string()).await;
-        vector_core::db::set_sql_setting("nip55_pin_check".to_string(), canary)?;
         vector_core::blossom_servers::refresh_cache();
         broadcast_pending_invite_if_any();
         return Ok(());
@@ -1856,6 +1882,7 @@ pub async fn setup_encryption<R: Runtime>(
             Some(&security_type),
             &encrypted_url,
             &remote_pk_hex,
+            biometric_wrap.as_deref(),
         )?;
         vector_core::clear_pending_bunker_setup();
     } else {
@@ -1866,6 +1893,7 @@ pub async fn setup_encryption<R: Runtime>(
             true,
             Some(&security_type),
             encrypted_seed.as_deref(),
+            biometric_wrap.as_deref(),
         )?;
     }
 
@@ -1927,7 +1955,7 @@ pub async fn skip_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), Str
         if !session.is_valid() {
             return Err("Account changed during setup. Please try again.".into());
         }
-        vector_core::db::commit_nip55_account_setup(&user_pk_hex, &package, false, None)?;
+        vector_core::db::commit_nip55_account_setup(&user_pk_hex, &package, false, None, None, None)?;
         vector_core::clear_pending_nip55_setup();
         crate::state::set_encryption_enabled(false);
         vector_core::blossom_servers::refresh_cache();
@@ -1983,6 +2011,7 @@ pub async fn skip_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), Str
             None,
             &url,
             &remote_pk_hex,
+            None,
         )?;
         vector_core::clear_pending_bunker_setup();
     } else {
@@ -1991,6 +2020,7 @@ pub async fn skip_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), Str
             false,
             None,
             encrypted_seed.as_deref(),
+            None,
         )?;
     }
 
