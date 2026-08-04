@@ -1024,9 +1024,16 @@ impl Community {
         self.core.invite_to_community(&self.id, npub).await.map(|_| ())
     }
 
-    /// Mint a public invite link for this community.
+    /// Mint a public invite link for this community (never expires, no label —
+    /// see `create_invite_with` to set either).
     pub async fn create_invite(&self) -> Result<String> {
-        self.core.create_public_invite(&self.id).await
+        self.core.create_public_invite(&self.id, None, None).await
+    }
+
+    /// Mint a public invite link with an optional absolute expiry (unix ms) and an
+    /// attribution label, surfaced as "joined via <label>".
+    pub async fn create_invite_with(&self, expires_at_ms: Option<u64>, label: Option<String>) -> Result<String> {
+        self.core.create_public_invite(&self.id, expires_at_ms, label).await
     }
 
     /// Update the community's name and/or description.

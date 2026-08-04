@@ -432,7 +432,7 @@ impl VectorAgent {
 
     #[tool(description = "Mint a shareable public invite link for a Community this identity owns. Returns the URL.")]
     async fn create_public_invite(&self, Parameters(req): Parameters<CommunityIdRequest>) -> Result<CallToolResult, McpError> {
-        match self.core.create_public_invite(&req.community_id).await {
+        match self.core.create_public_invite(&req.community_id, None, None).await {
             Ok(url) => Ok(CallToolResult::success(vec![Content::text(url)])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
         }

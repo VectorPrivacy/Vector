@@ -1521,7 +1521,15 @@ impl VectorCore {
     }
 
     /// Mint a public invite link for a Community this identity owns. Returns the shareable URL.
-    pub async fn create_public_invite(&self, community_id: &str) -> Result<String> {
+    /// `expires_at_ms` is an ABSOLUTE unix timestamp in MILLISECONDS (v2's native unit and the
+    /// `InviteEntry` wire's); the v1 path takes seconds, so it is converted here rather than at
+    /// each call site. `label` is the attribution bucket shown as "joined via <label>".
+    pub async fn create_public_invite(
+        &self,
+        community_id: &str,
+        expires_at_ms: Option<u64>,
+        label: Option<String>,
+    ) -> Result<String> {
         use crate::community::{service, transport::LiveTransport, CommunityId};
         if community_id.len() != 64 {
             return Err(VectorError::Other("malformed community id".into()));
@@ -1538,9 +1546,10 @@ impl VectorCore {
             // v2 `build_invite_url` appends its own `/invite/<naddr>`, so pass the
             // bare domain (strip the `/invite` the v1 constant carries).
             let base = crate::community::public_invite::INVITE_URL_BASE.trim_end_matches("/invite");
-            let minted = crate::community::v2::service::mint_public_link(&transport, &community, base, None, None)
-                .await
-                .map_err(VectorError::Other)?;
+            let minted =
+                crate::community::v2::service::mint_public_link(&transport, &community, base, expires_at_ms, label)
+                    .await
+                    .map_err(VectorError::Other)?;
             return Ok(minted.url);
         }
         let community = crate::db::community::load_community(&CommunityId(
@@ -1549,7 +1558,8 @@ impl VectorCore {
         .map_err(VectorError::Other)?
         .ok_or_else(|| VectorError::Other("community not found".into()))?;
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-        let (_token, url) = service::create_public_invite(&transport, &community, None, None)
+        let expires_at_secs = expires_at_ms.map(|ms| ms / 1000);
+        let (_token, url) = service::create_public_invite(&transport, &community, expires_at_secs, label)
             .await
             .map_err(VectorError::Other)?;
         Ok(url)

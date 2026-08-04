@@ -532,6 +532,21 @@ fn admin_role_id(community_id: &str) -> Result<String, String> {
 }
 
 /// Whether `community_id` (hex) names a locally-held **v2** community.
+/// Refuse minting an invite into a legacy v1 Community once the timelock has opened.
+/// Every accept door runs `gate_fresh_v1_join`, which refuses a fresh joiner to a live
+/// un-migrated v1 — so the mint would only ever hand out something nobody can redeem,
+/// and the owner would never learn it failed. Fail at the source with the remedy.
+fn refuse_legacy_invite(community_id: &str) -> Result<(), String> {
+    if !is_v2_community(community_id) && vector_core::community::migration::wizard_unlocked(now_secs()) {
+        return Err(
+            "This community still uses the legacy protocol, so new invites can no longer be redeemed. \
+             Upgrade it to Concord v2 first, then share a fresh invite."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn is_v2_community(community_id: &str) -> bool {
     hex_to_id32(community_id).ok().is_some_and(|b| {
         matches!(
@@ -3652,6 +3667,7 @@ pub async fn invite_to_community(community_id: String, invitee_npub: String) -> 
         vector_core::VectorCore.invite_to_community(&community_id, &invitee_npub).await.map_err(|e| e.to_string())?;
         return Ok(());
     }
+    refuse_legacy_invite(&community_id)?;
     let session = vector_core::state::SessionGuard::capture();
 
     let my_pk = vector_core::my_public_key().ok_or("Public key not set")?;
@@ -4256,11 +4272,16 @@ pub async fn create_public_invite(
     expires_in_secs: Option<u64>,
     label: Option<String>,
 ) -> Result<String, String> {
-    // v2 mints a naddr#fragment link (expiry/label wiring is a follow-up).
+    // v2 mints a naddr#fragment link. The facade takes an ABSOLUTE ms deadline;
+    // `expires_in_secs` is a duration, so resolve it against now before converting.
     if is_v2_community(&community_id) {
-        let _ = (expires_in_secs, label);
-        return vector_core::VectorCore.create_public_invite(&community_id).await.map_err(|e| e.to_string());
+        let expires_at_ms = expires_in_secs.map(|secs| now_secs().saturating_add(secs).saturating_mul(1000));
+        return vector_core::VectorCore
+            .create_public_invite(&community_id, expires_at_ms, label)
+            .await
+            .map_err(|e| e.to_string());
     }
+    refuse_legacy_invite(&community_id)?;
     let session = vector_core::state::SessionGuard::capture();
     let id_bytes = hex_to_id32(&community_id)?;
     let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
