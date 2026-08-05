@@ -98,14 +98,16 @@ impl nostr_sdk::prelude::Authenticator for VectorAuthenticator {
         &'a self,
         relay_url: &'a nostr_sdk::prelude::RelayUrl,
         challenge: &'a str,
-    ) -> nostr_sdk::prelude::BoxedFuture<'a, std::result::Result<nostr_sdk::prelude::Event, nostr_sdk::prelude::Error>>
+    ) -> signer::BoxedFuture<'a, std::result::Result<nostr_sdk::prelude::Event, nostr_sdk::prelude::Error>>
     {
         Box::pin(async move {
             let signer =
                 signer::active_signer().map_err(nostr_sdk::prelude::Error::other)?;
-            Ok(nostr_sdk::prelude::EventBuilder::auth(challenge, relay_url.clone())
-                .finalize_async(&signer)
-                .await?)
+            Ok(
+                nostr_sdk::prelude::ClientAuthentication::new(challenge, relay_url.clone())
+                    .finalize_async(&signer)
+                    .await?,
+            )
         })
     }
 }
@@ -758,7 +760,9 @@ impl VectorCore {
             kind: Some(Kind::PrivateDirectMessage),
             relay_hint: None,
         };
-        let mut builder = EventBuilder::reaction(reaction_target, emoji);
+        let mut builder =
+            nostr_sdk::prelude::nip25::ReactionBuilder::new(reaction_target, emoji)
+                .into_event_builder();
         if let Some(tag) = custom_emoji_tag {
             builder = builder.tag(tag);
         }

@@ -1272,7 +1272,7 @@ fn deletion_filter(addrs: &[&PackAddress]) -> Filter {
         .authors(addrs.iter().map(|a| a.pubkey))
         .kind(Kind::EventDeletion)
         .custom_tags(
-            SingleLetterTag::lowercase(Alphabet::A),
+            SingleLetterTag::LOWERCASE_A,
             addrs.iter().map(|a| a.to_addr_string()),
         )
 }

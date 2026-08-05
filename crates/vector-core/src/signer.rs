@@ -35,6 +35,13 @@ use nostr_connect::prelude::{AuthUrlHandler, NostrConnect, NostrConnectUri};
 // SignerError + VectorSigner — the capability-trait bundle
 // ============================================================================
 
+/// Boxed future returned by every async signer capability.
+///
+/// nostr 0.45.0 inlined this shape into its trait signatures and stopped
+/// exporting an alias, so Vector owns the name.
+pub type BoxedFuture<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
 /// Error from any signing backend.
 ///
 /// nostr 0.45 deleted `NostrSigner` and split it into per-capability traits,
@@ -524,7 +531,7 @@ pub fn build_nostrconnect_session(
     relays: Vec<RelayUrl>,
     timeout: Duration,
 ) -> Result<(NostrConnect, String), String> {
-    let uri = build_nostrconnect_uri(client_keys.public_key, relays);
+    let uri = build_nostrconnect_uri(client_keys.public_key(), relays);
     // Append the NIP-46 `perms=` scope. nostr-sdk's `Display` impl doesn't
     // write it, so the SDK-built URI is fine to hand back to `NostrConnect`
     // (which doesn't read perms locally), while the signer app on the other
@@ -945,7 +952,7 @@ mod tests {
         let r1 = RelayUrl::parse("wss://relay1.example").unwrap();
         let r2 = RelayUrl::parse("wss://relay2.example").unwrap();
         let uri = NostrConnectUri::Bunker {
-            remote_signer_public_key: signer_keys.public_key,
+            remote_signer_public_key: signer_keys.public_key(),
             relays: vec![r1.clone(), r2.clone()],
             secret: None,
         };
@@ -968,7 +975,7 @@ mod tests {
         // form we want to surface relays for.
         let client_keys = Keys::generate();
         let relay = RelayUrl::parse("wss://relay.example").unwrap();
-        let client_uri = build_nostrconnect_uri(client_keys.public_key, vec![relay]);
+        let client_uri = build_nostrconnect_uri(client_keys.public_key(), vec![relay]);
         assert!(parse_bunker_relays(&client_uri.to_string()).is_empty(),
             "client URI must not surface as a bunker relay list");
     }
@@ -987,7 +994,7 @@ mod tests {
         // attacker-controlled client pubkey as "the remote signer".
         let client_keys = Keys::generate();
         let relay = RelayUrl::parse("wss://relay.example").unwrap();
-        let uri = build_nostrconnect_uri(client_keys.public_key, vec![relay]);
+        let uri = build_nostrconnect_uri(client_keys.public_key(), vec![relay]);
         let err = parse_bunker_remote_pubkey(&uri.to_string())
             .expect_err("client URI must be rejected");
         assert!(err.contains("Client-initiated"), "unexpected error: {}", err);
@@ -1000,13 +1007,13 @@ mod tests {
         let signer_keys = Keys::generate();
         let relay = RelayUrl::parse("wss://relay.example").unwrap();
         let uri = NostrConnectUri::Bunker {
-            remote_signer_public_key: signer_keys.public_key,
+            remote_signer_public_key: signer_keys.public_key(),
             relays: vec![relay],
             secret: None,
         };
         let parsed = parse_bunker_remote_pubkey(&uri.to_string())
             .expect("valid bunker URI");
-        assert_eq!(parsed, signer_keys.public_key.to_hex().to_ascii_lowercase());
+        assert_eq!(parsed, signer_keys.public_key().to_hex().to_ascii_lowercase());
         assert_eq!(parsed, parsed.to_ascii_lowercase(),
             "callers may compare with == — output must already be lowercase");
     }
@@ -1088,7 +1095,7 @@ mod tests {
         let relay = RelayUrl::parse("wss://relay.example").unwrap();
         let signer_keys = Keys::generate();
         let uri = NostrConnectUri::Bunker {
-            remote_signer_public_key: signer_keys.public_key,
+            remote_signer_public_key: signer_keys.public_key(),
             relays: vec![relay],
             secret: None,
         };

@@ -135,7 +135,7 @@ pub async fn login<R: Runtime>(
             .ok_or("Public key not initialized")?
             .to_bech32()
             .map_err(|e| format!("Bech32 error: {}", e))?;
-        let new_npub = new_keys.public_key.to_bech32()
+        let new_npub = new_keys.public_key().to_bech32()
             .map_err(|e| format!("Bech32 error: {}", e))?;
         if prev_npub == new_npub {
             return Ok(LoginResult { public: prev_npub, existing: false });
@@ -167,7 +167,7 @@ pub async fn login<R: Runtime>(
     // already on disk lands here in add-account mode. Switch into the existing
     // account instead of stomping its per-account dir with a fresh
     // PENDING_NSEC install.
-    let public_key = keys.public_key;
+    let public_key = keys.public_key();
     let new_npub = public_key.to_bech32()
         .map_err(|e| format!("Bech32 error: {}", e))?;
     if let Ok(existing) = account_manager::list_accounts(&handle) {
@@ -1258,7 +1258,7 @@ pub async fn create_account() -> Result<LoginResult, String> {
     }
 
     // Store secret key in the guarded vault, then construct the client with GuardedSigner
-    let public_key = keys.public_key;
+    let public_key = keys.public_key();
     MY_SECRET_KEY.store_from_keys(&keys, &[&crate::ENCRYPTION_KEY]);
     set_my_public_key(public_key);
     drop(keys);
@@ -1579,7 +1579,7 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
         let keys = Keys::parse(&nsec).map_err(|_| "Invalid stored key".to_string())?;
         nsec.zeroize();
 
-        let client_public_key = keys.public_key;
+        let client_public_key = keys.public_key();
         MY_SECRET_KEY.store_from_keys(&keys, &[&crate::ENCRYPTION_KEY]);
 
         // Branch: bunker-signer accounts re-bootstrap the NIP-46 connection

@@ -378,7 +378,7 @@ pub fn open_wrap(wrap: &Event, group: &GroupKey) -> Result<OpenedStream, StreamE
     // Never trust a claimed id: recompute from the serialized fields
     // unconditionally (`ensure_id` is a no-op when an id is present, so it
     // would wave a forged one through). An absent id just takes the computed one.
-    let computed = EventId::new(&rumor.pubkey, &rumor.created_at, &rumor.kind, &rumor.tags, &rumor.content);
+    let computed = EventId::compute(&rumor.pubkey, &rumor.created_at, &rumor.kind, &rumor.tags, &rumor.content);
     if let Some(claimed) = rumor.id {
         if claimed != computed {
             return Err(StreamError::BadRumorId);

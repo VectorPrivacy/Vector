@@ -1119,7 +1119,7 @@ mod tests {
 
     fn make_rumor(keys: &Keys, kind: Kind, content: &str, t: Tags) -> RumorEvent {
         RumorEvent {
-            id: EventId::all_zeros(),
+            id: EventId::from_byte_array([0u8; 32]),
             kind,
             content: content.to_string(),
             tags: t,

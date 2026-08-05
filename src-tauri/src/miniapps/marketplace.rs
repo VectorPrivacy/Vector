@@ -513,7 +513,7 @@ pub async fn fetch_marketplace_apps(trusted_only: bool) -> Result<Vec<Marketplac
     // Build filter for marketplace events
     let mut filter = Filter::new()
         .kind(Kind::from(MINIAPP_MARKETPLACE_KIND))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::T), "miniapp");
+        .custom_tag(SingleLetterTag::LOWERCASE_T, "miniapp");
 
     // If trusted_only, filter by trusted publishers
     if trusted_only {

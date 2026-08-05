@@ -50,7 +50,7 @@ pub async fn get_or_create_invite_code() -> Result<String, String> {
     let filter = Filter::new()
         .author(my_public_key)
         .kind(Kind::ApplicationSpecificData)
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), "vector")
+        .custom_tag(SingleLetterTag::LOWERCASE_D, "vector")
         .limit(100);
 
     let mut events = client
@@ -108,8 +108,8 @@ pub async fn accept_invite_code(invite_code: String) -> Result<String, String> {
     // Search for the invite event
     let filter = Filter::new()
         .kind(Kind::ApplicationSpecificData)
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), "vector")
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::R), &invite_code)
+        .custom_tag(SingleLetterTag::LOWERCASE_D, "vector")
+        .custom_tag(SingleLetterTag::LOWERCASE_R, &invite_code)
         .limit(1);
 
 
@@ -173,7 +173,7 @@ pub async fn get_invited_users(npub: String) -> Result<u32, String> {
     let filter = Filter::new()
         .author(inviter_pubkey)
         .kind(Kind::ApplicationSpecificData)
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), "vector")
+        .custom_tag(SingleLetterTag::LOWERCASE_D, "vector")
         .limit(100);
 
     let mut events = client
@@ -200,7 +200,7 @@ pub async fn get_invited_users(npub: String) -> Result<u32, String> {
     // Now fetch all acceptance events for this invite code from the trusted relays
     let acceptance_filter = Filter::new()
         .kind(Kind::ApplicationSpecificData)
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), invite_code)
+        .custom_tag(SingleLetterTag::LOWERCASE_D, invite_code)
         .limit(1000); // Allow fetching many acceptances
 
     let mut acceptance_events = client

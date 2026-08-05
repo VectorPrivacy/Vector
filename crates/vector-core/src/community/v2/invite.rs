@@ -578,7 +578,7 @@ pub fn build_direct_invite(
     let seal_content = nip44::encrypt(inviter_keys.secret_key(), recipient, rumor.as_json(), nip44::Version::default())
         .map_err(|e| InviteError::Crypto(e.to_string()))?;
     let seal = EventBuilder::new(Kind::Seal, seal_content)
-        .custom_created_at(Timestamp::tweaked(crate::sending::NIP59_RANDOM_TIMESTAMP_TWEAK))
+        .custom_created_at(crate::sending::tweaked_timestamp())
         .finalize(inviter_keys)
         .map_err(|e| InviteError::Crypto(e.to_string()))?;
 
@@ -594,7 +594,7 @@ pub fn build_direct_invite(
     }
     EventBuilder::new(Kind::GiftWrap, wrap_content)
         .tags(tags)
-        .custom_created_at(Timestamp::tweaked(crate::sending::NIP59_RANDOM_TIMESTAMP_TWEAK))
+        .custom_created_at(crate::sending::tweaked_timestamp())
         .finalize(&ephemeral)
         .map_err(|e| InviteError::Crypto(e.to_string()))
 }
@@ -674,7 +674,7 @@ pub async fn build_direct_invite_signed<S: crate::signer::VectorSigner + ?Sized>
     let rumor_json = rumor.as_json();
     let seal_content = signer.nip44_encrypt_async(recipient, &rumor_json).await.map_err(|e| InviteError::Crypto(e.to_string()))?;
     let seal_unsigned = EventBuilder::new(Kind::Seal, seal_content)
-        .custom_created_at(Timestamp::tweaked(crate::sending::NIP59_RANDOM_TIMESTAMP_TWEAK))
+        .custom_created_at(crate::sending::tweaked_timestamp())
         .finalize_unsigned_with_id(inviter_pk);
     let seal = signer.sign_event_async(seal_unsigned).await.map_err(|e| InviteError::Crypto(e.to_string()))?;
     let ephemeral = Keys::generate();
@@ -689,7 +689,7 @@ pub async fn build_direct_invite_signed<S: crate::signer::VectorSigner + ?Sized>
     }
     EventBuilder::new(Kind::GiftWrap, wrap_content)
         .tags(tags)
-        .custom_created_at(Timestamp::tweaked(crate::sending::NIP59_RANDOM_TIMESTAMP_TWEAK))
+        .custom_created_at(crate::sending::tweaked_timestamp())
         .finalize(&ephemeral)
         .map_err(|e| InviteError::Crypto(e.to_string()))
 }

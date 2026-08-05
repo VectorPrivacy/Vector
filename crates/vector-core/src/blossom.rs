@@ -1,6 +1,6 @@
 use crate::signer::VectorSigner;
 use nostr_sdk::prelude::{Event, FinalizeEventAsync, Timestamp, Url};
-use nostr::hashes::{sha256::Hash as Sha256Hash, Hash};
+use bitcoin_hashes::sha256::Hash as Sha256Hash;
 use nostr_blossom::prelude::*;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
 use reqwest::{Body, StatusCode};
@@ -1216,7 +1216,7 @@ mod hash_extract_tests {
 
     #[test]
     fn x_sha256_simd_hex_matches_lowerhex() {
-        use nostr::hashes::{sha256::Hash as Sha256Hash, Hash};
+        use bitcoin_hashes::sha256::Hash as Sha256Hash;
         // The X-SHA-256 header swapped format!("{:x}") for the SIMD encoder; they MUST agree
         // byte-for-byte (sha256::Hash displays in forward order — a reversed-display hash type would
         // silently corrupt the upload header).

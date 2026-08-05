@@ -20,14 +20,19 @@ categories = ["network-programming", "cryptography", "asynchronous"]
 # feature from nostr-sdk, and the sdk enables only std/rand/os-rng on `nostr`.
 # Cargo unifies these across the workspace, so this is the one place they're set.
 
-# EXACT-pinned (=) across the whole nostr family: the alphas are not
-# inter-compatible, and a caret range lets a fresh consumer resolve a MIXED
-# set (alpha.8 core with alpha.5 siblings fails to compile). Bump all four
-# together or not at all.
-nostr = { version = "=0.45.0-alpha.5", features = ["nip04", "nip06", "nip44", "nip46", "nip59", "rand", "os-rng"] }
-nostr-sdk = "=0.45.0-alpha.5"
-nostr-blossom = "=0.45.0-alpha.5"
-nostr-connect = "=0.45.0-alpha.5"
+# EXACT-pinned (=) across the whole nostr family: a caret range lets a fresh
+# consumer resolve a MIXED set, and these crates share types across their
+# boundaries, so a mismatched sibling fails to compile. Bump all four together
+# or not at all.
+nostr = { version = "=0.45.0", features = ["nip04", "nip06", "nip44", "nip46", "nip59", "rand", "os-rng"] }
+nostr-sdk = "=0.45.0"
+nostr-blossom = "=0.45.0"
+nostr-connect = "=0.45.0"
+# Blossom blob hashing. Must track nostr-blossom's own bitcoin_hashes major, or
+# the Sha256Hash we hand it is a different type. `hex` is explicit because it
+# gates Display/FromStr on the hash: the `std` default only forwards to it
+# (`hex?/std`), so relying on a sibling's feature union would be a silent trap.
+bitcoin_hashes = { version = "1.2", default-features = false, features = ["std", "hex"] }
 bip39 = { version = "2.2.2", features = ["rand"] }
 
 # Database

@@ -352,7 +352,7 @@ mod tests {
         let sender = Keys::generate();
         let recipient = Keys::generate();
         // Stand-in wrap: any valid signed event — the id is what must survive.
-        let wrap = EventBuilder::text_note("wrap").finalize(&ephemeral).unwrap();
+        let wrap = EventBuilder::new(Kind::TextNote, "wrap").finalize(&ephemeral).unwrap();
         let rumor = EventBuilder::new(Kind::PrivateDirectMessage, "hello")
             .tag(Tag::public_key(recipient.public_key()))
             .finalize_unsigned_with_id(sender.public_key());

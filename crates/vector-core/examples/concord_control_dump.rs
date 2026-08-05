@@ -50,7 +50,7 @@ async fn main() {
     client.connect().await;
     let filter = Filter::new()
         .kind(Kind::Custom(3308))
-        .custom_tags(SingleLetterTag::lowercase(Alphabet::Z), [pseudonym]);
+        .custom_tags(SingleLetterTag::LOWERCASE_Z, [pseudonym]);
     let events = client
         .fetch_events(ReqTarget::manual(
             community.relays.clone().into_iter().map(|u| (u, vec![filter.clone()])),

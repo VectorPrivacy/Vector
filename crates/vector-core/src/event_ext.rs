@@ -31,7 +31,7 @@ mod tests {
     #[test]
     fn id_is_populated_and_matches_the_signed_event() {
         let keys = Keys::generate();
-        let unsigned = EventBuilder::text_note("hi").finalize_unsigned_with_id(keys.public_key());
+        let unsigned = EventBuilder::new(Kind::TextNote, "hi").finalize_unsigned_with_id(keys.public_key());
         let id = unsigned.id.expect("id computed eagerly");
         let signed = unsigned.finalize(&keys).expect("sign");
         assert_eq!(id, signed.id, "eager id must equal the signed event id");
@@ -42,7 +42,7 @@ mod tests {
         // Guards the reason this trait exists: if upstream ever populates the id
         // again, this fails and the wrapper can go.
         let keys = Keys::generate();
-        let unsigned = EventBuilder::text_note("hi").finalize_unsigned(keys.public_key());
+        let unsigned = EventBuilder::new(Kind::TextNote, "hi").finalize_unsigned(keys.public_key());
         assert!(unsigned.id.is_none());
     }
 }

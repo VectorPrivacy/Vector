@@ -34,8 +34,8 @@ vector-core = { path = "../crates/vector-core", default-features = false }
 
 # NIP features are set on the `nostr` dep in vector-core and unify across the
 # workspace; 0.45 removed them from nostr-sdk entirely.
-nostr-sdk = "0.45.0-alpha.5"
-nostr-blossom = "0.45.0-alpha.5"
+nostr-sdk = "=0.45.0"
+nostr-blossom = "=0.45.0"
 bip39 = { version = "2.2.2", features = ["rand"] }
 tokio = { version = "1.49.0", features = ["sync", "time", "net", "io-util"] }
 futures-util = "0.3.31"
@@ -156,5 +156,5 @@ tempfile = "3"
 whisper-rs-sys = { git = "https://github.com/VectorPrivacy/whisper-rs.git", branch = "master" }
 # nostr SDK's SecretKey Drop uses non_secure_erase which the compiler can optimize away.
 # Patched to use zeroize (volatile writes) so secret key bytes are guaranteed cleared from the stack.
-# Fork: https://github.com/VectorPrivacy/nostr/tree/zeroize-secretkey-v0.45
-nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "zeroize-secretkey-v0.45" }
+# Fork: https://github.com/VectorPrivacy/nostr/tree/zeroize-secretkey-v0.45.0
+nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "zeroize-secretkey-v0.45.0" }

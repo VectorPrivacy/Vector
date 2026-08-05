@@ -125,18 +125,18 @@ impl Query {
         }
         if !self.z_tags.is_empty() {
             filter = filter
-                .custom_tags(SingleLetterTag::lowercase(Alphabet::Z), self.z_tags.clone());
+                .custom_tags(SingleLetterTag::LOWERCASE_Z, self.z_tags.clone());
         }
         if !self.d_tags.is_empty() {
             filter = filter.identifiers(self.d_tags.clone());
         }
         if !self.p_tags.is_empty() {
             filter = filter
-                .custom_tags(SingleLetterTag::lowercase(Alphabet::P), self.p_tags.clone());
+                .custom_tags(SingleLetterTag::LOWERCASE_P, self.p_tags.clone());
         }
         if !self.k_tags.is_empty() {
             filter = filter
-                .custom_tags(SingleLetterTag::lowercase(Alphabet::K), self.k_tags.clone());
+                .custom_tags(SingleLetterTag::LOWERCASE_K, self.k_tags.clone());
         }
         if !self.authors.is_empty() {
             let authors: Vec<PublicKey> =
@@ -1698,10 +1698,10 @@ mod tests {
     }
 
     /// Build an event carrying one arbitrary single-letter tag (recipient `p`, wrapped-kind `k`).
-    fn evt_sl(kind: u16, letter: Alphabet, value: &str) -> Event {
+    fn evt_sl(kind: u16, letter: SingleLetterTag, value: &str) -> Event {
         EventBuilder::new(Kind::Custom(kind), "x")
             .tags([Tag::custom(
-                SingleLetterTag::lowercase(letter).as_char().to_string(),
+                letter.as_char().to_string(),
                 [value.to_string()],
             )])
             .finalize(&Keys::generate())
@@ -1723,7 +1723,7 @@ mod tests {
     #[test]
     fn to_filter_and_matches_agree_on_p_tags() {
         let recipient = Keys::generate().public_key().to_hex();
-        let e = evt_sl(1059, Alphabet::P, &recipient);
+        let e = evt_sl(1059, SingleLetterTag::LOWERCASE_P, &recipient);
         let q = Query { kinds: vec![1059], p_tags: vec![recipient], ..Default::default() };
         assert!(q.matches(&e));
         assert!(q.to_filter().match_event(&e, MatchEventOptions::new()));
@@ -1734,7 +1734,7 @@ mod tests {
 
     #[test]
     fn to_filter_and_matches_agree_on_k_tags() {
-        let e = evt_sl(1059, Alphabet::K, "3311");
+        let e = evt_sl(1059, SingleLetterTag::LOWERCASE_K, "3311");
         let q = Query { kinds: vec![1059], k_tags: vec!["3311".into()], ..Default::default() };
         assert!(q.matches(&e));
         assert!(q.to_filter().match_event(&e, MatchEventOptions::new()));
@@ -1895,7 +1895,7 @@ mod tests {
             relay.subscribe(Query { kinds: vec![1059], p_tags: vec![alice.clone()], ..Default::default() });
         let mut sub_bob =
             relay.subscribe(Query { kinds: vec![1059], p_tags: vec![bob.clone()], ..Default::default() });
-        let wrap = evt_sl(1059, Alphabet::P, &alice);
+        let wrap = evt_sl(1059, SingleLetterTag::LOWERCASE_P, &alice);
         relay.publish(&wrap, &relays).await.unwrap();
         assert_eq!(sub_alice.try_recv().unwrap().id, wrap.id, "addressed recipient gets it live");
         assert!(sub_bob.try_recv().is_err(), "a differently-addressed subscriber does not");

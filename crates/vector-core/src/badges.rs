@@ -52,7 +52,7 @@ pub async fn has_fawkes_badge(pubkey: &PublicKey) -> Result<bool, String> {
     let filter = Filter::new()
         .author(*pubkey)
         .kind(Kind::ApplicationSpecificData)
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), "fawkes_2025")
+        .custom_tag(SingleLetterTag::LOWERCASE_D, "fawkes_2025")
         // > 1 to tolerate relays serving superseded copies of the replaceable
         // event alongside the current one.
         .limit(10);
@@ -301,7 +301,7 @@ async fn fetch_bug_hunter_raw(pubkey: &PublicKey) -> Result<(Vec<(EventId, u8)>,
     let award_filter = Filter::new()
         .author(issuer)
         .kind(Kind::Custom(8))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::P), pubkey.to_hex())
+        .custom_tag(SingleLetterTag::LOWERCASE_P, pubkey.to_hex())
         .limit(64);
     let mut awards: Vec<(EventId, u8)> = Vec::new();
     let mut stream = client

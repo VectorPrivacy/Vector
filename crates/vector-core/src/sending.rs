@@ -17,6 +17,15 @@ use nostr_sdk::prelude::*;
 /// re-guessed per call site.
 pub const NIP59_RANDOM_TIMESTAMP_TWEAK: Range<u64> = 0..172_800;
 
+/// `Timestamp::now()` backdated by a random offset inside the NIP-59 window.
+///
+/// 0.45.0 removed `Timestamp::tweaked`; this mirrors what nip59 does internally.
+pub fn tweaked_timestamp() -> Timestamp {
+    use ::rand::Rng;
+    let secs: u64 = ::rand::thread_rng().gen_range(NIP59_RANDOM_TIMESTAMP_TWEAK);
+    Timestamp::from_secs(Timestamp::now().as_secs().saturating_sub(secs))
+}
+
 use crate::state::{nostr_client, my_public_key, STATE};
 use crate::types::{Message, Attachment};
 use crate::crypto;

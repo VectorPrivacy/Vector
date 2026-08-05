@@ -10,7 +10,7 @@
 
 use nostr_sdk::prelude::*;
 
-use crate::signer::SignerError;
+use crate::signer::{BoxedFuture, SignerError};
 
 /// A signer backed by the `MY_SECRET_KEY` vault.
 ///

@@ -400,7 +400,7 @@ fn hexpref(b: &[u8]) -> String {
 /// old name": relay starvation (newer editions missing from every reachable relay) vs
 /// gap-quarantine (head present but a chain prerequisite missing).
 async fn print_editions(c: &vector_core::community::Community) {
-    use nostr_sdk::prelude::{Alphabet, Client, Filter, Kind, SingleLetterTag};
+    use nostr_sdk::prelude::{Client, Filter, Kind, SingleLetterTag};
     use std::time::Duration;
     use vector_core::stored_event::event_kind::COMMUNITY_CONTROL;
 
@@ -412,7 +412,7 @@ async fn print_editions(c: &vector_core::community::Community) {
         client.try_connect().timeout(Duration::from_secs(15)).await;
         let filter = Filter::new()
             .kind(Kind::Custom(COMMUNITY_CONTROL))
-            .custom_tags(SingleLetterTag::lowercase(Alphabet::Z), vec![z.clone()])
+            .custom_tags(SingleLetterTag::LOWERCASE_Z, vec![z.clone()])
             .limit(250);
         let res = client.fetch_events(nostr_sdk::prelude::ReqTarget::single(r.clone(), [filter]))
                 .timeout(Duration::from_secs(15)).await;

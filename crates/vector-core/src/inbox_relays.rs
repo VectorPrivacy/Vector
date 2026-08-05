@@ -580,7 +580,7 @@ pub async fn send_event_pool_first_ok(
 /// **both** the signed wrap event and the ephemeral secp256k1 secret
 /// used to sign it.
 ///
-/// Wire-compatible with `EventBuilder::gift_wrap_from_seal` — other
+/// Wire-compatible with `GiftWrapBuilder` — other
 /// clients cannot tell the wraps apart. The only difference is that we
 /// keep the ephemeral key instead of dropping it on the floor, so the
 /// user can later sign a NIP-09 deletion against the wrap event id and
@@ -608,7 +608,7 @@ pub fn wrap_with_retained_key(
     tags.push(Tag::public_key(*receiver));
     let event = EventBuilder::new(Kind::GiftWrap, content)
         .tags(tags)
-        .custom_created_at(Timestamp::tweaked(crate::sending::NIP59_RANDOM_TIMESTAMP_TWEAK))
+        .custom_created_at(crate::sending::tweaked_timestamp())
         .finalize(&keys)
         .map_err(|e| format!("sign wrap: {}", e))?;
     Ok((event, secret))

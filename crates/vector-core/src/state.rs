@@ -494,7 +494,7 @@ mod session_globals_tests {
         let keys = Keys::parse(
             "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5",
         ).expect("parse test nsec");
-        let pk = keys.public_key;
+        let pk = keys.public_key();
 
         assert_eq!(my_public_key(), None, "starts as None");
 

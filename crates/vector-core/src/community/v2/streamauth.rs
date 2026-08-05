@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
 
-use nostr_sdk::prelude::{Client, ClientMessage, ClientNotification, EventBuilder, Keys, RelayUrl, StreamExt};
+use nostr_sdk::prelude::{Client, ClientAuthentication, ClientMessage, ClientNotification, Keys, RelayUrl, StreamExt};
 
 use super::community::CommunityV2;
 
@@ -160,7 +160,7 @@ pub fn is_empty() -> bool {
 fn sign_all(challenge: &str, relay: &RelayUrl) -> Vec<nostr_sdk::prelude::Event> {
     let reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
     reg.values()
-        .filter_map(|keys| EventBuilder::auth(challenge, relay.clone()).finalize(keys).ok())
+        .filter_map(|keys| ClientAuthentication::new(challenge, relay.clone()).finalize(keys).ok())
         .collect()
 }
 

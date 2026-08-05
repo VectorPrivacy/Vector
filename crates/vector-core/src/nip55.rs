@@ -29,7 +29,7 @@ use std::sync::{LazyLock, OnceLock};
 
 use nostr_sdk::prelude::*;
 
-use crate::signer::SignerError;
+use crate::signer::{BoxedFuture, SignerError};
 
 // ============================================================================
 // Nip55Error — hook failure taxonomy
@@ -690,7 +690,7 @@ mod tests {
         // no registered backend fails `Missing` and flips the state.
         set_nip55_state(Nip55State::Idle);
         let fresh = Nip55Signer::new(keys.public_key());
-        let unsigned = EventBuilder::text_note("hi")
+        let unsigned = EventBuilder::new(Kind::TextNote, "hi")
             .finalize_unsigned_with_id(keys.public_key());
         let err = fresh.sign_event_async(unsigned).await;
         assert!(err.is_err(), "no backend registered => sign must fail");

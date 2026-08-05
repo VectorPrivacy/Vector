@@ -257,7 +257,7 @@ pub async fn refresh_subscription(client: &Client) {
             Kind::Custom(event_kind::COMMUNITY_CONTROL),
             Kind::Custom(event_kind::COMMUNITY_REKEY),
         ])
-        .custom_tags(SingleLetterTag::lowercase(Alphabet::Z), pseudonyms)
+        .custom_tags(SingleLetterTag::LOWERCASE_Z, pseudonyms)
         .limit(0);
 
     // Pool-wide subscribe — the path that streams on Android (replaces any prior one).

@@ -1635,7 +1635,7 @@ mod tests {
         use nostr_sdk::prelude::{EventId, Timestamp, Tags};
         let author = Keys::generate();
         let opened = OpenedMessage {
-            message_id: EventId::all_zeros(),
+            message_id: EventId::from_byte_array([0u8; 32]),
             author: author.public_key(),
             content: "no ms".into(),
             channel_id: ChannelId([1u8; 32]),
@@ -1645,7 +1645,7 @@ mod tests {
             kind: 3300,
             attachments: vec![],
             citation: None,
-            wrapper_id: EventId::all_zeros(),
+            wrapper_id: EventId::from_byte_array([0u8; 32]),
             tags: Tags::new(),
         };
         assert_eq!(build_message(&opened, &author.public_key()).at, 1_500_000);

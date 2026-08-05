@@ -11,4 +11,4 @@ path = "src/main.rs"
 [dependencies]
 vector-core = { path = "../vector-core" }
 tokio = { version = "1.49.0", features = ["full"] }
-nostr-sdk = "0.45.0-alpha.5"
+nostr-sdk = "=0.45.0"
