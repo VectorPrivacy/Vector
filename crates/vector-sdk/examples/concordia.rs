@@ -319,6 +319,10 @@ async fn main() -> vector_sdk::Result<()> {
             BotEvent::Typing { npub, .. } => println!("[TYPING] {}", short(&npub)),
             BotEvent::Invite { community_id } => println!("[INVITE] for community {}", short(&community_id)),
             BotEvent::Removed { community_id } => println!("[REMOVED] from community {} — I was kicked/banned", short(&community_id)),
+            BotEvent::ChannelKeyed { community_id, channel_id } => {
+                println!("[KEYED] private channel {} in {} is readable now", short(&channel_id), short(&community_id));
+                print_channels(&bot, "channels visible (after key vend)").await;
+            }
         }
     })
     .await?;
@@ -371,17 +375,25 @@ async fn push_profile_to_communities() {
 }
 
 /// Print every v2 community's channel names under `label`.
+/// Every channel with its key state. A private channel we've been told about but
+/// hold no key for prints as `#name (locked)` — the signal that an admin granted
+/// access whose key vend hasn't landed yet, rather than a channel that is simply
+/// quiet.
 async fn print_channels(bot: &VectorBot, label: &str) {
-    for c in bot.core().list_communities().await {
-        if c.get("version").and_then(|v| v.as_u64()) == Some(2) {
-            let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-            let chans: Vec<String> = c
-                .get("channels")
-                .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|ch| ch.get("name").and_then(|n| n.as_str()).map(String::from)).collect())
-                .unwrap_or_default();
-            println!("── {label} in \"{name}\": {chans:?}");
+    for community in bot.communities().await {
+        let channels = community.channels().await;
+        if channels.is_empty() {
+            continue;
         }
+        let rendered: Vec<String> = channels
+            .iter()
+            .map(|ch| match (ch.is_private(), ch.is_readable()) {
+                (true, false) => format!("#{} (locked)", ch.name()),
+                (true, true) => format!("#{} (private)", ch.name()),
+                _ => format!("#{}", ch.name()),
+            })
+            .collect();
+        println!("── {label} in {}: {}", short(community.id()), rendered.join(", "));
     }
 }
 

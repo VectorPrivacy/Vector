@@ -1009,7 +1009,113 @@ impl Community {
         Member { core: self.core, community_id: self.id.clone(), npub: npub.into() }
     }
 
-    /// Observed members (best-effort, from recent activity).
+    /// Every channel in this community, **including private ones this bot cannot
+    /// read yet**.
+    ///
+    /// A private channel you have been told about but not yet handed the key for
+    /// is listed with [`is_readable`](CommunityChannel::is_readable) false. That
+    /// is the difference between "not a member" and "a member still waiting on
+    /// the key", which is otherwise indistinguishable from silence.
+    ///
+    /// ```no_run
+    /// # use vector_sdk::VectorBot;
+    /// # async fn run(bot: VectorBot) -> vector_sdk::Result<()> {
+    /// for community in bot.communities().await {
+    ///     for ch in community.channels().await {
+    ///         if ch.is_private() && !ch.is_readable() {
+    ///             eprintln!("waiting on a key for #{}", ch.name());
+    ///         }
+    ///     }
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub async fn channels(&self) -> Vec<CommunityChannel> {
+        self.core
+            .list_communities()
+            .await
+            .into_iter()
+            .find(|v| {
+                v.get("community_id").or_else(|| v.get("id")).and_then(|i| i.as_str()) == Some(self.id.as_str())
+            })
+            .and_then(|v| v.get("channels").cloned())
+            .and_then(|c| serde_json::from_value::<Vec<CommunityChannel>>(c).ok())
+            .unwrap_or_default()
+    }
+
+    /// A handle to one channel of this community by id.
+    pub fn channel(&self, channel_id: impl Into<String>) -> Channel {
+        Channel { core: self.core, id: channel_id.into(), kind: ChannelKind::Community }
+    }
+
+    /// Create a public channel — readable by every member, no key distribution.
+    /// Returns its id.
+    pub async fn create_channel(&self, name: &str) -> Result<String> {
+        self.core.create_channel(&self.id, name, false).await
+    }
+
+    /// Create a private channel: its own key, plus the channel-scoped role that
+    /// is its access list. Only you can read it until you
+    /// [`grant_access`](Self::grant_access) to someone. Returns its id.
+    pub async fn create_private_channel(&self, name: &str) -> Result<String> {
+        self.core.create_channel(&self.id, name, true).await
+    }
+
+    /// Rename a channel. Its id and history survive.
+    pub async fn rename_channel(&self, channel_id: &str, name: &str) -> Result<()> {
+        self.core.rename_channel(&self.id, channel_id, name).await
+    }
+
+    /// Delete a channel. Terminal — the id is never reused.
+    pub async fn delete_channel(&self, channel_id: &str) -> Result<()> {
+        self.core.delete_channel(&self.id, channel_id).await
+    }
+
+    /// Let `npub` read a private channel: grants its access role and sends them
+    /// the key. They pick it up on their next sync.
+    pub async fn grant_access(&self, channel_id: &str, npub: &str) -> Result<()> {
+        self.core.grant_channel_access(&self.id, channel_id, npub).await
+    }
+
+    /// Stop `npub` reading a private channel: drops the access role and rotates
+    /// the key so the removal actually takes effect. Messages they already read
+    /// stay read — rekeying protects the future, not the past.
+    pub async fn revoke_access(&self, channel_id: &str, npub: &str) -> Result<()> {
+        self.core.revoke_channel_access(&self.id, channel_id, npub).await
+    }
+
+    /// Who may read a private channel, as [`Member`] handles — the holders of its
+    /// access role. The owner is entitled whether or not they hold one, so they
+    /// appear here only if granted (a channel's creator is, so an owner-created
+    /// channel does list them).
+    pub fn channel_members(&self, channel_id: &str) -> Vec<Member> {
+        self.core
+            .channel_access(&self.id, channel_id)
+            .ok()
+            .and_then(|v| v.get("members").and_then(|m| m.as_array()).cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|n| n.as_str().map(|n| self.member(n.to_string())))
+            .collect()
+    }
+
+    /// The raw access summary for a channel: its scoped roles, the members
+    /// holding them, the owner, and whether we can read it.
+    pub fn channel_access(&self, channel_id: &str) -> Result<serde_json::Value> {
+        self.core.channel_access(&self.id, channel_id)
+    }
+
+    /// Every member of this community — the Complete Memberlist.
+    ///
+    /// Unified from four sources, not just one: the Guestbook (joins/leaves/kicks),
+    /// anyone **observed publishing** on a channel, everyone the roster grants a
+    /// role to, and the proven owner. Publishing is cryptographic proof of key
+    /// possession, so someone whose Join was lost — or who never published one —
+    /// still counts. Banned npubs are subtracted.
+    ///
+    /// Ordering is respected rather than naively unioned: a member who left and
+    /// went quiet drops out, while one who posted *after* leaving counts again,
+    /// since the later evidence wins. The same rule stops an un-ban resurrecting
+    /// a phantom from pre-ban activity.
     pub async fn members(&self) -> Vec<Member> {
         self.core
             .get_community_members(&self.id)
@@ -1059,6 +1165,60 @@ impl Community {
     /// The owner + admin npubs (`{ owner, admins: [...] }`).
     pub fn roles(&self) -> Result<serde_json::Value> {
         self.core.community_roles(&self.id)
+    }
+}
+
+/// One channel of a Community, as [`Community::channels`] reports it.
+///
+/// Deliberately includes channels this bot cannot read: a private channel whose
+/// key hasn't arrived is enumerable but unreadable, and a bot that can't see the
+/// difference has no way to tell "nobody has talked to me" from "I was granted
+/// access and never got the key".
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct CommunityChannel {
+    channel_id: String,
+    name: String,
+    #[serde(default)]
+    private: bool,
+    /// Absent on legacy (v1) communities, which have no private channels.
+    #[serde(default = "default_true")]
+    readable: bool,
+    #[serde(default)]
+    epoch: u64,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl CommunityChannel {
+    /// The channel id (32-byte hex) — what [`Community::channel`] takes.
+    pub fn id(&self) -> &str {
+        &self.channel_id
+    }
+
+    /// The channel's display name. Empty for a private channel recorded before
+    /// its metadata folded.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Whether this channel is private (independently keyed, readable only by
+    /// granted role-holders).
+    pub fn is_private(&self) -> bool {
+        self.private
+    }
+
+    /// Whether this bot can actually read it. False only for a private channel
+    /// whose key hasn't been delivered yet — see [`Community::channels`].
+    pub fn is_readable(&self) -> bool {
+        self.readable
+    }
+
+    /// The channel's current key generation. Climbs on every rekey; `0` means a
+    /// private channel we hold no key for.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
     }
 }
 
@@ -1222,6 +1382,10 @@ pub enum BotEvent {
     Invite { community_id: String },
     /// This bot was removed from a Community (kicked / banned / a leave authored on another device).
     Removed { community_id: String },
+    /// A private channel became readable — its key arrived after an admin granted
+    /// access. Until this fires, the channel is listed by
+    /// [`Community::channels`] with `is_readable()` false.
+    ChannelKeyed { community_id: String, channel_id: String },
 }
 
 /// Adapts a user `on_event` closure into an [`InboundEventHandler`], mapping every hook to a [`BotEvent`].
@@ -1316,6 +1480,12 @@ where
             bot.apply_invite_policy(&cid).await;
         });
         self.emit(BotEvent::Invite { community_id: community_id.to_string() });
+    }
+    fn on_channel_keyed(&self, community_id: &str, channel_id: &str) {
+        self.emit(BotEvent::ChannelKeyed {
+            community_id: community_id.to_string(),
+            channel_id: channel_id.to_string(),
+        });
     }
 }
 
@@ -1417,5 +1587,36 @@ mod tests {
         // A 64-char hex channel id (and a raw-hex pubkey) → Community (not bech32).
         assert_eq!(channel_kind_for(&"a".repeat(64)), ChannelKind::Community);
         assert_eq!(channel_kind_for(&Keys::generate().public_key().to_hex()), ChannelKind::Community);
+    }
+
+    #[test]
+    fn a_channel_view_distinguishes_locked_from_readable() {
+        // The whole point of issue #82: a bot must be able to tell "granted but
+        // awaiting the key" from "not a member" — otherwise a mute bot is
+        // indistinguishable from a quiet room.
+        let json = serde_json::json!([
+            { "channel_id": "aa".repeat(32), "name": "general", "private": false, "readable": true, "epoch": 0 },
+            { "channel_id": "bb".repeat(32), "name": "mods", "private": true, "readable": true, "epoch": 3 },
+            { "channel_id": "cc".repeat(32), "name": "vault", "private": true, "readable": false, "epoch": 0 },
+        ]);
+        let chans: Vec<CommunityChannel> = serde_json::from_value(json).unwrap();
+
+        assert!(!chans[0].is_private() && chans[0].is_readable(), "a public channel reads");
+        assert!(chans[1].is_private() && chans[1].is_readable(), "a keyed private channel reads");
+        assert_eq!(chans[1].epoch(), 3, "its key generation is visible");
+
+        let locked = &chans[2];
+        assert!(locked.is_private() && !locked.is_readable(), "a keyless private channel is enumerable but locked");
+        assert_eq!(locked.name(), "vault", "and still nameable, so it can be reported");
+        assert_eq!(locked.id(), "cc".repeat(32), "and addressable, so access can be requested for it");
+    }
+
+    #[test]
+    fn a_legacy_channel_without_the_readable_field_is_assumed_readable() {
+        // v1 communities have no private channels and emit no `readable` — the
+        // default must not render every legacy channel as locked.
+        let json = serde_json::json!([{ "channel_id": "aa".repeat(32), "name": "general" }]);
+        let chans: Vec<CommunityChannel> = serde_json::from_value(json).unwrap();
+        assert!(chans[0].is_readable() && !chans[0].is_private());
     }
 }
