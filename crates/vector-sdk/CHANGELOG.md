@@ -3,6 +3,41 @@
 All notable changes to `vector-sdk` are documented here. This project adheres to
 [Semantic Versioning](https://semver.org).
 
+## 0.7.0
+
+Requires `vector-core` 0.6.0.
+
+### Added
+
+- **Private community channels.** `Community::channels()` lists every channel with
+  `is_private()`, `is_readable()` and `epoch()` — **including private ones this bot
+  cannot read yet**. `is_readable() == false` means "granted, key hasn't arrived",
+  which was previously indistinguishable from "nobody has talked to me": a bot added
+  to a private channel simply went mute, with no error and no way to diagnose it.
+- **Channel management.** `create_channel`, `create_private_channel`, `rename_channel`,
+  `delete_channel`, `grant_access`, `revoke_access`, `channel_members`, `channel_access`.
+  Granting adds the channel's access role and sends the member its key; revoking drops
+  the role and rekeys the channel so the removal actually severs them.
+- **`BotEvent::ChannelKeyed`** — fires when a vended key lands, so a granted bot acts on
+  the transition instead of polling.
+
+### Fixed
+
+- **Headless clients never back-filled Concord v2 chat.** `sync_communities` only
+  refolded consensus and skipped chat entirely, so a bot saw *only* messages that
+  arrived live — anything sent while it was offline was invisible forever. Independent
+  of private channels, and affects every existing bot.
+- `Community::members()` was documented as "best-effort, from recent activity". It is
+  in fact the full Complete Memberlist: Guestbook joins/leaves ∪ anyone observed
+  publishing ∪ role-holders ∪ the proven owner, minus bans, with leave/rejoin ordering.
+  Behaviour unchanged; the doc was wrong.
+
+### Notes
+
+Verified live cross-client against Armada in both directions, through the whole
+lifecycle: join → grant → key vend → adopt → read history → reply → revoke → rekey →
+severed → re-grant.
+
 ## 0.3.0
 
 The first release of the rewritten SDK — a small, ergonomic layer over the
