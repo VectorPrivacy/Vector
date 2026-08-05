@@ -1077,8 +1077,19 @@ impl VectorCore {
                             "name": c.name,
                             "description": c.description,
                             "is_owner": is_owner,
+                            // `readable` is the field a bot needs and could never
+                            // compute: a private channel we've been told about but
+                            // hold no key for is enumerable-but-unreadable, which
+                            // is what distinguishes "not a member" from "member
+                            // awaiting the key vend".
                             "channels": c.channels.iter()
-                                .map(|ch| serde_json::json!({ "channel_id": crate::simd::hex::bytes_to_hex_32(&ch.id.0), "name": ch.name, "private": ch.private }))
+                                .map(|ch| serde_json::json!({
+                                    "channel_id": crate::simd::hex::bytes_to_hex_32(&ch.id.0),
+                                    "name": ch.name,
+                                    "private": ch.private,
+                                    "readable": !(ch.private && ch.key.is_none()),
+                                    "epoch": ch.epoch.0,
+                                }))
                                 .collect::<Vec<_>>(),
                         }));
                     }
@@ -1471,56 +1482,154 @@ impl VectorCore {
         }))
     }
 
-    /// Create a Community (single "general" channel) on the default trusted relays. Signs the
-    /// owner attestation with this identity (so the creator is the proven owner), registers the
-    /// channel as a chat, and returns a JSON summary.
-    pub async fn create_community(&self, name: &str) -> Result<serde_json::Value> {
-        use crate::community::{service, transport::LiveTransport};
-        let relays: Vec<String> = crate::state::active_trusted_relays()
-            .await
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        if relays.is_empty() {
-            return Err(VectorError::Other("no relays available to host the Community".into()));
+
+    // ── Channels (CORD-03) ───────────────────────────────────────────────────
+
+    /// Resolve a v2 community by id, or explain why it isn't one.
+    fn v2_community(community_id: &str) -> Result<crate::community::v2::community::CommunityV2> {
+        use crate::community::CommunityId;
+        if community_id.len() != 64 {
+            return Err(VectorError::Other("malformed community id".into()));
         }
+        let cid = CommunityId(crate::simd::hex::hex_to_bytes_32(community_id));
+        match crate::db::community::community_protocol(&cid).ok().flatten() {
+            Some(crate::community::ConcordProtocol::V2) => crate::db::community::load_community_v2(&cid)
+                .map_err(VectorError::Other)?
+                .ok_or_else(|| VectorError::Other("v2 community not found".into())),
+            Some(_) => Err(VectorError::Other(
+                "channel management is Concord v2 only — this community still uses the legacy protocol".into(),
+            )),
+            None => Err(VectorError::Other("community not found".into())),
+        }
+    }
+
+    fn channel_id_of(channel_id: &str) -> Result<crate::community::ChannelId> {
+        crate::simd::hex::hex_to_bytes_32_checked(channel_id)
+            .map(crate::community::ChannelId)
+            .ok_or_else(|| VectorError::Other("malformed channel id".into()))
+    }
+
+    /// Create a channel. A private one mints its own key plus the channel-scoped
+    /// access Role that is its access list (CORD-03/04); grant that role with
+    /// [`grant_channel_access`](Self::grant_channel_access) to let someone read it.
+    /// Returns the new channel id (32-byte hex).
+    pub async fn create_channel(&self, community_id: &str, name: &str, private: bool) -> Result<String> {
+        use crate::community::{v2::service, transport::LiveTransport};
+        let community = Self::v2_community(community_id)?;
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-        let community = service::create_community(&transport, name, "general", relays)
-            .await
-            .map_err(VectorError::Other)?;
-        let owner_npub = community
-            .owner_attestation
-            .as_ref()
-            .and_then(|att| crate::community::owner::verify_owner_attestation(att, &community.id.to_hex()))
-            .and_then(|pk| ToBech32::to_bech32(&pk).ok());
-        {
-            let created_at_ms = crate::db::community::community_created_at_ms(&community.id);
-            let primary_hex = community.channels.first().map(|c| c.id.to_hex()).unwrap_or_default();
-            let mut st = state::STATE.lock().await;
-            for ch in &community.channels {
-                st.upsert_community_chat(
-                    &ch.id.to_hex(),
-                    &community.name,
-                    community.description.as_deref().unwrap_or(""),
-                    &community.id.to_hex(),
-                    crate::community::service::is_proven_owner(&community),
-                    community.icon.is_some(),
-                    owner_npub.as_deref(),
-                    created_at_ms,
-                    community.dissolved,
-                    crate::community::ConcordProtocol::V1,
-                    &ch.name,
-                    &primary_hex,
-                );
-            }
+        let id = if private {
+            service::create_private_channel(&transport, &community, name).await
+        } else {
+            service::create_public_channel(&transport, &community, name).await
         }
+        .map_err(VectorError::Other)?;
+        // Subscribe the new channel's chat plane now — waiting on the round-trip of
+        // our own vsk-2 edition would leave the creator deaf to first replies.
+        if let Some(client) = state::nostr_client() {
+            crate::community::v2::realtime::refresh_subscription(&client).await;
+        }
+        Ok(crate::simd::hex::bytes_to_hex_32(&id.0))
+    }
+
+    /// Rename a channel (a versioned edit of the same entity, so its history and
+    /// id survive). Other folded fields are carried through untouched.
+    pub async fn rename_channel(&self, community_id: &str, channel_id: &str, name: &str) -> Result<()> {
+        use crate::community::{v2::service, transport::LiveTransport};
+        let community = Self::v2_community(community_id)?;
+        let id = Self::channel_id_of(channel_id)?;
+        let mut meta = community
+            .channel(&id)
+            .ok_or_else(|| VectorError::Other("unknown channel".into()))?
+            .metadata();
+        meta.name = name.to_string();
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        service::edit_channel_metadata(&transport, &community, &id, &meta)
+            .await
+            .map_err(VectorError::Other)
+    }
+
+    /// Tombstone a channel. Deletion is terminal and the id is never reused;
+    /// history stays readable to anyone who already holds its keys.
+    pub async fn delete_channel(&self, community_id: &str, channel_id: &str) -> Result<()> {
+        use crate::community::{v2::service, transport::LiveTransport};
+        let community = Self::v2_community(community_id)?;
+        let id = Self::channel_id_of(channel_id)?;
+        let name = community.channel(&id).map(|c| c.name.clone()).unwrap_or_default();
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        service::delete_channel(&transport, &community, &id, &name)
+            .await
+            .map_err(VectorError::Other)
+    }
+
+    /// Grant `npub` read access to a private channel: adds the channel's access
+    /// role and vends the key to them (CORD-03 "delivered on grant").
+    pub async fn grant_channel_access(&self, community_id: &str, channel_id: &str, npub: &str) -> Result<()> {
+        use crate::community::{v2::service, transport::LiveTransport};
+        let community = Self::v2_community(community_id)?;
+        let id = Self::channel_id_of(channel_id)?;
+        let member = nostr_sdk::prelude::PublicKey::parse(npub)
+            .map_err(|e| VectorError::Other(format!("bad npub: {e}")))?;
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        service::grant_channel_access(&transport, &community, &id, &member)
+            .await
+            .map_err(VectorError::Other)
+    }
+
+    /// Revoke `npub`'s read access: drops the access role and rekeys the channel
+    /// so the removal actually severs them (CORD-06). They keep whatever history
+    /// they already read — a rekey protects the future, never the past.
+    pub async fn revoke_channel_access(&self, community_id: &str, channel_id: &str, npub: &str) -> Result<()> {
+        use crate::community::{v2::service, transport::LiveTransport};
+        let community = Self::v2_community(community_id)?;
+        let id = Self::channel_id_of(channel_id)?;
+        let member = nostr_sdk::prelude::PublicKey::parse(npub)
+            .map_err(|e| VectorError::Other(format!("bad npub: {e}")))?;
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        service::revoke_channel_access(&transport, &community, &id, &member)
+            .await
+            .map_err(VectorError::Other)
+    }
+
+    /// Who may read a private channel: the channel-scoped Roles that are its
+    /// access list (CORD-04 §2) and the members holding them.
+    ///
+    /// Sync read off the folded roster. `members` is exactly the access-role
+    /// holders; `owner` is reported alongside because the owner is entitled
+    /// whether or not they hold one (a channel's creator is granted the role, so
+    /// an owner-created channel lists them in both).
+    pub fn channel_access(&self, community_id: &str, channel_id: &str) -> Result<serde_json::Value> {
+        use nostr_sdk::prelude::{PublicKey, ToBech32};
+        let community = Self::v2_community(community_id)?;
+        let id = Self::channel_id_of(channel_id)?;
+        let ch = community
+            .channel(&id)
+            .ok_or_else(|| VectorError::Other("unknown channel".into()))?;
+        // Normalised id, not the caller's string: an uppercase-hex argument loads
+        // the community but would miss the roster row and silently report nobody.
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let roster = crate::db::community::get_community_roles(&cid_hex).map_err(VectorError::Other)?;
+        let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
+        let chan_hex = crate::simd::hex::bytes_to_hex_32(&id.0);
+        let access_ids = roster.channel_role_ids(&chan_hex);
+        let roles: Vec<serde_json::Value> = roster
+            .channel_roles(&chan_hex)
+            .into_iter()
+            .map(|r| serde_json::json!({ "role_id": r.role_id, "name": r.name }))
+            .collect();
+        let members: Vec<String> = roster
+            .grants
+            .iter()
+            .filter(|g| !banned.contains(&g.member))
+            .filter(|g| g.role_ids.iter().any(|rid| access_ids.contains(rid)))
+            .filter_map(|g| PublicKey::from_hex(&g.member).ok().and_then(|pk| pk.to_bech32().ok()))
+            .collect();
         Ok(serde_json::json!({
-            "community_id": community.id.to_hex(),
-            "version": 1,
-            "name": community.name,
-            "channels": community.channels.iter()
-                .map(|c| serde_json::json!({ "channel_id": c.id.to_hex(), "name": c.name }))
-                .collect::<Vec<_>>(),
+            "channel_id": chan_hex,
+            "private": ch.private,
+            "readable": !(ch.private && ch.key.is_none()),
+            "owner": community.owner().ok().and_then(|o| o.to_bech32().ok()),
+            "roles": roles,
+            "members": members,
         }))
     }
 
@@ -1608,7 +1717,13 @@ impl VectorCore {
                 let community = crate::db::community::load_community_v2(&cid)
                     .map_err(VectorError::Other)?
                     .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
-                crate::community::v2::service::bundle_of(&community, Some(my_pk), None, None)
+                crate::community::v2::service::bundle_of(
+                    &community,
+                    crate::community::v2::service::BundleAudience::Member(recipient),
+                    Some(my_pk),
+                    None,
+                    None,
+                )
             };
             let bundle_json = serde_json::to_string(&bundle).map_err(|e| VectorError::Other(e.to_string()))?;
             // Same 24h NIP-40 expiry as v1 (invite::DIRECT_INVITE_EXPIRY_SECS): a bundle is
@@ -2578,7 +2693,7 @@ impl VectorCore {
     /// and PAGES backwards until it reaches messages it already holds, then
     /// ingests through the shared pipeline. The boot volley fetches its own
     /// batches and shares only [`Self::v2_ingest_chat_page`].
-    async fn v2_backfill_channel(
+    pub(crate) async fn v2_backfill_channel(
         id: &crate::community::CommunityId,
         channel_id: &str,
         limit: usize,
@@ -3055,40 +3170,7 @@ impl VectorCore {
         service::republish_community_metadata(&transport, &community).await.map_err(VectorError::Other)
     }
 
-    /// Create a new channel in a v2 community. A PUBLIC channel derives from the
-    /// community_root, so peers fold it in with nothing to distribute; a PRIVATE one
-    /// mints an independent key at channel-epoch 1 and delivers it to every current
-    /// member over the rekey plane (CORD-03 §2 / CORD-06). Requires MANAGE_CHANNELS.
-    /// Returns the new channel id (hex).
-    pub async fn create_community_channel(&self, community_id: &str, name: &str, private: bool) -> Result<String> {
-        let v2 = Self::load_v2_if_v2(community_id)?
-            .ok_or_else(|| VectorError::Other("channel creation is available on v2 communities".into()))?;
-        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-        let id = if private {
-            crate::community::v2::service::create_private_channel(&transport, &v2, name).await
-        } else {
-            crate::community::v2::service::create_public_channel(&transport, &v2, name).await
-        }
-        .map_err(VectorError::Other)?;
-        // Subscribe the new channel's chat plane now — waiting on the round-trip of
-        // our own vsk-2 edition would leave the creator deaf to first replies.
-        if let Some(client) = state::nostr_client() {
-            crate::community::v2::realtime::refresh_subscription(&client).await;
-        }
-        Ok(crate::simd::hex::bytes_to_hex_32(&id.0))
-    }
 
-    /// Delete (tombstone) a v2 community channel. Requires MANAGE_CHANNELS (reader-gated).
-    pub async fn delete_community_channel(&self, community_id: &str, channel_id: &str) -> Result<()> {
-        let v2 = Self::load_v2_if_v2(community_id)?
-            .ok_or_else(|| VectorError::Other("channel deletion is available on v2 communities".into()))?;
-        let ch = crate::community::ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
-        let name = v2.channels.iter().find(|c| c.id.0 == ch.0).map(|c| c.name.clone()).unwrap_or_default();
-        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-        crate::community::v2::service::delete_channel(&transport, &v2, &ch, &name)
-            .await
-            .map_err(VectorError::Other)
-    }
 
     /// Leave a Community: announce a best-effort "left" presence (before dropping keys), then
     /// drop the held keys + local channel chats. You need a fresh invite to rejoin.

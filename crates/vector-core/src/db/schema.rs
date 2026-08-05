@@ -1110,5 +1110,68 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // =========================================================================
+    // Migration 82: parked Private-Channel key vends (CORD-03/05 §6)
+    // =========================================================================
+    // A grant's key vend can arrive before the control fold that proves the
+    // grant, so it parks here and is re-judged after every control follow.
+    // Durable rather than in-RAM by necessity: the vend rides a 24h NIP-40 wrap
+    // that relays delete, so a restart before the fold catches up would lose the
+    // only copy. One row per (community, channel) — the newest epoch wins, and a
+    // vend at or below the held epoch is superseded.
+    run_atomic_migration(conn, 82, "Parked private-channel key vends", |tx| {
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS pending_channel_keys (
+                community_id TEXT NOT NULL,
+                channel_id   TEXT NOT NULL,
+                epoch        INTEGER NOT NULL,
+                channel_key  BLOB NOT NULL,
+                sender       TEXT NOT NULL,
+                received_at  INTEGER NOT NULL,
+                PRIMARY KEY (community_id, channel_id)
+            )",
+            [],
+        )
+        .map_err(|e| format!("migration 82: {}", e))?;
+        Ok(())
+    })?;
+
+    // =========================================================================
+    // Migration 83: parked vends become CANDIDATES, not a single slot
+    // =========================================================================
+    // 82 keyed the table on (community, channel) and only replaced on a higher
+    // epoch. Parking is reachable by any npub that can gift-wrap us (the bundle
+    // self-certifies, and its inputs are public for a public community), so a
+    // stranger could pre-park a high-epoch row and make the genuine vend a silent
+    // no-op — the member simply stays keyless with no retry.
+    //
+    // Now every vend is its own row and the judge tries them all, so an
+    // unprovable row can never displace a provable one. Caps bound what an
+    // arbitrary sender can make us store (and decrypt on every follow pass).
+    run_atomic_migration(conn, 83, "Parked channel-key vends as candidates", |tx| {
+        tx.execute("DROP TABLE IF EXISTS pending_channel_keys", [])
+            .map_err(|e| format!("migration 83: {}", e))?;
+        tx.execute(
+            "CREATE TABLE pending_channel_keys (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                community_id TEXT NOT NULL,
+                channel_id   TEXT NOT NULL,
+                epoch        INTEGER NOT NULL,
+                channel_key  BLOB NOT NULL,
+                sender       TEXT NOT NULL,
+                received_at  INTEGER NOT NULL
+            )",
+            [],
+        )
+        .map_err(|e| format!("migration 83: {}", e))?;
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pending_channel_keys_scope \
+             ON pending_channel_keys(community_id, channel_id)",
+            [],
+        )
+        .map_err(|e| format!("migration 83: {}", e))?;
+        Ok(())
+    })?;
+
     Ok(())
 }

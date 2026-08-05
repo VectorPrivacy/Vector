@@ -253,6 +253,96 @@ impl CommunityRoles {
         let target_position = self.highest_position(target_hex).unwrap_or(u32::MAX);
         self.can_act_on_position(actor_hex, owner_hex, target_position, permission)
     }
+
+    // ── Private-Channel entitlement (CORD-03/04/06) ──────────────────────────
+    //
+    // CORD-03 defines a Private Channel as "readable only by granted
+    // role-holders", its key "delivered on grant and rekeyed on removal"; the
+    // binding that names those role-holders is CORD-04 §2's
+    // `scope: {"kind":"channel","channel_id":...}`. So **the roles scoped to a
+    // channel are its access list**.
+    //
+    // Read access is enforced by key possession alone — nothing here grants it.
+    // This is the routing that decides who a key is delivered TO on grant, and
+    // who a rekey keeps on revoke.
+
+    /// The roles conferring read access to `channel_hex`, in display order
+    /// (highest authority first).
+    ///
+    /// A Private Channel with none is readable by nobody but the owner and
+    /// whoever already holds the key — degenerate rather than "open", so
+    /// clients shouldn't create it, but one arriving that way from elsewhere
+    /// still reads correctly and its key holders keep reading it.
+    pub fn channel_roles(&self, channel_hex: &str) -> Vec<&Role> {
+        let wanted = channel_hex.to_ascii_lowercase();
+        let mut out: Vec<&Role> = self
+            .roles
+            .iter()
+            .filter(|r| matches!(&r.scope, RoleScope::Channel(c) if c.eq_ignore_ascii_case(&wanted)))
+            .collect();
+        out.sort_by_key(|r| r.position);
+        out
+    }
+
+    /// [`channel_roles`], by id.
+    pub fn channel_role_ids(&self, channel_hex: &str) -> Vec<String> {
+        self.channel_roles(channel_hex).into_iter().map(|r| r.role_id.clone()).collect()
+    }
+
+    /// Is `member_hex` entitled to `channel_hex`'s key? The owner always is
+    /// (position 0, supreme and unremovable).
+    ///
+    /// `with`/`without` overlay a Grant that was JUST published, so a caller can
+    /// settle key custody against the change it just made rather than against a
+    /// fold that lags its own publish.
+    pub fn is_entitled(
+        &self,
+        owner_hex: Option<&str>,
+        member_hex: &str,
+        channel_hex: &str,
+        with: &[String],
+        without: &[String],
+    ) -> bool {
+        if owner_hex == Some(member_hex) {
+            return true;
+        }
+        let mut held: std::collections::HashSet<&str> =
+            self.roles_of(member_hex).map(|r| r.role_id.as_str()).collect();
+        for id in with {
+            held.insert(id.as_str());
+        }
+        for id in without {
+            held.remove(id.as_str());
+        }
+        self.channel_role_ids(channel_hex).iter().any(|id| held.contains(id.as_str()))
+    }
+
+    /// Effective permissions for an action TARGETING one channel: server-scope
+    /// roles plus roles scoped to that channel.
+    ///
+    /// ⚠️ **Offer-side only.** The fold stays scope-agnostic in every
+    /// implementation (CORD-04 §3, and [`effective_permissions`] is what judges
+    /// inbound authority) — this narrows only what THIS client offers its own
+    /// user, never what it honors from others. Tightening the honor path would
+    /// retroactively invalidate actions shipped clients already folded.
+    pub fn effective_permissions_in(&self, member_hex: &str, channel_hex: &str) -> Permissions {
+        let wanted = channel_hex.to_ascii_lowercase();
+        self.roles_of(member_hex)
+            .filter(|r| match &r.scope {
+                RoleScope::Server => true,
+                RoleScope::Channel(c) => c.eq_ignore_ascii_case(&wanted),
+            })
+            .fold(Permissions::empty(), |acc, r| acc.union(r.permissions))
+    }
+
+    /// [`is_authorized`](Self::is_authorized), judged against one channel per
+    /// [`effective_permissions_in`](Self::effective_permissions_in). Offer-side only.
+    pub fn is_authorized_in(&self, actor_hex: &str, owner_hex: Option<&str>, channel_hex: &str, permission: u64) -> bool {
+        if owner_hex == Some(actor_hex) {
+            return true;
+        }
+        self.effective_permissions_in(actor_hex, channel_hex).contains(permission)
+    }
 }
 
 #[cfg(test)]
@@ -478,5 +568,88 @@ mod tests {
         let json = serde_json::to_string(&scope).unwrap();
         let back: RoleScope = serde_json::from_str(&json).unwrap();
         assert_eq!(scope, back);
+    }
+
+    // ── Private-Channel entitlement ──────────────────────────────────────────
+
+    /// A roster with one channel-scoped role (`pos` 5) over `chan`, granted to
+    /// `member`, plus a server-scope Admin held by `admin`.
+    fn scoped_roster(chan: &str, member: &str, admin: &str) -> CommunityRoles {
+        let scoped = Role {
+            role_id: "11".repeat(32),
+            name: "Testers".into(),
+            position: 5,
+            permissions: Permissions(Permissions::MANAGE_MESSAGES),
+            scope: RoleScope::Channel(chan.to_string()),
+            color: 0,
+        };
+        let server = Role::admin("22".repeat(32));
+        CommunityRoles {
+            grants: vec![
+                MemberGrant { member: member.to_string(), role_ids: vec![scoped.role_id.clone()] },
+                MemberGrant { member: admin.to_string(), role_ids: vec![server.role_id.clone()] },
+            ],
+            roles: vec![scoped, server],
+        }
+    }
+
+    #[test]
+    fn a_channels_scoped_roles_are_its_access_list() {
+        let chan = "cc".repeat(32);
+        let other = "dd".repeat(32);
+        let owner = "00".repeat(32);
+        let member = "aa".repeat(32);
+        let admin = "bb".repeat(32);
+        let r = scoped_roster(&chan, &member, &admin);
+
+        assert_eq!(r.channel_roles(&chan).len(), 1, "the scoped role is the access list");
+        assert!(r.channel_roles(&other).is_empty(), "another channel gets none of it");
+
+        assert!(r.is_entitled(Some(&owner), &member, &chan, &[], &[]), "the granted holder is entitled");
+        assert!(r.is_entitled(Some(&owner), &owner, &chan, &[], &[]), "the owner is always entitled");
+        // A SERVER-scope Admin is not automatically entitled: entitlement is the
+        // channel's scoped roles, never rank (CORD-03 — key possession, not authority).
+        assert!(!r.is_entitled(Some(&owner), &admin, &chan, &[], &[]), "rank alone is not entitlement");
+        assert!(!r.is_entitled(Some(&owner), &member, &other, &[], &[]), "entitlement does not spill to another channel");
+    }
+
+    #[test]
+    fn the_grant_overlay_settles_against_a_publish_the_fold_has_not_caught() {
+        let chan = "cc".repeat(32);
+        let owner = "00".repeat(32);
+        let member = "aa".repeat(32);
+        let stranger = "ee".repeat(32);
+        let r = scoped_roster(&chan, &member, &"bb".repeat(32));
+        let scoped_id = r.channel_role_ids(&chan)[0].clone();
+
+        assert!(
+            r.is_entitled(Some(&owner), &stranger, &chan, std::slice::from_ref(&scoped_id), &[]),
+            "a just-published grant settles as entitled before the fold catches up"
+        );
+        assert!(
+            !r.is_entitled(Some(&owner), &member, &chan, &[], std::slice::from_ref(&scoped_id)),
+            "a just-published revoke settles as unentitled before the fold catches up"
+        );
+    }
+
+    #[test]
+    fn channel_narrowing_is_offer_side_only() {
+        let chan = "cc".repeat(32);
+        let other = "dd".repeat(32);
+        let owner = "00".repeat(32);
+        let member = "aa".repeat(32);
+        let r = scoped_roster(&chan, &member, &"bb".repeat(32));
+
+        // Narrowed: the scoped role's bits apply in ITS channel and nowhere else.
+        assert!(r.is_authorized_in(&member, Some(&owner), &chan, Permissions::MANAGE_MESSAGES));
+        assert!(!r.is_authorized_in(&member, Some(&owner), &other, Permissions::MANAGE_MESSAGES));
+
+        // The HONOR path stays scope-agnostic — every implementation folds the
+        // same union (CORD-04 §3). Tightening this would retroactively invalidate
+        // actions shipped clients already folded.
+        assert!(
+            r.is_authorized(&member, Some(&owner), Permissions::MANAGE_MESSAGES),
+            "the scope-blind honor path is unchanged"
+        );
     }
 }

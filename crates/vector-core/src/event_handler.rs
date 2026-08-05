@@ -80,6 +80,14 @@ pub trait InboundEventHandler: Send + Sync {
     /// Local data is torn down (epoch keys retained); the platform surfaces it + refreshes subs.
     fn on_community_self_removed(&self, _community_id: &str) {}
 
+    /// A Private channel is now readable — its key arrived, by rekey delivery or
+    /// by a grant's key vend. `channel_id` is the 32-byte hex id.
+    ///
+    /// The inverse of the silent-mute failure: a bot granted access can act the
+    /// moment it can actually read, rather than polling for a channel it has no
+    /// way to know it is waiting on.
+    fn on_channel_keyed(&self, _community_id: &str, _channel_id: &str) {}
+
     /// A Community's control plane was refreshed in realtime (banlist/roles/metadata/mode change,
     /// or a re-founding followed). The platform re-reads display state.
     fn on_community_refreshed(&self, _community_id: &str) {}
@@ -478,6 +486,72 @@ pub async fn prepare_event(
 /// ceiling either way. One hour of slack absorbs sender clock skew.
 pub const DIRECT_INVITE_LIFETIME_SECS: u64 = 24 * 3600 + 3600;
 
+/// Park the Private-Channel keys a CATCH-UP bundle carries that we don't hold.
+///
+/// This is delivery, never authority: nothing is adopted here. The bundle's
+/// self-certification is checked (a forged community binding never parks), the
+/// keys are stashed, and [`judge_channel_key_vend`] rules on them against our own
+/// fold after the next control follow. A vend that races its Grant therefore
+/// parks quietly instead of being dropped, which is what makes an admin's grant
+/// actually reach a member who is already in the community.
+///
+/// `inviter` is the seal author's npub (bech32) — recorded so the judge can
+/// require an entitled vendor.
+fn park_catch_up_channel_keys(
+    community_id: &str,
+    bundle_json: &str,
+    inviter: &str,
+    session: &crate::state::SessionGuard,
+) {
+    use crate::community::v2::invite::CommunityInvite;
+    let Ok(bundle) = CommunityInvite::from_bundle_json(bundle_json) else { return };
+    // (1) Self-cert: the bundle cannot claim to be this community while naming a
+    // different owner. Cheap, and it keeps garbage out of the park table.
+    let (Some(cid), Some(owner), Some(salt)) = (
+        crate::simd::hex::hex_to_bytes_32_checked(&bundle.community_id),
+        crate::simd::hex::hex_to_bytes_32_checked(&bundle.owner),
+        crate::simd::hex::hex_to_bytes_32_checked(&bundle.owner_salt),
+    ) else {
+        return;
+    };
+    if !crate::community::v2::derive::verify_community_id(&crate::community::CommunityId(cid), &owner, &salt) {
+        log_warn!("[community] catch-up bundle failed self-certification — dropped");
+        return;
+    }
+    let Ok(sender) = PublicKey::parse(inviter) else { return };
+    let sender_hex = sender.to_hex();
+    // The commit path's guard was captured before an await; re-check before the
+    // writes below or a swap mid-commit parks account A's channel key into
+    // account B's database.
+    if !session.is_valid() {
+        return;
+    }
+    let held = crate::db::community::load_community_v2(&crate::community::CommunityId(cid)).ok().flatten();
+    let mut parked_any = false;
+    for grant in &bundle.channels {
+        let Some(chan) = crate::simd::hex::hex_to_bytes_32_checked(&grant.id) else { continue };
+        let Some(key) = crate::simd::hex::hex_to_bytes_32_checked(&grant.key) else { continue };
+        // Only park what we LACK: a key at or below the held epoch is already
+        // superseded, and a public channel's "key" is just the root.
+        if let Some(c) = held.as_ref().and_then(|h| h.channel(&crate::community::ChannelId(chan))) {
+            if !c.private || (c.key.is_some() && grant.epoch <= c.epoch.0) {
+                continue;
+            }
+        }
+        if let Err(e) = crate::db::community::park_channel_key(community_id, &grant.id, grant.epoch, &key, &sender_hex) {
+            log_warn!("[community] parking a vended channel key failed: {e}");
+            continue;
+        }
+        parked_any = true;
+    }
+    // Judge it now rather than whenever the next edition happens by. A vend that
+    // lands AFTER its Grant folded changes no control state, so without a nudge
+    // there is nothing left to trigger the re-judge.
+    if parked_any {
+        crate::community::v2::realtime::enqueue_follow(&crate::community::CommunityId(cid));
+    }
+}
+
 fn expired_invite(expires_at: u64, rumor_created_at: u64) -> bool {
     let now = nostr_sdk::prelude::Timestamp::now().as_secs();
     if expires_at != 0 && expires_at <= now {
@@ -773,7 +847,13 @@ pub async fn commit_prepared_event(
                 Some(b) => crate::community::CommunityId(b),
                 None => return false,
             };
+            // Already a member? Then this is not an invitation but a CATCH-UP: a
+            // grant's Private-Channel key vend (CORD-03 "delivered on grant"), or
+            // an admin healing us forward. Park the keys we lack for the judge to
+            // rule on after the next control fold — dropping it here is why a
+            // granted member (or bot) stayed silently keyless.
             if crate::db::community::community_exists(&held).unwrap_or(false) {
+                park_catch_up_channel_keys(&community_id, &bundle_json, &inviter, &session);
                 return false;
             }
             if crate::db::community::pending_invite_exists(&community_id).unwrap_or(false) {

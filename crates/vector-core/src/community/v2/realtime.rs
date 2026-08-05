@@ -620,10 +620,48 @@ async fn follow_community(session: &SessionGuard, id: &CommunityId, handler: &dy
     let Ok(Some(current)) = crate::db::community::load_community_v2(id) else {
         return;
     };
-    if let Ok(Some(_)) = super::service::follow_control(&transport, &current, session).await {
-        if !session.is_valid() {
-            return;
+    let control_changed = matches!(
+        super::service::follow_control(&transport, &current, session).await,
+        Ok(Some(_))
+    );
+    if !session.is_valid() {
+        return;
+    }
+    // Re-judge parked key vends on EVERY pass, not only when the fold moved. A
+    // vend that lands AFTER its Grant folded has nothing left to change the
+    // control plane, so gating this on `changed` strands it until some unrelated
+    // edition happens by (CORD-03 "delivered on grant").
+    if let Ok(Some(folded)) = crate::db::community::load_community_v2(id) {
+        let keyed = super::service::absorb_parked_channel_keys(&folded, session);
+        if !keyed.is_empty() {
+            crate::log_info!(
+                "[v2:follow {}] adopted {} vended private-channel key(s)",
+                &community_id[..8.min(community_id.len())],
+                keyed.len()
+            );
+            // A newly-keyed channel adds its chat plane to the readable set, and
+            // the live subscription is addressed BY that set — without a rebuild
+            // we hold the key and still never hear the channel. Independent of
+            // `control_changed`: adopting a parked vend changes no control state.
+            refresh_subscription(&client).await;
         }
+        for ch in keyed {
+            let hex = crate::simd::hex::bytes_to_hex_32(&ch.0);
+            // Read what was said while we were locked out. The live subscription
+            // only carries what arrives NEXT, so without this a member granted
+            // access walks into a room that looks empty.
+            let _ = crate::VectorCore::v2_backfill_channel(
+                id, &hex, 50, 2, None,
+                crate::community::transport::Evidence::Fast, 12,
+            )
+            .await;
+            if !session.is_valid() {
+                return;
+            }
+            handler.on_channel_keyed(&community_id, &hex);
+        }
+    }
+    if control_changed {
         refresh_subscription(&client).await;
         handler.on_community_refreshed(&community_id);
         // A control change can reveal rekey work that predates it — a just-announced

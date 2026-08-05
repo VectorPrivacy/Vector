@@ -188,6 +188,47 @@ impl CommunityV2 {
         self.channels.iter().find(|c| c.id.0 == id.0)
     }
 
+    /// The channels an invite bundle may grant to `audience` (CORD-05 §1/§2).
+    ///
+    /// Public channels always ride (the joiner derives them from the
+    /// `community_root` anyway). A Private channel rides only for a MEMBER the
+    /// roster shows entitled, and only if we hold its key — a keyless one can't
+    /// be granted, and carrying the root placeholder would make the joiner
+    /// address a private channel at the public plane.
+    ///
+    /// A LINK has no recipient, so its audience holds no Role by construction
+    /// and is entitled to no Private channel at all.
+    pub fn vendable_channels<'a>(
+        &'a self,
+        roster: &crate::community::roles::CommunityRoles,
+        owner_hex: Option<&str>,
+        audience: Option<&str>,
+        with: &[String],
+        without: &[String],
+    ) -> Vec<&'a ChannelV2> {
+        self.channels
+            .iter()
+            .filter(|c| {
+                if !c.private {
+                    return true;
+                }
+                if c.key.is_none() {
+                    return false;
+                }
+                match audience {
+                    None => false,
+                    Some(m) => roster.is_entitled(
+                        owner_hex,
+                        m,
+                        &crate::simd::hex::bytes_to_hex_32(&c.id.0),
+                        with,
+                        without,
+                    ),
+                }
+            })
+            .collect()
+    }
+
     /// The ONE channel the chat list surfaces for this community (multi-channel
     /// UI is a later cut, mirroring v1's single-channel groups): a readable
     /// `#general` when present, else the oldest readable channel, else the first.

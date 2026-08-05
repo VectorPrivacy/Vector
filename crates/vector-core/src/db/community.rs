@@ -146,6 +146,160 @@ pub fn save_community(community: &Community) -> Result<(), String> {
     Ok(())
 }
 
+// ── Parked Private-Channel key vends (CORD-03 "delivered on grant") ──────────
+
+/// One parked key vend awaiting the control fold that proves its grant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingChannelKey {
+    /// Row id — the discharge handle, since several candidates may name one channel.
+    pub id: i64,
+    pub channel_id: String,
+    pub epoch: u64,
+    pub key: [u8; 32],
+    /// Seal author — judged as an entitled vendor before the key is accepted.
+    pub sender: String,
+    pub received_at: i64,
+}
+
+/// Most candidate vends retained per channel, and per community overall.
+///
+/// Parking is reachable by ANY npub that can gift-wrap us, so these bound what a
+/// stranger can make us store — and decrypt on every follow pass. Small, because
+/// more than a couple of live candidates for one channel is already pathological.
+const MAX_PARKED_PER_CHANNEL: usize = 4;
+const MAX_PARKED_PER_COMMUNITY: usize = 64;
+
+/// Park a vended channel key as a CANDIDATE.
+///
+/// Deliberately NOT a single slot keyed on (community, channel): parking is open
+/// to any sender, so a slot lets a stranger pre-empt the entitled vendor's key
+/// and silently suppress delivery. Every vend is its own row, the judge tries
+/// them all, and the caps evict oldest-first so an unprovable flood cannot push
+/// out a provable row indefinitely.
+///
+/// `sender` is encrypted at rest with a per-write nonce, so it can be neither a
+/// key nor a dedupe column — hence oldest-first eviction rather than per-sender
+/// replacement.
+pub fn park_channel_key(
+    community_id: &str,
+    channel_id: &str,
+    epoch: u64,
+    key: &[u8; 32],
+    sender: &str,
+) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let tx = conn.unchecked_transaction().map_err(|e| format!("park channel key tx: {e}"))?;
+    let enc = enc_key(key)?;
+    let enc_sender = enc_txt(sender)?;
+    tx.execute(
+        "INSERT INTO pending_channel_keys
+            (community_id, channel_id, epoch, channel_key, sender, received_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![community_id, channel_id, epoch as i64, &enc[..], enc_sender, now_secs()],
+    )
+    .map_err(|e| format!("park channel key: {e}"))?;
+    // Trim this channel's candidates, then the community's total. `id` is the
+    // arrival order (autoincrement), so this is oldest-first without trusting
+    // any attacker-supplied field.
+    tx.execute(
+        "DELETE FROM pending_channel_keys WHERE id IN (
+            SELECT id FROM pending_channel_keys
+             WHERE community_id = ?1 AND channel_id = ?2
+             ORDER BY id DESC LIMIT -1 OFFSET ?3)",
+        params![community_id, channel_id, MAX_PARKED_PER_CHANNEL as i64],
+    )
+    .map_err(|e| format!("trim parked channel keys: {e}"))?;
+    tx.execute(
+        "DELETE FROM pending_channel_keys WHERE id IN (
+            SELECT id FROM pending_channel_keys
+             WHERE community_id = ?1
+             ORDER BY id DESC LIMIT -1 OFFSET ?2)",
+        params![community_id, MAX_PARKED_PER_COMMUNITY as i64],
+    )
+    .map_err(|e| format!("trim parked community keys: {e}"))?;
+    tx.commit().map_err(|e| format!("park channel key commit: {e}"))?;
+    Ok(())
+}
+
+/// Every parked vend for a community, for the post-fold re-judge.
+pub fn get_pending_channel_keys(community_id: &str) -> Result<Vec<PendingChannelKey>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    // Newest first: the freshest candidate is the likeliest genuine vend, so a
+    // pile of stale squatters costs at most a few failed judgements.
+    let mut stmt = conn
+        .prepare("SELECT id, channel_id, epoch, channel_key, sender, received_at FROM pending_channel_keys WHERE community_id = ?1 ORDER BY id DESC")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![community_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, channel_id, epoch, blob, sender, received_at) = row.map_err(|e| e.to_string())?;
+        // A key that won't decrypt is unusable — drop it rather than failing the
+        // whole re-judge for its sake.
+        let Ok(key) = dec_key(&blob) else { continue };
+        out.push(PendingChannelKey { id, channel_id, epoch: epoch as u64, key, sender: dec_txt(&sender), received_at });
+    }
+    Ok(out)
+}
+
+/// Seat a channel key on a channel that currently holds NONE, without the
+/// monotonic epoch guard.
+///
+/// [`advance_channel_epoch`] requires `new_epoch > current`, which is right for a
+/// rotation but wrong for first delivery: a keyless record parks at epoch 0 (the
+/// rekey-scan cursor) and a client that mints born-private channels at epoch 0
+/// vends exactly that epoch, so the guard would silently refuse the only key we
+/// will ever be offered. A keyless channel has no key to lose, so any authorized
+/// delivery is strictly an improvement.
+pub fn seat_channel_key(
+    community_id: &str,
+    channel_id: &str,
+    epoch: u64,
+    key: &[u8; 32],
+) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let tx = conn.unchecked_transaction().map_err(|e| format!("seat channel key tx: {e}"))?;
+    store_epoch_key_tx(&tx, community_id, channel_id, epoch, key)?;
+    let enc = enc_key(key)?;
+    tx.execute(
+        "UPDATE community_channels SET epoch = ?1, channel_key = ?2
+           WHERE community_id = ?3 AND channel_id = ?4",
+        params![epoch as i64, &enc[..], community_id, channel_id],
+    )
+    .map_err(|e| format!("seat channel key: {e}"))?;
+    tx.commit().map_err(|e| format!("seat channel key commit: {e}"))?;
+    Ok(())
+}
+
+/// Discharge ONE candidate (refused, superseded, expired, or undecodable).
+pub fn drop_pending_channel_key(id: i64) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute("DELETE FROM pending_channel_keys WHERE id = ?1", params![id])
+        .map_err(|e| format!("drop pending channel key: {e}"))?;
+    Ok(())
+}
+
+/// Discharge every candidate for a channel — a key landed, so the rest are moot.
+pub fn drop_pending_channel_keys_for(community_id: &str, channel_id: &str) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "DELETE FROM pending_channel_keys WHERE community_id = ?1 AND channel_id = ?2",
+        params![community_id, channel_id],
+    )
+    .map_err(|e| format!("drop pending channel keys: {e}"))?;
+    Ok(())
+}
+
 /// Store one held epoch key in the multi-held archive. `scope_id` is a channel_id hex or
 /// [`crate::community::SERVER_ROOT_SCOPE_HEX`]. The `(community, scope, epoch)` PK makes a write for
 /// one epoch unable to disturb another epoch's key — so retained history survives a rekey. Uses
@@ -1040,6 +1194,12 @@ fn delete_community_inner(community_id: &str, retain_keys: bool) -> Result<(), S
         Some("DELETE FROM community_public_invites WHERE community_id = ?1"),
         Some("DELETE FROM community_invite_link_sets WHERE community_id = ?1"),
         Some("DELETE FROM pending_community_invites WHERE community_id = ?1"),
+        // Parked key vends. Dropped even under `retain_keys`: those are OUR held
+        // epoch keys kept for a later self-scrub, whereas a parked vend is
+        // undelivered key material for a community we no longer hold — nothing
+        // re-judges it once the community is gone, and it would resurrect on
+        // re-join to seat a stale epoch.
+        Some("DELETE FROM pending_channel_keys WHERE community_id = ?1"),
         // Per-entity edition heads (keyless model) — else stale refuse-downgrade floors + self_hash
         // anchors survive a leave/re-join and reject a legitimately reset chain.
         Some("DELETE FROM community_edition_heads WHERE community_id = ?1"),
