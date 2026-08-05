@@ -3542,6 +3542,21 @@ impl VectorCore {
                 } else {
                     let _ = Self::v2_inline_follow(&id).await;
                 }
+                // Back-fill each channel's chat, exactly as the v1 arm below does.
+                // Without this a headless client only ever sees messages that arrive
+                // LIVE: anything sent while it was down — or while it held no key for
+                // a private channel — is never fetched, so a bot granted access reads
+                // an empty room. Cheap when there is nothing new (id-deduped), and a
+                // channel we cannot read simply yields nothing.
+                if let Ok(Some(c)) = db::community::load_community_v2(&id) {
+                    for ch in &c.channels {
+                        let hex = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
+                        let _ = Self::v2_backfill_channel(
+                            &id, &hex, 50, 2, None,
+                            crate::community::transport::Evidence::Fast, 12,
+                        ).await;
+                    }
+                }
                 continue;
             }
             if let Ok(Some(community)) = db::community::load_community(&id) {
