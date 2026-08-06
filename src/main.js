@@ -2090,6 +2090,8 @@ async function surfaceCommunitySummary(summary) {
     if (!summary) return null;
     let firstChannel = null;
     let firstSync = null;
+    let fallbackChannel = null;
+    let fallbackSync = null;
     for (const ch of summary.channels || []) {
         const chat = getOrCreateChat(ch.channel_id, 'Community');
         chat.metadata = chat.metadata || {};
@@ -2118,7 +2120,12 @@ async function surfaceCommunitySummary(summary) {
         // The page-1 sync pulls existing history (e.g. the owner's welcome message) so the
         // channel isn't empty on open. Backend anti-stampede dedups a later open.
         const p = invoke('sync_community_channel', { channelId: ch.channel_id, beforeMs: null }).catch(() => {});
-        if (!firstChannel) { firstChannel = ch.channel_id; firstSync = p; }
+        // Navigate to a channel we can actually READ. A private channel we hold no
+        // key for renders empty and refuses every send, so landing there reads as
+        // the community being broken. Falls back to the first channel when nothing
+        // is readable, so a community never becomes unopenable.
+        if (ch.readable !== false && !firstChannel) { firstChannel = ch.channel_id; firstSync = p; }
+        if (!fallbackChannel) { fallbackChannel = ch.channel_id; fallbackSync = p; }
     }
     loadCommunityRoles(summary.community_id);
     resolveCommunityAvatars();
@@ -2126,9 +2133,11 @@ async function surfaceCommunitySummary(summary) {
     // If a warmed preload was promoted on Accept, the chat is ALREADY populated (its messages were
     // emitted by the backend), so open immediately — the first sync trues it up in the background.
     // Only await the sync when NOT preloaded (a cold join would otherwise open to an empty chat).
-    if (firstSync && !summary.preloaded) await firstSync;
+    const openChannel = firstChannel || fallbackChannel;
+    const openSync = firstChannel ? firstSync : fallbackSync;
+    if (openSync && !summary.preloaded) await openSync;
     renderChatlist();
-    return firstChannel;
+    return openChannel;
 }
 
 /**

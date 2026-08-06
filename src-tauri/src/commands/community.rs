@@ -98,6 +98,12 @@ pub struct CommunitySummary {
 pub struct ChannelSummary {
     pub channel_id: String,
     pub name: String,
+    /// CORD-03 private channel. Always false for v1, which has none.
+    pub private: bool,
+    /// Whether we hold this channel's key. A private channel we are not (yet)
+    /// granted reads false — the UI must not default to one, since it renders
+    /// empty and refuses every send.
+    pub readable: bool,
 }
 
 fn summarize(community: &vector_core::community::Community) -> CommunitySummary {
@@ -119,7 +125,7 @@ fn summarize(community: &vector_core::community::Community) -> CommunitySummary 
         channels: community
             .channels
             .iter()
-            .map(|c| ChannelSummary { channel_id: c.id.to_hex(), name: c.name.clone() })
+            .map(|c| ChannelSummary { channel_id: c.id.to_hex(), name: c.name.clone(), private: false, readable: true })
             .collect(),
         owner_npub,
         dissolved: community.dissolved,
@@ -147,6 +153,8 @@ fn summarize_v2(c: &vector_core::community::v2::community::CommunityV2) -> Commu
             .map(|ch| ChannelSummary {
                 channel_id: vector_core::simd::hex::bytes_to_hex_32(&ch.id.0),
                 name: ch.name.clone(),
+                private: ch.private,
+                readable: !ch.private || ch.key.is_some(),
             })
             .collect(),
         owner_npub: owner.and_then(|pk| pk.to_bech32().ok()),
