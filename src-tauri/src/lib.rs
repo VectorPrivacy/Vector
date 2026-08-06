@@ -389,6 +389,10 @@ pub fn run() {
                 account_manager::set_app_data_dir(data_dir);
             }
 
+            // Stamped into each account on open, so if the user later runs an
+            // older build the downgrade block can name what wrote the schema.
+            vector_core::db::set_app_version(handle.package_info().version.to_string());
+
             // Install the platform-correct download directory into
             // vector-core. Desktop & iOS use OS conventions (xdg-user-dirs
             // on Linux → `~/Téléchargements` etc., Known Folders on
@@ -650,6 +654,7 @@ pub fn run() {
             commands::system::get_background_service_prompted,
             commands::system::set_background_service_prompted,
             commands::updates::check_app_update,
+            commands::updates::check_account_downgrade,
             commands::updates::get_install_source,
             commands::updates::open_update_source,
             // Deep link commands

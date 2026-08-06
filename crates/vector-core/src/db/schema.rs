@@ -131,6 +131,32 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 );
 "#;
 
+/// Highest migration id this build knows how to apply.
+///
+/// **Bump this whenever you add a migration below.** A DB carrying anything
+/// above it was written by a newer Vector, so its schema holds changes this
+/// build cannot see and opening it corrupts data.
+///
+/// Leaving it behind is the one way the guard misfires: the new migration
+/// applies on first run, then this build reads its own database as newer and
+/// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
+/// `highest_migration_id_matches_the_runner` both catch that before release.
+pub const HIGHEST_MIGRATION_ID: u32 = 83;
+
+/// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
+///
+/// Nothing else reads the high-water mark: `schema_migrations` is a *set* of
+/// applied ids and every migration probes its own id, which is exactly why an
+/// older build slides past newer schema without noticing it exists.
+pub fn applied_migration_high_water(conn: &rusqlite::Connection) -> u32 {
+    conn.query_row("SELECT MAX(id) FROM schema_migrations", [], |row| {
+        row.get::<_, Option<u32>>(0)
+    })
+    .ok()
+    .flatten()
+    .unwrap_or(0)
+}
+
 /// Check if a specific migration has already been applied
 pub fn migration_applied(conn: &rusqlite::Connection, migration_id: u32) -> bool {
     conn.query_row(
@@ -172,6 +198,16 @@ fn run_atomic_migration<F>(
 where
     F: FnOnce(&rusqlite::Transaction) -> Result<(), String>,
 {
+    // A migration above the constant would apply fine on first run, then be
+    // read as a downgrade on the next one and lock the user out of their own
+    // account. Fires on any debug run, so it lands long before a release even
+    // if nobody ran the test suite.
+    debug_assert!(
+        id <= HIGHEST_MIGRATION_ID,
+        "migration {id} exceeds HIGHEST_MIGRATION_ID ({HIGHEST_MIGRATION_ID}); bump the constant \
+         or this build will refuse the database it just wrote"
+    );
+
     // Check if this specific migration was already applied.
     if migration_applied(conn, id) {
         return Ok(());
@@ -1174,4 +1210,42 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     })?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HIGHEST_MIGRATION_ID;
+
+    /// Parses this very file so the constant cannot drift from `run_migrations`.
+    /// Without it, adding a migration and forgetting the bump would silently
+    /// re-open the downgrade hole the constant exists to close.
+    #[test]
+    fn highest_migration_id_matches_the_runner() {
+        let src = include_str!("schema.rs");
+        let mut highest = 0u32;
+        let mut seen = 0usize;
+
+        for (at, _) in src.match_indices("run_atomic_migration(") {
+            let tail = src[at + "run_atomic_migration(".len()..].trim_start();
+            // Skips this test's own mention of the name, which is not a call.
+            let Some(args) = tail.strip_prefix("conn,") else {
+                continue;
+            };
+            let id: String = args
+                .trim_start()
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            if let Ok(id) = id.parse::<u32>() {
+                seen += 1;
+                highest = highest.max(id);
+            }
+        }
+
+        assert!(seen > 0, "parsed no migrations; the call shape must have changed");
+        assert_eq!(
+            HIGHEST_MIGRATION_ID, highest,
+            "bump HIGHEST_MIGRATION_ID to {highest} when adding a migration"
+        );
+    }
 }

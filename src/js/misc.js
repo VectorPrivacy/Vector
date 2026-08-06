@@ -110,6 +110,47 @@ function createPlaceholderAvatar(isGroup = false, limitSizeTo = null) {
  * @param {String} strTitleClass - If specified, a CSS class to be added to the title element (e.g., 'typing-indicator-text').
  * @return {Promise<Boolean>} - The Promise will resolve to 'true' if confirm button was clicked, otherwise 'false'.
  */
+/**
+ * Take over the screen when this build is older than the account's database.
+ *
+ * Deliberately terminal: there is no dismiss path, because continuing would let
+ * an older schema write over a newer one and corrupt message history.
+ *
+ * @param {Object} info - vector-core's DowngradeBlock: { db_schema, supported_schema, last_app_version }
+ */
+async function showDowngradeBlock(info) {
+    const domBlock = document.getElementById('downgrade-block');
+    if (!domBlock) return;
+
+    const format = (v) => (typeof parseVersion === 'function' ? parseVersion(v).display : `v${v}`);
+
+    let current = 'This build';
+    try {
+        current = format(await window.__TAURI__.app.getVersion());
+    } catch (e) { /* keep the generic label */ }
+
+    // The version that wrote the database reads far better than a schema
+    // number; the number is only reachable if an older build stamped nothing.
+    const required = info?.last_app_version
+        ? format(info.last_app_version)
+        : 'A newer version';
+
+    document.getElementById('downgrade-current').textContent = current;
+    document.getElementById('downgrade-required').textContent = required;
+
+    document.getElementById('downgrade-get-latest').onclick = () => openUrl('https://vectorapp.io');
+    document.getElementById('downgrade-quit').onclick = async () => {
+        // The process plugin is desktop-only, so this is accessed lazily.
+        try {
+            await window.__TAURI__.process.exit(0);
+        } catch (e) {
+            window.close();
+        }
+    };
+
+    domBlock.style.display = 'flex';
+}
+
 async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlaceholder = '', strIcon = '', strTitleClass = '', strConfirmText = null, fCircularIcon = false) {
     // Display the popup and render the UI
     domPopup.style.display = '';

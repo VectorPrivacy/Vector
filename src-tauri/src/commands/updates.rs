@@ -126,6 +126,19 @@ pub async fn check_app_update<R: Runtime>(handle: AppHandle<R>) -> Result<AppUpd
     })
 }
 
+/// Whether the account this build is about to open was written by a newer
+/// Vector.
+///
+/// Read-only, and deliberately callable before anything touches the database:
+/// the block has to replace boot, not follow a failed one. `init_database`
+/// refuses regardless, so this only decides whether the user gets an
+/// explanation or an error.
+#[tauri::command]
+pub fn check_account_downgrade() -> Option<vector_core::db::DowngradeBlock> {
+    let npub = vector_core::db::read_active_account_file().ok().flatten()?;
+    vector_core::db::inspect_downgrade(&npub).ok().flatten()
+}
+
 /// Where this build can be updated from.
 #[derive(serde::Serialize, Clone)]
 pub struct InstallSource {

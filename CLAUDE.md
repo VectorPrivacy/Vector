@@ -50,7 +50,7 @@ All business logic lives here, fully decoupled from Tauri. Any client (GUI, CLI,
 - **`compact.rs`** — CompactMessage (u64 ms timestamps), CompactMessageVec, NpubInterner, TinyVec, bitflags
 - **`state.rs`** — ChatState, all globals (NOSTR_CLIENT, MY_SECRET_KEY, STATE, etc.), WrapperIdCache, processing gate
 - **`crypto/`** — GuardedKey vault, GuardedSigner, Argon2id, AES-GCM, ChaCha20, decrypt_data, extension_from_mime, sanitize_filename, resolve_unique_filename, format_bytes, mime_from_magic_bytes, mime_from_extension (full MIME map)
-- **`db/`** — SQLite schema, 20 atomic migrations, connection pools, RAII guards, settings KV
+- **`db/`** — SQLite schema, 41 atomic migrations, downgrade guard, connection pools, RAII guards, settings KV
 - **`hex.rs`** — SIMD hex encode/decode (NEON ARM64, SSE2/AVX2 x86_64, scalar fallback)
 - **`rumor.rs`** — process_rumor() inbound message parser, RumorEvent, 11 result variants
 - **`stored_event.rs`** — StoredEvent, StoredEventBuilder, event_kind constants
@@ -146,6 +146,23 @@ Every new `#[tauri::command]` requires THREE things:
 Missing any = `invoke()` silently rejects with "Command X not allowed by ACL".
 
 **If the command mutates per-account state**, also see the multi-account section above — capture `SessionGuard` at entry, re-validate before any `save_*` call.
+
+### Adding a database migration
+
+Every new migration in `crates/vector-core/src/db/schema.rs` requires TWO things:
+
+1. A `run_atomic_migration(conn, <id>, ...)` call, using the next id **above the current highest**
+2. `HIGHEST_MIGRATION_ID` bumped to that same id
+
+**Forgetting step 2 locks users out of their own accounts.** The migration applies fine on first
+run, then the downgrade guard reads the DB as newer than the build that wrote it and refuses to
+open on the second run. Two guards catch it before release: a `debug_assert` in
+`run_atomic_migration` (fires on any debug run) and `highest_migration_id_matches_the_runner`
+(parses the file, so it can't drift). Neither runs in CI today.
+
+Ids are a high-water mark, never a count. **33-39 and 45-61 are burned** and must never be reused
+— some DBs recorded them as applied without the ALTER landing, so reuse is a silent skip. Live ids
+are 19-32, 40-44, 62-83.
 
 ### SendCallback — Unified DM Send Pipeline
 

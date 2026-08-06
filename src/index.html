@@ -79,6 +79,35 @@
       </center>
     </div>
 
+    <!-- Downgrade block. Deliberately has no dismiss path: continuing would
+         write an older schema over a newer database. -->
+    <div id="downgrade-block" class="downgrade-block" style="display: none;">
+      <div class="downgrade-card">
+        <img class="downgrade-icon" src="./icons/vector_warning.svg" alt="">
+        <h2>Vector can't open this account</h2>
+        <p>
+          Your data was last used with a newer version of Vector. Opening it with this
+          older build would damage your message history.
+        </p>
+        <div class="downgrade-versions">
+          <div class="downgrade-version">
+            <span>This build</span>
+            <strong id="downgrade-current"></strong>
+          </div>
+          <div class="downgrade-versions-sep"></div>
+          <div class="downgrade-version">
+            <span>Your data needs</span>
+            <strong id="downgrade-required"></strong>
+          </div>
+        </div>
+        <p class="downgrade-reassure">
+          Nothing has been lost. Your messages are intact and will open again on the newer version.
+        </p>
+        <button id="downgrade-get-latest" class="btn accept-btn btn-bounce">Get the latest version</button>
+        <button id="downgrade-quit" class="cancel-btn">Quit Vector</button>
+      </div>
+    </div>
+
     <!-- Edit History Popup -->
     <div id="edit-history-popup" class="edit-history-popup" style="display: none;">
       <div id="edit-history-content" class="edit-history-content"></div>

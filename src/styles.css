@@ -734,6 +734,111 @@ html, body {
   margin-top: auto;
 }
 
+/* Downgrade block — a full takeover, not a popup: there is no "continue". */
+.downgrade-block {
+  position: fixed;
+  inset: 0;
+  z-index: 10010;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background-color: rgba(0, 0, 0, 0.92);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+.downgrade-card {
+  max-width: 360px;
+  width: 100%;
+  text-align: center;
+  padding: 28px 24px;
+  border-radius: 12px;
+  background-color: #0d0d0d;
+  border: 1px solid color-mix(in srgb, var(--danger-color) 45%, transparent);
+}
+
+/* Vector's own dialog icon, matching how popupConfirm renders it large. The
+   themed `.warning-icon` asset is pixel art drawn for 16px and stair-steps
+   when enlarged. */
+.downgrade-icon {
+  width: 84px;
+  height: 84px;
+  margin-bottom: 12px;
+}
+
+.downgrade-card h2 {
+  font-size: 20px;
+  margin-bottom: 12px;
+  color: var(--danger-color);
+}
+
+.downgrade-card p {
+  font-size: 14px;
+  line-height: 1.5;
+  opacity: 0.8;
+  margin-bottom: 20px;
+}
+
+.downgrade-versions {
+  display: flex;
+  align-items: stretch;
+  margin-bottom: 20px;
+  border-radius: 8px;
+  background-color: rgba(255, 255, 255, 0.04);
+}
+
+.downgrade-version {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 8px;
+  min-width: 0;
+}
+
+.downgrade-version span {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  opacity: 0.45;
+}
+
+.downgrade-version strong {
+  font-size: 14px;
+  /* Long version strings wrap rather than widen the card. */
+  overflow-wrap: anywhere;
+}
+
+/* The required build is the one the user has to act on. */
+.downgrade-version:last-child strong {
+  color: var(--danger-color);
+}
+
+.downgrade-versions-sep {
+  width: 1px;
+  margin: 10px 0;
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+.downgrade-reassure {
+  font-size: 13px !important;
+  opacity: 0.55 !important;
+}
+
+/* Margins zeroed explicitly: `.cancel-btn` carries a global margin-left that
+   would otherwise offset it from the button above at identical width. */
+.downgrade-card .btn,
+.downgrade-card .cancel-btn {
+  display: block;
+  width: 100%;
+  margin: 0;
+}
+
+.downgrade-card .btn {
+  margin-bottom: 10px;
+}
+
 .typing-indicator-text {
   background-clip: text;
   -webkit-background-clip: text;

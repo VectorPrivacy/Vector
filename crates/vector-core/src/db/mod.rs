@@ -51,6 +51,15 @@ pub fn get_app_data_dir() -> Result<&'static PathBuf, String> {
     APP_DATA_DIR.get().ok_or_else(|| "App data directory not initialized".to_string())
 }
 
+/// Host app version, stamped into each account on open so a later downgrade can
+/// name what wrote the schema. Optional: the downgrade guard keys off the
+/// migration high-water mark, never this.
+static APP_VERSION: OnceLock<String> = OnceLock::new();
+
+pub fn set_app_version(version: impl Into<String>) {
+    let _ = APP_VERSION.set(version.into());
+}
+
 /// Host-installed override for the download directory. Tauri sets this
 /// at boot via `set_download_dir()` so platform conventions (XDG on
 /// Linux, Known Folders on Windows) are honored. Headless callers
@@ -751,6 +760,78 @@ pub fn get_write_connection_guard_static() -> Result<WriteConnectionGuard, Strin
 }
 
 // ============================================================================
+// Downgrade guard
+// ============================================================================
+
+/// Where each build stamps its version after successfully opening an account.
+const LAST_APP_VERSION_KEY: &str = "last_app_version";
+
+/// A newer Vector already opened this account's database.
+///
+/// Vector has no downgrade path: older builds neither recognise nor preserve
+/// newer schema, and the corruption that follows is silent until the user opens
+/// the wrong chat.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DowngradeBlock {
+    /// Migration high-water mark found in the account's DB.
+    pub db_schema: u32,
+    /// Highest migration this build can apply.
+    pub supported_schema: u32,
+    /// App version that last opened it, when one was stamped.
+    pub last_app_version: Option<String>,
+}
+
+impl std::fmt::Display for DowngradeBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "This account was last opened by a newer version of Vector")?;
+        if let Some(version) = &self.last_app_version {
+            write!(f, " ({version})")?;
+        }
+        write!(
+            f,
+            ". Its database is at schema {} and this build only understands {}. \
+             Opening it would corrupt your messages, so Vector has stopped. \
+             Reinstall the newer version to continue.",
+            self.db_schema, self.supported_schema
+        )
+    }
+}
+
+/// The check itself, against an already-open connection.
+fn downgrade_block(conn: &rusqlite::Connection) -> Option<DowngradeBlock> {
+    let db_schema = schema::applied_migration_high_water(conn);
+    if db_schema <= schema::HIGHEST_MIGRATION_ID {
+        return None;
+    }
+    Some(DowngradeBlock {
+        db_schema,
+        supported_schema: schema::HIGHEST_MIGRATION_ID,
+        last_app_version: conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                rusqlite::params![LAST_APP_VERSION_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .ok(),
+    })
+}
+
+/// Whether this account's DB was written by a newer Vector.
+///
+/// Read-only and side-effect free, so a host can call it before
+/// [`init_database`] and put a real dialog in front of the user rather than
+/// surfacing a failed boot.
+pub fn inspect_downgrade(npub: &str) -> Result<Option<DowngradeBlock>, String> {
+    let db_path = account_dir(npub)?.join("vector.db");
+    // Never create the file just to inspect it.
+    if !db_path.exists() {
+        return Ok(None);
+    }
+    let conn = create_connection(&db_path)?;
+    Ok(downgrade_block(&conn))
+}
+
+// ============================================================================
 // Database Initialization
 // ============================================================================
 
@@ -765,11 +846,29 @@ pub fn init_database(npub: &str) -> Result<(), String> {
 
     let db_path = profile_dir.join("vector.db");
     let mut conn = create_connection(&db_path)?;
+
+    // Before ANY write. SQL_SCHEMA is all CREATE TABLE IF NOT EXISTS, so an
+    // older build would resurrect tables newer migrations dropped and then
+    // start writing rows against a schema it cannot see.
+    if let Some(block) = downgrade_block(&conn) {
+        return Err(block.to_string());
+    }
+
     conn.execute_batch(schema::SQL_SCHEMA)
         .map_err(|e| format!("Failed to create schema: {}", e))?;
 
     // Run migrations
     schema::run_migrations(&mut conn)?;
+
+    // Stamped after migrations, so it names the build whose schema is now on
+    // disk. A blocked build never reaches here, so this only ever records a
+    // version that could actually read what it wrote.
+    if let Some(version) = APP_VERSION.get() {
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+            rusqlite::params![LAST_APP_VERSION_KEY, version],
+        );
+    }
 
     // SQLite's prescribed open-time step for long-lived connections: analyze every table that needs
     // it (missing stats, or grown/shrunk 10x), bounded by a temporary analysis_limit so it stays
@@ -1061,5 +1160,117 @@ mod pool_generation_tests {
             DB_WRITE_CONN.lock().unwrap().is_none(),
             "stale write guard must not fill an empty slot"
         );
+    }
+}
+
+#[cfg(test)]
+mod downgrade_tests {
+    use super::*;
+
+    fn test_account() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>, String) {
+        let guard = DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        close_database();
+        clear_id_caches();
+        let tmp = tempfile::tempdir().unwrap();
+        // Bases must not collide across test modules: APP_DATA_DIR is a
+        // OnceLock shared by the whole binary, and this generator collapses
+        // after ~4 chars, so nearby seeds yield near-identical npubs.
+        // Taken: 0, 900, 5_000, 50_000, 70_000, 71_000, 81_000, 90_000.
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(61_000);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        const B: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+        let mut acct = String::from("npub1");
+        let mut v = n as usize;
+        for _ in 0..58 {
+            acct.push(B[v % 32] as char);
+            v = v / 32 + 7;
+        }
+        set_app_data_dir(tmp.path().to_path_buf());
+        set_current_account(acct.clone()).unwrap();
+        (tmp, guard, acct)
+    }
+
+    /// A DB this build fully understands must open, or the guard is useless.
+    #[test]
+    fn an_equal_schema_opens_normally() {
+        let (_tmp, _guard, acct) = test_account();
+        init_database(&acct).unwrap();
+        assert!(inspect_downgrade(&acct).unwrap().is_none());
+        // Re-opening is still fine: the stamp write must not trip the guard.
+        init_database(&acct).unwrap();
+        assert!(inspect_downgrade(&acct).unwrap().is_none());
+    }
+
+    /// Absent DB is not a downgrade; it must not be created just to look.
+    #[test]
+    fn a_missing_database_is_not_a_downgrade() {
+        let (_tmp, _guard, acct) = test_account();
+        assert!(inspect_downgrade(&acct).unwrap().is_none());
+        assert!(!account_dir(&acct).unwrap().join("vector.db").exists());
+    }
+
+    #[test]
+    fn a_newer_schema_blocks_the_open_and_names_the_build() {
+        let (_tmp, _guard, acct) = test_account();
+        init_database(&acct).unwrap();
+
+        // Stand in for a newer Vector having run one migration past this build.
+        let db_path = account_dir(&acct).unwrap().join("vector.db");
+        {
+            let conn = create_connection(&db_path).unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_migrations (id, applied_at) VALUES (?1, 0)",
+                rusqlite::params![schema::HIGHEST_MIGRATION_ID + 1],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+                rusqlite::params![LAST_APP_VERSION_KEY, "9.9.9"],
+            )
+            .unwrap();
+        }
+        close_database();
+
+        let block = inspect_downgrade(&acct)
+            .unwrap()
+            .expect("a higher migration id must read as a downgrade");
+        assert_eq!(block.db_schema, schema::HIGHEST_MIGRATION_ID + 1);
+        assert_eq!(block.supported_schema, schema::HIGHEST_MIGRATION_ID);
+        assert_eq!(block.last_app_version.as_deref(), Some("9.9.9"));
+
+        let err = init_database(&acct).unwrap_err();
+        assert!(err.contains("9.9.9"), "must name the newer build: {err}");
+    }
+
+    /// The guard has to fire before SQL_SCHEMA runs: its CREATE TABLE IF NOT
+    /// EXISTS statements would otherwise resurrect tables newer migrations drop.
+    #[test]
+    fn a_blocked_open_writes_nothing() {
+        let (_tmp, _guard, acct) = test_account();
+        init_database(&acct).unwrap();
+        let db_path = account_dir(&acct).unwrap().join("vector.db");
+        {
+            let conn = create_connection(&db_path).unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_migrations (id, applied_at) VALUES (?1, 0)",
+                rusqlite::params![schema::HIGHEST_MIGRATION_ID + 5],
+            )
+            .unwrap();
+            conn.execute("DROP TABLE IF EXISTS settings", []).unwrap();
+        }
+        close_database();
+
+        assert!(init_database(&acct).is_err());
+
+        // SQL_SCHEMA would have recreated `settings`; it must still be gone.
+        let conn = create_connection(&db_path).unwrap();
+        let exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        assert!(!exists, "a blocked open must not write to the database");
     }
 }

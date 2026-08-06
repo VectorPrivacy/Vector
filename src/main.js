@@ -11031,6 +11031,20 @@ window.addEventListener("DOMContentLoaded", async () => {
     // Fetch platform features to determine OS-specific behavior
     await fetchPlatformFeatures();
 
+    // Downgrade gate, before any other boot step: this build must not touch a
+    // database a newer Vector wrote. Terminal by design — nothing below runs.
+    try {
+        const downgrade = await invoke('check_account_downgrade');
+        if (downgrade) {
+            await showDowngradeBlock(downgrade);
+            return;
+        }
+    } catch (e) {
+        // A failure here must not strand a healthy account on a blank screen;
+        // init_database still refuses the open if this really was a downgrade.
+        console.error('Downgrade check failed:', e);
+    }
+
     // Initialize relay dialog event listeners
     initRelayDialogs();
 
