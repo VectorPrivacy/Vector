@@ -56,7 +56,12 @@ pub struct JoinMaterial {
     pub community_root: String,
     pub root_epoch: u64,
     /// The PRIVATE channels held (public ones derive from the root — CORD-03).
+    /// ABSENT, not empty, when the writer holds no keys — armada omits the field.
+    /// Required once, which rejected the whole vault for the commonest case there
+    /// is: a membership with no private channels.
+    #[serde(default)]
     pub channels: Vec<ChannelKeyRef>,
+    #[serde(default)]
     pub relays: Vec<String>,
     pub name: String,
     /// Round-tripped verbatim: `held_roots`, `refounder`, and anything a peer
@@ -71,7 +76,12 @@ pub struct JoinMaterial {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelKeyRef {
     pub id: String,
-    pub key: String,
+    /// ABSENT when the writer knows the channel but holds no key for it — armada
+    /// lists private channels the account has not been granted. Required here
+    /// once, which made ONE unkeyed channel reject the whole document and strand
+    /// the account on a stale copy, so it must stay optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
     pub epoch: u64,
     pub name: String,
 }
@@ -398,6 +408,64 @@ mod tests {
     }
 
     #[test]
+    fn a_channel_listed_without_a_key_does_not_reject_the_whole_document() {
+        // GOLDEN, armada-shaped: it lists private channels the account holds NO key
+        // for, omitting `key` entirely. `key` was a required String, so ONE such
+        // channel failed the whole parse and pinned the account to a stale copy —
+        // cross-device sync stopped dead the day private channels shipped.
+        let json = r#"{
+          "entries": [{
+            "community_id": "aa",
+            "seed":    {"community_id":"aa","owner":"o","owner_salt":"s","community_root":"r","root_epoch":1,"channels":[],"relays":[],"name":"n"},
+            "current": {"community_id":"aa","owner":"o","owner_salt":"s","community_root":"r","root_epoch":1,
+                        "channels":[
+                          {"id":"c1","key":"kk","epoch":2,"name":"keyed"},
+                          {"id":"c2","epoch":0,"name":"not-granted"}
+                        ],
+                        "relays":[],"name":"n"},
+            "added_at": 5
+          }],
+          "tombstones": []
+        }"#;
+        let parsed: CommunityList = serde_json::from_str(json).expect("a keyless channel must parse");
+        let chans = &parsed.entries[0].current.channels;
+        assert_eq!(chans.len(), 2, "both channels survive");
+        assert_eq!(chans[0].key.as_deref(), Some("kk"));
+        assert_eq!(chans[1].key, None, "an unheld channel is known but keyless");
+        assert_eq!(chans[1].name, "not-granted", "and still carries its identity");
+    }
+
+    #[test]
+    fn join_material_that_vends_no_keys_omits_channels_entirely() {
+        // armada drops `channels` when it holds no keys ("the type promises an
+        // array while the wire promises nothing"). A required Vec would reject the
+        // whole vault document for the commonest case of all: a public community.
+        let json = r#"{
+          "entries": [{
+            "community_id": "aa",
+            "seed":    {"community_id":"aa","owner":"o","owner_salt":"s","community_root":"r","root_epoch":1,"relays":[],"name":"n"},
+            "current": {"community_id":"aa","owner":"o","owner_salt":"s","community_root":"r","root_epoch":1,"relays":[],"name":"n"},
+            "added_at": 5
+          }],
+          "tombstones": []
+        }"#;
+        let parsed: CommunityList = serde_json::from_str(json).expect("absent `channels` must parse");
+        assert!(parsed.entries[0].current.channels.is_empty(), "no keys held");
+        assert!(parsed.is_live("aa"), "and the membership still counts");
+    }
+
+    #[test]
+    fn a_keyless_channel_is_never_written_back() {
+        // Shipped builds require `key`, so emitting a keyless entry would inflict
+        // this very bug on them. Absent, not null.
+        let c = ChannelKeyRef { id: "c".into(), key: None, epoch: 0, name: "n".into() };
+        let s = serde_json::to_string(&c).unwrap();
+        assert!(!s.contains("key"), "no `key` field at all, got {s}");
+        let keyed = ChannelKeyRef { id: "c".into(), key: Some("kk".into()), epoch: 1, name: "n".into() };
+        assert!(serde_json::to_string(&keyed).unwrap().contains(r#""key":"kk""#), "keyed stays byte-identical");
+    }
+
+    #[test]
     fn canonical_json_sorts_nested_objects_and_keeps_array_order() {
         // GOLDEN: unsorted input with a nested object and arrays → one
         // deterministic byte string. Cross-client ties break on exactly this.
@@ -532,7 +600,7 @@ mod tests {
         for i in 0..600u64 {
             jm.channels.push(ChannelKeyRef {
                 id: format!("{i:064x}"),
-                key: "e".repeat(64),
+                key: Some("e".repeat(64)),
                 epoch: 0,
                 name: "c".into(),
             });

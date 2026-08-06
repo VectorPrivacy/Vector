@@ -44,7 +44,13 @@ pub struct CommunityInvite {
     /// keeps older bundles parseable (they predate rotation, so epoch 0 is correct for them).
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub server_root_epoch: u64,
+    /// Tolerant on read: a peer that carries no relays/channels may omit the field
+    /// entirely, and a required Vec would reject the WHOLE bundle over an absent
+    /// empty list. This bundle is also embedded in the v1 Community List, so one
+    /// such entry would strand the entire list.
+    #[serde(default)]
     pub relays: Vec<String>,
+    #[serde(default)]
     pub channels: Vec<InviteChannel>,
     /// Owner attestation (signed event JSON) so the joiner learns + verifies who the owner
     /// is. `serde(default)` keeps older bundles (pre-feature) parseable.

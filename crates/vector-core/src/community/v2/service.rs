@@ -2763,8 +2763,11 @@ fn join_material(community: &CommunityV2) -> super::list::JoinMaterial {
         .channels
         .iter()
         .filter(|c| c.private)
+        // Keyed channels ONLY. A keyless entry is readable by this build but is
+        // rejected outright by shipped ones (their `key` is a required String),
+        // so emitting one would strand every older client on a stale list.
         .filter_map(|c| {
-            c.key.map(|k| super::list::ChannelKeyRef { id: hex(&c.id.0), key: hex(&k), epoch: c.epoch.0, name: c.name.clone() })
+            c.key.map(|k| super::list::ChannelKeyRef { id: hex(&c.id.0), key: Some(hex(&k)), epoch: c.epoch.0, name: c.name.clone() })
         })
         .collect();
     super::list::JoinMaterial {
@@ -2784,10 +2787,14 @@ fn join_material(community: &CommunityV2) -> super::list::JoinMaterial {
 /// (the material IS the membership subset of a bundle). The owner root is still
 /// verified over the network before the community is trusted (accept_bundle).
 fn material_to_invite(jm: &super::list::JoinMaterial) -> CommunityInvite {
+    // A keyless listing records that the channel EXISTS, not a grant — there is
+    // nothing to seat, and it keys up when access is granted.
     let channels = jm
         .channels
         .iter()
-        .map(|c| invite::ChannelGrant { id: c.id.clone(), key: c.key.clone(), epoch: c.epoch, name: c.name.clone() })
+        .filter_map(|c| {
+            c.key.as_ref().map(|k| invite::ChannelGrant { id: c.id.clone(), key: k.clone(), epoch: c.epoch, name: c.name.clone() })
+        })
         .collect();
     CommunityInvite {
         community_id: jm.community_id.clone(),
@@ -2837,16 +2844,51 @@ async fn fetch_community_list<T: Transport + ?Sized>(transport: &T, relays: &[St
         ..Default::default()
     };
     let events = transport.fetch(&query, relays).await?;
-    let mut best: Option<(u64, super::list::CommunityList)> = None;
+    let seen = events.len();
+    // Which copy won matters: relays disagree (one may hold a stale replaceable),
+    // and a list near the NIP-44 ceiling stops accepting joins — both are invisible
+    // without saying so.
+    let mut undecryptable = 0usize;
+    let mut unreadable: Option<(u64, String, usize, String)> = None;
+    let mut best: Option<(u64, String, super::list::CommunityList)> = None;
     for e in events {
-        if let Ok(l) = super::list::parse_list_event_signed(&signer, my_pk, &e).await {
-            let at = e.created_at.as_secs();
-            if best.as_ref().map(|(b, _)| at > *b).unwrap_or(true) {
-                best = Some((at, l));
+        let at = e.created_at.as_secs();
+        let id_hex = e.id.to_hex();
+        let content_len = e.content.len();
+        match super::list::parse_list_event_signed(&signer, my_pk, &e).await {
+            Ok(l) => {
+                if best.as_ref().map(|(b, _, _)| at > *b).unwrap_or(true) {
+                    best = Some((at, id_hex, l));
+                }
+            }
+            Err(err) => {
+                undecryptable += 1;
+                if unreadable.as_ref().map(|(a, _, _, _)| at > *a).unwrap_or(true) {
+                    unreadable = Some((at, id_hex, content_len, err.to_string()));
+                }
             }
         }
     }
-    Ok(best.map(|(_, l)| l))
+    // Only the case that costs data is worth a warning: a copy we could not read
+    // that was NEWER than the one we settled for. That silently pins the account
+    // to stale membership, and the parse error is the only clue to why.
+    if let Some((at, id, len, err)) = &unreadable {
+        if best.as_ref().map(|(b, _, _)| at > b).unwrap_or(true) {
+            crate::log_net_fail!(
+                "[CommunityList] IGNORED a newer copy {} created_at={at} ({len} content bytes) — falling back to stale membership: {err}",
+                &id[..8]
+            );
+        }
+    }
+    if let Some((at, id, l)) = &best {
+        let bytes = serde_json::to_string(l).map(|s| s.len()).unwrap_or(0);
+        crate::log_debug!(
+            "[CommunityList] using {} created_at={at} ({bytes}/{} bytes) of {seen} copies, {undecryptable} unreadable",
+            &id[..8],
+            super::stream::NIP44_MAX_PLAINTEXT
+        );
+    }
+    Ok(best.map(|(_, _, l)| l))
 }
 
 /// Rebuild this account's 13302 from its held v2 communities, MERGE with the remote
@@ -3047,9 +3089,30 @@ pub async fn sync_community_list<T: Transport + ?Sized>(transport: &T, bootstrap
     if relays.is_empty() {
         return Ok(ListSyncOutcome { joined: vec![], removed: vec![] });
     }
+    // A cross-device sync that finds nothing is indistinguishable from one that
+    // never ran, so every exit says why — this path is only ever debugged after
+    // the fact, from a user's log.
     let list = match fetch_community_list(transport, &relays).await {
-        Ok(Some(l)) => l,
-        Ok(None) | Err(_) => return Ok(ListSyncOutcome { joined: vec![], removed: vec![] }),
+        Ok(Some(l)) => {
+            crate::log_debug!(
+                "[CommunityList] fetched: {} entries, {} tombstones, across {} relays",
+                l.entries.len(),
+                l.tombstones.len(),
+                relays.len()
+            );
+            l
+        }
+        Ok(None) => {
+            // Transient by nature: boot runs many concurrent passes and a relay that
+            // times out under that load returns nothing. Only persistent absence
+            // matters, and that shows up as "adopted nothing" anyway.
+            crate::log_debug!("[CommunityList] no kind-13302 across {} relays", relays.len());
+            return Ok(ListSyncOutcome { joined: vec![], removed: vec![] });
+        }
+        Err(e) => {
+            crate::log_net_fail!("[CommunityList] fetch failed across {} relays: {e}", relays.len());
+            return Ok(ListSyncOutcome { joined: vec![], removed: vec![] });
+        }
     };
     // Receive-side teardown (the counterpart to the republish tombstone guard):
     // a community this device still holds but the synced list shows TOMBSTONED (a
@@ -3099,8 +3162,15 @@ pub async fn sync_community_list<T: Transport + ?Sized>(transport: &T, bootstrap
         // account already holds elsewhere — the membership was announced when it
         // actually joined, and a key sync is not a membership event.
         let bundle = material_to_invite(&entry.current);
-        if let Ok(community) = accept_bundle(transport, &session, &bundle, None, false).await {
-            joined.push(community);
+        match accept_bundle(transport, &session, &bundle, None, false).await {
+            Ok(community) => joined.push(community),
+            // A listed-but-unadoptable entry is the failure mode that reads as
+            // "cross-device sync is broken": the community never appears and any
+            // parked invite for it is never retired.
+            Err(e) => crate::log_net_fail!(
+                "[CommunityList] {} is listed but adoption failed: {e}",
+                &entry.community_id[..entry.community_id.len().min(8)]
+            ),
         }
     }
     Ok(ListSyncOutcome { joined, removed })

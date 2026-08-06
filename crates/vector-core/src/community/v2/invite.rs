@@ -138,7 +138,12 @@ pub struct CommunityInvite {
     /// The base access key (32-byte hex) at `root_epoch`.
     pub community_root: String,
     pub root_epoch: u64,
+    /// ABSENT, not empty, when the bundle vends no channel keys — armada omits it
+    /// (and re-fills it defensively on read). A required Vec here rejects the whole
+    /// bundle, which is a JOIN failure, not just a stale read.
+    #[serde(default)]
     pub channels: Vec<ChannelGrant>,
+    #[serde(default)]
     pub relays: Vec<String>,
     /// Preview name so a parked invite renders; the Control fold is the authority.
     pub name: String,
@@ -790,6 +795,23 @@ mod tests {
 
     fn hex(bytes: &[u8; 32]) -> String {
         crate::simd::hex::bytes_to_hex_32(bytes)
+    }
+
+    #[test]
+    fn a_bundle_vending_no_channel_keys_omits_the_field_entirely() {
+        // armada omits `channels` when the bundle carries no keys, and re-fills it
+        // on read. Required here, a public-community invite fails to parse at all —
+        // a JOIN failure, not merely a stale read. Optional fields stay absent too.
+        let json = r#"{
+          "community_id":"aa","owner":"bb","owner_salt":"cc",
+          "community_root":"dd","root_epoch":0,"name":"Public Room"
+        }"#;
+        let inv: CommunityInvite = serde_json::from_str(json).expect("absent `channels`/`relays` must parse");
+        assert!(inv.channels.is_empty());
+        assert!(inv.relays.is_empty());
+        assert_eq!(inv.icon, None, "absent optionals are None, not an error");
+        assert_eq!(inv.expires_at, None);
+        assert_eq!(inv.name, "Public Room");
     }
 
     /// A valid owner + bundle whose (owner, salt) reproduce its community_id.

@@ -96,6 +96,8 @@ pub struct MigrationSignpost {
     /// The v2 owner salt (public input to the self-cert id).
     pub owner_salt: String,
     /// The v2 relay set (capped like every other attacker-influencable relay list).
+    /// Absent is empty, not a parse failure — a rejected signpost strands the migration.
+    #[serde(default)]
     pub relays: Vec<String>,
     /// Display name at migration time (informational only).
     pub name: String,
