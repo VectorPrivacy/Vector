@@ -3154,7 +3154,11 @@ pub async fn sync_community_list<T: Transport + ?Sized>(transport: &T, bootstrap
     let mut joined = Vec::new();
     for entry in list.live_entries() {
         let Some(cid) = crate::simd::hex::hex_to_bytes_32_checked(&entry.community_id) else { continue };
-        if crate::db::community::load_community_v2(&crate::community::CommunityId(cid)).ok().flatten().is_some() {
+        // Held under ANY protocol, not just v2. A protocol-scoped check re-adopts an
+        // id we already hold as v1: verification correctly fails (there is no v2
+        // community at that coordinate), and the entry is retried on EVERY sync pass
+        // forever — a permanent warning flood plus a wasted multi-relay walk each time.
+        if crate::db::community::community_exists(&crate::community::CommunityId(cid)).unwrap_or(false) {
             continue; // already held
         }
         if !session.is_valid() {
@@ -6596,6 +6600,62 @@ mod tests {
         assert!(
             !authority.roles.is_authorized(&Keys::generate().public_key().to_hex(), Some(&owner.keys.public_key().to_hex()), Permissions::MANAGE_ROLES),
             "a non-admin gains no authority"
+        );
+    }
+
+    /// A device that never folded the dissolution tombstone still heals.
+    ///
+    /// Live two-device wedge: the control fold is what seals a migrated-away community,
+    /// and the boot control probe can veto that fold indefinitely (it is `since`-windowed
+    /// over the CONTROL plane, while the tombstone lives at the DISSOLVED coordinate). The
+    /// second device therefore sat UNSEALED, which used to exclude it from the sweep
+    /// (`dissolved = 1`) AND from the flip retry (no pointer) — the one state that most
+    /// needed probing was the one nothing probed, so it stayed on v1 forever.
+    #[tokio::test]
+    async fn an_unsealed_v1_that_was_migrated_away_still_heals() {
+        use crate::community::migration;
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+
+        let mut v1 = crate::community::Community::create("Guild", "general", bed.relays.clone());
+        let v1_cid = v1.id.to_hex();
+        v1.owner_attestation = Some({
+            crate::community::owner::build_owner_attestation_unsigned(owner.keys.public_key(), &v1_cid)
+                .finalize(&owner.keys).unwrap().as_json()
+        });
+        crate::db::community::save_community(&v1).unwrap();
+
+        // The owner migrates on their FIRST device: this publishes the carrier tombstone.
+        let unlocked = migration::MIGRATION_UNLOCK_AT + 1;
+        let v2_hex = migration::migrate_community_to_v2(&bed.relay, &v1, unlocked).await.unwrap();
+
+        // A MEMBER's device that holds the v1 community and never folded the tombstone:
+        // unsealed, pointer-less, unchecked — exactly the wedged shape.
+        bed.swap_to(&member);
+        crate::db::community::save_community(&v1).unwrap();
+        assert!(
+            !crate::db::community::get_community_dissolved(&v1_cid).unwrap(),
+            "precondition: the wedged device has NOT sealed its v1 row"
+        );
+
+        // It IS a sweep candidate now (the fix); before, `dissolved = 1` excluded it.
+        assert!(
+            crate::db::community::migration_sweep_candidates().unwrap().contains(&v1_cid),
+            "an unsealed, migrated-away v1 must be probed"
+        );
+
+        migration::sweep_dissolved_for_migration(&bed.relay).await;
+
+        // The sweep found the carrier, sealed the v1 row, and flipped it to the twin.
+        assert!(crate::db::community::get_community_dissolved(&v1_cid).unwrap(), "sealed by the sweep");
+        assert_eq!(
+            crate::db::community::get_migrated_to(&v1_cid).unwrap().as_deref(),
+            Some(v2_hex.as_str()),
+            "flipped to the same twin the first device produced"
+        );
+        assert!(
+            !crate::db::community::migration_sweep_candidates().unwrap().contains(&v1_cid),
+            "and the sweep converges — no re-probing forever"
         );
     }
 
