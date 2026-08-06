@@ -3478,6 +3478,7 @@ pub async fn edit_channel_metadata<T: Transport + ?Sized>(transport: &T, communi
     let session = SessionGuard::capture();
     let my_pk = me_pk()?;
     ensure_channel_manager(community, &my_pk)?;
+    let old_name = community.channel(channel_id).map(|c| c.name.clone());
     // Public → private CONVERSION is a key rotation (CORD-03 §2) this build doesn't
     // mint yet — refuse the flag flip rather than publish an edition no reader can
     // key (members would keep posting on the root-derived plane, splitting the
@@ -3508,7 +3509,74 @@ pub async fn edit_channel_metadata<T: Transport + ?Sized>(transport: &T, communi
             crate::db::community::save_community_v2(&held)?;
         }
     }
+    // Keep the companion access role's label in step with the channel it gates.
+    if meta.private {
+        if let Some(old) = old_name.filter(|o| *o != meta.name) {
+            rename_channel_access_role(transport, community, channel_id, &old, &meta.name, &session).await;
+        }
+    }
     Ok(())
+}
+
+/// Rename a private channel's companion access role to follow the channel (CORD-04 §2).
+/// Best-effort and never fatal: the channel rename has already published, and a role's
+/// name is cosmetic — entitlement is carried by the scope, not the label.
+///
+/// Only renames a label still equal to the channel's OLD name, so a deliberately
+/// customised role name survives a channel rename untouched.
+async fn rename_channel_access_role<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    channel_id: &ChannelId,
+    old_name: &str,
+    new_name: &str,
+    session: &SessionGuard,
+) {
+    let (Ok(my_pk), Ok(owner)) = (me_pk(), community.owner()) else {
+        return;
+    };
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let chan_hex = crate::simd::hex::bytes_to_hex_32(&channel_id.0);
+    // Fetched, not cached: `set_role` republishes the WHOLE role body, so a stale
+    // cache would clobber a permission edit this client has not folded yet.
+    let mut roster = fetch_authority(transport, community).await.roles;
+    let cached = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+    for r in cached.roles {
+        if !roster.roles.iter().any(|x| x.role_id == r.role_id) {
+            roster.roles.push(r);
+        }
+    }
+    if !session.is_valid() {
+        return;
+    }
+    // MANAGE_CHANNELS got us the rename; the role edition needs MANAGE_ROLES + outrank
+    // of its own. Publishing one readers reject would wedge our later, legitimate role
+    // edits behind a rejected chain, so verify before publishing rather than after.
+    let (me_hex, owner_hex) = (my_pk.to_hex(), owner.to_hex());
+    if !roster.is_authorized_in(&me_hex, Some(&owner_hex), &chan_hex, crate::community::roles::Permissions::MANAGE_ROLES) {
+        return;
+    }
+    // Same selector `grant_channel_access` vends: the permission-less scoped role. A
+    // per-channel moderator role sharing the scope is NOT the access list.
+    let Some(mut role) = roster
+        .channel_roles(&chan_hex)
+        .into_iter()
+        .find(|r| r.permissions == crate::community::roles::Permissions::empty() && r.name == old_name)
+        .cloned()
+    else {
+        return;
+    };
+    if !roster.can_act_on_position(&me_hex, Some(&owner_hex), role.position, crate::community::roles::Permissions::MANAGE_ROLES) {
+        return;
+    }
+    role.name = new_name.to_string();
+    if let Err(e) = set_role(transport, community, &role).await {
+        crate::log_warn!("v2: channel renamed but its access role did not follow: {e}");
+        return;
+    }
+    if session.is_valid() {
+        merge_local_roster(&cid_hex, Some(&role), None);
+    }
 }
 
 /// The local mirror of the reader's `MANAGE_CHANNELS` fold gate (CORD-03 §2): the
@@ -9845,6 +9913,68 @@ mod tests {
         assert_eq!(ch.name, "staff", "the rename is visible immediately");
         assert!(ch.private, "and privacy survives the edit");
         assert_eq!(ch.key, key_before, "as does the key — a rename is not a rotation");
+    }
+
+    #[tokio::test]
+    async fn a_channel_rename_carries_its_companion_access_role() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Renames", vec!["wss://r".into()], None).await.unwrap();
+        let priv_id = create_private_channel(&relay, &community, "mods").await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let chan_hex = crate::simd::hex::bytes_to_hex_32(&priv_id.0);
+
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        let before = roster.channel_roles(&chan_hex);
+        assert_eq!(before.len(), 1, "one companion role, minted at create");
+        assert_eq!(before[0].name, "mods", "named after the channel it gates");
+        let role_id = before[0].role_id.clone();
+
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let mut meta = held.channel(&priv_id).unwrap().metadata();
+        meta.name = "staff".into();
+        edit_channel_metadata(&relay, &held, &priv_id, &meta).await.unwrap();
+
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        let after = roster.channel_roles(&chan_hex);
+        assert_eq!(after.len(), 1, "renamed in place, never duplicated");
+        assert_eq!(after[0].role_id, role_id, "a rename is a versioned edit of the same id");
+        assert_eq!(after[0].name, "staff", "the access role followed the channel");
+        assert_eq!(
+            after[0].permissions,
+            crate::community::roles::Permissions::empty(),
+            "and still confers read access, never authority"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_customised_access_role_name_survives_a_channel_rename() {
+        // The label is cosmetic — entitlement rides the scope. Overwriting a name
+        // someone chose deliberately is the surprising half of "keep them in step".
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Renames", vec!["wss://r".into()], None).await.unwrap();
+        let priv_id = create_private_channel(&relay, &community, "mods").await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let chan_hex = crate::simd::hex::bytes_to_hex_32(&priv_id.0);
+
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        let mut role = roster.channel_roles(&chan_hex)[0].clone();
+        role.name = "Lab Insiders".into();
+        set_role(&relay, &community, &role).await.unwrap();
+        merge_local_roster(&cid_hex, Some(&role), None);
+
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let mut meta = held.channel(&priv_id).unwrap().metadata();
+        meta.name = "staff".into();
+        edit_channel_metadata(&relay, &held, &priv_id, &meta).await.unwrap();
+
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        assert_eq!(
+            roster.channel_roles(&chan_hex)[0].name,
+            "Lab Insiders",
+            "a deliberate name is left alone"
+        );
     }
 
     #[tokio::test]
