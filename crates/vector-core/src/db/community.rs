@@ -2172,14 +2172,25 @@ pub fn reparent_channels_and_fence(v1_community_id: &str, v2_community_id: &str)
     Ok(())
 }
 
-/// Communities the boot sweep must probe: sealed (`dissolved = 1`), never flipped, and not
-/// yet migration-checked. Returns their ids.
+/// v1 communities the boot sweep must probe for a migration signpost: never flipped and
+/// not yet migration-checked, SEALED OR NOT. Sealed ones sort first (the common case);
+/// bounded per sweep so a long v1 tail can't storm the relays on every boot.
 pub fn migration_sweep_candidates() -> Result<Vec<String>, String> {
     let conn = super::get_db_connection_guard_static()?;
+    // Deliberately NOT gated on `dissolved = 1`. Sealing happens inside the control
+    // fold, and the boot control probe can veto that fold indefinitely: the probe is
+    // `since`-windowed over the CONTROL plane, while the authoritative migration
+    // tombstone lives at the rotation-stable DISSOLVED coordinate. Once the probe
+    // cursor passes the tombstone, a migrated-away community looks quiet forever, so
+    // it never seals — and a seal-gated sweep could never reach it. An unsealed v1 is
+    // exactly the state that needs the probe most.
     let mut stmt = conn
         .prepare(
             "SELECT community_id FROM communities
-             WHERE dissolved = 1 AND migrated_to IS NULL AND migration_checked = 0",
+             WHERE migrated_to IS NULL AND migration_checked = 0
+               AND (protocol IS NULL OR protocol = 1)
+             ORDER BY dissolved DESC
+             LIMIT 40",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -3198,23 +3209,27 @@ mod tests {
     }
 
     #[test]
-    fn migration_sweep_candidates_are_sealed_unflipped_unchecked() {
+    fn migration_sweep_candidates_include_unsealed_v1() {
         let (_tmp, _guard) = init_test_db();
         let a = Community::create("A", "g", vec![]);
         let b = Community::create("B", "g", vec![]);
         let c = Community::create("C", "g", vec![]);
         for x in [&a, &b, &c] { save_community(x).unwrap(); }
-        // a: sealed, unchecked → candidate. b: sealed but flipped → not. c: live → not.
         set_community_dissolved(&a.id.to_hex()).unwrap();
         set_community_dissolved(&b.id.to_hex()).unwrap();
         set_migrated_to(&b.id.to_hex(), &"ab".repeat(32)).unwrap();
         let cands = migration_sweep_candidates().unwrap();
-        assert!(cands.contains(&a.id.to_hex()));
+        assert!(cands.contains(&a.id.to_hex()), "sealed + unchecked is a candidate");
         assert!(!cands.contains(&b.id.to_hex()), "flipped is not a candidate");
-        assert!(!cands.contains(&c.id.to_hex()), "live is not a candidate");
-        // Marking checked converges the sweep.
+        // The regression this guards: a community migrated away whose control fold was
+        // vetoed by the boot probe never seals, so a seal-gated sweep could never reach
+        // it — leaving it stuck on v1 forever with no self-heal.
+        assert!(cands.contains(&c.id.to_hex()), "UNSEALED v1 is a candidate too");
+        // Marking checked converges the sweep for either kind.
         set_migration_checked(&a.id.to_hex()).unwrap();
-        assert!(!migration_sweep_candidates().unwrap().contains(&a.id.to_hex()));
+        set_migration_checked(&c.id.to_hex()).unwrap();
+        let after = migration_sweep_candidates().unwrap();
+        assert!(!after.contains(&a.id.to_hex()) && !after.contains(&c.id.to_hex()));
     }
 
     #[test]

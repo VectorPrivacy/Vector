@@ -756,11 +756,18 @@ pub async fn run_migration_maintenance<T: Transport + ?Sized>(transport: &T) -> 
     flipped
 }
 
-/// Boot / account-swap sweep: for every SEALED, pointer-less-checked v1 community, re-probe
-/// the rotation-stable dissolved coordinate (relays retain the event; the client kept only
-/// the `dissolved` flag). Extract + persist any migration payload and drive the flip; a
-/// plain `{}` dissolution is marked checked so it is never re-probed. This is the recovery
-/// path for a member who folded the tombstone on a build that predated migration support.
+/// Boot / account-swap sweep: for every pointer-less, unchecked v1 community — **sealed or
+/// not** — re-probe the rotation-stable dissolved coordinate. Extract + persist any migration
+/// payload and drive the flip; a plain `{}` dissolution is marked checked so it is never
+/// re-probed.
+///
+/// Unsealed candidates matter most. Sealing happens inside the control fold, which the boot
+/// control probe can veto indefinitely: that probe is `since`-windowed over the CONTROL plane
+/// while the authoritative tombstone lives at the DISSOLVED coordinate, so once the cursor
+/// passes it a migrated-away community reads as quiet forever and never seals. Probing only
+/// sealed rows made that state unreachable by every recovery path at once — the community sat
+/// on v1 permanently while its v2 twin, adopted from the Community List, stayed empty (the
+/// stitched channel id is already owned by the unsealed v1 row).
 pub async fn sweep_dissolved_for_migration<T: Transport + ?Sized>(transport: &T) -> Vec<String> {
     let session = SessionGuard::capture();
     let mut flipped = Vec::new();
