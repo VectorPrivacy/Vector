@@ -327,7 +327,22 @@ pub fn run() {
     builder
         .setup(|app| {
             #[cfg(desktop)]
-            app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
+            app.handle().plugin(
+                tauri_plugin_updater::Builder::new()
+                    // A stable build must never accept a preview, even if one
+                    // reaches the stable endpoint. Channel separation otherwise
+                    // rests entirely on a release being flagged pre-release on
+                    // GitHub, and one unticked box would ship an unfinished
+                    // build to every user. Previews take anything newer, which
+                    // is what walks them onto the official release.
+                    .default_version_comparator(|current, release| {
+                        if current.pre.is_empty() && !release.version.pre.is_empty() {
+                            return false;
+                        }
+                        release.version > current
+                    })
+                    .build(),
+            )?;
             #[cfg(desktop)]
             app.handle().plugin(tauri_plugin_process::init())?;
             

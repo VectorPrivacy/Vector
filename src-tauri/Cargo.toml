@@ -1,6 +1,6 @@
 [package]
 name = "vector"
-version = "0.4.1"
+version = "0.4.2-1"
 description = "A humble attempt at a modern, private, complete Nostr chat client."
 authors = ["Formless Labs", "JSKitty", "YuurinBee"]
 edition = "2021"
@@ -42,6 +42,9 @@ futures-util = "0.3.31"
 tauri = { version = "2.10.2", features = ["macos-private-api", "protocol-asset", "image-png"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
+# Same crate Tauri parses `package_info().version` with, so the Android update
+# beacon orders preview builds identically to the desktop updater plugin.
+semver = "1"
 # default-features=false drops `http2`, `default-tls`, and `macos-system-configuration` —
 # none of which Vector actually uses (rustls-tls is explicit; HTTP/1.1 is fine for
 # all relay/Blossom traffic). `charset` is kept for text-response decoding (link

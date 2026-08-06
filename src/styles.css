@@ -10677,6 +10677,41 @@ select:disabled:hover {
   font-size: 16px;
 }
 
+/* Shown only on preview builds; `display` is toggled to block from JS. */
+.update-preview-notice {
+  margin-bottom: 15px;
+  padding: 12px 14px;
+  text-align: left;
+  border-radius: 8px;
+  background-color: var(--danger-color-hover);
+  border: 1px solid color-mix(in srgb, var(--danger-color) 40%, transparent);
+}
+
+/* Rides the text baseline so it reads as the first word, not a gutter icon. */
+.update-preview-notice .warning-icon {
+  vertical-align: -3px;
+  margin-right: 6px;
+}
+
+/* margin-top too: there's no global `p` reset, so the UA's 1em block-start
+   would otherwise stack on top of the card's own padding. */
+.update-preview-notice p {
+  margin-top: 0;
+  margin-bottom: 8px;
+  font-size: 13px;
+  line-height: 1.45;
+  opacity: 0.85;
+}
+
+.update-preview-notice p:last-child {
+  margin-bottom: 0;
+}
+
+.update-preview-notice strong {
+  color: var(--danger-color);
+  opacity: 1;
+}
+
 #check-updates-btn {
   margin: 0 auto;
   padding: 8px 24px;

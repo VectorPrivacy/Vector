@@ -13,35 +13,62 @@ pub struct AppUpdateInfo {
     pub current: String,
     pub latest: String,
     pub notes: String,
+    /// Whether this build is on the preview channel.
+    pub preview: bool,
 }
 
 /// The desktop updater manifest doubles as the Android version beacon:
 /// every release tags desktop + APK builds together, so the top-level
 /// `version`/`notes` apply to both.
+///
+/// GitHub's `/releases/latest` skips pre-releases, so a stable build never
+/// sees a preview.
 const UPDATE_MANIFEST_URL: &str =
     "https://github.com/VectorPrivacy/Vector/releases/latest/download/latest.json";
+
+/// Preview channel. A fixed-tag pointer release re-pointed at the newest build
+/// of *either* channel on every publish, so previews roll forward onto the
+/// official release instead of stranding on the last one.
+///
+/// Desktop reaches this same URL through `tauri.preview.conf.json`, which the
+/// release workflow merges into preview builds only.
+const PREVIEW_MANIFEST_URL: &str =
+    "https://github.com/VectorPrivacy/Vector/releases/download/preview/latest.json";
+
 const MANIFEST_MAX_BYTES: usize = 1024 * 1024;
 
-/// True when `latest` is strictly newer than `current` (dotted numeric
-/// compare over the first three segments). Non-numeric or overflowing
-/// segments read as 0, so garbage never announces an update; a legitimately
-/// larger version does. Pre-release/build suffixes (after `-`/`+`) are
-/// ignored, comparing on the numeric core.
-fn version_is_newer(latest: &str, current: &str) -> bool {
-    fn parts(v: &str) -> [u64; 3] {
-        let mut out = [0u64; 3];
-        for (i, seg) in v
-            .trim()
-            .trim_start_matches('v')
-            .split(['.', '-', '+'])
-            .take(3)
-            .enumerate()
-        {
-            out[i] = seg.parse().unwrap_or(0);
-        }
-        out
+/// A semver pre-release identifier marks a preview build (`0.4.2-1`). It has to
+/// be numeric: the MSI bundler rejects anything else, and it lands in the 4th
+/// field of the Windows product version (`0.4.2.1`).
+///
+/// Windows Installer *ignores* that 4th field, so every preview of `0.4.2` and
+/// `0.4.2` itself are one and the same version to it. Moving between them is a
+/// same-version transition, which only `bundle > windows > allowDowngrades`
+/// permits, so it must stay at its default of `true`. No numbering scheme can
+/// substitute; ordering on Windows comes from the semver in the manifest, which
+/// the updater compares before msiexec is ever invoked.
+fn is_preview(version: &semver::Version) -> bool {
+    !version.pre.is_empty()
+}
+
+/// True when `latest` is strictly newer than `current`.
+///
+/// Semver ordering is the whole preview scheme: it ranks
+/// `0.4.1 < 0.4.2-1 < 0.4.2-2 < 0.4.2`, which is what carries a preview user
+/// onto the official release. Unparseable input fails closed, so garbage never
+/// announces an update.
+///
+/// A stable build additionally refuses previews outright, rather than trusting
+/// that the release was flagged pre-release on GitHub. Mirrors the desktop
+/// comparator in `lib.rs`, so both platforms fail the same way.
+fn version_is_newer(latest: &str, current: &semver::Version) -> bool {
+    let Ok(latest) = semver::Version::parse(latest.trim().trim_start_matches('v')) else {
+        return false;
+    };
+    if current.pre.is_empty() && !latest.pre.is_empty() {
+        return false;
     }
-    parts(latest) > parts(current)
+    latest > *current
 }
 
 /// Fetch the release manifest and compare against the running version.
@@ -49,10 +76,15 @@ fn version_is_newer(latest: &str, current: &str) -> bool {
 /// routes through it (or fails closed while it bootstraps).
 #[tauri::command]
 pub async fn check_app_update<R: Runtime>(handle: AppHandle<R>) -> Result<AppUpdateInfo, String> {
-    let current = handle.package_info().version.to_string();
+    let current = handle.package_info().version.clone();
+    let preview = is_preview(&current);
     let client = vector_core::net::shared_http_client();
     let mut resp = client
-        .get(UPDATE_MANIFEST_URL)
+        .get(if preview {
+            PREVIEW_MANIFEST_URL
+        } else {
+            UPDATE_MANIFEST_URL
+        })
         .send()
         .await
         .map_err(|e| format!("Update check failed: {}", e))?;
@@ -87,9 +119,10 @@ pub async fn check_app_update<R: Runtime>(handle: AppHandle<R>) -> Result<AppUpd
         .to_string();
     Ok(AppUpdateInfo {
         available: version_is_newer(&latest, &current),
-        current,
+        current: current.to_string(),
         latest,
         notes,
+        preview,
     })
 }
 
@@ -162,27 +195,66 @@ pub fn open_update_source() -> Result<bool, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::version_is_newer;
+    use super::{is_preview, version_is_newer};
+
+    fn v(s: &str) -> semver::Version {
+        semver::Version::parse(s).unwrap()
+    }
 
     #[test]
     fn version_compare_basics() {
-        assert!(version_is_newer("0.4.1", "0.4.0"));
-        assert!(version_is_newer("0.5.0", "0.4.9"));
-        assert!(version_is_newer("1.0.0", "0.9.9"));
-        assert!(version_is_newer("v0.4.1", "0.4.0"));
-        assert!(!version_is_newer("0.4.0", "0.4.0"));
-        assert!(!version_is_newer("0.4.0", "0.4.1"));
-        assert!(!version_is_newer("garbage", "0.4.0"));
-        assert!(!version_is_newer("", "0.4.0"));
-        assert!(version_is_newer("0.4.10", "0.4.9"));
-        // Overflowing segment fails safe to 0 (never announces).
-        assert!(!version_is_newer("99999999999999999999999999.0.0", "0.4.0"));
-        // Pre-release/build suffixes ignored: compares on the numeric core.
-        assert!(!version_is_newer("0.5.0-beta", "0.5.0"));
-        assert!(!version_is_newer("0.5.0", "0.5.0-beta"));
-        assert!(version_is_newer("0.5.1-beta", "0.5.0"));
-        // Missing trailing segments read as 0.
-        assert!(!version_is_newer("0.4", "0.4.0"));
-        assert!(!version_is_newer("0.4.0", "0.4"));
+        assert!(version_is_newer("0.4.1", &v("0.4.0")));
+        assert!(version_is_newer("0.5.0", &v("0.4.9")));
+        assert!(version_is_newer("1.0.0", &v("0.9.9")));
+        assert!(version_is_newer("v0.4.1", &v("0.4.0")));
+        assert!(version_is_newer("0.4.10", &v("0.4.9")));
+        assert!(!version_is_newer("0.4.0", &v("0.4.0")));
+        assert!(!version_is_newer("0.4.0", &v("0.4.1")));
+    }
+
+    #[test]
+    fn malformed_manifest_never_announces() {
+        assert!(!version_is_newer("garbage", &v("0.4.0")));
+        assert!(!version_is_newer("", &v("0.4.0")));
+        // Not semver (missing patch) — fails closed rather than guessing.
+        assert!(!version_is_newer("0.5", &v("0.4.0")));
+        assert!(!version_is_newer(
+            "99999999999999999999999999.0.0",
+            &v("0.4.0")
+        ));
+    }
+
+    #[test]
+    fn preview_channel_ordering() {
+        // The ladder a preview user climbs: newer previews, then the release.
+        assert!(version_is_newer("0.4.2-2", &v("0.4.2-1")));
+        assert!(version_is_newer("0.4.2", &v("0.4.2-2")));
+        // Numeric identifiers compare numerically, so 10 outranks 9.
+        assert!(version_is_newer("0.4.2-10", &v("0.4.2-9")));
+        // A preview of the next version still reaches a preview user.
+        assert!(version_is_newer("0.4.3-1", &v("0.4.2-1")));
+        // Never backwards.
+        assert!(!version_is_newer("0.4.2-1", &v("0.4.2")));
+        assert!(!version_is_newer("0.4.2-1", &v("0.4.2-2")));
+    }
+
+    #[test]
+    fn stable_never_accepts_a_preview() {
+        // Defence for a preview that reached the stable endpoint, e.g. a release
+        // published without the pre-release flag. Semver alone would say yes.
+        assert!(v("0.4.2-1") > v("0.4.1"));
+        assert!(!version_is_newer("0.4.2-1", &v("0.4.1")));
+        assert!(!version_is_newer("0.5.0-1", &v("0.4.1")));
+        // Stable still takes stable.
+        assert!(version_is_newer("0.4.2", &v("0.4.1")));
+        // Previews still take previews, and the official release.
+        assert!(version_is_newer("0.4.2-2", &v("0.4.2-1")));
+        assert!(version_is_newer("0.4.2", &v("0.4.2-1")));
+    }
+
+    #[test]
+    fn preview_detection() {
+        assert!(is_preview(&v("0.4.2-1")));
+        assert!(!is_preview(&v("0.4.2")));
     }
 }
