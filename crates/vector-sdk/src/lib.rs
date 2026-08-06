@@ -314,6 +314,15 @@ impl VectorBot {
         &self.commands
     }
 
+    /// Whether the realtime Community subscription has REGISTERED for this
+    /// session — the pollable twin of [`BotEvent::Ready`], for health checks
+    /// from outside the event handler. `false` only during the brief cold-start
+    /// registration (a bounded relay-connect wait), before which the bot is deaf
+    /// to live community traffic.
+    pub fn subscription_ready(&self) -> bool {
+        vector_core::community::v2::realtime::subscription_ready()
+    }
+
     /// This bot's invite policy (see [`InvitePolicy`]).
     pub fn invite_policy(&self) -> &InvitePolicy {
         &self.invite_policy
@@ -808,6 +817,65 @@ pub struct Channel {
     kind: ChannelKind,
 }
 
+/// A durable position in a channel's history, for paging and for building your
+/// own sync mechanism on top of [`Channel::history_before`] / [`Channel::sync_before`].
+///
+/// Ordered by `(at_ms, id)` and compared BY VALUE, so it keeps working after its
+/// message is gone (deletes, moderation hides, self-destruct timers) and stays
+/// unambiguous inside a same-millisecond burst.
+///
+/// Persist it however you like: it is serde-serializable, and its string form is
+/// **wire-stable** — `"<at_ms>:<message id hex>"` — parse it back with
+/// [`FromStr`](std::str::FromStr). A cursor is per-channel; store it keyed by the
+/// channel id.
+///
+/// ```no_run
+/// # use vector_sdk::Cursor;
+/// # fn f(msgs: &[vector_sdk::Message]) -> Result<(), Box<dyn std::error::Error>> {
+/// let cursor = Cursor::of(&msgs[0]);
+/// let saved = cursor.to_string();          // "1785979414499:0bcd2059e0b8..."
+/// let restored: Cursor = saved.parse()?;   // ...after a restart
+/// # Ok(()) }
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub struct Cursor {
+    /// Message timestamp, unix **milliseconds**.
+    pub at_ms: u64,
+    /// Message id (64-char hex). Tiebreak within a millisecond.
+    pub id: String,
+}
+
+impl Cursor {
+    /// The cursor at `message`'s position.
+    pub fn of(message: &Message) -> Self {
+        Self { at_ms: message.at, id: message.id.clone() }
+    }
+}
+
+impl From<&Message> for Cursor {
+    fn from(m: &Message) -> Self {
+        Self::of(m)
+    }
+}
+
+impl std::fmt::Display for Cursor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.at_ms, self.id)
+    }
+}
+
+impl std::str::FromStr for Cursor {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, String> {
+        let (at, id) = s.split_once(':').ok_or("cursor is '<at_ms>:<message id hex>'")?;
+        let at_ms: u64 = at.parse().map_err(|_| "cursor at_ms is not a number".to_string())?;
+        if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("cursor id is not 64-char hex".to_string());
+        }
+        Ok(Self { at_ms, id: id.to_ascii_lowercase() })
+    }
+}
+
 impl Channel {
     /// The id of this chat or channel — an `npub` for a DM, a channel id for a Community channel.
     pub fn id(&self) -> &str {
@@ -827,6 +895,85 @@ impl Channel {
     /// `true` for a Community channel.
     pub fn is_community(&self) -> bool {
         matches!(self.kind, ChannelKind::Community)
+    }
+
+    /// The newest `limit` messages this bot holds LOCALLY, chronological.
+    ///
+    /// Read-only and never touches the network: it answers from the bot's own
+    /// store, which live delivery, back-fills and [`Channel::sync`] keep fed.
+    /// This is how a bot reads what a `ChannelKeyed` back-fill fetched — those
+    /// messages are history, not delivery, and never arrive as live events.
+    /// Unit is MESSAGES ([`Channel::sync`]'s unit is events).
+    pub async fn history(&self, limit: usize) -> Vec<Message> {
+        self.core.get_messages_before(&self.id, None, limit).await
+    }
+
+    /// Up to `limit` messages strictly before `cursor`, chronological — the
+    /// paging form of [`Channel::history`]. The cursor is compared by value, so
+    /// it still works after its message was deleted. Page backwards by looping:
+    /// next cursor = [`Cursor::of`] the first message of the page you just got.
+    pub async fn history_before(&self, cursor: &Cursor, limit: usize) -> Vec<Message> {
+        self.core.get_messages_before(&self.id, Some((cursor.at_ms, &cursor.id)), limit).await
+    }
+
+    /// Fetch ONE page of up to `max_events` events (per relay) from this
+    /// Community channel's relays, ingest it locally, and return how many
+    /// MESSAGES were new. `0` means the page held nothing new — the walk's
+    /// natural stop — not that the channel is empty.
+    ///
+    /// The unit is EVENTS: reactions, edits, deletes and presence share the
+    /// plane and spend the budget, so a page rarely yields `max_events` new
+    /// messages. Clamped to 500; depth comes from looping with
+    /// [`Channel::sync_before`], not from a bigger page. Read what landed with
+    /// [`Channel::history`]. Community channels only — DM recovery is
+    /// [`VectorBot::sync_dms`].
+    pub async fn sync(&self, max_events: usize) -> Result<usize> {
+        self.sync_page(max_events, None, None).await
+    }
+
+    /// [`Channel::sync`] for the page of events at and before `cursor` — the
+    /// relay-side half of a walk-until-dry loop:
+    ///
+    /// ```no_run
+    /// # async fn f(channel: &vector_sdk::Channel) -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut cursor: Option<vector_sdk::Cursor> = None;
+    /// loop {
+    ///     let page = match &cursor {
+    ///         Some(c) => channel.history_before(c, 100).await,
+    ///         None => channel.history(100).await,
+    ///     };
+    ///     if page.is_empty() {
+    ///         let fetched = match &cursor {
+    ///             Some(c) => channel.sync_before(c, 200).await?,
+    ///             None => channel.sync(200).await?,
+    ///         };
+    ///         if fetched == 0 { break; } // relays dry too: true start of history
+    ///         continue;
+    ///     }
+    ///     // ...process(&page)...
+    ///     cursor = Some(vector_sdk::Cursor::of(&page[0]));
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub async fn sync_before(&self, cursor: &Cursor, max_events: usize) -> Result<usize> {
+        // Relay filters are seconds-granular; +1 keeps the cursor's own second
+        // covered (ingest dedups the overlap — duplicates are safe, skips are not).
+        self.sync_page(max_events, Some(cursor.at_ms / 1000 + 1), None).await
+    }
+
+    /// [`Channel::sync`] bounded to events at or after `since_ms` (unix ms) —
+    /// "pull the last N days" for time-based processors.
+    pub async fn sync_since(&self, since_ms: u64, max_events: usize) -> Result<usize> {
+        self.sync_page(max_events, None, Some(since_ms / 1000)).await
+    }
+
+    async fn sync_page(&self, max_events: usize, until_s: Option<u64>, since_s: Option<u64>) -> Result<usize> {
+        if self.is_dm() {
+            return Err(Error::Other(
+                "DM history rides the DM reconcile — use bot.sync_dms(), then Channel::history reads it".into(),
+            ));
+        }
+        self.core.sync_channel_events(&self.id, max_events, until_s, since_s).await
     }
 
     /// Send a text message. Returns the new message's event id.
@@ -1390,7 +1537,17 @@ where
 /// Community channels are unified: `chat_id` is the sender's npub for a DM, the channel id for a
 /// Community message.
 #[derive(Clone, Debug)]
+#[non_exhaustive] // event kinds grow; match with a `_` arm so additions stop being breaking
 pub enum BotEvent {
+    /// The realtime subscriptions REGISTERED: healthy relays deliver live events
+    /// from this moment. Fires once per listen, right after the startup catch-up
+    /// sync — stream auth continues in the background, and each AUTH-gating relay
+    /// joins the stream the moment its own auth completes, gating nobody else.
+    /// No longer gated on the slowest relay in the set. Fires even
+    /// with `communities: 0`, so "subscribed to nothing" and "still connecting"
+    /// are different observable states. Messages sent BEFORE this are not
+    /// delivered live; recover them with a sync + [`Channel::history`].
+    Ready { communities: usize },
     /// A new message (DM or Community channel).
     Message(IncomingMessage),
     /// A reaction or edit landed on an existing message; `message` is the updated view (inspect
@@ -1412,7 +1569,21 @@ pub enum BotEvent {
     /// A private channel became readable — its key arrived after an admin granted
     /// access. Until this fires, the channel is listed by
     /// [`Community::channels`] with `is_readable()` false.
-    ChannelKeyed { community_id: String, channel_id: String },
+    ///
+    /// `backfilled` counts the messages that PREDATE the grant and were pulled
+    /// into local state before this event. They are history, not delivery — none
+    /// of them arrive as [`BotEvent::Message`], ever. Read them explicitly and
+    /// decide what deserves acting on:
+    ///
+    /// ```no_run
+    /// # async fn f(bot: &vector_sdk::VectorBot, community_id: &str, channel_id: &str, backfilled: usize) {
+    /// if backfilled > 0 {
+    ///     let missed = bot.community(community_id).channel(channel_id).history(backfilled).await;
+    ///     // e.g. answer the question that was asked before the grant
+    /// }
+    /// # }
+    /// ```
+    ChannelKeyed { community_id: String, channel_id: String, backfilled: usize },
 }
 
 /// Adapts a user `on_event` closure into an [`InboundEventHandler`], mapping every hook to a [`BotEvent`].
@@ -1508,11 +1679,15 @@ where
         });
         self.emit(BotEvent::Invite { community_id: community_id.to_string() });
     }
-    fn on_channel_keyed(&self, community_id: &str, channel_id: &str) {
+    fn on_channel_keyed(&self, community_id: &str, channel_id: &str, backfilled: usize) {
         self.emit(BotEvent::ChannelKeyed {
             community_id: community_id.to_string(),
             channel_id: channel_id.to_string(),
+            backfilled,
         });
+    }
+    fn on_subscription_ready(&self, communities: usize) {
+        self.emit(BotEvent::Ready { communities });
     }
 }
 
@@ -1585,6 +1760,37 @@ fn default_data_dir() -> PathBuf {
 mod tests {
     use super::*;
     use nostr_sdk::prelude::Keys;
+
+    #[test]
+    fn cursor_string_form_is_wire_stable_and_roundtrips() {
+        // GOLDEN: persisted cursors live in users' own databases — a format
+        // change corrupts every one of them, so the exact bytes are pinned.
+        let c = Cursor { at_ms: 1785979414499, id: "0b".repeat(32) };
+        let s = c.to_string();
+        assert_eq!(s, format!("1785979414499:{}", "0b".repeat(32)));
+        assert_eq!(s.parse::<Cursor>().unwrap(), c);
+        // serde too, for the JSON-storage crowd.
+        let json = serde_json::to_string(&c).unwrap();
+        assert_eq!(serde_json::from_str::<Cursor>(&json).unwrap(), c);
+    }
+
+    #[test]
+    fn cursor_rejects_malformed_input_instead_of_guessing() {
+        for bad in ["", "123", "abc:def", "12:notahexid", &format!("9:{}", "z".repeat(64)), &format!("x:{}", "0b".repeat(32))] {
+            assert!(bad.parse::<Cursor>().is_err(), "{bad:?} must not parse");
+        }
+        // Uppercase hex normalizes: message ids compare as lowercase.
+        let c: Cursor = format!("5:{}", "0B".repeat(32)).parse().unwrap();
+        assert_eq!(c.id, "0b".repeat(32));
+    }
+
+    #[test]
+    fn cursor_orders_by_time_then_id_inside_a_same_ms_wall() {
+        let a = Cursor { at_ms: 900, id: "aa".repeat(32) };
+        let b = Cursor { at_ms: 900, id: "bb".repeat(32) };
+        let older = Cursor { at_ms: 500, id: "ff".repeat(32) };
+        assert!(older < a && a < b, "time first, id tiebreak inside the wall");
+    }
 
     #[test]
     fn invite_policy_matrix() {

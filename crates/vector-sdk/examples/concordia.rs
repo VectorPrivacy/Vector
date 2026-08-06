@@ -319,10 +319,20 @@ async fn main() -> vector_sdk::Result<()> {
             BotEvent::Typing { npub, .. } => println!("[TYPING] {}", short(&npub)),
             BotEvent::Invite { community_id } => println!("[INVITE] for community {}", short(&community_id)),
             BotEvent::Removed { community_id } => println!("[REMOVED] from community {} — I was kicked/banned", short(&community_id)),
-            BotEvent::ChannelKeyed { community_id, channel_id } => {
-                println!("[KEYED] private channel {} in {} is readable now", short(&channel_id), short(&community_id));
+            BotEvent::Ready { communities } => {
+                println!("[READY] live — subscribed across {communities} communities");
+            }
+            BotEvent::ChannelKeyed { community_id, channel_id, backfilled } => {
+                println!("[KEYED] private channel {} in {} is readable now ({backfilled} back-filled)", short(&channel_id), short(&community_id));
+                // Back-filled history is NOT delivered as live events — read it.
+                if backfilled > 0 {
+                    for m in bot.community(&community_id).channel(&channel_id).history(backfilled).await {
+                        println!("[KEYED]   history: {}", m.content.chars().take(60).collect::<String>());
+                    }
+                }
                 print_channels(&bot, "channels visible (after key vend)").await;
             }
+            _ => {} // BotEvent is non_exhaustive: future events land here
         }
     })
     .await?;
