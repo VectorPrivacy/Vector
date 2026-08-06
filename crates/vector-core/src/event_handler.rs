@@ -86,7 +86,21 @@ pub trait InboundEventHandler: Send + Sync {
     /// The inverse of the silent-mute failure: a bot granted access can act the
     /// moment it can actually read, rather than polling for a channel it has no
     /// way to know it is waiting on.
-    fn on_channel_keyed(&self, _community_id: &str, _channel_id: &str) {}
+    ///
+    /// `backfilled` counts the messages that predate the grant and were pulled
+    /// into LOCAL STATE before this fired. They are history, not delivery: none
+    /// of them reach [`on_message`](Self::on_message) — read them explicitly
+    /// (`get_messages_before`) and decide what deserves acting on.
+    fn on_channel_keyed(&self, _community_id: &str, _channel_id: &str, _backfilled: usize) {}
+
+    /// The realtime Community subscription REGISTERED: healthy relays deliver
+    /// live channel events from this moment (AUTH-gating relays join as their
+    /// stream auth completes in the background). Fires once per
+    /// [`listen`](crate::VectorCore::listen), after the startup refresh commits —
+    /// even when `communities` is 0, so "subscribed to nothing" and "still
+    /// connecting" are distinguishable. Before this, messages are only
+    /// recoverable by a later sync, not live.
+    fn on_subscription_ready(&self, _communities: usize) {}
 
     /// A Community's control plane was refreshed in realtime (banlist/roles/metadata/mode change,
     /// or a re-founding followed). The platform re-reads display state.

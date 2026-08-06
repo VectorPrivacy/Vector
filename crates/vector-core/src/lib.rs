@@ -956,6 +956,36 @@ impl VectorCore {
         }
     }
 
+    /// Cursor-paged local read: up to `limit` messages strictly before the
+    /// `(at_ms, id)` cursor, chronological. `None` returns the newest `limit`.
+    ///
+    /// The cursor is compared BY VALUE, never resolved to a stored row, so it
+    /// keeps working after its message is gone (NIP-09 delete, moderation hide,
+    /// a self-destruct timer) — a persisted cursor must not wedge the walk. The
+    /// id tiebreaks inside a same-millisecond burst, giving a total order that
+    /// can't skip or re-serve across pages. Local only: sync older history in
+    /// from relays first.
+    pub async fn get_messages_before(
+        &self,
+        chat_id: &str,
+        before: Option<(u64, &str)>,
+        limit: usize,
+    ) -> Vec<Message> {
+        let state = state::STATE.lock().await;
+        let Some(chat) = state.get_chat(chat_id) else {
+            return Vec::new();
+        };
+        let mut msgs = chat.get_all_messages(&state.interner);
+        if let Some((at, id)) = before {
+            msgs.retain(|m| (m.at, m.id.as_str()) < (at, id));
+        }
+        msgs.sort_by(|a, b| (a.at, a.id.as_str()).cmp(&(b.at, b.id.as_str())));
+        if msgs.len() > limit {
+            msgs.drain(..msgs.len() - limit);
+        }
+        msgs
+    }
+
     /// Get a profile by npub.
     pub async fn get_profile(&self, npub: &str) -> Option<SlimProfile> {
         let state = state::STATE.lock().await;
@@ -2367,7 +2397,7 @@ impl VectorCore {
     /// swallowed so a headless caller is never blind to "the sync ran but a re-founding couldn't
     /// be resumed."
     pub async fn sync_community_channel(&self, channel_id: &str, limit: usize) -> Result<(usize, Vec<String>)> {
-        use crate::community::{inbound, send, service, transport::LiveTransport};
+        use crate::community::{send, service, transport::LiveTransport};
         let my_pk = state::my_public_key().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
         // v2: consensus catch-up (rekeys then control refold) + chat backfill. With a
         // running listen() the coalescing worker owns the follow (never run inline beside
@@ -2385,7 +2415,7 @@ impl VectorCore {
             // evidence tier yet (#370) — until it does, the transport-seconds
             // bound is the effective limit; the declared Fast records intent.
             let new = Self::v2_backfill_channel(
-                &id, channel_id, limit, 8, None,
+                &id, channel_id, limit, 8, None, None,
                 crate::community::transport::Evidence::Fast, 12,
             ).await;
             return Ok((new, warnings));
@@ -2445,6 +2475,22 @@ impl VectorCore {
         let events = send::fetch_channel_page(&transport, &community, &channel, None, None, limit.max(1))
             .await
             .map_err(VectorError::Other)?;
+        let new = Self::v1_ingest_channel_page(channel_id, &events, &channel, my_pk, &session).await;
+        Ok((new, warnings))
+    }
+
+    /// Ingest one fetched v1 channel page: STATE apply, batched persist with
+    /// delete barriers, presence + WebXDC rows, self-removal teardown. Shared by
+    /// the full sync above and the cursor-paged sync — the two must never drift,
+    /// or paged history would skip the moderation/teardown arms.
+    async fn v1_ingest_channel_page(
+        channel_id: &str,
+        events: &[nostr_sdk::prelude::Event],
+        channel: &crate::community::Channel,
+        my_pk: nostr_sdk::prelude::PublicKey,
+        session: &state::SessionGuard,
+    ) -> usize {
+        use crate::community::inbound;
         let outcomes = {
             let mut st = state::STATE.lock().await;
             inbound::process_channel_batch(&mut st, &events, &channel, &my_pk)
@@ -2514,7 +2560,66 @@ impl VectorCore {
             }
         }
         crate::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
-        Ok((new, warnings))
+        new
+    }
+
+    /// Cursor-paged relay sync: fetch ONE page of up to `max_events` events from
+    /// the channel's relays (per relay — divergent relays can push the union
+    /// higher), ingest it, and return how many MESSAGES were new. A return of 0
+    /// means the page held nothing new, not that the channel is empty.
+    ///
+    /// `until_s` / `since_s` are unix-seconds bounds (the back-paging cursor and
+    /// the time floor). Depth comes from looping, not from a bigger page:
+    /// `max_events` is clamped to 500 (relays clamp theirs anyway) and values
+    /// under 50 behave as 50 on v2 (the shared pager's floor).
+    ///
+    /// Consensus (root rotations, control folds, ban checks) is the FULL sync's
+    /// job — [`sync_community_channel`](Self::sync_community_channel) — so a
+    /// hundred-page walk doesn't re-fold control a hundred times. Run one full
+    /// sync (or be listening) before deep walks.
+    pub async fn sync_channel_events(
+        &self,
+        channel_id: &str,
+        max_events: usize,
+        until_s: Option<u64>,
+        since_s: Option<u64>,
+    ) -> Result<usize> {
+        use crate::community::{send, transport::LiveTransport};
+        let max = max_events.clamp(1, 500);
+        if let Some(id) = self.v2_community_for_channel(channel_id)? {
+            let community = crate::db::community::load_community_v2(&id)
+                .map_err(VectorError::Other)?
+                .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
+            if community.dissolved {
+                return Err(VectorError::Other("this community has been dissolved".into()));
+            }
+            let ch_id = crate::community::ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
+            let ch = community
+                .channel(&ch_id)
+                .ok_or_else(|| VectorError::Other("no such channel in this community".into()))?;
+            // Err, not a silent 0 — "granted but the key hasn't arrived" must be
+            // distinguishable from "nothing new" or the caller diagnoses a mute bot.
+            if ch.private && ch.key.is_none() {
+                return Err(VectorError::Other(
+                    "this private channel has no key yet (awaiting rekey delivery)".into(),
+                ));
+            }
+            let new = Self::v2_backfill_channel(
+                &id, channel_id, max, 1, since_s, until_s,
+                crate::community::transport::Evidence::Fast, 12,
+            )
+            .await;
+            return Ok(new);
+        }
+        let (community, channel) = self.resolve_channel(channel_id)?;
+        Self::ensure_v1_writable(&community)?;
+        let my_pk = state::my_public_key().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        let session = state::SessionGuard::capture();
+        let events = send::fetch_channel_page(&transport, &community, &channel, until_s, since_s, max)
+            .await
+            .map_err(VectorError::Other)?;
+        Ok(Self::v1_ingest_channel_page(channel_id, &events, &channel, my_pk, &session).await)
     }
 
     /// The composer's `/` picker snapshot for `chat_id`, answered INSTANTLY
@@ -2722,6 +2827,7 @@ impl VectorCore {
         limit: usize,
         max_pages: usize,
         since: Option<u64>,
+        until: Option<u64>,
         evidence: crate::community::transport::Evidence,
         transport_secs: u64,
     ) -> usize {
@@ -2745,6 +2851,7 @@ impl VectorCore {
             limit.max(50),
             max_pages,
             since,
+            until,
             evidence,
             // Keep paging while a page still contains a MESSAGE we don't hold; a page
             // whose messages are all known means we've reached our own history. Only
@@ -3588,7 +3695,7 @@ impl VectorCore {
                     for ch in &c.channels {
                         let hex = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
                         let _ = Self::v2_backfill_channel(
-                            &id, &hex, 50, 2, None,
+                            &id, &hex, 50, 2, None, None,
                             crate::community::transport::Evidence::Fast, 12,
                         ).await;
                     }
@@ -3669,6 +3776,13 @@ impl VectorCore {
         let dm_sub_id = self.subscribe_dms().await?;
         community::realtime::refresh_subscription(&client).await;
         community::v2::realtime::refresh_subscription(&client).await;
+
+        // The subscriptions above are COMMITTED: live events flow from here. Say
+        // so — the startup gauntlet (relay-connect wait + stream-auth priming)
+        // can take a minute against a slow relay set, and without this signal a
+        // bot cannot tell "still connecting" from "subscribed to nothing".
+        // Fires even with 0 communities: that too is a completed, ready state.
+        handler.on_subscription_ready(db::community::list_community_ids().map(|v| v.len()).unwrap_or(0));
 
         // Outage resilience via the relay Monitor — event-driven, not polling.
         //
@@ -4018,5 +4132,62 @@ mod facade_tests {
         let parsed = parse_invite_link(&url).unwrap();
         assert_eq!(parsed.link_signer, signer.public_key());
         assert_eq!(parsed.token, token);
+    }
+}
+
+#[cfg(test)]
+mod history_paging_tests {
+    use super::*;
+
+    fn msg(at: u64, id_byte: u8, content: &str) -> Message {
+        Message {
+            id: format!("{:02x}", id_byte).repeat(32),
+            content: content.to_string(),
+            at,
+            ..Default::default()
+        }
+    }
+
+    /// The cursor is compared by VALUE: paging must step strictly through a
+    /// same-millisecond wall (the id tiebreak) and must survive the cursored
+    /// message being deleted — a persisted cursor must never wedge the walk.
+    #[tokio::test]
+    async fn history_pages_through_a_same_ms_wall_and_a_deleted_cursor() {
+        let chat_id = "test-history-paging-wall";
+        {
+            let mut st = state::STATE.lock().await;
+            st.ensure_community_chat(chat_id);
+            // A wall of three messages in the SAME millisecond, plus one older.
+            for m in [msg(500, 0x01, "old"), msg(900, 0xaa, "wall-a"), msg(900, 0xbb, "wall-b"), msg(900, 0xcc, "wall-c")] {
+                st.add_message_to_chat(chat_id, &m);
+            }
+        }
+        let core = VectorCore;
+
+        // Newest 2 — the tail of the wall, chronological.
+        let newest = core.get_messages_before(chat_id, None, 2).await;
+        assert_eq!(newest.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(), ["wall-b", "wall-c"]);
+
+        // Page strictly before wall-b: its same-ms predecessor, then the older one.
+        let cursor = (newest[0].at, newest[0].id.as_str().to_string());
+        let page = core.get_messages_before(chat_id, Some((cursor.0, &cursor.1)), 10).await;
+        assert_eq!(page.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(), ["old", "wall-a"]);
+
+        // The cursored message vanishes (delete / self-destruct): the SAME cursor
+        // still resolves to the same page, because nothing resolves it to a row.
+        {
+            let mut st = state::STATE.lock().await;
+            let chat = st.get_chat_mut(chat_id).unwrap();
+            chat.messages.remove_by_hex_id(&cursor.1);
+        }
+        let page = core.get_messages_before(chat_id, Some((cursor.0, &cursor.1)), 10).await;
+        assert_eq!(
+            page.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(),
+            ["old", "wall-a"],
+            "a deleted cursor pages identically"
+        );
+
+        // Unknown chat: empty, not an error.
+        assert!(core.get_messages_before("test-history-paging-nochat", None, 5).await.is_empty());
     }
 }

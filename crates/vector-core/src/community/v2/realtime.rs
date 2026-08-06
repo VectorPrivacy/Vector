@@ -33,6 +33,31 @@ static V2_POOLWIDE_SUB_ID: LazyLock<Mutex<Option<SubscriptionId>>> = LazyLock::n
 /// The current author-set (sorted hex) — an unchanged set skips a churny
 /// unsubscribe+resubscribe, exactly like v1's `COMMUNITY_SUB_SET`.
 static V2_SUB_SET: LazyLock<Mutex<Vec<String>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+
+/// Session generation of the last COMPLETED [`refresh_subscription`] pass, or
+/// `u64::MAX` before any. Generation-keyed rather than a bare bool so an account
+/// swap invalidates it automatically — a per-account global that survived a swap
+/// would report account A's readiness for account B.
+static V2_SUB_READY_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+#[inline]
+fn mark_subscription_ready() {
+    V2_SUB_READY_GEN.store(
+        crate::state::SessionGuard::capture().generation(),
+        std::sync::atomic::Ordering::Release,
+    );
+}
+
+/// Whether the v2 Community subscription pass has COMPLETED for the active
+/// session: live channel events are being delivered (or there is genuinely
+/// nothing to subscribe to). `false` during the cold-start window where the
+/// relay-connect wait + stream-auth priming are still running — the state a
+/// health-checking bot could previously not distinguish from "subscribed to
+/// nothing".
+pub fn subscription_ready() -> bool {
+    V2_SUB_READY_GEN.load(std::sync::atomic::Ordering::Acquire)
+        == crate::state::SessionGuard::capture().generation()
+}
 /// Outer-wrap ids already dispatched, so the handler fires EXACTLY ONCE per
 /// message. The relay pool delivers the same wrap under both the targeted and
 /// pool-wide subs and from every relay independently, so without this a bot's
@@ -245,14 +270,11 @@ pub async fn refresh_subscription(client: &Client) {
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
-            // AUTH-gating relays serve the planes only to a stream-authenticated
-            // connection, and a live subscription isn't auto-retried after the gate.
-            // Register every held plane's key + prime the connection auth (a cheap
-            // gated fetch the responder answers) so the subscription below streams.
+            // Register every held plane's key BEFORE subscribing, so the responder
+            // can answer any NIP-42 challenge our REQs trigger. Cheap + local.
             for c in &communities {
                 super::streamauth::register_community(c);
             }
-            super::streamauth::prime_auth(client, &relays).await;
         }
     }
 
@@ -279,6 +301,7 @@ pub async fn refresh_subscription(client: &Client) {
     // failed pool-wide subscribe would otherwise stay absent until the author-set
     // changes, and Android streams via the pool-wide path).
     if sub_guard.is_some() && *set_guard == new_set && (authors.is_empty() || V2_POOLWIDE_SUB_ID.lock().await.is_some()) {
+        mark_subscription_ready(); // an unchanged live sub is a completed pass
         return; // the pool re-applies the live subs across reconnects.
     }
     if let Some(old) = sub_guard.take() {
@@ -290,6 +313,9 @@ pub async fn refresh_subscription(client: &Client) {
         if let Some(old_pw) = V2_POOLWIDE_SUB_ID.lock().await.take() {
             let _ = client.unsubscribe(&old_pw).await;
         }
+        // Completed with nothing to hear: READY with zero planes, which is a
+        // different observable state from "still connecting".
+        mark_subscription_ready();
         return;
     }
 
@@ -315,6 +341,39 @@ pub async fn refresh_subscription(client: &Client) {
     {
         *sub_guard = Some(out.value);
     }
+    mark_subscription_ready();
+    drop(set_guard);
+    drop(sub_guard);
+
+    // AUTH-gating relays serve the planes only to a stream-authenticated
+    // connection, and a live subscription isn't auto-retried after the gate. The
+    // priming used to run BEFORE the subscribe, which gated the whole registration
+    // on the slowest relay: a set with dead or auth-refusing members left the
+    // client deaf for a minute while healthy relays sat idle. Prime in the
+    // BACKGROUND instead — healthy relays stream from the registration above, and
+    // each gating relay's auth completion re-sends the subs (`resubscribe_relay`
+    // via the responder), so it joins the moment IT is ready, gating nobody else.
+    prime_auth_in_background(client, relays);
+}
+
+/// In-flight coalescer for the background auth prime: boot fires many refreshes
+/// (dispatch, absorb, reconnect) and each spawning its own prime would stampede
+/// the gating relays with duplicate auth fetches.
+static PRIME_IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn prime_auth_in_background(client: &Client, relays: Vec<String>) {
+    use std::sync::atomic::Ordering;
+    if relays.is_empty() || PRIME_IN_FLIGHT.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        return;
+    }
+    let client = client.clone();
+    let session = crate::state::SessionGuard::capture();
+    tokio::spawn(async move {
+        if session.is_valid() {
+            super::streamauth::prime_auth(&client, &relays).await;
+        }
+        PRIME_IN_FLIGHT.store(false, Ordering::Release);
+    });
 }
 
 /// Re-send the CURRENT v2 subscriptions (same ids) to ONE relay. An AUTH-gating
@@ -649,16 +708,18 @@ async fn follow_community(session: &SessionGuard, id: &CommunityId, handler: &dy
             let hex = crate::simd::hex::bytes_to_hex_32(&ch.0);
             // Read what was said while we were locked out. The live subscription
             // only carries what arrives NEXT, so without this a member granted
-            // access walks into a room that looks empty.
-            let _ = crate::VectorCore::v2_backfill_channel(
-                id, &hex, 50, 2, None,
+            // access walks into a room that looks empty. The count rides the hook:
+            // backfilled history is NOT dispatched as live messages, and without
+            // the number a handler cannot even tell there is history to go read.
+            let backfilled = crate::VectorCore::v2_backfill_channel(
+                id, &hex, 50, 2, None, None,
                 crate::community::transport::Evidence::Fast, 12,
             )
             .await;
             if !session.is_valid() {
                 return;
             }
-            handler.on_channel_keyed(&community_id, &hex);
+            handler.on_channel_keyed(&community_id, &hex, backfilled);
         }
     }
     if control_changed {
@@ -754,6 +815,23 @@ mod tests {
         let owner = Keys::generate();
         let g = genesis(&owner, CommunityMetadata { name: name.into(), ..Default::default() }, 1_000).unwrap();
         CommunityV2::from_genesis(&g, name, None, vec!["wss://r".into()], 0)
+    }
+
+    #[test]
+    fn subscription_readiness_is_scoped_to_the_session_that_marked_it() {
+        // Generation-keyed on purpose: a bare bool would survive an account swap
+        // and report account A's readiness for account B — the exact class of
+        // per-account-global bug the swap-cache sweep exists to prevent.
+        //
+        // Bumping the GLOBAL generation invalidates every live SessionGuard, so
+        // serialize with the swap-sensitive tests via the same guard they hold.
+        let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        mark_subscription_ready();
+        assert!(subscription_ready(), "marked for the current session");
+        crate::state::bump_session_generation();
+        assert!(!subscription_ready(), "an account swap invalidates it");
+        mark_subscription_ready();
+        assert!(subscription_ready(), "the new session's own pass re-arms it");
     }
 
     #[test]

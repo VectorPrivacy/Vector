@@ -533,7 +533,7 @@ pub async fn fetch_channel<T: Transport + ?Sized>(
     channel_id: &ChannelId,
     limit: usize,
 ) -> Result<Vec<FetchedEvent>, String> {
-    fetch_channel_history(transport, community, channel_id, limit, 1, None, crate::community::transport::Evidence::Quorum, |_| true).await
+    fetch_channel_history(transport, community, channel_id, limit, 1, None, None, crate::community::transport::Evidence::Quorum, |_| true).await
 }
 
 /// Walk a channel's history newest-first (CORD-03 §3 "clients load a Channel
@@ -556,6 +556,9 @@ pub async fn fetch_channel_history<T: Transport + ?Sized>(
     page: usize,
     max_pages: usize,
     since: Option<u64>,
+    // Unix-seconds upper bound for the FIRST page (inclusive) — the back-paging
+    // cursor. `None` starts at the newest.
+    start_until: Option<u64>,
     evidence: crate::community::transport::Evidence,
     mut keep_paging: impl FnMut(&[FetchedEvent]) -> bool,
 ) -> Result<Vec<FetchedEvent>, String> {
@@ -594,7 +597,7 @@ pub async fn fetch_channel_history<T: Transport + ?Sized>(
     let mut seen_wraps: std::collections::HashSet<nostr_sdk::prelude::EventId> = std::collections::HashSet::new();
     let mut seen_rumors = std::collections::HashSet::new();
     let mut out: Vec<(u64, FetchedEvent)> = Vec::new();
-    let mut until: Option<u64> = None;
+    let mut until: Option<u64> = start_until;
     let mut oldest: Option<u64> = None;
     for _ in 0..max_pages {
         // Fetch each held epoch's Chat-Plane AUTHED AS that plane key. AUTH-gating
@@ -9071,7 +9074,7 @@ mod tests {
         let general = community.channels[0].id;
         flood_general(&relay, &community, &owner, 120, 10_000).await;
 
-        let all = fetch_channel_history(&relay, &community, &general, 50, 8, None, crate::community::transport::Evidence::Quorum, |_| true).await.unwrap();
+        let all = fetch_channel_history(&relay, &community, &general, 50, 8, None, None, crate::community::transport::Evidence::Quorum, |_| true).await.unwrap();
         assert_eq!(all.len(), 120, "the walk pages the whole burst");
         // Oldest→newest, no duplicates.
         let contents: Vec<String> = all.iter().map(|f| f.event.opened().rumor.content.clone()).collect();
@@ -9087,6 +9090,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_start_until_cursor_pages_history_from_that_point_backwards() {
+        // The back-paging cursor: a walk that starts at an explicit `until`
+        // returns only what lies at-or-before it, oldest→newest — the relay-side
+        // half of the SDK's walk-until-dry loop.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Paged", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        flood_general(&relay, &community, &owner, 120, 10_000).await;
+
+        let older = fetch_channel_history(
+            &relay, &community, &general, 50, 8, None, Some(10_059),
+            crate::community::transport::Evidence::Quorum, |_| true,
+        )
+        .await
+        .unwrap();
+        let contents: Vec<String> = older.iter().map(|f| f.event.opened().rumor.content.clone()).collect();
+        assert_eq!(contents.len(), 60, "everything at-or-before the cursor, nothing after");
+        assert_eq!(contents.first().map(String::as_str), Some("msg 0"));
+        assert_eq!(contents.last().map(String::as_str), Some("msg 59"));
+    }
+
+    #[tokio::test]
     async fn the_history_walk_stops_when_the_caller_is_caught_up() {
         let (_tmp, _guard, owner) = init_test_db();
         let relay = MemoryRelay::new();
@@ -9096,7 +9122,7 @@ mod tests {
 
         // The caller says "I hold everything" after the first page — no deeper fetch.
         let mut pages = 0usize;
-        let got = fetch_channel_history(&relay, &community, &general, 50, 8, None, crate::community::transport::Evidence::Quorum, |_| {
+        let got = fetch_channel_history(&relay, &community, &general, 50, 8, None, None, crate::community::transport::Evidence::Quorum, |_| {
             pages += 1;
             false
         })
@@ -9122,7 +9148,7 @@ mod tests {
             let (wrap, _) = chat::seal_chat_rumor(&rumor, &group, &owner, Timestamp::from_secs(5_000), false).unwrap();
             relay.publish(&wrap, &community.relays).await.unwrap();
         }
-        let got = fetch_channel_history(&relay, &community, &general, 25, 8, None, crate::community::transport::Evidence::Quorum, |_| true).await.unwrap();
+        let got = fetch_channel_history(&relay, &community, &general, 25, 8, None, None, crate::community::transport::Evidence::Quorum, |_| true).await.unwrap();
         assert!(got.len() >= 25, "at least the relay page is read");
         assert!(got.len() <= 60, "sane bound");
         // Termination is the assertion: reaching here means the wall didn't loop.
