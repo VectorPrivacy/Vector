@@ -1042,6 +1042,33 @@ impl Community {
             .unwrap_or_default()
     }
 
+    /// Whether this community has been DISSOLVED (permanently sealed by its owner).
+    ///
+    /// The local history survives — it is never auto-deleted — but the tombstone means
+    /// no relay will ever accept another message or control edit, by anyone. A bot that
+    /// does not check this retries sends into a sealed room forever, so gate any
+    /// unattended posting loop on it.
+    ///
+    /// ```no_run
+    /// # async fn f(bot: &vector_sdk::VectorBot) -> Result<(), Box<dyn std::error::Error>> {
+    /// for community in bot.communities().await {
+    ///     if community.is_dissolved().await { continue; }
+    ///     // ...safe to post
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub async fn is_dissolved(&self) -> bool {
+        self.core
+            .list_communities()
+            .await
+            .into_iter()
+            .find(|v| {
+                v.get("community_id").or_else(|| v.get("id")).and_then(|i| i.as_str()) == Some(self.id.as_str())
+            })
+            .and_then(|v| v.get("dissolved").and_then(|d| d.as_bool()))
+            .unwrap_or(false)
+    }
+
     /// A handle to one channel of this community by id.
     pub fn channel(&self, channel_id: impl Into<String>) -> Channel {
         Channel { core: self.core, id: channel_id.into(), kind: ChannelKind::Community }

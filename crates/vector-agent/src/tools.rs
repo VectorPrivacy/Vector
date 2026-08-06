@@ -452,7 +452,7 @@ impl VectorAgent {
 
     // === Communities ===
 
-    #[tool(description = "List all Vector Communities held locally (owned or joined), each with its channels and channel ids. Use a channel id as the chat_id for get_messages.")]
+    #[tool(description = "List all Vector Communities held locally (owned or joined), each with its channels and channel ids. Use a channel id as the chat_id for get_messages. `dissolved: true` means the community is permanently sealed — its history still reads, but no message or change will EVER be accepted again, so do not try to post there.")]
     async fn list_communities(&self) -> Result<CallToolResult, McpError> {
         let communities = self.core.list_communities().await;
         let json = serde_json::to_string_pretty(&communities).unwrap_or_else(|_| "[]".into());

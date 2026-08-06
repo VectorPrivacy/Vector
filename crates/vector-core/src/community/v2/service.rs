@@ -7765,6 +7765,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dissolution_seals_writes_but_not_reads() {
+        // CORD-02 §9: sealed means NO further activity, ever. Reads must survive —
+        // the history stays browsable, and only explicit user intent deletes it.
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Doomed", bed.relays.clone(), None).await.unwrap();
+        let general = community.channels[0].id;
+        send_message(&bed.relay, &community, &general, "before the end").await.unwrap();
+
+        dissolve_community(&bed.relay, &community).await.unwrap();
+        let sealed = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+
+        for err in [
+            send_message(&bed.relay, &sealed, &general, "after the end").await.unwrap_err(),
+            send_reaction(&bed.relay, &sealed, &general, &"a".repeat(64), &"b".repeat(64), crate::community::v2::kind::MESSAGE, "+", None)
+                .await
+                .unwrap_err(),
+            send_edit(&bed.relay, &sealed, &general, &"a".repeat(64), "revised").await.unwrap_err(),
+        ] {
+            assert!(err.contains("dissolved"), "every write is refused, got: {err}");
+        }
+        assert!(
+            texts_in(&bed.relay, &sealed, &general).await.contains(&"before the end".to_string()),
+            "but the history still reads"
+        );
+    }
+
+    #[tokio::test]
     async fn only_the_owner_can_dissolve() {
         let (bed, owner, member) = TestBed::new();
         bed.swap_to(&owner);

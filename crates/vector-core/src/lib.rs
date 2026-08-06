@@ -1077,6 +1077,11 @@ impl VectorCore {
                             "name": c.name,
                             "description": c.description,
                             "is_owner": is_owner,
+                            // A dissolved community is SEALED: the row survives (history
+                            // is never auto-deleted) but no write is ever accepted again.
+                            // Without this a bot cannot tell it from a live one and
+                            // retries sends into a tombstone forever.
+                            "dissolved": c.dissolved,
                             // `readable` is the field a bot needs and could never
                             // compute: a private channel we've been told about but
                             // hold no key for is enumerable-but-unreadable, which
@@ -1102,6 +1107,7 @@ impl VectorCore {
                             "name": c.name,
                             "description": c.description,
                             "is_owner": crate::community::service::is_proven_owner(&c),
+                            "dissolved": c.dissolved,
                             "channels": c.channels.iter()
                                 .map(|ch| serde_json::json!({ "channel_id": ch.id.to_hex(), "name": ch.name }))
                                 .collect::<Vec<_>>(),
@@ -1871,6 +1877,7 @@ impl VectorCore {
                 .map_err(VectorError::Other);
         }
         let (community, channel) = self.resolve_channel(channel_id)?;
+        Self::ensure_v1_writable(&community)?;
         let author_pk = state::my_public_key().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
         let reply = replied_to.filter(|r| !r.is_empty());
         let ms = std::time::SystemTime::now()
@@ -1941,6 +1948,20 @@ impl VectorCore {
             Some(_) => None,
             None => Some(self.resolve_channel(channel_id)?),
         };
+        // Same fail-fast rationale as the routing check above: a sealed community
+        // (CORD-02 §9) accepts nothing, so refuse before the encrypt + upload rather
+        // than burning a Blossom round-trip on a send that can never land. v2's own
+        // gate is inside the send, which is too late to save the upload.
+        match (&v2_target, &v1_target) {
+            (Some(c), _) => {
+                let cid = crate::simd::hex::bytes_to_hex_32(&c.id().0);
+                if crate::db::community::get_community_dissolved(&cid).unwrap_or(false) {
+                    return Err(VectorError::Other("this community has been dissolved".into()));
+                }
+            }
+            (None, Some((c, _))) => Self::ensure_v1_writable(c)?,
+            _ => {}
+        }
         let author_pk = state::my_public_key().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
 
         let file_hash = crate::crypto::sha256_hex(&bytes);
@@ -2045,6 +2066,7 @@ impl VectorCore {
                 .map_err(VectorError::Other);
         }
         let (community, channel) = self.resolve_channel(channel_id)?;
+        Self::ensure_v1_writable(&community)?;
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(8));
         service::publish_typing_signal(&transport, &community, &channel)
             .await
@@ -2299,6 +2321,7 @@ impl VectorCore {
     ) -> Result<()> {
         use crate::community::{envelope, inbound, service, transport::LiveTransport};
         let (community, channel) = self.resolve_channel(channel_id)?;
+        Self::ensure_v1_writable(&community)?;
         let author_pk = state::my_public_key().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
         let ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -3218,6 +3241,19 @@ impl VectorCore {
     }
 
     /// Resolve a channel id to its owning Community + the Channel (with its secret key).
+    /// Refuse a WRITE into a sealed community (CORD-02 §9). Once dissolved, no honest
+    /// peer accepts another event, so a send would sit pending forever with no reason
+    /// given. v2 enforces this inside `chat_send_context`; v1 has no shared send gate,
+    /// so each write path calls this.
+    ///
+    /// Reads are deliberately untouched — a dissolved community stays browsable.
+    fn ensure_v1_writable(community: &crate::community::Community) -> Result<()> {
+        if crate::db::community::get_community_dissolved(&community.id.to_hex()).unwrap_or(false) {
+            return Err(VectorError::Other("this community has been dissolved".into()));
+        }
+        Ok(())
+    }
+
     fn resolve_channel(
         &self,
         channel_id: &str,
