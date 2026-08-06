@@ -69,10 +69,9 @@ All business logic lives here, fully decoupled from Tauri. Any client (GUI, CLI,
 - **`commands/`** — Tauri command handlers (thin wrappers around vector-core logic)
 - **`state/`** — Re-exports vector-core globals + local TAURI_APP + TauriEventEmitter (bridges emit_event to Tauri)
 - **`macros.rs`** — log_error! only (toast + log file via TAURI_APP; log_info/debug/trace/warn in vector-core)
-- **`rumor.rs`** — Thin wrapper: re-exports vector-core + parse_mls_imeta_attachments + process_rumor_with_mls + resolve_download_dir
+- **`rumor.rs`** — Pure re-export of vector-core's rumor processing
 - **`message/`** — Re-exports vector-core types + TauriSendCallback + file dedup logic
 - **`services/`** — Event handler, subscription handler, notifications
-- **`mls/`** — MLS group encryption via OpenMLS/MDK (not yet in vector-core)
 - **`miniapps/`** — WebXDC-compatible mini apps (Tauri-specific: custom protocol, WebView, Iroh P2P)
 - **`android/`** — JNI bindings, localhost media server, background sync
 - **`simd/`** — SIMD image, audio, URL, HTML operations (hex moved to vector-core)
@@ -90,14 +89,14 @@ Frontend communicates with backend via `window.__TAURI__.core.invoke()`.
 
 ### 🚨 Multi-account session safety — read this BEFORE writing any code that touches STATE, DB, or relays
 
-Vector supports N accounts per install. A `swap_session` / `reset_session` can happen at **any await point**: the user might switch accounts mid-fetch, mid-publish, mid-MLS-sync, mid-anything. When that happens:
+Vector supports N accounts per install. A `swap_session` / `reset_session` can happen at **any await point**: the user might switch accounts mid-fetch, mid-publish, mid-sync, mid-anything. When that happens:
 
 - `STATE` (chats/profiles) is replaced with the new account's data
 - The DB pool (`POOL_GENERATION`) is swapped to the new account's vector.db
 - `MY_KEYS` / `MY_PUBLIC_KEY` / `ENCRYPTION_KEY` are rebound
 - The per-account marker file points at the new npub
 
-**Any task still running with values captured before the swap will write account A's data into account B's storage.** This has caused multiple real bugs: MLS messages from the previous account appearing in a fresh account's chat list, profile updates persisting to the wrong DB, kind-10063 server lists merging across accounts. The damage is invisible until the user opens the wrong chat.
+**Any task still running with values captured before the swap will write account A's data into account B's storage.** This has caused multiple real bugs: group messages from the previous account appearing in a fresh account's chat list, profile updates persisting to the wrong DB, kind-10063 server lists merging across accounts. The damage is invisible until the user opens the wrong chat.
 
 #### The SessionGuard contract
 
@@ -115,7 +114,7 @@ if !session.is_valid() { return; }       // bail if the generation advanced
 1. **Every `tokio::spawn` that touches per-account state needs a captured `SessionGuard` BEFORE the spawn boundary and an `is_valid()` check before its first side effect.** Capturing inside the `async move` block is too late — the spawn order is unobserved.
 2. **Every long async function (≥ ~1s, anything network-bound) that ends in a write needs a re-check before that write**, even if the caller already validated. Fetches can take seconds; the validation must straddle the I/O.
 3. **Every Tauri command that mutates per-account settings/DB needs a guard at entry.** Pattern: capture `SessionGuard`, do the read/mutate/save sandwich, re-check `is_valid()` immediately before `save_*`. Don't trust `get_current_account()` alone — it returns the *current* account, which may not be the one the caller expects.
-4. **Per-group locks and account-scoped service instances (`MlsService`, etc.) freeze their per-account paths at construction.** A stale instance keeps decrypting account A's MLS storage successfully and writes the plaintext into account B's STATE. Gate every method that mutates state on a `SessionGuard` captured at the call site, not at construction.
+4. **Any long-lived instance or per-group lock that resolves an account path at construction freezes it there.** A stale instance keeps reading account A's storage successfully and writes the plaintext into account B's STATE. Nothing in the tree does this today (Concord is module-level functions); if you introduce one, gate every state-mutating method on a `SessionGuard` captured at the call site, not at construction.
 5. **The debounced republish pattern (`republish_*_debounced`) captures `SessionGuard` before the sleep.** Copy that pattern for any debounced effect.
 
 #### Smell signals — grep for these in any PR
@@ -131,7 +130,7 @@ if !session.is_valid() { return; }       // bail if the generation advanced
 
 - `crates/vector-core/src/inbox_relays.rs::republish_inbox_relays_debounced` — debounced publish with SessionGuard
 - `crates/vector-core/src/blossom_servers.rs::fetch_and_merge_own_list` — long fetch + write, takes `SessionGuard` parameter, re-checks before save AND before cache refresh
-- `crates/vector-core/src/mls/service.rs::sync_group_since_cursor` — SessionGuard captured at entry, re-validated before each per-rumor STATE write
+- `crates/vector-core/src/community/v2/service.rs::fetch_channel_history` — SessionGuard captured at entry, re-validated inside the fetch loop before each per-rumor write
 - `src-tauri/src/commands/relays.rs::require_active_blossom_session` — entry-guard helper for mutation commands
 
 When in doubt, add a guard. Cost: one atomic load. Cost of the bug it prevents: catastrophic cross-account data corruption.
@@ -158,7 +157,7 @@ All DM sends (text + file) flow through vector-core's `send_dm`/`send_file_dm`/`
 - **`CliSendCallback`** — terminal output for sent/failed/progress
 - Text DMs: `message()` short-circuits to `vector_core::send_dm` with `TauriSendCallback`
 - File DMs: src-tauri handles dedup + upload, then calls `vector_core::send_rumor_dm` for gift-wrap + retry
-- MLS groups: stay in src-tauri (MDK dependency)
+- Community channels: their own send path in `vector_core::community` (Concord), not this pipeline
 
 ### ProfileSyncHandler — Unified Profile Pipeline
 
@@ -198,15 +197,15 @@ Files are encrypted (NIP-96/Blossom), uploaded to media servers, and referenced 
 
 ## Dependencies
 
-Key crates: `nostr-sdk` 0.44, `tauri` 2.10, `tokio` 1.49, `rusqlite` 0.32, `openmls`, `iroh` 0.96, `iroh-gossip` 0.96, `aes-gcm`, `argon2`, `image` 0.25
+Key crates: `nostr-sdk` 0.45, `tauri` 2.10, `tokio` 1.49, `rusqlite` 0.37, `iroh` 1.0, `iroh-gossip` 0.101, `aes-gcm`, `argon2`, `image` 0.25
 
-Local path deps: `../../mdk/crates/mdk-*` (MDK media/encryption library)
-
-wry fork: `[patch.crates-io]` in Cargo.toml points to local `../../wry` for WKWebView background color fix.
+`[patch.crates-io]` in `src-tauri/Cargo.toml` pins two forks:
+- `nostr` — `SecretKey`'s Drop used `non_secure_erase`, which the compiler can optimise away; the fork zeroizes with volatile writes
+- `whisper-rs-sys` — Vector's build fixes
 
 ## Platform Notes
 
-- **macOS**: WKWebView white flash prevented via `drawsBackground` KVC on config (wry fork). Metal GPU for Whisper.
+- **macOS**: WKWebView white flash prevented by the window's `backgroundColor` in `tauri.conf.json` plus `macOSPrivateApi`. Metal GPU for Whisper.
 - **Linux**: `WEBKIT_DISABLE_DMABUF_RENDERER=1` set for WebKitGTK compatibility.
 - **Android**: API 26+. Vulkan GPU disabled for Whisper (device freeze). OpenSSL vendored.
 - **Feature flag**: `whisper` (default) — enables OpenAI Whisper transcription. Use `--no-default-features` to skip.
