@@ -459,6 +459,17 @@ pub async fn save_system_event_at(
     invited_by: Option<&str>,
     invited_label: Option<&str>,
 ) -> Result<bool, String> {
+    // A blank conversation id is a caller bug, never a conversation. Left to
+    // `get_or_create_chat_id` it MINTS a chat row keyed by "" — and since the
+    // identifier is UNIQUE, every such write from every community collapses into
+    // one phantom row that nothing can open and the boot sweep can only report.
+    // A blank conversation id is a caller bug, never a conversation. Left to
+    // `get_or_create_chat_id` it MINTS a chat row keyed by "" — and since the
+    // identifier is UNIQUE, every such write from every community collapses into
+    // one phantom row that nothing can open and the boot sweep can only report.
+    if conversation_id.trim().is_empty() {
+        return Err("system event has no conversation id".to_string());
+    }
     let chat_id = super::id_cache::get_or_create_chat_id(conversation_id)?;
 
     let now_secs = std::time::SystemTime::now()
@@ -2204,6 +2215,36 @@ mod tests {
     // Regression: a "read to here" marker that lands on a system event (kind 30078, not a counted
     // kind, e.g. the windowed jump-reveal path marking off the raw tail) must still clear unread.
     // The anchor keys off the marker row's time whatever its kind, so it can't wedge at 99+.
+    /// A blank conversation id is refused, never minted into a chat row. Left to
+    /// `get_or_create_chat_id` it created a chat keyed by "" — and because the
+    /// identifier is UNIQUE, presence from EVERY channel-less community collapsed
+    /// into that one unopenable row (82 events across weeks, on a live account).
+    #[tokio::test]
+    async fn a_system_event_with_a_blank_conversation_id_is_refused() {
+        let (_tmp, _guard) = init_test_db();
+        let before = chat_row_count();
+        for blank in ["", "   "] {
+            assert!(
+                save_system_event_at("ev", blank, SystemEventType::MemberJoined, "npubX", None, 100, None, None)
+                    .await
+                    .is_err(),
+                "a blank conversation id must be refused, not minted"
+            );
+        }
+        assert_eq!(chat_row_count(), before, "and no chat row is created");
+        // A real id still works.
+        assert!(
+            save_system_event_at("ev2", "real-chat", SystemEventType::MemberJoined, "npubX", None, 100, None, None)
+                .await
+                .unwrap()
+        );
+    }
+
+    fn chat_row_count() -> i64 {
+        let conn = crate::db::get_db_connection_guard_static().unwrap();
+        conn.query_row("SELECT count(*) FROM chats", [], |r| r.get(0)).unwrap()
+    }
+
     #[tokio::test]
     async fn unread_clears_when_last_read_is_a_system_event() {
         let (_tmp, _guard) = init_test_db();

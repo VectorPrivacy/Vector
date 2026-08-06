@@ -477,11 +477,15 @@ fn dispatch_guestbook(ev: &guestbook::GuestbookEvent, community: &CommunityV2, h
     // paths (live replay, reconnect, catch-up) deliver it.
     let event_id = crate::simd::hex::bytes_to_hex_32(&ev.rumor_id);
     // Presence is announced against the community's SURFACED row (the primary
-    // channel — the one chat the list shows).
+    // channel — the one chat the list shows). A community with NO channels has no
+    // row to announce against, and `unwrap_or_default()` invented one: a blank
+    // conversation id, which a UNIQUE identifier then collapsed into a single
+    // unopenable chat shared by every such community. None = don't announce; the
+    // dispatch still reports the presence so the memberlist bookkeeping runs, and
+    // the guestbook re-folds the line once a channel exists.
     let chat_id = community
         .primary_channel()
-        .map(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0))
-        .unwrap_or_default();
+        .map(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0));
     match &ev.entry {
         GuestbookEntry::Join { member, at_ms, invited_by } => {
             let npub = member.to_bech32().unwrap_or_default();
@@ -489,15 +493,15 @@ fn dispatch_guestbook(ev: &guestbook::GuestbookEvent, community: &CommunityV2, h
                 Some((c, l)) => (Some(c.as_str()), Some(l.as_str())),
                 None => (None, None),
             };
-            if !suppressed {
-                handler.on_community_presence(&chat_id, &npub, true, &event_id, at_ms / 1000, by, label);
+            if let (false, Some(chat)) = (suppressed, chat_id.as_deref()) {
+                handler.on_community_presence(chat, &npub, true, &event_id, at_ms / 1000, by, label);
             }
             DispatchedV2::Presence { npub: npub.clone(), joined: true }
         }
         GuestbookEntry::Leave { member, at_ms } => {
             let npub = member.to_bech32().unwrap_or_default();
-            if !suppressed {
-                handler.on_community_presence(&chat_id, &npub, false, &event_id, at_ms / 1000, None, None);
+            if let (false, Some(chat)) = (suppressed, chat_id.as_deref()) {
+                handler.on_community_presence(chat, &npub, false, &event_id, at_ms / 1000, None, None);
             }
             DispatchedV2::Presence { npub: npub.clone(), joined: false }
         }
