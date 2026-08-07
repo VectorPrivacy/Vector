@@ -835,6 +835,9 @@ pub async fn mint_public_link<T: Transport + ?Sized>(
     label: Option<String>,
 ) -> Result<MintedLink, String> {
     let session = SessionGuard::capture();
+    // Readers ignore a registry whose author lacks CREATE_INVITE (it can't even
+    // flip the community Public) — refuse before minting a link nobody honors.
+    ensure_folded_permission(community, &me_pk()?, crate::community::roles::Permissions::CREATE_INVITE, "minting a public invite link")?;
     let mut token = [0u8; super::derive::TOKEN_LEN];
     token.copy_from_slice(&super::super::random_32()[..super::derive::TOKEN_LEN]);
     let link_signer = Keys::generate();
@@ -3524,10 +3527,38 @@ fn require_grant_head(community: &CommunityV2, view: &AuthorityView, member_hex:
 }
 
 /// Replace the Banlist (vsk 4, CORD-04 §4) with `banned` (lowercase-hex npubs), the
-/// whole list on every edit. Gated on the reader side by `BAN`.
+/// whole list on every edit. Gated on the reader side by `BAN` per head plus strict
+/// outrank per entry — mirrored here BEFORE the publish, so an unauthorized caller
+/// (an SDK bot without the bit, a demoted moderator) fails loudly instead of
+/// publishing an edition every reader silently rejects while its own local echo
+/// caches the phantom ban.
 pub async fn set_banlist<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, banned: &[String]) -> Result<(), String> {
     let session = SessionGuard::capture();
     super::roles::validate_banlist(banned)?;
+    {
+        let my_pk = me_pk()?;
+        let owner = community.owner()?;
+        if my_pk != owner {
+            let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+            let me_hex = my_pk.to_hex();
+            let current = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
+            if current.contains(&me_hex) {
+                return Err("you are banned from this community".to_string());
+            }
+            let roster = crate::db::community::get_community_roles(&cid_hex)?;
+            let owner_hex = owner.to_hex();
+            if !roster.is_authorized(&me_hex, Some(&owner_hex), crate::community::roles::Permissions::BAN) {
+                return Err("editing the banlist needs the BAN permission".to_string());
+            }
+            // Only the entries this edit ADDS need the per-target outrank (the fold
+            // keeps prior authorized bans alive through its per-candidate history).
+            for target in banned.iter().filter(|t| !current.contains(*t)) {
+                if !roster.can_act_on_member(&me_hex, Some(&owner_hex), target, crate::community::roles::Permissions::BAN) {
+                    return Err("you do not outrank a member this ban targets".to_string());
+                }
+            }
+        }
+    }
     let content = super::roles::banlist_content_json(banned)?;
     let eid = super::derive::banlist_locator(community.id());
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
@@ -3554,6 +3585,7 @@ pub async fn set_banlist<T: Transport + ?Sized>(transport: &T, community: &Commu
 /// `MANAGE_METADATA`.
 pub async fn edit_community_metadata<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, meta: &control::CommunityMetadata) -> Result<(), String> {
     let session = SessionGuard::capture();
+    ensure_folded_permission(community, &me_pk()?, crate::community::roles::Permissions::MANAGE_METADATA, "editing the community metadata")?;
     control::validate_community_metadata(meta).map_err(|e| e.to_string())?;
     let content = serde_json::to_string(meta).map_err(|e| e.to_string())?;
     publish_control_edition(transport, community, &session, vsk::COMMUNITY_METADATA, &community.id().0, &content).await
@@ -3691,12 +3723,18 @@ async fn rename_channel_access_role<T: Transport + ?Sized>(
     }
 }
 
-/// The local mirror of the reader's `MANAGE_CHANNELS` fold gate (CORD-03 §2): the
-/// owner, or a roster-authorized manager who isn't banned. Refusing BEFORE any
+/// The local mirror of a reader-side permission fold gate: the owner, or a
+/// roster-authorized holder of `needed` who isn't banned. Refusing BEFORE any
 /// publish keeps an unauthorized device from advancing its own edition floor onto
 /// a head every reader rejects (wedging its later, legitimately-authorized edits
-/// behind a rejected chain).
-fn ensure_channel_manager(community: &CommunityV2, me: &PublicKey) -> Result<(), String> {
+/// behind a rejected chain). Fail-closed: an empty/unfolded roster collapses to
+/// owner-only — it can over-restrict, never grant authority no one has.
+fn ensure_folded_permission(
+    community: &CommunityV2,
+    me: &PublicKey,
+    needed: u64,
+    verb: &str,
+) -> Result<(), String> {
     let owner = community.owner()?;
     if *me == owner {
         return Ok(());
@@ -3707,11 +3745,28 @@ fn ensure_channel_manager(community: &CommunityV2, me: &PublicKey) -> Result<(),
         return Err("you are banned from this community".to_string());
     }
     let roster = crate::db::community::get_community_roles(&cid_hex)?;
-    if roster.is_authorized(&me_hex, Some(&owner.to_hex()), crate::community::roles::Permissions::MANAGE_CHANNELS) {
+    if roster.is_authorized(&me_hex, Some(&owner.to_hex()), needed) {
         Ok(())
     } else {
-        Err("managing channels here needs the MANAGE_CHANNELS permission".to_string())
+        Err(format!("{verb} needs the {} permission", permission_label(needed)))
     }
+}
+
+fn permission_label(bits: u64) -> &'static str {
+    use crate::community::roles::Permissions;
+    match bits {
+        Permissions::MANAGE_ROLES => "MANAGE_ROLES",
+        Permissions::MANAGE_CHANNELS => "MANAGE_CHANNELS",
+        Permissions::MANAGE_METADATA => "MANAGE_METADATA",
+        Permissions::BAN => "BAN",
+        Permissions::CREATE_INVITE => "CREATE_INVITE",
+        _ => "required",
+    }
+}
+
+/// [`ensure_folded_permission`] for `MANAGE_CHANNELS` (CORD-03 §2).
+fn ensure_channel_manager(community: &CommunityV2, me: &PublicKey) -> Result<(), String> {
+    ensure_folded_permission(community, me, crate::community::roles::Permissions::MANAGE_CHANNELS, "managing channels here")
 }
 
 /// Create a new PUBLIC channel (CORD-03 §2): mint a fresh id, publish its metadata
@@ -4331,6 +4386,88 @@ async fn rekey_channel_excluding<T: Transport + ?Sized>(
         }
     }
     Ok(())
+}
+
+/// Rotate every private channel a just-banned member could read (CORD-06 §1 applied
+/// per channel). A Public-community Ban skips the Refounding (CORD-05 §5), but the
+/// banlist and grant strip alone leave the member holding each private channel's
+/// CURRENT epoch key — rotation is the only read severance.
+///
+/// `stripped_roles` is the member's role set as captured before the strip: the fold
+/// may or may not have caught the strip yet, and the `with` overlay makes the
+/// entitlement judgment independent of that timing.
+///
+/// Offer-side mirror of the reader's `channel_rotator_ok`: a channel rotation is
+/// honored only from `MANAGE_CHANNELS` holders, so a BAN-only moderator must not
+/// publish one — locally adopting an epoch every reader rejects forks the channel.
+///
+/// Best-effort per channel (one failure must not leave the others unrotated);
+/// returns how many channels rotated, or the joined failures.
+pub async fn sever_banned_private_reads<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    member: &PublicKey,
+    stripped_roles: &[String],
+) -> Result<usize, String> {
+    let session = SessionGuard::capture();
+    let my_pk = me_pk()?;
+    ensure_folded_permission(community, &my_pk, crate::community::roles::Permissions::MANAGE_CHANNELS, "severing a banned member's channel reads")?;
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    // Recipients need the CURRENT entitlement view — fetched, then merged over the
+    // cache so entitlements we published ourselves survive a lagging fold (the same
+    // two-strand merge as `revoke_channel_access`).
+    let mut roster = fetch_authority(transport, community).await.roles;
+    let cached = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+    for r in cached.roles {
+        if !roster.roles.iter().any(|x| x.role_id == r.role_id) {
+            roster.roles.push(r);
+        }
+    }
+    for g in cached.grants {
+        if !roster.grants.iter().any(|x| x.member == g.member) {
+            roster.grants.push(g);
+        }
+    }
+    if !session.is_valid() {
+        return Err("account changed during ban severance".to_string());
+    }
+    let owner_hex = community.owner().ok().map(|o| o.to_hex());
+    let member_hex = member.to_hex();
+    let mut rotated = 0usize;
+    let mut failures: Vec<String> = Vec::new();
+    for ch in &community.channels {
+        if !ch.private || ch.key.is_none() {
+            continue;
+        }
+        let chan_hex = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
+        if !roster.is_entitled(owner_hex.as_deref(), &member_hex, &chan_hex, stripped_roles, &[]) {
+            continue;
+        }
+        let access_ids = roster.channel_role_ids(&chan_hex);
+        // Entitlement without an access-role set can't happen for a non-owner, and
+        // an empty set would make the rotation's recipient filter mass-evict.
+        if access_ids.is_empty() {
+            continue;
+        }
+        // Reload per iteration: each rotation advances the held document, and a
+        // stale struct would mint a colliding channel epoch on the next pass.
+        let held = match crate::db::community::load_community_v2(community.id()) {
+            Ok(Some(c)) => c,
+            _ => return Err("community gone during ban severance".to_string()),
+        };
+        match rekey_channel_excluding(transport, &held, &ch.id, &roster, &access_ids, member).await {
+            Ok(()) => rotated += 1,
+            Err(e) => failures.push(format!("{}: {e}", &chan_hex[..12])),
+        }
+        if !session.is_valid() {
+            return Err("account changed during ban severance".to_string());
+        }
+    }
+    if failures.is_empty() {
+        Ok(rotated)
+    } else {
+        Err(format!("{rotated} rotated; failed: {}", failures.join("; ")))
+    }
 }
 
 /// Tombstone a channel (CORD-03 §2, `deleted: true`) + drop it locally. Reader-gated by
@@ -8614,7 +8751,8 @@ mod tests {
         bed.swap_to(&owner);
         let community = create_community(&bed.relay, "LinkHeal", bed.relays.clone(), None).await.unwrap();
         let rid = "b1".repeat(32);
-        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        // CREATE_INVITE too: minting is offer-gated by the same bit readers use.
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN | Permissions::CREATE_INVITE), 1).await;
         publish_grant(&bed.relay, &community, &owner.keys, &me.keys.public_key(), vec![rid], 1).await;
 
         let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
@@ -8834,7 +8972,6 @@ mod tests {
         let (bed, owner, me) = TestBed::new();
         bed.swap_to(&owner);
         let host = create_community(&bed.relay, "Host", bed.relays.clone(), None).await.unwrap();
-        let elsewhere = create_community(&bed.relay, "Elsewhere", bed.relays.clone(), None).await.unwrap();
         let rid = "b2".repeat(32);
         publish_role(&bed.relay, &host, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
         publish_grant(&bed.relay, &host, &owner.keys, &me.keys.public_key(), vec![rid], 1).await;
@@ -8846,7 +8983,9 @@ mod tests {
         let _ = follow_control(&bed.relay, &joined, &SessionGuard::capture()).await;
         let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
 
-        // My only link lives in a DIFFERENT community.
+        // My only link lives in a DIFFERENT community — one I own, since minting
+        // is offer-gated on CREATE_INVITE.
+        let elsewhere = create_community(&bed.relay, "Elsewhere", bed.relays.clone(), None).await.unwrap();
         mint_public_link(&bed.relay, &elsewhere, "https://other", None, None).await.unwrap();
 
         let before = bed.relay.stored_count();
@@ -10440,6 +10579,143 @@ mod tests {
         };
         assert_eq!(holders.len(), 1, "only the creator holds it — the revoked member is gone");
         assert_eq!(holders[0], serde_json::json!(me_npub), "and that holder is the creator");
+    }
+
+    #[tokio::test]
+    async fn a_public_ban_severs_the_private_channels_the_member_could_read() {
+        // CORD-06 §1 per channel: a Public-community ban skips the Refounding
+        // (CORD-05 §5), so without this rotation the banned member keeps each
+        // held channel key and reads on forever. Only channels they could
+        // actually reach rotate — the rest keep their epoch.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Sever", vec!["wss://r".into()], None).await.unwrap();
+        let mods = create_private_channel(&relay, &community, "mods").await.unwrap();
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let vault = create_private_channel(&relay, &held, "vault").await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+
+        let spammer = Keys::generate().public_key();
+        let bystander = Keys::generate().public_key();
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        grant_channel_access(&relay, &held, &mods, &spammer).await.unwrap();
+        grant_channel_access(&relay, &held, &mods, &bystander).await.unwrap();
+
+        // The ban composition's capture-then-strip: entitlement must be judged
+        // from the PRE-strip roles, whether or not the strip has folded.
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        let stripped: Vec<String> = roster.roles_of(&spammer.to_hex()).map(|r| r.role_id.clone()).collect();
+        assert!(!stripped.is_empty(), "the grant landed before the strip");
+        grant_roles(&relay, &held, &spammer, vec![]).await.unwrap();
+
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let rotated = sever_banned_private_reads(&relay, &held, &spammer, &stripped).await.unwrap();
+        assert_eq!(rotated, 1, "exactly the one channel they could read rotated");
+        let after = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(after.channel(&mods).unwrap().epoch, Epoch(2), "the reachable channel advanced");
+        assert_eq!(after.channel(&vault).unwrap().epoch, Epoch(1), "the unreachable channel did not");
+
+        // A member who never had reach rotates nothing.
+        let stranger = Keys::generate().public_key();
+        let n = sever_banned_private_reads(&relay, &after, &stranger, &[]).await.unwrap();
+        assert_eq!(n, 0, "no entitlement, no rotation");
+    }
+
+    #[tokio::test]
+    async fn ban_severance_refuses_without_manage_channels() {
+        // Offer-side mirror of `channel_rotator_ok`: readers honor a channel
+        // rotation only from MANAGE_CHANNELS holders, so a BAN-only moderator
+        // publishing one would adopt an epoch every reader rejects — a fork.
+        let (bed, owner, moderator) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Gated", bed.relays.clone(), None).await.unwrap();
+        create_private_channel(&bed.relay, &community, "mods").await.unwrap();
+        let rid = "c1".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &moderator.keys.public_key(), vec![rid], 1).await;
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let bundle = bundle_of(&held, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+
+        bed.swap_to(&moderator);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined, &SessionGuard::capture()).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        let target = Keys::generate().public_key();
+        let err = sever_banned_private_reads(&bed.relay, &joined, &target, &[]).await.unwrap_err();
+        assert!(err.contains("permission"), "refused at the gate, not mid-rotation: {err}");
+    }
+
+    #[tokio::test]
+    async fn set_banlist_refuses_an_author_the_fold_would_reject() {
+        // The reader gates the banlist head on BAN and each added entry on strict
+        // outrank. Publishing anyway would be silently void everywhere while the
+        // author's own echo caches the phantom — fail-closed at the offer instead.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Soap", bed.relays.clone(), None).await.unwrap();
+        let rid = "c2".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let bundle = bundle_of(&held, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+
+        // A roleless member holds no BAN: refused before any publish.
+        bed.swap_to(&member);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined, &SessionGuard::capture()).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        let target = Keys::generate().public_key().to_hex();
+        let err = set_banlist(&bed.relay, &joined, std::slice::from_ref(&target)).await.unwrap_err();
+        assert!(err.contains("BAN"), "refused for the missing bit: {err}");
+        assert!(
+            crate::db::community::get_community_banlist(&crate::simd::hex::bytes_to_hex_32(&joined.id().0)).unwrap().is_empty(),
+            "no phantom echo cached"
+        );
+
+        // Grant them BAN: adding a peer they don't outrank still refuses (the
+        // fold drops per-target on outrank), while an unranked target passes.
+        bed.swap_to(&owner);
+        publish_grant(&bed.relay, &community, &owner.keys, &member.keys.public_key(), vec![rid.clone()], 1).await;
+        let peer = Keys::generate().public_key();
+        publish_grant(&bed.relay, &community, &owner.keys, &peer, vec![rid], 2).await;
+        bed.swap_to(&member);
+        let _ = follow_control(&bed.relay, &joined, &SessionGuard::capture()).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        let err = set_banlist(&bed.relay, &joined, &[peer.to_hex()]).await.unwrap_err();
+        assert!(err.contains("outrank"), "an equal is not actionable: {err}");
+        set_banlist(&bed.relay, &joined, std::slice::from_ref(&target)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn metadata_and_link_minting_refuse_unauthorized_authors() {
+        // Both are reader-gated (MANAGE_METADATA; CREATE_INVITE on the registry) —
+        // the offer must mirror or the SDK reports success on a void publish.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Locked", bed.relays.clone(), None).await.unwrap();
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let bundle = bundle_of(&held, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+
+        bed.swap_to(&member);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined, &SessionGuard::capture()).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        let meta = control::CommunityMetadata {
+            name: "Hijacked".into(),
+            description: None,
+            relays: vec![],
+            icon: None,
+            banner: None,
+            custom: None,
+            extra: Default::default(),
+        };
+        assert!(edit_community_metadata(&bed.relay, &joined, &meta).await.is_err(), "metadata edit refused");
+        assert!(
+            mint_public_link(&bed.relay, &joined, "https://vectorapp.io/i/", None, None).await.is_err(),
+            "link minting refused"
+        );
     }
 
     #[tokio::test]

@@ -3311,8 +3311,11 @@ impl VectorCore {
         service::publish_kick(&transport, &community, channel, &pk.to_hex()).await.map(|_| ()).map_err(VectorError::Other)
     }
 
-    /// Ban (`true`) or unban (`false`) a member. Ban is terminal (no rejoin); in a private community it also
-    /// fires the read-cut rekey (needs a local key). Requires BAN + outrank.
+    /// Ban (`true`) or unban (`false`) a member. Ban is terminal (no rejoin). The read cut:
+    /// a private community re-founds (full rotation); a public one rotates just the private
+    /// channels the member could read (CORD-05 §5 — no refound, the link refresh would
+    /// re-hand them the root). Requires BAN + outrank, checked against the folded roster
+    /// BEFORE any publish.
     pub async fn set_member_banned(&self, community_id: &str, npub: &str, banned: bool) -> Result<()> {
         use crate::community::{service, transport::LiveTransport, CommunityId};
         let session = crate::state::SessionGuard::capture();
@@ -3338,7 +3341,7 @@ impl VectorCore {
                 let mut list = crate::db::community::get_community_banlist(community_id).map_err(VectorError::Other)?;
                 list.retain(|h| h != &hex);
                 if banned {
-                    list.push(hex);
+                    list.push(hex.clone());
                 }
                 // Rotation barrier: a Ban's refound holds this lock for its whole
                 // multi-publish rotation while the row still names the OLD root. An
@@ -3346,17 +3349,42 @@ impl VectorCore {
                 // post-commit root — unlocked, it publishes the edit to the epoch
                 // being buried, where no reader will ever fold it. Dropped before
                 // `refound_community`, which re-acquires it (non-reentrant).
-                let community = {
+                let (community, stripped_roles) = {
                     let lock = crate::community::v2::realtime::follow_lock(&cid);
                     let _rotation = lock.lock().await;
                     let community = crate::db::community::load_community_v2(&cid)
                         .map_err(VectorError::Other)?
                         .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
                     crate::community::v2::service::set_banlist(&transport, &community, &list).await.map_err(VectorError::Other)?;
+                    let mut stripped_roles: Vec<String> = Vec::new();
                     if banned {
-                        crate::community::v2::service::grant_roles(&transport, &community, &pk, vec![]).await.map_err(VectorError::Other)?;
+                        // Pre-strip role capture: the read-severance below judges which
+                        // private channels the member could reach, and after the strip
+                        // the fold may no longer show it.
+                        let roster = crate::db::community::get_community_roles(community_id).unwrap_or_default();
+                        stripped_roles = roster.roles_of(&hex).map(|r| r.role_id.clone()).collect();
+                        // Strip on the kick doctrine (skip, not refuse): readers honor a
+                        // grant strip only from MANAGE_ROLES + outrank, and a BAN-only
+                        // moderator still bans — the banlist silences regardless, and
+                        // publishing a strip readers reject would only poison our own
+                        // floor for that grant entity.
+                        let owner = community.owner().map_err(VectorError::Other)?;
+                        let my_pk = crate::state::my_public_key()
+                            .ok_or_else(|| VectorError::Other("Public key not set".into()))?;
+                        let can_strip = my_pk == owner
+                            || roster.can_act_on_member(
+                                &my_pk.to_hex(),
+                                Some(&owner.to_hex()),
+                                &hex,
+                                crate::community::roles::Permissions::MANAGE_ROLES,
+                            );
+                        if can_strip {
+                            crate::community::v2::service::grant_roles(&transport, &community, &pk, vec![]).await.map_err(VectorError::Other)?;
+                        } else {
+                            crate::log_warn!("[Ban] grant strip skipped (no MANAGE_ROLES over the target); the banlist still silences");
+                        }
                     }
-                    community
+                    (community, stripped_roles)
                 };
                 if banned {
                     // CORD-05 §5 gate (v1 parity, regressed in the v2 port): a
@@ -3367,7 +3395,15 @@ impl VectorCore {
                     // foreign-link joiners on a buried epoch. The Banlist does
                     // all the real work in Public mode.
                     if crate::community::v2::service::community_is_public(&transport, &community).await {
-                        crate::log_info!("[Ban] public community — banlist + grant strip only, no refound (CORD-05 §5)");
+                        crate::log_info!("[Ban] public community — banlist + grant strip, no refound (CORD-05 §5)");
+                        // CORD-06 §1 still applies per channel: the banlist silences and
+                        // the strip de-authorizes, but only rotation severs the private-
+                        // channel reads their held keys still allow.
+                        match crate::community::v2::service::sever_banned_private_reads(&transport, &community, &pk, &stripped_roles).await {
+                            Ok(0) => {}
+                            Ok(n) => crate::log_info!("[Ban] rotated {n} private channel(s) the banned member could read"),
+                            Err(e) => crate::log_warn!("[Ban] private-channel read severance incomplete: {e}"),
+                        }
                     } else if let Err(e) = crate::community::v2::service::refound_community(&transport, &community, &[pk]).await {
                         // Best-effort escalation, NEVER the ban's verdict. The
                         // banlist edition (instant silence at every honest
