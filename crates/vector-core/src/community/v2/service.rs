@@ -1278,14 +1278,17 @@ async fn accept_bundle<T: Transport + ?Sized>(
             && v.community_id == community.id().0
             && v.community_root == community.community_root
     });
-    let (community, join_heads, join_banlist) = match handoff {
+    let (community, join_heads, join_banlist, join_pins, join_banlist_content) = match handoff {
         Some(v) => {
             let mut c = v.folded;
             // The preview holds no acquisition time — stamp the JOIN's.
             c.created_at_ms = at_ms;
-            (c, v.heads, v.banned)
+            (c, v.heads, v.banned, v.pins, v.banlist_persist)
         }
-        None => verify_owner_root_and_reconcile(transport, community).await?,
+        None => {
+            let vj = verify_owner_root_and_reconcile(transport, community).await?;
+            (vj.community, vj.heads, vj.banned, vj.pins, vj.banlist_persist)
+        }
     };
 
     // A dissolved community is a grave (CORD-02 §9): refuse to join it.
@@ -1324,6 +1327,25 @@ async fn accept_bundle<T: Transport + ?Sized>(
     for ch in &community.channels {
         if let (true, Some(key)) = (ch.private, ch.key) {
             let _ = crate::db::community::store_epoch_key(&cid_hex, &crate::simd::hex::bytes_to_hex_32(&ch.id.0), ch.epoch.0, &key);
+        }
+    }
+    // Persist what the verification walk already folded: the control plane WAS
+    // read, so making the fresh member wait for the follow worker's queued
+    // re-walk to see pins or enforce bans is pure lag (it read 20-30s on a busy
+    // queue). The system "modified the Pins" line still arrives via that first
+    // follow — a join backfills state, it doesn't announce edits.
+    if let Some((banned_list, version)) = &join_banlist_content {
+        let _ = crate::db::community::set_community_banlist(&cid_hex, banned_list, *version as i64);
+    }
+    for (channel_hex, content, version, _author, _at) in &join_pins {
+        if matches!(
+            crate::db::community::set_community_pins(&cid_hex, channel_hex, content, *version as i64),
+            Ok(true)
+        ) {
+            crate::emit_event(
+                "community_pins_updated",
+                &serde_json::json!({ "community_id": cid_hex, "channel_id": channel_hex }),
+            );
         }
     }
 
@@ -1375,10 +1397,27 @@ async fn accept_bundle<T: Transport + ?Sized>(
 /// Fail-closed: no anchor (forged invite, or relays unreachable) → refuse to join.
 /// On success, folds the owner's authoritative editions to heal a bundle that
 /// misclassified a channel.
+/// Everything the join-time verification walk folded, handed to the accept path so
+/// what the join VERIFIED is also what it PERSISTS. The walk already paid for the
+/// control plane read; deferring persistence to the first post-join follow re-pays
+/// the network cost and leaves the fresh member pins-blind and banlist-blind for
+/// the whole follow-queue delay.
+struct VerifiedJoin {
+    community: CommunityV2,
+    heads: Vec<FoldedHead>,
+    /// The join-gate banlist (authorized fold over the any-author edition set).
+    banned: std::collections::BTreeSet<String>,
+    /// Pin List heads folded under the FULL join-time authority (curators included,
+    /// same §5 gate as any later follow): `(channel_hex, content, version, author_npub, created_at)`.
+    pins: Vec<(String, String, u64, String, u64)>,
+    /// The authorized banlist head's content + version, for local persistence.
+    banlist_persist: Option<(Vec<String>, u64)>,
+}
+
 async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
     transport: &T,
     community: CommunityV2,
-) -> Result<(CommunityV2, Vec<FoldedHead>, std::collections::BTreeSet<String>), String> {
+) -> Result<VerifiedJoin, String> {
     let owner = community.owner()?;
     let control = control_group_key(&community.community_root, community.id(), community.root_epoch);
     let control_pk = control.pk_hex();
@@ -1529,8 +1568,19 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
     // chain to the genesis-verified owner; the banlist head is honored only if its signer
     // held BAN). Returned so the accept path can refuse a banned self BEFORE it publishes
     // a Guestbook Join — the gate every join door shares (Armada parity, CORD-04 §4).
-    let join_banlist = fold_authority(&community, &all_editions, &empty_floors).banned;
-    Ok((fold.updated.unwrap_or(community), fold.heads, join_banlist))
+    let authority_full = fold_authority(&community, &all_editions, &empty_floors);
+    // Pins under the FULL authority: a curator-authored Pin List is as valid at join
+    // as on any later follow (same PIN_MESSAGES + citation gate, same owner-chained
+    // roster). Only the pins are taken from this pass — the DOCUMENT adoption above
+    // stays owner-only, its stricter envelope unchanged.
+    let pins = apply_control_fold(&community, &all_editions, &empty_floors, &authority_full).pins_persist;
+    Ok(VerifiedJoin {
+        community: fold.updated.unwrap_or(community),
+        heads: fold.heads,
+        banned: authority_full.banned,
+        pins,
+        banlist_persist: authority_full.banlist_persist,
+    })
 }
 
 /// Accept a Direct Invite: unwrap the 3313 giftwrap (Schnorr-verifying the seal),
@@ -1661,6 +1711,10 @@ struct VerifiedPreview {
     /// The join-time authorized banlist from the SAME verified walk — carried so the
     /// handoff path keeps the ban gate (a preview-then-join must not skip it).
     banned: std::collections::BTreeSet<String>,
+    /// Folded pins + banlist content from the same walk, so a preview-handoff join
+    /// persists them exactly like a direct join.
+    pins: Vec<(String, String, u64, String, u64)>,
+    banlist_persist: Option<(Vec<String>, u64)>,
 }
 static VERIFIED_PREVIEW: std::sync::Mutex<Option<VerifiedPreview>> = std::sync::Mutex::new(None);
 const VERIFIED_PREVIEW_TTL: std::time::Duration = std::time::Duration::from_secs(120);
@@ -1683,15 +1737,18 @@ pub async fn preview_public_link<T: Transport + ?Sized>(transport: &T, url: &str
 pub async fn preview_bundle<T: Transport + ?Sized>(transport: &T, bundle: &CommunityInvite) -> Result<CommunityV2, String> {
     let community = CommunityV2::from_bundle(bundle, 0)?;
     match verify_owner_root_and_reconcile(transport, community.clone()).await {
-        Ok((folded, heads, banned)) => {
+        Ok(vj) => {
+            let folded = vj.community;
             *VERIFIED_PREVIEW.lock().unwrap() = Some(VerifiedPreview {
                 session: SessionGuard::capture(),
                 at: std::time::Instant::now(),
                 community_id: folded.id().0,
                 community_root: folded.community_root,
                 folded: folded.clone(),
-                heads,
-                banned,
+                heads: vj.heads,
+                banned: vj.banned,
+                pins: vj.pins,
+                banlist_persist: vj.banlist_persist,
             });
             Ok(folded)
         }
@@ -7159,10 +7216,10 @@ mod tests {
             "sibling channel re-parented by the resumed run"
         );
         let twin_reloaded = crate::db::community::load_community_v2(&twin.identity.community_id).unwrap().unwrap();
-        let (_, _, wire_banlist) = verify_owner_root_and_reconcile(&bed.relay, twin_reloaded.clone())
+        let wire_banlist = verify_owner_root_and_reconcile(&bed.relay, twin_reloaded.clone())
             .await
-            .map(|(c, h, b)| (c, h, b))
-            .unwrap();
+            .unwrap()
+            .banned;
         assert!(wire_banlist.contains(&banned.keys.public_key().to_hex()),
             "the resumed banlist clone is folded from the twin's wire control plane");
 
@@ -7222,7 +7279,7 @@ mod tests {
         // The compacted control plane still verifies (owner genesis carried to epoch 1) — a
         // fresh joiner at epoch 1 folds it. And a genesis-epoch snapshot has NO power: rolling
         // a fresh twin's snapshot only counts because the owner minted epoch 1.
-        let (_, _, _banlist) = verify_owner_root_and_reconcile(&bed.relay, rolled.clone()).await
+        let _ = verify_owner_root_and_reconcile(&bed.relay, rolled.clone()).await
             .expect("the epoch-1 twin verifies from its compacted control plane");
 
         // RESUME IDEMPOTENCE: a re-call on the already-refounded twin is a no-op (returns
@@ -12962,6 +13019,51 @@ mod tests {
         assert_eq!(read.pins.len(), 1);
         assert_eq!(read.pins[0].content, "pin-worthy");
         assert_eq!(read.pins[0].rumor_id, opened.rumor_id.to_hex());
+    }
+
+    #[tokio::test]
+    async fn a_fresh_join_sees_pins_and_the_banlist_without_waiting_for_a_follow() {
+        // The join's verification walk already folds the control plane, so pins and
+        // the banlist must persist FROM THE JOIN — deferring them to the follow
+        // worker's queued re-walk left a fresh member pins-blind (and rendering a
+        // banned author) for the whole queue delay.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "PinJoin", bed.relays.clone(), None).await.unwrap();
+        let general = community.channels[0].id;
+        let ch_hex = crate::simd::hex::bytes_to_hex_32(&general.0);
+
+        send_message(&bed.relay, &community, &general, "pin-worthy").await.unwrap();
+        let page = fetch_channel(&bed.relay, &community, &general, 10).await.unwrap();
+        let opened = page
+            .iter()
+            .find_map(|f| match &f.event {
+                ChatEvent::Message { opened, .. } => Some(opened.clone()),
+                _ => None,
+            })
+            .expect("the sent message reads back");
+        let ch = community.channels[0].clone();
+        let conv = channel_conv_key_at(&community, &ch, 0).unwrap();
+        let entry = crate::community::v2::pins::build_pin_entry(&opened, &conv, &ch_hex).unwrap();
+        let content = crate::community::v2::pins::serialize_public_pin_list(&[entry]).unwrap();
+        let session = crate::state::SessionGuard::capture();
+        let eid = crate::community::v2::derive::pins_locator(community.id(), &general);
+        publish_control_edition(&bed.relay, &community, &session, vsk::PINS, &eid, &content).await.unwrap();
+        let spammer = Keys::generate().public_key().to_hex();
+        set_banlist(&bed.relay, &community, std::slice::from_ref(&spammer)).await.unwrap();
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+
+        bed.swap_to(&member);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        // Deliberately NO follow_control here — the join alone must suffice.
+        let read = read_channel_pins(&joined, &general).unwrap();
+        assert!(!read.sealed);
+        assert_eq!(read.pins.len(), 1, "pins visible the instant the join returns");
+        assert_eq!(read.pins[0].content, "pin-worthy");
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&joined.id().0);
+        let banlist = crate::db::community::get_community_banlist(&cid_hex).unwrap();
+        assert!(banlist.contains(&spammer), "the banlist is enforced from the join, not the first follow");
     }
 
     /// CORD-04 §5: a pins edition from an author holding no PIN_MESSAGES never
