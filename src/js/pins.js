@@ -210,11 +210,17 @@ function pinsRenderDrawer() {
     for (const row of domPinsList.querySelectorAll('.pins-drawer-row')) {
         const text = row.querySelector('.pins-drawer-row-text');
         if (!text) continue;
-        // Truncated text earns the expander — and so does previewable media,
-        // whose expansion shows the media itself rather than more words.
+        // The expander appears whenever expansion would SHOW more: a clipped
+        // first line, further displayable lines beyond the one-line preview
+        // (pixels can't detect those — the preview is only line one), or
+        // previewable media (expansion renders it). A non-previewable file
+        // gets no expander: its Reveal/Open affordance rides the collapsed
+        // row, so expanding would reveal nothing.
         const rowPin = pinsCache.pins.find(p => p.rumor_id === row.dataset.rumorId);
-        const hasMedia = rowPin && pinsPreviewableMedia(rowPin);
-        if (text.scrollWidth <= text.clientWidth && !hasMedia) continue;
+        const hasMedia = !!rowPin && !!pinsPreviewableMedia(rowPin);
+        const source = rowPin ? (rowPin.edited?.content ?? rowPin.content) : '';
+        const hasMoreLines = source.split('\n').filter(l => l.trim()).length > 1;
+        if (!pinsLineClips(text) && !hasMedia && !hasMoreLines) continue;
         const expander = document.createElement('span');
         expander.className = 'icon icon-chevron-down pins-drawer-row-expander btn';
         expander.title = 'Show more';
@@ -429,10 +435,42 @@ async function pinsUpgradeMediaPreview(row, body, pin, kind) {
     body.appendChild(media);
 }
 
+/// Does the collapsed line actually clip? WKWebView's scrollWidth on an
+/// ellipsized block omits overflow from PLAIN TEXT runs (only inline-blocks
+/// and images count), so a text-only line can paint "…" while measuring as
+/// fitting. Measure the body's true width with an unconstrained offscreen
+/// clone instead, against the space the floated controls leave it.
+function pinsLineClips(text) {
+    const body = text.querySelector('.pins-drawer-row-body');
+    if (!body) return text.scrollWidth > text.clientWidth;
+    const clone = body.cloneNode(true);
+    clone.style.cssText = 'position:absolute; visibility:hidden; white-space:nowrap; width:auto; max-width:none;';
+    text.appendChild(clone);
+    const trueWidth = clone.getBoundingClientRect().width;
+    clone.remove();
+    const controls = text.querySelector('.pins-drawer-row-controls');
+    const avail = text.clientWidth - (controls?.getBoundingClientRect().width || 0);
+    return trueWidth > avail + 1;
+}
+
+/// The first line a reader would actually SEE in chat: blank lines, `---` rules
+/// and code-fence markers render as structure, not text, so they never lead a
+/// preview — without this the collapsed line glues line 2 onto the title.
+function pinsFirstDisplayLine(source) {
+    for (const raw of source.split('\n')) {
+        const line = raw.trim();
+        if (!line) continue;
+        if (/^(-{3,}|\*{3,}|_{3,})$/.test(line)) continue;
+        if (line.startsWith('```')) continue;
+        return line;
+    }
+    return source;
+}
+
 /// COLLAPSED row content: the chat-list preview treatment — one escaped line,
 /// inline markdown, non-interactive spoilers, mentions resolved to names.
 function pinsRenderCollapsedContent(text, pin) {
-    const source = pin.edited?.content ?? pin.content;
+    const source = pinsFirstDisplayLine(pin.edited?.content ?? pin.content);
     text.innerHTML = contentToPreviewHtml(resolveMentionText(source));
     twemojify(text);
     const emojiTags = pinsEmojiTags(pin);
