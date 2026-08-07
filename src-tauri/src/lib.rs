@@ -905,6 +905,10 @@ pub fn run() {
             commands::community::get_community_admins,
             commands::community::can_manage_community_roles,
             commands::community::get_community_capabilities,
+            commands::community::pin_community_message,
+            commands::community::unpin_community_message,
+            commands::community::get_channel_pins,
+            commands::community::fetch_pinned_attachment,
             commands::community::get_community_invite_summary,
             // Sync commands (commands/sync.rs)
             commands::sync::queue_profile_sync,

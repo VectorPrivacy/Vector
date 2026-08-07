@@ -909,6 +909,9 @@ async function _dmsgOpenMessageMenu(rowEl, x, y) {
             items.push({ label: 'React', icon: 'smile-face', onClick: () => _dmsgOpenReactionPicker(targetId) });
         }
         items.push({ label: 'Reply', icon: 'reply', onClick: () => _dmsgSelectReply(targetId) });
+        // Pin/Unpin (Concord v2): empty unless this chat is a v2 community
+        // channel and the user holds PIN_MESSAGES.
+        items.push(...pinsMenuItems(targetId));
         if (mine && hasContent && !hasAttachments && !_dmsgCommandInfo(msg)) {
             items.push({ label: 'Edit', icon: 'edit', onClick: () => { if (msg) startEditMessage(targetId, msg.content); } });
         }

@@ -12,6 +12,7 @@ const SystemEventType = {
     MemberRemoved: 2,
     WallpaperChanged: 3,
     WallpaperRemoved: 4,
+    PinsModified: 5,
 };
 
 /** The one true display-name resolver. Accepts a profile object or an npub/id string.
@@ -36,6 +37,7 @@ function systemEventSuffix(eventType) {
         case SystemEventType.MemberRemoved: return ' was removed';
         case SystemEventType.WallpaperChanged: return ' changed the wallpaper';
         case SystemEventType.WallpaperRemoved: return ' removed the wallpaper';
+        case SystemEventType.PinsModified: return ' modified the Pins';
         default: return '';
     }
 }
@@ -1377,7 +1379,12 @@ function contentToPreviewText(content) {
  * @returns {string} Safe HTML string — assign to .innerHTML
  */
 function contentToPreviewHtml(content) {
-    let text = contentToPreviewText(content);
+    // Headers demote to BOLD in one-line previews (chat list + pins): the
+    // structure can't survive the flatten, but the emphasis can. Rewritten to
+    // markdown bold BEFORE the flatten so it rides the existing `**` pathway
+    // (and fenced code is stripped later, taking any rewritten lines with it).
+    const demoted = String(content ?? '').replace(/^#{1,6}\s+(.+)$/gm, '**$1**');
+    let text = contentToPreviewText(demoted);
     // HTML-escape to prevent injection — must happen before markdown conversion
     text = escapeHtml(text);
     // Convert inline markdown to HTML (order matters: bold before italic to avoid **x** matching **)
@@ -8669,6 +8676,10 @@ async function openChat(contact) {
     // Only reset revealed blocked messages when switching to a different chat
     if (strOpenChat !== contact) revealedBlockedMessages.clear();
 
+    // Pins: resolve this chat's pin context (v2 community channels only) —
+    // shows/hides the header pin button and closes a stale drawer.
+    pinsOnChatOpened(contact);
+
     // Warm up GIF server connection early (non-blocking)
     preconnectGifServer();
 
@@ -9004,6 +9015,7 @@ function openNewChat() {
 async function closeChat() {
     popBack('chat');
     popBack('new-chat');
+    pinsOnChatClosed();
     // Stop all audio engine playback (voice messages, music, etc.)
     invoke('audio_stop_all').catch(() => {});
 

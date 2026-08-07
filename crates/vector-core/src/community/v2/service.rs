@@ -214,7 +214,9 @@ pub async fn clone_governance_to_twin<T: Transport + ?Sized>(
     use crate::community::roles::Permissions;
     let owner = twin.owner()?;
     for grant in &v1_roles.grants {
-        if !v1_roles.effective_permissions(&grant.member).contains(Permissions::ADMIN_ALL) {
+        // Founding mask: v1 admin roles predate PIN_MESSAGES, so requiring the
+        // widened ADMIN_ALL would silently demote every migrating v1 admin.
+        if !v1_roles.effective_permissions(&grant.member).contains(Permissions::ADMIN_FOUNDING_MASK) {
             continue; // not a full admin → plain member on v2 (never escalated)
         }
         if banned.contains(&grant.member) {
@@ -332,7 +334,14 @@ pub async fn send_delete<T: Transport + ?Sized>(
     let (author_pk, group, epoch, session) = chat_send_context(community, channel_id)?;
     let at_ms = now_ms();
     let rumor = chat::build_delete_rumor(author_pk, channel_id, epoch, target_id_hex, target_kind, at_ms, None);
-    publish_chat(transport, community, &session, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await
+    let id = publish_chat(transport, community, &session, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await?;
+    // §7: deleting one's own pinned message obliges the immediate omitting
+    // edition. Hooked HERE and not only at ingest — the local delete drops the
+    // row before the relay echo returns, so the echo can't re-authorize and
+    // the ingest hook never sees an own delete.
+    let ch_hex = crate::simd::hex::bytes_to_hex_32(&channel_id.0);
+    spawn_pin_duty(&ch_hex, target_id_hex, None);
+    Ok(id)
 }
 
 /// Moderation-hide: remove SOMEONE ELSE's message under `MANAGE_MESSAGES`
@@ -370,7 +379,13 @@ pub async fn moderation_delete<T: Transport + ?Sized>(
     let at_ms = now_ms();
     let citation = required_authority_citation(community, &author_pk)?;
     let rumor = chat::build_delete_rumor(author_pk, channel_id, epoch, target_id_hex, target_kind, at_ms, citation.as_ref());
-    publish_chat(transport, community, &session, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await
+    let id = publish_chat(transport, community, &session, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await?;
+    // §7: a moderation-hide of a pinned message obliges the omission too, and
+    // the moderator here provably holds the bit's neighbourhood (MANAGE_MESSAGES
+    // curators usually hold PIN_MESSAGES); the duty itself re-checks.
+    let ch_hex = crate::simd::hex::bytes_to_hex_32(&channel_id.0);
+    spawn_pin_duty(&ch_hex, target_id_hex, None);
+    Ok(id)
 }
 
 /// WebXDC realtime peer signal (kind 3310) — the v2 twin of v1's
@@ -3405,11 +3420,14 @@ pub async fn ensure_admin_role<T: Transport + ?Sized>(
     create_if_missing: bool,
 ) -> Result<Option<String>, String> {
     use crate::community::roles::{Permissions, Role, RoleScope};
+    // The finder tests the FROZEN founding mask, never ADMIN_ALL: published
+    // Admin roles predate later bits (PIN_MESSAGES...), and requiring a bit
+    // they can't have would orphan every one of them and mint a duplicate.
     if let Some(r) = view
         .roles
         .roles
         .iter()
-        .find(|r| matches!(r.scope, RoleScope::Server) && r.permissions.contains(Permissions::ADMIN_ALL))
+        .find(|r| matches!(r.scope, RoleScope::Server) && r.permissions.contains(Permissions::ADMIN_FOUNDING_MASK))
     {
         return Ok(Some(r.role_id.clone()));
     }
@@ -4264,6 +4282,37 @@ async fn rekey_channel_excluding<T: Transport + ?Sized>(
     // Adopt locally + archive, so our own history reads across the rotation.
     crate::db::community::advance_channel_epoch(&cid_hex, &chan_hex, new_epoch.0, &new_key)?;
     crate::db::community::store_epoch_key(&cid_hex, &chan_hex, new_epoch.0, &new_key)?;
+
+    // §7 Rotator duty: reseal the Pin List under the NEW key. Without this,
+    // members who join at this epoch hold no old key and the channel's pins
+    // read as sealed-dark for them forever. The rotator is uniquely placed:
+    // it provably reads the old seal (it held the old key) and mints the new
+    // one. Best-effort — a failed reseal never fails the rotation, and any
+    // curator's next edit heals the same way.
+    {
+        let mut rotated = community.clone();
+        if let Some(c) = rotated.channels.iter_mut().find(|c| c.id == *channel_id) {
+            c.key = Some(new_key);
+            c.epoch = new_epoch;
+        }
+        match read_channel_pins(&rotated, channel_id) {
+            Ok(read) if !read.sealed && !read.pins.is_empty() => {
+                let entries: Vec<super::pins::PinEntry> =
+                    read.pins.iter().map(|p| p.entry.clone()).collect();
+                if let Some(ch2) = rotated.channel(channel_id).cloned() {
+                    if let Err(e) = publish_pin_list(transport, &rotated, &session, &ch2, &entries).await {
+                        crate::log_warn!("[pins] rotation reseal failed (a curator's next edit heals): {e}");
+                    } else {
+                        crate::log_info!("[pins] resealed {} pin(s) under epoch {}", entries.len(), new_epoch.0);
+                    }
+                }
+            }
+            Ok(read) if read.sealed => {
+                crate::log_warn!("[pins] rotating a channel whose pin list we cannot read; reseal skipped");
+            }
+            _ => {}
+        }
+    }
     Ok(())
 }
 
@@ -4345,7 +4394,7 @@ pub async fn follow_control<T: Transport + ?Sized>(
     let mut seen_wraps: std::collections::HashSet<nostr_sdk::prelude::EventId> = std::collections::HashSet::new();
     let mut oldest: Option<u64> = None;
     let mut until: Option<u64> = None;
-    let mut fold = ControlFold { updated: None, heads: Vec::new(), gapped: false };
+    let mut fold = ControlFold { updated: None, heads: Vec::new(), gapped: false, pins_persist: Vec::new() };
     let mut authority = AuthoritySet::owner_only();
     // Whether this round gave up with editions still unread. The follow is
     // procedural by design — process what arrives, converge with everyone else —
@@ -4494,12 +4543,42 @@ pub async fn follow_control<T: Transport + ?Sized>(
             crate::db::community::replace_invite_link_sets(&cid_hex, &sets)?;
         }
     }
+    // Folded Pin List heads (CORD-04 §7): raw content per channel. The write
+    // itself is monotonic on version (atomic in the statement), so a stale
+    // window racing a publish echo can never regress a newer held head.
+    for (channel_hex, content, version, author_npub, created_at) in &fold.pins_persist {
+        match crate::db::community::set_community_pins(&cid_hex, channel_hex, content, *version as i64) {
+            Ok(true) => {
+                crate::log_info!("[pins] fold adopted v{} for channel {}", version, &channel_hex[..12]);
+                crate::emit_event(
+                    "community_pins_updated",
+                    &serde_json::json!({ "community_id": cid_hex, "channel_id": channel_hex }),
+                );
+                note_pins_modified(channel_hex, *version, author_npub, *created_at).await;
+            }
+            Ok(false) => {}
+            Err(e) => crate::log_warn!("[pins] fold persist failed: {e}"),
+        }
+    }
     // Roster/banlist moves are invisible in the returned community (they live in
     // their own columns), so callers that key a refresh off `updated` would never
     // repaint a promote/demote/ban. Announce from the single fold point — it covers
     // realtime, boot catch-up and manual sync alike.
     if authority_changed {
         crate::emit_event("community_refreshed", &serde_json::json!({ "community_id": cid_hex }));
+    }
+    // Owner-side silent Admin widening (PIN_MESSAGES): after the roster has
+    // folded, so the check reads the settled roles. Once per community per
+    // process — the fold runs constantly and the upgrade is a one-shot.
+    {
+        static UPGRADED: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+        let first = UPGRADED
+            .lock()
+            .map(|mut set| set.get_or_insert_with(Default::default).insert(cid_hex.clone()))
+            .unwrap_or(false);
+        if first {
+            let _ = upgrade_admin_role_pin_bit(transport, community).await;
+        }
     }
     match fold.updated {
         Some(u) => {
@@ -4544,6 +4623,10 @@ struct ControlFold {
     updated: Option<CommunityV2>,
     heads: Vec<FoldedHead>,
     gapped: bool,
+    /// Folded Pin List heads to persist:
+    /// `(channel_hex, raw content, version, author_npub, created_at)`.
+    /// Raw carried bytes on purpose — republishing must not re-serialize.
+    pins_persist: Vec<(String, String, u64, String, u64)>,
 }
 
 /// Per-entity floor: `(version, self_hash, inner_id)` of the committed head.
@@ -4584,21 +4667,39 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
     let mut changed = false;
     let mut heads = Vec::new();
     let mut gapped = false;
+    let mut pins_persist = Vec::new();
+    // Pin List eids are one-way HKDF locators, so attribution runs the other
+    // direction: precompute every known channel's locator. An eid matching no
+    // channel folds nothing this round — once the channel's metadata lands, the
+    // next fold attributes it (editions re-fold from the window each sync).
+    let pins_by_eid: std::collections::HashMap<[u8; 32], String> = community
+        .channels
+        .iter()
+        .map(|ch| (super::derive::pins_locator(community.id(), &ch.id), crate::simd::hex::bytes_to_hex_32(&ch.id.0)))
+        .collect();
     for ((vsk_code, eid), group) in &groups {
-        // This fold applies exactly two entities: community metadata (eid ==
-        // community_id) and channel metadata. A vsk-2 whose eid equals the community
-        // id is excluded — the floor row keys on the entity alone, so it would share
-        // (and corrupt) the metadata chain's floor.
+        // This fold applies three entities: community metadata (eid ==
+        // community_id), channel metadata, and per-channel Pin Lists. A vsk-2
+        // whose eid equals the community id is excluded — the floor row keys on
+        // the entity alone, so it would share (and corrupt) the metadata
+        // chain's floor.
         let is_meta = vsk_code == vsk::COMMUNITY_METADATA && *eid == community.id().0;
         let is_channel = vsk_code == vsk::CHANNEL_METADATA && *eid != community.id().0;
-        if !is_meta && !is_channel {
+        let pins_channel = (vsk_code == vsk::PINS).then(|| pins_by_eid.get(eid)).flatten();
+        if !is_meta && !is_channel && pins_channel.is_none() {
             continue;
         }
         // Authority gate (CORD-04 §5): only editions whose author CURRENTLY holds the
         // entity's management bit are eligible. Pre-filtering before the fold means a
         // demoted admin's (possibly higher-version) edition can't be the head; the
         // highest AUTHORIZED head wins. The owner is supreme.
-        let required = if is_meta { Permissions::MANAGE_METADATA } else { Permissions::MANAGE_CHANNELS };
+        let required = if is_meta {
+            Permissions::MANAGE_METADATA
+        } else if is_channel {
+            Permissions::MANAGE_CHANNELS
+        } else {
+            Permissions::PIN_MESSAGES
+        };
         let authed: Vec<&ParsedEdition> = group
             .iter()
             .copied()
@@ -4629,14 +4730,26 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
             if let Ok(meta) = serde_json::from_str::<control::CommunityMetadata>(&head.content) {
                 changed |= apply_community_metadata(&mut out, meta);
             }
-        } else if let Ok(meta) = serde_json::from_str::<control::ChannelMetadata>(&head.content) {
-            // vsk-2 carries no community binding (shared v1 grammar); a same-owner
-            // cross-community replay can inject a phantom PUBLIC channel (bounded:
-            // root-scoped key, eids don't collide). Binding is a deferred wire change.
-            changed |= apply_channel_metadata(&mut out, ChannelId(*eid), meta);
+        } else if is_channel {
+            if let Ok(meta) = serde_json::from_str::<control::ChannelMetadata>(&head.content) {
+                // vsk-2 carries no community binding (shared v1 grammar); a same-owner
+                // cross-community replay can inject a phantom PUBLIC channel (bounded:
+                // root-scoped key, eids don't collide). Binding is a deferred wire change.
+                changed |= apply_channel_metadata(&mut out, ChannelId(*eid), meta);
+            }
+        } else if let Some(channel_hex) = pins_channel {
+            // The RAW carried content, cap-violations included: readers judge
+            // those (read as empty), and a re-serialization here would break the
+            // byte cap's meaning and every republish's fidelity.
+            use nostr_sdk::prelude::ToBech32;
+            let author_npub = head
+                .author
+                .to_bech32()
+                .unwrap_or_else(|_| head.author.to_hex());
+            pins_persist.push((channel_hex.clone(), head.content.clone(), head.version, author_npub, head.created_at));
         }
     }
-    ControlFold { updated: changed.then_some(out), heads, gapped }
+    ControlFold { updated: changed.then_some(out), heads, gapped, pins_persist }
 }
 
 /// Fold one entity's editions against its persisted floor into a head index (into the
@@ -5781,6 +5894,460 @@ async fn advance_scope<S: crate::signer::VectorSigner + ?Sized>(
     } else {
         Advance::Stay
     }
+}
+
+// ── Pins (CORD-04 §7) ────────────────────────────────────────────────────────
+
+/// A channel's pin list, read from the locally folded head.
+#[derive(Debug, serde::Serialize)]
+pub struct ChannelPins {
+    /// Entries that passed the full §7 verification, wire order (curator's).
+    pub pins: Vec<super::pins::VerifiedPin>,
+    /// The head is sealed under a key epoch this client does not hold: the
+    /// pins exist but are unreadable. Render as unavailable, NEVER as empty —
+    /// and a writer seeing this MUST NOT publish (it would drop every entry).
+    pub sealed: bool,
+    /// Folded head version (0 = no edition has ever folded).
+    pub version: u64,
+}
+
+/// The channel's stream conversation key at `epoch`, if this client holds the
+/// deriving secret: a private channel's held per-epoch key, a public channel's
+/// held base root at that epoch.
+fn channel_conv_key_at(community: &CommunityV2, ch: &ChannelV2, epoch: u64) -> Option<[u8; 32]> {
+    let ikm = channel_conv_ikm(community, ch, epoch).ok()?;
+    // A private plane is never derived from the root value (that would address
+    // the public plane) — mirrors fetch_channel_history's invariant.
+    if ch.private && ikm == community.community_root {
+        return None;
+    }
+    let group = channel_group_key(&ikm, &ch.id, Epoch(epoch));
+    group.conv_key().as_bytes().try_into().ok()
+}
+
+/// Read a channel's pins from the locally folded head: unseal (private form),
+/// verify every entry, keep wire order. Local-only — the control follow is what
+/// moves the head.
+pub fn read_channel_pins(community: &CommunityV2, channel_id: &ChannelId) -> Result<ChannelPins, String> {
+    let ch = community.channel(channel_id).ok_or("no such channel in this community")?;
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let ch_hex = crate::simd::hex::bytes_to_hex_32(&channel_id.0);
+    let Some((content, version)) = crate::db::community::get_community_pins(&cid_hex, &ch_hex)? else {
+        return Ok(ChannelPins { pins: Vec::new(), sealed: false, version: 0 });
+    };
+    let read = super::pins::read_pin_list(&content, |epoch| channel_conv_key_at(community, ch, epoch));
+    let pins = read
+        .entries
+        .iter()
+        .filter_map(|e| super::pins::verify_pin_entry(e, &ch_hex))
+        .collect();
+    Ok(ChannelPins { pins, sealed: read.sealed, version: version.max(0) as u64 })
+}
+
+/// Publish `entries` as the channel's next Pin List edition, in the form the
+/// channel's folded type mandates, and echo it locally so a follow-up edit
+/// builds on this write rather than the pre-write fold.
+async fn publish_pin_list<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    session: &SessionGuard,
+    ch: &ChannelV2,
+    entries: &[super::pins::PinEntry],
+) -> Result<(), String> {
+    let content = if ch.private {
+        let key = ch.key.ok_or("this private channel's key has not arrived yet")?;
+        let group = channel_group_key(&key, &ch.id, ch.epoch);
+        super::pins::serialize_sealed_pin_list(entries, group.conv_key(), ch.epoch.0)?
+    } else {
+        super::pins::serialize_public_pin_list(entries)?
+    };
+    let eid = super::derive::pins_locator(community.id(), &ch.id);
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let ch_hex = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
+    let entity_hex = crate::simd::hex::bytes_to_hex_32(&eid);
+    // The version this publish will chain to — mirrors publish_control_edition.
+    let version = match crate::db::community::get_edition_head(&cid_hex, &entity_hex)? {
+        Some((v, _)) => v + 1,
+        None => 1,
+    };
+    crate::log_info!("[pins] publishing v{} with {} entries for channel {}", version, entries.len(), &ch_hex[..12]);
+    publish_control_edition(transport, community, session, vsk::PINS, &eid, &content).await?;
+    if session.is_valid() {
+        let _ = crate::db::community::set_community_pins(&cid_hex, &ch_hex, &content, version as i64);
+        crate::emit_event(
+            "community_pins_updated",
+            &serde_json::json!({ "community_id": cid_hex, "channel_id": ch_hex }),
+        );
+        if let Ok(me) = me_pk() {
+            use nostr_sdk::prelude::ToBech32;
+            let me_npub = me.to_bech32().unwrap_or_else(|_| me.to_hex());
+            note_pins_modified(&ch_hex, version, &me_npub, now_ms() / 1000).await;
+        }
+    }
+    Ok(())
+}
+
+/// One centered system row per adopted Pin List edition — "X modified the
+/// Pins". The id is deterministic on (channel, version), so the publisher's
+/// echo and every fold that adopts the same edition collapse into one row,
+/// and a catch-up fold stamps the edition's own time so history sorts true.
+async fn note_pins_modified(channel_hex: &str, version: u64, actor_npub: &str, at_secs: u64) {
+    let event_id = format!("pins-mod-{}-v{}", &channel_hex[..16], version);
+    let inserted = crate::db::events::save_system_event_at(
+        &event_id,
+        channel_hex,
+        crate::stored_event::SystemEventType::PinsModified,
+        actor_npub,
+        None,
+        at_secs,
+        None,
+        None,
+    )
+    .await
+    .unwrap_or(false);
+    if inserted {
+        crate::emit_event(
+            "system_event",
+            &serde_json::json!({
+                "conversation_id": channel_hex,
+                "event_id": event_id,
+                "event_type": crate::stored_event::SystemEventType::PinsModified.as_u8(),
+                "member_pubkey": actor_npub,
+            }),
+        );
+    }
+}
+
+/// The current entries this writer may build on. Replace-entire cuts sharply
+/// (§7): an empty view has two innocent causes indistinguishable from an empty
+/// list, so a writer MUST refuse to build from a list it could not read.
+fn writable_pin_entries(community: &CommunityV2, channel_id: &ChannelId) -> Result<Vec<super::pins::PinEntry>, String> {
+    let current = read_channel_pins(community, channel_id)?;
+    if current.sealed {
+        return Err("this channel's pins are sealed under a key you don't hold; pinning would erase them".to_string());
+    }
+    Ok(current.pins.into_iter().map(|p| p.entry).collect())
+}
+
+/// Pin a message: recover its wrap, rebuild its proof, append, republish.
+///
+/// The seal is re-fetched from the community relays by the stored wrapper id —
+/// the DB retains rumors, not seals, and a proof needs the seal verbatim.
+pub async fn pin_message<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    channel_id: &ChannelId,
+    rumor_id_hex: &str,
+) -> Result<(), String> {
+    let session = SessionGuard::capture();
+    let ch = community.channel(channel_id).ok_or("no such channel in this community")?.clone();
+    let ch_hex = crate::simd::hex::bytes_to_hex_32(&channel_id.0);
+
+    let mut entries = writable_pin_entries(community, channel_id)?;
+    if entries.len() >= super::pins::PIN_MAX_ENTRIES {
+        return Err(format!("this channel already holds {} pins; unpin one first", super::pins::PIN_MAX_ENTRIES));
+    }
+    // Idempotent: re-pinning an already-pinned message is a no-op, not an error.
+    if entries
+        .iter()
+        .filter_map(|e| super::pins::verify_pin_entry(e, &ch_hex))
+        .any(|v| v.rumor_id == rumor_id_hex)
+    {
+        return Ok(());
+    }
+
+    let (wrap_id, _tags) = crate::db::events::get_event_wrap_context(rumor_id_hex)?
+        .ok_or("message not found in this device's history")?;
+    let wrap_id = wrap_id.ok_or("this message's original wrap id was not recorded")?;
+
+    // Recover the wrap verbatim — Full evidence: a pin is a permanent artifact,
+    // so don't build it from the first relay to answer.
+    let wraps = transport
+        .fetch(
+            &Query {
+                ids: vec![wrap_id.clone()],
+                kinds: vec![super::stream::KIND_WRAP],
+                limit: Some(1),
+                evidence: crate::community::transport::Evidence::Full,
+                ..Default::default()
+            },
+            &community.relays,
+        )
+        .await?;
+    let wrap = wraps
+        .iter()
+        .find(|w| w.id.to_hex() == wrap_id)
+        .ok_or("the message's wrap is no longer served by this community's relays")?;
+
+    // The stored row does not retain the rumor's epoch binding, so re-derive it
+    // the way history reads do: try the channel's every held plane coordinate,
+    // current epoch first, until the wrap opens AND carries this rumor. The
+    // open itself verifies the channel + epoch binding, so a false coordinate
+    // fails closed rather than mis-attributing.
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let mut coords: Vec<(u64, [u8; 32])> = Vec::new();
+    if ch.private {
+        if let Some(k) = ch.key {
+            coords.push((ch.epoch.0, k));
+        }
+        let held = crate::db::community::held_epoch_keys(&cid_hex, &ch_hex).unwrap_or_default();
+        coords.extend(held.into_iter().filter(|(_, k)| *k != community.community_root).map(|(ep, k)| (ep.0, k)));
+    } else {
+        coords.push((community.root_epoch.0, community.community_root));
+        let held = crate::db::community::held_epoch_keys(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX).unwrap_or_default();
+        coords.extend(held.into_iter().map(|(ep, k)| (ep.0, k)));
+    }
+    coords.dedup();
+
+    let mut found: Option<(super::stream::OpenedStream, [u8; 32])> = None;
+    for (epoch, ikm) in coords {
+        let group = channel_group_key(&ikm, &ch.id, Epoch(epoch));
+        if let Ok(super::chat::ChatEvent::Message { opened, .. }) =
+            super::chat::open_chat_event(wrap, &group, channel_id, Epoch(epoch))
+        {
+            if opened.rumor_id.to_hex() == rumor_id_hex {
+                let conv: [u8; 32] = group
+                    .conv_key()
+                    .as_bytes()
+                    .try_into()
+                    .map_err(|_| "conversation key size".to_string())?;
+                found = Some((opened, conv));
+                break;
+            }
+        }
+    }
+    let Some((opened, conv_key)) = found else {
+        return Err("that message is from a key epoch this device no longer holds".to_string());
+    };
+
+    let entry = super::pins::build_pin_entry(&opened, &conv_key, &ch_hex).map_err(|e| match e {
+        super::pins::PinBuildFailure::NotEncrypted => "this message's seal form cannot be pinned".to_string(),
+        super::pins::PinBuildFailure::BadPayload => "that message is from a key epoch this device no longer holds".to_string(),
+        super::pins::PinBuildFailure::Unverifiable => "this message's proof did not verify".to_string(),
+    })?;
+    entries.push(entry);
+
+    if !session.is_valid() {
+        return Err("account changed before the pin was published".to_string());
+    }
+    publish_pin_list(transport, community, &session, &ch, &entries).await
+}
+
+/// The deriving secret (ikm) for a channel plane at `epoch` — the same lookup
+/// `channel_conv_key_at` performs, surfaced for the open path.
+fn channel_conv_ikm(community: &CommunityV2, ch: &ChannelV2, epoch: u64) -> Result<[u8; 32], String> {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    if ch.private {
+        if ch.epoch.0 == epoch {
+            return ch.key.ok_or("this private channel's key has not arrived yet".to_string());
+        }
+        let ch_hex = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
+        crate::db::community::held_epoch_keys(&cid_hex, &ch_hex)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|(ep, _)| ep.0 == epoch)
+            .map(|(_, k)| k)
+            .ok_or("that message is from a key epoch this device no longer holds".to_string())
+    } else if community.root_epoch.0 == epoch {
+        Ok(community.community_root)
+    } else {
+        crate::db::community::held_epoch_keys(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|(ep, _)| ep.0 == epoch)
+            .map(|(_, k)| k)
+            .ok_or("that message is from a root epoch this device no longer holds".to_string())
+    }
+}
+
+/// Unpin a message: the next edition without the entry (§7 — no deletion event).
+pub async fn unpin_message<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    channel_id: &ChannelId,
+    rumor_id_hex: &str,
+) -> Result<(), String> {
+    let session = SessionGuard::capture();
+    let ch = community.channel(channel_id).ok_or("no such channel in this community")?.clone();
+    let ch_hex = crate::simd::hex::bytes_to_hex_32(&channel_id.0);
+    let entries = writable_pin_entries(community, channel_id)?;
+    let kept: Vec<super::pins::PinEntry> = entries
+        .into_iter()
+        .filter(|e| {
+            super::pins::verify_pin_entry(e, &ch_hex)
+                .map(|v| v.rumor_id != rumor_id_hex)
+                // An entry we can't verify is kept: unpin removes exactly the
+                // named message, never collateral.
+                .unwrap_or(true)
+        })
+        .collect();
+    publish_pin_list(transport, community, &session, &ch, &kept).await
+}
+
+/// §7 curator duties: converge the Pin List when a pinned message is deleted
+/// or edited. Spawned fire-and-forget from ingest — a non-curator, a sealed
+/// list, or an unpinned target all no-op silently; the duty is voluntary.
+pub(crate) fn spawn_pin_duty(channel_hex: &str, target_rumor_hex: &str, edit: Option<super::stream::OpenedStream>) {
+    let channel_hex = channel_hex.to_string();
+    let target = target_rumor_hex.to_string();
+    let session = SessionGuard::capture();
+    tokio::spawn(async move {
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        let _ = run_pin_duty(&transport, &channel_hex, &target, edit, session).await;
+    });
+}
+
+/// The duty body, transport-injected so tests can drive it end to end.
+///
+/// The affected author acts at once; every other PIN_MESSAGES holder waits a
+/// deterministic 5-25s stagger (hashed from (me, target) — no thundering herd
+/// of racing editions) and re-reads before publishing, so a duty another
+/// curator already performed dissolves into a no-op.
+async fn run_pin_duty<T: Transport + ?Sized>(
+    transport: &T,
+    channel_hex: &str,
+    target: &str,
+    edit: Option<super::stream::OpenedStream>,
+    session: SessionGuard,
+) -> Result<(), String> {
+    use crate::community::roles::Permissions;
+    let Some(cid_hex) = crate::db::community::community_id_for_channel(channel_hex)? else {
+        return Ok(());
+    };
+    let cid = crate::community::CommunityId(crate::simd::hex::hex_to_bytes_32(&cid_hex));
+    let Some(community) = crate::db::community::load_community_v2(&cid)? else {
+        return Ok(());
+    };
+    let channel_id = ChannelId(crate::simd::hex::hex_to_bytes_32(channel_hex));
+
+    // Cheap pre-checks before any waiting: pinned target, readable list, held bit.
+    let read = read_channel_pins(&community, &channel_id)?;
+    if read.sealed {
+        return Ok(());
+    }
+    let Some(hit) = read.pins.iter().find(|p| p.rumor_id == target) else {
+        return Ok(());
+    };
+    if let Some(ed) = &edit {
+        // Monotonic: a bundle at or past this revision needs no refresh.
+        if hit.edited.as_ref().is_some_and(|held| held.ms >= ed.at_ms) {
+            return Ok(());
+        }
+    }
+    let me = me_pk()?;
+    let me_hex = me.to_hex();
+    let owner_hex = community.owner()?.to_hex();
+    let roster = crate::db::community::get_community_roles(&cid_hex)?;
+    if !roster.is_authorized(&me_hex, Some(&owner_hex), Permissions::PIN_MESSAGES) {
+        return Ok(());
+    }
+
+    if hit.author != me_hex {
+        let mut h: u32 = 0;
+        for b in me_hex.bytes().chain(target.bytes()) {
+            h = h.wrapping_mul(31).wrapping_add(u32::from(b));
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5 + u64::from(h % 21))).await;
+        if !session.is_valid() {
+            return Ok(());
+        }
+    }
+
+    // Re-read after the stagger: another curator's edition may have landed.
+    let read = read_channel_pins(&community, &channel_id)?;
+    if read.sealed {
+        return Ok(());
+    }
+    let Some(hit) = read.pins.iter().find(|p| p.rumor_id == target) else {
+        return Ok(());
+    };
+    let ch = community.channel(&channel_id).ok_or("no such channel")?.clone();
+
+    let entries: Vec<super::pins::PinEntry> = match &edit {
+        // Deletion: the next edition simply omits the entry (§7 — replace-entire).
+        None => read
+            .pins
+            .iter()
+            .filter(|p| p.rumor_id != target)
+            .map(|p| p.entry.clone())
+            .collect(),
+        // Edit: the same entry, its bundle refreshed to the newest revision.
+        Some(ed) => {
+            if hit.edited.as_ref().is_some_and(|held| held.ms >= ed.at_ms) {
+                return Ok(());
+            }
+            let ch_hex = crate::simd::hex::bytes_to_hex_32(&channel_id.0);
+            // The edit sealed under the channel's current plane in the common
+            // (realtime) case; older epochs are tried like every other read.
+            let mut bundle = None;
+            let mut epochs: Vec<u64> = vec![if ch.private { ch.epoch.0 } else { community.root_epoch.0 }];
+            let scope = if ch.private { ch_hex.clone() } else { crate::community::SERVER_ROOT_SCOPE_HEX.to_string() };
+            epochs.extend(
+                crate::db::community::held_epoch_keys(&cid_hex, &scope)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(ep, _)| ep.0),
+            );
+            epochs.dedup();
+            for epoch in epochs {
+                let Some(conv) = channel_conv_key_at(&community, &ch, epoch) else { continue };
+                if let Ok(b) = super::pins::build_pin_edit_bundle(ed, &conv, &hit.author, target, &ch_hex) {
+                    bundle = Some(b);
+                    break;
+                }
+            }
+            let Some(bundle) = bundle else { return Ok(()) };
+            read.pins
+                .iter()
+                .map(|p| {
+                    let mut entry = p.entry.clone();
+                    if p.rumor_id == target {
+                        entry.edit = Some(bundle.clone());
+                    }
+                    entry
+                })
+                .collect()
+        }
+    };
+
+    if !session.is_valid() {
+        return Ok(());
+    }
+    crate::log_info!(
+        "[pins] duty {} for target {} in channel {}",
+        if edit.is_some() { "edit-refresh" } else { "omission" },
+        &target[..12],
+        &channel_hex[..12]
+    );
+    publish_pin_list(transport, &community, &session, &ch, &entries).await
+}
+
+/// Silent owner-side widening: an Admin role published before PIN_MESSAGES
+/// existed gains the bit, so delegated admins can curate pins in communities
+/// founded before this build. One edition, idempotent, converges across owner
+/// devices (both publish the same widened mask as editions of one entity).
+pub async fn upgrade_admin_role_pin_bit<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+) -> Result<bool, String> {
+    use crate::community::roles::{Permissions, RoleScope};
+    let my_pk = me_pk()?;
+    if community.owner()? != my_pk {
+        return Ok(false);
+    }
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let roles = crate::db::community::get_community_roles(&cid_hex)?;
+    let Some(role) = roles.roles.iter().find(|r| {
+        matches!(r.scope, RoleScope::Server)
+            && r.permissions.contains(Permissions::ADMIN_FOUNDING_MASK)
+            && !r.permissions.contains(Permissions::PIN_MESSAGES)
+    }) else {
+        return Ok(false);
+    };
+    let mut widened = role.clone();
+    widened.permissions.0 |= Permissions::PIN_MESSAGES;
+    set_role(transport, community, &widened).await?;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -12062,5 +12629,238 @@ mod tests {
             "an ADMIN_ALL grant carries KICK"
         );
         assert!(view.banned.is_empty());
+    }
+
+    // ── Pins (CORD-04 §7) — fold, authority, and the silent Admin widening ──
+
+    /// The full wire round trip: a real message pinned into a published
+    /// edition, folded by the control follow, persisted, and read back proven.
+    #[tokio::test]
+    async fn a_pin_edition_folds_persists_and_reads_back() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Pinsville", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let ch_hex = crate::simd::hex::bytes_to_hex_32(&general.0);
+
+        send_message(&relay, &community, &general, "pin-worthy").await.unwrap();
+        let page = fetch_channel(&relay, &community, &general, 10).await.unwrap();
+        let opened = page
+            .iter()
+            .find_map(|f| match &f.event {
+                ChatEvent::Message { opened, .. } => Some(opened.clone()),
+                _ => None,
+            })
+            .expect("the sent message reads back");
+
+        let ch = community.channels[0].clone();
+        let conv = channel_conv_key_at(&community, &ch, 0).expect("owner holds the public plane key");
+        let entry = crate::community::v2::pins::build_pin_entry(&opened, &conv, &ch_hex).unwrap();
+        let content = crate::community::v2::pins::serialize_public_pin_list(&[entry]).unwrap();
+
+        let session = crate::state::SessionGuard::capture();
+        let eid = crate::community::v2::derive::pins_locator(community.id(), &general);
+        publish_control_edition(&relay, &community, &session, vsk::PINS, &eid, &content).await.unwrap();
+        follow_control(&relay, &community, &session).await.unwrap();
+
+        let read = read_channel_pins(&community, &general).unwrap();
+        assert!(!read.sealed);
+        assert!(read.version >= 1, "the folded head persisted");
+        assert_eq!(read.pins.len(), 1);
+        assert_eq!(read.pins[0].content, "pin-worthy");
+        assert_eq!(read.pins[0].rumor_id, opened.rumor_id.to_hex());
+    }
+
+    /// CORD-04 §5: a pins edition from an author holding no PIN_MESSAGES never
+    /// becomes the head — the fold's authority gate covers the new entity.
+    #[tokio::test]
+    async fn an_unauthorized_pin_edition_never_folds() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Gated", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+
+        let rogue = Keys::generate();
+        let group = control_group_key(&community.community_root, community.id(), community.root_epoch);
+        let eid = crate::community::v2::derive::pins_locator(community.id(), &general);
+        let rumor = control::build_edition_rumor(rogue.public_key(), vsk::PINS, &eid, 1, None, r#"{"entries":[]}"#, 2_000, None);
+        let (wrap, _) = control::seal_control_edition(&rumor, &group, &rogue, Timestamp::from_secs(2_000)).unwrap();
+        relay.publish(&wrap, &community.relays).await.unwrap();
+
+        let session = crate::state::SessionGuard::capture();
+        follow_control(&relay, &community, &session).await.unwrap();
+        let read = read_channel_pins(&community, &general).unwrap();
+        assert_eq!(read.version, 0, "an unauthorized edition never persists a head");
+        assert!(read.pins.is_empty());
+    }
+
+    /// The silent owner-side widening: a pre-pins Admin role (founding mask)
+    /// gains PIN_MESSAGES as one edition of the same entity; idempotent after.
+    #[tokio::test]
+    async fn owner_silently_widens_a_legacy_admin_role() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Legacy", vec!["wss://r".into()], None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let rid = crate::simd::hex::bytes_to_hex_32(&[0x5d; 32]);
+
+        // An Admin role exactly as a pre-pins build published it.
+        let legacy = Role {
+            role_id: rid.clone(),
+            name: "Admin".into(),
+            position: 1,
+            permissions: Permissions(Permissions::ADMIN_FOUNDING_MASK),
+            scope: RoleScope::Server,
+            color: 0,
+        };
+        publish_role(&relay, &community, &owner, &legacy, 1).await;
+        let session = crate::state::SessionGuard::capture();
+        follow_control(&relay, &community, &session).await.unwrap();
+
+        assert!(upgrade_admin_role_pin_bit(&relay, &community).await.unwrap(), "the widening publishes");
+        follow_control(&relay, &community, &session).await.unwrap();
+        let roles = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        let widened = roles.roles.iter().find(|r| r.role_id == rid).expect("same entity");
+        assert!(widened.permissions.contains(Permissions::PIN_MESSAGES), "bit 11 landed");
+        assert!(widened.permissions.contains(Permissions::ADMIN_FOUNDING_MASK), "nothing stripped");
+
+        // Second call: nothing left to widen.
+        assert!(!upgrade_admin_role_pin_bit(&relay, &community).await.unwrap());
+    }
+
+    /// §7 deletion duty: the author-curator's own deleted message leaves the
+    /// list as an immediate omitting edition.
+    #[tokio::test]
+    async fn the_deletion_duty_omits_a_pinned_message() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Duties", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let ch_hex = crate::simd::hex::bytes_to_hex_32(&general.0);
+
+        let rumor_id = send_message(&relay, &community, &general, "soon deleted").await.unwrap();
+        let page = fetch_channel(&relay, &community, &general, 10).await.unwrap();
+        let opened = page
+            .iter()
+            .find_map(|f| match &f.event {
+                ChatEvent::Message { opened, .. } => (opened.rumor_id.to_hex() == rumor_id).then(|| opened.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let ch = community.channels[0].clone();
+        let conv = channel_conv_key_at(&community, &ch, 0).unwrap();
+        let entry = crate::community::v2::pins::build_pin_entry(&opened, &conv, &ch_hex).unwrap();
+        let session = crate::state::SessionGuard::capture();
+        publish_pin_list(&relay, &community, &session, &ch, &[entry]).await.unwrap();
+        assert_eq!(read_channel_pins(&community, &general).unwrap().pins.len(), 1);
+
+        // The author holds the bit (owner) → the duty publishes the omission at once.
+        run_pin_duty(&relay, &ch_hex, &rumor_id, None, crate::state::SessionGuard::capture()).await.unwrap();
+        let after = read_channel_pins(&community, &general).unwrap();
+        assert!(after.pins.is_empty(), "the omitting edition landed");
+        assert!(after.version >= 2, "a NEW edition, not a local erase");
+    }
+
+    /// §7 edit duty: an edited pinned message gets its proof bundle refreshed,
+    /// so keyless readers see the revision — and the duty is idempotent.
+    #[tokio::test]
+    async fn the_edit_duty_refreshes_a_pinned_proof() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Edits", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let ch_hex = crate::simd::hex::bytes_to_hex_32(&general.0);
+
+        let rumor_id = send_message(&relay, &community, &general, "first words").await.unwrap();
+        let page = fetch_channel(&relay, &community, &general, 10).await.unwrap();
+        let opened = page
+            .iter()
+            .find_map(|f| match &f.event {
+                ChatEvent::Message { opened, .. } => (opened.rumor_id.to_hex() == rumor_id).then(|| opened.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let ch = community.channels[0].clone();
+        let conv = channel_conv_key_at(&community, &ch, 0).unwrap();
+        let entry = crate::community::v2::pins::build_pin_entry(&opened, &conv, &ch_hex).unwrap();
+        let session = crate::state::SessionGuard::capture();
+        publish_pin_list(&relay, &community, &session, &ch, &[entry]).await.unwrap();
+
+        send_edit(&relay, &community, &general, &rumor_id, "second thoughts").await.unwrap();
+        let page = fetch_channel(&relay, &community, &general, 10).await.unwrap();
+        let edit_opened = page
+            .iter()
+            .find_map(|f| match &f.event {
+                ChatEvent::Edit { opened, .. } => Some(opened.clone()),
+                _ => None,
+            })
+            .expect("the edit reads back");
+
+        run_pin_duty(&relay, &ch_hex, &rumor_id, Some(edit_opened.clone()), crate::state::SessionGuard::capture()).await.unwrap();
+        let after = read_channel_pins(&community, &general).unwrap();
+        assert_eq!(after.pins.len(), 1);
+        assert_eq!(
+            after.pins[0].content, "second thoughts",
+            "the refreshed bundle proves the revision"
+        );
+        let v = after.version;
+
+        // Same revision again → monotonic guard, no new edition.
+        run_pin_duty(&relay, &ch_hex, &rumor_id, Some(edit_opened), crate::state::SessionGuard::capture()).await.unwrap();
+        assert_eq!(read_channel_pins(&community, &general).unwrap().version, v, "idempotent");
+    }
+
+    /// §7 Rotator duty: a private-channel rotation republishes the Pin List
+    /// sealed under the NEW epoch — a member who joins after the rotation
+    /// (holding only the new key) must not read the channel's pins as dark.
+    #[tokio::test]
+    async fn a_rotation_reseals_the_pin_list_under_the_new_epoch() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Reseal", vec!["wss://r".into()], None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let chan = create_private_channel(&relay, &community, "vault").await.unwrap();
+        let community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let ch_hex = crate::simd::hex::bytes_to_hex_32(&chan.0);
+
+        let rumor_id = send_message(&relay, &community, &chan, "sealed wisdom").await.unwrap();
+        let page = fetch_channel(&relay, &community, &chan, 10).await.unwrap();
+        let opened = page
+            .iter()
+            .find_map(|f| match &f.event {
+                ChatEvent::Message { opened, .. } => (opened.rumor_id.to_hex() == rumor_id).then(|| opened.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let ch = community.channel(&chan).unwrap().clone();
+        let old_epoch = ch.epoch.0;
+        let conv = channel_conv_key_at(&community, &ch, old_epoch).unwrap();
+        let entry = crate::community::v2::pins::build_pin_entry(&opened, &conv, &ch_hex).unwrap();
+        let session = crate::state::SessionGuard::capture();
+        publish_pin_list(&relay, &community, &session, &ch, &[entry]).await.unwrap();
+        let (_, v_before) = crate::db::community::get_community_pins(&cid_hex, &ch_hex).unwrap().unwrap();
+
+        // Rotate the channel away from a (never-granted) member.
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        rekey_channel_excluding(&relay, &community, &chan, &roster, &[], &Keys::generate().public_key())
+            .await
+            .unwrap();
+
+        // The stored head is a NEW edition, sealed under the NEW epoch.
+        let (content, version) = crate::db::community::get_community_pins(&cid_hex, &ch_hex).unwrap().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            parsed["epoch"].as_str().unwrap(),
+            (old_epoch + 1).to_string(),
+            "the reseal names the rotated epoch"
+        );
+        assert!(version > v_before, "a real edition, not a local rewrite");
+
+        // The rotator's own post-rotation view still verifies the pin.
+        let community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let read = read_channel_pins(&community, &chan).unwrap();
+        assert!(!read.sealed);
+        assert_eq!(read.pins.len(), 1);
+        assert_eq!(read.pins[0].content, "sealed wisdom");
     }
 }

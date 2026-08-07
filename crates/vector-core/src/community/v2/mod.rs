@@ -24,6 +24,8 @@ pub mod guestbook;
 pub mod inbound;
 pub mod invite;
 pub mod list;
+pub mod pin_keys;
+pub mod pins;
 pub mod realtime;
 pub mod volley;
 pub mod rekey;
@@ -95,4 +97,6 @@ pub mod vsk {
     pub const INVITE_LIVE: &str = "6";
     pub const INVITE_REVOKED: &str = "9";
     pub const DISSOLVED: &str = "10";
+    /// One Pin List per Channel at `pins_locator` (CORD-04 §7).
+    pub const PINS: &str = "11";
 }

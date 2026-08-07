@@ -141,7 +141,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 83;
+pub const HIGHEST_MIGRATION_ID: u32 = 84;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1206,6 +1206,24 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("migration 83: {}", e))?;
+        Ok(())
+    })?;
+
+    // CORD-04 §7: one Pin List per channel — the folded head's RAW content
+    // (both self-describing forms), never a re-serialization, so republishing
+    // carries the exact bytes and the byte cap judges what the wire carried.
+    run_atomic_migration(conn, 84, "Per-channel pin lists", |tx| {
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS community_pins (
+                community_id TEXT NOT NULL,
+                channel_id   TEXT NOT NULL,
+                content      TEXT NOT NULL,
+                version      INTEGER NOT NULL,
+                PRIMARY KEY (community_id, channel_id)
+            )",
+            [],
+        )
+        .map_err(|e| format!("migration 84: {}", e))?;
         Ok(())
     })?;
 

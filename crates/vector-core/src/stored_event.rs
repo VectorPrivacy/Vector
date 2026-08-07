@@ -110,6 +110,7 @@ pub enum SystemEventType {
     MemberRemoved = 2,
     WallpaperChanged = 3,
     WallpaperRemoved = 4,
+    PinsModified = 5,
 }
 
 impl SystemEventType {
@@ -120,6 +121,7 @@ impl SystemEventType {
             SystemEventType::MemberRemoved => format!("{} was removed", display_name),
             SystemEventType::WallpaperChanged => format!("{} changed the wallpaper", display_name),
             SystemEventType::WallpaperRemoved => format!("{} removed the wallpaper", display_name),
+            SystemEventType::PinsModified => format!("{} modified the Pins", display_name),
         }
     }
 

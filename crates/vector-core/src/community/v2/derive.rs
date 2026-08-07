@@ -42,6 +42,7 @@ const LABEL_VOICE_SENDER: &str = "concord/voice-sender";
 const LABEL_DISSOLVED: &str = "concord/dissolved";
 const LABEL_GRANT: &str = "concord/grant";
 const LABEL_BANLIST: &str = "concord/banlist";
+const LABEL_PINS: &str = "concord/pins";
 const LABEL_INVITE_LINKS: &str = "concord/invite-links";
 const LABEL_INVITE_KEY: &str = "concord/invite-key";
 /// A.4 community_id commitment prefix — plain SHA-256, NOT the hkdf shape.
@@ -225,6 +226,11 @@ pub fn grant_locator(community_id: &CommunityId, member_xonly: &[u8; 32]) -> [u8
 /// The community-wide Banlist coordinate.
 pub fn banlist_locator(community_id: &CommunityId) -> [u8; 32] {
     hkdf32(&community_id.0, &build_info(LABEL_BANLIST, &ZERO32, None))
+}
+
+/// A Channel's Pin List coordinate (CORD-04 §7).
+pub fn pins_locator(community_id: &CommunityId, channel_id: &ChannelId) -> [u8; 32] {
+    hkdf32(&community_id.0, &build_info(LABEL_PINS, &channel_id.0, None))
 }
 
 /// A creator's invite-link Registry coordinate (CORD-05 §5) — bound to the

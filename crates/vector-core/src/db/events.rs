@@ -2561,3 +2561,21 @@ mod tests {
         assert!(ledgered(wrap_evicted.0), "evicted message's wrapper ledgered with it");
     }
 }
+
+/// The stored context a pin proof needs to recover a message's wrap: its
+/// `wrapper_event_id` and the rumor's stored tags (for the epoch binding).
+pub fn get_event_wrap_context(event_id: &str) -> Result<Option<(Option<String>, Vec<Vec<String>>)>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let row: Option<(Option<String>, String)> = conn
+        .query_row(
+            "SELECT wrapper_event_id, tags FROM events WHERE id = ?1",
+            rusqlite::params![event_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("get wrap context: {e}"))?;
+    Ok(row.map(|(wrap, tags_json)| {
+        let tags: Vec<Vec<String>> = serde_json::from_str(&tags_json).unwrap_or_default();
+        (wrap, tags)
+    }))
+}

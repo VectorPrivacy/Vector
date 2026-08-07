@@ -175,6 +175,10 @@
   mask-image: url("./icons/chevron-down.svg");
 }
 
+.icon-pin {
+  mask-image: url("./icons/pin.svg");
+}
+
 .icon-chevron-double-left {
   mask-image: url("./icons/chevron-double-left.svg");
 }
@@ -8616,6 +8620,334 @@ select:disabled:hover {
 
 .nav-menu-btn .icon-dots-horizontal {
   background-color: #b2b2b2;
+}
+
+/* ── Pinned Messages (Concord v2) ─────────────────────────────────────────── */
+
+/* Header pin toggle — a twin of the ••• button (40px box at top:10), seated
+   immediately to its left. Resting color matches the hamburger's gray; the
+   accent green marks the drawer being OPEN, not the button existing. */
+.pins-header-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: absolute;
+  top: 10px;
+  right: 50px;
+  width: 40px;
+  height: 40px;
+  color: #b2b2b2;
+  transition: color 0.15s ease;
+}
+
+.pins-header-btn.pins-open {
+  color: var(--accent-color);
+}
+
+.pins-header-btn svg {
+  width: 22px;
+  height: 22px;
+}
+
+/* The drawer slides open directly under the fixed 60px chat header, laying
+   over the messages like a sheet. */
+.pins-drawer {
+  position: fixed;
+  top: 60px;
+  left: 0;
+  right: 0;
+  /* Above the chat's own chrome (msg-top-fade sits at 100) but below every
+     real overlay (popups/menus live at 10000+). */
+  z-index: 101;
+  background-color: #0d0d0d;
+  /* Gray chrome (not accent) with rounded bottom corners, sheet-style. */
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-top: none;
+  border-radius: 0 0 12px 12px;
+  transform-origin: top;
+  animation: pins-drawer-open 0.18s ease-out;
+}
+
+@keyframes pins-drawer-open {
+  from {
+    transform: translateY(-10px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+/* Close plays the slide in reverse and holds the end state (`forwards`) so
+   there is no one-frame flash before JS lands display:none. */
+.pins-drawer.pins-drawer-closing {
+  animation: pins-drawer-shut 0.15s ease-in forwards;
+}
+
+@keyframes pins-drawer-shut {
+  from {
+    transform: translateY(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateY(-10px);
+    opacity: 0;
+  }
+}
+
+/* Up to 40% of the screen, but never squeezed useless on short windows.
+   Scrolls without a visible scrollbar — the drawer is a compact sheet and
+   the bar reads as clutter (wheel/touch/trackpad all still scroll). */
+.pins-drawer-list {
+  max-height: max(200px, 40vh);
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.pins-drawer-list::-webkit-scrollbar {
+  display: none;
+}
+
+/* Open drawer dims + blurs the conversation so the pins own the eye. A filter
+   on the messages container, NOT backdrop-filter on a scrim — WKWebKit's
+   backdrop-filter is unreliable (see the popup styles). The transition lives
+   on the base rule so both directions animate in step with the drawer slide. */
+#chat-messages {
+  transition: filter 0.22s ease;
+}
+
+#chat.pins-focus #chat-messages {
+  filter: blur(6px) brightness(0.45);
+  /* A blurred chat is a backdrop, not a surface: no accidental scrolls,
+     clicks, or hover toolbars while choosing a pin. */
+  pointer-events: none;
+}
+
+/* The top fade belongs to the CHAT: over the drawer's rows it reads as a
+   smudge, and over the blurred backdrop it means nothing. Ease it out with
+   the same timing as the focus dim. */
+#msg-top-fade {
+  transition: opacity 0.22s ease;
+}
+
+#chat.pins-focus #msg-top-fade {
+  opacity: 0;
+}
+
+.pins-drawer-row {
+  display: flex;
+  /* Top-aligned in BOTH states, with each control optically centered against
+     the first text line by a fixed margin — so expanding a row cannot move
+     the icon, date, chevron or ✕ by even a pixel. */
+  align-items: flex-start;
+  gap: 6px;
+  padding: 8px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.pins-drawer-row:hover {
+  background-color: rgba(255, 255, 255, 0.04);
+}
+
+/* No message on this device = nothing to jump to: an inert row, unless it's
+   truncated — then the whole row is the expand toggle and stays clickable. */
+.pins-drawer-row.pins-no-jump {
+  cursor: default;
+}
+
+.pins-drawer-row.pins-no-jump:hover {
+  background-color: transparent;
+}
+
+.pins-drawer-row.pins-no-jump.pins-expandable {
+  cursor: pointer;
+}
+
+.pins-drawer-row.pins-no-jump.pins-expandable:hover {
+  background-color: rgba(255, 255, 255, 0.04);
+}
+
+/* Twemoji in pinned previews — sized like inline text, not natural-size SVGs. */
+.pins-drawer-row-text img.emoji {
+  width: 18px;
+  height: 18px;
+  vertical-align: -4px;
+}
+
+.pins-drawer-row svg {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  color: var(--accent-color);
+  /* Mirrored so the pin's point aims INTO the row it marks. */
+  transform: scaleX(-1);
+  /* Optically centered against the first text line (top-aligned row). */
+  margin-top: 1.5px;
+}
+
+.pins-drawer-row-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* Explicit: an ancestor centers text, but rows read as a list —
+     [pin][text……spacer][date][✕] with the text hugging the icon. */
+  text-align: left;
+  /* ONE line metric for both states: the collapsed preview line and the
+     expanded render's first line must occupy identical pixels, or the
+     content swap at expand-start reads as a jump. */
+  line-height: 24px;
+  /* Driven inline by the expander; animates the grow/shrink. */
+  transition: max-height 0.25s ease;
+}
+
+/* Date/chevron/✕ float top-right INSIDE the text flow: collapsed rows look
+   identical to the flex layout, but an expanded pin's lines wrap around this
+   box and take the full drawer width below it — no dead right gutter. */
+.pins-drawer-row-controls {
+  float: right;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: 10px;
+  height: 24px;
+}
+
+/* An expanded pin reads in full INSIDE the drawer — a member without the
+   original message in their DB has nowhere else to read it. */
+.pins-drawer-row.pins-expanded .pins-drawer-row-text {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* Headers demote to bold body text inside the drawer: chat-scale h1-h3 read
+   as shouting in a compact sheet. Purely presentational — the renderer stays
+   byte-identical to in-chat, so semantics and copy behavior are untouched. */
+.pins-drawer-row-text h1,
+.pins-drawer-row-text h2,
+.pins-drawer-row-text h3,
+.pins-drawer-row-text h4,
+.pins-drawer-row-text h5,
+.pins-drawer-row-text h6 {
+  font-size: 14px;
+  font-weight: 700;
+  margin: 0 0 6px 0;
+  /* Inherit the container's 24px line so a header-led first line sits on
+     exactly the collapsed line's pixels. */
+  line-height: inherit;
+}
+
+/* Show-more chevron: rendered only on rows whose text actually truncates. */
+/* Same hit target as the ✕ beside it. */
+.pins-drawer-row-expander {
+  position: relative;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  background-color: #b2b2b2;
+  transition: transform 0.25s ease;
+}
+
+/* Keyed to its OWN class, not .pins-expanded: the collapse branch holds
+   .pins-expanded until the height transition ends (the text must stay
+   wrapped while shrinking), and the chevron must not wait for that. */
+.pins-drawer-row-expander.pins-open {
+  transform: rotate(180deg);
+}
+
+.pins-drawer-row-date {
+  flex-shrink: 0;
+  opacity: 0.55;
+  font-size: 13px;
+}
+
+/* Reveal/Open for non-previewable file pins — fetches via the pin-only path,
+   then hands off to the OS (file manager on desktop, ACTION_VIEW on Android). */
+.pins-drawer-row-open {
+  position: relative;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  background-color: #b2b2b2;
+}
+
+.pins-drawer-row-open:hover {
+  background-color: var(--accent-color);
+}
+
+/* Unpin ✕ — rendered only for PIN_MESSAGES holders. */
+.pins-drawer-row-unpin {
+  position: relative;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  background-color: #b2b2b2;
+}
+
+.pins-drawer-row-unpin:hover {
+  background-color: var(--danger-color);
+}
+
+/* Attachment kind — the reply-context wording ("Picture", "File", …); the
+   row's leading type icon carries the visual. Medium weight: present, not
+   shouting next to genuinely bold message text. */
+.pins-drawer-row-kind {
+  font-weight: 500;
+}
+
+/* File pins lead with the chat's type icon (image/film/mic/file) in the pin
+   slot — same size, same accent, same seat as the pin icon it replaces. */
+.pins-drawer-row-type-icon {
+  position: relative;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  background-color: var(--accent-color);
+  margin-top: 1.5px;
+}
+
+/* Inline media preview for image/video pins whose decrypted local copy
+   exists. Block-level under the chip, bounded so one media pin can't own
+   the whole drawer. */
+.pins-drawer-row-media {
+  display: block;
+  max-width: 100%;
+  max-height: 240px;
+  margin-top: 8px;
+  border-radius: 8px;
+}
+
+/* Sealed/empty notices reuse the row layout without actions. */
+.pins-drawer-notice {
+  padding: 16px;
+  font-size: 13px;
+  opacity: 0.6;
+  text-align: center;
+}
+
+/* Inline centering on purpose — a plain text-align block is immune to the
+   app's global span/flex quirks that mis-seated the flex version. */
+.pins-drawer-close {
+  display: block;
+  text-align: center;
+  padding: 8px 16px;
+  font-size: 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.pins-drawer-close-icon {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  vertical-align: -5px;
+  color: var(--accent-color);
 }
 
 /* Text-accompanied "Back" Navigation button */

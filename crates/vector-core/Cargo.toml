@@ -58,6 +58,12 @@ sha2 = "0.10.9"
 # (GROUP_PROTOCOL.md §14). Audited RustCrypto crate rather than a hand-rolled
 # construction, since the derivation is wire-immutable.
 hkdf = "0.12"
+# NIP-44 v2 per-message key disclosure (CORD-04 §7 Pins): the nostr crate keeps
+# its message-key expansion private, so the construction is reproduced over the
+# same audited RustCrypto primitives and round-tripped against nostr's own
+# encrypt in tests. Both crates are already in the tree transitively.
+hmac = "0.12"
+chacha20 = "0.9"
 zeroize = { version = "1.8", features = ["derive"] }
 
 # HTTP

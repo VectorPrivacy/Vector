@@ -4576,3 +4576,48 @@ fn hex_to_id32(hex: &str) -> Result<[u8; 32], String> {
 // decline_community_invite, create_public_invite, preview_public_invite,
 // accept_public_invite, list_public_invites, revoke_public_invite,
 // update_community_metadata, set_community_image, cache_community_image
+
+// ── Pins (CORD-04 §7, Concord v2 only) ───────────────────────────────────────
+
+/// Pin a message in a v2 community channel. Authority is enforced by every
+/// reader's fold (PIN_MESSAGES); the frontend gates the affordance on
+/// `get_community_capabilities().pin_messages`.
+#[tauri::command]
+pub async fn pin_community_message(community_id: String, channel_id: String, message_id: String) -> Result<(), String> {
+    vector_core::VectorCore
+        .pin_community_message(&community_id, &channel_id, &message_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Unpin a message: the next Pin List edition without the entry.
+#[tauri::command]
+pub async fn unpin_community_message(community_id: String, channel_id: String, message_id: String) -> Result<(), String> {
+    vector_core::VectorCore
+        .unpin_community_message(&community_id, &channel_id, &message_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// A channel's verified pins from the locally folded head. `sealed: true`
+/// means the list exists but is unreadable here — the UI must render that as
+/// unavailable, never as empty. Live updates arrive as `community_pins_updated`.
+#[tauri::command]
+pub fn get_channel_pins(community_id: String, channel_id: String) -> Result<serde_json::Value, String> {
+    vector_core::VectorCore
+        .get_channel_pins(&community_id, &channel_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Fetch a pinned attachment from the pin proof alone (CORD-04 §7): the
+/// disclosed keys open the rumor, whose imeta carries the blob URL + file
+/// decryption material — so media pins render for members with no chat
+/// history and no old epoch key. Downloads/decrypts/caches on first touch,
+/// serves the verified local copy after.
+#[tauri::command]
+pub async fn fetch_pinned_attachment(community_id: String, channel_id: String, message_id: String) -> Result<serde_json::Value, String> {
+    vector_core::VectorCore
+        .fetch_pinned_attachment(&community_id, &channel_id, &message_id)
+        .await
+        .map_err(|e| e.to_string())
+}

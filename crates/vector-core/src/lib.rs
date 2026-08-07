@@ -3020,9 +3020,11 @@ impl VectorCore {
 
     fn admin_role_id_of(community_id: &str) -> Result<String> {
         let roles = crate::db::community::get_community_roles(community_id).map_err(VectorError::Other)?;
+        // Founding mask, not ADMIN_ALL: identifies Admin roles published before
+        // later bits (PIN_MESSAGES...) existed.
         roles.roles.iter()
             .find(|r| matches!(r.scope, crate::community::roles::RoleScope::Server)
-                && r.permissions.contains(crate::community::roles::Permissions::ADMIN_ALL))
+                && r.permissions.contains(crate::community::roles::Permissions::ADMIN_FOUNDING_MASK))
             .map(|r| r.role_id.clone())
             .ok_or_else(|| VectorError::Other("admin role not found (roster not synced?)".into()))
     }
@@ -3044,6 +3046,7 @@ impl VectorCore {
                 return Ok(serde_json::json!({
                     "manage_metadata": false, "manage_channels": false, "create_invite": false, "kick": false,
                     "ban": false, "manage_messages": false, "manage_roles": false, "manage_admin_role": false,
+                    "pin_messages": false,
                 }));
             }
             let has = |p: u64| roster.is_authorized(&me, Some(&owner_hex), p);
@@ -3053,6 +3056,7 @@ impl VectorCore {
                 "manage_messages": has(Permissions::MANAGE_MESSAGES), "manage_roles": has(Permissions::MANAGE_ROLES),
                 // Only the owner (position 0) strictly outranks the position-1 Admin role.
                 "manage_admin_role": me == owner_hex,
+                "pin_messages": has(Permissions::PIN_MESSAGES),
             }));
         }
         let community = Self::load_community_hex(community_id)?;
@@ -3065,7 +3069,120 @@ impl VectorCore {
             "create_invite": caps.create_invite, "kick": caps.kick, "ban": caps.ban,
             "manage_messages": caps.manage_messages, "manage_roles": caps.manage_roles,
             "manage_admin_role": manage_admin_role,
+            // Pins are Concord v2 only (CORD-04 §7) — v1 has no control-plane entity for them.
+            "pin_messages": false,
         }))
+    }
+
+    /// Pin a message in a v2 community channel (CORD-04 §7). The proof is
+    /// rebuilt from the message's recovered wrap; see `service::pin_message`.
+    pub async fn pin_community_message(&self, community_id: &str, channel_id: &str, message_id: &str) -> Result<()> {
+        use crate::community::{transport::LiveTransport, ChannelId};
+        let v2 = Self::load_v2_if_v2(community_id)?
+            .ok_or_else(|| VectorError::Other("pins are only available in Concord v2 communities".into()))?;
+        let ch = ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        crate::community::v2::service::pin_message(&transport, &v2, &ch, message_id)
+            .await
+            .map_err(VectorError::Other)
+    }
+
+    /// Unpin a message: the next Pin List edition without the entry.
+    pub async fn unpin_community_message(&self, community_id: &str, channel_id: &str, message_id: &str) -> Result<()> {
+        use crate::community::{transport::LiveTransport, ChannelId};
+        let v2 = Self::load_v2_if_v2(community_id)?
+            .ok_or_else(|| VectorError::Other("pins are only available in Concord v2 communities".into()))?;
+        let ch = ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        crate::community::v2::service::unpin_message(&transport, &v2, &ch, message_id)
+            .await
+            .map_err(VectorError::Other)
+    }
+
+    /// Fetch a pinned attachment FROM THE PIN ALONE (CORD-04 §7's whole point:
+    /// the proof carries the rumor, whose imeta carries the blob URL and the
+    /// file's decryption material — no chat history and no old epoch key
+    /// needed). Serves the already-downloaded copy when its content hash
+    /// verifies; otherwise runs the full download walk (mirrors + hash-swap),
+    /// decrypts, verifies, and caches at the same content-addressed path the
+    /// chat pipeline uses. Returns `{ path, mime, name }`.
+    pub async fn fetch_pinned_attachment(
+        &self,
+        community_id: &str,
+        channel_id: &str,
+        rumor_id: &str,
+    ) -> Result<serde_json::Value> {
+        use crate::community::ChannelId;
+        let session = crate::state::SessionGuard::capture();
+        let v2 = Self::load_v2_if_v2(community_id)?
+            .ok_or_else(|| VectorError::Other("pins are only available in Concord v2 communities".into()))?;
+        let ch = ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
+        let pins = crate::community::v2::service::read_channel_pins(&v2, &ch).map_err(VectorError::Other)?;
+        let pin = pins
+            .pins
+            .iter()
+            .find(|p| p.rumor_id == rumor_id)
+            .ok_or_else(|| VectorError::Other("that message is not pinned".into()))?;
+        let dir = crate::db::get_download_dir();
+        let tag = pin
+            .tags
+            .iter()
+            .find(|t| t.first().map(String::as_str) == Some("imeta"))
+            .map(|t| nostr_sdk::prelude::Tag::custom("imeta", t[1..].to_vec()))
+            .ok_or_else(|| VectorError::Other("this pin carries no attachment".into()))?;
+        let attachment = crate::community::attachments::attachment_from_imeta(&tag, &dir)
+            .ok_or_else(|| VectorError::Other("this pin's attachment metadata is malformed".into()))?;
+
+        let respond = |path: &std::path::Path| {
+            serde_json::json!({
+                "path": path.to_string_lossy(),
+                "name": attachment.name.to_string(),
+                "extension": attachment.extension.to_string(),
+            })
+        };
+
+        // The author-committed content address (the pin verified the rumor, so
+        // `ox` carries the author's signature-weight claim — the same trust the
+        // chat pipeline extends). Reuse and fresh downloads both verify it.
+        let expected = attachment.original_hash.as_deref();
+        let path = std::path::PathBuf::from(&*attachment.path);
+        if let Ok(bytes) = std::fs::read(&path) {
+            match expected {
+                Some(want) if crate::crypto::sha256_hex(&bytes) == want => return Ok(respond(&path)),
+                None => return Ok(respond(&path)),
+                _ => {} // stale or foreign bytes at the path: re-download
+            }
+        }
+
+        let author_npub = nostr_sdk::prelude::PublicKey::from_hex(&pin.author)
+            .ok()
+            .and_then(|pk| nostr_sdk::prelude::ToBech32::to_bech32(&pk).ok());
+        let bytes = self.download_attachment_from(&attachment, author_npub.as_deref()).await?;
+        if let Some(want) = expected {
+            if crate::crypto::sha256_hex(&bytes) != want {
+                return Err(VectorError::Other("downloaded bytes do not match the pinned content hash".into()));
+            }
+        }
+        if !session.is_valid() {
+            return Err(VectorError::Other("account changed during the download".into()));
+        }
+        std::fs::write(&path, &bytes).map_err(|e| VectorError::Other(format!("could not cache the attachment: {e}")))?;
+        Ok(respond(&path))
+    }
+
+    /// A channel's verified pins from the locally folded head — local-only read.
+    /// `sealed: true` means the list exists but is unreadable on this device;
+    /// render it as unavailable, never as empty.
+    pub fn get_channel_pins(&self, community_id: &str, channel_id: &str) -> Result<serde_json::Value> {
+        use crate::community::ChannelId;
+        let Some(v2) = Self::load_v2_if_v2(community_id)? else {
+            // v1 channels simply have no pins — an empty read, not an error, so
+            // one frontend path serves both stacks.
+            return Ok(serde_json::json!({ "pins": [], "sealed": false, "version": 0 }));
+        };
+        let ch = ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
+        let pins = crate::community::v2::service::read_channel_pins(&v2, &ch).map_err(VectorError::Other)?;
+        serde_json::to_value(&pins).map_err(|e| VectorError::Other(e.to_string()))
     }
 
     /// The community's owner npub + the admin npubs (role overview). A local read,

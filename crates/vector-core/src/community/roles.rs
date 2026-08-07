@@ -33,13 +33,19 @@ impl Permissions {
     pub const CREATE_INVITE: u64 = 1 << 6;
     pub const VIEW_AUDIT_LOG: u64 = 1 << 8;
     pub const MENTION_EVERYONE: u64 = 1 << 9;
+    /// Curate a Channel's Pin List (CORD-04 §7) — editorial power: a pin makes
+    /// its message permanently attributable to every future member.
+    pub const PIN_MESSAGES: u64 = 1 << 11;
     // Reserved / retired (claim the bit so it's never reassigned):
     // `1 << 7` was MANAGE_INVITES — RETIRED (per-creator ownership: no one can manage another's
     // links, so there is nothing to grant; `CREATE_INVITE` mints your own, `BAN` owns the revoking rekey).
-    // MANAGE_EMOJI = 1 << 10, PIN_MESSAGES = 1 << 11, MANAGE_EVENTS = 1 << 12.
+    // MANAGE_EMOJI = 1 << 10, MANAGE_EVENTS = 1 << 12.
 
-    /// Every management bit currently defined — what the MVP "Admin" role holds.
-    pub const ADMIN_ALL: u64 = Self::MANAGE_ROLES
+    /// The founding nine bits — the mask every Admin role published before
+    /// PIN_MESSAGES existed carries. FROZEN FOREVER: this is the floor the
+    /// admin-role finder tests with, so it must never gain a bit. Widening it
+    /// would orphan every published Admin role and mint duplicates.
+    pub const ADMIN_FOUNDING_MASK: u64 = Self::MANAGE_ROLES
         | Self::MANAGE_CHANNELS
         | Self::MANAGE_METADATA
         | Self::KICK
@@ -48,6 +54,11 @@ impl Permissions {
         | Self::CREATE_INVITE
         | Self::VIEW_AUDIT_LOG
         | Self::MENTION_EVERYONE;
+
+    /// Every management bit currently defined — what a newly minted "Admin"
+    /// role holds. MAY widen as bits land; anything that *identifies* an
+    /// existing admin role must test [`Self::ADMIN_FOUNDING_MASK`] instead.
+    pub const ADMIN_ALL: u64 = Self::ADMIN_FOUNDING_MASK | Self::PIN_MESSAGES;
 
     /// Control-plane bits: exercising any of these signs a control/metadata edition (keyless model —
     /// the actor's own npub signature IS the authority, re-verified against the roster). Every
@@ -60,7 +71,8 @@ impl Permissions {
         | Self::BAN
         | Self::MANAGE_MESSAGES
         | Self::CREATE_INVITE
-        | Self::VIEW_AUDIT_LOG;
+        | Self::VIEW_AUDIT_LOG
+        | Self::PIN_MESSAGES;
 
     pub fn empty() -> Self {
         Permissions(0)
@@ -651,5 +663,23 @@ mod tests {
             r.is_authorized(&member, Some(&owner), Permissions::MANAGE_MESSAGES),
             "the scope-blind honor path is unchanged"
         );
+    }
+
+    /// The founding mask is the admin-FINDER's floor and is frozen forever: a
+    /// role minted under the ORIGINAL nine bits must always satisfy it, or
+    /// every published Admin role orphans and the finder mints duplicates.
+    #[test]
+    fn founding_mask_is_frozen_at_the_original_nine_bits() {
+        const ORIGINAL_NINE: u64 = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4)
+            | (1 << 5) | (1 << 6) | (1 << 8) | (1 << 9);
+        assert_eq!(Permissions::ADMIN_FOUNDING_MASK, ORIGINAL_NINE);
+        // A legacy admin role (pre-PIN_MESSAGES) still passes the finder's test...
+        assert!(Permissions(ORIGINAL_NINE).contains(Permissions::ADMIN_FOUNDING_MASK));
+        // ...and a newly minted one does too (ADMIN_ALL may widen, and has).
+        assert!(Permissions::admin().contains(Permissions::ADMIN_FOUNDING_MASK));
+        assert!(Permissions::admin().contains(Permissions::PIN_MESSAGES));
+        // But a legacy role does NOT contain the widened ADMIN_ALL — the exact
+        // reason nothing may identify admins with it.
+        assert!(!Permissions(ORIGINAL_NINE).contains(Permissions::ADMIN_ALL));
     }
 }

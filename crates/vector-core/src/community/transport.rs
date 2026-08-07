@@ -58,6 +58,9 @@ pub struct Query {
     pub k_tags: Vec<String>,
     /// Author pubkeys (hex) to match (OR). Empty = any author.
     pub authors: Vec<String>,
+    /// Event ids (hex) to match (OR). Empty = any id. Used to recover a known
+    /// wrap verbatim (e.g. re-opening a message's seal to build a pin proof).
+    pub ids: Vec<String>,
     /// Lower bound on `created_at` (seconds), inclusive.
     pub since: Option<u64>,
     /// Upper bound on `created_at` (seconds), inclusive — pages OLDER history (events
@@ -91,6 +94,9 @@ impl Query {
             }
         }
         if !self.authors.is_empty() && !self.authors.iter().any(|a| *a == event.pubkey.to_hex()) {
+            return false;
+        }
+        if !self.ids.is_empty() && !self.ids.iter().any(|i| *i == event.id.to_hex()) {
             return false;
         }
         if !self.z_tags.is_empty() && !self.matches_single_letter("z", &self.z_tags, event) {
@@ -143,6 +149,13 @@ impl Query {
                 self.authors.iter().filter_map(|a| PublicKey::from_hex(a).ok()).collect();
             if !authors.is_empty() {
                 filter = filter.authors(authors);
+            }
+        }
+        if !self.ids.is_empty() {
+            let ids: Vec<EventId> =
+                self.ids.iter().filter_map(|i| EventId::from_hex(i).ok()).collect();
+            if !ids.is_empty() {
+                filter = filter.ids(ids);
             }
         }
         if let Some(since) = self.since {

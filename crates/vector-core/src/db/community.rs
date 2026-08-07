@@ -3356,3 +3356,44 @@ mod tests {
         assert!(get_pending_invite(&cid).unwrap().is_none());
     }
 }
+
+// ── Pin lists (CORD-04 §7) ───────────────────────────────────────────────────
+
+/// Persist a channel's folded Pin List head — the RAW carried content (either
+/// self-describing form), never a re-serialization: republishing must carry the
+/// exact bytes, and the byte cap judges what the wire carried. Encrypted at
+/// rest like the banlist — a public-form list carries disclosed message keys.
+///
+/// Monotonic IN THE STATEMENT: fold persists and publish echoes race (the fold
+/// reads relay windows while an echo lands), and a read-check-then-write let a
+/// stale fold clobber a newer echo. Equal versions still write — a same-version
+/// fork's converged winner must be adoptable. Returns whether a row changed.
+pub fn set_community_pins(community_id: &str, channel_id: &str, content: &str, version: i64) -> Result<bool, String> {
+    let enc = enc_txt(content)?;
+    let conn = super::get_write_connection_guard_static()?;
+    let changed = conn
+        .execute(
+            "INSERT INTO community_pins (community_id, channel_id, content, version) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(community_id, channel_id) DO UPDATE SET
+                 content = excluded.content, version = excluded.version
+             WHERE excluded.version >= community_pins.version",
+            params![community_id, channel_id, enc, version],
+        )
+        .map_err(|e| format!("set pins: {e}"))?;
+    Ok(changed > 0)
+}
+
+/// A channel's stored Pin List head: `(raw content, version)`, `None` when no
+/// edition has ever folded for it.
+pub fn get_community_pins(community_id: &str, channel_id: &str) -> Result<Option<(String, i64)>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let row: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT content, version FROM community_pins WHERE community_id = ?1 AND channel_id = ?2",
+            params![community_id, channel_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("get pins: {e}"))?;
+    Ok(row.map(|(content, version)| (dec_txt(&content), version)))
+}

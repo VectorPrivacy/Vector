@@ -275,6 +275,19 @@ pub async fn persist_chat_event(
         return None;
     }
     persist_chat(channel_id, &outcome).await;
+    // §7 pin duties: a deleted pinned message wants the omitting edition, an
+    // edited one a refreshed proof bundle. Fired only from a PERSISTED outcome
+    // (the dedup/authorization gates above already passed); non-curators no-op.
+    match (&outcome, event) {
+        (ChatPersist::Removed(target), _) => {
+            super::service::spawn_pin_duty(channel_id, target, None);
+        }
+        (ChatPersist::Updated { .. }, ChatEvent::Edit { opened, target, .. }) => {
+            let target_hex = crate::simd::hex::bytes_to_hex_32(target);
+            super::service::spawn_pin_duty(channel_id, &target_hex, Some(opened.clone()));
+        }
+        _ => {}
+    }
     Some(outcome)
 }
 
