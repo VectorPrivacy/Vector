@@ -2405,8 +2405,7 @@ checksum = "f6b8866ec53810a9a4b3d434a29801e78c707430a9ae11c2db4b8b62bb9675a0"
 [[package]]
 name = "nostr"
 version = "0.45.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5dde8c76076d334409d86c2e1db3e97abe5deb8cb92744f939cbc1fa45bd69e7"
+source = "git+https://github.com/VectorPrivacy/nostr.git?branch=zeroize-secretkey-v0.45.1#416e5a5a97a225e17666ff2f96d13873e1a0bc23"
 dependencies = [
  "aes",
  "base64",
@@ -6652,8 +6651,3 @@ checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
 ]
-
-[[patch.unused]]
-name = "nostr"
-version = "0.45.0"
-source = "git+https://github.com/VectorPrivacy/nostr.git?branch=zeroize-secretkey-v0.45.0#382434f4ab541aa92684255039e113605cbb2971"
