@@ -3319,18 +3319,27 @@ impl VectorCore {
         let pk = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| VectorError::Other("invalid npub".into()))?;
         let hex = pk.to_hex();
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-        // Recompute the full list (latest-wins): drop any existing entry, then add if banning.
-        let mut list = crate::db::community::get_community_banlist(community_id).map_err(VectorError::Other)?;
-        list.retain(|h| h != &hex);
-        if banned {
-            list.push(hex);
-        }
         // Dual-stack: a v2 Ban is the CORD-04 §6 three-removal composition, in order —
         // the Banlist edition first (instant silence), then the Grant strip (authority
         // removal), then the Refounding read-cut (cryptographic severance).
         if community_id.len() == 64 {
             let cid = CommunityId(crate::simd::hex::hex_to_bytes_32(community_id));
             if let Some(Some(crate::community::ConcordProtocol::V2)) = crate::db::community::community_protocol(&cid).ok() {
+                // SYNC BEFORE COMPOSING: a banlist edition replaces the whole
+                // list on the wire, so the mutation must start from the freshest
+                // view — another moderator's ban this device hasn't folded yet
+                // would otherwise be silently erased by ours. Best-effort: on a
+                // dead network the cache (kept fresh by set_banlist's own echo)
+                // is still the best available basis.
+                Self::converge_v2_authority(&transport, community_id, &session).await;
+                // Recompute the full list from the freshest view (latest-wins):
+                // drop any existing entry, then add if banning — the ROTATION-
+                // aware mutation that preserves every other standing ban.
+                let mut list = crate::db::community::get_community_banlist(community_id).map_err(VectorError::Other)?;
+                list.retain(|h| h != &hex);
+                if banned {
+                    list.push(hex);
+                }
                 // Rotation barrier: a Ban's refound holds this lock for its whole
                 // multi-publish rotation while the row still names the OLD root. An
                 // unban/reban clicked in that window must WAIT and then load the
@@ -3350,11 +3359,37 @@ impl VectorCore {
                     community
                 };
                 if banned {
-                    crate::community::v2::service::refound_community(&transport, &community, &[pk]).await.map_err(VectorError::Other)?;
+                    // CORD-05 §5 gate (v1 parity, regressed in the v2 port): a
+                    // PUBLIC community — any live invite link — must NOT refound
+                    // on ban. The link refresh re-posts the bundle with the new
+                    // root behind the same URL, so the banned member re-fetches
+                    // and reads on: the rotation severs nothing and can strand
+                    // foreign-link joiners on a buried epoch. The Banlist does
+                    // all the real work in Public mode.
+                    if crate::community::v2::service::community_is_public(&transport, &community).await {
+                        crate::log_info!("[Ban] public community — banlist + grant strip only, no refound (CORD-05 §5)");
+                    } else if let Err(e) = crate::community::v2::service::refound_community(&transport, &community, &[pk]).await {
+                        // Best-effort escalation, NEVER the ban's verdict. The
+                        // banlist edition (instant silence at every honest
+                        // reader) and the grant strip ARE the ban; the refound's
+                        // §3 coverage gate demands the relay serve back heads
+                        // published milliseconds ago, so propagation lag makes
+                        // it fail-closed — and propagating that error out of
+                        // here once left every ban half-applied AND skipped the
+                        // converge below, so each next ban rebuilt from a stale
+                        // list and erased its predecessors.
+                        crate::log_warn!("[Ban] refound deferred (banlist + grant strip landed): {e}");
+                    }
                 }
                 Self::converge_v2_authority(&transport, community_id, &session).await;
                 return Ok(());
             }
+        }
+        // v1: same latest-wins mutation over the held list.
+        let mut list = crate::db::community::get_community_banlist(community_id).map_err(VectorError::Other)?;
+        list.retain(|h| h != &hex);
+        if banned {
+            list.push(hex);
         }
         let community = Self::load_community_hex(community_id)?;
         service::publish_banlist(&transport, &community, &list).await.map_err(VectorError::Other)

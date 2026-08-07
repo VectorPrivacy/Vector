@@ -3530,7 +3530,24 @@ pub async fn set_banlist<T: Transport + ?Sized>(transport: &T, community: &Commu
     super::roles::validate_banlist(banned)?;
     let content = super::roles::banlist_content_json(banned)?;
     let eid = super::derive::banlist_locator(community.id());
-    publish_control_edition(transport, community, &session, vsk::BANLIST, &eid, &content).await
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let entity_hex = crate::simd::hex::bytes_to_hex_32(&eid);
+    // The version this publish will chain to — mirrors publish_control_edition.
+    let version = match crate::db::community::get_edition_head(&cid_hex, &entity_hex)? {
+        Some((v, _)) => v + 1,
+        None => 1,
+    };
+    publish_control_edition(transport, community, &session, vsk::BANLIST, &eid, &content).await?;
+    // ECHO the published list into the local cache at once. Without this, the
+    // cache only moves on a successful control-plane fold — and a caller
+    // composing ban steps (banlist → grant strip → refound) re-reads the STALE
+    // list if any later step trips before the fold, so each new banlist
+    // edition it builds ERASES every ban since the last fold. Nineteen bans in
+    // production each overwrote their predecessor exactly this way.
+    if session.is_valid() {
+        let _ = crate::db::community::set_community_banlist(&cid_hex, banned, version as i64);
+    }
+    Ok(())
 }
 
 /// Edit the community metadata (vsk 0, CORD-02 §6). Gated on the reader side by
@@ -12862,5 +12879,44 @@ mod tests {
         assert!(!read.sealed);
         assert_eq!(read.pins.len(), 1);
         assert_eq!(read.pins[0].content, "sealed wisdom");
+    }
+
+    /// The production ban-eraser: set_banlist must ECHO its published list
+    /// into the local cache immediately. Before this, the cache moved only on
+    /// a successful control fold — and a composing caller (ban = banlist →
+    /// grant strip → refound) whose refound tripped re-read the stale list,
+    /// so each of 19 real bans erased its predecessors.
+    #[tokio::test]
+    async fn a_published_banlist_echoes_locally_before_any_fold() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Modtown", vec!["wss://r".into()], None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let spammer_a = "aa".repeat(32);
+        let spammer_b = "bb".repeat(32);
+
+        // Ban A. NO fold runs — the cache must hold the publish regardless.
+        set_banlist(&relay, &community, &[spammer_a.clone()]).await.unwrap();
+        assert_eq!(
+            crate::db::community::get_community_banlist(&cid_hex).unwrap(),
+            vec![spammer_a.clone()],
+            "the publish echoes without waiting for a fold"
+        );
+
+        // Ban B composes from the cache, exactly as the SDK does.
+        let mut list = crate::db::community::get_community_banlist(&cid_hex).unwrap();
+        list.push(spammer_b.clone());
+        set_banlist(&relay, &community, &list).await.unwrap();
+        let held = crate::db::community::get_community_banlist(&cid_hex).unwrap();
+        assert!(
+            held.contains(&spammer_a) && held.contains(&spammer_b),
+            "sequential bans UNION; the second must not erase the first: {held:?}"
+        );
+
+        // The wire agrees: a real fold confirms rather than regresses.
+        let session = crate::state::SessionGuard::capture();
+        follow_control(&relay, &community, &session).await.unwrap();
+        let folded = crate::db::community::get_community_banlist(&cid_hex).unwrap();
+        assert!(folded.contains(&spammer_a) && folded.contains(&spammer_b));
     }
 }
