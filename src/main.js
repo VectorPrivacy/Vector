@@ -7265,6 +7265,11 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
                 adjustSize();
                 // Force an auto-scroll, given soft-scrolling won't accurately work when the entire list has just rendered
                 scrollToBottom(domChatMessages, false);
+                // A render is where media starts resolving — hold the bottom through
+                // it. Load-driven arming alone misses a cold render that lands after
+                // the open's own hold expired, and the pin then releases on distance
+                // with nothing left to recover it.
+                holdChatBottom();
             }
         }
     } else {
@@ -8918,6 +8923,10 @@ async function openChat(contact) {
     }
     // Initial open lands on the newest message — the window bottom IS the live tail.
     if (CHAT_WINDOW_ENABLED) windowAtTail = true;
+    // A chat open is where the most media resolves at once, and every one of
+    // those loads grows the content below the fold — hold the bottom until the
+    // layout settles instead of finishing short of the newest message.
+    holdChatBottom();
     refreshChatEmptyState(); // empty community → show the "start of channel" marker
 
     // Drop a "New" divider above the first non-mine message after
@@ -13399,6 +13408,9 @@ const PIN_THRESHOLD_PX = 80;
 const BOTTOM_EPSILON_PX = 6;        // "true bottom" tolerance for clearing the latch
 const PROGRAMMATIC_SCROLL_MS = 120; // suppress user-scroll-up detection just after an app scroll
 let lastScrollTop = 0;
+// Content height at the previous pin evaluation, so growth beneath the view can be
+// told apart from the user moving away from the bottom.
+let _lastPinEvalHeight = 0;
 let _userScrolledAway = false;
 let _programmaticScrollUntil = 0;
 /** Mark a short window during which scroll events are the app's own (not the
@@ -13474,13 +13486,27 @@ function clearUnreadBelow() { setUnreadBelow(0); }
 function handleChatScrollIntent() {
     if (!strOpenChat || !domChatMessages) return;
     const scrollTop = domChatMessages.scrollTop;
-    const pxFromBottom = domChatMessages.scrollHeight - scrollTop - domChatMessages.clientHeight;
+    const scrollHeight = domChatMessages.scrollHeight;
+    const pxFromBottom = scrollHeight - scrollTop - domChatMessages.clientHeight;
     const isProgrammatic = Date.now() < _programmaticScrollUntil;
+    // Content grew and the view did NOT move up: the world got taller beneath us,
+    // which is never the user leaving the bottom.
+    const prevHeight = _lastPinEvalHeight;
+    _lastPinEvalHeight = scrollHeight;
+    const grewUnderUs = scrollHeight > prevHeight && scrollTop >= lastScrollTop;
 
     // User scrolled UP (and it wasn't us) → release and latch until they're
     // back at the true bottom. Drop-top compensations move scrollTop up too,
     // but they're wrapped in beginProgrammaticScroll, so isProgrammatic gates them out.
-    if (!isProgrammatic && scrollTop < lastScrollTop - 1) {
+    //
+    // A SHRINK clamp is not a scroll-up: switching to a shorter chat (or hiding
+    // rows) makes the engine pull scrollTop down on its own, outside any
+    // programmatic window. That latched "the user left" on chat-open, and the
+    // latch outlives the open — every later scroll-to-bottom then refused to run.
+    // A clamp always lands at the bottom, which is what separates it from a real
+    // scroll-up (that leaves real distance below).
+    const clampedByShrink = scrollHeight < prevHeight && pxFromBottom < BOTTOM_EPSILON_PX;
+    if (!isProgrammatic && scrollTop < lastScrollTop - 1 && !clampedByShrink) {
         _userScrolledAway = true;
     }
     // Returned to the true bottom → allow re-pin (genuine "glue to the live tail").
@@ -13494,7 +13520,16 @@ function handleChatScrollIntent() {
     revealUnreadFrontierIfReached();
 
     const wasPinned = chatPinnedToBottom;
-    chatPinnedToBottom = pxFromBottom < PIN_THRESHOLD_PX && !_userScrolledAway;
+    // Only the USER leaves the bottom. Distance alone used to release the pin, so
+    // media resolving after a chat-open — which drops hundreds of px in below the
+    // fold in one frame — blew past PIN_THRESHOLD_PX and silently released it,
+    // after which every scroll-to-bottom path refused to run and the chat sat
+    // short forever. So the pin also survives while the app is actively holding
+    // the bottom, and whenever the content simply grew beneath a view that didn't
+    // move up. A seek moves the view up, so it still releases normally.
+    chatPinnedToBottom =
+        (pxFromBottom < PIN_THRESHOLD_PX || chatBottomHoldPending() || (wasPinned && grewUnderUs))
+        && !_userScrolledAway;
     // User scrolled themselves back into pin range — clear the badge and
     // advance last_read so the OS unread indicator reflects reality. The
     // divider stays put until the chat is closed.
@@ -13517,6 +13552,9 @@ function softChatScroll() {
     // infinite down-window cascade. Stay put; the ↓ button is the way back to "now".
     if (CHAT_WINDOW_ENABLED && !isAtDataBottom()) return;
     scrollToBottom(domChatMessages, false);
+    // Whatever prompted this (a media load, a new message) may keep growing the
+    // content below us for a few frames — ride it down.
+    holdChatBottom();
 }
 
 window.onresize = adjustSize;
