@@ -2865,6 +2865,11 @@ body.chat-bg-disabled .chat-messages::before {
   text-decoration: underline;
   opacity: 1;
 }
+/* A repeat folded into the run's first line ("… 4 times"). The row stays in the
+   DOM so its id remains addressable; it just takes no space. */
+.msg-inline-timestamp.system-event-merged {
+  display: none;
+}
 
 /* "New" divider — same flexbox shape as inline timestamps but tinted with
    the active accent. Marks the boundary between read and unread messages. */

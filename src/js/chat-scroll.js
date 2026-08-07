@@ -207,6 +207,7 @@ function _windowDropBottom(count) {
     }
     windowBottomId = msgs[newEnd - 1]?.id || windowBottomId;
     _dedupeAdjacentDaySeparators();
+    _mergeAdjacentSystemEvents();
     return removed;
 }
 
@@ -245,8 +246,10 @@ function _windowDropTop(count) {
         }
     }
     windowTopId = firstKeptId || windowTopId;
-    // Rebuild date dividers (a dropped row may have orphaned a leading divider).
+    // Rebuild date dividers (a dropped row may have orphaned a leading divider),
+    // then recompute system-event runs the drop may have split or joined.
     _dedupeAdjacentDaySeparators();
+    _mergeAdjacentSystemEvents();
 
     if (!firstKept) return droppedHeightSum;
     // Exact removed height from the kept row's offsetTop delta.

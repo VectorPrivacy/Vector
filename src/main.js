@@ -3340,6 +3340,9 @@ async function setupRustListeners() {
                     // find + repaint this line in place when a stranger's name lands.
                     systemElement.id = event_id;
                     domChatMessages.appendChild(systemElement);
+                    // A repeat of the line above folds into its count instead of
+                    // stacking a new row.
+                    _mergeAdjacentSystemEvents();
                     softChatScroll();
                     if (CHAT_WINDOW_ENABLED) { _windowReseatAnchorsFromDom(); windowTrimTopIfOver(); }
                 }
@@ -6853,6 +6856,7 @@ function _derezRowDom(domMsg, followingRow) {
     // orphan left by this removal is dropped (and nothing left misplaced).
     domMsg.remove();
     _dedupeAdjacentDaySeparators();
+    _mergeAdjacentSystemEvents();
 }
 
 /** A message just vanished (deletion or self-destruct) — bail out of any UI
@@ -7244,8 +7248,10 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
 
         // Rebuild date separators from the final `.dmsg` order so any
         // orphans or misplaced separators from per-message inserts get
-        // healed in one pass.
+        // healed in one pass, then collapse repeated system events (runs
+        // are read off the final order, dividers included).
         _dedupeAdjacentDaySeparators();
+        _mergeAdjacentSystemEvents();
 
         // Auto-scroll on new messages (if the user hasn't scrolled up, or on manual chat open).
         // Gated on the intent-aware pin, NOT raw distance: a user resting just below the
@@ -7373,6 +7379,58 @@ function _dedupeAdjacentDaySeparators() {
     }
 }
 
+/** System events that collapse when they repeat back-to-back. Membership is
+ *  deliberately absent: WHO joined or left is the content, so those never merge. */
+const MERGEABLE_SYSTEM_EVENTS = new Set([
+    SystemEventType.WallpaperChanged,
+    SystemEventType.WallpaperRemoved,
+    SystemEventType.PinsModified,
+]);
+
+/**
+ * Collapse a run of the same system event by the same person into one line
+ * ("JSKitty modified the Pins 4 times"). Every repeat keeps its row — ids stay
+ * addressable for the dedup guard, window bookkeeping and the profile
+ * retro-resolver — so the extras are hidden rather than removed. Anything else
+ * between two events (a message, a date divider, a different actor) breaks the
+ * run, which is also what keeps a merge inside one day.
+ *
+ * Recomputed from scratch each call, so a run that later splits restores its
+ * individual lines.
+ */
+function _mergeAdjacentSystemEvents(container = domChatMessages) {
+    if (!container) return;
+    let run = [];
+    const flush = () => {
+        if (!run.length) return;
+        const suffix = run[0].querySelector('.system-event-suffix');
+        if (suffix) {
+            const type = parseInt(run[0].dataset.systemEventType, 10);
+            suffix.textContent = systemEventSuffix(type) + (run.length > 1 ? ` ${run.length} times` : '');
+        }
+        for (let i = 1; i < run.length; i++) run[i].classList.add('system-event-merged');
+        run = [];
+    };
+    for (const child of container.children) {
+        const type = parseInt(child.dataset?.systemEventType, 10);
+        if (!Number.isFinite(type) || !MERGEABLE_SYSTEM_EVENTS.has(type)) {
+            flush();
+            continue;
+        }
+        child.classList.remove('system-event-merged'); // recompute from a clean slate
+        const head = run[0];
+        if (head
+            && head.dataset.systemEventType === child.dataset.systemEventType
+            && head.dataset.systemEventNpub === child.dataset.systemEventNpub) {
+            run.push(child);
+        } else {
+            flush();
+            run = [child];
+        }
+    }
+    flush();
+}
+
 function insertTimestamp(timestamp, parent = null) {
     const pTimestamp = document.createElement('p');
     // `.date-divider` distinguishes day-boundary timestamps from system
@@ -7429,7 +7487,12 @@ function insertSystemEvent(content, parent = null, npub = null, eventType = null
         nameSpan.textContent = systemEventName(npub);
         inner.appendChild(avatar);
         inner.appendChild(nameSpan);
-        inner.appendChild(document.createTextNode(systemEventSuffix(eventType)));
+        // The suffix owns its own element so the repeat-merge pass can rewrite it
+        // ("… 4 times") without disturbing the name affordance beside it.
+        const suffixSpan = document.createElement('span');
+        suffixSpan.className = 'system-event-suffix';
+        suffixSpan.textContent = systemEventSuffix(eventType);
+        inner.appendChild(suffixSpan);
         // Direct listener (system events are few — no delegation needed) so the affordance works
         // regardless of which container the line is appended to. Opens the same mini-profile as a
         // chat name/avatar tap. stopPropagation so it doesn't double-fire any ancestor delegate.
@@ -7438,6 +7501,9 @@ function insertSystemEvent(content, parent = null, npub = null, eventType = null
             showMiniProfile(npub, nameSpan);
         });
         pSystemEvent.appendChild(inner);
+        // Merge keys, read by `_mergeAdjacentSystemEvents`.
+        pSystemEvent.dataset.systemEventType = String(eventType);
+        pSystemEvent.dataset.systemEventNpub = npub;
     } else {
         pSystemEvent.textContent = content;
     }
