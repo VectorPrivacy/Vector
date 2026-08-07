@@ -19,7 +19,7 @@ readme = "README.md"
 # until then the `path` wins for local builds.
 vector-core = { path = "../vector-core", version = "0.7.1", default-features = false }
 # Exact-pinned to match vector-core — the nostr alphas are not inter-compatible.
-nostr-sdk = "=0.45.0"
+nostr-sdk = "=0.45.1"
 tokio = { version = "1.49", features = ["rt", "rt-multi-thread", "macros", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

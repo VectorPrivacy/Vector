@@ -24,10 +24,10 @@ categories = ["network-programming", "cryptography", "asynchronous"]
 # consumer resolve a MIXED set, and these crates share types across their
 # boundaries, so a mismatched sibling fails to compile. Bump all four together
 # or not at all.
-nostr = { version = "=0.45.0", features = ["nip04", "nip06", "nip44", "nip46", "nip59", "rand", "os-rng"] }
-nostr-sdk = "=0.45.0"
+nostr = { version = "=0.45.1", features = ["nip04", "nip06", "nip44", "nip46", "nip59", "rand", "os-rng"] }
+nostr-sdk = "=0.45.1"
 nostr-blossom = "=0.45.0"
-nostr-connect = "=0.45.0"
+nostr-connect = "=0.45.1"
 # Blossom blob hashing. Must track nostr-blossom's own bitcoin_hashes major, or
 # the Sha256Hash we hand it is a different type. `hex` is explicit because it
 # gates Display/FromStr on the hash: the `std` default only forwards to it
