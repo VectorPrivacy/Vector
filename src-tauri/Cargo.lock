@@ -5133,8 +5133,8 @@ dependencies = [
 
 [[package]]
 name = "nostr"
-version = "0.45.0"
-source = "git+https://github.com/VectorPrivacy/nostr.git?branch=zeroize-secretkey-v0.45.0#072a8e49a4bb8f36233c3217099afeaa34f5a830"
+version = "0.45.1"
+source = "git+https://github.com/VectorPrivacy/nostr.git?branch=zeroize-secretkey-v0.45.1#416e5a5a97a225e17666ff2f96d13873e1a0bc23"
 dependencies = [
  "aes",
  "base64 0.22.1",
@@ -5172,9 +5172,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-connect"
-version = "0.45.0"
+version = "0.45.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ab2d08f5611af6679d9aeb4c34560cbc903604c29994334505b1da02e365673"
+checksum = "aca70234854c0557b313422da709f157bf70eb601cb34b13f7fd868e52ea1600"
 dependencies = [
  "async-utility",
  "futures-core",
@@ -5207,9 +5207,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-sdk"
-version = "0.45.0"
+version = "0.45.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "359881fbaded2d19a5003609673744b8b68c4973817598eb0e262d049ec9c3f3"
+checksum = "26c86342f367bd9b173ec4a697e936e3a82d6dad5b4aa06c0d35d9b4f88a8e72"
 dependencies = [
  "async-utility",
  "async-wsocket",
@@ -11112,7 +11112,7 @@ dependencies = [
 
 [[package]]
 name = "vector-core"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "aes",
  "aes-gcm",
