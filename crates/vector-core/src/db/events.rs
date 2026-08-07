@@ -582,6 +582,34 @@ pub async fn delete_event(event_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Record a durable delete tombstone for `event_id`. The events row is gone after a
+/// delete, so this is the only thing that lets ingest refuse a wrap a relay
+/// re-serves across restarts (NIP-09 is best-effort — relays ignore it freely).
+pub fn add_message_tombstone(event_id: &str) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    conn.execute(
+        "INSERT OR IGNORE INTO deleted_messages (event_id, deleted_at) VALUES (?1, ?2)",
+        rusqlite::params![event_id, now],
+    ).map_err(|e| format!("Failed to save delete tombstone: {}", e))?;
+    Ok(())
+}
+
+/// Every recorded delete tombstone, for seeding the in-session set at account init.
+pub fn load_message_tombstones() -> Result<Vec<String>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn.prepare("SELECT event_id FROM deleted_messages")
+        .map_err(|e| format!("Failed to prepare tombstone query: {}", e))?;
+    let ids = stmt.query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("Failed to query tombstones: {}", e))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(ids)
+}
+
 /// The stored author (npub) of an event, or `None` if the row (or DB) is absent. Lets the
 /// out-of-window moderation-hide path authorize against a paged-out message's real author.
 pub fn event_author(event_id: &str) -> Result<Option<String>, String> {
@@ -2501,6 +2529,28 @@ mod tests {
     // The filter keys on the POSITIVE tombstone, never STATE absence — an LRU-evicted (but
     // not deleted) message MUST still persist and ledger, or archive sync could silently
     // drop the exact history it exists to persist.
+    #[tokio::test]
+    async fn a_delete_tombstone_survives_a_restart() {
+        // NIP-09 is best-effort: a relay that ignored it re-serves the wrap days
+        // later. The events row is gone by then and the in-session tombstone set
+        // died with the process — only the durable row lets ingest keep refusing.
+        let (_tmp, _guard) = init_test_db();
+        let msg = Message {
+            id: "resurrect-me".into(), content: "note".into(), at: 1_000_000,
+            mine: true, ..Default::default()
+        };
+        save_message("npub1notes", &msg).await.unwrap();
+        add_message_tombstone("resurrect-me").unwrap();
+        delete_event("resurrect-me").await.unwrap();
+
+        // Simulated restart/swap: the in-session set dies...
+        crate::state::bump_session_generation();
+        assert!(!crate::state::was_message_deleted("resurrect-me"), "session set cleared");
+        // ...and account init re-seeds the refusal from the durable rows.
+        crate::state::seed_message_tombstones(load_message_tombstones().unwrap());
+        assert!(crate::state::was_message_deleted("resurrect-me"), "the durable tombstone re-seeds");
+    }
+
     #[tokio::test]
     async fn buffered_message_deleted_before_flush_never_persists() {
         let (_tmp, _guard) = init_test_db();

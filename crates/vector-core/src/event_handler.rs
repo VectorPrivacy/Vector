@@ -366,6 +366,13 @@ pub async fn prepare_event(
         return PreparedEvent::DedupSkip { wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at };
     }
 
+    // The persistent ledger too, not just the events table: a DELETED message has no
+    // events row, so without this a wrap re-served after a restart (relays ignore
+    // NIP-09 freely) re-processes cleanly and resurrects the message.
+    if crate::db::wrappers::processed_wrapper_exists(&wrapper_event_id_bytes) {
+        return PreparedEvent::DedupSkip { wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at };
+    }
+
     // Unwrap gift wrap (CPU-bound ECDH + ChaCha20Poly1305)
     let unwrap_start = std::time::Instant::now();
     let signer = match crate::signer::active_signer() {
@@ -938,6 +945,14 @@ async fn commit_dm_message(
             &wrapper_event_id_bytes, wrapper_created_at, crate::db::wrappers::TRANSPORT_NIP17,
         );
     };
+    // A tombstoned (user-deleted) message must never re-commit, whatever wrap
+    // carried it — a retry wrap this device never ledgered can still deliver
+    // the deleted rumor. Ledger the wrap so it stops re-delivering.
+    if crate::state::was_message_deleted(&msg.id) {
+        ledger_wrapper();
+        return false;
+    }
+
     // Dedup: check if message already in DB
     if let Ok(true) = crate::db::events::message_exists_in_db(&msg.id) {
         // Already in DB — try to backfill wrapper_event_id
@@ -1146,8 +1161,13 @@ async fn commit_deletion(
         None => return false,
     };
     // Tombstone BEFORE the row delete: the target may sit unflushed in a sync batch buffer
-    // (delete_event below would no-op) — the flush consults this and drops it.
+    // (delete_event below would no-op) — the flush consults this and drops it. The durable
+    // row keeps the refusal across restarts: the sender's NIP-09 may never land on every
+    // relay, and this side must not resurrect what it already agreed to drop.
     crate::state::note_message_deleted(target_event_id);
+    if let Err(e) = crate::db::events::add_message_tombstone(target_event_id) {
+        crate::log_warn!("[NIP-17 cooperative-delete] tombstone write failed: {}", e);
+    }
 
     // Nuke any cached attachment files for this message — sender asked
     // for the message to disappear, and a downloaded file the receiver

@@ -876,6 +876,20 @@ pub fn init_database(npub: &str) -> Result<(), String> {
     // this also satisfies the "run optimize after CREATE INDEX" guidance for the migrations above.
     let _ = conn.execute_batch("PRAGMA optimize=0x10002;");
 
+    // Seed the in-session delete-tombstone set from this account's durable rows,
+    // so ingest keeps refusing deleted messages across restarts (the swap's
+    // session bump cleared the set; a fresh boot starts empty).
+    {
+        let mut stmt = conn.prepare("SELECT event_id FROM deleted_messages")
+            .map_err(|e| format!("tombstone seed prepare: {}", e))?;
+        let ids: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("tombstone seed query: {}", e))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+        crate::state::seed_message_tombstones(ids);
+    }
+
     // MLS is fully removed. Migration 41 drops the relational tables, but the OpenMLS/MDK
     // crypto store lived in a SEPARATE per-account file (`<account>/mls/`) that no migration
     // can reach. Purge it here: it's dead weight (can run to hundreds of MB) and, worse,

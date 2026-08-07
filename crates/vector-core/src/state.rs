@@ -392,6 +392,15 @@ pub fn note_message_deleted(message_id: &str) {
     }
 }
 
+/// Seed the tombstone set from the account's durable `deleted_messages` rows,
+/// making `was_message_deleted` survive restarts and account swaps. Called at
+/// account DB init (the set was cleared by the session bump on swap).
+pub fn seed_message_tombstones(ids: Vec<String>) {
+    if let Ok(mut set) = DELETED_MESSAGE_TOMBSTONES.lock() {
+        set.extend(ids);
+    }
+}
+
 /// Whether `message_id` was deleted this session.
 pub fn was_message_deleted(message_id: &str) -> bool {
     DELETED_MESSAGE_TOMBSTONES.lock().map(|s| s.contains(message_id)).unwrap_or(false)

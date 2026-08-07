@@ -141,7 +141,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 84;
+pub const HIGHEST_MIGRATION_ID: u32 = 85;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1224,6 +1224,22 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("migration 84: {}", e))?;
+        Ok(())
+    })?;
+
+    // Durable delete tombstones: a deleted message's row is GONE, so the ingest
+    // dedup can't refuse a wrap a relay re-serves after ignoring our NIP-09 —
+    // across a restart the in-session tombstone set is empty and the message
+    // resurrects. One row per deleted message id, forever.
+    run_atomic_migration(conn, 85, "Deleted-message tombstones", |tx| {
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS deleted_messages (
+                event_id   TEXT PRIMARY KEY,
+                deleted_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .map_err(|e| format!("migration 85: {}", e))?;
         Ok(())
     })?;
 

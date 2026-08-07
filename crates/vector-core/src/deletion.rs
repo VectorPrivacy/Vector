@@ -81,6 +81,15 @@ pub async fn delete_own_dm(rumor_id: &EventId) -> Result<DeleteOutcome, String> 
     // Session captured for the relay-nuke loop — without this, an
     // account-A wrap-key purge could land in account B's nip17_keys.
     let session = crate::state::SessionGuard::capture();
+    // Durable tombstone FIRST: NIP-09 is best-effort and relays ignore it
+    // freely — without this, a surviving wrap re-served after a restart
+    // re-ingests cleanly (the events row is gone, the session set is empty)
+    // and the message resurrects, now key-less and only Limited-deletable.
+    let rumor_hex = rumor_id.to_hex();
+    if let Err(e) = crate::db::events::add_message_tombstone(&rumor_hex) {
+        crate::log_warn!("[NIP-17 delete] tombstone write failed: {}", e);
+    }
+    crate::state::note_message_deleted(&rumor_hex);
     let keys = crate::db::nip17_keys::get_wrap_keys_for_rumor(rumor_id)
         .unwrap_or_default();
 
