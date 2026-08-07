@@ -3728,10 +3728,13 @@ body.chat-bg-disabled .chat-messages::before {
   line-height: inherit;
   resize: none;
   overflow: hidden;
-  height: 20px;
+  /* Collapsed box = one full 24px line + balanced padding, 45px total to match
+     the row's buttons. The content box MUST fit the line: a shorter box leaves
+     hidden overflow, and a textarea scrolls its own overflow on caret moves and
+     drags even under overflow:hidden — the text rides 0-4px off center. */
+  height: 24px;
   max-height: 150px;
-  padding: 10px;
-  padding-left: 0;
+  padding: 10.5px 10px 10.5px 0;
   background: transparent !important;
 }
 
