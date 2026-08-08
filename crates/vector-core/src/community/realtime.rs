@@ -319,6 +319,13 @@ pub async fn dispatch_event(
 
     let outcome = {
         let mut state = crate::state::STATE.lock().await;
+        // Waiting on the lock is an await: a swap landing here would judge this
+        // event's authority against the NEW account's synced grant heads (an
+        // uncited hide is honored or dropped on the wrong account's state) and
+        // write the result into the wrong STATE.
+        if !session.is_valid() {
+            return;
+        }
         inbound::process_incoming(&mut state, &event, &channel, &my_pk)
     };
     let chat_id = channel.id.to_hex();
