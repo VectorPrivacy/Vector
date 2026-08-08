@@ -3241,7 +3241,7 @@ pub fn republish_community_list_durable(just_joined: Option<crate::community::Co
         return;
     }
     let session = SessionGuard::capture();
-    tokio::spawn(async move {
+    crate::db::spawn_bound(async move {
         for (attempt, wait) in LIST_REPUBLISH_BACKOFF_SECS.iter().enumerate() {
             if !session.is_valid() {
                 return;
@@ -6818,7 +6818,7 @@ pub(crate) fn spawn_pin_duty(channel_hex: &str, target_rumor_hex: &str, edit: Op
     let channel_hex = channel_hex.to_string();
     let target = target_rumor_hex.to_string();
     let session = SessionGuard::capture();
-    tokio::spawn(async move {
+    crate::db::spawn_bound(async move {
         let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
         let _ = run_pin_duty(&transport, &channel_hex, &target, edit, session).await;
     });

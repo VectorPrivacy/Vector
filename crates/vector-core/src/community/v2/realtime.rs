@@ -370,7 +370,7 @@ fn prime_auth_in_background(client: &Client, relays: Vec<String>) {
     }
     let client = client.clone();
     let session = crate::state::SessionGuard::capture();
-    tokio::spawn(async move {
+    crate::db::spawn_bound(async move {
         if session.is_valid() {
             super::streamauth::prime_auth(&client, &relays).await;
         }
@@ -605,7 +605,7 @@ pub fn spawn_follow_worker(handler: Arc<dyn InboundEventHandler>) {
     }
     *V2_FOLLOW_TX.lock().unwrap() = Some(tx);
     let session = SessionGuard::capture();
-    tokio::spawn(async move {
+    crate::db::spawn_bound(async move {
         while let Some(id) = rx.recv().await {
             if !session.is_valid() {
                 break;

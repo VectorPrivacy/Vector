@@ -791,7 +791,7 @@ impl VectorCore {
         // device (or this one) can later revoke. Bail on account swap.
         let self_wrap_client = client.clone();
         let self_wrap_session = state::SessionGuard::capture();
-        tokio::spawn(async move {
+        db::spawn_bound(async move {
             if !self_wrap_session.is_valid() { return; }
             if let Ok(self_outcome) = inbox_relays::send_gift_wrap_retained(
                 &self_wrap_client, &my_public_key, rumor, [],
@@ -914,7 +914,7 @@ impl VectorCore {
 
         let self_wrap_client = client.clone();
         let self_wrap_session = state::SessionGuard::capture();
-        tokio::spawn(async move {
+        db::spawn_bound(async move {
             if !self_wrap_session.is_valid() { return; }
             let Ok(signer) = signer::active_signer() else { return };
             if let Ok(wrap) = nostr_sdk::prelude::GiftWrapBuilder::new(my_public_key, rumor)
@@ -1301,7 +1301,7 @@ impl VectorCore {
             } else {
                 let seed_session = state::SessionGuard::capture();
                 let seed_community = community.clone();
-                tokio::spawn(async move {
+                db::spawn_bound(async move {
                     if !seed_session.is_valid() {
                         return;
                     }
@@ -2722,7 +2722,7 @@ impl VectorCore {
                     } else {
                         let session = state::SessionGuard::capture();
                         let c2 = community.clone();
-                        tokio::spawn(async move {
+                        db::spawn_bound(async move {
                             if !session.is_valid() {
                                 return;
                             }
@@ -3782,7 +3782,7 @@ impl VectorCore {
                         .filter_map(|(_relay, res)| async move { res.ok() })
                         .map(move |event| {
                             let c = client_clone.clone();
-                            tokio::spawn(async move {
+                            db::spawn_bound(async move {
                                 event_handler::prepare_event(event, &c, my_pk).await
                             })
                         })
@@ -3989,7 +3989,7 @@ impl VectorCore {
         if let Some(monitor) = client.monitor() {
             let mut rx = monitor.subscribe();
             let session = state::SessionGuard::capture();
-            tokio::spawn(async move {
+            db::spawn_bound(async move {
                 // Debounce reconnect bursts: StatusChanged is per-relay, but one catch-up queries the
                 // whole pool — so coalesce Connected transitions within a short window into one resync.
                 let mut last_resync: Option<std::time::Instant> = None;
@@ -4020,7 +4020,7 @@ impl VectorCore {
         {
             let client_health = client.clone();
             let session = state::SessionGuard::capture();
-            tokio::spawn(async move {
+            db::spawn_bound(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await; // warm-up
                 loop {
                     if !session.is_valid() {

@@ -1250,16 +1250,10 @@ mod pool_generation_tests {
             ("src/blossom.rs", "upload byte-pump — bytes already in hand, no account state"),
         ];
 
-        /// The migration worklist: files whose spawns still resolve the account
-        /// late. NOT an exemption — a ratchet. Delete a line as you convert its
-        /// file, and this test makes sure the list only ever shrinks. When it is
-        /// empty, no task in the crate can be redirected by an account switch
-        /// and the SessionGuard checks that compensate for it can go.
-        const PENDING_CONVERSION: &[&str] = &[
-        "src/community/v2/realtime.rs",
-        "src/community/v2/service.rs",
-        "src/lib.rs",
-        ];
+        /// Empty, and it stays that way: every task in the crate now carries the
+        /// account it started under. A file may only be added back with a
+        /// deliberate edit to this list, which is the point.
+        const PENDING_CONVERSION: &[&str] = &[];
 
         let mut offenders: Vec<String> = Vec::new();
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
