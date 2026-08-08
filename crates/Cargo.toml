@@ -2,6 +2,23 @@
 members = ["vector-core", "vector-cli", "vector-agent", "concord-cli", "vector-sdk"]
 resolver = "2"
 
+# Dependencies compile OPTIMIZED even in dev/test; our own crates stay unoptimized
+# so incremental builds and debug info are unaffected. The suite is dominated by
+# crypto that lives entirely in dependencies — Argon2id at 150MB/10 iterations, plus
+# the AEADs — and unoptimized those run orders of magnitude slower than shipped code.
+# Same code, same results: this changes compilation, never behaviour.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.test.package."*"]
+opt-level = 3
+
+# Our own crates under test: the vault stress tests (500-1000 iterations of real
+# AEAD work) are OUR code, so the dependency override above can't reach them.
+# opt-level 1 keeps compiles quick while removing the worst of the debug overhead.
+[profile.test]
+opt-level = 1
+
 [patch.crates-io]
 # nostr SDK's SecretKey Drop uses non_secure_erase which the compiler can optimize away.
 # Patched to use zeroize (volatile writes) so secret key bytes are guaranteed cleared from the stack.

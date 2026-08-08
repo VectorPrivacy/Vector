@@ -4269,7 +4269,7 @@ mod facade_tests {
             s
         };
         std::fs::create_dir_all(tmp.path().join(&acct)).unwrap();
-        crate::db::set_app_data_dir(tmp.path().to_path_buf());
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
         crate::db::set_current_account(acct.clone()).unwrap();
         crate::db::init_database(&acct).unwrap();
         let _ = crate::state::take_nostr_client();

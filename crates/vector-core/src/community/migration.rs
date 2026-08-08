@@ -836,7 +836,7 @@ mod tests {
         let acct = Keys::generate().public_key().to_bech32().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(&acct)).unwrap();
-        crate::db::set_app_data_dir(tmp.path().to_path_buf());
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
         crate::db::set_current_account(acct.clone()).unwrap();
         crate::db::init_database(&acct).unwrap();
 

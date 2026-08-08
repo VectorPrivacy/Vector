@@ -47,6 +47,23 @@ pub fn set_app_data_dir(path: PathBuf) {
     let _ = APP_DATA_DIR.set(path);
 }
 
+/// The data dir every test must use — ONE per process, alive for its whole life.
+///
+/// `APP_DATA_DIR` is set-once, so in a test binary only the first
+/// `set_app_data_dir` ever takes effect: every later helper silently kept using
+/// the FIRST test's `TempDir`, which was deleted the moment that test returned,
+/// leaving the rest to build account dirs under a path that no longer existed.
+/// Which test drew the short straw depended on thread scheduling, so the failures
+/// wandered. Tests already isolate by account subdirectory, so sharing the root is
+/// safe; what they cannot share is a lifetime owned by one of them.
+#[cfg(test)]
+pub(crate) fn shared_test_data_dir() -> &'static std::path::Path {
+    static DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+    // Never dropped: process-lifetime by construction, so no test can pull it out
+    // from under another. The OS reclaims it after the run.
+    DIR.get_or_init(|| tempfile::tempdir().expect("test data dir")).path()
+}
+
 pub fn get_app_data_dir() -> Result<&'static PathBuf, String> {
     APP_DATA_DIR.get().ok_or_else(|| "App data directory not initialized".to_string())
 }
@@ -1199,7 +1216,7 @@ mod downgrade_tests {
             acct.push(B[v % 32] as char);
             v = v / 32 + 7;
         }
-        set_app_data_dir(tmp.path().to_path_buf());
+        set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
         set_current_account(acct.clone()).unwrap();
         (tmp, guard, acct)
     }

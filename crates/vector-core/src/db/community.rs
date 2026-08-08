@@ -2680,7 +2680,7 @@ mod tests {
         let n = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let account = make_test_npub(n);
         std::fs::create_dir_all(tmp.path().join(&account)).unwrap();
-        crate::db::set_app_data_dir(tmp.path().to_path_buf());
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
         crate::db::set_current_account(account.clone()).unwrap();
         crate::db::init_database(&account).unwrap();
         (tmp, guard)

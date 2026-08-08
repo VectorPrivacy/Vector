@@ -6606,7 +6606,7 @@ mod tests {
             crate::db::close_database();
             crate::db::clear_id_caches();
             let tmp = tempfile::tempdir().unwrap();
-            crate::db::set_app_data_dir(tmp.path().to_path_buf());
+            crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
 
             let mk = || {
                 let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -6652,7 +6652,7 @@ mod tests {
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let acct = account_name(n);
         std::fs::create_dir_all(tmp.path().join(&acct)).unwrap();
-        crate::db::set_app_data_dir(tmp.path().to_path_buf());
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
         crate::db::set_current_account(acct.clone()).unwrap();
         crate::db::init_database(&acct).unwrap();
         let _ = crate::state::take_nostr_client();
@@ -9533,7 +9533,7 @@ mod tests {
         crate::db::close_database();
         crate::db::clear_id_caches();
         let tmp = tempfile::tempdir().unwrap();
-        crate::db::set_app_data_dir(tmp.path().to_path_buf());
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
 
         // Throwaway (or bring-your-own via env for a re-run against the same accounts).
         let a = std::env::var("VECTOR_E2E_NSEC_A").ok().and_then(|n| Keys::parse(&n).ok()).unwrap_or_else(Keys::generate);
@@ -12331,7 +12331,7 @@ mod tests {
             println!("[smoke] OWNER nsec (throwaway — do NOT reuse): {}", keys.secret_key().to_bech32().unwrap());
         }
         std::fs::create_dir_all(tmp.path().join(&npub)).unwrap();
-        crate::db::set_app_data_dir(tmp.path().to_path_buf());
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
         crate::db::set_current_account(npub.clone()).unwrap();
         crate::db::init_database(&npub).unwrap();
         crate::state::MY_SECRET_KEY.store_from_keys(&keys, &[]);
