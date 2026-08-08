@@ -924,13 +924,11 @@ mod xform_tests {
         }
     }
 
-    /// Sweep parity: every encrypted community_public_invites column must survive
-    /// enable → rekey → disable (a column missed by the sweep garbles on the first rekey).
-    #[test]
-    fn public_invite_label_survives_enable_rekey_disable() {
-        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+    /// The Concord tables exactly as the sweep addresses them (columns it does
+    /// not touch omitted).
+    fn migrate_test_schema(conn: &rusqlite::Connection) {
         conn.execute_batch(
-            "CREATE TABLE communities (community_id TEXT, server_root_key BLOB, name TEXT, relays TEXT, description TEXT, icon TEXT, banner TEXT, banlist TEXT, owner_attestation TEXT, roles TEXT, invite_registry TEXT);
+            "CREATE TABLE communities (community_id TEXT, server_root_key BLOB, name TEXT, relays TEXT, description TEXT, icon TEXT, banner TEXT, banlist TEXT, owner_attestation TEXT, roles TEXT, invite_registry TEXT, owner_pubkey TEXT, owner_salt TEXT, meta_extra TEXT, control_pk TEXT, control_root BLOB);
              CREATE TABLE community_channels (channel_id TEXT, channel_key BLOB, name TEXT);
              CREATE TABLE community_epoch_keys (key BLOB);
              CREATE TABLE community_message_keys (outer_event_id TEXT, ephemeral_secret BLOB, relays TEXT);
@@ -938,6 +936,55 @@ mod xform_tests {
              CREATE TABLE community_public_invites (token TEXT, url TEXT, label TEXT);
              CREATE TABLE community_invite_link_sets (creator TEXT, locators TEXT);",
         ).unwrap();
+    }
+
+    /// Sweep parity for the v2 columns: the owner commitment and the CORD-02 §2
+    /// control pair must survive enable → rekey → disable. A missed column stays
+    /// under the old key — the pair silently drops to read-only on load, and a
+    /// garbled owner commitment fails the whole v2 load.
+    #[test]
+    fn v2_control_pair_survives_enable_rekey_disable() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        migrate_test_schema(&conn);
+        let control_root: Vec<u8> = vec![0x5Au8; 32];
+        conn.execute(
+            "INSERT INTO communities (community_id, server_root_key, name, relays, banlist, roles, invite_registry, owner_pubkey, owner_salt, meta_extra, control_pk, control_root)
+             VALUES (?1, ?2, 'n', '[]', '[]', '{}', '[]', ?3, ?4, '{\"custom\":null,\"extra\":{}}', ?5, ?6)",
+            rusqlite::params!["cc".repeat(32), vec![0x11u8; 32], "ab".repeat(32), "cd".repeat(32), "ef".repeat(32), control_root],
+        ).unwrap();
+        let read = |c: &rusqlite::Connection| -> (String, String, Vec<u8>) {
+            c.query_row("SELECT owner_pubkey, control_pk, control_root FROM communities", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            }).unwrap()
+        };
+
+        let tx = conn.transaction().unwrap();
+        encrypt_community_in_tx(&tx, &K).unwrap();
+        tx.commit().unwrap();
+        let (owner_pk, control_pk, root) = read(&conn);
+        assert_ne!(owner_pk, "ab".repeat(32), "owner commitment must be wrapped after enable");
+        assert_ne!(control_pk, "ef".repeat(32), "control_pk must be wrapped after enable");
+        assert_ne!(root, vec![0x5Au8; 32], "control_root must be wrapped after enable");
+
+        let tx = conn.transaction().unwrap();
+        rekey_community_in_tx(&tx, &K, &K2).unwrap();
+        tx.commit().unwrap();
+
+        let tx = conn.transaction().unwrap();
+        decrypt_community_in_tx(&tx, &K2).unwrap();
+        tx.commit().unwrap();
+        let (owner_pk, control_pk, root) = read(&conn);
+        assert_eq!(owner_pk, "ab".repeat(32), "owner commitment survives enable → rekey → disable");
+        assert_eq!(control_pk, "ef".repeat(32), "control_pk survives enable → rekey → disable");
+        assert_eq!(root, vec![0x5Au8; 32], "control_root survives enable → rekey → disable");
+    }
+
+    /// Sweep parity: every encrypted community_public_invites column must survive
+    /// enable → rekey → disable (a column missed by the sweep garbles on the first rekey).
+    #[test]
+    fn public_invite_label_survives_enable_rekey_disable() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        migrate_test_schema(&conn);
         conn.execute(
             "INSERT INTO community_public_invites (token, url, label) VALUES (?1, ?2, ?3)",
             rusqlite::params!["ab".repeat(32), "https://vectorapp.io/invite#x", "Reddit"],
@@ -979,27 +1026,35 @@ fn migrate_community_in_tx(
     enc: Option<&[u8; 32]>,
     dec: Option<&[u8; 32]>,
 ) -> Result<(), String> {
-    // communities: 1 secret BLOB + identifying text (some nullable).
-    let rows: Vec<(String, Vec<u8>, String, String, Option<String>, Option<String>, Option<String>, String, Option<String>, String, String)> = {
+    // communities: 2 secret BLOBs + identifying text (some nullable). Every
+    // encrypted column save_community / save_community_v2 writes MUST appear
+    // here, or it stays under the old key after a rekey and garbles on read.
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(String, Vec<u8>, String, String, Option<String>, Option<String>, Option<String>, String, Option<String>, String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<Vec<u8>>)> = {
         let mut stmt = tx.prepare(
-            "SELECT community_id, server_root_key, name, relays, description, icon, banner, banlist, owner_attestation, roles, invite_registry FROM communities",
+            "SELECT community_id, server_root_key, name, relays, description, icon, banner, banlist, owner_attestation, roles, invite_registry, owner_pubkey, owner_salt, meta_extra, control_pk, control_root FROM communities",
         ).map_err(|e| format!("prepare communities: {e}"))?;
         let mapped = stmt.query_map([], |r| Ok((
             r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?,
             r.get::<_, Option<String>>(4)?, r.get::<_, Option<String>>(5)?, r.get::<_, Option<String>>(6)?,
             r.get::<_, String>(7)?, r.get::<_, Option<String>>(8)?, r.get::<_, String>(9)?, r.get::<_, String>(10)?,
+            r.get::<_, Option<String>>(11)?, r.get::<_, Option<String>>(12)?, r.get::<_, Option<String>>(13)?,
+            r.get::<_, Option<String>>(14)?, r.get::<_, Option<Vec<u8>>>(15)?,
         ))).map_err(|e| format!("query communities: {e}"))?;
         mapped.filter_map(|r| r.ok()).collect()
     };
-    for (id, root, name, relays, desc, icon, banner, banlist, owner, roles, registry) in rows {
+    for (id, root, name, relays, desc, icon, banner, banlist, owner, roles, registry, owner_pk, owner_salt, meta_extra, control_pk, control_root) in rows {
         tx.execute(
             "UPDATE communities SET server_root_key=?1, name=?2, relays=?3, description=?4, icon=?5,
-                banner=?6, banlist=?7, owner_attestation=?8, roles=?9, invite_registry=?10 WHERE community_id=?11",
+                banner=?6, banlist=?7, owner_attestation=?8, roles=?9, invite_registry=?10,
+                owner_pubkey=?11, owner_salt=?12, meta_extra=?13, control_pk=?14, control_root=?15 WHERE community_id=?16",
             rusqlite::params![
                 xform_blob(&root, enc, dec)?, xform_text(&name, enc, dec)?, xform_text(&relays, enc, dec)?,
                 xform_text_opt(&desc, enc, dec)?, xform_text_opt(&icon, enc, dec)?, xform_text_opt(&banner, enc, dec)?,
                 xform_text(&banlist, enc, dec)?, xform_text_opt(&owner, enc, dec)?, xform_text(&roles, enc, dec)?,
-                xform_text(&registry, enc, dec)?, id,
+                xform_text(&registry, enc, dec)?, xform_text_opt(&owner_pk, enc, dec)?, xform_text_opt(&owner_salt, enc, dec)?,
+                xform_text_opt(&meta_extra, enc, dec)?, xform_text_opt(&control_pk, enc, dec)?,
+                control_root.as_deref().map(|b| xform_blob(b, enc, dec)).transpose()?, id,
             ],
         ).map_err(|e| format!("update communities: {e}"))?;
     }
