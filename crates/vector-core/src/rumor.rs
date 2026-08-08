@@ -210,7 +210,7 @@ pub fn process_rumor(
     match rumor.kind {
         // Text messages — Kind 14 (NIP-17 DM chat message).
         Kind::PrivateDirectMessage => {
-            process_text_message(rumor, context)
+            process_text_message(rumor, context, download_dir)
         }
         // File attachments
         k if k.as_u16() == 15 => {
@@ -281,10 +281,12 @@ fn process_unknown_event(
 
 /// Process a text message rumor
 ///
-/// Extracts text content, reply references, and millisecond-precision timestamps.
+/// Extracts text content, reply references, millisecond-precision timestamps,
+/// and any NIP-92 `imeta` attachments riding the message.
 fn process_text_message(
     rumor: RumorEvent,
     context: RumorContext,
+    download_dir: &Path,
 ) -> Result<RumorProcessingResult, String> {
     // Extract reply reference if present
     let replied_to = extract_reply_reference(&rumor);
@@ -304,10 +306,22 @@ fn process_text_message(
     if already_expired(expiration) {
         return Ok(RumorProcessingResult::Ignored);
     }
+    // NIP-92 `imeta` on a kind-14: how other clients (Armada) send a file in a
+    // DM, where Vector uses kind 15 with top-level decryption tags. Both are
+    // valid NIP-17; without this the file arrives as a bare URL in the text.
+    // The imeta's own fields carry the AES-GCM key/nonce when the sender
+    // encrypted it, so the existing download path serves either kind. A
+    // community message overwrites both fields from its transport-parsed
+    // attachments, so this cannot double-add there.
+    let attachments = crate::community::attachments::attachments_from_tags(rumor.tags.iter(), download_dir);
+    // The URL usually IS the whole content on such a message; rendering the
+    // attachment AND the raw link would show the file twice.
+    let content = crate::community::attachments::strip_attachment_urls(&rumor.content, &attachments);
+
     let msg = Message {
         expiration,
         id: rumor.id.to_hex(),
-        content: rumor.content,
+        content,
         replied_to,
         replied_to_content: None, // Populated by get_message_views
         replied_to_npub: None,
@@ -315,7 +329,7 @@ fn process_text_message(
         replied_to_attachment_extension: None,
         preview_metadata: None,
         at: ms_timestamp,
-        attachments: Vec::new(),
+        attachments,
         reactions: Vec::new(),
         mine: context.is_mine,
         pending: false,
@@ -1158,6 +1172,78 @@ mod tests {
                 assert!(!msg.mine);
                 assert!(msg.npub.is_none());
                 assert!(msg.attachments.is_empty());
+            }
+            _ => panic!("Expected TextMessage"),
+        }
+    }
+
+    #[test]
+    fn a_kind_14_imeta_attachment_is_a_file_not_a_link() {
+        // Armada sends a DM file as a kind-14 whose content IS the URL, with a
+        // NIP-92 `imeta` carrying the encryption params — where Vector uses
+        // kind 15 with top-level tags. Both are valid NIP-17. Tag bytes below
+        // are copied verbatim from a real Armada voice message, extra fields
+        // (waveform/duration/encryption-algorithm) included, so an unknown
+        // field can never quietly break the parse.
+        let keys = test_keypair();
+        let url = "https://blossom.ditto.pub/80f94026dc4fc97f59d131d0f6ce9af1951602f720a9957d6d7189fc1aa4ffcf.m4a";
+        let imeta = Tag::custom(
+            "imeta",
+            vec![
+                format!("url {url}"),
+                "m audio/mp4".to_string(),
+                "waveform 2 100 83 100 2 100 100 100".to_string(),
+                "duration 58".to_string(),
+                "encryption-algorithm aes-gcm".to_string(),
+                "decryption-key 6989b3b663e29897cbb8bbaeda93d7f02d54c5551be9b4fda7aa7cd788a4b7f0".to_string(),
+                "decryption-nonce d45c254d936ce9e9108e8d7a4e88834c".to_string(),
+                "ox 5276b12eaa5019742abe86508d0a1ce6ee704603dc384048d0f00fa80b8d7eb8".to_string(),
+            ],
+        );
+        let rumor = make_rumor(&keys, Kind::PrivateDirectMessage, url, Tags::from_list(vec![imeta]));
+        let result = process_rumor(rumor, dm_context(&keys), &temp_dir()).unwrap();
+
+        match result {
+            RumorProcessingResult::TextMessage(msg) => {
+                assert_eq!(msg.attachments.len(), 1, "the imeta becomes a real attachment");
+                let att = &msg.attachments[0];
+                assert_eq!(att.url, url);
+                assert_eq!(att.extension, "m4a", "extension resolves from the audio/mp4 mime");
+                assert_eq!(att.key, "6989b3b663e29897cbb8bbaeda93d7f02d54c5551be9b4fda7aa7cd788a4b7f0");
+                assert_eq!(att.nonce, "d45c254d936ce9e9108e8d7a4e88834c");
+                assert_eq!(
+                    att.original_hash.as_deref(),
+                    Some("5276b12eaa5019742abe86508d0a1ce6ee704603dc384048d0f00fa80b8d7eb8"),
+                    "ox is the dedup identity"
+                );
+                assert!(!att.downloaded, "arrival never claims the bytes are held");
+                assert!(msg.content.is_empty(), "the URL renders as the file, not also as a link");
+            }
+            _ => panic!("Expected TextMessage carrying an attachment"),
+        }
+    }
+
+    #[test]
+    fn a_kind_14_caption_survives_beside_its_attachment() {
+        // Only the URL is stripped: a caption sent alongside the file stays.
+        let keys = test_keypair();
+        let url = "https://blossom.example/abc.png";
+        let imeta = Tag::custom(
+            "imeta",
+            vec![format!("url {url}"), "m image/png".to_string()],
+        );
+        let rumor = make_rumor(
+            &keys,
+            Kind::PrivateDirectMessage,
+            &format!("look at this\n{url}"),
+            Tags::from_list(vec![imeta]),
+        );
+        match process_rumor(rumor, dm_context(&keys), &temp_dir()).unwrap() {
+            RumorProcessingResult::TextMessage(msg) => {
+                assert_eq!(msg.content, "look at this");
+                assert_eq!(msg.attachments.len(), 1);
+                // Unencrypted foreign media: no key/nonce, and that is allowed.
+                assert!(msg.attachments[0].key.is_empty());
             }
             _ => panic!("Expected TextMessage"),
         }
