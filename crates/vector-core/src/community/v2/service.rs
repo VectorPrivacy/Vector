@@ -46,6 +46,24 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// `now_ms`, but never twice the same value in this process.
+///
+/// Ordering is by the `ms` tag, and two sends can finish inside one millisecond
+/// — so a sender's own back-to-back messages carried IDENTICAL stamps and fell
+/// through to the reader's tiebreak, which is content-derived and therefore
+/// indifferent to which was typed first. Bumping past the last stamp keeps a
+/// single sender's sequence self-consistent; readers still tiebreak across
+/// senders. Drifts at most a few ms ahead of the clock under a burst, and only
+/// until the clock catches up.
+fn next_send_ms() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = now_ms();
+    LAST.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| Some(now.max(last + 1)))
+        .map(|last| now.max(last + 1))
+        .unwrap_or(now)
+}
+
 /// Create a fresh v2 community owned by the local identity: mint the genesis
 /// (self-certifying id + the two owner editions), persist, publish the genesis
 /// control editions, and announce the owner's Guestbook Join. Returns the saved
@@ -260,7 +278,7 @@ pub async fn send_chat_message<T: Transport + ?Sized>(
     emoji: &[(&str, &str)],
     extra_tags: Vec<nostr_sdk::prelude::Tag>,
 ) -> Result<String, String> {
-    send_chat_message_at(transport, community, channel_id, content, reply_to, emoji, extra_tags, now_ms()).await
+    send_chat_message_at(transport, community, channel_id, content, reply_to, emoji, extra_tags, next_send_ms()).await
 }
 
 /// [`send_chat_message`] with an explicit event time. The rumor id is a pure
@@ -299,7 +317,7 @@ pub async fn send_reaction<T: Transport + ?Sized>(
     emoji: Option<(&str, &str)>,
 ) -> Result<String, String> {
     let (author_pk, group, epoch, session) = chat_send_context(community, channel_id)?;
-    let at_ms = now_ms();
+    let at_ms = next_send_ms();
     let rumor =
         chat::build_reaction_rumor(author_pk, channel_id, epoch, target_id_hex, target_author_hex, target_kind, emoji_content, emoji, at_ms);
     publish_chat(transport, community, &session, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await
@@ -316,7 +334,7 @@ pub async fn send_edit<T: Transport + ?Sized>(
     new_content: &str,
 ) -> Result<String, String> {
     let (author_pk, group, epoch, session) = chat_send_context(community, channel_id)?;
-    let at_ms = now_ms();
+    let at_ms = next_send_ms();
     let rumor = chat::build_edit_rumor(author_pk, channel_id, epoch, target_id_hex, new_content, at_ms);
     publish_chat(transport, community, &session, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await
 }
@@ -332,7 +350,7 @@ pub async fn send_delete<T: Transport + ?Sized>(
     target_kind: u16,
 ) -> Result<String, String> {
     let (author_pk, group, epoch, session) = chat_send_context(community, channel_id)?;
-    let at_ms = now_ms();
+    let at_ms = next_send_ms();
     let rumor = chat::build_delete_rumor(author_pk, channel_id, epoch, target_id_hex, target_kind, at_ms, None);
     let id = publish_chat(transport, community, &session, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await?;
     // §7: deleting one's own pinned message obliges the immediate omitting
@@ -376,7 +394,7 @@ pub async fn moderation_delete<T: Transport + ?Sized>(
     ) {
         return Err("you can't hide a message from a member who outranks you (or the owner)".to_string());
     }
-    let at_ms = now_ms();
+    let at_ms = next_send_ms();
     let citation = required_authority_citation(community, &author_pk)?;
     let rumor = chat::build_delete_rumor(author_pk, channel_id, epoch, target_id_hex, target_kind, at_ms, citation.as_ref());
     let id = publish_chat(transport, community, &session, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await?;
@@ -695,7 +713,14 @@ pub async fn fetch_channel_history<T: Transport + ?Sized>(
         }
         until = oldest; // inclusive — wrap-id dedup absorbs the boundary overlap.
     }
-    out.sort_by_key(|(ms, _)| *ms);
+    // Ties break on the content-derived rumor id, so every client orders a
+    // same-millisecond pair identically. A bare `ms` sort left ties to whatever
+    // order the relay happened to serve across pages, so two readers could show
+    // the same two messages in opposite orders.
+    out.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.event.opened().rumor_id.as_bytes().cmp(b.1.event.opened().rumor_id.as_bytes()))
+    });
     Ok(out.into_iter().map(|(_, e)| e).collect())
 }
 
@@ -6784,6 +6809,85 @@ mod tests {
             })
             .collect();
         assert_eq!(texts, vec!["hello world", "second message"], "messages round-trip in ms order");
+    }
+
+    #[test]
+    fn send_stamps_never_repeat_within_a_process() {
+        // Ordering is by the `ms` tag, and an optimized build seals several sends
+        // per millisecond. Identical stamps fell through to the reader's
+        // content-derived tiebreak, which knows nothing about which was typed
+        // first, so a fast sender could watch its own messages come back
+        // shuffled — the flake in `owner_sends_and_reads_back_a_message` once the
+        // suite began compiling optimized. Distinctness must not depend on how
+        // slow the build happens to be.
+        let stamps: Vec<u64> = (0..5_000).map(|_| next_send_ms()).collect();
+        for pair in stamps.windows(2) {
+            assert!(pair[1] > pair[0], "stamps must strictly increase: {} then {}", pair[0], pair[1]);
+        }
+    }
+
+    #[tokio::test]
+    async fn same_millisecond_messages_order_by_rumor_id_not_relay_order() {
+        // Cross-client half: when stamps DO collide (two senders, clock skew),
+        // every reader must still agree. A bare `ms` sort left ties in whatever
+        // order the relay served them across pages, so two readers could show the
+        // same pair in opposite orders. The rumor id is content-derived, so
+        // pinning ties to it is something every client computes identically.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Ties", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+
+        let at = now_ms();
+        for i in 0..6 {
+            send_chat_message_at(&relay, &community, &general, &format!("tied {i}"), None, &[], vec![], at)
+                .await
+                .unwrap();
+        }
+        let page = fetch_channel(&relay, &community, &general, 100).await.unwrap();
+        let msgs: Vec<(Vec<u8>, String)> = page
+            .iter()
+            .filter_map(|f| match &f.event {
+                ChatEvent::Message { .. } => {
+                    let o = f.event.opened();
+                    Some((o.rumor_id.as_bytes().to_vec(), o.rumor.content.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(msgs.len(), 6, "all six tied messages read back");
+        let got: Vec<String> = msgs.iter().map(|(_, c)| c.clone()).collect();
+        let mut by_id = msgs.clone();
+        by_id.sort_by(|a, b| a.0.cmp(&b.0));
+        let expected: Vec<String> = by_id.into_iter().map(|(_, c)| c).collect();
+        assert_eq!(got, expected, "ties resolve by rumor id, never by the relay's serving order");
+    }
+
+    #[tokio::test]
+    async fn a_rapid_burst_carries_strictly_increasing_stamps() {
+        // The call-site half: sends must draw from the monotonic stamp, not the
+        // raw clock. An optimized build seals several per millisecond, and equal
+        // stamps hand a sender's own ordering to the content tiebreak, which
+        // knows nothing about typing order.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Burst", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        for i in 0..8 {
+            send_message(&relay, &community, &general, &format!("msg {i}")).await.unwrap();
+        }
+        let page = fetch_channel(&relay, &community, &general, 100).await.unwrap();
+        let stamps: Vec<u64> = page
+            .iter()
+            .filter_map(|f| match &f.event {
+                ChatEvent::Message { .. } => Some(f.event.opened().at_ms),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stamps.len(), 8);
+        for pair in stamps.windows(2) {
+            assert!(pair[1] > pair[0], "a sender's own stamps must strictly increase, got {pair:?}");
+        }
     }
 
     #[tokio::test]

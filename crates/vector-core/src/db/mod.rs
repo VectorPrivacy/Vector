@@ -730,10 +730,17 @@ fn create_connection(path: &PathBuf) -> Result<rusqlite::Connection, String> {
     let conn = rusqlite::Connection::open(path)
         .map_err(|e| format!("Failed to open database: {}", e))?;
 
-    // WAL for concurrent reads; busy_timeout for lock contention. cache_size negative = KiB
-    // (16 MiB page cache) to keep hot pages resident on a large DB; temp_store=MEMORY keeps
-    // GROUP BY / sort scratch in memory instead of spilling to disk.
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA cache_size=-16000; PRAGMA temp_store=MEMORY;")
+    // busy_timeout FIRST, alone: `journal_mode=WAL` takes a brief exclusive lock,
+    // and until the timeout is set it is still 0 — so a connection opened while
+    // another is active failed outright ("database is locked") instead of waiting
+    // the moment or two the other needed. Every pragma below now waits too.
+    conn.execute_batch("PRAGMA busy_timeout=5000;")
+        .map_err(|e| format!("Failed to set busy_timeout: {}", e))?;
+
+    // WAL for concurrent reads. cache_size negative = KiB (16 MiB page cache) to keep hot
+    // pages resident on a large DB; temp_store=MEMORY keeps GROUP BY / sort scratch in
+    // memory instead of spilling to disk.
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA cache_size=-16000; PRAGMA temp_store=MEMORY;")
         .map_err(|e| format!("Failed to set pragmas: {}", e))?;
 
     Ok(conn)

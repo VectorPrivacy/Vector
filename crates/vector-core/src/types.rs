@@ -170,7 +170,13 @@ impl Message {
         }
 
         if let Some(ref mut history) = self.edit_history {
-            if history.iter().any(|e| e.edited_at == edited_at) {
+            // One edit per timestamp — but the BASE revision is not an edit. History
+            // is seeded with the original at the message's own `at`, and deduping
+            // against that entry silently dropped any edit made inside that same
+            // millisecond: the message just refused to change. Skip the base slot,
+            // keep repeat-edit suppression exactly as it was.
+            let base_slot = usize::from(history.first().is_some_and(|e| e.edited_at == self.at));
+            if history.iter().skip(base_slot).any(|e| e.edited_at == edited_at) {
                 return;
             }
             history.push(EditEntry { content: new_content, edited_at });
@@ -480,6 +486,26 @@ mod tests {
         let history = msg.edit_history.as_ref().expect("edit_history should exist");
         assert_eq!(history.len(), 2, "duplicate timestamp edit should be ignored, history should have 2 entries");
         assert_eq!(msg.content, "edit1", "content should remain from first edit at timestamp 2000");
+    }
+
+    #[test]
+    fn apply_edit_lands_when_it_shares_the_message_timestamp() {
+        // Editing within a millisecond of sending is ordinary on a fast build
+        // (and trivial over IPC). History is seeded with the original at the
+        // message's own `at`, so the timestamp dedup mistook the base revision
+        // for a prior edit and dropped the edit entirely — the message silently
+        // refused to change.
+        let mut msg = Message { content: "original".to_string(), at: 1000, ..Default::default() };
+        msg.apply_edit("edited!".to_string(), 1000, Vec::new());
+        assert_eq!(msg.content, "edited!", "an edit sharing the message's stamp still applies");
+        assert!(msg.edited);
+        let history = msg.edit_history.as_ref().expect("edit_history should exist");
+        assert_eq!(history.len(), 2, "base revision + the edit");
+        assert_eq!(history[0].content, "original", "the base revision stays first");
+
+        // Repeat suppression is untouched: the same edit again is absorbed.
+        msg.apply_edit("edited!".to_string(), 1000, Vec::new());
+        assert_eq!(msg.edit_history.as_ref().unwrap().len(), 2, "a repeat of that edit is ignored");
     }
 
     #[test]
