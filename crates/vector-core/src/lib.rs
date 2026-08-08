@@ -4145,14 +4145,8 @@ impl VectorCore {
             }
         }
 
-        // In-memory per-account state owned by vector-core's globals.
-        {
-            let mut st = state::STATE.lock().await;
-            st.profiles.clear();
-            st.chats.clear();
-            st.db_loaded = false;
-            st.is_syncing = false;
-        }
+        // Chats and profiles need no clearing: they belong to the session
+        // `close_database` just released, and went with it.
         state::WRAPPER_ID_CACHE.lock().await.clear();
         state::PENDING_EVENTS.lock().await.clear();
         state::set_active_chat(None);

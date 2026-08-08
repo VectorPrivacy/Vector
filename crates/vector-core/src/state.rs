@@ -604,7 +604,32 @@ mod session_globals_tests {
 
 pub static WRAPPER_ID_CACHE: LazyLock<Mutex<WrapperIdCache>> = LazyLock::new(|| Mutex::new(WrapperIdCache::new()));
 
-pub static STATE: LazyLock<Mutex<ChatState>> = LazyLock::new(|| Mutex::new(ChatState::new()));
+/// The account's chats and profiles in memory.
+///
+/// Locking resolves the session THIS work belongs to, so a task bound by
+/// [`crate::db::spawn_bound`] reaches the state of the account it started
+/// under — for its whole life, whoever logs in meanwhile. A swap installs a
+/// fresh session, and with it a fresh state; the previous account's is dropped
+/// with the session rather than cleared field by field.
+///
+/// Deliberately a handle rather than the `Mutex` itself: `STATE.lock().await`
+/// reads the same at every call site, and cannot be hoisted into a `static` or
+/// a long-lived struct where it would freeze one account's state in place.
+pub struct ChatStateHandle;
+
+pub static STATE: ChatStateHandle = ChatStateHandle;
+
+impl ChatStateHandle {
+    pub async fn lock(&self) -> tokio::sync::OwnedMutexGuard<ChatState> {
+        crate::db::current_session().chat_state().lock_owned().await
+    }
+
+    /// For callers that must not block — notably Android's WebView threads,
+    /// which have no tokio runtime.
+    pub fn try_lock(&self) -> Result<tokio::sync::OwnedMutexGuard<ChatState>, tokio::sync::TryLockError> {
+        crate::db::current_session().chat_state().try_lock_owned()
+    }
+}
 
 /// Chat id currently visible to the user with auto-mark eligibility — set by
 /// the frontend when the chat is open AND pinned to bottom AND the window is

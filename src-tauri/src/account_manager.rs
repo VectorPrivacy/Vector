@@ -658,18 +658,10 @@ pub async fn reset_session() {
     #[cfg(target_os = "android")]
     crate::android::biometric::on_session_reset();
 
-    // In-memory state owned by vector-core's globals.
-    {
-        let mut state = crate::STATE.lock().await;
-        state.profiles.clear();
-        state.chats.clear();
-        state.db_loaded = false;
-        state.is_syncing = false;
-        // Drop the unread cache + its seeded flag, or the next account reads A's counts and never
-        // reseeds from its own DB.
-        state.unread_cache.clear();
-        state.unread_seeded = false;
-    }
+    // Chats, profiles and the unread cache need no clearing: they belong to the
+    // session `close_db_connection` released above, and went with it. That
+    // covers every field at once, which is the point — this block enumerated
+    // them, and a field added without a line here leaked into the next account.
     { crate::WRAPPER_ID_CACHE.lock().await.clear(); }
     { crate::state::PENDING_EVENTS.lock().await.clear(); }
     // Active-chat marker is an npub; a shared contact across accounts would

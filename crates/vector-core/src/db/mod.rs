@@ -611,16 +611,38 @@ pub struct Session {
     db_path: Option<PathBuf>,
     read_pool: Mutex<Vec<rusqlite::Connection>>,
     write_conn: Mutex<Option<rusqlite::Connection>>,
+    /// This account's chats and profiles in memory — the DB's read-through
+    /// cache, and so bound to the same account for the same reason.
+    chat_state: Arc<tokio::sync::Mutex<crate::state::ChatState>>,
 }
 
 impl Session {
     fn empty() -> Arc<Self> {
-        Arc::new(Session { db_path: None, read_pool: Mutex::new(Vec::new()), write_conn: Mutex::new(None) })
+        Self::new(None, Arc::new(tokio::sync::Mutex::new(crate::state::ChatState::new())))
     }
 
-    /// A session bound to one account's database file.
+    /// A session bound to one account's database file, with a fresh in-memory
+    /// state — the caller loads it from that database.
     fn bound(db_path: PathBuf) -> Arc<Self> {
-        Arc::new(Session { db_path: Some(db_path), read_pool: Mutex::new(Vec::new()), write_conn: Mutex::new(None) })
+        Self::new(Some(db_path), Arc::new(tokio::sync::Mutex::new(crate::state::ChatState::new())))
+    }
+
+    fn new(db_path: Option<PathBuf>, chat_state: Arc<tokio::sync::Mutex<crate::state::ChatState>>) -> Arc<Self> {
+        Arc::new(Session {
+            db_path,
+            read_pool: Mutex::new(Vec::new()),
+            write_conn: Mutex::new(None),
+            chat_state,
+        })
+    }
+
+    /// This account's in-memory chats and profiles.
+    ///
+    /// Reached through the session, so a task bound to account A keeps reading
+    /// and writing A's chats after a swap. Its state is then an orphan nothing
+    /// displays, rather than corruption in the account now on screen.
+    pub fn chat_state(&self) -> Arc<tokio::sync::Mutex<crate::state::ChatState>> {
+        self.chat_state.clone()
     }
 
     /// Where THIS session opens connections. A bound session never consults the
@@ -1014,8 +1036,18 @@ pub fn init_database(npub: &str) -> Result<(), String> {
     // Install a NEW session before opening anything: guards still outstanding
     // against the previous one return their connections there, and that pool
     // closes with it. Nothing from the old account can reach the new pool.
-    *CURRENT_SESSION.write().unwrap_or_else(|e| e.into_inner()) = Session::bound(db_path.clone());
-    let session = current_session();
+    //
+    // Re-initialising the SAME account keeps its in-memory state: this is
+    // documented idempotent and callers rely on it (schema checks, background
+    // sync). A different database is a different account, and starts empty.
+    let session = {
+        let mut current = CURRENT_SESSION.write().unwrap_or_else(|e| e.into_inner());
+        *current = match current.db_path.as_deref() {
+            Some(p) if p == db_path => Session::new(Some(db_path.clone()), current.chat_state.clone()),
+            _ => Session::bound(db_path.clone()),
+        };
+        current.clone()
+    };
 
     // Pre-warm read pool
     if let Ok(mut pool) = session.read_pool.lock() {
@@ -1265,6 +1297,37 @@ mod pool_generation_tests {
         assert!(Arc::ptr_eq(&current_session(), &b), "unbound callers follow the live account");
     }
 
+    #[tokio::test]
+    async fn a_bound_tasks_chat_writes_cannot_reach_the_new_account() {
+        // The bug this closes, in the form it actually took: a task holding a
+        // chat id from account A finishes after the swap and inserts it into
+        // whatever STATE it finds. The group chats that appeared in a freshly
+        // created account arrived exactly this way.
+        use crate::chat::{Chat, ChatType};
+        let dir = tempfile::tempdir().unwrap();
+        let a = Session::bound(dir.path().join("a.db"));
+        let b = Session::bound(dir.path().join("b.db"));
+
+        *CURRENT_SESSION.write().unwrap() = a.clone();
+        let handle = spawn_bound(async {
+            // ...the user switches accounts right here...
+            tokio::task::yield_now().await;
+            crate::state::STATE.lock().await.chats.push(Chat::new("a-chat".into(), ChatType::DirectMessage, Vec::new()));
+        });
+        *CURRENT_SESSION.write().unwrap() = b.clone();
+        handle.await.unwrap();
+
+        assert!(
+            crate::state::STATE.lock().await.chats.is_empty(),
+            "the account now on screen never sees the previous account's chat"
+        );
+        assert_eq!(
+            a.chat_state().lock().await.chats.len(),
+            1,
+            "it landed in the state of the account the task began under"
+        );
+    }
+
     #[test]
     fn a_dropped_session_closes_its_pool() {
         // Teardown IS the drop: no clearing step to forget.
@@ -1341,6 +1404,21 @@ mod downgrade_tests {
         set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
         set_current_account(acct.clone()).unwrap();
         (tmp, guard, acct)
+    }
+
+    #[tokio::test]
+    async fn re_initialising_the_same_account_keeps_its_loaded_state() {
+        // init_database is documented idempotent, and callers lean on that —
+        // the schema check and Android's background sync both re-run it against
+        // an account already loaded. Dropping its chats there would empty the
+        // list under a running app.
+        use crate::chat::{Chat, ChatType};
+        let (_dir, _lock, acct) = test_account();
+        init_database(&acct).unwrap();
+        crate::state::STATE.lock().await.chats.push(Chat::new("kept".into(), ChatType::DirectMessage, Vec::new()));
+
+        init_database(&acct).unwrap();
+        assert_eq!(crate::state::STATE.lock().await.chats.len(), 1, "same account, same in-memory state");
     }
 
     /// A DB this build fully understands must open, or the guard is useless.
