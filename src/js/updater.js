@@ -93,33 +93,60 @@ function handleButtonClick() {
     }
 }
 
-// Android can't self-update: hand off to whatever store shipped this APK.
-// Preview builds skip the store entirely — stores only carry official releases,
-// so a store that has never seen this build can't offer the next preview.
+// Where an Android build updates from depends on where it CAME from. A store
+// installed it, signed with that store's key, so only that store can update it.
+// A sideload was signed by the release key we publish, so Vector can install the
+// next release itself. Previews skip stores entirely — a store that never
+// carried this build can't offer the next preview.
 function androidUpdateButtonLabel() {
-    if (versionInfo.preview !== null) return 'Download preview';
-    return androidInstallSource.has_store
-        ? `Update via ${androidInstallSource.label}`
-        : 'Download at vectorapp.io';
+    // A store can only update what it installed. Previews are never store
+    // builds, so they always take the sideload route.
+    if (androidInstallSource.has_store && versionInfo.preview === null) {
+        return `Update via ${androidInstallSource.label}`;
+    }
+    return 'Download & install';
 }
 
 async function openAndroidUpdateSource() {
-    // Checked before the store: a preview-to-preview update has no store build
-    // to deep-link to, so the store would either 404 or offer the older stable.
-    if (versionInfo.preview !== null) {
-        return openUrl(previewReleaseUrl());
-    }
-    if (androidInstallSource.has_store) {
+    // A store build hands back to its store — it holds the signing key, so it is
+    // the only thing that CAN update this copy. Previews are never store builds,
+    // so they skip straight past (a store would 404 or offer the older stable).
+    if (androidInstallSource.has_store && versionInfo.preview === null) {
         try {
             const opened = await window.__TAURI__.core.invoke('open_update_source');
             if (opened) return;
         } catch (e) {
             console.warn('Updater: store hand-off failed:', e);
         }
+        // The store couldn't take the deep link: the website carries every build
+        // and links out to each store.
+        return openUrl('https://vectorapp.io');
     }
-    // Sideload, or the store couldn't take the deep link: the website carries
-    // every build and links out to each store.
-    return openUrl('https://vectorapp.io');
+    // Sideload: this copy carries the release signing key, so Vector can fetch
+    // and install the next one itself. The system installer still asks.
+    try {
+        updateUI('downloading', '', 0);
+        const stopProgress = await window.__TAURI__.event.listen('update_download_progress', (evt) => {
+            const { received = 0, total = 0 } = evt.payload || {};
+            updateUI('downloading', '', total > 0 ? Math.round((received / total) * 100) : 0);
+        });
+        try {
+            const result = await window.__TAURI__.core.invoke('download_and_install_update');
+            if (result === 'needs-permission') {
+                updateUI('available', 'Allow installs from Vector, then tap again');
+            } else {
+                updateUI('available', 'Confirm the install to finish');
+            }
+        } finally {
+            stopProgress();
+        }
+    } catch (e) {
+        console.warn('Updater: in-app install failed:', e);
+        // Anything that stops the in-app route (a signing-key change, no space,
+        // a dead network) still has the manual path behind it.
+        updateUI('available', String(e?.message || e || 'Update failed'));
+        return openUrl('https://vectorapp.io');
+    }
 }
 
 // Update UI state

@@ -657,6 +657,7 @@ pub fn run() {
             commands::updates::check_account_downgrade,
             commands::updates::get_install_source,
             commands::updates::open_update_source,
+            commands::updates::download_and_install_update,
             // Deep link commands
             deep_link::get_pending_deep_link,
             share::get_pending_share,

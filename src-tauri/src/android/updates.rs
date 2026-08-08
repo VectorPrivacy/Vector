@@ -1,7 +1,64 @@
 //! Install-source detection + store hand-off for the in-app update flow.
 
-use jni::objects::JValue;
+use jni::objects::{JClass, JObject, JValue};
+use jni::JNIEnv;
 use super::with_android_context;
+
+fn load_class<'a>(
+    env: &mut JNIEnv<'a>,
+    activity: &JObject<'a>,
+    name: &str,
+) -> Result<JClass<'a>, String> {
+    let class_loader = env
+        .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+        .map_err(|e| format!("classloader: {:?}", e))?
+        .l()
+        .map_err(|e| format!("classloader obj: {:?}", e))?;
+    let j_name = env
+        .new_string(name.replace('/', "."))
+        .map_err(|e| format!("class name str: {:?}", e))?;
+    let cls = env
+        .call_method(
+            &class_loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[JValue::Object(&j_name)],
+        )
+        .map_err(|e| format!("loadClass {}: {:?}", name, e))?
+        .l()
+        .map_err(|e| format!("loaded class obj: {:?}", e))?;
+    Ok(JClass::from(cls))
+}
+
+/// Hand a downloaded update APK to the system installer — but only after the
+/// Kotlin side confirms it carries the SAME signing certificate as the running
+/// app. Android would reject a mismatch anyway; checking here means the user
+/// hears why instead of watching an install fail.
+///
+/// Returns the raw status: `ok`, `needs-permission` (the settings screen was
+/// opened), `signature-mismatch`, `unverifiable`, `missing`.
+pub fn install_update(path: &str) -> Result<String, String> {
+    let path = path.to_string();
+    with_android_context(|env, activity| {
+        let cls = load_class(env, activity, "io/vectorapp/VectorUpdates")?;
+        let j_path = env.new_string(&path).map_err(|e| format!("path str: {:?}", e))?;
+        let res = env
+            .call_static_method(
+                &cls,
+                "installUpdate",
+                "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;",
+                &[JValue::Object(activity), JValue::Object(&j_path)],
+            )
+            .map_err(|e| format!("installUpdate: {:?}", e))?
+            .l()
+            .map_err(|e| format!("installUpdate obj: {:?}", e))?;
+        let s: String = env
+            .get_string((&res).into())
+            .map_err(|e| format!("installUpdate string: {:?}", e))?
+            .into();
+        Ok(s)
+    })
+}
 
 /// Package name of whatever installed us (e.g. `dev.zapstore.app`), or
 /// `None` for sideloads (browser download, file manager, adb).

@@ -1,8 +1,10 @@
 //! App-update commands for platforms without the Tauri updater plugin.
 //!
 //! Desktop checks + installs through the updater plugin end-to-end. Android
-//! can't self-update, so it reads the same release manifest for the version
-//! beacon and hands off to wherever the APK came from (store or website).
+//! reads the same release manifest for the version beacon, then splits on where
+//! the build came from: a store-installed copy hands off to that store, which
+//! owns updates and holds the matching signing key, while a SIDELOADED copy
+//! downloads and installs the next release itself.
 
 use tauri::{AppHandle, Runtime};
 
@@ -203,6 +205,117 @@ pub fn open_update_source() -> Result<bool, String> {
     #[cfg(not(target_os = "android"))]
     {
         Ok(false)
+    }
+}
+
+/// The release asset matching THIS build's ABI. The running binary is the
+/// authority on its own architecture, so no device probing is needed — and
+/// installing the wrong split would fail or ship dead native code.
+#[cfg(target_os = "android")]
+const APK_ASSET: &str = {
+    #[cfg(target_arch = "aarch64")]
+    {
+        "Vector-arm64-v8a.apk"
+    }
+    #[cfg(target_arch = "arm")]
+    {
+        "Vector-armeabi-v7a.apk"
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "arm")))]
+    {
+        "Vector.apk"
+    }
+};
+
+/// Download the matching release APK and hand it to the system installer.
+///
+/// SIDELOADS ONLY. A store-installed copy is signed by that store's key, so its
+/// update has to come from the same place; this refuses rather than download
+/// tens of megabytes that Android will reject. The install itself is gated on a
+/// signing-certificate match, and the user still confirms in the system dialog.
+///
+/// Emits `update_download_progress` ({ received, total }) while streaming.
+#[tauri::command]
+pub async fn download_and_install_update<R: Runtime>(app: AppHandle<R>) -> Result<String, String> {
+    #[cfg(target_os = "android")]
+    {
+        use tauri::Emitter;
+        use futures_util::StreamExt;
+
+        // Belt-and-braces: the UI only offers this on a sideload, but the
+        // command is reachable on its own.
+        if get_install_source().has_store {
+            return Err("This build updates through the store that installed it".to_string());
+        }
+
+        let current = app.package_info().version.to_string();
+        let preview = semver::Version::parse(&current).map(|v| is_preview(&v)).unwrap_or(false);
+        let url = if preview {
+            format!("https://github.com/VectorPrivacy/Vector/releases/download/preview/{APK_ASSET}")
+        } else {
+            format!("https://github.com/VectorPrivacy/Vector/releases/latest/download/{APK_ASSET}")
+        };
+
+        let client = vector_core::net::build_http_client(std::time::Duration::from_secs(120))?;
+        let resp = client.get(&url).send().await.map_err(|e| format!("update download failed: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("update download failed: HTTP {}", resp.status()));
+        }
+        let total = resp.content_length().unwrap_or(0);
+
+        // App-private cache, not the public download dir: an update binary is
+        // not the user's media, and a half-written APK must not surface in
+        // their gallery or file manager.
+        let dir = std::path::PathBuf::from(vector_core::db::get_download_dir()).join(".updates");
+        std::fs::create_dir_all(&dir).map_err(|e| format!("update dir: {e}"))?;
+        let path = dir.join(APK_ASSET);
+        // Stream to a PARTIAL file, renamed only once complete, so an
+        // interrupted download can never be handed to the installer.
+        let part = dir.join(format!("{APK_ASSET}.part"));
+        {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&part).map_err(|e| format!("update file: {e}"))?;
+            let mut stream = resp.bytes_stream();
+            let mut received: u64 = 0;
+            let mut last_emit = 0u64;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|e| format!("update download interrupted: {e}"))?;
+                file.write_all(&chunk).map_err(|e| format!("update write: {e}"))?;
+                received += chunk.len() as u64;
+                // Throttle: one event per ~256KiB keeps the IPC quiet on a
+                // 60MB APK (Android's raw-IPC budget is not generous).
+                if received - last_emit >= 256 * 1024 || received == total {
+                    last_emit = received;
+                    let _ = app.emit("update_download_progress", serde_json::json!({
+                        "received": received,
+                        "total": total,
+                    }));
+                }
+            }
+            file.flush().map_err(|e| format!("update flush: {e}"))?;
+        }
+        std::fs::rename(&part, &path).map_err(|e| format!("update rename: {e}"))?;
+
+        let status = crate::android::updates::install_update(&path.to_string_lossy())?;
+        match status.as_str() {
+            "ok" => Ok("installing".to_string()),
+            "needs-permission" => Ok("needs-permission".to_string()),
+            "signature-mismatch" => {
+                // Keeping it would only re-fail; the user needs their original source.
+                let _ = std::fs::remove_file(&path);
+                Err("This update is signed by a different key than the installed app — reinstall from where you originally got Vector".to_string())
+            }
+            "unverifiable" => {
+                let _ = std::fs::remove_file(&path);
+                Err("Could not verify the update's signature, so it was not installed".to_string())
+            }
+            other => Err(format!("update install failed ({other})")),
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("Desktop updates run through the updater plugin".to_string())
     }
 }
 
