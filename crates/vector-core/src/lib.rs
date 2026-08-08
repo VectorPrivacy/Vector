@@ -4160,10 +4160,6 @@ impl VectorCore {
         // them here let a swapped-in account resolve a channel/npub to the WRONG (prior-account) row id →
         // saves FK-failed silently + reads hit the wrong row (e.g. a community member vanished post-swap).
         crate::db::clear_id_caches();
-        // Community sync RAM cache (page cursors, history-start, in-flight, invite preload) is
-        // account-scoped — drop it so the next account can't read A's cursors/warmed pages. The
-        // generation stamp self-invalidates too, but clear explicitly for parity with the GUI swap.
-        crate::community::cache::clear();
         // Community realtime route/subscription state is account-scoped (channel keys + banned sets);
         // drop it so a swapped-in account can't listen on the prior account's pseudonyms.
         crate::community::realtime::clear().await;

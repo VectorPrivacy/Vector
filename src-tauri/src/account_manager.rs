@@ -686,10 +686,6 @@ pub async fn reset_session() {
     vector_core::community::v2::realtime::clear().await;
     // Pooled plane connections are authed as account A's plane secret keys — close them on swap.
     vector_core::community::transport::clear_plane_pool();
-    // Community per-channel sync state (account-scoped) — drop so account B doesn't inherit
-    // A's history-start flags, paging cursors, or any stale in-flight claims. (Access-time
-    // generation checks self-reset too; this is the explicit teardown.)
-    vector_core::community::cache::clear();
 
     // Mini App realtime lobby state is account-scoped (session npubs + cached peer addrs
     // keyed by game topic). Carried across a swap it would show account A's players in
