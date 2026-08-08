@@ -234,7 +234,7 @@ impl VectorAgent {
     /// prior listener ended when `swap_session` shut its client down.
     fn respawn_listener(&self) {
         let buffer = self.message_buffer.clone();
-        tokio::spawn(async move {
+        vector_core::db::spawn_bound(async move {
             let handler = Arc::new(crate::handler::AgentEventHandler::with_buffer(buffer));
             if let Err(e) = VectorCore.listen(handler).await {
                 eprintln!("[vector-agent] re-listen error: {}", e);

@@ -22,7 +22,7 @@ impl ProfileSyncHandler for TauriProfileSyncHandler {
         // queued just before reset_session would otherwise land in
         // account B's DB after the swap.
         let session = vector_core::state::SessionGuard::capture();
-        tokio::spawn(async move {
+        vector_core::db::spawn_bound(async move {
             if !session.is_valid() { return; }
             db::set_profile(slim).await.ok();
             if !session.is_valid() { return; }

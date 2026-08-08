@@ -1227,7 +1227,7 @@ pub async fn pivx_send_payment<R: Runtime>(
         // Self-copy for recovery (in-scope client clone + SessionGuard).
         let self_wrap_client = client.clone();
         let self_wrap_session = vector_core::state::SessionGuard::capture();
-        tokio::spawn(async move {
+        vector_core::db::spawn_bound(async move {
             if !self_wrap_session.is_valid() { return; }
             let _ = vector_core::send_gift_wrap(&self_wrap_client, Vec::<nostr_sdk::prelude::RelayUrl>::new(), &my_public_key, rumor, []).await;
         });
@@ -1344,7 +1344,7 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
         // Self-copy for recovery (in-scope client clone + SessionGuard).
         let self_wrap_client = client.clone();
         let self_wrap_session = vector_core::state::SessionGuard::capture();
-        tokio::spawn(async move {
+        vector_core::db::spawn_bound(async move {
             if !self_wrap_session.is_valid() { return; }
             let _ = vector_core::send_gift_wrap(&self_wrap_client, Vec::<nostr_sdk::prelude::RelayUrl>::new(), &my_public_key, rumor, []).await;
         });

@@ -174,6 +174,7 @@ pub async fn start_cached_bytes_compression() -> Result<(), String> {
     }
 
     // Spawn compression task (no min_savings - checked later by caller)
+    // spawn-detached: image compression — CPU work on bytes already in hand.
     tokio::spawn(async move {
         let result = compress_bytes_internal(bytes, &extension, None);
         let mut comp_cache = JS_COMPRESSION_CACHE.lock().await;
@@ -652,6 +653,7 @@ pub async fn start_image_precompression(file_path: String) -> Result<(), String>
 
     // Spawn the compression task
     let path_clone = file_path.clone();
+    // spawn-detached: same, for a path already resolved.
     tokio::spawn(async move {
         let result = compress_image_internal(&path_clone);
         let mut cache = COMPRESSION_CACHE.lock().await;

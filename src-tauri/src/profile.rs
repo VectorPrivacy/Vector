@@ -119,7 +119,7 @@ pub async fn cache_all_profile_images() {
     for (npub, avatar_url, banner_url) in profiles_to_cache {
         let handle = handle.clone();
         let task_session = session;
-        tokio::spawn(async move {
+        vector_core::db::spawn_bound(async move {
             // Cache avatar if needed
             if !avatar_url.is_empty() {
                 if let CacheResult::Cached(path) | CacheResult::AlreadyCached(path) =

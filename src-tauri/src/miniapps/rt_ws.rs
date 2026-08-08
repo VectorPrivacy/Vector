@@ -50,6 +50,7 @@ pub(crate) async fn run_accept_loop(
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 let st = Arc::clone(&state);
+                // spawn-detached: miniapp websocket accept loop — process-lifetime transport, no account storage.
                 tokio::spawn(async move {
                     if let Err(e) = handle_connection(stream, &st).await {
                         log_trace!("[WEBXDC] RT WS connection error: {e}");
@@ -227,7 +228,7 @@ fn fast_send_inline(
 
     // Fire-and-forget broadcast (gossip is async, spawn a task)
     let sender = handle.sender.clone();
-    tokio::spawn(async move {
+    vector_core::db::spawn_bound(async move {
         let _ = sender.broadcast(msg.into()).await;
     });
 }

@@ -36,7 +36,7 @@ impl InboundEventHandler for AgentEventHandler {
             message: msg.clone(),
         };
         let buf = self.buffer.clone();
-        tokio::spawn(async move {
+        vector_core::db::spawn_bound(async move {
             buf.lock().await.push(entry);
         });
     }
@@ -48,7 +48,7 @@ impl InboundEventHandler for AgentEventHandler {
             message: msg.clone(),
         };
         let buf = self.buffer.clone();
-        tokio::spawn(async move {
+        vector_core::db::spawn_bound(async move {
             buf.lock().await.push(entry);
         });
     }

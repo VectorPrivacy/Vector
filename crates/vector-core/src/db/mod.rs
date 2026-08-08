@@ -698,6 +698,7 @@ where
     F::Output: Send + 'static,
 {
     let session = current_session();
+    // spawn-detached: this IS the binding — it installs the session it just read.
     tokio::spawn(TASK_SESSION.scope(session, fut))
 }
 
@@ -1233,96 +1234,11 @@ mod pool_generation_tests {
 
     /// Every task that touches per-account state must be bound to an account.
     ///
-    /// A bare `tokio::spawn` leaves its task reading whoever is live when it
-    /// finally asks, which is how account A's work ends up in account B's
-    /// storage. That is precisely the mistake nobody catches in review, so it
-    /// is caught here instead: parse the tree and fail on an unbound spawn in a
-    /// per-account module. Add a file to `DETACHED_OK` only when its tasks
-    /// genuinely own no account data, and say why.
+    /// The worklist is empty: every spawn in this crate either binds or says on
+    /// the line why it owns no account state. See [`crate::spawn_audit`].
     #[test]
     fn per_account_tasks_are_spawned_bound_to_their_account() {
-        /// Files whose spawns touch no per-account state. Permanent.
-        const DETACHED_OK: &[(&str, &str)] = &[
-            ("src/db/mod.rs", "defines spawn_bound itself"),
-            ("src/nip55.rs", "Android signer IPC — no account storage"),
-            ("src/tor/mod.rs", "the Tor daemon is process-wide, not per-account"),
-            ("src/self_destruct.rs", "the sweeper loop must follow the live account, not the first one"),
-            ("src/blossom.rs", "upload byte-pump — bytes already in hand, no account state"),
-        ];
-
-        /// Empty, and it stays that way: every task in the crate now carries the
-        /// account it started under. A file may only be added back with a
-        /// deliberate edit to this list, which is the point.
-        const PENDING_CONVERSION: &[&str] = &[];
-
-        let mut offenders: Vec<String> = Vec::new();
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let mut stack = vec![root.join("src")];
-        while let Some(dir) = stack.pop() {
-            for entry in std::fs::read_dir(&dir).expect("read src").flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    stack.push(path);
-                    continue;
-                }
-                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                    continue;
-                }
-                let rel = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
-                if DETACHED_OK.iter().any(|(f, _)| *f == rel) || PENDING_CONVERSION.contains(&rel.as_str()) {
-                    continue;
-                }
-                let src = std::fs::read_to_string(&path).expect("read source");
-                // Tests spawn freely; only shipping code is bound.
-                let prod = src.split("#[cfg(test)]").next().unwrap_or("");
-                // A `// spawn-detached:` marker on (or just above) the line
-                // exempts one spawn, so a file carrying both kinds is audited
-                // per-site instead of exempted wholesale. The marker must say
-                // WHY the task owns no account state.
-                let lines: Vec<&str> = prod.lines().collect();
-                for (i, line) in lines.iter().enumerate() {
-                    if !line.contains("tokio::spawn(") || line.trim_start().starts_with("//") {
-                        continue;
-                    }
-                    let exempt = line.contains("spawn-detached:")
-                        || lines[..i].iter().rev().take(4).any(|l| l.contains("spawn-detached:"));
-                    if !exempt {
-                        offenders.push(format!("{rel}:{}", i + 1));
-                    }
-                }
-            }
-        }
-        assert!(
-            offenders.is_empty(),
-            "these tasks are not bound to an account — use db::spawn_bound so their work \
-             follows the account they started under, or add the file to DETACHED_OK with a \
-             reason:\n  {}",
-            offenders.join("\n  ")
-        );
-
-        // The ratchet: a file that no longer spawns unbound must leave the
-        // worklist, so it can never silently regress afterwards.
-        let mut converted: Vec<&str> = Vec::new();
-        for file in PENDING_CONVERSION {
-            let src = std::fs::read_to_string(root.join(file)).expect("read pending file");
-            let prod = src.split("#[cfg(test)]").next().unwrap_or("");
-            let lines: Vec<&str> = prod.lines().collect();
-            let has_unbound = lines.iter().enumerate().any(|(i, l)| {
-                l.contains("tokio::spawn(")
-                    && !l.trim_start().starts_with("//")
-                    && !l.contains("spawn-detached:")
-                    && !lines[..i].iter().rev().take(4).any(|p| p.contains("spawn-detached:"))
-            });
-            if !has_unbound {
-                converted.push(file);
-            }
-        }
-        assert!(
-            converted.is_empty(),
-            "these files are fully converted — delete them from PENDING_CONVERSION so they \
-             stay converted:\n  {}",
-            converted.join("\n  ")
-        );
+        crate::spawn_audit::assert_all_spawns_bound(std::path::Path::new(env!("CARGO_MANIFEST_DIR")), &[]);
     }
 
     #[tokio::test]

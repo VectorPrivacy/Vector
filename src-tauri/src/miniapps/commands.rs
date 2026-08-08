@@ -759,7 +759,7 @@ pub async fn miniapp_open(
                     let chat_id_clone = chat_id.clone();
                     // chat_id belongs to the account current NOW — bail in the task if it swaps.
                     let session = vector_core::state::SessionGuard::capture();
-                    tokio::spawn(async move {
+                    vector_core::db::spawn_bound(async move {
                         if !session.is_valid() { return; }
                         crate::commands::realtime::send_webxdc_peer_left(chat_id_clone, topic_encoded).await;
                     });
@@ -849,7 +849,7 @@ pub async fn miniapp_open(
         // chat_id_pc belongs to the account current NOW; preconnect spans Iroh init
         // (seconds) — bail before the session-scoped writes/sends if the account swaps.
         let pc_session = vector_core::state::SessionGuard::capture();
-        tokio::spawn(async move {
+        vector_core::db::spawn_bound(async move {
             log_info!("[WEBXDC] Preconnect: scanning '{}' for realtime API (path: {:?})", pkg_name, pkg_path);
             let uses_rt = tokio::task::spawn_blocking(move || {
                 MiniAppPackage::scan_for_realtime_api(&pkg_path)
@@ -1151,7 +1151,7 @@ pub async fn miniapp_open(
                             let topic_for_left = topic_encoded.clone();
                             // chat_id belongs to the account current NOW — bail if it swaps.
                             let session = vector_core::state::SessionGuard::capture();
-                            tokio::spawn(async move {
+                            vector_core::db::spawn_bound(async move {
                                 if !session.is_valid() { return; }
                                 if !crate::commands::realtime::send_webxdc_peer_left(chat_id, topic_for_left).await {
                                     log_warn!("[WEBXDC] Failed to send peer-left signal");
@@ -1284,7 +1284,7 @@ pub async fn miniapp_close(
             let chat_id_clone = chat_id.clone();
             // chat_id belongs to the account current NOW — bail in the task if it swaps.
             let session = vector_core::state::SessionGuard::capture();
-            tokio::spawn(async move {
+            vector_core::db::spawn_bound(async move {
                 if !session.is_valid() { return; }
                 crate::commands::realtime::send_webxdc_peer_left(chat_id_clone, topic_encoded).await;
             });
@@ -1525,7 +1525,7 @@ pub async fn miniapp_join_realtime_channel(
             let te = topic_encoded.clone();
             // chat_id belongs to the account current NOW — bail in the task if it swaps.
             let session = vector_core::state::SessionGuard::capture();
-            tokio::spawn(async move {
+            vector_core::db::spawn_bound(async move {
                 if !session.is_valid() { return; }
                 crate::commands::realtime::send_webxdc_peer_advertisement(chat_id, te, encoded).await;
             });

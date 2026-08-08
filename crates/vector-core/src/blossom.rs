@@ -27,6 +27,7 @@ impl ProgressTrackingStream {
 
         // Spawn a background task to feed the stream. NOT bound: this pumps
         // bytes already in hand into a channel and never touches account state.
+        // spawn-detached: byte-pump into a channel; the bytes are already in hand.
         tokio::spawn(async move {
             let chunk_size = 64 * 1024; // 64 KB chunks - only unavoidable copy
             let mut position = 0;
@@ -978,6 +979,7 @@ where
         origin.set_fragment(None);
 
         let signer = signer.clone();
+        // spawn-detached: deleting one probe blob from a server — signer in hand, no account storage.
         tokio::spawn(async move {
             if let Err(e) = delete_blob(signer, &origin, hash).await {
                 crate::log_warn!("[Blossom delete] {} from {}: {}", hash, origin, e);

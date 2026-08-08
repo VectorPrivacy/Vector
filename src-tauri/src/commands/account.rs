@@ -302,7 +302,7 @@ pub async fn reauthorize_bunker<R: Runtime>(handle: AppHandle<R>) -> Result<Stri
     // Reuse the entry-captured guard so the spawn shares the same generation
     // snapshot — capturing fresh here would mask a swap occurring between the
     // last entry-check and the spawn.
-    tokio::spawn(async move {
+    vector_core::db::spawn_bound(async move {
         vector_core::log_debug!("[bunker-reauth] awaiting signer pair…");
 
         let bunker_uri = match nc.bunker_uri().await {
@@ -417,6 +417,7 @@ pub async fn reauthorize_bunker<R: Runtime>(handle: AppHandle<R>) -> Result<Stri
         // take a moment to release sockets, and the success event shouldn't
         // wait on that.
         if let Some(old) = old_signer {
+            // spawn-detached: draining a replaced signer's sockets — no account storage.
             tokio::spawn(async move { let _ = old.shutdown().await; });
         }
 
@@ -440,6 +441,7 @@ pub async fn reauthorize_bunker<R: Runtime>(handle: AppHandle<R>) -> Result<Stri
             // the NostrConnect we installed gets replaced by attempt_bunker_login
             // during the next login_from_stored_key.
             if let Some(b) = vector_core::take_bunker_signer() {
+                // spawn-detached: same, for the bunker signer being torn down.
                 tokio::spawn(async move { let _ = b.shutdown().await; });
             }
             vector_core::set_bunker_state(vector_core::BunkerConnectionState::Idle);
@@ -1044,7 +1046,7 @@ pub async fn start_nostrconnect_session<R: Runtime>(
     let handle_for_task = handle.clone();
     let uri_for_log = uri_string.clone();
     let session = vector_core::state::SessionGuard::capture();
-    tokio::spawn(async move {
+    vector_core::db::spawn_bound(async move {
         vector_core::log_debug!("[bunker] start_nostrconnect_session: background task spawned");
         vector_core::log_debug!("[bunker] nostrconnect URI: {}", uri_for_log);
         let signer = match vector_core::bunker_signer() {
@@ -1373,7 +1375,7 @@ pub async fn encrypt(input: String, password: Option<String>) -> String {
             let inviter_pubkey = pending_invite.inviter_pubkey.clone();
 
             // Spawn the broadcast in a separate task to avoid blocking
-            tokio::spawn(async move {
+            vector_core::db::spawn_bound(async move {
                 // Create and publish the acceptance event
                 let event_builder = EventBuilder::new(Kind::ApplicationSpecificData, "vector_invite_accepted")
                     .tag(Tag::custom("l", vec!["vector"]))
@@ -2065,7 +2067,7 @@ fn broadcast_pending_invite_if_any() {
     let invite_code = pending_invite.invite_code;
     let inviter_pubkey = pending_invite.inviter_pubkey;
     let session = vector_core::state::SessionGuard::capture();
-    tokio::spawn(async move {
+    vector_core::db::spawn_bound(async move {
         if !session.is_valid() { return; }
         // `l:vector` tag is part of the published event shape; external
         // indexers / relay filters may key on it.

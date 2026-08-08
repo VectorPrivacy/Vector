@@ -2486,7 +2486,7 @@ pub fn trigger_community_reconnect_resync() {
     // reconnect trigger must not drive its sync. `sync_communities_boot` also re-guards each per-account
     // write, but capturing here keeps the whole detached task scoped to the account that reconnected.
     let session = vector_core::state::SessionGuard::capture();
-    tokio::spawn(async move {
+    vector_core::db::spawn_bound(async move {
         tokio::time::sleep(Duration::from_millis(1500)).await;
         if session.is_valid() {
             // RE-ARM the live Community subscription FIRST. On reconnect the pool re-applies the
@@ -2723,7 +2723,7 @@ async fn rehydrate_listed_communities(
                 let session_for_backfill = *session;
                 let backfill_channels: Vec<String> = community.channels.iter().map(|c| c.id.to_hex()).collect();
                 let backfill_cid = community.id.to_hex();
-                tokio::spawn(async move {
+                vector_core::db::spawn_bound(async move {
                     let bt = LiveTransport::with_timeout(Duration::from_secs(20));
                     match vector_core::community::list::backfill_history_from_seed(
                         &bt, &entry_for_backfill, session_for_backfill,
@@ -3131,7 +3131,7 @@ pub async fn sync_communities_boot() -> Result<(), String> {
     // anti-stampede coalesces any overlap with the sweep.
     {
         let discovery_session = vector_core::state::SessionGuard::capture();
-        tokio::spawn(async move {
+        vector_core::db::spawn_bound(async move {
             if !discovery_session.is_valid() {
                 return;
             }
@@ -3154,7 +3154,7 @@ pub async fn sync_communities_boot() -> Result<(), String> {
     // and probes sealed pointer-less ones for a carrier this client missed (upgrade lag).
     {
         let maintenance_session = vector_core::state::SessionGuard::capture();
-        tokio::spawn(async move {
+        vector_core::db::spawn_bound(async move {
             if !maintenance_session.is_valid() {
                 return;
             }
@@ -3886,7 +3886,7 @@ pub async fn accept_community_invite(community_id: String) -> Result<CommunitySu
             let bg_pub = vector_core::state::SessionGuard::capture();
             let community_pub = community.clone();
             let primary_pub = primary.clone();
-            tokio::spawn(async move {
+            vector_core::db::spawn_bound(async move {
                 if !bg_pub.is_valid() { return; }
                 let transport = LiveTransport::with_timeout(Duration::from_secs(12));
                 let _ = vector_core::community::service::publish_presence_event(&transport, &community_pub, &primary_pub, &inner).await;
@@ -3898,7 +3898,7 @@ pub async fn accept_community_invite(community_id: String) -> Result<CommunitySu
     // realtime. SessionGuard re-checked so a mid-flight account swap can't write account A's join into B.
     let bg = vector_core::state::SessionGuard::capture();
     let community_bg = community.clone();
-    tokio::spawn(async move {
+    vector_core::db::spawn_bound(async move {
         if !bg.is_valid() { return; }
         vector_core::community::list::add_membership(&community_bg);
         crate::services::subscription_handler::refresh_community_subscription().await;
@@ -4376,7 +4376,7 @@ pub async fn preview_public_invite(url: String) -> Result<PublicInvitePreviewInf
     // Accept opens populated. RAM-only + best-effort; promotion on Join re-validates freshness.
     let invite_warm = bundle.join.clone();
     let bg = vector_core::state::SessionGuard::capture();
-    tokio::spawn(async move {
+    vector_core::db::spawn_bound(async move {
         if !bg.is_valid() {
             return;
         }
@@ -4453,7 +4453,7 @@ pub async fn accept_public_invite(url: String) -> Result<CommunitySummary, Strin
             let bg_pub = vector_core::state::SessionGuard::capture();
             let community_pub = community.clone();
             let primary_pub = primary.clone();
-            tokio::spawn(async move {
+            vector_core::db::spawn_bound(async move {
                 if !bg_pub.is_valid() { return; }
                 let transport = LiveTransport::with_timeout(Duration::from_secs(12));
                 let _ = service::publish_presence_event(&transport, &community_pub, &primary_pub, &inner).await;
@@ -4465,7 +4465,7 @@ pub async fn accept_public_invite(url: String) -> Result<CommunitySummary, Strin
     // excluding rotation = removal → teardown), then record cross-device membership + (re)subscribe.
     let bg = vector_core::state::SessionGuard::capture();
     let community_bg = community.clone();
-    tokio::spawn(async move {
+    vector_core::db::spawn_bound(async move {
         if !bg.is_valid() { return; }
         let bt = LiveTransport::with_timeout(Duration::from_secs(20));
         if let Ok(c) = service::catch_up_server_root(&bt, &community_bg).await {

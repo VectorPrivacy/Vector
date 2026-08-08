@@ -580,6 +580,7 @@ pub async fn fetch_marketplace_apps(trusted_only: bool) -> Result<Vec<Marketplac
                 let app_id = app.id.clone();
                 let icon_url = app.icon_url.clone().unwrap();
 
+                // spawn-detached: the marketplace icon cache is app-wide, not per-account.
                 tokio::spawn(async move {
                     cache_miniapp_icon(&handle, &app_id, &icon_url).await;
                 });
@@ -739,6 +740,7 @@ pub async fn install_marketplace_app<R: tauri::Runtime>(
         let handle_clone = handle.clone();
         let app_id_clone = app_id.to_string();
         let icon_url_clone = icon_url.clone();
+        // spawn-detached: same.
         tokio::spawn(async move {
             recache_miniapp_icon(&handle_clone, &app_id_clone, &icon_url_clone).await;
         });
@@ -1003,6 +1005,7 @@ pub async fn update_marketplace_app<R: tauri::Runtime>(
         let handle_clone = handle.clone();
         let app_id_clone = app_id.to_string();
         let icon_url_clone = icon_url.clone();
+        // spawn-detached: same.
         tokio::spawn(async move {
             recache_miniapp_icon(&handle_clone, &app_id_clone, &icon_url_clone).await;
         });

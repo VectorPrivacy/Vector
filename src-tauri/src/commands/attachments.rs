@@ -44,6 +44,7 @@ impl Drop for ActiveDownloadGuard {
             Ok(mut active) => { active.remove(&self.id); }
             Err(_) => {
                 let id = self.id.clone();
+                // spawn-detached: removes an id from the process-wide in-flight download set.
                 tokio::spawn(async move {
                     ACTIVE_DOWNLOADS.lock().await.remove(&id);
                 });

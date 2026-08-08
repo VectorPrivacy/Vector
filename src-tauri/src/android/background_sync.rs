@@ -450,6 +450,7 @@ fn run_standalone_sync_loop(data_dir: &str) {
         // Spawn a stop-checker task that disconnects the client when stop is signaled.
         // Uses Notify for instant zero-cost wakeup instead of polling.
         let client_for_stop = client.clone();
+        // spawn-detached: Android background client lifecycle — stops whichever client is live.
         tokio::spawn(async move {
             STOP_NOTIFY.notified().await;
             logcat("Stop signal received, disconnecting client...");
@@ -472,6 +473,7 @@ fn run_standalone_sync_loop(data_dir: &str) {
         // reconcile loop (which resolves the *global* client), so if nobody reconnects
         // it, a soft-backgrounded app silently stops receiving community messages.
         let client_for_reconnect = client.clone();
+        // spawn-detached: resolves the live global client by design; see the comment above.
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;

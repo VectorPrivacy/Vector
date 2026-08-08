@@ -237,5 +237,6 @@ pub fn start_sweeper() {
     // NOT bound: this loop runs for the process lifetime and must sweep
     // whichever account is live. Binding would pin it to whoever logged in
     // first, and every later account would silently stop expiring messages.
+    // spawn-detached: the sweeper must expire messages for whichever account is live; see above.
     tokio::spawn(run_sweeper_loop());
 }

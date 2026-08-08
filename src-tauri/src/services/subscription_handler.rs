@@ -119,7 +119,7 @@ async fn handle_self_sync_event(session: &vector_core::state::SessionGuard, even
             // Both lists are kind 30078 — route by `d`-tag.
             let is_invite = event.tags.identifier().as_deref()
                 == Some(vector_core::community::invite_list::INVITE_LIST_D_TAG);
-            tokio::spawn(async move {
+            vector_core::db::spawn_bound(async move {
                 if is_invite {
                     crate::commands::community::ingest_invite_list_update(event).await;
                 } else {
@@ -130,12 +130,12 @@ async fn handle_self_sync_event(session: &vector_core::state::SessionGuard, even
         k if k == vector_core::community::v2::kind::COMMUNITY_LIST => {
             // Re-run the same sync the boot path uses: it adopts newly-listed communities and
             // tears down ones a sibling device left. Spawned — it runs several relay fetches.
-            tokio::spawn(async move {
+            vector_core::db::spawn_bound(async move {
                 crate::commands::community::ingest_v2_community_list_update().await;
             });
         }
         10030 => {
-            tokio::spawn(async move {
+            vector_core::db::spawn_bound(async move {
                 let _ = vector_core::emoji_packs::refresh_subscribed_packs().await;
             });
         }
@@ -186,7 +186,7 @@ impl vector_core::community::transport::CommunityIngestSink for CommunityStraggl
         // SessionGuard captured BEFORE the spawn boundary (a capture inside the task would validate
         // against whatever generation is current by then) — re-checked per event across the fold loop.
         let session = vector_core::state::SessionGuard::capture();
-        tokio::spawn(async move {
+        vector_core::db::spawn_bound(async move {
             for event in events {
                 if !session.is_valid() {
                     return;
@@ -371,7 +371,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
     if let Some(monitor) = client.monitor() {
         let mut rx = monitor.subscribe();
         let monitor_session = vector_core::state::SessionGuard::capture();
-        tokio::spawn(async move {
+        vector_core::db::spawn_bound(async move {
             let mut last: Option<std::time::Instant> = None;
             while let Ok(n) = rx.recv().await {
                 if !monitor_session.is_valid() {

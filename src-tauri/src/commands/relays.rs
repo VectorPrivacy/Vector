@@ -491,7 +491,7 @@ fn require_active_blossom_session() -> Result<vector_core::state::SessionGuard, 
 /// capability row already exists.
 fn spawn_probe_for_server(server_url: String) {
     let session = vector_core::state::SessionGuard::capture();
-    tokio::spawn(async move {
+    vector_core::db::spawn_bound(async move {
         if !session.is_valid() { return; }
         // Route through the active client signer — local accounts get the
         // local GuardedSigner, bunker accounts get NostrConnect (so the
@@ -1110,6 +1110,7 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
 
     // Spawn task for real-time relay status notifications
     let handle_clone = handle.clone();
+    // spawn-detached: relay status notifications — pool health, which is the live pool by definition.
     tokio::spawn(async move {
         while let Ok(notification) = receiver.recv().await {
             match notification {
@@ -1151,6 +1152,7 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                             if !is_syncing {
                                 let handle_inner = handle_clone.clone();
                                 let url_string = url_str.clone();
+                                // spawn-detached: one relay's status toast.
                                 tokio::spawn(async move {
                                     crate::commands::sync::fetch_messages(handle_inner, false, Some(url_string)).await;
                                 });
@@ -1187,6 +1189,7 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                                 if let (Some(client), Ok(relay_url)) =
                                     (vector_core::state::nostr_client(), nostr_sdk::prelude::RelayUrl::parse(&url_str))
                                 {
+                                    // spawn-detached: reconnecting one relay — socket work, no account storage.
                                     tokio::spawn(async move {
                                         vector_core::resubscribe_relay_after_reconnect(&client, &relay_url).await;
                                     });
@@ -1205,6 +1208,7 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
     // to prevent a disconnect→reconnect→sync death loop.
     let client_health = client.clone();
     let handle_health = handle.clone();
+    // spawn-detached: the health probe must probe whichever pool is live.
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
 
@@ -1295,6 +1299,7 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
     // dead ones; the short warmup covers the startup window. Re-resolves the
     // active client each pass so an account swap can't reconcile a stale pool.
     let handle_recon = handle.clone();
+    // spawn-detached: the reconciler re-resolves the active client each pass, deliberately.
     tokio::spawn(async move {
         let norm = |u: &str| u.trim_end_matches('/').to_ascii_lowercase();
         // First time each relay was seen sitting in `Pending`. See the rescue below.
@@ -1492,7 +1497,7 @@ pub async fn connect<R: Runtime>(handle: AppHandle<R>) -> bool {
     // that list — inbound changes from other devices/apps apply locally,
     // then any outbound diff merge-publishes.
     let reconcile_handle = handle.clone();
-    tokio::spawn(async move {
+    vector_core::db::spawn_bound(async move {
         // Small delay to let relay connections stabilise
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         reconcile_dm_relay_list(reconcile_handle).await;

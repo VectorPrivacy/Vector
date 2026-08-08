@@ -105,7 +105,7 @@ impl SendCallback for TauriSendCallback {
         if old_id.starts_with("pending-") && old_id != msg.id {
             let pending_id = old_id.to_string();
             let session = vector_core::state::SessionGuard::capture();
-            tokio::spawn(async move {
+            vector_core::db::spawn_bound(async move {
                 if !session.is_valid() { return; }
                 let _ = vector_core::db::events::delete_event(&pending_id);
             });
@@ -136,7 +136,7 @@ impl SendCallback for TauriSendCallback {
         // SessionGuard so a swap before the DB write doesn't persist
         // account A's outgoing message as a phantom chat row in B's DB.
         let session = vector_core::state::SessionGuard::capture();
-        tokio::spawn(async move {
+        vector_core::db::spawn_bound(async move {
             if !session.is_valid() { return; }
             let _ = crate::db::save_message(&chat_id, &msg).await;
         });
@@ -600,7 +600,7 @@ pub async fn cancel_upload(pending_id: String) -> Result<(), String> {
             .collect();
 
         if !attachments_to_delete.is_empty() {
-            tokio::spawn(async move {
+            vector_core::db::spawn_bound(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
                 let download_dir = vector_core::db::get_download_dir();

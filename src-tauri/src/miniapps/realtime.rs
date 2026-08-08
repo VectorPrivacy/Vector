@@ -194,13 +194,13 @@ impl IrohState {
         // Accept loop: handle incoming gossip connections
         let accept_endpoint = endpoint.clone();
         let accept_gossip = gossip.clone();
-        tokio::spawn(async move {
+        vector_core::db::spawn_bound(async move {
             log_info!("[WEBXDC] Starting connection accept loop");
             loop {
                 match accept_endpoint.accept().await {
                     Some(incoming) => {
                         let gossip = accept_gossip.clone();
-                        tokio::spawn(async move {
+                        vector_core::db::spawn_bound(async move {
                             match incoming.await {
                                 Ok(conn) => {
                                     if conn.alpn() == GOSSIP_ALPN {
@@ -340,7 +340,7 @@ impl IrohState {
                 let addr = peer_addr.clone();
                 let ep = self.endpoint.clone();
                 let g = self.gossip.clone();
-                tokio::spawn(async move {
+                vector_core::db::spawn_bound(async move {
                     match ep.connect(addr, GOSSIP_ALPN).await {
                         Ok(conn) => {
                             if let Err(e) = g.handle_connection(conn).await {
@@ -375,7 +375,7 @@ impl IrohState {
         let our_key_bytes = self.public_key_bytes;
         let topic_encoded = encode_topic_id(&topic);
         let sender_for_loop = gossip_sender.clone();
-        let subscribe_loop = tokio::spawn(async move {
+        let subscribe_loop = vector_core::db::spawn_bound(async move {
             if let Err(e) = run_subscribe_loop(gossip_receiver, sender_for_loop, topic, shared_target_clone, join_tx, our_key_bytes, peer_count_clone, app_handle, topic_encoded).await {
                 log_warn!("Subscribe loop failed: {e}");
             }
@@ -507,7 +507,7 @@ impl IrohState {
 
         // Fire-and-forget broadcast via a spawned task (broadcast is async)
         let sender = handle.sender.clone();
-        tokio::spawn(async move {
+        vector_core::db::spawn_bound(async move {
             let _ = sender.broadcast(msg.into()).await;
         });
     }
@@ -809,7 +809,7 @@ async fn run_subscribe_loop(
                     // Capture BEFORE the sleep: the topic→chat_id mapping belongs to the
                     // account current now, and 2s is plenty of time for a swap.
                     let session = vector_core::state::SessionGuard::capture();
-                    tokio::spawn(async move {
+                    vector_core::db::spawn_bound(async move {
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         if !session.is_valid() { return; }
                         let state = app.state::<crate::miniapps::state::MiniAppsState>();

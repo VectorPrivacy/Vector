@@ -957,3 +957,17 @@ pub fn append_vector_log(line: &str) {
         }
     }
 }
+
+#[cfg(test)]
+mod spawn_binding_tests {
+    /// The shell spawns per-account work too, and the same mistake costs the
+    /// same: a task that outlives an account switch writing account A's data
+    /// into account B's storage. Same check, same marker, one implementation.
+    #[test]
+    fn per_account_tasks_are_spawned_bound_to_their_account() {
+        vector_core::spawn_audit::assert_all_spawns_bound(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+            &[],
+        );
+    }
+}

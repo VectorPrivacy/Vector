@@ -59,7 +59,7 @@ async fn main() {
     // Start background listener with event handler
     let (event_handler, message_buffer) = AgentEventHandler::new();
     let listen_core = VectorCore;
-    tokio::spawn(async move {
+    vector_core::db::spawn_bound(async move {
         if let Err(e) = listen_core.listen(Arc::new(event_handler)).await {
             eprintln!("[vector-agent] Listen error: {}", e);
         }
@@ -102,4 +102,18 @@ fn dirs_or_default() -> PathBuf {
         }
     }
     PathBuf::from("/tmp/vector-data")
+}
+
+#[cfg(test)]
+mod spawn_binding_tests {
+    /// This agent swaps accounts on demand (`swap_account`), so it carries the
+    /// same hazard as the app: a listener or buffer task outliving the swap and
+    /// writing the previous account's data into the new one's store.
+    #[test]
+    fn per_account_tasks_are_spawned_bound_to_their_account() {
+        vector_core::spawn_audit::assert_all_spawns_bound(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+            &[],
+        );
+    }
 }

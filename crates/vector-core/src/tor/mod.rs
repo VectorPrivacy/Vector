@@ -256,6 +256,7 @@ impl TorService {
         // the value as a radial progress bar via the comet dasharray.
         let bootstrap_events = client.bootstrap_events();
         let log_progress = !bridges.is_empty();
+        // spawn-detached: logging the Tor daemon's bootstrap progress; the daemon is process-wide.
         tokio::spawn(async move {
             let mut events = bootstrap_events;
             while let Some(status) = events.next().await {
@@ -299,6 +300,7 @@ impl TorService {
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let client_for_socks = client.clone();
+        // spawn-detached: the SOCKS listener runs for the daemon's life, serving whoever is live.
         let socks_join = tokio::spawn(async move {
             socks::run(listener, client_for_socks, shutdown_rx).await;
             log_info!("[Tor] SOCKS5 listener stopped");
@@ -411,6 +413,7 @@ impl TorService {
         let _guard = BootstrapGuard;
 
         let bootstrap_events = self.client.bootstrap_events();
+        // spawn-detached: bootstrap progress again — same daemon, same reason.
         tokio::spawn(async move {
             let mut events = bootstrap_events;
             while let Some(status) = events.next().await {

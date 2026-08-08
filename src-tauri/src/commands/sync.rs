@@ -435,7 +435,7 @@ pub async fn fetch_messages<R: Runtime>(
                             .filter_map(|(_relay, res)| async move { res.ok() })
                             .map(move |event| {
                                 let c = client_clone.clone();
-                                tokio::spawn(async move {
+                                vector_core::db::spawn_bound(async move {
                                     vector_core::event_handler::prepare_event(event, &c, my_public_key).await
                                 })
                             })
@@ -495,7 +495,7 @@ pub async fn fetch_messages<R: Runtime>(
                     // load below — by volley time they're up and the gating
                     // relays' challenges are already remembered.
                     let warm_session = vector_core::state::SessionGuard::capture();
-                    tokio::spawn(async move {
+                    vector_core::db::spawn_bound(async move {
                         if warm_session.is_valid() {
                             vector_core::community::transport::prewarm_held_communities(warm_session).await;
                         }
@@ -538,7 +538,7 @@ pub async fn fetch_messages<R: Runtime>(
 
                 // Spawn background task to cache profile images for offline support
                 let img_session = vector_core::state::SessionGuard::capture();
-                tokio::spawn(async move {
+                vector_core::db::spawn_bound(async move {
                     if !img_session.is_valid() { return; }
                     profile::cache_all_profile_images().await;
                 });
@@ -688,7 +688,7 @@ pub async fn fetch_messages<R: Runtime>(
                 // messages before this runs, so a missing file on a preloaded message would otherwise
                 // stay a broken image until a full reload.
                 let integrity_session = vector_core::state::SessionGuard::capture();
-                tokio::spawn(async move {
+                vector_core::db::spawn_bound(async move {
                     if !integrity_session.is_valid() { return; }
                     match db::check_downloaded_attachments_integrity().await {
                         Ok((_, missing, _, affected)) if missing > 0 => {
@@ -738,7 +738,7 @@ pub async fn fetch_messages<R: Runtime>(
             // Preload marketplace cache from SQLite → MARKETPLACE_STATE (non-blocking)
             // Ensures permission checks work before the user visits the Nexus tab,
             // then silently refreshes from the network in the background.
-            tokio::spawn(async {
+            vector_core::db::spawn_bound(async {
                 crate::miniapps::marketplace::preload_marketplace_cache().await;
             });
 
@@ -750,7 +750,7 @@ pub async fn fetch_messages<R: Runtime>(
             // fallback in handle_event.
             let wrapper_session = vector_core::state::SessionGuard::capture();
             let wrapper_client = client.clone();
-            tokio::spawn(async move {
+            vector_core::db::spawn_bound(async move {
                 let t = std::time::Instant::now();
                 let mut full_load = false;
                 let mut bound = Timestamp::now().as_secs().saturating_sub(7 * 24 * 3600);
@@ -806,7 +806,7 @@ pub async fn fetch_messages<R: Runtime>(
     // already emitted above, so the frontend holds the Community chat rows before any page arrives.
     // SessionGuard captured before the spawn boundary (swap-safe); the sweep re-captures internally.
     let community_session = vector_core::state::SessionGuard::capture();
-    tokio::spawn(async move {
+    vector_core::db::spawn_bound(async move {
         if community_session.is_valid() {
             let _ = crate::commands::community::sync_communities_boot().await;
         }
@@ -963,7 +963,7 @@ pub async fn fetch_messages<R: Runtime>(
         println!("[Sync] detaching {} quick straggler(s)", relay_futs.len());
         let det_client = client.clone();
         let det_session = quick_session;
-        tokio::spawn(async move {
+        vector_core::db::spawn_bound(async move {
             let inner = crate::services::event_handler::TauriEventHandler;
             let batcher = vector_core::event_handler::BatchingPersist::new(&inner);
             let mut ok = true;
@@ -1033,7 +1033,7 @@ pub async fn fetch_messages<R: Runtime>(
     {
         let bg_client = client.clone();
         let session = vector_core::state::SessionGuard::capture();
-        tokio::spawn(async move {
+        vector_core::db::spawn_bound(async move {
             if !session.is_valid() { return; }
             match vector_core::blossom_servers::fetch_and_merge_own_list(&bg_client, my_public_key, session).await {
                 Ok(0) => {}
@@ -1074,7 +1074,7 @@ pub async fn fetch_messages<R: Runtime>(
         // still burns relay bandwidth pointlessly and any post-sync
         // community sweep would run against the new account. Bail early on swap.
         let archive_session = vector_core::state::SessionGuard::capture();
-        tokio::spawn(async move {
+        vector_core::db::spawn_bound(async move {
             if !archive_session.is_valid() { return; }
             let archive_start = std::time::Instant::now();
             let mut archive_new = 0u32;
@@ -1277,7 +1277,7 @@ pub async fn fetch_messages<R: Runtime>(
                 let det_session = vector_core::state::SessionGuard::capture();
                 let primary_set: std::collections::HashSet<EventId> =
                     all_missing.iter().copied().collect();
-                tokio::spawn(async move {
+                vector_core::db::spawn_bound(async move {
                     if !det_session.is_valid() { return; }
                     let mut extra: Vec<EventId> = Vec::new();
                     while let Some((url, result)) = futs.next().await {
@@ -1456,7 +1456,7 @@ pub async fn fetch_messages<R: Runtime>(
             {
                 let badge_handle = handle_bg.clone();
                 let badge_session = vector_core::state::SessionGuard::capture();
-                tokio::spawn(async move {
+                vector_core::db::spawn_bound(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                     if !badge_session.is_valid() { return; }
                     vector_core::badges::refresh_own_badges().await;

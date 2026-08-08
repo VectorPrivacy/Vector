@@ -139,7 +139,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppManager_onMiniAppClosed(
                     let chat_id = instance.chat_id.clone();
                     let topic_for_left = topic_encoded.clone();
                     if session.is_valid() {
-                        tokio::spawn(async move {
+                        vector_core::db::spawn_bound(async move {
                             if !crate::commands::realtime::send_webxdc_peer_left(chat_id, topic_for_left).await {
                                 log_warn!("[WEBXDC] Failed to send peer-left signal");
                             }
@@ -521,7 +521,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
                     let chat_id_1 = chat_id.clone();
                     let topic_1 = topic_for_ad.clone();
                     let addr_1 = addr_for_ad.clone();
-                    tokio::spawn(async move {
+                    vector_core::db::spawn_bound(async move {
                         crate::commands::realtime::send_webxdc_peer_advertisement(
                             chat_id_1, topic_1, addr_1,
                         ).await;
@@ -531,7 +531,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
                     let chat_id_2 = chat_id;
                     let topic_2 = topic_for_ad;
                     let addr_2 = addr_for_ad;
-                    tokio::spawn(async move {
+                    vector_core::db::spawn_bound(async move {
                         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
                         crate::commands::realtime::send_webxdc_peer_advertisement(
                             chat_id_2, topic_2, addr_2,
