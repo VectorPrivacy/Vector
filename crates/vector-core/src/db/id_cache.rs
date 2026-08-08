@@ -4,25 +4,34 @@
 //! preloaded at boot and cleared on account switch.
 
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::{Arc, RwLock};
 
-static CHAT_ID_CACHE: LazyLock<Arc<RwLock<HashMap<String, i64>>>> =
-    LazyLock::new(|| Arc::new(RwLock::new(HashMap::new())));
+// Row ids belong to ONE account's database. Resolving a chat or npub against
+// another account's cache returns a live id for the wrong row, which reads and
+// writes then follow silently.
+struct ChatIds;
+struct UserIds;
 
-static USER_ID_CACHE: LazyLock<Arc<RwLock<HashMap<String, i64>>>> =
-    LazyLock::new(|| Arc::new(RwLock::new(HashMap::new())));
+fn chat_id_cache() -> Arc<RwLock<HashMap<String, i64>>> {
+    crate::db::current_session().scoped::<ChatIds, _>()
+}
+
+fn user_id_cache() -> Arc<RwLock<HashMap<String, i64>>> {
+    crate::db::current_session().scoped::<UserIds, _>()
+}
 
 /// Drop a chat's cached identifier→id mapping. Call after deleting a chat row so
 /// a later recreate doesn't reuse the stale (now-deleted) integer id.
 pub fn forget_chat_id(chat_identifier: &str) {
-    CHAT_ID_CACHE.write().unwrap().remove(chat_identifier);
+    chat_id_cache().write().unwrap().remove(chat_identifier);
 }
 
 /// Lookup-only: get integer chat ID from identifier. Errors if not found.
 pub fn get_chat_id_by_identifier(chat_identifier: &str) -> Result<i64, String> {
     // Fast path: cache hit
     {
-        let cache = CHAT_ID_CACHE.read().unwrap();
+        let owner = chat_id_cache();
+        let cache = owner.read().unwrap();
         if let Some(&id) = cache.get(chat_identifier) {
             return Ok(id);
         }
@@ -38,7 +47,8 @@ pub fn get_chat_id_by_identifier(chat_identifier: &str) -> Result<i64, String> {
 
     // Update cache
     {
-        let mut cache = CHAT_ID_CACHE.write().unwrap();
+        let owner = chat_id_cache();
+        let mut cache = owner.write().unwrap();
         cache.insert(chat_identifier.to_string(), id);
     }
 
@@ -49,7 +59,8 @@ pub fn get_chat_id_by_identifier(chat_identifier: &str) -> Result<i64, String> {
 pub fn get_or_create_chat_id(chat_identifier: &str) -> Result<i64, String> {
     // Fast path: cache hit
     {
-        let cache = CHAT_ID_CACHE.read().unwrap();
+        let owner = chat_id_cache();
+        let cache = owner.read().unwrap();
         if let Some(&id) = cache.get(chat_identifier) {
             return Ok(id);
         }
@@ -86,7 +97,8 @@ pub fn get_or_create_chat_id(chat_identifier: &str) -> Result<i64, String> {
 
     // Update cache
     {
-        let mut cache = CHAT_ID_CACHE.write().unwrap();
+        let owner = chat_id_cache();
+        let mut cache = owner.write().unwrap();
         cache.insert(chat_identifier.to_string(), id);
     }
 
@@ -101,7 +113,8 @@ pub fn get_or_create_user_id(npub: &str) -> Result<Option<i64>, String> {
 
     // Fast path: cache hit
     {
-        let cache = USER_ID_CACHE.read().unwrap();
+        let owner = user_id_cache();
+        let cache = owner.read().unwrap();
         if let Some(&id) = cache.get(npub) {
             return Ok(Some(id));
         }
@@ -127,7 +140,8 @@ pub fn get_or_create_user_id(npub: &str) -> Result<Option<i64>, String> {
 
     // Update cache
     {
-        let mut cache = USER_ID_CACHE.write().unwrap();
+        let owner = user_id_cache();
+        let mut cache = owner.write().unwrap();
         cache.insert(npub.to_string(), id);
     }
 
@@ -149,7 +163,8 @@ pub fn preload_id_caches() -> Result<(), String> {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         }).map_err(|e| format!("Failed to query chats: {}", e))?;
 
-        let mut cache = CHAT_ID_CACHE.write().unwrap();
+        let owner = chat_id_cache();
+        let mut cache = owner.write().unwrap();
         for row in rows.flatten() {
             cache.insert(row.0, row.1);
         }
@@ -163,7 +178,8 @@ pub fn preload_id_caches() -> Result<(), String> {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         }).map_err(|e| format!("Failed to query profiles: {}", e))?;
 
-        let mut cache = USER_ID_CACHE.write().unwrap();
+        let owner = user_id_cache();
+        let mut cache = owner.write().unwrap();
         for row in rows.flatten() {
             cache.insert(row.0, row.1);
         }
@@ -174,6 +190,6 @@ pub fn preload_id_caches() -> Result<(), String> {
 
 /// Clear all ID caches (call on account switch).
 pub fn clear_id_caches() {
-    CHAT_ID_CACHE.write().unwrap().clear();
-    USER_ID_CACHE.write().unwrap().clear();
+    chat_id_cache().write().unwrap().clear();
+    user_id_cache().write().unwrap().clear();
 }

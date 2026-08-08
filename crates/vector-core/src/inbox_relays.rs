@@ -215,8 +215,13 @@ struct CachedRelays {
     fetch_ok: bool,
 }
 
-static INBOX_RELAY_CACHE: LazyLock<Mutex<HashMap<PublicKey, CachedRelays>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Recipient-keyed, so technically account-agnostic — but the set of
+/// recipients is a record of who this account has messaged.
+struct InboxRelayCache;
+
+fn inbox_relay_cache() -> Arc<Mutex<HashMap<PublicKey, CachedRelays>>> {
+    crate::db::current_session().scoped::<InboxRelayCache, _>()
+}
 
 /// Drop every cached recipient relay list — called by `reset_session()`.
 /// The cache is recipient-keyed (so technically account-agnostic) but
@@ -224,7 +229,7 @@ static INBOX_RELAY_CACHE: LazyLock<Mutex<HashMap<PublicKey, CachedRelays>>> =
 /// re-queried entries. Clear on swap to free memory and avoid
 /// stale-data revivals.
 pub fn clear_inbox_relay_cache() {
-    if let Ok(mut cache) = INBOX_RELAY_CACHE.lock() {
+    if let Ok(mut cache) = inbox_relay_cache().lock() {
         cache.clear();
     }
 }
@@ -391,7 +396,8 @@ where
 {
     // Fast path: cache hit (no per-key lock needed, no pruning)
     {
-        let cache = INBOX_RELAY_CACHE.lock().unwrap();
+        let owner = inbox_relay_cache();
+        let cache = owner.lock().unwrap();
         if let Some(entry) = cache.get(pubkey) {
             let ttl = if entry.fetch_ok { CACHE_TTL_SECS } else { CACHE_TTL_ERROR_SECS };
             if entry.fetched_at.elapsed().as_secs() < ttl {
@@ -431,7 +437,8 @@ where
 
         // Double-check: another task may have filled the cache while we waited
         let cached_relays = {
-            let cache = INBOX_RELAY_CACHE.lock().unwrap();
+            let owner = inbox_relay_cache();
+            let cache = owner.lock().unwrap();
             if let Some(entry) = cache.get(pubkey) {
                 let ttl = if entry.fetch_ok { CACHE_TTL_SECS } else { CACHE_TTL_ERROR_SECS };
                 if entry.fetched_at.elapsed().as_secs() < ttl {
@@ -452,7 +459,8 @@ where
 
                 // Store in cache (even empty/error results to avoid hammering relays)
                 {
-                    let mut cache = INBOX_RELAY_CACHE.lock().unwrap();
+                    let owner = inbox_relay_cache();
+                    let mut cache = owner.lock().unwrap();
                     cache.insert(
                         *pubkey,
                         CachedRelays {
@@ -1719,7 +1727,8 @@ mod tests {
         let relays = vec!["wss://a.example.com".to_string()];
 
         {
-            let mut cache = INBOX_RELAY_CACHE.lock().unwrap();
+            let owner = inbox_relay_cache();
+            let mut cache = owner.lock().unwrap();
             cache.insert(pk, CachedRelays {
                 relays: relays.clone(),
                 fetched_at: Instant::now(),
@@ -1727,7 +1736,8 @@ mod tests {
             });
         }
 
-        let cache = INBOX_RELAY_CACHE.lock().unwrap();
+        let owner = inbox_relay_cache();
+        let cache = owner.lock().unwrap();
         let entry = cache.get(&pk).unwrap();
         assert_eq!(entry.relays, relays);
         assert!(entry.fetch_ok);
@@ -1740,7 +1750,8 @@ mod tests {
         let pk = test_pubkey();
 
         {
-            let mut cache = INBOX_RELAY_CACHE.lock().unwrap();
+            let owner = inbox_relay_cache();
+            let mut cache = owner.lock().unwrap();
             cache.insert(pk, CachedRelays {
                 relays: vec!["wss://stale.example.com".to_string()],
                 fetched_at: Instant::now() - std::time::Duration::from_secs(CACHE_TTL_SECS + 1),
@@ -1748,7 +1759,8 @@ mod tests {
             });
         }
 
-        let cache = INBOX_RELAY_CACHE.lock().unwrap();
+        let owner = inbox_relay_cache();
+        let cache = owner.lock().unwrap();
         let entry = cache.get(&pk).unwrap();
         assert!(entry.fetched_at.elapsed().as_secs() >= CACHE_TTL_SECS);
     }
@@ -1759,7 +1771,8 @@ mod tests {
         let pk = test_pubkey();
 
         {
-            let mut cache = INBOX_RELAY_CACHE.lock().unwrap();
+            let owner = inbox_relay_cache();
+            let mut cache = owner.lock().unwrap();
             cache.insert(pk, CachedRelays {
                 relays: vec![],
                 fetched_at: Instant::now(),
@@ -1767,7 +1780,8 @@ mod tests {
             });
         }
 
-        let cache = INBOX_RELAY_CACHE.lock().unwrap();
+        let owner = inbox_relay_cache();
+        let cache = owner.lock().unwrap();
         let entry = cache.get(&pk).unwrap();
         assert!(entry.relays.is_empty());
         assert!(entry.fetch_ok);
@@ -1780,7 +1794,8 @@ mod tests {
         let pk = test_pubkey();
 
         {
-            let mut cache = INBOX_RELAY_CACHE.lock().unwrap();
+            let owner = inbox_relay_cache();
+            let mut cache = owner.lock().unwrap();
             cache.insert(pk, CachedRelays {
                 relays: vec![],
                 // Inserted 2 minutes ago — past the error TTL (60s) but within success TTL (3600s)
@@ -1789,7 +1804,8 @@ mod tests {
             });
         }
 
-        let cache = INBOX_RELAY_CACHE.lock().unwrap();
+        let owner = inbox_relay_cache();
+        let cache = owner.lock().unwrap();
         let entry = cache.get(&pk).unwrap();
         assert!(!entry.fetch_ok);
         // Should be considered expired under error TTL
@@ -1807,7 +1823,8 @@ mod tests {
 
         // Clear cache so all tasks see a cold cache
         {
-            let mut cache = INBOX_RELAY_CACHE.lock().unwrap();
+            let owner = inbox_relay_cache();
+            let mut cache = owner.lock().unwrap();
             cache.remove(&pk);
         }
 
@@ -1870,7 +1887,8 @@ mod tests {
 
         // Clear both cache and locks to avoid interference from other tests
         {
-            let mut cache = INBOX_RELAY_CACHE.lock().unwrap();
+            let owner = inbox_relay_cache();
+            let mut cache = owner.lock().unwrap();
             cache.clear();
         }
         {
@@ -1932,7 +1950,8 @@ mod tests {
         let pk = test_pubkey();
 
         {
-            let mut cache = INBOX_RELAY_CACHE.lock().unwrap();
+            let owner = inbox_relay_cache();
+            let mut cache = owner.lock().unwrap();
             cache.clear();
         }
         {

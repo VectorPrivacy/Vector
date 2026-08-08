@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::{NOSTR_CLIENT, MY_SECRET_KEY, ENCRYPTION_KEY, set_my_public_key};
+use crate::{MY_SECRET_KEY, ENCRYPTION_KEY, set_my_public_key};
 use vector_core::state::set_nostr_client;
 use crate::commands::relays::DEFAULT_RELAYS;
 use crate::services::event_handler::handle_event_with_context;
@@ -403,7 +403,7 @@ fn run_standalone_sync_loop(data_dir: &str) {
             // standalone one, so nativeOnResume can restore it (and keep the notification loop and all
             // future subscriptions on a single live client).
             if ACTIVITY_EVER_CREATED.load(Ordering::Acquire) {
-                if let Some(fg) = NOSTR_CLIENT.read().unwrap().as_ref().cloned() {
+                if let Some(fg) = vector_core::state::nostr_client() {
                     *PRESWAP_FOREGROUND_CLIENT.lock().unwrap() = Some(fg);
                 }
             }

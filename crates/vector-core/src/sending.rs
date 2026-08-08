@@ -184,27 +184,32 @@ struct WrapConfirm {
     registered_at: std::time::Instant,
 }
 
-static WRAP_CONFIRMS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<EventId, Arc<WrapConfirm>>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+/// Entries carry this account's chat and message ids, so a late OK must only
+/// ever rescue a message in the account that sent it.
+struct WrapConfirms;
+
+fn wrap_confirms() -> Arc<std::sync::Mutex<std::collections::HashMap<EventId, Arc<WrapConfirm>>>> {
+    crate::db::current_session().scoped::<WrapConfirms, _>()
+}
 
 /// An OK this long after the last publish attempt is a ghost — drop the
 /// entry rather than resurrect a message the user has moved past.
 const WRAP_CONFIRM_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 fn register_wrap_confirm(entry: Arc<WrapConfirm>) {
-    let mut map = WRAP_CONFIRMS.lock().unwrap();
+    let owner = wrap_confirms();
+    let mut map = owner.lock().unwrap();
     map.retain(|_, e| e.registered_at.elapsed() < WRAP_CONFIRM_TTL);
     map.insert(entry.wrap_id, entry);
 }
 
 fn remove_wrap_confirm(wrap_id: &EventId) {
-    WRAP_CONFIRMS.lock().unwrap().remove(wrap_id);
+    wrap_confirms().lock().unwrap().remove(wrap_id);
 }
 
 /// Clear on session swap — entries carry per-account chat/message ids.
 pub fn clear_wrap_confirms() {
-    WRAP_CONFIRMS.lock().unwrap().clear();
+    wrap_confirms().lock().unwrap().clear();
 }
 
 /// Feed a relay `OK` for an outbound event back into the send pipeline.
@@ -217,7 +222,8 @@ pub fn note_relay_ok(event_id: &EventId, accepted: bool) {
         return;
     }
     let entry = {
-        let map = WRAP_CONFIRMS.lock().unwrap();
+        let owner = wrap_confirms();
+        let map = owner.lock().unwrap();
         map.get(event_id).cloned()
     };
     let Some(entry) = entry else { return };

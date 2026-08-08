@@ -392,7 +392,7 @@ pub use profile::{Profile, ProfileFlags, SlimProfile, Status};
 pub use chat::{Chat, ChatType, ChatMetadata, SerializableChat};
 pub use compact::{CompactMessage, CompactMessageVec, NpubInterner};
 pub use state::{
-    ChatState, NOSTR_CLIENT, MY_SECRET_KEY, MY_PUBLIC_KEY, STATE, ENCRYPTION_KEY,
+    ChatState, MY_SECRET_KEY, STATE, ENCRYPTION_KEY,
     nostr_client, my_public_key, has_active_session,
     set_nostr_client, set_my_public_key,
     take_nostr_client, clear_my_public_key,

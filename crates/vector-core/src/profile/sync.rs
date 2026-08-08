@@ -9,7 +9,7 @@
 //! CLI provides a no-op or logging implementation.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Mutex, LazyLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nostr_sdk::prelude::*;
@@ -87,6 +87,10 @@ pub struct ProfileSyncQueue {
     processing: HashSet<String>,
     last_fetched: HashMap<String, Instant>,
     is_processing: bool,
+}
+
+impl Default for ProfileSyncQueue {
+    fn default() -> Self { Self::new() }
 }
 
 impl ProfileSyncQueue {
@@ -193,14 +197,20 @@ impl ProfileSyncQueue {
 // Global queue
 // ============================================================================
 
-static PROFILE_SYNC_QUEUE: LazyLock<Arc<Mutex<ProfileSyncQueue>>> =
-    LazyLock::new(|| Arc::new(Mutex::new(ProfileSyncQueue::new())));
+/// Queued work for THIS account's contacts. The processor loop is
+/// process-lifetime and services whichever queue the live session holds, so a
+/// swap leaves the prior account's entries behind rather than fetching them.
+struct ProfileSyncQueueKey;
+
+fn profile_sync_queue() -> Arc<Mutex<ProfileSyncQueue>> {
+    crate::db::current_session().scoped::<ProfileSyncQueueKey, _>()
+}
 
 /// Drop every queued profile-sync entry. Called by `reset_session()` so the
 /// long-lived `start_profile_sync_processor` loop doesn't service the prior
 /// account's contacts after an inline session swap.
 pub fn clear_profile_sync_queue() {
-    if let Ok(mut q) = PROFILE_SYNC_QUEUE.lock() {
+    if let Ok(mut q) = profile_sync_queue().lock() {
         q.clear();
     }
 }
@@ -736,7 +746,8 @@ pub async fn start_profile_sync_processor(handler: Arc<dyn ProfileSyncHandler>) 
                 let npub = state.interner.resolve(own_profile.id).unwrap_or("").to_string();
                 drop(state);
 
-                let mut queue = PROFILE_SYNC_QUEUE.lock().unwrap();
+                let owner = profile_sync_queue();
+                let mut queue = owner.lock().unwrap();
                 queue.add(npub, SyncPriority::Low, false);
             }
             last_own_profile_sync = Instant::now();
@@ -744,7 +755,8 @@ pub async fn start_profile_sync_processor(handler: Arc<dyn ProfileSyncHandler>) 
 
         // Get next batch (lock scoped)
         let (should_wait, batch) = {
-            let mut queue = PROFILE_SYNC_QUEUE.lock().unwrap();
+            let owner = profile_sync_queue();
+            let mut queue = owner.lock().unwrap();
 
             if queue.is_processing {
                 (true, vec![])
@@ -765,7 +777,8 @@ pub async fn start_profile_sync_processor(handler: Arc<dyn ProfileSyncHandler>) 
 
         if batch.is_empty() {
             {
-                let mut queue = PROFILE_SYNC_QUEUE.lock().unwrap();
+                let owner = profile_sync_queue();
+                let mut queue = owner.lock().unwrap();
                 queue.is_processing = false;
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -784,7 +797,8 @@ pub async fn start_profile_sync_processor(handler: Arc<dyn ProfileSyncHandler>) 
             load_profile(entry.npub.clone(), handler.as_ref()).await;
 
             {
-                let mut queue = PROFILE_SYNC_QUEUE.lock().unwrap();
+                let owner = profile_sync_queue();
+                let mut queue = owner.lock().unwrap();
                 queue.mark_done(&entry.npub);
             }
 
@@ -793,7 +807,8 @@ pub async fn start_profile_sync_processor(handler: Arc<dyn ProfileSyncHandler>) 
 
         // Release processing lock
         {
-            let mut queue = PROFILE_SYNC_QUEUE.lock().unwrap();
+            let owner = profile_sync_queue();
+            let mut queue = owner.lock().unwrap();
             queue.is_processing = false;
         }
 
@@ -807,7 +822,8 @@ pub async fn start_profile_sync_processor(handler: Arc<dyn ProfileSyncHandler>) 
 
 /// Queue a single profile for syncing.
 pub fn queue_profile_sync(npub: String, priority: SyncPriority, force_refresh: bool) {
-    let mut queue = PROFILE_SYNC_QUEUE.lock().unwrap();
+    let owner = profile_sync_queue();
+    let mut queue = owner.lock().unwrap();
     queue.add(npub, priority, force_refresh);
 }
 
@@ -853,7 +869,8 @@ pub async fn queue_chat_profiles(chat_id: String, is_opening: bool) {
 
     drop(state);
 
-    let mut queue = PROFILE_SYNC_QUEUE.lock().unwrap();
+    let owner = profile_sync_queue();
+    let mut queue = owner.lock().unwrap();
     for (npub, priority) in profiles_to_queue {
         queue.add(npub, priority, false);
     }
@@ -861,7 +878,8 @@ pub async fn queue_chat_profiles(chat_id: String, is_opening: bool) {
 
 /// Force immediate refresh of a profile (for user clicks).
 pub fn refresh_profile_now(npub: String) {
-    let mut queue = PROFILE_SYNC_QUEUE.lock().unwrap();
+    let owner = profile_sync_queue();
+    let mut queue = owner.lock().unwrap();
     queue.add(npub, SyncPriority::Critical, true);
 }
 
@@ -891,7 +909,8 @@ pub async fn sync_all_profiles() {
 
     drop(state);
 
-    let mut queue = PROFILE_SYNC_QUEUE.lock().unwrap();
+    let owner = profile_sync_queue();
+    let mut queue = owner.lock().unwrap();
     for (npub, priority) in profiles_to_queue {
         queue.add(npub, priority, false);
     }

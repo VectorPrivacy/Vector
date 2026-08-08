@@ -614,26 +614,85 @@ pub struct Session {
     /// This account's chats and profiles in memory — the DB's read-through
     /// cache, and so bound to the same account for the same reason.
     chat_state: Arc<tokio::sync::Mutex<crate::state::ChatState>>,
+    /// Everything else the account owns, keyed by type. See [`Session::scoped`].
+    scoped: RwLock<std::collections::HashMap<std::any::TypeId, Arc<dyn std::any::Any + Send + Sync>>>,
 }
 
 impl Session {
     fn empty() -> Arc<Self> {
-        Self::new(None, Arc::new(tokio::sync::Mutex::new(crate::state::ChatState::new())))
+        Arc::new(Session {
+            db_path: None,
+            read_pool: Mutex::new(Vec::new()),
+            write_conn: Mutex::new(None),
+            chat_state: Arc::new(tokio::sync::Mutex::new(crate::state::ChatState::new())),
+            scoped: RwLock::new(std::collections::HashMap::new()),
+        })
     }
 
     /// A session bound to one account's database file, with a fresh in-memory
     /// state — the caller loads it from that database.
     fn bound(db_path: PathBuf) -> Arc<Self> {
-        Self::new(Some(db_path), Arc::new(tokio::sync::Mutex::new(crate::state::ChatState::new())))
-    }
-
-    fn new(db_path: Option<PathBuf>, chat_state: Arc<tokio::sync::Mutex<crate::state::ChatState>>) -> Arc<Self> {
         Arc::new(Session {
-            db_path,
+            db_path: Some(db_path),
             read_pool: Mutex::new(Vec::new()),
             write_conn: Mutex::new(None),
-            chat_state,
+            chat_state: Arc::new(tokio::sync::Mutex::new(crate::state::ChatState::new())),
+            scoped: RwLock::new(std::collections::HashMap::new()),
         })
+    }
+
+    /// The same account's session, pointed at its database, keeping everything
+    /// it already holds.
+    ///
+    /// Two callers need this. Re-initialising an account that is already open —
+    /// `init_database` is documented idempotent, and the schema check and
+    /// Android's background sync both re-run it — must not empty the chat list
+    /// under a running app. And a login legitimately fills a session before the
+    /// account's database exists: creating an account installs its keys and
+    /// client first, and only reaches `init_database` once the user has chosen
+    /// a PIN. Binding the session it was filling is a promotion, not a swap.
+    fn rebound(&self, db_path: PathBuf) -> Arc<Self> {
+        Arc::new(Session {
+            db_path: Some(db_path),
+            read_pool: Mutex::new(Vec::new()),
+            write_conn: Mutex::new(None),
+            chat_state: self.chat_state.clone(),
+            scoped: RwLock::new(self.scoped.read().unwrap_or_else(|e| e.into_inner()).clone()),
+        })
+    }
+
+    /// This account's instance of `T`, built on first touch.
+    ///
+    /// The home for anything an account owns beyond its database: caches keyed
+    /// by its row ids, queues holding its work, routing tables holding its
+    /// keys. Previously these were process globals with a hand-written clear in
+    /// two teardown paths, which is how they drifted — one path cleared fields
+    /// the other did not, and a cache added without a clear leaked into the
+    /// next account. Here there is nothing to clear: the account's instances go
+    /// when its session does.
+    ///
+    /// Keyed by a marker type the owning module declares, so the session never
+    /// has to know what any of this is, and two modules storing the same SHAPE
+    /// (say a `Mutex<HashMap<PublicKey, _>>`) can't collide on one slot.
+    ///
+    /// ```ignore
+    /// struct InboxRelayCache;               // the key, private to this module
+    /// fn cache() -> Arc<Mutex<HashMap<PublicKey, CachedRelays>>> {
+    ///     db::current_session().scoped::<InboxRelayCache, _>()
+    /// }
+    /// ```
+    pub fn scoped<K: 'static, T: Default + Send + Sync + 'static>(self: &Arc<Self>) -> Arc<T> {
+        let key = std::any::TypeId::of::<(K, T)>();
+        if let Some(existing) = self.scoped.read().unwrap_or_else(|e| e.into_inner()).get(&key) {
+            return existing.clone().downcast::<T>().expect("keyed by its own TypeId");
+        }
+        let mut map = self.scoped.write().unwrap_or_else(|e| e.into_inner());
+        // Another thread may have inserted while the read lock was released.
+        map.entry(key)
+            .or_insert_with(|| Arc::new(T::default()) as Arc<dyn std::any::Any + Send + Sync>)
+            .clone()
+            .downcast::<T>()
+            .expect("keyed by its own TypeId")
     }
 
     /// This account's in-memory chats and profiles.
@@ -1037,14 +1096,14 @@ pub fn init_database(npub: &str) -> Result<(), String> {
     // against the previous one return their connections there, and that pool
     // closes with it. Nothing from the old account can reach the new pool.
     //
-    // Re-initialising the SAME account keeps its in-memory state: this is
-    // documented idempotent and callers rely on it (schema checks, background
-    // sync). A different database is a different account, and starts empty.
+    // A session already pointed at this database, or not yet pointed at one at
+    // all, is THIS account's — bind it and keep what it holds (see `rebound`).
+    // Only a session belonging to a different account starts over.
     let session = {
         let mut current = CURRENT_SESSION.write().unwrap_or_else(|e| e.into_inner());
         *current = match current.db_path.as_deref() {
-            Some(p) if p == db_path => Session::new(Some(db_path.clone()), current.chat_state.clone()),
-            _ => Session::bound(db_path.clone()),
+            Some(p) if p != db_path => Session::bound(db_path.clone()),
+            _ => current.rebound(db_path.clone()),
         };
         current.clone()
     };
@@ -1241,6 +1300,7 @@ mod pool_generation_tests {
 
     #[test]
     fn a_pool_miss_after_a_swap_opens_the_sessions_own_database() {
+        let _serialized = DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         // The other half of the guarantee. Returning a connection was already
         // safe; ACQUIRING one was not, because a miss resolved the ambient
         // account and could open the incoming account's file into the outgoing
@@ -1275,6 +1335,7 @@ mod pool_generation_tests {
 
     #[tokio::test]
     async fn a_bound_task_keeps_its_account_across_a_swap() {
+        let _serialized = DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         // What the SessionGuard checks were approximating by hand: the task
         // began under account A, so its work resolves to A no matter who logs
         // in while it is awaiting. No check, and nothing to forget.
@@ -1299,6 +1360,7 @@ mod pool_generation_tests {
 
     #[tokio::test]
     async fn a_bound_tasks_chat_writes_cannot_reach_the_new_account() {
+        let _serialized = DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         // The bug this closes, in the form it actually took: a task holding a
         // chat id from account A finishes after the swap and inserts it into
         // whatever STATE it finds. The group chats that appeared in a freshly
@@ -1326,6 +1388,50 @@ mod pool_generation_tests {
             1,
             "it landed in the state of the account the task began under"
         );
+    }
+
+    #[tokio::test]
+    async fn a_bound_task_cannot_publish_through_the_new_accounts_client() {
+        let _serialized = DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        // The client carries the signer, so reaching the wrong one means
+        // publishing account A's payload under account B's identity. A bound
+        // task reaches the client it started with, which the swap has already
+        // shut down — its send fails instead of succeeding as the wrong person.
+        use nostr_sdk::prelude::*;
+        let dir = tempfile::tempdir().unwrap();
+        let a = Session::bound(dir.path().join("a.db"));
+        let b = Session::bound(dir.path().join("b.db"));
+
+        *CURRENT_SESSION.write().unwrap() = a.clone();
+        crate::state::set_my_public_key(Keys::generate().public_key());
+        let a_identity = crate::state::my_public_key().expect("installed under A");
+
+        let handle = spawn_bound(async move {
+            tokio::task::yield_now().await;
+            crate::state::my_public_key()
+        });
+        *CURRENT_SESSION.write().unwrap() = b.clone();
+        crate::state::set_my_public_key(Keys::generate().public_key());
+
+        assert_eq!(handle.await.unwrap(), Some(a_identity), "the task signs as the account it began under");
+        assert_ne!(crate::state::my_public_key(), Some(a_identity), "and the live account is someone else");
+    }
+
+    #[test]
+    fn binding_an_unbound_session_to_a_database_keeps_what_it_holds() {
+        let _serialized = DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        // Creating an account installs its keys and client BEFORE its database
+        // exists — `init_database` only runs once the user has chosen a PIN.
+        // Replacing the session there would discard the login in progress.
+        let dir = tempfile::tempdir().unwrap();
+        let staging = Session::empty();
+        *CURRENT_SESSION.write().unwrap() = staging.clone();
+        let held = staging.scoped::<Session, Mutex<u8>>();
+        *held.lock().unwrap() = 7;
+
+        let promoted = staging.rebound(dir.path().join("a.db"));
+        assert_eq!(*promoted.scoped::<Session, Mutex<u8>>().lock().unwrap(), 7, "the login survives being bound");
+        assert!(promoted.db_path.is_some(), "and it now has a database");
     }
 
     #[test]

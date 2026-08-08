@@ -12,7 +12,7 @@ use tauri::{AppHandle, Emitter, Runtime};
 use zeroize::Zeroize;
 
 use std::sync::atomic::AtomicBool;
-use crate::{STATE, TAURI_APP, NOSTR_CLIENT, nostr_client, set_my_public_key, MY_SECRET_KEY, MNEMONIC_SEED, PENDING_NSEC, active_trusted_relays};
+use crate::{STATE, TAURI_APP, nostr_client, set_my_public_key, MY_SECRET_KEY, MNEMONIC_SEED, PENDING_NSEC, active_trusted_relays};
 use crate::{Profile, account_manager, db, crypto};
 
 /// Set to true after a full foreground login+sync flow completes.
@@ -198,13 +198,8 @@ pub async fn login<R: Runtime>(
     // above catches the common case, but a concurrent install between guard
     // and here is possible. Take the write lock once, install only if the
     // slot is empty, and otherwise drop our just-built client.
-    {
-        let mut slot = NOSTR_CLIENT.write().unwrap();
-        if slot.is_some() {
-            eprintln!("[Login] NOSTR_CLIENT was set concurrently; reusing existing instance.");
-        } else {
-            *slot = Some(client);
-        }
+    if !vector_core::state::set_nostr_client_if_absent(client) {
+        eprintln!("[Login] a client was installed concurrently; reusing that instance.");
     }
 
     // Add our profile (at least, the npub of it) to our state
@@ -674,11 +669,8 @@ pub async fn login_with_nip55<R: Runtime>(handle: AppHandle<R>) -> Result<LoginR
             .monitor(Monitor::new(1024))
             .build();
         {
-            let mut slot = NOSTR_CLIENT.write().unwrap();
-            if slot.is_some() {
-                vector_core::log_warn!("[NIP-55 Login] NOSTR_CLIENT was set concurrently; reusing existing instance.");
-            } else {
-                *slot = Some(client);
+            if !vector_core::state::set_nostr_client_if_absent(client) {
+                vector_core::log_warn!("[NIP-55 Login] a client was installed concurrently; reusing that instance.");
             }
         }
 
@@ -924,11 +916,8 @@ pub async fn connect_bunker<R: Runtime>(
             .monitor(Monitor::new(1024))
             .build();
         {
-            let mut slot = NOSTR_CLIENT.write().unwrap();
-            if slot.is_some() {
-                vector_core::log_warn!("[Bunker Login] NOSTR_CLIENT was set concurrently; reusing existing instance.");
-            } else {
-                *slot = Some(client);
+            if !vector_core::state::set_nostr_client_if_absent(client) {
+                vector_core::log_warn!("[Bunker Login] a client was installed concurrently; reusing that instance.");
             }
         }
 
@@ -1167,8 +1156,7 @@ pub async fn start_nostrconnect_session<R: Runtime>(
             let client = vector_core::nostr_client_builder()
                 .monitor(Monitor::new(1024))
                 .build();
-            { let mut slot = NOSTR_CLIENT.write().unwrap();
-              if slot.is_none() { *slot = Some(client); } }
+            vector_core::state::set_nostr_client_if_absent(client);
 
             if !session.is_valid() {
                 return Err("Session changed during pairing".to_string());
@@ -1273,13 +1261,8 @@ pub async fn create_account() -> Result<LoginResult, String> {
     // above catches the common case, but a concurrent install between guard
     // and here is possible. Take the write lock once, install only if the
     // slot is empty, and otherwise drop our just-built client.
-    {
-        let mut slot = NOSTR_CLIENT.write().unwrap();
-        if slot.is_some() {
-            eprintln!("[Login] NOSTR_CLIENT was set concurrently; reusing existing instance.");
-        } else {
-            *slot = Some(client);
-        }
+    if !vector_core::state::set_nostr_client_if_absent(client) {
+        eprintln!("[Login] a client was installed concurrently; reusing that instance.");
     }
 
     // Add our profile (at least, the npub of it) to our state
@@ -1691,13 +1674,8 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
     // above catches the common case, but a concurrent install between guard
     // and here is possible. Take the write lock once, install only if the
     // slot is empty, and otherwise drop our just-built client.
-    {
-        let mut slot = NOSTR_CLIENT.write().unwrap();
-        if slot.is_some() {
-            eprintln!("[Login] NOSTR_CLIENT was set concurrently; reusing existing instance.");
-        } else {
-            *slot = Some(client);
-        }
+    if !vector_core::state::set_nostr_client_if_absent(client) {
+        eprintln!("[Login] a client was installed concurrently; reusing that instance.");
     }
 
     let npub = public_key.to_bech32().map_err(|e| e.to_string())?;

@@ -186,11 +186,12 @@ fn is_valid_shortcode(s: &str) -> bool {
 /// The theme pack is shown in the picker without being a real subscription, so
 /// its shortcodes never land in `emoji_pack_items`; this lets the send resolver
 /// still attach NIP-30 tags for them. Replaced wholesale on theme change.
-static THEME_EMOJI_TAGS: std::sync::OnceLock<std::sync::Mutex<Vec<(String, String)>>> =
-    std::sync::OnceLock::new();
+/// Per-account: leaving the prior account's set active would tag the next
+/// account's outbound messages with A's shortcodes, leaking A's pack URLs.
+struct ThemeEmojiTags;
 
-fn theme_emoji_tags() -> &'static std::sync::Mutex<Vec<(String, String)>> {
-    THEME_EMOJI_TAGS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+fn theme_emoji_tags() -> std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>> {
+    crate::db::current_session().scoped::<ThemeEmojiTags, _>()
 }
 
 /// Register (or clear, with an empty vec) the active theme pack's emoji so the
@@ -983,17 +984,19 @@ struct CachedRelayList {
     verified: bool,
 }
 
-static NIP65_CACHE: std::sync::OnceLock<std::sync::RwLock<HashMap<PublicKey, CachedRelayList>>> =
-    std::sync::OnceLock::new();
+/// Pack-author relay lists. Author-keyed, so technically account-agnostic, but
+/// the set of authors is contact-graph metadata belonging to one account.
+struct Nip65Cache;
 
-fn nip65_cache() -> &'static std::sync::RwLock<HashMap<PublicKey, CachedRelayList>> {
-    NIP65_CACHE.get_or_init(|| std::sync::RwLock::new(HashMap::new()))
+fn nip65_cache() -> std::sync::Arc<std::sync::RwLock<HashMap<PublicKey, CachedRelayList>>> {
+    crate::db::current_session().scoped::<Nip65Cache, _>()
 }
 
 /// Read fresh write relays for `pubkey` from the cache, or `None` if absent /
 /// expired. Honours the dual TTL (short for empty entries).
 fn cached_write_relays(pubkey: &PublicKey) -> Option<Vec<RelayUrl>> {
-    let cache = nip65_cache().read().ok()?;
+    let owner = nip65_cache();
+    let cache = owner.read().ok()?;
     let entry = cache.get(pubkey)?;
     let ttl = if entry.empty { NIP65_CACHE_TTL_ERROR_SECS } else { NIP65_CACHE_TTL_SECS };
     if entry.fetched_at.elapsed() < std::time::Duration::from_secs(ttl) {
@@ -1007,7 +1010,8 @@ fn cached_write_relays(pubkey: &PublicKey) -> Option<Vec<RelayUrl>> {
 /// kind-10002 fetch. Judging a pack's absence needs its canonical home to
 /// have really been resolved; an error placeholder must read as unknown.
 fn cached_write_relays_verified(pubkey: &PublicKey) -> Option<Vec<RelayUrl>> {
-    let cache = nip65_cache().read().ok()?;
+    let owner = nip65_cache();
+    let cache = owner.read().ok()?;
     let entry = cache.get(pubkey)?;
     if !entry.verified {
         return None;
