@@ -1050,10 +1050,80 @@ pub async fn revoke_public_link<T: Transport + ?Sized>(transport: &T, community:
     let event = invite::build_invite_list_event_signed(&signer, my_pk, &list).await.map_err(|e| e.to_string())?;
     transport.publish(&event, &community.relays).await?;
     let signers = live_signers_for(&list, &cid_hex, now_ms());
+    // Does anyone ELSE still vend a live link? Folded BEFORE our own registry
+    // republish: a fold taken after it would race relay propagation and read our
+    // own stale (pre-revoke) registry, so the privatize decision would flip to
+    // "still public" almost every time. Links are per-creator (CORD-05 §5), so
+    // only the other creators' sets matter here — ours is `signers`.
+    // (v1 parity: `revoke_public_invite`'s B1 fix refreshes the aggregate first
+    // for exactly this reason.)
+    let others_vend = if signers.is_empty() {
+        match fetch_control_plane_whole(transport, community).await {
+            Some(editions) => {
+                let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|(_, f)| f.0 == community.root_epoch.0)
+                    .map(|(entity, f)| (entity, (f.1, f.2, f.3)))
+                    .collect();
+                let owner_hex = community.owner().map(|o| o.to_hex()).unwrap_or_default();
+                let authority = fold_authority(community, &editions, &floors);
+                live_invite_link_sets(community.id(), &owner_hex, &editions, &authority, &floors)
+                    .iter()
+                    .any(|s| s.creator_hex != my_pk.to_hex())
+            }
+            // Unreadable plane: assume someone else still vends. Rotating on a
+            // guess would burn an epoch (and strand pre-split clients) over a
+            // transport blip; the community simply stays public until a read
+            // that succeeds says otherwise.
+            None => true,
+        }
+    } else {
+        false
+    };
     publish_invite_registry(transport, community, &session, &signers).await?;
     // Drop the local mirror row (sibling of the mint-time save) — only if still our session.
     if session.is_valid() {
         let _ = crate::db::community::delete_public_invite(token_hex);
+    }
+    // CORD-06 §3: converting a Public Community to Private is a Refounding
+    // trigger. Revoking only stops NEW acquisitions — everyone who already
+    // fetched the bundle keeps the `community_root` until it rolls, so without
+    // this the community reads Private while every past link-holder retains
+    // read access forever. (v1 does this in `revoke_public_invite`; v2 shipped
+    // without it.)
+    //
+    // Best-effort and retried, NEVER the revocation's verdict: the tombstone has
+    // already landed, and reporting failure here would read as "the link is
+    // still live" — the opposite of the truth — while a retry would fail anyway
+    // (its list entry is gone). A Refounding needs BAN, so a link creator who
+    // holds only CREATE_INVITE legitimately can't rotate; that surfaces as a
+    // logged warning, not a broken revoke.
+    if signers.is_empty() && !others_vend {
+        let mut rotated = false;
+        for attempt in 0..3u8 {
+            match refound_community(transport, community, &[]).await {
+                Ok(_) => {
+                    rotated = true;
+                    break;
+                }
+                Err(_) if !session.is_valid() => break,
+                Err(e) if attempt == 2 => {
+                    crate::log_warn!(
+                        "[v2] privatizing {} could not rotate the base key ({e}); the community reads Private but everyone who took a link keeps read access until it rotates",
+                        &cid_hex[..8.min(cid_hex.len())]
+                    );
+                    crate::emit_event(
+                        "community_privatize_rotation_failed",
+                        &serde_json::json!({ "community_id": cid_hex, "error": e }),
+                    );
+                }
+                Err(_) => continue,
+            }
+        }
+        if rotated {
+            crate::log_info!("[v2] {} privatized: base key rotated so link-joined readers are cut off", &cid_hex[..8.min(cid_hex.len())]);
+        }
     }
     Ok(())
 }
@@ -8600,6 +8670,39 @@ mod tests {
         assert_eq!(adopted.root_epoch, Epoch(1));
         assert_eq!(adopted.control_pk, refounded.control_pk);
         assert_eq!(adopted.control_root, refounded.control_root, "staff crossing a rotation get the new secret in the blob");
+    }
+
+    #[tokio::test]
+    async fn revoking_the_last_link_privatizes_and_rotates_but_an_earlier_revoke_does_not() {
+        // CORD-06 §3: converting a Public Community to Private is a Refounding
+        // trigger — revoking stops NEW acquisitions, only the rotation cuts off
+        // everyone who already fetched the bundle. v1 does this; v2 shipped
+        // without it. Revoking a link while ANOTHER stays live is not the
+        // conversion, and must not burn an epoch.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Privatize", vec!["wss://r".into()], None).await.unwrap();
+        assert_eq!(community.root_epoch, Epoch(0));
+
+        let a = mint_public_link(&relay, &community, "https://x", None, None).await.unwrap();
+        let b = mint_public_link(&relay, &community, "https://x", None, None).await.unwrap();
+        assert!(community_is_public(&relay, &community).await, "two live links = Public");
+
+        // Revoking ONE of two: still Public, still epoch 0 — no rotation.
+        revoke_public_link(&relay, &community, &crate::simd::hex::bytes_to_hex_16(&a.token)).await.unwrap();
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(held.root_epoch, Epoch(0), "a link remains live — not the Public→Private conversion");
+        assert!(community_is_public(&relay, &held).await, "still Public");
+
+        // Revoking the LAST one privatizes AND rotates.
+        revoke_public_link(&relay, &held, &crate::simd::hex::bytes_to_hex_16(&b.token)).await.unwrap();
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert!(!community_is_public(&relay, &held).await, "no live links = Private");
+        assert_eq!(held.root_epoch, Epoch(1), "privatizing rotated the base key");
+        // The rotation is a real one: the new epoch carries the split pair and
+        // the old root is retired, so a link-joined lurker's key is now dead.
+        assert!(held.control_pk.is_some(), "the privatize rotation mints the split like any base rotation");
+        assert_ne!(held.community_root, community.community_root, "the base key actually rolled");
     }
 
     #[tokio::test]
