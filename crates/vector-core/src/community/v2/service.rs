@@ -1472,12 +1472,20 @@ async fn accept_bundle<T: Transport + ?Sized>(
     // Record the membership across devices (CORD-02 §8). The inline attempt covers the
     // happy path; anything else hands off to the durable retry, because an unrecorded
     // join is what strands a community behind a stale tombstone.
-    match republish_community_list(transport, Some(community.id())).await {
-        Ok(true) => {}
-        Ok(false) => republish_community_list_durable(Some(*community.id())),
-        Err(e) => {
-            crate::log_warn!("[CommunityList] failed to record this join across devices ({}) — retrying", e);
-            republish_community_list_durable(Some(*community.id()));
+    //
+    // Only for a REAL join. `announce_join == false` is the list-sync adoption path,
+    // and those entries were just read FROM this list — republishing it re-records what
+    // it already holds. A device adopting N entries would otherwise rebuild and publish
+    // the whole document N times, concurrently, every copy identical, on the boot path
+    // that is already the slowest thing the app does.
+    if announce_join {
+        match republish_community_list(transport, Some(community.id())).await {
+            Ok(true) => {}
+            Ok(false) => republish_community_list_durable(Some(*community.id())),
+            Err(e) => {
+                crate::log_warn!("[CommunityList] failed to record this join across devices ({}) — retrying", e);
+                republish_community_list_durable(Some(*community.id()));
+            }
         }
     }
     Ok(community)
@@ -3055,7 +3063,7 @@ async fn fetch_community_list<T: Transport + ?Sized>(transport: &T, relays: &[St
     let signer = crate::signer::active_signer()?;
     let my_pk = me_pk()?;
     let query = Query {
-        kinds: vec![super::kind::COMMUNITY_LIST],
+        kinds: vec![crate::community::v2::kind::COMMUNITY_LIST],
         authors: vec![my_pk.to_hex()],
         limit: Some(4),
         ..Default::default()
@@ -12802,8 +12810,38 @@ mod tests {
 
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
         crate::db::community::delete_community(&cid_hex).unwrap();
+        // A key sync is not a membership event, and it is not a membership
+        // RECORD either: the entry was just read from the very list a republish
+        // would rewrite. A device adopting N entries used to rebuild and
+        // publish the whole document N times over, concurrently, on boot.
+        // 13302 is REPLACEABLE, so a republish swaps the stored event rather
+        // than adding one — the id is the tell, and it always changes on a
+        // real republish because the list is NIP-44 sealed with a random nonce.
+        async fn list_id(relay: &MemoryRelay, me: &PublicKey, relays: &[String]) -> Option<String> {
+            let q = Query { kinds: vec![crate::community::v2::kind::COMMUNITY_LIST], authors: vec![me.to_hex()], ..Default::default() };
+            let mut evs = relay.fetch(&q, relays).await.unwrap_or_default();
+            evs.sort_by_key(|e| e.created_at.as_secs());
+            evs.last().map(|e| e.id.to_hex())
+        }
+        let my_pk = me_pk().unwrap();
+        let list_before = list_id(&bed.relay, &my_pk, &bed.relays).await;
         accept_bundle(&bed.relay, &session, &bundle, None, false).await.unwrap();
         assert_eq!(gb_count(&bed.relay, &gb_pk, &bed.relays).await, baseline + 1, "a cross-device key sync is not a membership event");
+        assert_eq!(
+            list_id(&bed.relay, &my_pk, &bed.relays).await,
+            list_before,
+            "adopting an entry FROM the list must not republish the list"
+        );
+
+        // A genuine join still records, so the storm fix can't have muted the
+        // thing the republish exists for.
+        crate::db::community::delete_community(&cid_hex).unwrap();
+        accept_bundle(&bed.relay, &session, &bundle, None, true).await.unwrap();
+        assert_ne!(
+            list_id(&bed.relay, &my_pk, &bed.relays).await,
+            list_before,
+            "a real join still records the membership across devices"
+        );
     }
 
     #[tokio::test]
