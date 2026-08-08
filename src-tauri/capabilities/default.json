@@ -138,6 +138,7 @@
     "allow-hide-community-message",
     "allow-leave-community",
     "allow-open-attachment",
+    "allow-can-install-apks",
     "allow-share-attachment",
     "allow-get-gallery-hidden",
     "allow-set-gallery-hidden",

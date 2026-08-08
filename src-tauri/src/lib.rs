@@ -850,6 +850,7 @@ pub fn run() {
             commands::attachments::decode_thumbhash,
             commands::attachments::download_attachment,
             commands::attachments::open_attachment,
+            commands::attachments::can_install_apks,
             commands::attachments::share_attachment,
             commands::attachments::get_gallery_hidden,
             commands::attachments::set_gallery_hidden,

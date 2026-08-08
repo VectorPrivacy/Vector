@@ -925,7 +925,7 @@ async function _dmsgOpenMessageMenu(rowEl, x, y) {
             : null;
         if (downloadedPath) {
             if (platformFeatures?.os === 'android') {
-                items.push({ label: 'Open', icon: 'file-search', onClick: () => invoke('open_attachment', { path: downloadedPath }) });
+                items.push({ label: 'Open', icon: 'file-search', onClick: () => (platformFeatures.os === 'android' ? openAndroidAttachment(downloadedPath) : invoke('open_attachment', { path: downloadedPath })) });
                 items.push({ label: 'Share', icon: 'share', onClick: () => invoke('share_attachment', { path: downloadedPath }) });
                 items.push({ label: 'Copy', icon: 'copy', onClick: () => {
                     invoke('write_clipboard_files', { paths: [downloadedPath] })

@@ -183,6 +183,22 @@ pub async fn open_attachment(path: String) -> Result<bool, String> {
     }
 }
 
+/// Whether Vector may hand an `.apk` to the system installer yet (Android only;
+/// always true on desktop, which has no such gate). Lets the UI explain the
+/// settings trip BEFORE the tap, rather than dumping the user into Settings
+/// unannounced — the platform offers no runtime prompt for this one.
+#[tauri::command]
+pub async fn can_install_apks() -> Result<bool, String> {
+    #[cfg(target_os = "android")]
+    {
+        Ok(crate::android::storage::can_install_apks())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Ok(true)
+    }
+}
+
 /// Share a downloaded file via Android's share sheet (ACTION_SEND).
 /// No-op on non-Android (desktop shares are handled elsewhere). Returns true
 /// if the share sheet was launched.

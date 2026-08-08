@@ -13116,6 +13116,25 @@ document.addEventListener('mouseout', (e) => {
     if (e.target.closest?.('a[href]')) hideGlobalTooltip();
 });
 
+/**
+ * Open a downloaded file on Android.
+ *
+ * An `.apk` goes to the system package installer, but only once the user has
+ * trusted Vector as an install source. That is a "special app access", not a
+ * runtime permission: nothing can prompt for it, so the backend routes an
+ * untrusted tap to the settings screen that grants it. Say so first, otherwise
+ * asking to open a file appears to fling you into Settings for no reason.
+ */
+async function openAndroidAttachment(filepath) {
+    if (/\.apk$/i.test(filepath || '')) {
+        const allowed = await invoke('can_install_apks').catch(() => true);
+        if (!allowed) {
+            showToast('Android needs your permission first — switch on "Allow from this source", then tap the file again');
+        }
+    }
+    return invoke('open_attachment', { path: filepath });
+}
+
 // Listen for app-wide click interations
 document.addEventListener('click', (e) => {
     // If we're clicking the emoji search, don't close it!
@@ -13172,7 +13191,7 @@ document.addEventListener('click', (e) => {
     if (e.target.getAttribute('filepath')) {
         const filepath = e.target.getAttribute('filepath');
         if (platformFeatures.os === 'android') {
-            return invoke('open_attachment', { path: filepath });
+            return openAndroidAttachment(filepath);
         }
         return revealItemInDir(filepath);
     }

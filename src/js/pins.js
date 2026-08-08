@@ -262,7 +262,7 @@ function pinsRenderDrawer() {
                 });
                 if (!att?.path) return;
                 if (isAndroid) {
-                    await invoke('open_attachment', { path: att.path });
+                    await openAndroidAttachment(att.path);
                 } else {
                     revealItemInDir(att.path);
                 }
