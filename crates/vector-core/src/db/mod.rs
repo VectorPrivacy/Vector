@@ -663,11 +663,42 @@ impl Session {
 /// unit of work; hold the `Arc` for its duration.
 static CURRENT_SESSION: LazyLock<RwLock<Arc<Session>>> = LazyLock::new(|| RwLock::new(Session::empty()));
 
-/// The live session. Callers that hold this across an account swap keep serving
-/// the account they captured, which is the correct outcome — their work belongs
-/// to that account.
+tokio::task_local! {
+    /// The session this task is bound to, installed by [`spawn_bound`].
+    ///
+    /// Readable from any code running on the task, including the synchronous
+    /// `db::` helpers an async body calls — which is what lets every existing
+    /// call site become account-correct without growing a parameter.
+    static TASK_SESSION: Arc<Session>;
+}
+
+/// The session THIS work belongs to.
+///
+/// A task bound by [`spawn_bound`] gets the account it started under, for its
+/// whole life, however many awaits it spans and whoever logs in meanwhile. That
+/// is the property the SessionGuard checks were approximating by hand.
+///
+/// Unbound callers (startup, the UI command that performs the swap itself) get
+/// the live account, which for them is the correct and only meaningful answer.
 pub fn current_session() -> Arc<Session> {
-    CURRENT_SESSION.read().unwrap_or_else(|e| e.into_inner()).clone()
+    TASK_SESSION
+        .try_with(Arc::clone)
+        .unwrap_or_else(|_| CURRENT_SESSION.read().unwrap_or_else(|e| e.into_inner()).clone())
+}
+
+/// Spawn a task pinned to the CURRENT account.
+///
+/// Everything it does through `db::` resolves to that account for as long as it
+/// runs, so an account switch mid-flight can no longer redirect its writes. Use
+/// this for any task that touches per-account state; a bare `tokio::spawn`
+/// leaves the task reading whoever is live at the moment it asks.
+pub fn spawn_bound<F>(fut: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let session = current_session();
+    tokio::spawn(TASK_SESSION.scope(session, fut))
 }
 
 /// Install a fresh session, dropping the reference to the previous one. Any
@@ -1198,6 +1229,126 @@ mod pool_generation_tests {
             "a miss opens the session's OWN database, never the incoming account's (opened {opened})"
         );
         assert!(!Arc::ptr_eq(&session_a, &current_session()), "the live session really did move on");
+    }
+
+    /// Every task that touches per-account state must be bound to an account.
+    ///
+    /// A bare `tokio::spawn` leaves its task reading whoever is live when it
+    /// finally asks, which is how account A's work ends up in account B's
+    /// storage. That is precisely the mistake nobody catches in review, so it
+    /// is caught here instead: parse the tree and fail on an unbound spawn in a
+    /// per-account module. Add a file to `DETACHED_OK` only when its tasks
+    /// genuinely own no account data, and say why.
+    #[test]
+    fn per_account_tasks_are_spawned_bound_to_their_account() {
+        /// Files whose spawns touch no per-account state. Permanent.
+        const DETACHED_OK: &[(&str, &str)] = &[
+            ("src/db/mod.rs", "defines spawn_bound itself"),
+            ("src/nip55.rs", "Android signer IPC — no account storage"),
+            ("src/tor/mod.rs", "the Tor daemon is process-wide, not per-account"),
+        ];
+
+        /// The migration worklist: files whose spawns still resolve the account
+        /// late. NOT an exemption — a ratchet. Delete a line as you convert its
+        /// file, and this test makes sure the list only ever shrinks. When it is
+        /// empty, no task in the crate can be redirected by an account switch
+        /// and the SessionGuard checks that compensate for it can go.
+        const PENDING_CONVERSION: &[&str] = &[
+        "src/blossom.rs",
+        "src/blossom_servers.rs",
+        "src/bot_interface.rs",
+        "src/community/invite_list.rs",
+        "src/community/list.rs",
+        "src/community/realtime.rs",
+        "src/community/service.rs",
+        "src/community/transport.rs",
+        "src/community/v2/realtime.rs",
+        "src/community/v2/service.rs",
+        "src/community/v2/streamauth.rs",
+        "src/deletion.rs",
+        "src/emoji_packs.rs",
+        "src/inbox_relays.rs",
+        "src/lib.rs",
+        "src/self_destruct.rs",
+        "src/sending.rs",
+        "src/wallpaper.rs",
+        ];
+
+        let mut offenders: Vec<String> = Vec::new();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut stack = vec![root.join("src")];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read src").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let rel = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+                if DETACHED_OK.iter().any(|(f, _)| *f == rel) || PENDING_CONVERSION.contains(&rel.as_str()) {
+                    continue;
+                }
+                let src = std::fs::read_to_string(&path).expect("read source");
+                // Tests spawn freely; only shipping code is bound.
+                let prod = src.split("#[cfg(test)]").next().unwrap_or("");
+                for (i, line) in prod.lines().enumerate() {
+                    if line.contains("tokio::spawn(") && !line.trim_start().starts_with("//") {
+                        offenders.push(format!("{rel}:{}", i + 1));
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "these tasks are not bound to an account — use db::spawn_bound so their work \
+             follows the account they started under, or add the file to DETACHED_OK with a \
+             reason:\n  {}",
+            offenders.join("\n  ")
+        );
+
+        // The ratchet: a file that no longer spawns unbound must leave the
+        // worklist, so it can never silently regress afterwards.
+        let mut converted: Vec<&str> = Vec::new();
+        for file in PENDING_CONVERSION {
+            let src = std::fs::read_to_string(root.join(file)).expect("read pending file");
+            let prod = src.split("#[cfg(test)]").next().unwrap_or("");
+            if !prod.lines().any(|l| l.contains("tokio::spawn(") && !l.trim_start().starts_with("//")) {
+                converted.push(file);
+            }
+        }
+        assert!(
+            converted.is_empty(),
+            "these files are fully converted — delete them from PENDING_CONVERSION so they \
+             stay converted:\n  {}",
+            converted.join("\n  ")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bound_task_keeps_its_account_across_a_swap() {
+        // What the SessionGuard checks were approximating by hand: the task
+        // began under account A, so its work resolves to A no matter who logs
+        // in while it is awaiting. No check, and nothing to forget.
+        let dir = tempfile::tempdir().unwrap();
+        let a = Session::bound(dir.path().join("a.db"));
+        let b = Session::bound(dir.path().join("b.db"));
+
+        *CURRENT_SESSION.write().unwrap() = a.clone();
+        let handle = spawn_bound(async {
+            // ...the user switches accounts right here...
+            tokio::task::yield_now().await;
+            current_session()
+        });
+        *CURRENT_SESSION.write().unwrap() = b.clone();
+
+        let seen = handle.await.unwrap();
+        assert!(Arc::ptr_eq(&seen, &a), "the task still sees the account it started under");
+        assert!(!Arc::ptr_eq(&seen, &b), "the incoming account is not reachable from it");
+        // And an UNBOUND caller correctly sees the live account.
+        assert!(Arc::ptr_eq(&current_session(), &b), "unbound callers follow the live account");
     }
 
     #[test]
