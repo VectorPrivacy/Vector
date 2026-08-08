@@ -138,6 +138,14 @@ pub struct CommunityInvite {
     /// The base access key (32-byte hex) at `root_epoch`.
     pub community_root: String,
     pub root_epoch: u64,
+    /// The Control Plane's signer pubkey at `root_epoch` (CORD-02 §5):
+    /// subscribe, verify, read — never write. Absent = a legacy, pre-split
+    /// Community (fold Control at the legacy address instead, CORD-06 §3).
+    /// Taken on trust — it derives from a secret the joiner never holds, so
+    /// nothing in the bundle can prove it; a wrong one is eclipse-class
+    /// self-harm by the inviter, never forged authority (CORD-05 §1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub control_pk: Option<String>,
     /// ABSENT, not empty, when the bundle vends no channel keys — armada omits it
     /// (and re-fills it defensively on read). A required Vec here rejects the whole
     /// bundle, which is a JOIN failure, not just a stale read.
@@ -824,6 +832,7 @@ mod tests {
             owner_salt: hex(&id.owner_salt),
             community_root: hex(&random_32()),
             root_epoch: 0,
+            control_pk: None,
             channels: vec![],
             relays: vec!["wss://a.example".into(), "wss://b.example".into()],
             name: "Test community".into(),

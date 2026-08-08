@@ -141,7 +141,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 85;
+pub const HIGHEST_MIGRATION_ID: u32 = 86;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1240,6 +1240,25 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("migration 85: {}", e))?;
+        Ok(())
+    })?;
+
+    // CORD-02 §2 control_root split: the Control Plane's held address
+    // (control_pk, encrypted hex) and the staff write secret (control_root,
+    // encrypted blob) per v2 community. Nullable — a legacy epoch has neither,
+    // a non-staff member holds only the address, and the v1 writer never
+    // names these columns.
+    run_atomic_migration(conn, 86, "Concord v2 control_root split columns", |tx| {
+        for (col, ddl) in [("control_pk", "TEXT"), ("control_root", "BLOB")] {
+            // ADD COLUMN is not idempotent; tolerate a re-run (duplicate column).
+            let sql = format!("ALTER TABLE communities ADD COLUMN {col} {ddl}");
+            if let Err(e) = tx.execute(&sql, []) {
+                let msg = e.to_string();
+                if !msg.contains("duplicate column name") {
+                    return Err(format!("add communities.{col}: {msg}"));
+                }
+            }
+        }
         Ok(())
     })?;
 

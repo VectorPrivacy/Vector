@@ -3046,17 +3046,25 @@ impl VectorCore {
                 return Ok(serde_json::json!({
                     "manage_metadata": false, "manage_channels": false, "create_invite": false, "kick": false,
                     "ban": false, "manage_messages": false, "manage_roles": false, "manage_admin_role": false,
-                    "pin_messages": false,
+                    "pin_messages": false, "control_write": false,
                 }));
             }
+            // Actions that land as Control editions additionally need the plane's
+            // write key (CORD-02 §2): a role-authorized staffer whose control_wrap
+            // hasn't arrived yet factually cannot publish, and an honest false here
+            // beats a bot retry-looping a publish every reader drops. KICK
+            // (Guestbook) and MANAGE_MESSAGES (Chat planes) never need it.
+            let control_write = crate::community::v2::control::ControlPlane::of(&v2).can_write();
             let has = |p: u64| roster.is_authorized(&me, Some(&owner_hex), p);
+            let has_ctl = |p: u64| control_write && has(p);
             return Ok(serde_json::json!({
-                "manage_metadata": has(Permissions::MANAGE_METADATA), "manage_channels": has(Permissions::MANAGE_CHANNELS),
-                "create_invite": has(Permissions::CREATE_INVITE), "kick": has(Permissions::KICK), "ban": has(Permissions::BAN),
-                "manage_messages": has(Permissions::MANAGE_MESSAGES), "manage_roles": has(Permissions::MANAGE_ROLES),
+                "manage_metadata": has_ctl(Permissions::MANAGE_METADATA), "manage_channels": has_ctl(Permissions::MANAGE_CHANNELS),
+                "create_invite": has_ctl(Permissions::CREATE_INVITE), "kick": has(Permissions::KICK), "ban": has_ctl(Permissions::BAN),
+                "manage_messages": has(Permissions::MANAGE_MESSAGES), "manage_roles": has_ctl(Permissions::MANAGE_ROLES),
                 // Only the owner (position 0) strictly outranks the position-1 Admin role.
-                "manage_admin_role": me == owner_hex,
-                "pin_messages": has(Permissions::PIN_MESSAGES),
+                "manage_admin_role": me == owner_hex && control_write,
+                "pin_messages": has_ctl(Permissions::PIN_MESSAGES),
+                "control_write": control_write,
             }));
         }
         let community = Self::load_community_hex(community_id)?;

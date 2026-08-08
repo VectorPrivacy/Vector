@@ -44,7 +44,8 @@ use zeroize::Zeroizing;
 
 use super::super::{ChannelId, CommunityId, Epoch};
 use super::derive::{
-    base_rekey_group_key, channel_rekey_group_key, epoch_key_commitment, recipient_locator, GroupKey,
+    base_rekey_group_key, channel_rekey_group_key, control_signer_group_key, epoch_key_commitment,
+    recipient_locator, GroupKey,
 };
 use super::stream::{self, OpenedStream, SealForm, StreamError};
 
@@ -124,6 +125,15 @@ pub enum RekeyError {
     Crypto(String),
     /// The wrapped plaintext isn't the expected 72-byte layout.
     BadBlobLength(usize),
+    /// A base blob's plaintext isn't one of the three fixed widths (CORD-06 §1):
+    /// 72 (legacy pre-split), 104 (member), 136 (staff).
+    BadBaseBlobWidth(usize),
+    /// A 136-byte base blob's `new_control_root` doesn't derive to its
+    /// `new_control_pk` — refused whole rather than adopting a plane split from
+    /// its readers (CORD-06 §1).
+    ControlPairMismatch,
+    /// A Grant's `control_wrap` plaintext isn't the fixed 40 bytes (CORD-04 §3).
+    BadControlWrapLength(usize),
     /// The blob's bound scope ≠ the coordinate it's being opened under (splice).
     ScopeSplice,
     /// The blob's bound epoch ≠ the coordinate it's being opened under (splice).
@@ -146,6 +156,9 @@ impl std::fmt::Display for RekeyError {
             RekeyError::Stream(e) => write!(f, "stream: {e}"),
             RekeyError::Crypto(e) => write!(f, "crypto: {e}"),
             RekeyError::BadBlobLength(n) => write!(f, "rekey blob plaintext is {n} bytes, expected 72"),
+            RekeyError::BadBaseBlobWidth(n) => write!(f, "base rekey blob plaintext is {n} bytes, expected 72, 104 or 136"),
+            RekeyError::ControlPairMismatch => write!(f, "base rekey blob control_root does not derive to its control_pk"),
+            RekeyError::BadControlWrapLength(n) => write!(f, "control_wrap plaintext is {n} bytes, expected 40"),
             RekeyError::ScopeSplice => write!(f, "rekey blob scope binding mismatch (splice)"),
             RekeyError::EpochSplice => write!(f, "rekey blob epoch binding mismatch (splice)"),
             RekeyError::NotARekey(k) => write!(f, "rumor kind {k} is not a rekey"),
@@ -201,6 +214,165 @@ pub fn parse_bound_plaintext(pt: &[u8], scope: RekeyScope, epoch: Epoch) -> Resu
     let mut new_key = [0u8; 32];
     new_key.copy_from_slice(&pt[40..72]);
     Ok(new_key)
+}
+
+// ── The base-rotation blob forms (CORD-06 §1) ────────────────────────────────
+//
+// A base rotation's blob widens past the 72-byte channel layout to carry the
+// next epoch's Control Plane keys (CORD-02 §2): every member's blob appends
+// `new_control_pk[32]` (104 bytes), a staff recipient's additionally
+// `new_control_root[32]` (136). The width declares the form; a 72-byte BASE
+// blob is the legacy pre-split rotation — honored when reading old epochs,
+// never minted by a compliant Rotator. Any other width is malformed.
+
+/// What a base blob delivered (CORD-06 §1); the width declared the form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseKeyDelivery {
+    pub new_root: [u8; 32],
+    /// The next epoch's Control Plane address — absent on a legacy 72-byte
+    /// blob, whose acceptor folds that epoch's Control at the legacy
+    /// member-derivable address instead (CORD-06 §3).
+    pub control_pk: Option<[u8; 32]>,
+    /// The staff write secret (136-byte form only), already verified to derive
+    /// to `control_pk`.
+    pub control_root: Option<[u8; 32]>,
+}
+
+fn bound_base_plaintext(epoch: Epoch, new_root: &[u8; 32], control_pk: &[u8; 32], control_root: Option<&[u8; 32]>) -> Vec<u8> {
+    let mut pt = Vec::with_capacity(if control_root.is_some() { 136 } else { 104 });
+    pt.extend_from_slice(&bound_plaintext(RekeyScope::Root, epoch, new_root));
+    pt.extend_from_slice(control_pk);
+    if let Some(cr) = control_root {
+        pt.extend_from_slice(cr);
+    }
+    pt
+}
+
+/// The base64 string a BASE blob's NIP-44 layer encrypts (D5) — the 104-byte
+/// member form, or the 136-byte staff form when `control_root` rides.
+pub fn bound_base_plaintext_b64(epoch: Epoch, new_root: &[u8; 32], control_pk: &[u8; 32], control_root: Option<&[u8; 32]>) -> String {
+    base64_simd::STANDARD.encode_to_string(bound_base_plaintext(epoch, new_root, control_pk, control_root))
+}
+
+/// Parse + verify a decrypted BASE blob plaintext (CORD-06 §1): 72 (legacy
+/// pre-split), 104 (member), 136 (staff). The scope must be the all-zero base
+/// sentinel and the epoch must match the coordinate (unspliceable), and a
+/// 136-byte blob's `new_control_root` must derive to exactly its
+/// `new_control_pk` (CORD-02 §5) — a mismatched pair refuses the WHOLE blob
+/// rather than adopting a plane split from its readers.
+///
+/// A width ABOVE 136 is a future form this build predates. Refusing it would
+/// re-create the pre-split brick (a member forks off at the rotation until
+/// they update), so it degrades per CORD-06 §3's lenient grade instead: the
+/// frozen 72-byte prefix yields the root (membership and every Chat plane
+/// survive), the family's appended offsets yield the control pair when they
+/// still verify (the derive check fails closed on a reordered layout), and
+/// whatever the extra bytes govern freezes — a safe prompt to update, never a
+/// fork. Widths between the defined forms fit no append-only extension and
+/// stay malformed.
+pub fn parse_bound_base_plaintext(pt: &[u8], community_id: &CommunityId, epoch: Epoch) -> Result<BaseKeyDelivery, RekeyError> {
+    if !matches!(pt.len(), 72 | 104 | 136) && pt.len() < 137 {
+        return Err(RekeyError::BadBaseBlobWidth(pt.len()));
+    }
+    let new_root = parse_bound_plaintext(&pt[..72], RekeyScope::Root, epoch)?;
+    if pt.len() == 72 {
+        return Ok(BaseKeyDelivery { new_root, control_pk: None, control_root: None });
+    }
+    let mut control_pk = [0u8; 32];
+    control_pk.copy_from_slice(&pt[72..104]);
+    if pt.len() == 104 {
+        return Ok(BaseKeyDelivery { new_root, control_pk: Some(control_pk), control_root: None });
+    }
+    let mut control_root = [0u8; 32];
+    control_root.copy_from_slice(&pt[104..136]);
+    if control_signer_group_key(&control_root, community_id, epoch).pk().to_bytes() != control_pk {
+        if pt.len() == 136 {
+            return Err(RekeyError::ControlPairMismatch);
+        }
+        // Future form whose 104..136 bytes are no longer the secret: keep the
+        // verified prefix fields, drop the unverifiable ones.
+        return Ok(BaseKeyDelivery { new_root, control_pk: Some(control_pk), control_root: None });
+    }
+    Ok(BaseKeyDelivery { new_root, control_pk: Some(control_pk), control_root: Some(control_root) })
+}
+
+/// Build one BASE blob via a [`VectorSigner`] — the 104-byte member form, or
+/// 136 with `control_root` for a staff recipient (CORD-04 §3). Mirrors
+/// [`build_blob`]; the locator is the same public Root-scope locator.
+pub async fn build_base_blob<S: crate::signer::VectorSigner + ?Sized>(
+    signer: &S,
+    rotator_xonly: &[u8; 32],
+    recipient_pk: &PublicKey,
+    epoch: Epoch,
+    new_root: &[u8; 32],
+    control_pk: &[u8; 32],
+    control_root: Option<&[u8; 32]>,
+) -> Result<RekeyBlob, RekeyError> {
+    let inner_b64 = Zeroizing::new(bound_base_plaintext_b64(epoch, new_root, control_pk, control_root));
+    let wrapped = signer
+        .nip44_encrypt_async(recipient_pk, inner_b64.as_str())
+        .await
+        .map_err(|e| RekeyError::Crypto(e.to_string()))?;
+    Ok(RekeyBlob {
+        locator: blob_locator(rotator_xonly, &recipient_pk.to_bytes(), RekeyScope::Root, epoch),
+        wrapped,
+    })
+}
+
+/// Open a BASE blob addressed to me via a [`VectorSigner`]. Mirror of
+/// [`open_blob`], but width-tolerant per CORD-06 §1 — the returned delivery
+/// says which form arrived.
+pub async fn open_base_blob<S: crate::signer::VectorSigner + ?Sized>(
+    signer: &S,
+    rotator_pk: &PublicKey,
+    community_id: &CommunityId,
+    epoch: Epoch,
+    blob: &RekeyBlob,
+) -> Result<BaseKeyDelivery, RekeyError> {
+    let inner_b64 = Zeroizing::new(
+        signer
+            .nip44_decrypt_async(rotator_pk, &blob.wrapped)
+            .await
+            .map_err(|e| RekeyError::Crypto(e.to_string()))?,
+    );
+    let pt = Zeroizing::new(
+        base64_simd::STANDARD
+            .decode_to_vec(inner_b64.as_bytes())
+            .map_err(|e| RekeyError::Crypto(e.to_string()))?,
+    );
+    parse_bound_base_plaintext(&pt, community_id, epoch)
+}
+
+// ── The Grant's control_wrap plaintext (CORD-04 §3) ──────────────────────────
+
+/// `epoch_be[8] ‖ control_root[32]` — the staff write key as delivered inside a
+/// staff-making Grant, NIP-44-encrypted under the granter↔member pairwise key
+/// (the rekey-blob discipline: fixed width, the epoch INSIDE the ciphertext).
+pub fn encode_control_wrap(epoch: Epoch, control_root: &[u8; 32]) -> [u8; 40] {
+    let mut pt = [0u8; 40];
+    pt[..8].copy_from_slice(&epoch.0.to_be_bytes());
+    pt[8..].copy_from_slice(control_root);
+    pt
+}
+
+/// The base64 string a control_wrap's NIP-44 layer encrypts (string-typed
+/// signer surfaces, the D5 transport discipline).
+pub fn control_wrap_b64(epoch: Epoch, control_root: &[u8; 32]) -> String {
+    base64_simd::STANDARD.encode_to_string(encode_control_wrap(epoch, control_root))
+}
+
+/// Parse a decrypted 40-byte control_wrap plaintext. The caller verifies the
+/// secret derives to the `control_pk` it holds for the named epoch — any
+/// mismatch is dropped, never adopted (CORD-04 §3).
+pub fn parse_control_wrap(pt: &[u8]) -> Result<(Epoch, [u8; 32]), RekeyError> {
+    if pt.len() != 40 {
+        return Err(RekeyError::BadControlWrapLength(pt.len()));
+    }
+    let mut epoch_be = [0u8; 8];
+    epoch_be.copy_from_slice(&pt[..8]);
+    let mut control_root = [0u8; 32];
+    control_root.copy_from_slice(&pt[8..]);
+    Ok((Epoch(u64::from_be_bytes(epoch_be)), control_root))
 }
 
 /// The public per-recipient locator (D1). Both parties compute it from public
@@ -1106,6 +1278,148 @@ mod tests {
         let rots = collect_rotations(&[c.clone(), c]);
         assert_eq!(rots.len(), 1);
         assert_eq!(rots[0].blobs.len(), 1, "re-delivering a chunk must not double its blobs");
+    }
+
+    // ── base blob forms + control_wrap (CORD-06 §1, CORD-04 §3) ──────────────
+
+    #[test]
+    fn base_blob_forms_are_width_declared() {
+        let community = CommunityId([0x77u8; 32]);
+        let new_root = [0xABu8; 32];
+        let control_root = [0x5Cu8; 32];
+        let epoch = Epoch(3);
+        let control_pk = control_signer_group_key(&control_root, &community, epoch).pk().to_bytes();
+
+        // 104-byte member form: root + pk, no secret.
+        let member = bound_base_plaintext(epoch, &new_root, &control_pk, None);
+        assert_eq!(member.len(), 104);
+        let d = parse_bound_base_plaintext(&member, &community, epoch).unwrap();
+        assert_eq!(d.new_root, new_root);
+        assert_eq!(d.control_pk, Some(control_pk));
+        assert_eq!(d.control_root, None);
+
+        // 136-byte staff form carries the secret, verified against its own pk.
+        let staff = bound_base_plaintext(epoch, &new_root, &control_pk, Some(&control_root));
+        assert_eq!(staff.len(), 136);
+        let d = parse_bound_base_plaintext(&staff, &community, epoch).unwrap();
+        assert_eq!(d.control_root, Some(control_root));
+        assert_eq!(d.control_pk, Some(control_pk));
+
+        // Legacy 72-byte base form yields the root alone.
+        let legacy = bound_plaintext(RekeyScope::Root, epoch, &new_root);
+        let d = parse_bound_base_plaintext(&legacy, &community, epoch).unwrap();
+        assert_eq!(d.new_root, new_root);
+        assert_eq!(d.control_pk, None);
+        assert_eq!(d.control_root, None);
+    }
+
+    #[test]
+    fn base_blob_mismatched_control_pair_is_refused_whole() {
+        let community = CommunityId([0x77u8; 32]);
+        let control_pk = control_signer_group_key(&[0x5Cu8; 32], &community, Epoch(3)).pk().to_bytes();
+        // A secret that does NOT derive to the carried pk — the whole blob is
+        // dropped, the new_root included (never a partial adoption).
+        let bad = bound_base_plaintext(Epoch(3), &[0xABu8; 32], &control_pk, Some(&[0x11u8; 32]));
+        assert!(matches!(
+            parse_bound_base_plaintext(&bad, &community, Epoch(3)),
+            Err(RekeyError::ControlPairMismatch)
+        ));
+    }
+
+    #[test]
+    fn base_blob_rejects_any_other_width_and_splices() {
+        let community = CommunityId([0x77u8; 32]);
+        // Below and between the defined forms: no append-only extension fits.
+        for n in [0usize, 71, 73, 100, 105, 135] {
+            assert!(matches!(
+                parse_bound_base_plaintext(&vec![0u8; n], &community, Epoch(1)),
+                Err(RekeyError::BadBaseBlobWidth(m)) if m == n
+            ));
+        }
+        // The scope and epoch bind INSIDE the ciphertext (unspliceable).
+        let control_root = [0x5Cu8; 32];
+        let pk = control_signer_group_key(&control_root, &community, Epoch(3)).pk().to_bytes();
+        let pt = bound_base_plaintext(Epoch(3), &[0xABu8; 32], &pk, None);
+        assert!(matches!(parse_bound_base_plaintext(&pt, &community, Epoch(4)), Err(RekeyError::EpochSplice)));
+        let mut channel_scoped = pt.clone();
+        channel_scoped[..32].copy_from_slice(&[0x42u8; 32]);
+        assert!(matches!(parse_bound_base_plaintext(&channel_scoped, &community, Epoch(3)), Err(RekeyError::ScopeSplice)));
+    }
+
+    #[tokio::test]
+    async fn base_blob_round_trips_member_and_staff_forms() {
+        let rotator = keys(7);
+        let member = keys(8);
+        let staffer = keys(9);
+        let community = CommunityId([0x77u8; 32]);
+        let epoch = Epoch(2);
+        let new_root = [0xEEu8; 32];
+        let control_root = [0xDDu8; 32];
+        let control_pk = control_signer_group_key(&control_root, &community, epoch).pk().to_bytes();
+
+        let mb = build_base_blob(&as_signer(&rotator), &xonly(&rotator), &member.public_key(), epoch, &new_root, &control_pk, None).await.unwrap();
+        let d = open_base_blob(&as_signer(&member), &rotator.public_key(), &community, epoch, &mb).await.unwrap();
+        assert_eq!(d.new_root, new_root);
+        assert_eq!(d.control_pk, Some(control_pk));
+        assert_eq!(d.control_root, None, "a member blob never carries the secret");
+
+        let sb = build_base_blob(&as_signer(&rotator), &xonly(&rotator), &staffer.public_key(), epoch, &new_root, &control_pk, Some(&control_root)).await.unwrap();
+        let d = open_base_blob(&as_signer(&staffer), &rotator.public_key(), &community, epoch, &sb).await.unwrap();
+        assert_eq!(d.control_root, Some(control_root));
+
+        // The locator is the same public Root-scope slot the legacy form used.
+        assert_eq!(mb.locator, blob_locator(&xonly(&rotator), &xonly(&member), RekeyScope::Root, epoch));
+        // And a legacy 72-byte blob still opens through the base opener.
+        let legacy = build_blob(&as_signer(&rotator), &xonly(&rotator), &member.public_key(), RekeyScope::Root, epoch, &new_root).await.unwrap();
+        let d = open_base_blob(&as_signer(&member), &rotator.public_key(), &community, epoch, &legacy).await.unwrap();
+        assert_eq!(d.new_root, new_root);
+        assert_eq!(d.control_pk, None);
+    }
+
+    #[test]
+    fn a_future_wider_base_blob_degrades_instead_of_forking() {
+        // The pre-split lesson (CORD-06 §3): a width this build predates must
+        // never park the member at the old epoch — extract the frozen prefix
+        // and whatever appended fields still verify.
+        let community = CommunityId([0x77u8; 32]);
+        let new_root = [0xABu8; 32];
+        let control_root = [0x5Cu8; 32];
+        let epoch = Epoch(3);
+        let control_pk = control_signer_group_key(&control_root, &community, epoch).pk().to_bytes();
+
+        // A hypothetical 168-byte form that appended a field after the secret.
+        let mut future = bound_base_plaintext(epoch, &new_root, &control_pk, Some(&control_root));
+        future.extend_from_slice(&[0x99u8; 32]);
+        let d = parse_bound_base_plaintext(&future, &community, epoch).unwrap();
+        assert_eq!(d.new_root, new_root);
+        assert_eq!(d.control_pk, Some(control_pk));
+        assert_eq!(d.control_root, Some(control_root), "held offsets still verify → full function");
+
+        // One that REPLACED the secret's bytes: the derive check fails closed
+        // to the verified prefix, never a refusal (membership must survive).
+        let mut reordered = bound_base_plaintext(epoch, &new_root, &control_pk, Some(&[0x44u8; 32]));
+        reordered.extend_from_slice(&[0x99u8; 32]);
+        let d = parse_bound_base_plaintext(&reordered, &community, epoch).unwrap();
+        assert_eq!(d.new_root, new_root);
+        assert_eq!(d.control_pk, Some(control_pk));
+        assert_eq!(d.control_root, None, "an unverifiable secret is dropped, not adopted");
+
+        // The prefix's splice bindings still gate a future form.
+        assert!(parse_bound_base_plaintext(&future, &community, Epoch(4)).is_err());
+    }
+
+    #[test]
+    fn control_wrap_layout_is_frozen_and_round_trips() {
+        let pt = encode_control_wrap(Epoch(7), &[0xCDu8; 32]);
+        assert_eq!(pt.len(), 40);
+        let expected = format!("{}{}", "0000000000000007", "cd".repeat(32));
+        assert_eq!(crate::simd::hex::bytes_to_hex_string(&pt), expected);
+        let (epoch, root) = parse_control_wrap(&pt).unwrap();
+        assert_eq!(epoch, Epoch(7));
+        assert_eq!(root, [0xCDu8; 32]);
+        for n in [0usize, 39, 41, 72] {
+            assert!(matches!(parse_control_wrap(&vec![0u8; n]), Err(RekeyError::BadControlWrapLength(m)) if m == n));
+        }
     }
 
     #[test]

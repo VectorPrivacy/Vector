@@ -204,7 +204,9 @@ pub fn plane_authors(communities: &[CommunityV2]) -> Vec<PublicKey> {
 /// source of truth shared by [`plane_authors`] (subscribe) and
 /// [`inbound::dispatch_wrap`] (recognize) so the two can't drift.
 pub(crate) fn control_author(c: &CommunityV2) -> PublicKey {
-    derive::control_group_key(&c.community_root, c.id(), c.root_epoch).pk()
+    // A split epoch's address is the HELD control_pk (CORD-02 §5); a legacy
+    // epoch derives it from the community_root as always.
+    super::control::ControlPlane::of(c).pk()
 }
 
 /// The next-epoch rekey plane addresses for a community: the base rotation
@@ -842,7 +844,9 @@ mod tests {
         // Subscribed: the guestbook, the control plane, and the one public channel
         // (the planes dispatch_wrap handles). Exactly those three.
         let gb = derive::guestbook_group_key(&c.community_root, c.id(), c.root_epoch).pk();
-        let control = derive::control_group_key(&c.community_root, c.id(), c.root_epoch).pk();
+        // The split address (the held control_pk), not the legacy derivation.
+        let control = crate::community::v2::control::ControlPlane::of(&c).pk();
+        assert_ne!(control, derive::control_group_key(&c.community_root, c.id(), c.root_epoch).pk());
         let general = {
             let (s, e) = c.channel_secret(&c.channels[0]);
             derive::channel_group_key(&s, &c.channels[0].id, e).pk()

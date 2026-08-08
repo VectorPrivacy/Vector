@@ -59,10 +59,19 @@ pub fn register(keys: impl IntoIterator<Item = Keys>) -> usize {
 /// first). Called at join and on every follow so a rotated address is covered.
 pub fn register_community(c: &CommunityV2) -> usize {
     let mut keys: Vec<Keys> = vec![
-        super::derive::control_group_key(&c.community_root, c.id(), c.root_epoch).keys().clone(),
         super::derive::guestbook_group_key(&c.community_root, c.id(), c.root_epoch).keys().clone(),
         super::derive::dissolved_group_key(c.id()).keys().clone(),
     ];
+    // The Control Plane's signer: the whole legacy key on a pre-split epoch, the
+    // staff-held control_root's signer when this member holds it. A non-staff
+    // member on a split epoch holds NO secret for the plane address (CORD-02
+    // §2), so there is nothing to authenticate AS — a NIP-42 read-gating relay
+    // must not gate reads on a write-restricted stream's key, and registering
+    // nothing here is what keeps the auth dance from waiting on an
+    // unanswerable challenge.
+    if let Some(k) = super::control::ControlPlane::of(c).signer_keys() {
+        keys.push(k.clone());
+    }
     for ch in &c.channels {
         if ch.private && ch.key.is_none() {
             continue;
@@ -323,7 +332,10 @@ mod tests {
         assert!(added >= 6, "control+guestbook+dissolved+public chat+keyed chat+rekeys = at least 6 new keys, got {added}");
 
         use super::super::derive;
-        assert!(registered(&derive::control_group_key(&c.community_root, c.id(), c.root_epoch).pk()));
+        // The control SIGNER registers (this community's owner holds the
+        // control_root); the legacy derivation is not the address and must not.
+        assert!(registered(&super::super::control::ControlPlane::of(&c).pk()));
+        assert!(!registered(&derive::control_group_key(&c.community_root, c.id(), c.root_epoch).pk()));
         assert!(registered(&derive::guestbook_group_key(&c.community_root, c.id(), c.root_epoch).pk()));
         assert!(registered(&derive::dissolved_group_key(c.id()).pk()));
         // Public channel: chat plane derives from the community root.

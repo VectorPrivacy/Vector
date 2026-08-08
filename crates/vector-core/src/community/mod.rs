@@ -146,6 +146,12 @@ impl core::fmt::Debug for ServerRootKey {
 pub const SERVER_ROOT_SCOPE_HEX: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 
+/// The epoch-key-archive scope for a v2 `control_root` (CORD-02 §2): non-hex on
+/// purpose, so it collides with neither a channel id nor the root sentinel.
+/// Reserves the pair beside the root at mint (retry idempotency) and archives
+/// the secret per epoch.
+pub const CONTROL_ROOT_SCOPE: &str = "control-root";
+
 /// 32 cryptographically-random bytes (OsRng).
 pub(crate) fn random_32() -> [u8; 32] {
     let mut b = [0u8; 32];

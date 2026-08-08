@@ -19,12 +19,13 @@
 //!     ([`super::derive::verify_community_id`]), not an attestation event —
 //!     vsk 7 is retired.
 
+use nostr_sdk::prelude::nip44::v2::ConversationKey;
 use nostr_sdk::prelude::{Event, Keys, PublicKey, Tag, Timestamp, UnsignedEvent};
 use serde::{Deserialize, Serialize};
 
 use super::super::edition::{AuthorityCitation, EditionError, ParsedEdition, TAG_AUTHORITY_CITATION};
 use super::super::{version, ChannelId, CommunityId, Epoch};
-use super::derive::{control_group_key, verify_community_id, GroupKey};
+use super::derive::{control_group_key, control_signer_group_key, verify_community_id, GroupKey};
 use super::stream::{self, OpenedStream, SealForm, StreamError};
 use super::{kind, vsk};
 
@@ -198,6 +199,122 @@ pub fn parse_edition_rumor(rumor: &UnsignedEvent) -> Result<ParsedEdition, Contr
     })
 }
 
+// ── The Control Plane view (CORD-02 §2/§5) ───────────────────────────────────
+
+/// The Control Plane as this member holds it for one epoch.
+///
+/// A SPLIT epoch (the community carries a held `control_pk`) subscribes and
+/// verifies by that address while decrypting under the community_root-derived
+/// read key; its signer is present only when this member holds the epoch's
+/// `control_root` AND it derives to the held address (staff, fail-closed on a
+/// corrupt secret). A LEGACY epoch is the `concord/control` derivation whole —
+/// address, signer, and encryption in one key every member holds.
+#[derive(Clone)]
+pub struct ControlPlane {
+    pk: PublicKey,
+    conv_key: ConversationKey,
+    signer: Option<Keys>,
+    restricted: bool,
+}
+
+impl ControlPlane {
+    /// The CURRENT epoch's view of `community`'s Control Plane.
+    pub fn of(community: &super::community::CommunityV2) -> ControlPlane {
+        let read = control_group_key(&community.community_root, community.id(), community.root_epoch);
+        match community.control_pk {
+            None => ControlPlane {
+                pk: read.pk(),
+                conv_key: read.conv_key().clone(),
+                signer: Some(read.keys().clone()),
+                restricted: false,
+            },
+            Some(pk) => {
+                // A held secret that does not derive to the held address is
+                // corrupt state, not a signer: fail closed to read-only rather
+                // than mint wraps at an address nobody subscribes to.
+                let signer = community.control_root.and_then(|cr| {
+                    let s = control_signer_group_key(&cr, community.id(), community.root_epoch);
+                    (s.pk() == pk).then(|| s.keys().clone())
+                });
+                ControlPlane { pk, conv_key: read.conv_key().clone(), signer, restricted: true }
+            }
+        }
+    }
+
+    /// A whole legacy plane view from its single group key (tests, migrations).
+    pub fn legacy(group: &GroupKey) -> ControlPlane {
+        ControlPlane {
+            pk: group.pk(),
+            conv_key: group.conv_key().clone(),
+            signer: Some(group.keys().clone()),
+            restricted: false,
+        }
+    }
+
+    /// The plane address — what `authors` filters and wrap-author checks match.
+    pub fn pk(&self) -> PublicKey {
+        self.pk
+    }
+
+    pub fn pk_hex(&self) -> String {
+        self.pk.to_hex()
+    }
+
+    /// Whether this member can PUBLISH to the plane (CORD-02 §2).
+    pub fn can_write(&self) -> bool {
+        self.signer.is_some()
+    }
+
+    /// The signer Keys when held (NIP-42 auth as the plane, staff only on a
+    /// split epoch).
+    pub fn signer_keys(&self) -> Option<&Keys> {
+        self.signer.as_ref()
+    }
+
+    /// The WRITE group: address, signing secret, and read conv_key composed for
+    /// the seal/wrap builders. Errs when the epoch is split and this member does
+    /// not hold its `control_root` — publishing there would mint a wrap that
+    /// fails the plane's signature check at every reader and relay.
+    pub fn write_group(&self) -> Result<GroupKey, String> {
+        match &self.signer {
+            Some(keys) => Ok(GroupKey::from_parts(keys.clone(), self.conv_key.clone())),
+            None => Err("only community staff hold this community's write key; ask an admin to re-send your promotion".to_string()),
+        }
+    }
+
+    /// Open a control wrap under this view — [`open_control_edition`] with the
+    /// split's mandatory wrap-signature check on a restricted plane (CORD-01
+    /// Write-Restricted Streams: the signature IS the write gate there).
+    pub fn open(&self, wrap: &Event) -> Result<(ParsedEdition, OpenedStream), ControlError> {
+        let opened = stream::open_wrap_at(wrap, &self.pk, &self.conv_key, self.restricted)?;
+        if opened.seal_form != SealForm::Plaintext {
+            return Err(ControlError::NotPlaintextSealed);
+        }
+        let edition = parse_edition_rumor(&opened.rumor)?;
+        Ok((edition, opened))
+    }
+}
+
+impl std::fmt::Debug for ControlPlane {
+    // No key material in logs — address only.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ControlPlane")
+            .field("pk", &self.pk_hex())
+            .field("restricted", &self.restricted)
+            .field("writable", &self.can_write())
+            .finish()
+    }
+}
+
+/// The SPLIT write group for a freshly minted epoch (genesis / a Refounding's
+/// new plane): the `control_root`-derived signer with the `community_root`-
+/// derived read key (CORD-02 §5).
+pub fn split_write_group(control_root: &[u8; 32], community_root: &[u8; 32], community_id: &CommunityId, epoch: Epoch) -> GroupKey {
+    let signer = control_signer_group_key(control_root, community_id, epoch);
+    let read = control_group_key(community_root, community_id, epoch);
+    GroupKey::from_parts(signer.keys().clone(), read.conv_key().clone())
+}
+
 // ── Seal / open over the stream ──────────────────────────────────────────────
 
 /// Seal a signed-by-`author_keys` edition rumor into a control-plane wrap.
@@ -347,14 +464,26 @@ pub struct Genesis {
     pub identity: CommunityIdentity,
     /// The community_root minted for epoch 0.
     pub community_root: [u8; 32],
+    /// The staff write key minted beside it (CORD-02 §2) — held by the owner
+    /// alone until staff are promoted. Its derived pk is the plane's address.
+    pub control_root: [u8; 32],
     pub general_channel_id: ChannelId,
     /// `[metadata wrap, #general wrap]`, both sealed at the epoch-0 control_pk.
     pub wraps: [Event; 2],
 }
 
+impl Genesis {
+    /// The epoch-0 Control Plane address the split minted (CORD-02 §5).
+    pub fn control_pk(&self) -> PublicKey {
+        control_signer_group_key(&self.control_root, &self.identity.community_id, Epoch(0)).pk()
+    }
+}
+
 /// Mint a v2 community: fresh identity (salt-committed to the owner), fresh
-/// community_root, and the two genesis editions sealed at the epoch-0 control
-/// plane. The caller persists the secrets and publishes the wraps.
+/// community_root + control_root (the split, CORD-02 §2), and the two genesis
+/// editions sealed at the epoch-0 control plane — signed by the control_root-
+/// derived signer, readable under the community_root-derived read key. The
+/// caller persists the secrets and publishes the wraps.
 pub fn genesis(owner_keys: &Keys, mut metadata: CommunityMetadata, at_secs: u64) -> Result<Genesis, ControlError> {
     validate_community_metadata(&metadata)?;
     // Relays ride the metadata entity so they can evolve by edit; cap on write.
@@ -362,8 +491,9 @@ pub fn genesis(owner_keys: &Keys, mut metadata: CommunityMetadata, at_secs: u64)
 
     let identity = CommunityIdentity::mint(&owner_keys.public_key());
     let community_root = super::super::random_32();
+    let control_root = super::super::random_32();
     let general_channel_id = ChannelId(super::super::random_32());
-    let group = control_group_key(&community_root, &identity.community_id, Epoch(0));
+    let group = split_write_group(&control_root, &community_root, &identity.community_id, Epoch(0));
 
     let meta_json = serde_json::to_string(&metadata).map_err(|e| ControlError::Stream(StreamError::Parse(e.to_string())))?;
     let meta_rumor = build_edition_rumor(
@@ -396,6 +526,7 @@ pub fn genesis(owner_keys: &Keys, mut metadata: CommunityMetadata, at_secs: u64)
     Ok(Genesis {
         identity,
         community_root,
+        control_root,
         general_channel_id,
         wraps: [meta_wrap, general_wrap],
     })
@@ -429,11 +560,12 @@ pub async fn genesis_signed_with_primary<S: crate::signer::VectorSigner + ?Sized
 
     let identity = CommunityIdentity::mint(&owner_pk);
     let community_root = super::super::random_32();
+    let control_root = super::super::random_32();
     let (general_channel_id, general_name) = match primary {
         Some((id, name)) => (id, name),
         None => (ChannelId(super::super::random_32()), "general".to_string()),
     };
-    let group = control_group_key(&community_root, &identity.community_id, Epoch(0));
+    let group = split_write_group(&control_root, &community_root, &identity.community_id, Epoch(0));
 
     let meta_json = serde_json::to_string(&metadata).map_err(|e| ControlError::Stream(StreamError::Parse(e.to_string())))?;
     let meta_rumor = build_edition_rumor(owner_pk, vsk::COMMUNITY_METADATA, &identity.community_id.0, 1, None, &meta_json, at_secs, None);
@@ -448,6 +580,7 @@ pub async fn genesis_signed_with_primary<S: crate::signer::VectorSigner + ?Sized
     Ok(Genesis {
         identity,
         community_root,
+        control_root,
         general_channel_id,
         wraps: [meta_wrap, general_wrap],
     })
@@ -664,8 +797,11 @@ mod tests {
         assert!(g.identity.verify());
         assert_eq!(g.identity.owner().unwrap(), owner.public_key());
 
-        // Exactly two editions, both owner-signed, both openable at epoch 0.
-        let group = control_group_key(&g.community_root, &g.identity.community_id, Epoch(0));
+        // Exactly two editions, both owner-signed, both openable at epoch 0 —
+        // at the SPLIT address (the control_root-derived signer, CORD-02 §2).
+        let group = split_write_group(&g.control_root, &g.community_root, &g.identity.community_id, Epoch(0));
+        assert_eq!(group.pk(), g.control_pk(), "the plane address is the signer's pk");
+        assert_ne!(group.pk(), control_group_key(&g.community_root, &g.identity.community_id, Epoch(0)).pk(), "never the legacy address");
         let (meta_ed, _) = open_control_edition(&g.wraps[0], &group).unwrap();
         let (chan_ed, _) = open_control_edition(&g.wraps[1], &group).unwrap();
         assert_eq!(meta_ed.author, owner.public_key());
@@ -684,6 +820,42 @@ mod tests {
         let general: ChannelMetadata = serde_json::from_str(&chan_ed.content).unwrap();
         assert_eq!(general.name, "general");
         assert!(!general.private);
+    }
+
+    #[test]
+    fn a_member_view_reads_the_split_plane_but_cannot_write_and_a_bad_wrap_sig_is_refused() {
+        // CORD-01 Write-Restricted Streams / CORD-02 §2: every member holds the
+        // address + read key; only a control_root holder can mint a wrap that
+        // verifies there — and on a restricted view the wrap signature is the
+        // write gate, so the reader MUST check it.
+        let owner = Keys::generate();
+        let g = genesis(&owner, CommunityMetadata { name: "Gate".into(), ..Default::default() }, 1_000).unwrap();
+        let mut member = super::super::community::CommunityV2::from_genesis(&g, "Gate", None, vec![], 0);
+        member.control_root = None; // a member holds the address, never the secret
+        let view = ControlPlane::of(&member);
+        assert!(!view.can_write());
+        let err = view.write_group().unwrap_err();
+        assert!(err.contains("staff"), "a readable refusal, not a panic: {err}");
+
+        // The member READS a staff wrap fine…
+        let (ed, _) = view.open(&g.wraps[0]).unwrap();
+        assert_eq!(ed.author, owner.public_key());
+
+        // …and a corrupt secret fails closed to the same read-only view.
+        member.control_root = Some([0x77u8; 32]);
+        assert!(!ControlPlane::of(&member).can_write(), "a non-deriving secret is corrupt state, not a signer");
+
+        // A wrap whose signature doesn't verify is refused on the restricted
+        // view — the best a read-key holder can do is claim the address with a
+        // signature that cannot check out.
+        let mut json: serde_json::Value = serde_json::from_str(&g.wraps[0].as_json()).unwrap();
+        json["sig"] = serde_json::Value::String("aa".repeat(64));
+        let tampered = Event::from_json(json.to_string()).unwrap();
+        member.control_root = None;
+        assert!(
+            matches!(ControlPlane::of(&member).open(&tampered), Err(ControlError::Stream(StreamError::BadWrapSignature))),
+            "the wrap signature IS the write gate on a restricted stream"
+        );
     }
 
     #[test]

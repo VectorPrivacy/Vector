@@ -55,6 +55,19 @@ pub struct JoinMaterial {
     pub owner_salt: String,
     pub community_root: String,
     pub root_epoch: u64,
+    /// The current epoch's Control Plane signer pubkey (CORD-02 §2/§8) — read
+    /// access to the plane, never write. Absent = a legacy pre-split epoch,
+    /// whose Control folds at the member-derivable legacy address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_pk: Option<String>,
+    /// STAFF ONLY: the current epoch's `control_root` write secret (hex). The
+    /// list is NIP-44-encrypted to self and already carries the
+    /// `community_root`, so this is the same trust class — it is how a
+    /// staffer's write key survives across their own devices (CORD-02 §8).
+    /// Delivered by a staff-making Grant's `control_wrap` (CORD-04 §3) or a
+    /// 136-byte base blob (CORD-06 §1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_root: Option<String>,
     /// The PRIVATE channels held (public ones derive from the root — CORD-03).
     /// ABSENT, not empty, when the writer holds no keys — armada omits the field.
     /// Required once, which rejected the whole vault for the commonest case there
@@ -382,6 +395,8 @@ mod tests {
             owner_salt: "b".repeat(64),
             community_root: "d".repeat(64),
             root_epoch,
+            control_pk: None,
+            control_root: None,
             channels: vec![],
             relays: vec![],
             name: name.to_string(),

@@ -84,6 +84,10 @@ pub enum StreamError {
     BadWrapKind(u16),
     /// Wrap author isn't this plane's group key — not this stream's event.
     WrongStream,
+    /// A write-restricted stream's wrap signature failed to verify (CORD-01):
+    /// the signer set is narrower than the readership there, so the signature
+    /// IS the write gate and a reader MUST check it.
+    BadWrapSignature,
     /// Seal kind is neither 20013 nor 20014.
     BadSealKind(u16),
     /// The seal's Schnorr signature (or id) failed to verify.
@@ -117,6 +121,7 @@ impl std::fmt::Display for StreamError {
             StreamError::Oversize(n) => write!(f, "plaintext {n} bytes exceeds NIP-44 cap"),
             StreamError::BadWrapKind(k) => write!(f, "not a stream wrap kind: {k}"),
             StreamError::WrongStream => write!(f, "wrap author is not this stream"),
+            StreamError::BadWrapSignature => write!(f, "write-restricted wrap signature invalid"),
             StreamError::BadSealKind(k) => write!(f, "not a seal kind: {k}"),
             StreamError::BadSealSignature => write!(f, "seal signature invalid"),
             StreamError::AuthorMismatch => write!(f, "rumor pubkey != seal pubkey"),
@@ -353,22 +358,41 @@ pub fn rewrap_seal(seal: &Event, new_group: &GroupKey, wrap_at: Timestamp) -> Re
 /// rumor recover → rumor.pubkey == seal.pubkey → rumor.id == computed hash
 /// (never trust a claimed id) → strict ms resolve.
 pub fn open_wrap(wrap: &Event, group: &GroupKey) -> Result<OpenedStream, StreamError> {
+    open_wrap_at(wrap, &group.pk(), group.conv_key(), false)
+}
+
+/// [`open_wrap`] against a stream READ VIEW: the address to verify by and the
+/// conversation key that opens the wraps — no signing secret needed. With
+/// `verify_wrap_sig` (a Write-Restricted Stream, CORD-01), the wrap's own
+/// signature is additionally checked: there the signer set is narrower than the
+/// readership, so unlike an ordinary stream wrap (signed with a key every
+/// reader holds — proves nothing) it proves a write-keyholder published this,
+/// and a reader MUST check it rather than lean on the relays having done so.
+pub fn open_wrap_at(
+    wrap: &Event,
+    address: &PublicKey,
+    conv_key: &nostr_sdk::prelude::nip44::v2::ConversationKey,
+    verify_wrap_sig: bool,
+) -> Result<OpenedStream, StreamError> {
     let wrap_kind = wrap.kind.as_u16();
     if wrap_kind != KIND_WRAP && wrap_kind != KIND_WRAP_EPHEMERAL {
         return Err(StreamError::BadWrapKind(wrap_kind));
     }
-    if wrap.pubkey != group.pk() {
+    if wrap.pubkey != *address {
         return Err(StreamError::WrongStream);
     }
+    if verify_wrap_sig && wrap.verify().is_err() {
+        return Err(StreamError::BadWrapSignature);
+    }
 
-    let seal_json = open_nip44(group.conv_key(), &wrap.content)?;
+    let seal_json = open_nip44(conv_key, &wrap.content)?;
     let seal: Event = Event::from_json(&seal_json).map_err(|e| StreamError::Parse(e.to_string()))?;
     let seal_form = SealForm::from_kind(seal.kind.as_u16()).ok_or(StreamError::BadSealKind(seal.kind.as_u16()))?;
     seal.verify().map_err(|_| StreamError::BadSealSignature)?;
 
     let rumor_json = match seal_form {
         SealForm::Plaintext => seal.content.clone(),
-        SealForm::Encrypted => open_nip44(group.conv_key(), &seal.content)?,
+        SealForm::Encrypted => open_nip44(conv_key, &seal.content)?,
     };
     let mut rumor: UnsignedEvent = UnsignedEvent::from_json(rumor_json.as_bytes()).map_err(|e| StreamError::Parse(e.to_string()))?;
 

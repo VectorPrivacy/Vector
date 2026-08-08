@@ -2384,21 +2384,26 @@ pub fn save_community_v2(c: &crate::community::v2::community::CommunityV2) -> Re
         .then(|| serde_json::to_string(&CommunityMetaStash { custom: c.meta_custom.clone(), extra: c.meta_extra.clone() }).map_err(|e| e.to_string()))
         .transpose()?;
     let enc_stash = enc_txt_opt(&stash_json)?;
+    // The split pair (CORD-02 §2): the address as encrypted hex (owner_pubkey's
+    // treatment), the secret as an encrypted blob (server_root_key's).
+    let enc_control_pk = enc_txt_opt(&c.control_pk.map(|p| p.to_hex()))?;
+    let enc_control_root = c.control_root.as_ref().map(enc_key).transpose()?;
 
     let tx = conn.unchecked_transaction().map_err(|e| format!("save v2 community tx: {e}"))?;
     tx.execute(
         "INSERT INTO communities
             (community_id, server_root_key, name, relays, created_at, description,
-             server_root_epoch, dissolved, protocol, owner_pubkey, owner_salt, icon, banner, meta_extra)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 2, ?9, ?10, ?11, ?12, ?13)
+             server_root_epoch, dissolved, protocol, owner_pubkey, owner_salt, icon, banner, meta_extra,
+             control_pk, control_root)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 2, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
          ON CONFLICT(community_id) DO UPDATE SET
             server_root_key=?2, name=?3, relays=?4, description=?6,
             server_root_epoch=?7, dissolved=?8, protocol=2, owner_pubkey=?9, owner_salt=?10,
-            icon=?11, banner=?12, meta_extra=?13",
+            icon=?11, banner=?12, meta_extra=?13, control_pk=?14, control_root=?15",
         params![
             id_hex, enc_root, enc_name, enc_relays, created, enc_desc,
             c.root_epoch.0 as i64, c.dissolved as i64, enc_owner_pk, enc_owner_salt,
-            enc_icon, enc_banner, enc_stash,
+            enc_icon, enc_banner, enc_stash, enc_control_pk, enc_control_root,
         ],
     )
     .map_err(|e| format!("save v2 community: {e}"))?;
@@ -2482,7 +2487,7 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
         .query_row(
             "SELECT server_root_key, name, relays, created_at, description,
                     server_root_epoch, dissolved, protocol, owner_pubkey, owner_salt,
-                    icon, banner, meta_extra
+                    icon, banner, meta_extra, control_pk, control_root
              FROM communities WHERE community_id = ?1",
             params![id_hex],
             |r| {
@@ -2500,12 +2505,14 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
                     r.get::<_, Option<String>>(10)?,
                     r.get::<_, Option<String>>(11)?,
                     r.get::<_, Option<String>>(12)?,
+                    r.get::<_, Option<String>>(13)?,
+                    r.get::<_, Option<Vec<u8>>>(14)?,
                 ))
             },
         )
         .optional()
         .map_err(|e| e.to_string())?;
-    let Some((root_blob, name_e, relays_e, created, desc_e, root_epoch, dissolved, protocol, owner_pk_e, owner_salt_e, icon_e, banner_e, stash_e)) = row
+    let Some((root_blob, name_e, relays_e, created, desc_e, root_epoch, dissolved, protocol, owner_pk_e, owner_salt_e, icon_e, banner_e, stash_e, control_pk_e, control_root_b)) = row
     else {
         return Ok(None);
     };
@@ -2584,10 +2591,26 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
         .and_then(|j| serde_json::from_str(&j).ok())
         .unwrap_or_default();
 
+    // The split pair (CORD-02 §2). Fail closed on corruption: an unparseable
+    // address degrades to the legacy view, and a secret that no longer derives
+    // to the held address is dropped to read-only rather than signing at an
+    // address nobody reads.
+    let control_pk = control_pk_e
+        .as_deref()
+        .and_then(|e| nostr_sdk::prelude::PublicKey::from_hex(&dec_txt(e)).ok());
+    let control_root = match (control_pk, control_root_b) {
+        (Some(pk), Some(blob)) => dec_key(&blob).ok().filter(|cr| {
+            crate::community::v2::derive::control_signer_group_key(cr, id, Epoch(root_epoch as u64)).pk() == pk
+        }),
+        _ => None,
+    };
+
     Ok(Some(CommunityV2 {
         identity,
         community_root,
         root_epoch: Epoch(root_epoch as u64),
+        control_pk,
+        control_root,
         name: dec_txt(&name_e),
         description: desc_e.map(|d| dec_txt(&d)),
         icon,

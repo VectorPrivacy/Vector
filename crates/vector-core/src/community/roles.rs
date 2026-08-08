@@ -74,6 +74,20 @@ impl Permissions {
         | Self::VIEW_AUDIT_LOG
         | Self::PIN_MESSAGES;
 
+    /// The STAFF bits (CORD-04 §3): the permissions whose authorized actions
+    /// land as Control Plane editions. A member holding ANY of them — plus
+    /// always the owner — is staff: the set that holds the `control_root`
+    /// write key (CORD-02 §2). `KICK` writes to the Guestbook and
+    /// `MANAGE_MESSAGES` to Chat planes; neither needs it. The list is
+    /// normative — a future permission whose actions are Control editions
+    /// joins it by explicit spec amendment, never by local judgment.
+    pub const STAFF_MASK: u64 = Self::MANAGE_ROLES
+        | Self::MANAGE_CHANNELS
+        | Self::MANAGE_METADATA
+        | Self::BAN
+        | Self::CREATE_INVITE
+        | Self::PIN_MESSAGES;
+
     pub fn empty() -> Self {
         Permissions(0)
     }
@@ -199,6 +213,27 @@ impl CommunityRoles {
     /// holds only a non-management/social role). Drives the member-list crown.
     pub fn is_admin(&self, member_hex: &str) -> bool {
         self.roles_of(member_hex).any(|r| r.permissions.is_management())
+    }
+
+    /// Whether a member is STAFF (CORD-04 §3): the owner, or any holder of a
+    /// Control-writing bit ([`Permissions::STAFF_MASK`]) — the set entitled to
+    /// the `control_root` (CORD-02 §2).
+    pub fn is_staff(&self, member_hex: &str, owner_hex: Option<&str>) -> bool {
+        if owner_hex == Some(member_hex) {
+            return true;
+        }
+        self.effective_permissions(member_hex).0 & Permissions::STAFF_MASK != 0
+    }
+
+    /// Whether a grant's role set leaves its member staff, judged against this
+    /// roster's role definitions — the granter-side trigger for delivering the
+    /// `control_root` inside the Grant itself (CORD-04 §3). An id with no known
+    /// definition contributes nothing (never a reason to hand out the secret).
+    pub fn roles_make_staff(&self, role_ids: &[String]) -> bool {
+        role_ids
+            .iter()
+            .filter_map(|rid| self.role(rid))
+            .any(|r| r.permissions.0 & Permissions::STAFF_MASK != 0)
     }
 
     /// Is `actor_hex` authorized for an action requiring `permission`? The **owner** (the
