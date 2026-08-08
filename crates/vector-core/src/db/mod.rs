@@ -9,7 +9,6 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, LazyLock, RwLock};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::ops::{Deref, DerefMut};
 
 use serde::{Deserialize, Serialize};
@@ -595,46 +594,103 @@ mod active_account_tests {
 // Connection Pools
 // ============================================================================
 
-static DB_READ_POOL: LazyLock<Arc<Mutex<Vec<rusqlite::Connection>>>> =
-    LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
-
-static DB_WRITE_CONN: LazyLock<Arc<Mutex<Option<rusqlite::Connection>>>> =
-    LazyLock::new(|| Arc::new(Mutex::new(None)));
-
-/// Monotonic generation counter for the connection pool.
+/// One account's database resources, held behind an `Arc`.
 ///
-/// Every guard captures the current value at construction and compares
-/// on `Drop` — mismatch means the pool was reset (account switch /
-/// `close_database`) and the connection MUST be dropped instead of
-/// returned. Without this, an in-flight guard from account A could
-/// re-enter the pool after account B has initialized, causing account
-/// B's queries to silently run against account A's database.
+/// The connections an account uses are reachable ONLY through its own
+/// `Session`, so a task that captured one keeps talking to the account it
+/// started with even after a swap — it cannot be handed the next account's
+/// database, because it never asks "who is current?" again.
 ///
-/// Bumped by both `close_database()` and `init_database()`, so a swap
-/// (close → init) advances twice; either bump alone invalidates
-/// outstanding guards.
-static POOL_GENERATION: AtomicU64 = AtomicU64::new(0);
-
-#[inline]
-fn current_pool_generation() -> u64 {
-    POOL_GENERATION.load(Ordering::Acquire)
+/// That makes teardown structural: swapping installs a new `Session` and drops
+/// the reference to the old one, whose pool closes when the last in-flight
+/// guard finishes with it. Nothing to clear, nothing to remember to clear.
+pub struct Session {
+    /// The database this session opens, resolved ONCE when it is built.
+    /// `None` only before an account is bound, where there is nothing better
+    /// than the ambient lookup to fall back to.
+    db_path: Option<PathBuf>,
+    read_pool: Mutex<Vec<rusqlite::Connection>>,
+    write_conn: Mutex<Option<rusqlite::Connection>>,
 }
 
-#[inline]
-fn bump_pool_generation() -> u64 {
-    // fetch_add returns the previous value; the new generation is +1.
-    POOL_GENERATION.fetch_add(1, Ordering::AcqRel).wrapping_add(1)
+impl Session {
+    fn empty() -> Arc<Self> {
+        Arc::new(Session { db_path: None, read_pool: Mutex::new(Vec::new()), write_conn: Mutex::new(None) })
+    }
+
+    /// A session bound to one account's database file.
+    fn bound(db_path: PathBuf) -> Arc<Self> {
+        Arc::new(Session { db_path: Some(db_path), read_pool: Mutex::new(Vec::new()), write_conn: Mutex::new(None) })
+    }
+
+    /// Where THIS session opens connections. A bound session never consults the
+    /// ambient account, so a pool miss after a swap still opens the file this
+    /// session belongs to rather than the incoming account's.
+    fn path(&self) -> Result<PathBuf, String> {
+        match &self.db_path {
+            Some(p) => Ok(p.clone()),
+            None => get_current_db_path(),
+        }
+    }
+
+    /// Take a READ connection from this session, opening one against this
+    /// session's own database if the pool is empty.
+    pub fn acquire_read(self: &Arc<Self>) -> Result<ConnectionGuard, String> {
+        if let Ok(mut pool) = self.read_pool.lock() {
+            if let Some(conn) = pool.pop() {
+                return Ok(ConnectionGuard::new(conn, self.clone()));
+            }
+        }
+        let conn = create_connection(&self.path()?)?;
+        Ok(ConnectionGuard::new(conn, self.clone()))
+    }
+
+    /// Take THE write connection from this session, opening one against this
+    /// session's own database if the slot is empty.
+    pub fn acquire_write(self: &Arc<Self>) -> Result<WriteConnectionGuard, String> {
+        {
+            let mut slot = self.write_conn.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(conn) = slot.take() {
+                return Ok(WriteConnectionGuard::new(conn, self.clone()));
+            }
+        }
+        let conn = create_connection(&self.path()?)?;
+        Ok(WriteConnectionGuard::new(conn, self.clone()))
+    }
 }
 
-/// RAII guard for READ connections — auto-returns to pool on drop.
+/// The account whose resources new work binds to. Read once at the START of a
+/// unit of work; hold the `Arc` for its duration.
+static CURRENT_SESSION: LazyLock<RwLock<Arc<Session>>> = LazyLock::new(|| RwLock::new(Session::empty()));
+
+/// The live session. Callers that hold this across an account swap keep serving
+/// the account they captured, which is the correct outcome — their work belongs
+/// to that account.
+pub fn current_session() -> Arc<Session> {
+    CURRENT_SESSION.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Install a fresh session, dropping the reference to the previous one. Any
+/// guard still outstanding against the old session returns its connection
+/// there, and that pool closes with it.
+fn replace_session() {
+    *CURRENT_SESSION.write().unwrap_or_else(|e| e.into_inner()) = Session::empty();
+}
+
+/// RAII guard for READ connections — auto-returns to its OWN session's pool.
+///
+/// Holding the `Arc` is what makes the return safe: the connection goes back
+/// where it came from, so a guard outstanding across an account swap can never
+/// hand account A's connection to account B. When that older session has no
+/// references left, its pool closes with it.
 pub struct ConnectionGuard {
     conn: Option<rusqlite::Connection>,
-    generation: u64,
+    session: Arc<Session>,
 }
 
 impl ConnectionGuard {
-    fn new(conn: rusqlite::Connection, generation: u64) -> Self {
-        Self { conn: Some(conn), generation }
+    fn new(conn: rusqlite::Connection, session: Arc<Session>) -> Self {
+        Self { conn: Some(conn), session }
     }
 }
 
@@ -650,13 +706,8 @@ impl DerefMut for ConnectionGuard {
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
-            // Only return to pool if our generation still matches —
-            // otherwise the pool was reset mid-flight and pushing back
-            // would let account A's connection serve account B's queries.
-            if self.generation == current_pool_generation() {
-                if let Ok(mut pool) = DB_READ_POOL.lock() {
-                    pool.push(conn);
-                }
+            if let Ok(mut pool) = self.session.read_pool.lock() {
+                pool.push(conn);
             }
         }
     }
@@ -665,12 +716,12 @@ impl Drop for ConnectionGuard {
 /// RAII guard for the WRITE connection — auto-returns on drop.
 pub struct WriteConnectionGuard {
     conn: Option<rusqlite::Connection>,
-    generation: u64,
+    session: Arc<Session>,
 }
 
 impl WriteConnectionGuard {
-    fn new(conn: rusqlite::Connection, generation: u64) -> Self {
-        Self { conn: Some(conn), generation }
+    fn new(conn: rusqlite::Connection, session: Arc<Session>) -> Self {
+        Self { conn: Some(conn), session }
     }
 }
 
@@ -686,15 +737,11 @@ impl DerefMut for WriteConnectionGuard {
 impl Drop for WriteConnectionGuard {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
-            // Same generation gate as ConnectionGuard, plus a slot-empty
-            // check: if `init_database` already installed a fresh write
-            // connection for the new account, dropping ours over the top
-            // would clobber it.
-            if self.generation == current_pool_generation() {
-                if let Ok(mut slot) = DB_WRITE_CONN.lock() {
-                    if slot.is_none() {
-                        *slot = Some(conn);
-                    }
+            // Slot-empty check remains: a fresh write connection may already
+            // have been installed for this same session.
+            if let Ok(mut slot) = self.session.write_conn.lock() {
+                if slot.is_none() {
+                    *slot = Some(conn);
                 }
             }
         }
@@ -726,7 +773,31 @@ fn get_current_db_path() -> Result<PathBuf, String> {
     Ok(account_dir(&npub)?.join("vector.db"))
 }
 
+/// Open a connection, riding out a TRANSIENT lock on the file.
+///
+/// `busy_timeout` governs waits inside a connection that already exists; it
+/// cannot help the open itself, and `journal_mode=WAL` needs the lock briefly.
+/// A task started under the previous account can still be holding this file for
+/// a moment — it resolves the CURRENT account when it takes a connection, so a
+/// swap points it here — and failing outright turns that into a failed login or
+/// a failed account switch. Bounded: a genuinely stuck holder still surfaces.
 fn create_connection(path: &PathBuf) -> Result<rusqlite::Connection, String> {
+    const OPEN_RETRIES: u32 = 4;
+    let mut last_err = String::new();
+    for attempt in 0..OPEN_RETRIES {
+        match open_connection(path) {
+            Ok(conn) => return Ok(conn),
+            Err(e) if e.contains("locked") || e.contains("busy") => {
+                last_err = e;
+                std::thread::sleep(std::time::Duration::from_millis(50 * u64::from(attempt + 1)));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err)
+}
+
+fn open_connection(path: &PathBuf) -> Result<rusqlite::Connection, String> {
     let conn = rusqlite::Connection::open(path)
         .map_err(|e| format!("Failed to open database: {}", e))?;
 
@@ -748,22 +819,12 @@ fn create_connection(path: &PathBuf) -> Result<rusqlite::Connection, String> {
 
 /// Get a READ connection (headless-safe — no AppHandle).
 pub fn get_db_connection_guard_static() -> Result<ConnectionGuard, String> {
-    let generation = current_pool_generation();
-    // Try to get from pool first
-    if let Ok(mut pool) = DB_READ_POOL.lock() {
-        if let Some(conn) = pool.pop() {
-            return Ok(ConnectionGuard::new(conn, generation));
-        }
-    }
-    // Create new connection
-    let path = get_current_db_path()?;
-    let conn = create_connection(&path)?;
-    Ok(ConnectionGuard::new(conn, generation))
+    current_session().acquire_read()
 }
 
 /// Process-wide serialization lock for tests that install into the global DB pool.
 /// Any test calling `init_database` must hold this for its whole body — otherwise
-/// concurrent inits race on `POOL_GENERATION` and clobber each other's connections.
+/// concurrent inits race on the shared account/data-dir state and clobber each other.
 /// One shared guard across every module (community, ...) so cross-module test
 /// parallelism can't collide.
 #[cfg(test)]
@@ -771,16 +832,7 @@ pub(crate) static DB_TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(()
 
 /// Get the WRITE connection (headless-safe — no AppHandle).
 pub fn get_write_connection_guard_static() -> Result<WriteConnectionGuard, String> {
-    let generation = current_pool_generation();
-    let mut write_slot = DB_WRITE_CONN.lock().unwrap();
-    if let Some(conn) = write_slot.take() {
-        return Ok(WriteConnectionGuard::new(conn, generation));
-    }
-    drop(write_slot);
-
-    let path = get_current_db_path()?;
-    let conn = create_connection(&path)?;
-    Ok(WriteConnectionGuard::new(conn, generation))
+    current_session().acquire_write()
 }
 
 // ============================================================================
@@ -927,14 +979,14 @@ pub fn init_database(npub: &str) -> Result<(), String> {
         }
     }
 
-    // Bump BEFORE installing the new pool so any in-flight guards from
-    // the previous account fail their Drop check and don't pollute the
-    // freshly-initialized pool.
-    bump_pool_generation();
+    // Install a NEW session before opening anything: guards still outstanding
+    // against the previous one return their connections there, and that pool
+    // closes with it. Nothing from the old account can reach the new pool.
+    *CURRENT_SESSION.write().unwrap_or_else(|e| e.into_inner()) = Session::bound(db_path.clone());
+    let session = current_session();
 
     // Pre-warm read pool
-    if let Ok(mut pool) = DB_READ_POOL.lock() {
-        pool.clear();
+    if let Ok(mut pool) = session.read_pool.lock() {
         for _ in 0..4 {
             if let Ok(c) = create_connection(&db_path) {
                 pool.push(c);
@@ -944,7 +996,7 @@ pub fn init_database(npub: &str) -> Result<(), String> {
 
     // Set write connection
     let write_conn = create_connection(&db_path)?;
-    *DB_WRITE_CONN.lock().unwrap() = Some(write_conn);
+    *session.write_conn.lock().unwrap_or_else(|e| e.into_inner()) = Some(write_conn);
 
     // Hydrate Tor's hot-path settings cache directly from `db_path`,
     // NOT via `get_sql_setting()` — the global helper resolves through
@@ -971,16 +1023,13 @@ pub fn init_database(npub: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Close all database connections (for logout / account switch).
-/// Bumps `POOL_GENERATION` first so in-flight guards fail their Drop
-/// check and discard the connection instead of returning it to the
-/// (now-cleared) pool.
+/// Drop this account's database resources.
+///
+/// Installing a fresh session IS the teardown: the previous one is released,
+/// and its connections close once the last outstanding guard returns. A guard
+/// still in flight keeps serving the account it began under.
 pub fn close_database() {
-    bump_pool_generation();
-    if let Ok(mut pool) = DB_READ_POOL.lock() {
-        pool.clear();
-    }
-    *DB_WRITE_CONN.lock().unwrap() = None;
+    replace_session();
 }
 
 /// Run plain `PRAGMA optimize` on the live write connection — the periodic top-up SQLite recommends
@@ -988,10 +1037,10 @@ pub fn close_database() {
 /// Best-effort and cheap: re-analyzes only tables whose stats the planner used and that changed
 /// materially since the last run.
 pub fn optimize_database() {
-    if let Ok(guard) = DB_WRITE_CONN.lock() {
-        if let Some(conn) = guard.as_ref() {
-            let _ = conn.execute_batch("PRAGMA optimize;");
-        }
+    let session = current_session();
+    let guard = session.write_conn.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(conn) = guard.as_ref() {
+        let _ = conn.execute_batch("PRAGMA optimize;");
     }
 }
 
@@ -1078,7 +1127,6 @@ impl SystemEventType {
 #[cfg(test)]
 mod pool_generation_tests {
     use super::*;
-    use tempfile::TempDir;
 
     /// Build a minimal in-memory SQLite connection — just enough to drop
     /// a connection through the guard machinery. We don't run schema or
@@ -1088,115 +1136,117 @@ mod pool_generation_tests {
     }
 
     #[test]
-    fn close_database_bumps_generation() {
-        let before = current_pool_generation();
+    fn close_database_installs_a_fresh_session() {
+        // The guard is the POINT here, not boilerplate: `close_database`
+        // replaces the process-global session, so running unguarded yanks the
+        // database out from under whichever test is mid-query.
+        let _guard = DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let before = current_session();
         close_database();
-        let after = current_pool_generation();
-        assert!(after > before, "close_database must advance POOL_GENERATION");
-    }
-
-    #[test]
-    fn init_database_bumps_generation() {
-        // init_database requires APP_DATA_DIR to be set; we don't fully exercise
-        // it here (would need schema/migrations). The cheaper invariant we test
-        // is that bump_pool_generation itself advances the counter — which is
-        // what init_database does at the top of its body.
-        let before = current_pool_generation();
-        let bumped = bump_pool_generation();
-        assert_eq!(bumped, before.wrapping_add(1));
-        assert_eq!(current_pool_generation(), bumped);
-    }
-
-    #[test]
-    fn stale_read_guard_does_not_return_to_pool_after_generation_bump() {
-        // Snapshot the pool generation, construct a guard at that generation,
-        // bump the generation (simulating a swap), then drop the guard.
-        // The drop must NOT push back into the pool.
-        let _tmp = TempDir::new().unwrap(); // keeps any side-effects scoped
-
-        // Drain whatever happens to be in the pool to start from a known state.
-        let pool_size_before = DB_READ_POOL.lock().unwrap().len();
-
-        let stale_generation = current_pool_generation();
-        let guard = ConnectionGuard::new(fake_conn(), stale_generation);
-
-        // Account swap: bump generation invalidates outstanding guards.
-        bump_pool_generation();
-
-        drop(guard);
-
-        let pool_size_after = DB_READ_POOL.lock().unwrap().len();
-        assert_eq!(
-            pool_size_after, pool_size_before,
-            "stale read guard must not re-enter the pool"
-        );
-    }
-
-    #[test]
-    fn fresh_read_guard_returns_to_pool() {
-        let pool_size_before = DB_READ_POOL.lock().unwrap().len();
-
-        let generation = current_pool_generation();
-        let guard = ConnectionGuard::new(fake_conn(), generation);
-
-        // No generation bump — guard is still valid.
-        drop(guard);
-
-        let pool_size_after = DB_READ_POOL.lock().unwrap().len();
-        assert_eq!(
-            pool_size_after,
-            pool_size_before + 1,
-            "fresh read guard should be returned to the pool"
-        );
-
-        // Cleanup: drain the connection we just pushed so we don't pollute
-        // sibling tests sharing the global.
-        DB_READ_POOL.lock().unwrap().pop();
-    }
-
-    #[test]
-    fn stale_write_guard_does_not_overwrite_fresh_slot() {
-        // The dropped stale guard must not clobber a write connection that
-        // init_database has freshly installed for the new account.
-        let stale_generation = current_pool_generation();
-        let stale_guard = WriteConnectionGuard::new(fake_conn(), stale_generation);
-
-        bump_pool_generation();
-
-        // Simulate init_database installing a new write connection.
-        let fresh_conn = fake_conn();
-        *DB_WRITE_CONN.lock().unwrap() = Some(fresh_conn);
-
-        drop(stale_guard);
-
-        // The slot must still hold the fresh connection, not be overwritten
-        // by the stale guard's drop.
+        let after = current_session();
         assert!(
-            DB_WRITE_CONN.lock().unwrap().is_some(),
-            "write slot must keep the freshly installed connection"
+            !Arc::ptr_eq(&before, &after),
+            "close_database must install a NEW session — the old one is what in-flight guards return to"
         );
-
-        // Cleanup.
-        *DB_WRITE_CONN.lock().unwrap() = None;
     }
 
     #[test]
-    fn stale_write_guard_does_not_fill_empty_slot() {
-        // Even if the write slot is empty (e.g., reset just happened and
-        // the new account hasn't initialized yet), a stale guard from the
-        // previous account must NOT fill it — that connection points at a
-        // different DB.
-        let stale_generation = current_pool_generation();
-        let stale_guard = WriteConnectionGuard::new(fake_conn(), stale_generation);
+    fn a_guard_returns_its_connection_to_its_own_session() {
+        let session = Session::empty();
+        drop(ConnectionGuard::new(fake_conn(), session.clone()));
+        assert_eq!(session.read_pool.lock().unwrap().len(), 1, "the connection goes home");
+    }
 
-        bump_pool_generation();
-        *DB_WRITE_CONN.lock().unwrap() = None;
+    #[test]
+    fn a_guard_outstanding_across_a_swap_returns_to_the_session_it_came_from() {
+        // The property that replaced the generation counter, and a stronger
+        // one: the old design could only assert a stale connection did NOT
+        // pollute the new pool. Holding the Arc says where it actually went,
+        // so account A's connection is unreachable from account B by
+        // construction rather than by a comparison someone has to remember.
+        let old = Session::empty();
+        let new_session = Session::empty();
+
+        let guard = ConnectionGuard::new(fake_conn(), old.clone());
+        // ...the account switches while the guard is still in flight...
+        drop(guard);
+
+        assert_eq!(old.read_pool.lock().unwrap().len(), 1, "returned to the session it was taken from");
+        assert_eq!(new_session.read_pool.lock().unwrap().len(), 0, "never reachable from the new account");
+    }
+
+    #[test]
+    fn a_pool_miss_after_a_swap_opens_the_sessions_own_database() {
+        // The other half of the guarantee. Returning a connection was already
+        // safe; ACQUIRING one was not, because a miss resolved the ambient
+        // account and could open the incoming account's file into the outgoing
+        // account's pool. A bound session never asks what is current.
+        let dir = tempfile::tempdir().unwrap();
+        let path_a = dir.path().join("a.db");
+        let path_b = dir.path().join("b.db");
+
+        let session_a = Session::bound(path_a.clone());
+        // ...the account switches, and the live session is now B's...
+        *CURRENT_SESSION.write().unwrap() = Session::bound(path_b.clone());
+
+        // A task still holding A misses A's (empty) pool and opens a connection.
+        let guard = session_a.acquire_read().expect("acquire against the held session");
+        // Compare by filename: macOS reports the /private-resolved path.
+        let opened = guard.path().expect("a file-backed connection").to_string();
+        assert!(
+            opened.ends_with("a.db") && !opened.ends_with("b.db"),
+            "a miss opens the session's OWN database, never the incoming account's (opened {opened})"
+        );
+        assert!(!Arc::ptr_eq(&session_a, &current_session()), "the live session really did move on");
+    }
+
+    #[test]
+    fn a_dropped_session_closes_its_pool() {
+        // Teardown IS the drop: no clearing step to forget.
+        let session = Session::empty();
+        drop(ConnectionGuard::new(fake_conn(), session.clone()));
+        assert_eq!(Arc::strong_count(&session), 1, "the guard released its reference");
+        drop(session); // pool + connections close here
+    }
+
+    #[test]
+    fn a_stale_write_guard_cannot_clobber_the_new_accounts_connection() {
+        // Under the old design the stale guard and the fresh connection shared
+        // one global slot, so the guard's Drop had to be talked out of
+        // overwriting it. They are now in different sessions and cannot meet.
+        let old = Session::empty();
+        let new_session = Session::empty();
+
+        let stale_guard = WriteConnectionGuard::new(fake_conn(), old.clone());
+        // init_database installs the new account's write connection.
+        *new_session.write_conn.lock().unwrap() = Some(fake_conn());
 
         drop(stale_guard);
 
         assert!(
-            DB_WRITE_CONN.lock().unwrap().is_none(),
-            "stale write guard must not fill an empty slot"
+            new_session.write_conn.lock().unwrap().is_some(),
+            "the new account's write connection is untouched"
+        );
+        assert!(
+            old.write_conn.lock().unwrap().is_some(),
+            "the stale guard returned to its own session's slot"
+        );
+    }
+
+    #[test]
+    fn a_new_accounts_empty_write_slot_stays_empty() {
+        // The old worry: a stale guard filling the fresh account's empty slot
+        // with a connection pointing at a different database. It has no way to
+        // reach that slot now — it only knows its own session.
+        let old = Session::empty();
+        let new_session = Session::empty();
+
+        let stale_guard = WriteConnectionGuard::new(fake_conn(), old.clone());
+        drop(stale_guard);
+
+        assert!(
+            new_session.write_conn.lock().unwrap().is_none(),
+            "the new account's slot is untouched by the previous account's guard"
         );
     }
 }
