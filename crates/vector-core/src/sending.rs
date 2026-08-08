@@ -232,7 +232,7 @@ pub fn note_relay_ok(event_id: &EventId, accepted: bool) {
         remove_wrap_confirm(&entry.wrap_id);
         return;
     }
-    tokio::spawn(async move {
+    crate::db::spawn_bound(async move {
         rescue_failed_as_sent(&entry).await;
         remove_wrap_confirm(&entry.wrap_id);
     });
@@ -276,7 +276,7 @@ async fn rescue_failed_as_sent(entry: &WrapConfirm) {
 fn spawn_self_send(client: Client, my_pk: PublicKey, rumor: UnsignedEvent) {
     let rid_for_self = rumor.id;
     let session = crate::state::SessionGuard::capture();
-    tokio::spawn(async move {
+    crate::db::spawn_bound(async move {
         if !session.is_valid() { return; }
         match crate::inbox_relays::send_gift_wrap_retained(
             &client, &my_pk, rumor, [],

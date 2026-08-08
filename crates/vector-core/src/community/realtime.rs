@@ -304,7 +304,7 @@ pub async fn dispatch_event(
             if session.is_valid() {
                 // Spawn off the loop — the refresh runs several relay fetches (seconds) and must not
                 // head-of-line-block other event consumption. It self-captures a guard + re-checks.
-                tokio::spawn(refresh_control(community_id, handler.clone()));
+                crate::db::spawn_bound(refresh_control(community_id, handler.clone()));
             }
         }
         return;

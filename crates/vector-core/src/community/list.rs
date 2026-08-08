@@ -508,7 +508,7 @@ pub fn republish_community_list_debounced() {
     stamp_published_now();
     let gen = REPUBLISH_GEN.fetch_add(1, Ordering::SeqCst) + 1;
     let session = crate::state::SessionGuard::capture();
-    tokio::spawn(async move {
+    crate::db::spawn_bound(async move {
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         if REPUBLISH_GEN.load(Ordering::SeqCst) != gen { return; }
         if !session.is_valid() { return; }

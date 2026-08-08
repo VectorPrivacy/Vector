@@ -1762,7 +1762,7 @@ pub async fn get_or_fetch_theme_pack(naddr: &str) -> Result<Option<EmojiPack>, S
     if let Some(cached) = load_cached_pack(&coord)? {
         let naddr_owned = naddr.to_string();
         let session = crate::state::SessionGuard::capture();
-        tokio::spawn(async move {
+        crate::db::spawn_bound(async move {
             if !session.is_valid() { return; }
             let Some(client) = nostr_client() else { return };
             if let Ok(parsed) = parse_naddr(&naddr_owned) {
@@ -1901,7 +1901,7 @@ pub fn republish_emoji_list_debounced() {
     );
     let gen = REPUBLISH_GEN.fetch_add(1, Ordering::SeqCst) + 1;
     let session = crate::state::SessionGuard::capture();
-    tokio::spawn(async move {
+    crate::db::spawn_bound(async move {
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         if REPUBLISH_GEN.load(Ordering::SeqCst) != gen { return; }
         if !session.is_valid() { return; }

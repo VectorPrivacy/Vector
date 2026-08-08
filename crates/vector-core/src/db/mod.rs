@@ -1246,6 +1246,8 @@ mod pool_generation_tests {
             ("src/db/mod.rs", "defines spawn_bound itself"),
             ("src/nip55.rs", "Android signer IPC — no account storage"),
             ("src/tor/mod.rs", "the Tor daemon is process-wide, not per-account"),
+            ("src/self_destruct.rs", "the sweeper loop must follow the live account, not the first one"),
+            ("src/blossom.rs", "upload byte-pump — bytes already in hand, no account state"),
         ];
 
         /// The migration worklist: files whose spawns still resolve the account
@@ -1254,24 +1256,9 @@ mod pool_generation_tests {
         /// empty, no task in the crate can be redirected by an account switch
         /// and the SessionGuard checks that compensate for it can go.
         const PENDING_CONVERSION: &[&str] = &[
-        "src/blossom.rs",
-        "src/blossom_servers.rs",
-        "src/bot_interface.rs",
-        "src/community/invite_list.rs",
-        "src/community/list.rs",
-        "src/community/realtime.rs",
-        "src/community/service.rs",
-        "src/community/transport.rs",
         "src/community/v2/realtime.rs",
         "src/community/v2/service.rs",
-        "src/community/v2/streamauth.rs",
-        "src/deletion.rs",
-        "src/emoji_packs.rs",
-        "src/inbox_relays.rs",
         "src/lib.rs",
-        "src/self_destruct.rs",
-        "src/sending.rs",
-        "src/wallpaper.rs",
         ];
 
         let mut offenders: Vec<String> = Vec::new();
@@ -1294,8 +1281,18 @@ mod pool_generation_tests {
                 let src = std::fs::read_to_string(&path).expect("read source");
                 // Tests spawn freely; only shipping code is bound.
                 let prod = src.split("#[cfg(test)]").next().unwrap_or("");
-                for (i, line) in prod.lines().enumerate() {
-                    if line.contains("tokio::spawn(") && !line.trim_start().starts_with("//") {
+                // A `// spawn-detached:` marker on (or just above) the line
+                // exempts one spawn, so a file carrying both kinds is audited
+                // per-site instead of exempted wholesale. The marker must say
+                // WHY the task owns no account state.
+                let lines: Vec<&str> = prod.lines().collect();
+                for (i, line) in lines.iter().enumerate() {
+                    if !line.contains("tokio::spawn(") || line.trim_start().starts_with("//") {
+                        continue;
+                    }
+                    let exempt = line.contains("spawn-detached:")
+                        || lines[..i].iter().rev().take(4).any(|l| l.contains("spawn-detached:"));
+                    if !exempt {
                         offenders.push(format!("{rel}:{}", i + 1));
                     }
                 }
@@ -1315,7 +1312,14 @@ mod pool_generation_tests {
         for file in PENDING_CONVERSION {
             let src = std::fs::read_to_string(root.join(file)).expect("read pending file");
             let prod = src.split("#[cfg(test)]").next().unwrap_or("");
-            if !prod.lines().any(|l| l.contains("tokio::spawn(") && !l.trim_start().starts_with("//")) {
+            let lines: Vec<&str> = prod.lines().collect();
+            let has_unbound = lines.iter().enumerate().any(|(i, l)| {
+                l.contains("tokio::spawn(")
+                    && !l.trim_start().starts_with("//")
+                    && !l.contains("spawn-detached:")
+                    && !lines[..i].iter().rev().take(4).any(|p| p.contains("spawn-detached:"))
+            });
+            if !has_unbound {
                 converted.push(file);
             }
         }

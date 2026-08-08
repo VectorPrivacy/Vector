@@ -1393,7 +1393,7 @@ pub async fn preload_community(invite: &super::invite::CommunityInvite) {
     let prune_relays = community.relays.clone();
     let prune_id = community.id;
     let guard = crate::state::SessionGuard::capture();
-    tokio::spawn(async move {
+    crate::db::spawn_bound(async move {
         tokio::time::sleep(crate::community::cache::PRELOAD_TTL).await;
         if !guard.is_valid() {
             return;

@@ -181,7 +181,7 @@ pub fn spawn_tracked_publish(
     for (url, relay) in resolved {
         let event = event.clone();
         let tracker = tracker.clone();
-        handles.push(tokio::spawn(async move {
+        handles.push(crate::db::spawn_bound(async move {
             let result = relay
                 .send_event(&event)
                 .await
@@ -1358,7 +1358,7 @@ pub fn republish_inbox_relays_debounced() {
     // debounce window would publish account A's inbox-relay claim
     // signed by account B's client.
     let session = crate::state::SessionGuard::capture();
-    tokio::spawn(async move {
+    crate::db::spawn_bound(async move {
         // Wait for the relay pool to settle; if another call arrives
         // during this window it will bump the generation and we'll exit.
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
@@ -1818,7 +1818,7 @@ mod tests {
         let mut handles = vec![];
         for _ in 0..10 {
             let counter = fetch_counter.clone();
-            let handle = tokio::spawn(async move {
+            let handle = crate::db::spawn_bound(async move {
                 get_or_fetch_with_lock(&pk, || async {
                     counter.fetch_add(1, Ordering::SeqCst);
                     // Simulate network delay so concurrent tasks pile up
@@ -1942,7 +1942,7 @@ mod tests {
 
         let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
         let task_pk = pk;
-        let handle = tokio::spawn(async move {
+        let handle = crate::db::spawn_bound(async move {
             get_or_fetch_with_lock(&task_pk, || async move {
                 let _ = started_tx.send(());
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;

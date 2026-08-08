@@ -680,6 +680,7 @@ pub async fn fetch_relay_eose_filters(
         fn drop(&mut self) {
             let relay = self.0.clone();
             let id = self.1.clone();
+            // spawn-detached: sends a relay CLOSE, touches no account state.
             tokio::spawn(async move {
                 let _ = relay
                     .send_msg(nostr_sdk::prelude::ClientMessage::Close(std::borrow::Cow::Owned(id)))
@@ -1048,6 +1049,7 @@ impl LiveTransport {
                     base_timeout
                 };
                 let full_budget = timeout >= base_timeout;
+                // spawn-detached: relay I/O only — no account storage is touched.
                 tokio::spawn(async move {
                     let out = fetch_relay_eose(&client, &r, filter, timeout).await;
                     (r, full_budget, out)
@@ -1136,7 +1138,7 @@ impl LiveTransport {
             // Captured BEFORE the drain spawn: the drain can outlive an account swap, and
             // stragglers fetched under the prior session must not feed the new one's ingest.
             let session = crate::state::SessionGuard::capture();
-            tokio::spawn(async move {
+            crate::db::spawn_bound(async move {
                 let mut extra: Vec<Event> = Vec::new();
                 let mut extra_ids: std::collections::HashSet<EventId> = std::collections::HashSet::new();
                 while let Some(joined) = fetches.next().await {
@@ -1185,6 +1187,7 @@ impl Transport for LiveTransport {
             .map(|r| {
                 let client = client.clone();
                 let event = event.clone();
+                // spawn-detached: relay I/O only — no account storage is touched.
                 tokio::spawn(async move {
                     matches!(
                         tokio::time::timeout(timeout, client.send_event(&event).to(vec![r.clone()])).await,
@@ -1358,6 +1361,7 @@ impl Transport for LiveTransport {
         // MAX_PUBLISH_ATTEMPTS at a 750ms backoff, so it can't run forever). The caller returns NOW with its
         // confirmed ACK; 's fetch-union heals anything that never lands. The client is shared — not torn
         // down — so the spawned task just drops its handle when finished.
+        // spawn-detached: relay I/O only — no account storage is touched.
         tokio::spawn(async move {
             let client_ref = &client;
             let event_ref = &event;

@@ -489,7 +489,7 @@ pub async fn publish_wallpaper(chat_npub: &str, blur: u8, dim: u8) -> Result<(),
     if !prev_url.is_empty() && prev_uploader == me_npub {
         let signer_clone = signer.clone();
         let prev_url_clone = prev_url.clone();
-        tokio::spawn(async move {
+        crate::db::spawn_bound(async move {
             if let Err(e) =
                 crate::blossom::delete_blob_by_url(signer_clone, &prev_url_clone).await
             {
@@ -706,7 +706,7 @@ pub async fn apply_received_wallpaper(
             if let Some(_client) = crate::state::nostr_client() {
                 if let Ok(signer) = crate::signer::active_signer() {
                     let prev_url_clone = prev_url.clone();
-                    tokio::spawn(async move {
+                    crate::db::spawn_bound(async move {
                         if let Err(e) =
                             crate::blossom::delete_blob_by_url(signer, &prev_url_clone).await
                         {
@@ -790,7 +790,7 @@ async fn delete_prior_blob_if_ours(prev_url: &str, prev_uploader: &str) {
     if let Some(_client) = crate::state::nostr_client() {
         if let Ok(signer) = crate::signer::active_signer() {
             let prev_url = prev_url.to_string();
-            tokio::spawn(async move {
+            crate::db::spawn_bound(async move {
                 if let Err(e) = crate::blossom::delete_blob_by_url(signer, &prev_url).await {
                     log_warn!("[Wallpaper] DELETE prev blob {} failed: {}", prev_url, e);
                 }

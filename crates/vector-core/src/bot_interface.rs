@@ -600,7 +600,7 @@ pub fn spawn_commands_refresh(chat_id: String, bots: Vec<nostr_sdk::prelude::Pub
         }
     }
     let session = crate::state::SessionGuard::capture();
-    tokio::spawn(async move {
+    crate::db::spawn_bound(async move {
         let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(5));
         let fetched = fetch_manifests(&transport, &bots, &relays).await;
         if let Ok(mut inflight) = REFRESH_INFLIGHT.lock() {

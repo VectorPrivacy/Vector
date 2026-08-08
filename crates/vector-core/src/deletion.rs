@@ -154,7 +154,7 @@ pub async fn delete_own_dm(rumor_id: &EventId) -> Result<DeleteOutcome, String> 
         let wrap_event_id = stored.wrap_event_id;
         let secret = stored.secret.clone();
         let relay_urls = stored.relay_urls.clone();
-        tokio::spawn(async move {
+        crate::db::spawn_bound(async move {
             if !task_session.is_valid() { return; }
             delete_wrap_per_relay(&client, wrap_event_id, secret, relay_urls).await;
             if !task_session.is_valid() { return; }
@@ -238,7 +238,7 @@ pub async fn delete_own_reaction(
         let wrap_event_id = stored.wrap_event_id;
         let secret = stored.secret.clone();
         let relay_urls = stored.relay_urls.clone();
-        tokio::spawn(async move {
+        crate::db::spawn_bound(async move {
             if !task_session.is_valid() { return; }
             delete_wrap_per_relay(&client, wrap_event_id, secret, relay_urls).await;
             if !task_session.is_valid() { return; }
@@ -501,7 +501,7 @@ async fn send_to_one_relay(client: &Client, url: &RelayUrl, event: &Event) -> bo
                 if let Some(wrap_id) = extract_target_event_id(event) {
                     let url_clone = url.clone();
                     let client_clone = client.clone();
-                    tokio::spawn(async move {
+                    crate::db::spawn_bound(async move {
                         verify_relay_dropped(&client_clone, &url_clone, &wrap_id).await;
                     });
                 }
@@ -551,7 +551,7 @@ async fn send_to_one_relay(client: &Client, url: &RelayUrl, event: &Event) -> bo
                     if let Some(wrap_id) = extract_target_event_id(event) {
                         let url_clone = url.clone();
                         let client_clone = client.clone();
-                        tokio::spawn(async move {
+                        crate::db::spawn_bound(async move {
                             verify_relay_dropped(&client_clone, &url_clone, &wrap_id).await;
                         });
                     }

@@ -25,7 +25,8 @@ impl ProgressTrackingStream {
     fn new(data: Arc<Vec<u8>>, bytes_sent: Arc<Mutex<u64>>) -> Self {
         let (tx, rx) = mpsc::channel(8); // Buffer size of 8 chunks
 
-        // Spawn a background task to feed the stream
+        // Spawn a background task to feed the stream. NOT bound: this pumps
+        // bytes already in hand into a channel and never touches account state.
         tokio::spawn(async move {
             let chunk_size = 64 * 1024; // 64 KB chunks - only unavoidable copy
             let mut position = 0;

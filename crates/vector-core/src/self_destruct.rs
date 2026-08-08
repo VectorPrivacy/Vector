@@ -191,7 +191,7 @@ pub fn strip_expired(messages: &mut Vec<crate::types::Message>) {
         return;
     }
     let session = crate::state::SessionGuard::capture();
-    tokio::spawn(async move {
+    crate::db::spawn_bound(async move {
         for (id, attachments, mine) in expired {
             if !session.is_valid() {
                 return;
@@ -234,5 +234,8 @@ pub fn start_sweeper() {
     if STARTED.swap(true, Ordering::AcqRel) {
         return;
     }
+    // NOT bound: this loop runs for the process lifetime and must sweep
+    // whichever account is live. Binding would pin it to whoever logged in
+    // first, and every later account would silently stop expiring messages.
     tokio::spawn(run_sweeper_loop());
 }

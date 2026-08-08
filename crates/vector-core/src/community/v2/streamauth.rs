@@ -205,7 +205,7 @@ pub fn ensure_responder(client: &Client) {
     }
     let client = client.clone();
     let session = crate::state::SessionGuard::capture();
-    tokio::spawn(async move {
+    crate::db::spawn_bound(async move {
         let mut notifications = client.notifications();
         while let Some(n) = notifications.next().await {
             if !session.is_valid() {
