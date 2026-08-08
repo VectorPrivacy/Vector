@@ -13,9 +13,11 @@ opt-level = 3
 [profile.test.package."*"]
 opt-level = 3
 
-# Our own crates under test: the vault stress tests (500-1000 iterations of real
-# AEAD work) are OUR code, so the dependency override above can't reach them.
-# opt-level 1 keeps compiles quick while removing the worst of the debug overhead.
+# Our own crates under test: the vault stress tests are OUR code, so the
+# dependency override above can't reach them. 1 is the measured optimum — 2 and 3
+# both run SLOWER (50.9s / 50.2s vs 49.0s) and compile slower, because the vault's
+# cost is ~524k atomic writes per set(), which is memory-bandwidth-bound and
+# neither vectorizes nor reorders.
 [profile.test]
 opt-level = 1
 

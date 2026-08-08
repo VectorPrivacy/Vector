@@ -18,6 +18,27 @@ codegen-units = 1
 opt-level = 3
 strip = true
 
+# Dev builds run the login KDF at SHIPPING speed. Argon2id is deliberately
+# expensive (150MB, 10 iterations); unoptimized it costs seconds per unlock,
+# which is paid on every dev-loop login with Local Encryption on. These crates
+# are dependencies, so optimizing them leaves our own build times and debug
+# info untouched — same code, same output, just not interpreted at a crawl.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+# The at-rest AEADs + hashes the unlock path runs alongside the KDF.
+[profile.dev.package.aes-gcm]
+opt-level = 3
+[profile.dev.package.aes]
+opt-level = 3
+[profile.dev.package.chacha20poly1305]
+opt-level = 3
+[profile.dev.package.chacha20]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
