@@ -9,16 +9,23 @@
 /// Mint a fresh realtime-channel topic id for an outbound `.xdc` attachment.
 ///
 /// 32 bytes of SHA-256 over a domain separator + file hash + sender + send-time
-/// nanos, encoded base32 (RFC 4648, no padding) — the same codec the miniapp
-/// realtime layer's `decode_topic_id` expects, so the tag value round-trips
-/// into an iroh `TopicId`. The nanos input makes re-sends of the same file
-/// distinct sessions.
+/// nanos + a per-process counter, encoded base32 (RFC 4648, no padding) — the
+/// same codec the miniapp realtime layer's `decode_topic_id` expects, so the tag
+/// value round-trips into an iroh `TopicId`.
+///
+/// The counter is what actually guarantees re-sends are distinct sessions. The
+/// clock cannot: `SystemTime::now()` reports nanos but does not RESOLVE them, so
+/// two sends of the same file inside one tick hashed identical input and minted
+/// the same topic — the "fresh" session silently rejoined the previous one.
 pub fn mint_topic_id(file_hash: &str, sender_hex: &str) -> String {
     use sha2::{Digest, Sha256};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static MINTED: AtomicU64 = AtomicU64::new(0);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
+    let seq = MINTED.fetch_add(1, Ordering::Relaxed);
     let mut hasher = Sha256::new();
     hasher.update(b"webxdc-realtime-v1:");
     hasher.update(file_hash.as_bytes());
@@ -26,6 +33,8 @@ pub fn mint_topic_id(file_hash: &str, sender_hex: &str) -> String {
     hasher.update(sender_hex.as_bytes());
     hasher.update(b":");
     hasher.update(nanos.to_le_bytes());
+    hasher.update(b":");
+    hasher.update(seq.to_le_bytes());
     base32_nopad_encode(&hasher.finalize())
 }
 
