@@ -4358,7 +4358,8 @@ pub async fn grant_channel_access<T: Transport + ?Sized>(
         // client hasn't folded yet. Fetch the authority fresh rather than trusting
         // the cache, and merge the local view on top so a role we just published
         // ourselves (which the plane has but no fold has read back) survives too.
-        let mut roster = fetch_authority(transport, community).await.roles;
+        let view = fetch_authority(transport, community).await;
+        let mut roster = view.roles.clone();
         let cached = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
         for r in cached.roles {
             if !roster.roles.iter().any(|x| x.role_id == r.role_id) {
@@ -4370,10 +4371,25 @@ pub async fn grant_channel_access<T: Transport + ?Sized>(
                 roster.grants.push(g);
             }
         }
+        let my_hex = my_pk.to_hex();
+        let member_hex = member.to_hex();
         // Reader-gated by MANAGE_ROLES, like any Grant; narrowed to this channel so
         // a channel-scoped manager can run its own access list.
-        if !roster.is_authorized_in(&my_pk.to_hex(), Some(&owner_hex), &chan_hex, crate::community::roles::Permissions::MANAGE_ROLES) {
+        if !roster.is_authorized_in(&my_hex, Some(&owner_hex), &chan_hex, crate::community::roles::Permissions::MANAGE_ROLES) {
             return Err("not authorized to manage this channel's access".to_string());
+        }
+        // Rank as well as the bit: the fold drops a Grant aimed at a peer or superior
+        // (CORD-04 §2), so publishing one vends a key against a role set no reader
+        // will honour. The owner is the exception — never a valid rank target, but a
+        // legitimate recipient of a channel key an admin minted.
+        if member_hex != owner_hex {
+            if !roster.can_act_on_member(&my_hex, Some(&owner_hex), &member_hex, crate::community::roles::Permissions::MANAGE_ROLES) {
+                return Err("you do not outrank this member".to_string());
+            }
+            // A Grant replaces whole — a floored-but-unserved head would publish a
+            // wipe. The owner holds no Grant (their authority is implicit), so there
+            // is no head to insist on and nothing a first edition could erase.
+            require_grant_head(community, &view, &member_hex)?;
         }
         // The channel's roles are ordered by AUTHORITY, so `.first()` is the most
         // privileged — granting read access must never hand out a per-channel
@@ -4386,7 +4402,7 @@ pub async fn grant_channel_access<T: Transport + ?Sized>(
             .map(|r| r.role_id.clone())
             .ok_or("channel has no permission-less access role to grant")?;
 
-        let mut role_ids: Vec<String> = roster.roles_of(&member.to_hex()).map(|r| r.role_id.clone()).collect();
+        let mut role_ids: Vec<String> = roster.roles_of(&member_hex).map(|r| r.role_id.clone()).collect();
         if !role_ids.contains(&role_id) {
             role_ids.push(role_id.clone());
         }
@@ -4434,7 +4450,8 @@ pub async fn revoke_channel_access<T: Transport + ?Sized>(
         let owner_hex = community.owner()?.to_hex();
         // Same replace-not-merge hazard as the grant: the retained set must be built
         // from a CURRENT roster or this revoke strips roles we simply hadn't folded.
-        let mut roster = fetch_authority(transport, community).await.roles;
+        let view = fetch_authority(transport, community).await;
+        let mut roster = view.roles.clone();
         let cached = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
         for r in cached.roles {
             if !roster.roles.iter().any(|x| x.role_id == r.role_id) {
@@ -4446,12 +4463,22 @@ pub async fn revoke_channel_access<T: Transport + ?Sized>(
                 roster.grants.push(g);
             }
         }
-        if !roster.is_authorized_in(&my_pk.to_hex(), Some(&owner_hex), &chan_hex, crate::community::roles::Permissions::MANAGE_ROLES) {
+        let my_hex = my_pk.to_hex();
+        let member_hex = member.to_hex();
+        if !roster.is_authorized_in(&my_hex, Some(&owner_hex), &chan_hex, crate::community::roles::Permissions::MANAGE_ROLES) {
             return Err("not authorized to manage this channel's access".to_string());
         }
         if *member == community.owner()? {
             return Err("the owner is supreme and cannot be removed".to_string());
         }
+        // Rank as well as the bit, and it matters more here than on the grant side:
+        // readers drop the Grant, but the channel rotation below is gated on the
+        // citation alone, so an unauthorized revoke still severs its target.
+        if !roster.can_act_on_member(&my_hex, Some(&owner_hex), &member_hex, crate::community::roles::Permissions::MANAGE_ROLES) {
+            return Err("you do not outrank this member".to_string());
+        }
+        // A Grant replaces whole — a floored-but-unserved head would publish a wipe.
+        require_grant_head(community, &view, &member_hex)?;
         let access_ids = roster.channel_role_ids(&chan_hex);
         // Without the access list this revoke is a no-op that still ROTATES, and the
         // rotation's recipient filter would match nobody — cutting off every
@@ -4460,7 +4487,7 @@ pub async fn revoke_channel_access<T: Transport + ?Sized>(
             return Err("this channel's access role has not folded yet — retry once the control plane serves it".to_string());
         }
         let remaining: Vec<String> = roster
-            .roles_of(&member.to_hex())
+            .roles_of(&member_hex)
             .map(|r| r.role_id.clone())
             .filter(|id| !access_ids.contains(id))
             .collect();
@@ -11254,6 +11281,156 @@ mod tests {
         assert!(
             mine.channels.iter().any(|c| c.id == priv_hex),
             "the creator is entitled via the companion access role"
+        );
+    }
+
+    /// Mint a server-scope role at `position` carrying `permissions`, grant it to
+    /// `member`, and return its id. Used to build a RANKED roster (the owner-only
+    /// tests can't exercise outranking, since the owner outranks everyone).
+    async fn seat_ranked_role(
+        relay: &MemoryRelay,
+        community: &CommunityV2,
+        member: &PublicKey,
+        name: &str,
+        position: u32,
+        permissions: crate::community::roles::Permissions,
+    ) -> String {
+        let role_id = crate::crypto::sha256_hex(format!("test/role/{name}/{position}").as_bytes());
+        let role = crate::community::roles::Role {
+            role_id: role_id.clone(),
+            name: name.to_string(),
+            position,
+            permissions,
+            scope: crate::community::roles::RoleScope::Server,
+            color: 0,
+        };
+        set_role(relay, community, &role).await.unwrap();
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let mut ids: Vec<String> = {
+            let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+            let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+            roster.roles_of(&member.to_hex()).map(|r| r.role_id.clone()).collect()
+        };
+        if !ids.contains(&role_id) {
+            ids.push(role_id.clone());
+        }
+        grant_roles(relay, &held, member, ids).await.unwrap();
+        role_id
+    }
+
+    /// Become `who` without touching the account DB — the acting identity only.
+    /// Enough to exercise an offer-side authority gate from a non-owner's seat.
+    fn act_as(who: &Keys) {
+        crate::state::MY_SECRET_KEY.store_from_keys(who, &[]);
+        crate::state::set_my_public_key(who.public_key());
+    }
+
+    #[tokio::test]
+    async fn a_moderator_cannot_revoke_channel_access_from_a_superior_and_the_channel_never_rotates() {
+        // CORD-04 §2: the fold drops a Grant aimed at a peer or superior, but the
+        // channel rotation is gated on the citation alone — so without an
+        // offer-side rank check the Grant dies and the target is severed anyway.
+        // The epoch assertion is the point: refusing the publish is worthless if
+        // the rekey still runs.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Ranked", vec!["wss://r".into()], None).await.unwrap();
+        let vault = create_private_channel(&relay, &community, "vault").await.unwrap();
+
+        let superior = Keys::generate();
+        let moderator = Keys::generate();
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        grant_admin(&relay, &held, &superior.public_key()).await.unwrap();
+        seat_ranked_role(
+            &relay,
+            &community,
+            &moderator.public_key(),
+            "Moderator",
+            5,
+            crate::community::roles::Permissions(crate::community::roles::Permissions::MANAGE_ROLES),
+        )
+        .await;
+
+        // The superior legitimately holds the channel (granted by the owner).
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        grant_channel_access(&relay, &held, &vault, &superior.public_key()).await.unwrap();
+        let before = crate::db::community::load_community_v2(community.id())
+            .unwrap()
+            .unwrap()
+            .channel(&vault)
+            .unwrap()
+            .epoch;
+
+        act_as(&moderator);
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let err = revoke_channel_access(&relay, &held, &vault, &superior.public_key())
+            .await
+            .expect_err("a moderator must not act on an admin");
+        assert!(err.contains("outrank"), "refused for RANK, not some incidental reason: {err}");
+
+        let after = crate::db::community::load_community_v2(community.id())
+            .unwrap()
+            .unwrap()
+            .channel(&vault)
+            .unwrap()
+            .epoch;
+        assert_eq!(after, before, "the refusal must also stop the rotation — the rekey IS the severance");
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        let chan_hex = crate::simd::hex::bytes_to_hex_32(&vault.0);
+        let owner_hex = owner.public_key().to_hex();
+        assert!(
+            roster.is_entitled(Some(&owner_hex), &superior.public_key().to_hex(), &chan_hex, &[], &[]),
+            "and the superior keeps their access role"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_moderator_cannot_grant_channel_access_to_a_superior_but_the_owner_stays_grantable() {
+        // The grant direction of the same gate. The owner is never a valid rank
+        // target, yet IS a legitimate recipient of a key an admin minted — the
+        // rank check must not swallow that case.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Ranked", vec!["wss://r".into()], None).await.unwrap();
+        let vault = create_private_channel(&relay, &community, "vault").await.unwrap();
+
+        let superior = Keys::generate();
+        let moderator = Keys::generate();
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        grant_admin(&relay, &held, &superior.public_key()).await.unwrap();
+        let chan_hex = crate::simd::hex::bytes_to_hex_32(&vault.0);
+        // Scoped access so the moderator holds the channel key itself, else the
+        // refusal could come from "we hold no key" and prove nothing about rank.
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        grant_channel_access(&relay, &held, &vault, &moderator.public_key()).await.unwrap();
+        seat_ranked_role(
+            &relay,
+            &community,
+            &moderator.public_key(),
+            "Moderator",
+            5,
+            crate::community::roles::Permissions(crate::community::roles::Permissions::MANAGE_ROLES),
+        )
+        .await;
+
+        act_as(&moderator);
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let err = grant_channel_access(&relay, &held, &vault, &superior.public_key())
+            .await
+            .expect_err("a moderator must not grant against an admin");
+        assert!(err.contains("outrank"), "refused for RANK: {err}");
+
+        // Same seat, same channel, owner as the target: allowed.
+        grant_channel_access(&relay, &held, &vault, &owner.public_key())
+            .await
+            .expect("the owner is not a rank target, and may still be handed a key");
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        let owner_hex = owner.public_key().to_hex();
+        assert!(
+            roster.is_entitled(Some(&owner_hex), &owner_hex, &chan_hex, &[], &[]),
+            "the owner's access role landed"
         );
     }
 
