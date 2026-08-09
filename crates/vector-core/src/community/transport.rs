@@ -572,55 +572,58 @@ fn demotion_allowed() -> bool {
 /// Session-gated between the per-account DB reads and the shared-client
 /// mutation: a swap mid-read must not warm account A's relays under B.
 pub async fn prewarm_held_communities(session: crate::state::SessionGuard) {
-    let mut relays: Vec<String> = Vec::new();
-    for id in crate::db::community::list_community_ids().unwrap_or_default() {
-        match crate::db::community::community_protocol(&id).ok().flatten() {
-            Some(crate::community::ConcordProtocol::V2) => {
-                if let Ok(Some(c)) = crate::db::community::load_community_v2(&id) {
-                    relays.extend(c.relays.iter().cloned());
+    crate::db::scoped(async move {
+        let mut relays: Vec<String> = Vec::new();
+        for id in crate::db::community::list_community_ids().unwrap_or_default() {
+            match crate::db::community::community_protocol(&id).ok().flatten() {
+                Some(crate::community::ConcordProtocol::V2) => {
+                    if let Ok(Some(c)) = crate::db::community::load_community_v2(&id) {
+                        relays.extend(c.relays.iter().cloned());
+                    }
                 }
-            }
-            _ => {
-                if let Ok(Some(c)) = crate::db::community::load_community(&id) {
-                    relays.extend(c.relays.iter().cloned());
+                _ => {
+                    if let Ok(Some(c)) = crate::db::community::load_community(&id) {
+                        relays.extend(c.relays.iter().cloned());
+                    }
                 }
             }
         }
-    }
-    relays.sort();
-    relays.dedup();
-    if relays.is_empty() || !session.is_valid() {
-        return;
-    }
-    let Ok(client) = LiveTransport::warm_client(&relays, std::time::Duration::from_secs(4)).await
-    else {
-        return;
-    };
-    // Elicit each relay's NIP-42 challenge NOW: a gating relay challenges on
-    // the first gated REQ (never on connect), and challenges are
-    // per-connection — without this the volley's priming pays the full
-    // challenge round inside its own wall time every boot. The responder
-    // remembers the challenge; the volley's prime then replays it instantly.
-    crate::community::v2::streamauth::ensure_responder(&client);
-    let probe = Keys::generate();
-    let filter = Query {
-        kinds: vec![crate::community::v2::stream::KIND_WRAP],
-        authors: vec![probe.public_key().to_hex()],
-        limit: Some(1),
-        ..Default::default()
-    }
-    .to_filter();
-    let mut elicits = futures_util::stream::FuturesUnordered::new();
-    for r in &relays {
-        let c = client.clone();
-        let f = filter.clone();
-        let r = r.clone();
-        elicits.push(async move {
-            let _ = fetch_relay_eose_filters(&c, &r, vec![f], std::time::Duration::from_secs(3)).await;
-        });
-    }
-    use futures_util::StreamExt;
-    while elicits.next().await.is_some() {}
+        relays.sort();
+        relays.dedup();
+        if relays.is_empty() || !session.is_valid() {
+            return;
+        }
+        let Ok(client) = LiveTransport::warm_client(&relays, std::time::Duration::from_secs(4)).await
+        else {
+            return;
+        };
+        // Elicit each relay's NIP-42 challenge NOW: a gating relay challenges on
+        // the first gated REQ (never on connect), and challenges are
+        // per-connection — without this the volley's priming pays the full
+        // challenge round inside its own wall time every boot. The responder
+        // remembers the challenge; the volley's prime then replays it instantly.
+        crate::community::v2::streamauth::ensure_responder(&client);
+        let probe = Keys::generate();
+        let filter = Query {
+            kinds: vec![crate::community::v2::stream::KIND_WRAP],
+            authors: vec![probe.public_key().to_hex()],
+            limit: Some(1),
+            ..Default::default()
+        }
+        .to_filter();
+        let mut elicits = futures_util::stream::FuturesUnordered::new();
+        for r in &relays {
+            let c = client.clone();
+            let f = filter.clone();
+            let r = r.clone();
+            elicits.push(async move {
+                let _ = fetch_relay_eose_filters(&c, &r, vec![f], std::time::Duration::from_secs(3)).await;
+            });
+        }
+        use futures_util::StreamExt;
+        while elicits.next().await.is_some() {}
+    })
+    .await
 }
 
 /// Why a genuine-EOSE read failed — callers that retry must not treat a

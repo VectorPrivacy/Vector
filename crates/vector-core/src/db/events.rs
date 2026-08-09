@@ -314,17 +314,20 @@ pub async fn save_messages_batch(
     messages: &[&Message],
     session: Option<&crate::state::SessionGuard>,
 ) -> Result<usize, String> {
-    if messages.is_empty() {
-        return Ok(0);
-    }
-    let with_wrappers: Vec<(&Message, Option<([u8; 32], u64)>)> =
-        messages.iter().map(|m| (*m, None)).collect();
-    let mut rows = Vec::with_capacity(messages.len());
-    prepare_batch_rows(chat_id, &with_wrappers, &mut rows).await?;
-    if session.is_some_and(|s| !s.is_valid()) {
-        return Ok(0);
-    }
-    write_batch_rows(&rows)
+    crate::db::scoped(async move {
+        if messages.is_empty() {
+            return Ok(0);
+        }
+        let with_wrappers: Vec<(&Message, Option<([u8; 32], u64)>)> =
+            messages.iter().map(|m| (*m, None)).collect();
+        let mut rows = Vec::with_capacity(messages.len());
+        prepare_batch_rows(chat_id, &with_wrappers, &mut rows).await?;
+        if session.is_some_and(|s| !s.is_valid()) {
+            return Ok(0);
+        }
+        write_batch_rows(&rows)
+    })
+    .await
 }
 
 /// Multi-chat variant for the DM sync stream: gift-wrapped messages span many contacts, and
@@ -335,18 +338,21 @@ pub async fn save_messages_batch_multi(
     groups: &[(String, Vec<(&Message, Option<([u8; 32], u64)>)>)],
     session: Option<&crate::state::SessionGuard>,
 ) -> Result<usize, String> {
-    let total: usize = groups.iter().map(|(_, m)| m.len()).sum();
-    if total == 0 {
-        return Ok(0);
-    }
-    let mut rows = Vec::with_capacity(total);
-    for (chat_id, messages) in groups {
-        prepare_batch_rows(chat_id, messages, &mut rows).await?;
-    }
-    if session.is_some_and(|s| !s.is_valid()) {
-        return Ok(0);
-    }
-    write_batch_rows(&rows)
+    crate::db::scoped(async move {
+        let total: usize = groups.iter().map(|(_, m)| m.len()).sum();
+        if total == 0 {
+            return Ok(0);
+        }
+        let mut rows = Vec::with_capacity(total);
+        for (chat_id, messages) in groups {
+            prepare_batch_rows(chat_id, messages, &mut rows).await?;
+        }
+        if session.is_some_and(|s| !s.is_valid()) {
+            return Ok(0);
+        }
+        write_batch_rows(&rows)
+    })
+    .await
 }
 
 /// Convert a Message to a StoredEvent.
@@ -1764,17 +1770,20 @@ pub async fn flush_message_batch(
     pending: &mut Vec<&Message>,
     session: &crate::state::SessionGuard,
 ) {
-    if pending.is_empty() {
-        return;
-    }
-    if !session.is_valid() {
+    crate::db::scoped(async move {
+        if pending.is_empty() {
+            return;
+        }
+        if !session.is_valid() {
+            pending.clear();
+            return;
+        }
+        if let Err(e) = save_messages_batch(chat_id, pending, Some(session)).await {
+            crate::log_warn!("[DB] batch flush failed for {}: {}", chat_id, e);
+        }
         pending.clear();
-        return;
-    }
-    if let Err(e) = save_messages_batch(chat_id, pending, Some(session)).await {
-        crate::log_warn!("[DB] batch flush failed for {}: {}", chat_id, e);
-    }
-    pending.clear();
+    })
+    .await
 }
 
 /// Batch save messages for a chat — one transaction for the whole slice.

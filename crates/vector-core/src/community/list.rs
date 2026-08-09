@@ -379,45 +379,44 @@ fn stamp_published_now() {
 pub async fn fetch_community_list(
     client: &Client,
     my_pubkey: PublicKey,
-    session: crate::state::SessionGuard,
 ) -> Result<CommunityList, String> {
-    let filter = Filter::new()
-        .author(my_pubkey)
-        .kind(Kind::Custom(event_kind::APPLICATION_SPECIFIC))
-        .identifier(COMMUNITY_LIST_D_TAG)
-        .limit(1);
+    crate::db::scoped(async move {
+        let filter = Filter::new()
+            .author(my_pubkey)
+            .kind(Kind::Custom(event_kind::APPLICATION_SPECIFIC))
+            .identifier(COMMUNITY_LIST_D_TAG)
+            .limit(1);
 
-    let events = client
-        .fetch_events(filter).timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
-        .await
-        .map_err(|e| format!("fetch community list (kind 30078): {}", e))?;
+        let events = client
+            .fetch_events(filter).timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
+            .await
+            .map_err(|e| format!("fetch community list (kind 30078): {}", e))?;
 
-    if !session.is_valid() {
-        return Ok(load_local_list());
-    }
 
-    let our_last_publish: u64 = crate::db::settings::get_sql_setting(LIST_PUBLISHED_AT_KEY.to_string())
-        .ok()
-        .flatten()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+        let our_last_publish: u64 = crate::db::settings::get_sql_setting(LIST_PUBLISHED_AT_KEY.to_string())
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
 
-    let latest = events.into_iter().max_by_key(|e| e.created_at);
-    let list = match latest {
-        Some(ev) if ev.created_at.as_secs() < our_last_publish => {
-            crate::log_debug!(
-                "[CommunityList] relay copy (created_at {}) predates our publish ({}) — keeping local",
-                ev.created_at.as_secs(), our_last_publish,
-            );
-            load_local_list()
-        }
-        Some(ev) => decrypt_list_event(client, &my_pubkey, &ev).await,
-        None => {
-            crate::log_debug!("[CommunityList] no list on relays — using local mirror");
-            load_local_list()
-        }
-    };
-    Ok(list)
+        let latest = events.into_iter().max_by_key(|e| e.created_at);
+        let list = match latest {
+            Some(ev) if ev.created_at.as_secs() < our_last_publish => {
+                crate::log_debug!(
+                    "[CommunityList] relay copy (created_at {}) predates our publish ({}) — keeping local",
+                    ev.created_at.as_secs(), our_last_publish,
+                );
+                load_local_list()
+            }
+            Some(ev) => decrypt_list_event(client, &my_pubkey, &ev).await,
+            None => {
+                crate::log_debug!("[CommunityList] no list on relays — using local mirror");
+                load_local_list()
+            }
+        };
+        Ok(list)
+    })
+    .await
 }
 
 /// Decrypt a fetched list event; a malformed/undecryptable payload degrades to an empty list (never an
@@ -449,33 +448,36 @@ pub async fn publish_community_list(
     client: &Client,
     session: crate::state::SessionGuard,
 ) -> Result<(), String> {
-    let my_pk = crate::state::my_public_key().ok_or_else(|| "Not logged in".to_string())?;
+    crate::db::scoped(async move {
+        let my_pk = crate::state::my_public_key().ok_or_else(|| "Not logged in".to_string())?;
 
-    // Fold the relay's copy first so we don't drop a sibling device's change.
-    let relay = fetch_community_list(client, my_pk, session).await.unwrap_or_default();
-    if !session.is_valid() {
-        return Ok(());
-    }
-    let merged = load_local_list().merge(&relay);
-    save_local_list(&merged)?;
+        // Fold the relay's copy first so we don't drop a sibling device's change.
+        let relay = fetch_community_list(client, my_pk).await.unwrap_or_default();
+        if !session.is_valid() {
+            return Ok(());
+        }
+        let merged = load_local_list().merge(&relay);
+        save_local_list(&merged)?;
 
-    let signer = crate::signer::active_signer().map_err(|e| format!("Signer unavailable: {}", e))?;
-    let content = signer
-        .nip44_encrypt_async(&my_pk, &merged.to_json())
-        .await
-        .map_err(|e| format!("nip44 encrypt community list: {}", e))?;
+        let signer = crate::signer::active_signer().map_err(|e| format!("Signer unavailable: {}", e))?;
+        let content = signer
+            .nip44_encrypt_async(&my_pk, &merged.to_json())
+            .await
+            .map_err(|e| format!("nip44 encrypt community list: {}", e))?;
 
-    let builder = EventBuilder::new(Kind::Custom(event_kind::APPLICATION_SPECIFIC), content)
-        .tag(Tag::identifier(COMMUNITY_LIST_D_TAG));
-    crate::sign_and_send(client, builder)
-        .await
-        .map_err(|e| format!("Failed to publish community list (kind 30078): {}", e))?;
+        let builder = EventBuilder::new(Kind::Custom(event_kind::APPLICATION_SPECIFIC), content)
+            .tag(Tag::identifier(COMMUNITY_LIST_D_TAG));
+        crate::sign_and_send(client, builder)
+            .await
+            .map_err(|e| format!("Failed to publish community list (kind 30078): {}", e))?;
 
-    crate::log_info!(
-        "[CommunityList] Published encrypted list: {} membership(s), {} tombstone(s)",
-        merged.entries.len(), merged.tombstones.len(),
-    );
-    Ok(())
+        crate::log_info!(
+            "[CommunityList] Published encrypted list: {} membership(s), {} tombstone(s)",
+            merged.entries.len(), merged.tombstones.len(),
+        );
+        Ok(())
+    })
+    .await
 }
 
 /// Consume a remotely-received list event (the live cross-device path): decrypt it, fold it into the local
@@ -487,15 +489,14 @@ pub async fn ingest_remote_list_event(
     client: &Client,
     my_pk: &PublicKey,
     event: &nostr_sdk::prelude::Event,
-    session: crate::state::SessionGuard,
 ) -> Result<CommunityList, String> {
-    let incoming = decrypt_list_event(client, my_pk, event).await;
-    if !session.is_valid() {
-        return Ok(load_local_list());
-    }
-    let merged = load_local_list().merge(&incoming);
-    save_local_list(&merged)?;
-    Ok(merged)
+    crate::db::scoped(async move {
+        let incoming = decrypt_list_event(client, my_pk, event).await;
+        let merged = load_local_list().merge(&incoming);
+        save_local_list(&merged)?;
+        Ok(merged)
+    })
+    .await
 }
 
 static REPUBLISH_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -704,60 +705,58 @@ pub async fn rehydrate_community_from_seed<T: super::transport::Transport + ?Siz
     entry: &CommunityListEntry,
     session: crate::state::SessionGuard,
 ) -> Result<RehydrateOutcome, String> {
-    // Validate the id is real 64-char hex — `hex_to_bytes_32` is lenient (zero-pads/zero-decodes), so a
-    // malformed entry would silently key the lookup to a bogus id. (Self-authored, so defense-in-depth.)
-    if entry.community_id.len() != 64 || !entry.community_id.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(format!("invalid community id in list entry: {}", entry.community_id));
-    }
-    let id = super::CommunityId(crate::simd::hex::hex_to_bytes_32(&entry.community_id));
-
-    // Idempotent: if we already hold it (a concurrent join, or a prior reconcile), do nothing.
-    if let Some(existing) = crate::db::community::load_community(&id)? {
-        return Ok(RehydrateOutcome::AlreadyHeld(existing));
-    }
-
-    // Reconstruct + persist from the CURRENT snapshot (latest root + channel keys) for an INSTANT latest view.
-    // `catch_up_server_root` below is then one cheap probe (or walks forward if `current` is itself stale);
-    // prior-epoch keys are archived quietly by `backfill_history_from_seed`. For a legacy/never-re-founded entry
-    // `current()` == `seed`, so this is the full from-genesis walk and the backfill is a no-op.
-    // Deliberately NOT behind `migration::gate_fresh_v1_join`: this replays a membership the
-    // user already holds on a sibling device — cross-device sync, not a fresh on-ramp.
-    let community = super::service::accept_invite(entry.current())?;
-    if !session.is_valid() {
-        // Session swapped: the DB pool may now be another account's — do NOT delete (it'd hit the wrong DB).
-        return Err("account changed during rehydrate".to_string());
-    }
-
-    // Fast-forward the base. An authorized rotation that excluded us == removal: leave the (saved) community
-    // in place and signal the caller to tear it down fully (DB + STATE + routes); we can't read the new
-    // control plane to learn the ban the normal way. A transient fetch error cleans up the partial save so
-    // the next boot retries from scratch instead of stranding a seed-epoch community.
-    match super::service::catch_up_server_root(transport, &community).await {
-        Ok(c) if c.removed => return Ok(RehydrateOutcome::Removed),
-        Ok(_) => {}
-        Err(e) => {
-            if session.is_valid() {
-                let _ = crate::db::community::delete_community_retain_keys(&entry.community_id);
-            }
-            return Err(e);
+    crate::db::scoped(async move {
+        // Validate the id is real 64-char hex — `hex_to_bytes_32` is lenient (zero-pads/zero-decodes), so a
+        // malformed entry would silently key the lookup to a bogus id. (Self-authored, so defense-in-depth.)
+        if entry.community_id.len() != 64 || !entry.community_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(format!("invalid community id in list entry: {}", entry.community_id));
         }
-    }
-    let community = crate::db::community::load_community(&id)?.unwrap_or(community);
+        let id = super::CommunityId(crate::simd::hex::hex_to_bytes_32(&entry.community_id));
 
-    // Fold the whole control plane (roster / mode / metadata / channel names). A dissolution tombstone
-    // present here seals it (read-only) — still a valid rehydrate.
-    let _ = super::service::fetch_and_apply_control(transport, &community).await;
-    let community = crate::db::community::load_community(&id)?.unwrap_or(community);
+        // Idempotent: if we already hold it (a concurrent join, or a prior reconcile), do nothing.
+        if let Some(existing) = crate::db::community::load_community(&id)? {
+            return Ok(RehydrateOutcome::AlreadyHeld(existing));
+        }
 
-    // Walk each channel's rekey chain so we hold the CURRENT channel key before the caller pages it.
-    for ch in &community.channels {
-        let _ = super::service::catch_up_channel_rekeys(transport, &community, &ch.id).await;
-    }
-    if !session.is_valid() {
-        return Err("account changed during rehydrate".to_string());
-    }
-    let community = crate::db::community::load_community(&id)?.unwrap_or(community);
-    Ok(RehydrateOutcome::Rehydrated(community))
+        // Reconstruct + persist from the CURRENT snapshot (latest root + channel keys) for an INSTANT latest view.
+        // `catch_up_server_root` below is then one cheap probe (or walks forward if `current` is itself stale);
+        // prior-epoch keys are archived quietly by `backfill_history_from_seed`. For a legacy/never-re-founded entry
+        // `current()` == `seed`, so this is the full from-genesis walk and the backfill is a no-op.
+        // Deliberately NOT behind `migration::gate_fresh_v1_join`: this replays a membership the
+        // user already holds on a sibling device — cross-device sync, not a fresh on-ramp.
+        let community = super::service::accept_invite(entry.current())?;
+        if !session.is_valid() {
+            // Session swapped: the DB pool may now be another account's — do NOT delete (it'd hit the wrong DB).
+            return Err("account changed during rehydrate".to_string());
+        }
+
+        // Fast-forward the base. An authorized rotation that excluded us == removal: leave the (saved) community
+        // in place and signal the caller to tear it down fully (DB + STATE + routes); we can't read the new
+        // control plane to learn the ban the normal way. A transient fetch error cleans up the partial save so
+        // the next boot retries from scratch instead of stranding a seed-epoch community.
+        match super::service::catch_up_server_root(transport, &community).await {
+            Ok(c) if c.removed => return Ok(RehydrateOutcome::Removed),
+            Ok(_) => {}
+            Err(e) => {
+                let _ = crate::db::community::delete_community_retain_keys(&entry.community_id);
+                return Err(e);
+            }
+        }
+        let community = crate::db::community::load_community(&id)?.unwrap_or(community);
+
+        // Fold the whole control plane (roster / mode / metadata / channel names). A dissolution tombstone
+        // present here seals it (read-only) — still a valid rehydrate.
+        let _ = super::service::fetch_and_apply_control(transport, &community).await;
+        let community = crate::db::community::load_community(&id)?.unwrap_or(community);
+
+        // Walk each channel's rekey chain so we hold the CURRENT channel key before the caller pages it.
+        for ch in &community.channels {
+            let _ = super::service::catch_up_channel_rekeys(transport, &community, &ch.id).await;
+        }
+        let community = crate::db::community::load_community(&id)?.unwrap_or(community);
+        Ok(RehydrateOutcome::Rehydrated(community))
+    })
+    .await
 }
 
 /// Quietly archive the PRIOR epochs' keys for a community that was rehydrated instant-from-`current`, so its

@@ -168,39 +168,42 @@ impl<'a> BatchingPersist<'a> {
     /// holding the batch (reconcile-cursor births) need the difference: an
     /// advance over an unledgered batch skips those events forever.
     pub async fn try_flush(&self, session: &crate::state::SessionGuard) -> Result<usize, String> {
-        let mut drained: Vec<BufferedDm> = match self.buf.lock() {
-            Ok(mut b) => b.drain(..).collect(),
-            Err(_) => return Ok(0),
-        };
-        if drained.is_empty() || !session.is_valid() {
-            return Ok(0);
-        }
-        // A deletion may have landed (live subscription or this stream) while an entry sat
-        // buffered: its delete_event no-ops on the not-yet-written row, so persisting the
-        // buffered copy would resurrect a deleted message. Keyed on the POSITIVE deletion
-        // tombstone, never STATE absence — the LRU evicts old messages from STATE, and
-        // archive-synced history is exactly that tail (an evicted message must still
-        // persist). A dropped entry's wrapper stays unledgered and re-delivers next sync,
-        // where the DB dedup sees the (still-deleted) state cleanly.
-        drained.retain(|e| !crate::state::was_message_deleted(&e.msg.id));
-        if drained.is_empty() {
-            return Ok(0);
-        }
-        // Group by chat preserving first-seen chat order + per-chat arrival order.
-        let mut groups: Vec<(String, Vec<(&Message, Option<([u8; 32], u64)>)>)> = Vec::new();
-        for e in &drained {
-            match groups.iter_mut().find(|(c, _)| c == &e.chat_id) {
-                Some((_, v)) => v.push((&e.msg, e.wrapper)),
-                None => groups.push((e.chat_id.clone(), vec![(&e.msg, e.wrapper)])),
+        crate::db::scoped(async move {
+            let mut drained: Vec<BufferedDm> = match self.buf.lock() {
+                Ok(mut b) => b.drain(..).collect(),
+                Err(_) => return Ok(0),
+            };
+            if drained.is_empty() || !session.is_valid() {
+                return Ok(0);
             }
-        }
-        match crate::db::events::save_messages_batch_multi(&groups, Some(session)).await {
-            Ok(n) => Ok(n),
-            Err(e) => {
-                crate::log_warn!("[Sync] batched persist failed ({} msgs): {}", drained.len(), e);
-                Err(e)
+            // A deletion may have landed (live subscription or this stream) while an entry sat
+            // buffered: its delete_event no-ops on the not-yet-written row, so persisting the
+            // buffered copy would resurrect a deleted message. Keyed on the POSITIVE deletion
+            // tombstone, never STATE absence — the LRU evicts old messages from STATE, and
+            // archive-synced history is exactly that tail (an evicted message must still
+            // persist). A dropped entry's wrapper stays unledgered and re-delivers next sync,
+            // where the DB dedup sees the (still-deleted) state cleanly.
+            drained.retain(|e| !crate::state::was_message_deleted(&e.msg.id));
+            if drained.is_empty() {
+                return Ok(0);
             }
-        }
+            // Group by chat preserving first-seen chat order + per-chat arrival order.
+            let mut groups: Vec<(String, Vec<(&Message, Option<([u8; 32], u64)>)>)> = Vec::new();
+            for e in &drained {
+                match groups.iter_mut().find(|(c, _)| c == &e.chat_id) {
+                    Some((_, v)) => v.push((&e.msg, e.wrapper)),
+                    None => groups.push((e.chat_id.clone(), vec![(&e.msg, e.wrapper)])),
+                }
+            }
+            match crate::db::events::save_messages_batch_multi(&groups, Some(session)).await {
+                Ok(n) => Ok(n),
+                Err(e) => {
+                    crate::log_warn!("[Sync] batched persist failed ({} msgs): {}", drained.len(), e);
+                    Err(e)
+                }
+            }
+        })
+        .await
     }
 }
 

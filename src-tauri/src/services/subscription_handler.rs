@@ -149,12 +149,11 @@ async fn handle_self_sync_event(event: Event) {
 /// verifies + ingests + persists it and dispatches the typed outcome to the Tauri handler (UI +
 /// notifications + presence/teardown). Thin wrapper — the realtime pipeline now lives in core.
 async fn handle_community_event(
-    session: &vector_core::state::SessionGuard,
     event: Event,
 ) {
     let handler: std::sync::Arc<dyn vector_core::InboundEventHandler> =
         std::sync::Arc::new(super::event_handler::TauriEventHandler);
-    vector_core::community::realtime::dispatch_event(session, event, handler).await;
+    vector_core::community::realtime::dispatch_event(event, handler).await;
 }
 
 /// v2 twin of [`handle_community_event`]: the same Tauri handler surface fed by
@@ -182,10 +181,9 @@ impl vector_core::community::transport::CommunityIngestSink for CommunityStraggl
         // Called from inside the transport's background drain task (always within the tokio runtime).
         // SessionGuard captured BEFORE the spawn boundary (a capture inside the task would validate
         // against whatever generation is current by then) — re-checked per event across the fold loop.
-        let session = vector_core::state::SessionGuard::capture();
         vector_core::db::spawn_bound(async move {
             for event in events {
-                handle_community_event(&session, event).await;
+                handle_community_event(event).await;
             }
         });
     }
@@ -403,7 +401,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                         // id would drop the rest. dispatch_event resolves the channel by the event's
                         // z-pseudonym, and process_incoming dedups by outer-event id, so handling every
                         // community event the pool surfaces is correct and idempotent.
-                        handle_community_event(&session, *event).await;
+                        handle_community_event(*event).await;
                     } else if k == 1059 || k == 21059 {
                         // v2 wraps (plane-key authors). DM gift wraps matched the gift sub above;
                         // any other wrap-kind event tries the v2 route — the dispatcher dedups by

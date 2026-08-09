@@ -1558,159 +1558,158 @@ async fn sweep_via_isolated_client(
 pub async fn fetch_subscribed_packs(
     client: &Client,
     my_pubkey: PublicKey,
-    session: crate::state::SessionGuard,
 ) -> Result<Vec<EmojiPack>, String> {
-    let list_filter = Filter::new()
-        .author(my_pubkey)
-        .kind(Kind::Custom(KIND_EMOJI_LIST))
-        .limit(1);
+    crate::db::scoped(async move {
+        let list_filter = Filter::new()
+            .author(my_pubkey)
+            .kind(Kind::Custom(KIND_EMOJI_LIST))
+            .limit(1);
 
-    let list_events = client
-        .fetch_events(list_filter).timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
-        .await
-        .map_err(|e| format!("fetch kind 10030: {}", e))?;
-
-    if !session.is_valid() {
-        return Ok(Vec::new());
-    }
-
-    // Source-of-truth selection. If relays returned a kind 10030, trust
-    // its `a` tags as the canonical subscription set — UNLESS it predates
-    // our own last publish, which means our latest republish hasn't
-    // propagated yet and the relay is still serving a stale list. Trusting
-    // a stale list would clobber a just-added pack (last-write-wins by
-    // created_at). If relays returned *nothing*, that's a transient sync
-    // gap — fall back to the local mirror either way.
-    let local_addrs = || -> Vec<PackAddress> {
-        load_subscriptions()
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|s| parse_pack_address(&s).ok())
-            .collect()
-    };
-    let our_last_publish: u64 = crate::db::settings::get_sql_setting(EMOJI_LIST_PUBLISHED_AT_KEY.to_string())
-        .ok()
-        .flatten()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-
-    let list_event = list_events.into_iter().max_by_key(|e| e.created_at);
-    // Anchor only rides in from a TRUSTED relay list — a stale/absent event
-    // falls back to local subs and leaves the local KV anchor untouched.
-    let mut fetched_anchor: Option<String> = None;
-    let addrs: Vec<PackAddress> = match list_event {
-        Some(ev) if ev.created_at.as_secs() < our_last_publish => {
-            crate::log_debug!(
-                "[EmojiPacks] fetched kind 10030 (created_at {}) predates our publish ({}) — keeping local subs",
-                ev.created_at.as_secs(), our_last_publish,
-            );
-            local_addrs()
-        }
-        Some(ev) => {
-            let (a, anchor) = decrypt_subscribed_addresses_with_anchor(client, &my_pubkey, &ev).await;
-            fetched_anchor = anchor;
-            a
-        }
-        None => {
-            crate::log_debug!(
-                "[EmojiPacks] kind 10030 not on relays — refreshing local subs only",
-            );
-            local_addrs()
-        }
-    };
-
-    let addr_strings: Vec<String> = addrs.iter().map(|a| a.to_addr_string()).collect();
-
-    // Batched resolve: one home request for every subscribed pack, plus one
-    // batched outbox pass for any not on our relays. Packs that still don't
-    // resolve keep their cached copy (we never shrink the subscription set on
-    // a transient miss); the health engine below decides whether an absence
-    // is judgeable at all. The per-pack `fetch_pack_from_relays` is reserved
-    // for the independent preview/theme flows.
-    let PackSweep { packs: fresh, outcomes } = sweep_packs_from_relays(client, &addrs).await;
-    let tombstoned = outcomes.values().filter(|o| matches!(o, PackFetchOutcome::Tombstoned)).count();
-    let unresolved = addrs.len().saturating_sub(fresh.len()).saturating_sub(tombstoned);
-    if unresolved > 0 {
-        crate::log_warn!(
-            "[EmojiPacks] {} subscribed pack(s) not on relays — keeping cached copies",
-            unresolved,
-        );
-    }
-    if tombstoned > 0 {
-        crate::log_info!("[EmojiPacks] {} subscribed pack(s) deleted by their creator", tombstoned);
-    }
+        let list_events = client
+            .fetch_events(list_filter).timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
+            .await
+            .map_err(|e| format!("fetch kind 10030: {}", e))?;
 
 
-    // Health verdicts BEFORE the save loop: save_pack's REPLACE resets the
-    // health columns, so `Found` must read the pre-save status or a revival
-    // (revoked back to active) would go unreported. Own packs are skipped:
-    // deleting an own pack removes its rows locally, so there's nothing to
-    // grieve, and a self-authored pack must never grey out over relay state.
-    let me_hex = my_pubkey.to_hex();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let mut health_changed = false;
-    for addr in &addrs {
-        if addr.pubkey.to_hex() == me_hex { continue; }
-        let raw = addr.to_addr_string();
-        let Some(outcome) = outcomes.get(&raw) else { continue; };
-        match apply_pack_health(&raw, outcome, now) {
-            Ok(true) => {
-                health_changed = true;
-                crate::log_info!(
-                    "[EmojiPacks] pack `{}` health changed ({:?})",
-                    addr.identifier, outcome,
+        // Source-of-truth selection. If relays returned a kind 10030, trust
+        // its `a` tags as the canonical subscription set — UNLESS it predates
+        // our own last publish, which means our latest republish hasn't
+        // propagated yet and the relay is still serving a stale list. Trusting
+        // a stale list would clobber a just-added pack (last-write-wins by
+        // created_at). If relays returned *nothing*, that's a transient sync
+        // gap — fall back to the local mirror either way.
+        let local_addrs = || -> Vec<PackAddress> {
+            load_subscriptions()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|s| parse_pack_address(&s).ok())
+                .collect()
+        };
+        let our_last_publish: u64 = crate::db::settings::get_sql_setting(EMOJI_LIST_PUBLISHED_AT_KEY.to_string())
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+
+        let list_event = list_events.into_iter().max_by_key(|e| e.created_at);
+        // Anchor only rides in from a TRUSTED relay list — a stale/absent event
+        // falls back to local subs and leaves the local KV anchor untouched.
+        let mut fetched_anchor: Option<String> = None;
+        let addrs: Vec<PackAddress> = match list_event {
+            Some(ev) if ev.created_at.as_secs() < our_last_publish => {
+                crate::log_debug!(
+                    "[EmojiPacks] fetched kind 10030 (created_at {}) predates our publish ({}) — keeping local subs",
+                    ev.created_at.as_secs(), our_last_publish,
                 );
+                local_addrs()
             }
-            Ok(false) => {}
-            Err(e) => crate::log_warn!("[EmojiPacks] health update for `{}` failed: {}", addr.identifier, e),
-        }
-    }
-    for pack in &fresh {
-        if let Err(e) = save_pack(pack) {
-            crate::log_warn!("[EmojiPacks] save pack {} failed: {}", pack.identifier, e);
-        }
-    }
-    // Detect a real list change (reorder, sub add/remove, or theme-slot move)
-    // against the pre-save state, so a cross-device edit repaints an OPEN
-    // picker live — not only on its next open. Our own republish echoes back
-    // unchanged, so this stays quiet on self-echo.
-    let list_changed = load_subscriptions().unwrap_or_default() != addr_strings
-        || fetched_anchor.as_deref().map_or(false, |a| a != load_theme_slot_anchor());
+            Some(ev) => {
+                let (a, anchor) = decrypt_subscribed_addresses_with_anchor(client, &my_pubkey, &ev).await;
+                fetched_anchor = anchor;
+                a
+            }
+            None => {
+                crate::log_debug!(
+                    "[EmojiPacks] kind 10030 not on relays — refreshing local subs only",
+                );
+                local_addrs()
+            }
+        };
 
-    // Persist the full subscription list (10030-driven, or local-mirror
-    // when 10030 was missing). Per-pack fetch failures don't shrink it —
-    // the user is still subscribed, they just have a cached copy for now.
-    if let Err(e) = save_subscriptions(&addr_strings) {
-        crate::log_warn!("[EmojiPacks] save subscriptions failed: {}", e);
-    }
-    // Sync the theme-slot position from the trusted list (old-format lists
-    // carry no marker → leave the local anchor as-is).
-    if let Some(anchor) = fetched_anchor {
-        if let Err(e) = save_theme_slot_anchor(&anchor) {
-            crate::log_warn!("[EmojiPacks] save theme slot anchor failed: {}", e);
-        }
-    }
-    if health_changed || list_changed {
-        crate::traits::emit_event("emoji_packs_updated", &());
-    }
+        let addr_strings: Vec<String> = addrs.iter().map(|a| a.to_addr_string()).collect();
 
-    crate::log_info!(
-        "[EmojiPacks] Resolved {} of {} subscribed pack(s){}",
-        fresh.len(),
-        addrs.len(),
+        // Batched resolve: one home request for every subscribed pack, plus one
+        // batched outbox pass for any not on our relays. Packs that still don't
+        // resolve keep their cached copy (we never shrink the subscription set on
+        // a transient miss); the health engine below decides whether an absence
+        // is judgeable at all. The per-pack `fetch_pack_from_relays` is reserved
+        // for the independent preview/theme flows.
+        let PackSweep { packs: fresh, outcomes } = sweep_packs_from_relays(client, &addrs).await;
+        let tombstoned = outcomes.values().filter(|o| matches!(o, PackFetchOutcome::Tombstoned)).count();
+        let unresolved = addrs.len().saturating_sub(fresh.len()).saturating_sub(tombstoned);
         if unresolved > 0 {
-            format!(" ({} via cache)", unresolved)
-        } else {
-            String::new()
-        },
-    );
+            crate::log_warn!(
+                "[EmojiPacks] {} subscribed pack(s) not on relays — keeping cached copies",
+                unresolved,
+            );
+        }
+        if tombstoned > 0 {
+            crate::log_info!("[EmojiPacks] {} subscribed pack(s) deleted by their creator", tombstoned);
+        }
 
-    // Return the unified view: freshly-fetched packs overlay the cached
-    // ones, and load_all_packs filters to subscribed-only for us.
-    load_all_packs()
+
+        // Health verdicts BEFORE the save loop: save_pack's REPLACE resets the
+        // health columns, so `Found` must read the pre-save status or a revival
+        // (revoked back to active) would go unreported. Own packs are skipped:
+        // deleting an own pack removes its rows locally, so there's nothing to
+        // grieve, and a self-authored pack must never grey out over relay state.
+        let me_hex = my_pubkey.to_hex();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let mut health_changed = false;
+        for addr in &addrs {
+            if addr.pubkey.to_hex() == me_hex { continue; }
+            let raw = addr.to_addr_string();
+            let Some(outcome) = outcomes.get(&raw) else { continue; };
+            match apply_pack_health(&raw, outcome, now) {
+                Ok(true) => {
+                    health_changed = true;
+                    crate::log_info!(
+                        "[EmojiPacks] pack `{}` health changed ({:?})",
+                        addr.identifier, outcome,
+                    );
+                }
+                Ok(false) => {}
+                Err(e) => crate::log_warn!("[EmojiPacks] health update for `{}` failed: {}", addr.identifier, e),
+            }
+        }
+        for pack in &fresh {
+            if let Err(e) = save_pack(pack) {
+                crate::log_warn!("[EmojiPacks] save pack {} failed: {}", pack.identifier, e);
+            }
+        }
+        // Detect a real list change (reorder, sub add/remove, or theme-slot move)
+        // against the pre-save state, so a cross-device edit repaints an OPEN
+        // picker live — not only on its next open. Our own republish echoes back
+        // unchanged, so this stays quiet on self-echo.
+        let list_changed = load_subscriptions().unwrap_or_default() != addr_strings
+            || fetched_anchor.as_deref().map_or(false, |a| a != load_theme_slot_anchor());
+
+        // Persist the full subscription list (10030-driven, or local-mirror
+        // when 10030 was missing). Per-pack fetch failures don't shrink it —
+        // the user is still subscribed, they just have a cached copy for now.
+        if let Err(e) = save_subscriptions(&addr_strings) {
+            crate::log_warn!("[EmojiPacks] save subscriptions failed: {}", e);
+        }
+        // Sync the theme-slot position from the trusted list (old-format lists
+        // carry no marker → leave the local anchor as-is).
+        if let Some(anchor) = fetched_anchor {
+            if let Err(e) = save_theme_slot_anchor(&anchor) {
+                crate::log_warn!("[EmojiPacks] save theme slot anchor failed: {}", e);
+            }
+        }
+        if health_changed || list_changed {
+            crate::traits::emit_event("emoji_packs_updated", &());
+        }
+
+        crate::log_info!(
+            "[EmojiPacks] Resolved {} of {} subscribed pack(s){}",
+            fresh.len(),
+            addrs.len(),
+            if unresolved > 0 {
+                format!(" ({} via cache)", unresolved)
+            } else {
+                String::new()
+            },
+        );
+
+        // Return the unified view: freshly-fetched packs overlay the cached
+        // ones, and load_all_packs filters to subscribed-only for us.
+        load_all_packs()
+    })
+    .await
 }
 
 /// Convenience entry point that grabs the client + my_pubkey internally
@@ -1720,8 +1719,7 @@ pub async fn fetch_subscribed_packs(
 pub async fn refresh_subscribed_packs() -> Result<Vec<EmojiPack>, String> {
     let client = nostr_client().ok_or_else(|| "Nostr client not initialised".to_string())?;
     let me = crate::state::my_public_key().ok_or_else(|| "Not logged in".to_string())?;
-    let session = crate::state::SessionGuard::capture();
-    fetch_subscribed_packs(&client, me, session).await
+    fetch_subscribed_packs(&client, me).await
 }
 
 /// Preview-only fetch by naddr — resolves + parses but never touches
@@ -1747,48 +1745,48 @@ pub async fn fetch_pack_by_naddr(naddr: &str) -> Result<EmojiPack, String> {
 /// equip slot or land in the kind-10030 list. Returns `None` if uncached and
 /// the live fetch finds nothing.
 pub async fn get_or_fetch_theme_pack(naddr: &str) -> Result<Option<EmojiPack>, String> {
-    let addr = parse_naddr(naddr)?;
-    let coord = addr.to_addr_string();
+    crate::db::scoped(async move {
+        let addr = parse_naddr(naddr)?;
+        let coord = addr.to_addr_string();
 
-    // Cache hit: return immediately, refresh in the background so a later
-    // creator-side edit still propagates without blocking first paint.
-    if let Some(cached) = load_cached_pack(&coord)? {
-        let naddr_owned = naddr.to_string();
-        let session = crate::state::SessionGuard::capture();
-        crate::db::spawn_bound(async move {
-            let Some(client) = nostr_client() else { return };
-            if let Ok(parsed) = parse_naddr(&naddr_owned) {
-                if let Some(fresh) = fetch_pack_from_relays(&client, &parsed).await {
-                    if session.is_valid() && fresh.updated_at > cached.updated_at {
-                        if let Err(e) = save_pack(&fresh) {
-                            crate::log_warn!("[EmojiPacks] theme pack refresh save failed: {}", e);
-                        } else {
-                            crate::traits::emit_event("emoji_packs_updated", &());
+        // Cache hit: return immediately, refresh in the background so a later
+        // creator-side edit still propagates without blocking first paint.
+        if let Some(cached) = load_cached_pack(&coord)? {
+            let naddr_owned = naddr.to_string();
+            let session = crate::state::SessionGuard::capture();
+            crate::db::spawn_bound(async move {
+                let Some(client) = nostr_client() else { return };
+                if let Ok(parsed) = parse_naddr(&naddr_owned) {
+                    if let Some(fresh) = fetch_pack_from_relays(&client, &parsed).await {
+                        if session.is_valid() && fresh.updated_at > cached.updated_at {
+                            if let Err(e) = save_pack(&fresh) {
+                                crate::log_warn!("[EmojiPacks] theme pack refresh save failed: {}", e);
+                            } else {
+                                crate::traits::emit_event("emoji_packs_updated", &());
+                            }
                         }
                     }
                 }
-            }
-        });
-        return Ok(Some(cached));
-    }
+            });
+            return Ok(Some(cached));
+        }
 
-    // Cache miss: fetch live, persist for next session, return.
-    let session = crate::state::SessionGuard::capture();
-    let client = nostr_client().ok_or_else(|| "Nostr client not initialised".to_string())?;
-    match fetch_pack_from_relays(&client, &addr).await {
-        Some(pack) => {
-            // Still show the pack this session, but only persist if the account
-            // didn't swap during the fetch — otherwise we'd write into the wrong
-            // account's DB.
-            if session.is_valid() {
+        // Cache miss: fetch live, persist for next session, return.
+        let client = nostr_client().ok_or_else(|| "Nostr client not initialised".to_string())?;
+        match fetch_pack_from_relays(&client, &addr).await {
+            Some(pack) => {
+                // Still show the pack this session, but only persist if the account
+                // didn't swap during the fetch — otherwise we'd write into the wrong
+                // account's DB.
                 if let Err(e) = save_pack(&pack) {
                     crate::log_warn!("[EmojiPacks] theme pack cache save failed: {}", e);
                 }
+                Ok(Some(pack))
             }
-            Ok(Some(pack))
+            None => Ok(None),
         }
-        None => Ok(None),
-    }
+    })
+    .await
 }
 
 /// KV setting holding the raw addr (`30030:pk:d`) of the pack the theme slot
@@ -1914,42 +1912,38 @@ pub fn republish_emoji_list_debounced() {
 /// subscription, then schedule a debounced republish of kind 10030.
 /// Returns the hydrated pack on success.
 pub async fn subscribe_pack(naddr: &str) -> Result<EmojiPack, String> {
-    let session = crate::state::SessionGuard::capture();
-    let pack = fetch_pack_by_naddr(naddr).await?;
-    if !session.is_valid() {
-        return Err("Account swapped during fetch — aborted".to_string());
-    }
+    crate::db::scoped(async move {
+        let pack = fetch_pack_by_naddr(naddr).await?;
 
-    // Equipped-pack cap. Idempotent re-subscribe to a pack we already
-    // have stays free; only adding a brand-new addr counts toward the limit.
-    let pack_addr = pack.addr();
-    {
-        let existing_subs = load_subscriptions()?;
-        let is_new = !existing_subs.iter().any(|a| a == &pack_addr);
-        let cap = effective_max_equipped_packs();
-        if is_new && existing_subs.len() >= cap {
-            return Err(format!(
-                "You can equip at most {} packs. Remove one to add another.",
-                cap,
-            ));
+        // Equipped-pack cap. Idempotent re-subscribe to a pack we already
+        // have stays free; only adding a brand-new addr counts toward the limit.
+        let pack_addr = pack.addr();
+        {
+            let existing_subs = load_subscriptions()?;
+            let is_new = !existing_subs.iter().any(|a| a == &pack_addr);
+            let cap = effective_max_equipped_packs();
+            if is_new && existing_subs.len() >= cap {
+                return Err(format!(
+                    "You can equip at most {} packs. Remove one to add another.",
+                    cap,
+                ));
+            }
         }
-    }
 
-    save_pack(&pack)?;
+        save_pack(&pack)?;
 
-    let mut subs = load_subscriptions()?;
-    if !subs.iter().any(|a| a == &pack_addr) {
-        subs.push(pack_addr.clone());
-    }
-    if !session.is_valid() {
-        return Err("Account swapped before subscription save — aborted".to_string());
-    }
-    save_subscriptions(&subs)?;
+        let mut subs = load_subscriptions()?;
+        if !subs.iter().any(|a| a == &pack_addr) {
+            subs.push(pack_addr.clone());
+        }
+        save_subscriptions(&subs)?;
 
-    republish_emoji_list_debounced();
-    crate::traits::emit_event("emoji_packs_updated", &());
+        republish_emoji_list_debounced();
+        crate::traits::emit_event("emoji_packs_updated", &());
 
-    Ok(pack)
+        Ok(pack)
+    })
+    .await
 }
 
 // ============================================================================
@@ -2002,137 +1996,131 @@ fn build_pack_event(pack: &EmojiPack) -> Result<EventBuilder, String> {
 /// the picker surfaces it immediately. SessionGuard-gated so a mid-
 /// network account swap can't push account A's pack signed by B's key.
 pub async fn publish_pack(pack: &EmojiPack) -> Result<EmojiPack, String> {
-    let session = crate::state::SessionGuard::capture();
-    let client = nostr_client().ok_or_else(|| "Nostr client not initialised".to_string())?;
-    let my_pk = crate::state::my_public_key().ok_or_else(|| "Not logged in".to_string())?;
+    crate::db::scoped(async move {
+        let client = nostr_client().ok_or_else(|| "Nostr client not initialised".to_string())?;
+        let my_pk = crate::state::my_public_key().ok_or_else(|| "Not logged in".to_string())?;
 
-    // Per-pack emoji cap. Applies to own packs only — shared packs the
-    // user receives can exceed this, the display layer truncates.
-    let emoji_cap = effective_max_emojis_per_pack();
-    if pack.emojis.len() > emoji_cap {
-        return Err(format!(
-            "A pack can hold at most {} emojis.",
-            emoji_cap,
-        ));
-    }
-
-    // Force `pubkey` + `is_own` regardless of caller — protects against
-    // a malformed payload claiming ownership of someone else's pack.
-    let mut to_save = pack.clone();
-    to_save.pubkey = my_pk.to_hex();
-    to_save.is_own = true;
-    let raw_addr = build_pack_addr(&to_save.pubkey, &to_save.identifier);
-    to_save.id = naddr_from_addr(&raw_addr)?;
-    to_save.updated_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-
-    // Equipped-pack cap. Replacing an existing own pack is fine — only
-    // a *new* identifier would push us over the limit.
-    {
-        let existing_subs = load_subscriptions()?;
-        let is_new = !existing_subs.iter().any(|a| a == &raw_addr);
-        let cap = effective_max_equipped_packs();
-        if is_new && existing_subs.len() >= cap {
+        // Per-pack emoji cap. Applies to own packs only — shared packs the
+        // user receives can exceed this, the display layer truncates.
+        let emoji_cap = effective_max_emojis_per_pack();
+        if pack.emojis.len() > emoji_cap {
             return Err(format!(
-                "You can equip at most {} packs. Remove one to add another.",
-                cap,
+                "A pack can hold at most {} emojis.",
+                emoji_cap,
             ));
         }
-    }
 
-    let builder = build_pack_event(&to_save)?;
-    crate::sign_and_send(&client, builder).await
-        .map_err(|e| format!("publish kind 30030: {}", e))?;
+        // Force `pubkey` + `is_own` regardless of caller — protects against
+        // a malformed payload claiming ownership of someone else's pack.
+        let mut to_save = pack.clone();
+        to_save.pubkey = my_pk.to_hex();
+        to_save.is_own = true;
+        let raw_addr = build_pack_addr(&to_save.pubkey, &to_save.identifier);
+        to_save.id = naddr_from_addr(&raw_addr)?;
+        to_save.updated_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
 
-    if !session.is_valid() {
-        return Err("Account swapped during publish — local state untouched".to_string());
-    }
-
-    save_pack(&to_save)?;
-
-    // Add to local subscriptions so the picker shows it without waiting
-    // for the next 10030 republish to land.
-    let mut subs = load_subscriptions()?;
-    if !subs.iter().any(|a| a == &raw_addr) {
-        subs.push(raw_addr.clone());
-        if !session.is_valid() {
-            return Err("Account swapped before subscription save — aborted".to_string());
+        // Equipped-pack cap. Replacing an existing own pack is fine — only
+        // a *new* identifier would push us over the limit.
+        {
+            let existing_subs = load_subscriptions()?;
+            let is_new = !existing_subs.iter().any(|a| a == &raw_addr);
+            let cap = effective_max_equipped_packs();
+            if is_new && existing_subs.len() >= cap {
+                return Err(format!(
+                    "You can equip at most {} packs. Remove one to add another.",
+                    cap,
+                ));
+            }
         }
-        save_subscriptions(&subs)?;
-        republish_emoji_list_debounced();
-    }
 
-    crate::traits::emit_event("emoji_packs_updated", &());
-    crate::log_info!("[EmojiPacks] Published own pack `{}` with {} emoji(s)",
-        to_save.identifier, to_save.emojis.len());
+        let builder = build_pack_event(&to_save)?;
+        crate::sign_and_send(&client, builder).await
+            .map_err(|e| format!("publish kind 30030: {}", e))?;
 
-    Ok(to_save)
+
+        save_pack(&to_save)?;
+
+        // Add to local subscriptions so the picker shows it without waiting
+        // for the next 10030 republish to land.
+        let mut subs = load_subscriptions()?;
+        if !subs.iter().any(|a| a == &raw_addr) {
+            subs.push(raw_addr.clone());
+            save_subscriptions(&subs)?;
+            republish_emoji_list_debounced();
+        }
+
+        crate::traits::emit_event("emoji_packs_updated", &());
+        crate::log_info!("[EmojiPacks] Published own pack `{}` with {} emoji(s)",
+            to_save.identifier, to_save.emojis.len());
+
+        Ok(to_save)
+    })
+    .await
 }
 
 /// Tombstone one of the user's own packs by publishing an empty kind
 /// 30030 with just the `d` tag (relays replace the prior payload), drop
 /// the local subscription, and republish kind 10030.
 pub async fn delete_own_pack(id: &str) -> Result<(), String> {
-    let session = crate::state::SessionGuard::capture();
-    let parsed = parse_naddr(id)?;
-    let raw_addr = parsed.to_addr_string();
-    let my_pk = crate::state::my_public_key().ok_or_else(|| "Not logged in".to_string())?;
-    if parsed.pubkey != my_pk {
-        return Err("Cannot delete a pack you don't own".to_string());
-    }
-    let client = nostr_client().ok_or_else(|| "Nostr client not initialised".to_string())?;
+    crate::db::scoped(async move {
+        let parsed = parse_naddr(id)?;
+        let raw_addr = parsed.to_addr_string();
+        let my_pk = crate::state::my_public_key().ok_or_else(|| "Not logged in".to_string())?;
+        if parsed.pubkey != my_pk {
+            return Err("Cannot delete a pack you don't own".to_string());
+        }
+        let client = nostr_client().ok_or_else(|| "Nostr client not initialised".to_string())?;
 
-    let builder = EventBuilder::new(Kind::Custom(KIND_EMOJI_SET), "")
-        .tag(Tag::custom("d", [parsed.identifier.clone()]));
-    crate::sign_and_send(&client, builder).await
-        .map_err(|e| format!("publish empty kind 30030: {}", e))?;
+        let builder = EventBuilder::new(Kind::Custom(KIND_EMOJI_SET), "")
+            .tag(Tag::custom("d", [parsed.identifier.clone()]));
+        crate::sign_and_send(&client, builder).await
+            .map_err(|e| format!("publish empty kind 30030: {}", e))?;
 
-    if !session.is_valid() {
-        return Err("Account swapped during delete — local state untouched".to_string());
-    }
 
-    // Drop subscription + pack rows (CASCADE wipes pack items).
-    // Wrapped in a transaction so a crash between the two deletes can't
-    // leave an orphan subscription pointing at a pack row that's already gone.
-    {
-        let mut conn = crate::db::get_write_connection_guard_static()?;
-        let tx = conn.transaction()
-            .map_err(|e| format!("begin delete tx: {}", e))?;
-        tx.execute("DELETE FROM emoji_pack_subscriptions WHERE addr = ?1",
-            rusqlite::params![raw_addr])
-            .map_err(|e| format!("drop subscription: {}", e))?;
-        tx.execute("DELETE FROM emoji_packs WHERE addr = ?1",
-            rusqlite::params![raw_addr])
-            .map_err(|e| format!("drop pack row: {}", e))?;
-        tx.commit()
-            .map_err(|e| format!("commit delete tx: {}", e))?;
-    }
+        // Drop subscription + pack rows (CASCADE wipes pack items).
+        // Wrapped in a transaction so a crash between the two deletes can't
+        // leave an orphan subscription pointing at a pack row that's already gone.
+        {
+            let mut conn = crate::db::get_write_connection_guard_static()?;
+            let tx = conn.transaction()
+                .map_err(|e| format!("begin delete tx: {}", e))?;
+            tx.execute("DELETE FROM emoji_pack_subscriptions WHERE addr = ?1",
+                rusqlite::params![raw_addr])
+                .map_err(|e| format!("drop subscription: {}", e))?;
+            tx.execute("DELETE FROM emoji_packs WHERE addr = ?1",
+                rusqlite::params![raw_addr])
+                .map_err(|e| format!("drop pack row: {}", e))?;
+            tx.commit()
+                .map_err(|e| format!("commit delete tx: {}", e))?;
+        }
 
-    republish_emoji_list_debounced();
-    crate::traits::emit_event("emoji_packs_updated", &());
-    crate::log_info!("[EmojiPacks] Deleted own pack `{}`", parsed.identifier);
-    Ok(())
+        republish_emoji_list_debounced();
+        crate::traits::emit_event("emoji_packs_updated", &());
+        crate::log_info!("[EmojiPacks] Deleted own pack `{}`", parsed.identifier);
+        Ok(())
+    })
+    .await
 }
 
 /// Unsubscribe locally and republish kind 10030 without the pack.
 /// The pack row itself stays in `emoji_packs` (caller may still want
 /// to render old reactions); only the subscription link is dropped.
 pub async fn unsubscribe_pack(id: &str) -> Result<(), String> {
-    let session = crate::state::SessionGuard::capture();
-    let raw_addr = parse_naddr(id)?.to_addr_string();
-    let mut subs = load_subscriptions()?;
-    let before = subs.len();
-    subs.retain(|a| a != &raw_addr);
-    if subs.len() == before {
-        return Ok(()); // not subscribed, noop
-    }
-    if !session.is_valid() {
-        return Err("Account swapped before unsubscribe save — aborted".to_string());
-    }
-    save_subscriptions(&subs)?;
-    republish_emoji_list_debounced();
-    crate::traits::emit_event("emoji_packs_updated", &());
-    Ok(())
+    crate::db::scoped(async move {
+        let raw_addr = parse_naddr(id)?.to_addr_string();
+        let mut subs = load_subscriptions()?;
+        let before = subs.len();
+        subs.retain(|a| a != &raw_addr);
+        if subs.len() == before {
+            return Ok(()); // not subscribed, noop
+        }
+        save_subscriptions(&subs)?;
+        republish_emoji_list_debounced();
+        crate::traits::emit_event("emoji_packs_updated", &());
+        Ok(())
+    })
+    .await
 }
 
 /// Persist a user-defined display order for the equipped packs (including the

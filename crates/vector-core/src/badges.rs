@@ -165,67 +165,67 @@ pub fn note_own_badge_confirmed(pubkey: &PublicKey, has_badge: bool) {
 /// after initial sync. The SessionGuard straddles the network fetch so a
 /// mid-fetch account swap can't write account A's badge into account B's DB.
 pub async fn refresh_own_badges() {
-    let session = crate::state::SessionGuard::capture();
-    let Some(pk) = crate::state::my_public_key() else {
-        crate::log_warn!("[Badges] refresh skipped — no public key");
-        return;
-    };
+    crate::db::scoped(async move {
+        let Some(pk) = crate::state::my_public_key() else {
+            crate::log_warn!("[Badges] refresh skipped — no public key");
+            return;
+        };
 
-    // Sticky: the badge is a permanent achievement, so once confirmed we never
-    // re-query (avoids a flaky relay later flipping it off) and never downgrade.
-    if has_vector_badge() {
-        crate::log_info!("[Badges] vector badge already cached — skipping refresh");
-        return;
-    }
-
-    // Throttle: skip the relay sweep if we already checked recently without
-    // success. The window is closed, so a miss now will still be a miss in an
-    // hour — no need to re-sweep on every restart.
-    let now = unix_now();
-    if let Some(last) = crate::db::get_sql_setting(BADGE_CHECK_TS_KEY.to_string())
-        .ok()
-        .flatten()
-        .and_then(|v| v.parse::<u64>().ok())
-    {
-        if now.saturating_sub(last) < RECHECK_COOLDOWN_SECS {
+        // Sticky: the badge is a permanent achievement, so once confirmed we never
+        // re-query (avoids a flaky relay later flipping it off) and never downgrade.
+        if has_vector_badge() {
+            crate::log_info!("[Badges] vector badge already cached — skipping refresh");
             return;
         }
-    }
 
-    crate::log_info!(
-        "[Badges] resolving own badges for {}…",
-        pk.to_bech32().unwrap_or_default()
-    );
-
-    // The holding relay (often the user's own) is flaky/overloaded during the
-    // heavy sync window, so retry a few times to catch it during a quiet
-    // moment. A miss leaves the badge cache untouched (records only the check
-    // time for the cooldown); the next boot past the cooldown tries again until
-    // it lands once (then sticky-cached forever).
-    const ATTEMPTS: u8 = 3;
-    for attempt in 1..=ATTEMPTS {
-        match has_fawkes_badge(&pk).await {
-            Ok(true) => {
-                crate::log_info!("[Badges] vector badge confirmed (attempt {})", attempt);
-                let _ = crate::db::set_sql_setting(BADGE_VECTOR_KEY.to_string(), "true".to_string());
+        // Throttle: skip the relay sweep if we already checked recently without
+        // success. The window is closed, so a miss now will still be a miss in an
+        // hour — no need to re-sweep on every restart.
+        let now = unix_now();
+        if let Some(last) = crate::db::get_sql_setting(BADGE_CHECK_TS_KEY.to_string())
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            if now.saturating_sub(last) < RECHECK_COOLDOWN_SECS {
                 return;
             }
-            Ok(false) => {
-                crate::log_info!("[Badges] vector badge not found (attempt {}/{})", attempt, ATTEMPTS);
+        }
+
+        crate::log_info!(
+            "[Badges] resolving own badges for {}…",
+            pk.to_bech32().unwrap_or_default()
+        );
+
+        // The holding relay (often the user's own) is flaky/overloaded during the
+        // heavy sync window, so retry a few times to catch it during a quiet
+        // moment. A miss leaves the badge cache untouched (records only the check
+        // time for the cooldown); the next boot past the cooldown tries again until
+        // it lands once (then sticky-cached forever).
+        const ATTEMPTS: u8 = 3;
+        for attempt in 1..=ATTEMPTS {
+            match has_fawkes_badge(&pk).await {
+                Ok(true) => {
+                    crate::log_info!("[Badges] vector badge confirmed (attempt {})", attempt);
+                    let _ = crate::db::set_sql_setting(BADGE_VECTOR_KEY.to_string(), "true".to_string());
+                    return;
+                }
+                Ok(false) => {
+                    crate::log_info!("[Badges] vector badge not found (attempt {}/{})", attempt, ATTEMPTS);
+                }
+                Err(e) => {
+                    crate::log_warn!("[Badges] refresh attempt {}/{} failed: {}", attempt, ATTEMPTS, e);
+                }
             }
-            Err(e) => {
-                crate::log_warn!("[Badges] refresh attempt {}/{} failed: {}", attempt, ATTEMPTS, e);
+            if attempt < ATTEMPTS {
+                tokio::time::sleep(std::time::Duration::from_secs(20)).await;
             }
         }
-        if attempt < ATTEMPTS {
-            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
-        }
-    }
-    // Record the unsuccessful pass so the cooldown applies before re-sweeping.
-    if session.is_valid() {
+        // Record the unsuccessful pass so the cooldown applies before re-sweeping.
         let _ = crate::db::set_sql_setting(BADGE_CHECK_TS_KEY.to_string(), now.to_string());
-    }
-    crate::log_info!("[Badges] vector badge not resolved this boot — will retry after cooldown");
+        crate::log_info!("[Badges] vector badge not resolved this boot — will retry after cooldown");
+    })
+    .await
 }
 
 // ── Bug Hunter (NIP-58 tiered, team-awarded) ───────────────────────────────

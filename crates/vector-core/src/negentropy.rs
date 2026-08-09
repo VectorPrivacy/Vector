@@ -160,84 +160,85 @@ pub async fn reconcile_missing(
     local_items: Vec<(EventId, Timestamp)>,
     timeout: Duration,
 ) -> Result<HashSet<EventId>, String> {
-    use futures_util::stream::{FuturesUnordered, StreamExt};
+    crate::db::scoped(async move {
+        use futures_util::stream::{FuturesUnordered, StreamExt};
 
-    let client = crate::state::nostr_client().ok_or("Nostr client not initialized")?;
+        let client = crate::state::nostr_client().ok_or("Nostr client not initialized")?;
 
-    let opts = SyncOptions::new()
-        .direction(SyncDirection::Down)
-        .initial_timeout(timeout)
-        .dry_run();
+        let opts = SyncOptions::new()
+            .direction(SyncDirection::Down)
+            .initial_timeout(timeout)
+            .dry_run();
 
-    // Resolve trusted relay URLs to live Relay handles, skipping relays with a
-    // fresh no-NIP-77 verdict — each would burn the full timeout for nothing.
-    let relay_map = client.relays().await;
-    let trusted = crate::state::active_trusted_relays().await;
-    let relays: Vec<(String, Relay)> = trusted.iter().filter_map(|url| {
-        if neg_supported_cached(url) == Some(false) {
-            crate::log_debug!("[Negentropy] {} skipped (cached: no NIP-77)", url);
-            return None;
-        }
-        let normalized = url.trim_end_matches('/');
-        relay_map.iter()
-            .find(|(u, _)| u.as_str().trim_end_matches('/') == normalized)
-            .map(|(_, r)| (url.to_string(), r.clone()))
-    }).collect();
-    drop(relay_map);
-
-    if relays.is_empty() {
-        crate::log_warn!("[Negentropy] No trusted relays available for reconciliation");
-        return Ok(HashSet::new());
-    }
-
-    let connect_allowance = crate::relay_request_timeout(Duration::from_secs(3)).min(timeout);
-    let mut futs = FuturesUnordered::new();
-    for (url, relay) in &relays {
-        let url = url.clone();
-        let relay = relay.clone();
-        let f = filter.clone();
-        let items = local_items.clone();
-        let o = opts.clone();
-        futs.push(async move {
-            if !wait_connected(&relay, connect_allowance).await {
-                return (url, None, false);
+        // Resolve trusted relay URLs to live Relay handles, skipping relays with a
+        // fresh no-NIP-77 verdict — each would burn the full timeout for nothing.
+        let relay_map = client.relays().await;
+        let trusted = crate::state::active_trusted_relays().await;
+        let relays: Vec<(String, Relay)> = trusted.iter().filter_map(|url| {
+            if neg_supported_cached(url) == Some(false) {
+                crate::log_debug!("[Negentropy] {} skipped (cached: no NIP-77)", url);
+                return None;
             }
-            let r = tokio::time::timeout(timeout, relay.sync(f).items(items).opts(o)).await;
-            let connected = relay.status() == RelayStatus::Connected;
-            (url, Some(r), connected)
-        });
-    }
+            let normalized = url.trim_end_matches('/');
+            relay_map.iter()
+                .find(|(u, _)| u.as_str().trim_end_matches('/') == normalized)
+                .map(|(_, r)| (url.to_string(), r.clone()))
+        }).collect();
+        drop(relay_map);
 
-    let session = crate::state::SessionGuard::capture();
-    let mut missing: HashSet<EventId> = HashSet::new();
-    while let Some((url, result, connected)) = futs.next().await {
-        let Some(result) = result else {
-            crate::log_debug!("[Negentropy] {} skipped: not connected", url);
-            continue;
-        };
-        match result {
-            Ok(Ok(recon)) => {
-                let n = recon.remote.len();
-                missing.extend(recon.remote);
-                crate::log_debug!("[Negentropy] {} reconciled: {} missing", url, n);
-                if session.is_valid() {
+        if relays.is_empty() {
+            crate::log_warn!("[Negentropy] No trusted relays available for reconciliation");
+            return Ok(HashSet::new());
+        }
+
+        let connect_allowance = crate::relay_request_timeout(Duration::from_secs(3)).min(timeout);
+        let mut futs = FuturesUnordered::new();
+        for (url, relay) in &relays {
+            let url = url.clone();
+            let relay = relay.clone();
+            let f = filter.clone();
+            let items = local_items.clone();
+            let o = opts.clone();
+            futs.push(async move {
+                if !wait_connected(&relay, connect_allowance).await {
+                    return (url, None, false);
+                }
+                let r = tokio::time::timeout(timeout, relay.sync(f).items(items).opts(o)).await;
+                let connected = relay.status() == RelayStatus::Connected;
+                (url, Some(r), connected)
+            });
+        }
+
+        let session = crate::state::SessionGuard::capture();
+        let mut missing: HashSet<EventId> = HashSet::new();
+        while let Some((url, result, connected)) = futs.next().await {
+            let Some(result) = result else {
+                crate::log_debug!("[Negentropy] {} skipped: not connected", url);
+                continue;
+            };
+            match result {
+                Ok(Ok(recon)) => {
+                    let n = recon.remote.len();
+                    missing.extend(recon.remote);
+                    crate::log_debug!("[Negentropy] {} reconciled: {} missing", url, n);
                     record_neg_support(&url, true);
                 }
-            }
-            Ok(Err(e)) => {
-                crate::log_warn!("[Negentropy] {} failed: {}", url, e);
-                if session.is_valid()
-                    && classify_neg_sync_error(&e.to_string(), connected) == Some(false)
-                {
-                    crate::log_info!("[Negentropy] {} marked no-NIP-77 for 24h", url);
-                    record_neg_support(&url, false);
+                Ok(Err(e)) => {
+                    crate::log_warn!("[Negentropy] {} failed: {}", url, e);
+                    if session.is_valid()
+                        && classify_neg_sync_error(&e.to_string(), connected) == Some(false)
+                    {
+                        crate::log_info!("[Negentropy] {} marked no-NIP-77 for 24h", url);
+                        record_neg_support(&url, false);
+                    }
                 }
+                Err(_) => crate::log_warn!("[Negentropy] {} timed out", url),
             }
-            Err(_) => crate::log_warn!("[Negentropy] {} timed out", url),
         }
-    }
 
-    Ok(missing)
+        Ok(missing)
+    })
+    .await
 }
 
 #[cfg(test)]

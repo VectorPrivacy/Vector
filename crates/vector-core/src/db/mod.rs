@@ -705,6 +705,15 @@ impl Session {
             .expect("keyed by its own TypeId")
     }
 
+    /// Whether this session is the account currently on screen.
+    ///
+    /// For code holding a session it captured earlier — a drop handler, a
+    /// callback fired by a relay OK — where there is no await to be bound
+    /// across and the question is "is what I captured still current?".
+    pub fn is_live(&self) -> bool {
+        self.id == CURRENT_SESSION.read().unwrap_or_else(|e| e.into_inner()).id
+    }
+
     /// This account's in-memory chats and profiles.
     ///
     /// Reached through the session, so a task bound to account A keeps reading
@@ -775,6 +784,51 @@ pub fn current_session() -> Arc<Session> {
     TASK_SESSION
         .try_with(Arc::clone)
         .unwrap_or_else(|_| CURRENT_SESSION.read().unwrap_or_else(|e| e.into_inner()).clone())
+}
+
+/// Run `fut` pinned to the CURRENT account, without spawning.
+///
+/// The counterpart to [`spawn_bound`] for work that is NOT a task we started:
+/// a Tauri command, an SDK call, a JNI entry point. Nothing installs a session
+/// for those, so every `db::` call inside them re-resolves the live account and
+/// a swap mid-operation silently moves the rest of their writes. Wrapping the
+/// body fixes the account for its whole duration — a swap then leaves the
+/// operation completing against the account that asked for it, which is both
+/// the correct outcome and the one the user intended.
+///
+/// This is what makes the hand-written "did the account change?" checks
+/// unnecessary rather than merely redundant.
+pub async fn scoped<F: std::future::Future>(fut: F) -> F::Output {
+    TASK_SESSION.scope(current_session(), fut).await
+}
+
+/// [`scoped`], but the RESULT is refused if the account changed while it ran.
+///
+/// For an operation whose value goes back to the UI. The work itself completed
+/// correctly against its own account; what must not happen is that value being
+/// painted into, or acted on by, the account now on screen. One wrapper in
+/// place of a check before every write.
+pub async fn scoped_result<T, E, F>(fut: F) -> Result<T, E>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+    E: From<String>,
+{
+    let session = current_session();
+    let id = session.id;
+    let out = TASK_SESSION.scope(session, fut).await;
+    if id != CURRENT_SESSION.read().unwrap_or_else(|e| e.into_inner()).id {
+        return Err(E::from("account changed during the operation".to_string()));
+    }
+    out
+}
+
+/// Run `fut` pinned to a session you already hold.
+///
+/// For code that captured a session earlier and wants to finish that account's
+/// work through it — and for tests, which need to read an account's storage
+/// after the live session has moved on.
+pub async fn with_session<F: std::future::Future>(session: Arc<Session>, fut: F) -> F::Output {
+    TASK_SESSION.scope(session, fut).await
 }
 
 /// Spawn a task pinned to the CURRENT account.

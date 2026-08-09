@@ -2499,7 +2499,7 @@ pub(crate) async fn reconcile_community_list_boot() {
     };
     // One REQ for BOTH self-lists (Community + Invite) — same kind-30078, different `d`-tags.
     let (relay, relay_invites) =
-        vector_core::community::invite_list::fetch_self_lists(&client, my_pk, session.clone()).await;
+        vector_core::community::invite_list::fetch_self_lists(&client, my_pk).await;
 
     // Invite List half: merge the relay copy, seed any pre-feature local tokens, hydrate the read model
     // (so a link minted on another device shows up here), and publish only if genuinely ahead.
@@ -2592,7 +2592,7 @@ pub(crate) async fn ingest_community_list_update(event: nostr_sdk::prelude::Even
         None => return,
     };
     let Some(my_pk) = vector_core::my_public_key() else { return };
-    let merged = match vector_core::community::list::ingest_remote_list_event(&client, &my_pk, &event, session.clone()).await {
+    let merged = match vector_core::community::list::ingest_remote_list_event(&client, &my_pk, &event).await {
         Ok(m) => m,
         Err(e) => {
             vector_core::log_warn!("[CommunityList] ingest remote update failed: {}", e);
@@ -2618,13 +2618,12 @@ pub(crate) async fn ingest_community_list_update(event: nostr_sdk::prelude::Even
 /// Route a live Invite List update from another device: decrypt, merge into the local mirror, and hydrate
 /// the read model so a link minted (or revoked) elsewhere appears (or disappears) here without a restart.
 pub(crate) async fn ingest_invite_list_update(event: nostr_sdk::prelude::Event) {
-    let session = vector_core::state::SessionGuard::capture();
     let client = match vector_core::state::nostr_client() {
         Some(c) => c,
         None => return,
     };
     let Some(my_pk) = vector_core::my_public_key() else { return };
-    match vector_core::community::invite_list::ingest_remote_invite_list_event(&client, &my_pk, &event, session).await {
+    match vector_core::community::invite_list::ingest_remote_invite_list_event(&client, &my_pk, &event).await {
         Ok(merged) => {
             // Refresh any open invite panel (+ metadata) for each community whose links changed, so a link
             // minted OR revoked on another device shows up live (tombstones carry their community too, so a
