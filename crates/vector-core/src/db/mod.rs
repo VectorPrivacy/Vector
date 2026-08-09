@@ -851,8 +851,17 @@ pub fn current_session() -> Arc<Session> {
 ///
 /// This is what makes the hand-written "did the account change?" checks
 /// unnecessary rather than merely redundant.
-pub async fn scoped<F: std::future::Future>(fut: F) -> F::Output {
-    TASK_SESSION.scope(current_session(), fut).await
+/// NOT an `async fn`, and that is load-bearing. An `async fn` stores its
+/// parameters in the state machine it returns, so `scoped` would be sized to
+/// hold the body it binds — and nesting would multiply, exactly as passing the
+/// future to `scope` unboxed does. A plain fn returning `impl Future` hands
+/// back a wrapper around a `Pin<Box<_>>`: a pointer, whatever the body.
+///
+/// This is not hypothetical. Boot crashed with a stack overflow on BOTH Android
+/// and macOS, several layers into the community sync, on stacks every test here
+/// runs on happily. `binding_a_future_does_not_embed_it` is the guard.
+pub fn scoped<F: std::future::Future>(fut: F) -> impl std::future::Future<Output = F::Output> {
+    TASK_SESSION.scope(current_session(), Box::pin(fut))
 }
 
 /// [`scoped`], but the RESULT is refused if the account changed while it ran.
@@ -861,18 +870,23 @@ pub async fn scoped<F: std::future::Future>(fut: F) -> F::Output {
 /// correctly against its own account; what must not happen is that value being
 /// painted into, or acted on by, the account now on screen. One wrapper in
 /// place of a check before every write.
-pub async fn scoped_result<T, E, F>(fut: F) -> Result<T, E>
+pub fn scoped_result<T, E, F>(fut: F) -> impl std::future::Future<Output = Result<T, E>>
 where
     F: std::future::Future<Output = Result<T, E>>,
     E: From<String>,
 {
     let session = current_session();
     let id = session.id;
-    let out = TASK_SESSION.scope(session, fut).await;
-    if id != CURRENT_SESSION.read().unwrap_or_else(|e| e.into_inner()).id {
-        return Err(E::from("account changed during the operation".to_string()));
+    // Bind first, so the async block below holds only the (pointer-sized)
+    // bound future rather than the body. See `scoped`.
+    let bound = TASK_SESSION.scope(session, Box::pin(fut));
+    async move {
+        let out = bound.await;
+        if id != CURRENT_SESSION.read().unwrap_or_else(|e| e.into_inner()).id {
+            return Err(E::from("account changed during the operation".to_string()));
+        }
+        out
     }
-    out
 }
 
 /// Run `fut` pinned to a session you already hold.
@@ -880,8 +894,11 @@ where
 /// For code that captured a session earlier and wants to finish that account's
 /// work through it — and for tests, which need to read an account's storage
 /// after the live session has moved on.
-pub async fn with_session<F: std::future::Future>(session: Arc<Session>, fut: F) -> F::Output {
-    TASK_SESSION.scope(session, fut).await
+pub fn with_session<F: std::future::Future>(
+    session: Arc<Session>,
+    fut: F,
+) -> impl std::future::Future<Output = F::Output> {
+    TASK_SESSION.scope(session, Box::pin(fut))
 }
 
 /// Spawn a task pinned to the CURRENT account.
@@ -1645,6 +1662,35 @@ mod pool_generation_tests {
         let promoted = staging.rebound(dir.path().join("a.db"));
         assert!(!staging.stopped(), "binding a session is not switching away from it");
         assert_eq!(promoted.id, staging.id);
+    }
+
+    /// Binding must not grow with what it binds.
+    ///
+    /// `scope` takes the future BY VALUE, so an unboxed `scoped` embeds the
+    /// whole inner state machine in its caller's. Nesting then multiplies, and
+    /// a deep chain of bound calls overflows a worker stack — which is exactly
+    /// what happened: boot crashed on BOTH Android and macOS, several layers
+    /// into the community sync, on stacks every one of these tests runs on
+    /// happily. Sizes are what the compiler gives us; the invariant is that the
+    /// wrapper adds a bounded amount regardless of the body.
+    #[test]
+    fn binding_a_future_does_not_embed_it() {
+        // A deliberately fat body: 8KB of state the future must carry.
+        let fat = async {
+            let block = [0u8; 8192];
+            tokio::task::yield_now().await;
+            block[0]
+        };
+        let fat_size = std::mem::size_of_val(&fat);
+        assert!(fat_size >= 8192, "the body really is large ({fat_size})");
+
+        let bound = scoped(fat);
+        let bound_size = std::mem::size_of_val(&bound);
+        assert!(
+            bound_size < 1024,
+            "binding must cost a pointer, not a copy of the body \
+             (body {fat_size} bytes, bound {bound_size})"
+        );
     }
 
     #[test]
