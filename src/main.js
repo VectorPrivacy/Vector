@@ -1798,6 +1798,65 @@ function chatPinRank(chat) {
     return arrPinnedChats.indexOf(chatPinKey(chat));
 }
 
+/**
+ * True while a sync phase is running. The synced preference lists (pins,
+ * blocks, mutes, nicknames) are whole-list newest-wins, so a change made before
+ * this device has reconciled would publish its emptier view over another
+ * device's. The backend refuses such a publish outright; this stops the user
+ * making one and wondering why nothing happened.
+ */
+let fSyncing = false;
+
+/**
+ * Refuse a synced-preference action mid-sync, with a reason. Returns true when
+ * the caller should stop.
+ */
+/**
+ * Repaint every rendered surface showing `npub`'s name: chat list, open chat
+ * header, message authors, command invokers, bot names and system-event lines.
+ *
+ * A single helper on purpose. The chat is DOM-windowed, so re-rendering reuses
+ * existing rows and the name baked in at build time survives it — every surface
+ * has to be patched in place, and doing that per call site missed one four
+ * times running. Any new element rendering a person's name should tag itself
+ * `data-npub` and be added to the selector here, not handled somewhere else.
+ */
+function refreshRenderedName(npub) {
+    if (!npub) return;
+    renderChatlist();
+
+    const cProfile = getProfile(npub);
+    const strName = getName(cProfile || npub);
+    const sel = (cls) => `${cls}[data-npub="${npub}"]`;
+    for (const el of document.querySelectorAll(
+        [sel('.dmsg-author'), sel('.dmsg-command-author'), sel('.dmsg-command-bot')].join(', ')
+    )) {
+        el.textContent = strName;
+        twemojify(el);
+    }
+    // System-event lines phrase the name their own way ("X has joined"), so
+    // they take the same treatment through their own formatter.
+    for (const el of document.querySelectorAll(sel('.system-event-name'))) {
+        el.textContent = systemEventName(npub);
+        twemojify(el);
+    }
+
+    // The open chat's header names the DM's peer; a group's header is the
+    // group's own name and must not be relabelled.
+    if (strOpenChat) {
+        const cOpen = arrChats.find(c => c.id === strOpenChat);
+        if (cOpen && !chatIsGroup(cOpen) && cOpen.id === npub) {
+            setChatHeader(cOpen, cProfile, false, false);
+        }
+    }
+}
+
+function blockedBySync() {
+    if (!fSyncing) return false;
+    showToast('Syncing your account — try again in a moment');
+    return true;
+}
+
 /** Has the pinned list been pulled from the backend this session? */
 let _pinnedLoaded = false;
 
@@ -3460,6 +3519,7 @@ async function setupRustListeners() {
     });
 
     _on('sync_finished', async (_) => {
+        fSyncing = false;
         // Mark sync as complete - this allows real-time messages to be cached
         fSyncComplete = true;
         
@@ -3484,6 +3544,7 @@ async function setupRustListeners() {
         // meant it never showed a bar for the fastest, most common sync. Only the
         // layout reflow below needs the gate.
         const { mode, current, total } = evt.payload || {};
+        fSyncing = true;
         // `active` is the centre reveal and carries BOTH modes — a determinate sync
         // (the common one, since the quick phase runs inside boot) used to jump
         // straight to `progress` and grow out of the left edge instead.
@@ -3972,6 +4033,8 @@ async function setupRustListeners() {
             if (domProfileId.textContent === evt.payload.profile_id) {
                 renderProfileTab(cProfile);
             }
+            // One helper owns every surface that shows a name.
+            refreshRenderedName(evt.payload.profile_id);
         }
     });
 
@@ -6036,6 +6099,7 @@ function renderProfileTab(cProfile) {
             const nick = await popupConfirm('Choose a Nickname', '', false, 'Nickname');
             if (nick === false) return;
             if (nick.length >= 30) return popupConfirm('Woah woah!', 'A ' + nick.length + '-character nickname seems excessive!', true, '', 'vector_warning.svg');
+            if (blockedBySync()) return;
             await invoke('set_nickname', { npub: cProfile.id, nickname: nick });
         };
 

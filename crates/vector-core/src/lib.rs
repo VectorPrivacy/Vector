@@ -372,6 +372,7 @@ pub mod sending;
 
 // === Per-DM Wallpapers ===
 pub mod pinned_chats;
+pub mod synced_prefs;
 pub mod wallpaper;
 
 // === Message Deletion (NIP-09 against retained gift-wraps) ===

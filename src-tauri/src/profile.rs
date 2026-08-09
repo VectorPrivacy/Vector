@@ -320,6 +320,7 @@ pub async fn block_user<R: tauri::Runtime>(handle: tauri::AppHandle<R>, npub: St
     // chat's unreads. Refresh immediately on the flip (both directions).
     if ok {
         crate::commands::messaging::update_unread_counter(handle).await;
+        crate::commands::prefs::publish_projection(vector_core::synced_prefs::Pref::Blocks);
     }
     ok
 }
@@ -330,6 +331,7 @@ pub async fn unblock_user<R: tauri::Runtime>(handle: tauri::AppHandle<R>, npub: 
     let ok = vector_core::profile::sync::unblock_user(npub, &crate::profile_sync::TauriProfileSyncHandler).await;
     if ok {
         crate::commands::messaging::update_unread_counter(handle).await;
+        crate::commands::prefs::publish_projection(vector_core::synced_prefs::Pref::Blocks);
     }
     ok
 }
@@ -343,5 +345,9 @@ pub async fn get_blocked_users() -> Vec<crate::db::SlimProfile> {
 /// Set a nickname for a profile.
 #[tauri::command]
 pub async fn set_nickname(npub: String, nickname: String) -> bool {
-    vector_core::profile::sync::set_nickname(npub, nickname, &crate::profile_sync::TauriProfileSyncHandler).await
+    let ok = vector_core::profile::sync::set_nickname(npub, nickname, &crate::profile_sync::TauriProfileSyncHandler).await;
+    if ok {
+        crate::commands::prefs::publish_projection(vector_core::synced_prefs::Pref::Nicknames);
+    }
+    ok
 }

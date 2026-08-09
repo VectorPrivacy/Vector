@@ -63,6 +63,9 @@ pub(crate) async fn subscribe_self_sync() {
             vector_core::community::list::COMMUNITY_LIST_D_TAG.to_string(),
             vector_core::community::invite_list::INVITE_LIST_D_TAG.to_string(),
             vector_core::pinned_chats::PINNED_D_TAG.to_string(),
+            vector_core::synced_prefs::BLOCKS_D_TAG.to_string(),
+            vector_core::synced_prefs::MUTES_D_TAG.to_string(),
+            vector_core::synced_prefs::NICKNAMES_D_TAG.to_string(),
         ]);
     match client.subscribe(self_lists_filter).await {
         Ok(out) => new_ids.push(out.value),
@@ -123,6 +126,8 @@ async fn handle_self_sync_event(event: Event) {
                     crate::commands::community::ingest_invite_list_update(event).await;
                 } else if d == vector_core::pinned_chats::PINNED_D_TAG {
                     crate::commands::pinned::ingest_pinned_chats_update(event).await;
+                } else if vector_core::synced_prefs::Pref::from_d_tag(&d).is_some() {
+                    crate::commands::prefs::ingest_prefs_update(event).await;
                 } else if d == vector_core::community::list::COMMUNITY_LIST_D_TAG {
                     crate::commands::community::ingest_community_list_update(event).await;
                 }
@@ -357,6 +362,12 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
     // Self-sync subscription — our own replaceable settings lists (Community List + emoji list). Covers
     // boot, reconnect, AND instant cross-device in one open subscription.
     subscribe_self_sync().await;
+
+    // Reconcile blocks/mutes/nicknames BEFORE the user can change them. The
+    // subscription above delivers them too, but it races the user: acting in
+    // that window would publish this device's emptier view over another
+    // device's prefs. Until this lands, those lists are unpublishable.
+    crate::commands::prefs::hydrate_prefs().await;
 
     // v2 reconnect catch-up: a `limit(0)` sub never replays what a relay missed
     // while down, so each Connected transition enqueues a refold + re-tracks the

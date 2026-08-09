@@ -241,6 +241,7 @@ function _showChatRowContextMenu(chat, isGroup, nUnread, x, y) {
         label: chat.muted ? 'Unmute' : 'Mute',
         icon: 'volume-mute',
         onClick: async () => {
+            if (blockedBySync()) return;
             chat.muted = await invoke('toggle_chat_mute', { chatId: chat.id });
             renderChatlist();
         },
@@ -253,6 +254,7 @@ function _showChatRowContextMenu(chat, isGroup, nUnread, x, y) {
         label: fPinned ? 'Unpin' : 'Pin',
         icon: 'pin',
         onClick: async () => {
+            if (blockedBySync()) return;
             try {
                 arrPinnedChats = await invoke(fPinned ? 'unpin_chat' : 'pin_chat', { chatId: strPinKey });
                 sortChats();
@@ -269,6 +271,7 @@ function _showChatRowContextMenu(chat, isGroup, nUnread, x, y) {
             icon: 'x-user',
             danger: true,
             onClick: async () => {
+                if (blockedBySync()) return;
                 const confirmed = await popupConfirm('Block User', 'Are you sure you want to block this user? You will no longer receive DMs from them.', false, '', 'vector_warning.svg');
                 if (!confirmed) return;
                 await invoke('block_user', { npub: chat.id });

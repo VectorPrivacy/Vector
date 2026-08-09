@@ -611,7 +611,11 @@ function _dmsgBuildCommandLine(msg, cmd) {
 
     const author = document.createElement('span');
     author.classList.add('dmsg-command-author');
-    author.textContent = getName(msg.mine ? strPubkey : (msg.npub || ''));
+    // Tagged like every other rendered name so a rename can find it — the chat
+    // is DOM-windowed, so nothing rebuilds these rows to pick a new name up.
+    const strAuthorNpub = msg.mine ? strPubkey : (msg.npub || '');
+    if (strAuthorNpub) author.dataset.npub = strAuthorNpub;
+    author.textContent = getName(strAuthorNpub);
     line.appendChild(author);
 
     line.appendChild(document.createTextNode(' ran '));

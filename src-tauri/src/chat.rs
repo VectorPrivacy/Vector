@@ -168,5 +168,6 @@ pub async fn toggle_chat_mute(chat_id: String) -> bool {
     })).ok();
 
     let _ = crate::commands::messaging::update_unread_counter(handle.clone()).await;
+    crate::commands::prefs::publish_projection(vector_core::synced_prefs::Pref::Mutes);
     muted
 }
