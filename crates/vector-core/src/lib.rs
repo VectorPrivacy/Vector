@@ -2765,7 +2765,7 @@ impl VectorCore {
             // before the Refounding), so keying removal solely off the rotation leaves a
             // banned headless client running against a community that already dropped it.
             if let Some(me) = crate::my_public_key() {
-                if crate::db::community::is_author_banned(&cid_hex, &me) && session.is_valid() {
+                if crate::db::community::is_author_banned(&cid_hex, &me) {
                     let _ = crate::db::community::delete_community(&cid_hex);
                 }
             }
@@ -3190,7 +3190,6 @@ impl VectorCore {
     async fn converge_v2_authority(
         transport: &crate::community::transport::LiveTransport,
         community_id: &str,
-        session: &crate::state::SessionGuard,
     ) {
         crate::db::scoped(async move {
             // Reload rather than reuse the caller's clone: the publish advanced edition floors,
@@ -3202,7 +3201,7 @@ impl VectorCore {
                 // window may exist only on the relays — and our own just-published
                 // edition doesn't echo back to trigger a follow.
                 if let Ok(added) = crate::community::v2::service::sync_guestbook(transport, &fresh).await {
-                    if !added.is_empty() && session.is_valid() {
+                    if !added.is_empty() {
                         traits::emit_event_json(
                             "community_refreshed",
                             serde_json::json!({ "community_id": community_id }),
@@ -3217,14 +3216,13 @@ impl VectorCore {
     /// Grant a member the @admin role. Requires MANAGE_ROLES + outranking the role's position.
     pub async fn grant_admin(&self, community_id: &str, npub: &str) -> Result<()> {
         use crate::community::{service, transport::LiveTransport};
-        let session = crate::state::SessionGuard::capture();
         let member = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| VectorError::Other("invalid npub".into()))?;
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
         if let Some(v2) = Self::load_v2_if_v2(community_id)? {
             crate::community::v2::service::grant_admin(&transport, &v2, &member)
                 .await
                 .map_err(VectorError::Other)?;
-            Self::converge_v2_authority(&transport, community_id, &session).await;
+            Self::converge_v2_authority(&transport, community_id).await;
             return Ok(());
         }
         let community = Self::load_community_hex(community_id)?;
@@ -3235,14 +3233,13 @@ impl VectorCore {
     /// Revoke a member's @admin role.
     pub async fn revoke_admin(&self, community_id: &str, npub: &str) -> Result<()> {
         use crate::community::{service, transport::LiveTransport};
-        let session = crate::state::SessionGuard::capture();
         let member = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| VectorError::Other("invalid npub".into()))?;
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
         if let Some(v2) = Self::load_v2_if_v2(community_id)? {
             crate::community::v2::service::revoke_admin(&transport, &v2, &member)
                 .await
                 .map_err(VectorError::Other)?;
-            Self::converge_v2_authority(&transport, community_id, &session).await;
+            Self::converge_v2_authority(&transport, community_id).await;
             return Ok(());
         }
         let community = Self::load_community_hex(community_id)?;
@@ -3254,7 +3251,6 @@ impl VectorCore {
     pub async fn kick_member(&self, community_id: &str, npub: &str) -> Result<()> {
         crate::db::scoped(async move {
             use crate::community::{service, transport::LiveTransport};
-            let session = crate::state::SessionGuard::capture();
             let pk = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| VectorError::Other("invalid npub".into()))?;
             let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
             if let Some(v2) = Self::load_v2_if_v2(community_id)? {
@@ -3270,7 +3266,7 @@ impl VectorCore {
                         emit_event("community_refreshed", &serde_json::json!({ "community_id": community_id }));
                     }
                 }
-                Self::converge_v2_authority(&transport, community_id, &session).await;
+                Self::converge_v2_authority(&transport, community_id).await;
                 return Ok(());
             }
             let community = Self::load_community_hex(community_id)?;
@@ -3287,7 +3283,6 @@ impl VectorCore {
     /// BEFORE any publish.
     pub async fn set_member_banned(&self, community_id: &str, npub: &str, banned: bool) -> Result<()> {
         use crate::community::{service, transport::LiveTransport, CommunityId};
-        let session = crate::state::SessionGuard::capture();
         let pk = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| VectorError::Other("invalid npub".into()))?;
         let hex = pk.to_hex();
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
@@ -3303,7 +3298,7 @@ impl VectorCore {
                 // would otherwise be silently erased by ours. Best-effort: on a
                 // dead network the cache (kept fresh by set_banlist's own echo)
                 // is still the best available basis.
-                Self::converge_v2_authority(&transport, community_id, &session).await;
+                Self::converge_v2_authority(&transport, community_id).await;
                 // Recompute the full list from the freshest view (latest-wins):
                 // drop any existing entry, then add if banning — the ROTATION-
                 // aware mutation that preserves every other standing ban.
@@ -3386,7 +3381,7 @@ impl VectorCore {
                         crate::log_warn!("[Ban] refound deferred (banlist + grant strip landed): {e}");
                     }
                 }
-                Self::converge_v2_authority(&transport, community_id, &session).await;
+                Self::converge_v2_authority(&transport, community_id).await;
                 return Ok(());
             }
         }

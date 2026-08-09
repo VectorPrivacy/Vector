@@ -173,7 +173,7 @@ impl<'a> BatchingPersist<'a> {
                 Ok(mut b) => b.drain(..).collect(),
                 Err(_) => return Ok(0),
             };
-            if drained.is_empty() || !session.is_valid() {
+            if drained.is_empty() {
                 return Ok(0);
             }
             // A deletion may have landed (live subscription or this stream) while an entry sat

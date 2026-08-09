@@ -3244,7 +3244,6 @@ pub struct ListSyncOutcome {
 
 pub async fn sync_community_list<T: Transport + ?Sized>(transport: &T, bootstrap_relays: &[String]) -> Result<ListSyncOutcome, String> {
     crate::db::scoped(async move {
-        let session = SessionGuard::capture();
         let mut relays = held_v2_relays();
         relays.extend(bootstrap_relays.iter().cloned());
         relays.sort();
@@ -3333,7 +3332,7 @@ pub async fn sync_community_list<T: Transport + ?Sized>(transport: &T, bootstrap
                     if let (Some(pk), Some(root_hex)) = (community.control_pk, entry.current.control_root.as_deref()) {
                         if let Some(root) = crate::simd::hex::hex_to_bytes_32_checked(root_hex) {
                             if super::derive::control_signer_group_key(&root, community.id(), community.root_epoch).pk() == pk
-                                && session.is_valid()
+
                             {
                                 let mut held = community.clone();
                                 held.control_root = Some(root);

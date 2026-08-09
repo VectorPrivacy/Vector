@@ -978,7 +978,7 @@ pub async fn fetch_messages<R: Runtime>(
                     }
                 }
                 ok &= batcher.try_flush(&det_session).await.is_ok();
-                if ok && det_session.is_valid() {
+                if ok {
                     for url in &clean {
                         vector_core::negentropy::advance_reconcile_cursor(url.as_str(), sync_anchor);
                     }
@@ -1379,7 +1379,7 @@ pub async fn fetch_messages<R: Runtime>(
                     // arrived AND every batch landed: commit/skip both ledger the
                     // wrapper, but only through a flush that succeeded — a birth
                     // over a lost batch would skip those events forever.
-                    if archive_session.is_valid() && flushes_ok && received.len() == ids.len() {
+                    if flushes_ok && received.len() == ids.len() {
                         for u in &cursor_pending {
                             vector_core::negentropy::advance_reconcile_cursor(u, archive_anchor);
                         }

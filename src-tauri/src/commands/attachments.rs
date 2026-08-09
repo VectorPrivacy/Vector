@@ -432,9 +432,8 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                 // STATE missed: refill this chat's window from the DB (STATE is authoritative,
                 // the message is durable there) and retry. Guard the DB-read → STATE-write
                 // against a mid-download account swap.
-                let session = vector_core::state::SessionGuard::capture();
                 if let Ok(msgs) = db::get_messages_around(&npub, &msg_id, 8, 8).await {
-                    if !msgs.is_empty() && session.is_valid() {
+                    if !msgs.is_empty() {
                         let mut state = STATE.lock().await;
                         state.add_messages_to_chat_batch(&npub, msgs);
                     }

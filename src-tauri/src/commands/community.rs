@@ -1951,7 +1951,7 @@ async fn sync_community_channel_inner(
         // Close the rekey realtime gap: if the follow advanced the server-root OR this channel's epoch, the
         // live subscription is still pinned to the OLD pseudonyms — rebuild it so realtime delivery resumes at
         // the NEW epoch immediately, instead of only on the next sync (the documented post-MVP closure).
-        if !is_older && session.is_valid() {
+        if !is_older {
             let post_channel_epoch = community.channels.iter().find(|c| c.id.to_hex() == channel_id).map(|c| c.epoch.0);
             if community.server_root_epoch.0 != pre_server_epoch || post_channel_epoch != pre_channel_epoch {
                 crate::services::subscription_handler::refresh_community_subscription().await;
@@ -2708,7 +2708,7 @@ async fn rehydrate_listed_communities(
                 }
             }
         }
-        if rehydrated_any && session.is_valid() {
+        if rehydrated_any {
             crate::services::subscription_handler::refresh_community_subscription().await;
         }
         rehydrated_any
@@ -3347,11 +3347,10 @@ pub(crate) async fn apply_community_presence(
         // A swap can land during the save await; without this re-check the queue push
         // below would seed account A's npub into account B's freshly-cleared profile
         // queue, and the emit would surface A's join in B's open chat.
-        let session = vector_core::state::SessionGuard::capture();
         let inserted = vector_core::db::events::save_system_event_at(event_id, channel_id, et, npub, note.as_deref(), created_at, invited_by, invited_label)
             .await
             .unwrap_or(false);
-        if inserted && session.is_valid() {
+        if inserted {
             // A member we can't NAME renders as an npub stub everywhere (join/leave
             // line, member list, @mention pool) — queue their profile so the name
             // lands moments after the event. Gated on nameless-ness: a member we

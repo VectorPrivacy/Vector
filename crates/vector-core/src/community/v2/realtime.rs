@@ -409,7 +409,7 @@ pub(crate) async fn resubscribe_relay(client: &Client, relay: &RelayUrl) {
 /// and fire the matching handler callback (via the shared bridge). Persistence to
 /// the local DB is deferred (bots deliver via the callback; GUI history is v1 for
 /// now). `session` gates against a mid-flight account swap.
-pub async fn dispatch_event(session: &SessionGuard, event: Event, handler: Arc<dyn InboundEventHandler>) {
+pub async fn dispatch_event(__session: &SessionGuard, event: Event, handler: Arc<dyn InboundEventHandler>) {
     crate::db::scoped(async move {
         let Some(my_pk) = crate::my_public_key() else {
             return;
@@ -489,7 +489,7 @@ pub async fn dispatch_event(session: &SessionGuard, event: Event, handler: Arc<d
                     if let Ok(opened) = super::stream::open_wrap(&event, &gb) {
                         if let Ok(ev) = super::guestbook::parse_guestbook_event(&opened) {
                             let changed = super::service::ingest_guestbook_event(c, ev, event.created_at.as_secs()).unwrap_or(false);
-                            if changed && session.is_valid() {
+                            if changed {
                                 handler.on_community_refreshed(&crate::simd::hex::bytes_to_hex_32(&c.id().0));
                             }
                         }
@@ -728,7 +728,7 @@ async fn follow_community(session: &SessionGuard, id: &CommunityId, handler: &dy
             return;
         };
         if let Ok(fresh) = super::service::sync_guestbook(&transport, &current).await {
-            if fresh.is_empty() || !session.is_valid() {
+            if fresh.is_empty() {
                 return;
             }
             surface_presence(&current, &fresh, handler);

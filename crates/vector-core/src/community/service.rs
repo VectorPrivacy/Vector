@@ -462,7 +462,6 @@ pub async fn publish_banlist<T: Transport + ?Sized>(
     banned_hex: &[String],
 ) -> Result<(), String> {
     crate::db::scoped(async move {
-        let session = SessionGuard::capture();
         let cid = community.id.to_hex();
         // Keyless model: sign with the actor's own identity via the active signer (local vault OR a NIP-46
         // bunker). `author` is the active pubkey; `signer` signs the unsigned edition below.
@@ -559,7 +558,7 @@ pub async fn publish_banlist<T: Transport + ?Sized>(
         // ban OR a community sync ([`retry_pending_read_cut`]) re-attempts it — no "blocked but not read-cut"
         // member survives a transient failure. The re-seal publish is itself durable (×30 per relay).
         let need_cut = (newly_banned || crate::db::community::get_read_cut_pending(&cid)?)
-            && session.is_valid()
+
             && !is_public(community)?;
         if need_cut {
             // `newly_banned` is a fresh exclusion delta → force a base epoch past the removal; otherwise this is
@@ -845,7 +844,6 @@ pub async fn set_member_grant<T: Transport + ?Sized>(
     role_ids: Vec<String>,
 ) -> Result<(), String> {
     crate::db::scoped(async move {
-        let session = SessionGuard::capture();
         // Keyless model: the grant is a real-npub-signed edition. Sign
         // with the actor's own identity via the active signer (local vault OR a NIP-46 bunker).
         let signer = crate::signer::active_signer()?;
@@ -906,7 +904,7 @@ pub async fn set_member_grant<T: Transport + ?Sized>(
         // included — and a post-demotion forgery can't win. Skip-if-not-head: only entities the member actually
         // heads are re-asserted (the common case publishes nothing). Best-effort + per-entity publish-then-
         // persist inside the helpers (W2). MVP: full revoke only (`role_ids` empty); partial demote is a follow-on.
-        if is_full_revoke && session.is_valid() {
+        if is_full_revoke {
             if let Ok(folded) = fetch_control_folded(transport, community).await {
                 let current = crate::db::community::load_community(&community.id)?.unwrap_or_else(|| community.clone());
                 if folded.root_author.map(|a| a.to_hex()).as_deref() == Some(member_hex) {
@@ -2044,7 +2042,6 @@ async fn fetch_and_apply_metadata_inner<T: Transport + ?Sized>(
     prefolded: Option<super::roster::FoldedRoster>,
 ) -> Result<(), String> {
     crate::db::scoped(async move {
-        let session = SessionGuard::capture();
         let cid = community.id.to_hex();
         let folded = match prefolded {
             Some(f) => f,
@@ -2138,7 +2135,7 @@ async fn fetch_and_apply_metadata_inner<T: Transport + ?Sized>(
             }
         }
 
-        if dirty && session.is_valid() {
+        if dirty {
             crate::db::community::save_community(&current)?;
             // Persist heads in the SAME save block so a subsequent re-assert/edit chains prev_hash from the
             // converged head, not a stale one (else the fork regenerates at the next version).

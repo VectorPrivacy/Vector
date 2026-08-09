@@ -1753,12 +1753,11 @@ pub async fn get_or_fetch_theme_pack(naddr: &str) -> Result<Option<EmojiPack>, S
         // creator-side edit still propagates without blocking first paint.
         if let Some(cached) = load_cached_pack(&coord)? {
             let naddr_owned = naddr.to_string();
-            let session = crate::state::SessionGuard::capture();
             crate::db::spawn_bound(async move {
                 let Some(client) = nostr_client() else { return };
                 if let Ok(parsed) = parse_naddr(&naddr_owned) {
                     if let Some(fresh) = fetch_pack_from_relays(&client, &parsed).await {
-                        if session.is_valid() && fresh.updated_at > cached.updated_at {
+                        if fresh.updated_at > cached.updated_at {
                             if let Err(e) = save_pack(&fresh) {
                                 crate::log_warn!("[EmojiPacks] theme pack refresh save failed: {}", e);
                             } else {

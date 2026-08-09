@@ -410,7 +410,6 @@ pub async fn refresh_control(community_id: String, handler: Arc<dyn InboundEvent
         }
         let _claim = RefreshClaim(community_id.clone());
 
-        let session = SessionGuard::capture();
         let Some(id_bytes) = hex_to_id32(&community_id) else { return; };
         let Some(community) = crate::db::community::load_community(&CommunityId(id_bytes)).ok().flatten() else { return; };
         let bt = LiveTransport::with_timeout(Duration::from_secs(20));
@@ -469,7 +468,7 @@ pub async fn refresh_control(community_id: String, handler: Arc<dyn InboundEvent
             || community.channels.iter().any(|c| {
                 pre_channel_epochs.iter().find(|(id, _)| id == &c.id.to_hex()).map(|(_, e)| *e != c.epoch.0).unwrap_or(true)
             });
-        if advanced && session.is_valid() {
+        if advanced {
             if let Some(client) = crate::state::nostr_client() {
                 refresh_subscription(&client).await;
             }
