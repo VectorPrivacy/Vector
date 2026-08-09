@@ -8676,6 +8676,16 @@ select:disabled:hover {
   animation: pins-drawer-open 0.18s ease-out;
 }
 
+/* Android lays this sheet out at a fractional width (412.19 CSS px on a 412 px
+   viewport), and a right BORDER lands on the composited layer's clip boundary
+   and paints nothing at all — the left one is unaffected, so the sheet reads as
+   lopsided. An inset shadow paints inside the box, so it survives the clip;
+   1.5px because the same boundary eats the outer half of it. */
+.mobile .pins-drawer {
+  border-right: none;
+  box-shadow: inset -1.5px 0 0 rgba(255, 255, 255, 0.12);
+}
+
 @keyframes pins-drawer-open {
   from {
     transform: translateY(-10px);
