@@ -91,3 +91,49 @@ fn bench_pool_acquire_release_contended() {
         );
     }
 }
+
+/// The cost of reaching a per-account resource through the session.
+///
+/// Every cache that used to be a `LazyLock` static now costs one session
+/// resolve plus one type-keyed lookup on top of its own lock. That is paid on
+/// paths that were already taking a mutex next to I/O, but the claim deserves
+/// a number rather than a shrug.
+#[test]
+#[ignore = "benchmark, not an assertion"]
+fn bench_scoped_resource_lookup() {
+    use std::sync::Mutex;
+    struct BenchKey;
+
+    let baseline: &'static Mutex<u64> = Box::leak(Box::new(Mutex::new(0)));
+    let bump_static = || {
+        *baseline.lock().unwrap() += 1;
+    };
+    let bump_scoped = || {
+        let cell = vector_core::db::current_session().scoped::<BenchKey, Mutex<u64>>();
+        *cell.lock().unwrap() += 1;
+    };
+
+    for _ in 0..WARMUP {
+        bump_static();
+        bump_scoped();
+    }
+
+    let start = Instant::now();
+    for _ in 0..ITERS {
+        bump_static();
+    }
+    let flat = start.elapsed();
+
+    let start = Instant::now();
+    for _ in 0..ITERS {
+        bump_scoped();
+    }
+    let via_session = start.elapsed();
+
+    println!(
+        "STATIC LOOKUP    {:>10.1} ns/op\nSESSION LOOKUP   {:>10.1} ns/op   (+{:.1} ns)",
+        flat.as_nanos() as f64 / ITERS as f64,
+        via_session.as_nanos() as f64 / ITERS as f64,
+        (via_session.as_nanos() as f64 - flat.as_nanos() as f64) / ITERS as f64,
+    );
+}

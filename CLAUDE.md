@@ -87,53 +87,82 @@ Frontend communicates with backend via `window.__TAURI__.core.invoke()`.
 
 ## Key Patterns
 
-### 🚨 Multi-account session safety — read this BEFORE writing any code that touches STATE, DB, or relays
+### 🚨 Multi-account safety — read this BEFORE writing code that touches STATE, the DB, or relays
 
-Vector supports N accounts per install. A `swap_session` / `reset_session` can happen at **any await point**: the user might switch accounts mid-fetch, mid-publish, mid-sync, mid-anything. When that happens:
+Vector supports N accounts per install, and a swap can happen at **any await point**: mid-fetch,
+mid-publish, mid-sync. Work that started under account A and finishes after the swap used to write
+A's data into B's storage — that is how group messages from the previous account showed up in a
+fresh account's chat list, and how profile updates persisted to the wrong database.
 
-- `STATE` (chats/profiles) is replaced with the new account's data
-- The DB pool (`POOL_GENERATION`) is swapped to the new account's vector.db
-- `MY_KEYS` / `MY_PUBLIC_KEY` / `ENCRYPTION_KEY` are rebound
-- The per-account marker file points at the new npub
+**This is now structural, not a rule you apply.** An account's resources live on a `Session`
+(`crates/vector-core/src/db/mod.rs`): its database connections, its chats and profiles, its relay
+client and identity, and every per-account cache. A task started with `db::spawn_bound` carries
+that session for its whole life, so `db::`, `STATE`, `nostr_client()` and the caches all resolve
+the account the task **began under** — for however many awaits it spans, whoever logs in meanwhile.
+A swap installs a new `Session` and drops the old one. There is no teardown list.
 
-**Any task still running with values captured before the swap will write account A's data into account B's storage.** This has caused multiple real bugs: group messages from the previous account appearing in a fresh account's chat list, profile updates persisting to the wrong DB, kind-10063 server lists merging across accounts. The damage is invisible until the user opens the wrong chat.
+#### The three things to actually do
 
-#### The SessionGuard contract
+1. **Spawn with `crate::db::spawn_bound`, never bare `tokio::spawn`.** The test suite parses the
+   tree and fails on an unbound spawn (`crates/vector-core/src/spawn_audit.rs`, run by vector-core,
+   src-tauri and vector-agent). A task that genuinely owns no account state — a process-lifetime
+   listener, a socket drain, CPU work on bytes in hand — is exempted **per site** with
+   `// spawn-detached: <why>` on the line or just above it. Per site, not per file.
 
-Use `vector_core::state::SessionGuard` to defend against this:
+2. **Put a new per-account resource on the session, not in a `static`.** Declare a private marker
+   type and one accessor:
 
-```rust
-let session = SessionGuard::capture();   // snapshot generation NOW
-// ...network/file/long-await work...
-if !session.is_valid() { return; }       // bail if the generation advanced
-// ...STATE/DB mutation...
-```
+   ```rust
+   struct MyCache;                                    // the key, private to this module
+   fn my_cache() -> Arc<Mutex<HashMap<K, V>>> {
+       crate::db::current_session().scoped::<MyCache, _>()
+   }
+   ```
 
-**Rules — apply every single one of these:**
+   Nothing to clear on swap: the account's instance goes when its session does. The two teardown
+   lists that used to enumerate these had already drifted apart from each other.
 
-1. **Every `tokio::spawn` that touches per-account state needs a captured `SessionGuard` BEFORE the spawn boundary and an `is_valid()` check before its first side effect.** Capturing inside the `async move` block is too late — the spawn order is unobserved.
-2. **Every long async function (≥ ~1s, anything network-bound) that ends in a write needs a re-check before that write**, even if the caller already validated. Fetches can take seconds; the validation must straddle the I/O.
-3. **Every Tauri command that mutates per-account settings/DB needs a guard at entry.** Pattern: capture `SessionGuard`, do the read/mutate/save sandwich, re-check `is_valid()` immediately before `save_*`. Don't trust `get_current_account()` alone — it returns the *current* account, which may not be the one the caller expects.
-4. **Any long-lived instance or per-group lock that resolves an account path at construction freezes it there.** A stale instance keeps reading account A's storage successfully and writes the plaintext into account B's STATE. Nothing in the tree does this today (Concord is module-level functions); if you introduce one, gate every state-mutating method on a `SessionGuard` captured at the call site, not at construction.
-5. **The debounced republish pattern (`republish_*_debounced`) captures `SessionGuard` before the sleep.** Copy that pattern for any debounced effect.
+3. **Keep the guard ONLY where the caller is unbound.** A Tauri command or an SDK call is not a
+   task we spawned, so nothing binds it — a swap really does move its writes, and its return value
+   goes to a UI now showing someone else. A multi-step publish there must refuse to half-commit:
 
-#### Smell signals — grep for these in any PR
+   ```rust
+   let session = SessionGuard::capture();
+   // ...publish, then persist...
+   if !session.is_valid() { return Err("account changed during …".into()); }
+   ```
 
-- `tokio::spawn(` without a `SessionGuard::capture()` on the lines just before it
-- `client.fetch_events`, `client.send_event_builder`, `tokio::time::sleep` between two writes to STATE/DB (without an `is_valid()` between fetch and save)
-- `static` / `OnceLock` / `LazyLock` storing anything per-account that doesn't refresh on swap
-- A function that takes `&Client` plus an `npub` / `PublicKey` argument *and* writes to STATE or per-account DB — almost certainly needs a `SessionGuard` parameter too
-- New tables / settings keys created without `account_dir(npub)` scoping
-- Anything pre-fetched into a `Vec<String>` before a `for` loop that does network/DB writes — the loop must re-check session each iteration
+   That is what the ~150 remaining `is_valid()` checks are, and
+   `a_swap_during_create_private_channel_aborts_without_a_write` proves one of them.
 
-#### Reference implementations (copy these patterns)
+#### What is handled for you
 
-- `crates/vector-core/src/inbox_relays.rs::republish_inbox_relays_debounced` — debounced publish with SessionGuard
-- `crates/vector-core/src/blossom_servers.rs::fetch_and_merge_own_list` — long fetch + write, takes `SessionGuard` parameter, re-checks before save AND before cache refresh
-- `crates/vector-core/src/community/v2/service.rs::fetch_channel_history` — SessionGuard captured at entry, re-validated inside the fetch loop before each per-rumor write
-- `src-tauri/src/commands/relays.rs::require_active_blossom_session` — entry-guard helper for mutation commands
+- **UI emission.** `emit_event` / `emit_event_json` drop anything from a session that is no longer
+  live (`db::session_is_live`). There is one UI showing one account; work for a previous account
+  paints nothing. Emit through those, **not** a raw `AppHandle::emit`, from anywhere that can
+  outlive a swap.
+- **Database and chat state.** Both belong to the session. A late write lands in an orphan nobody
+  reads, never in the account on screen.
+- **`init_database` is idempotent and login-safe.** Re-running it for the same account keeps its
+  state; binding a not-yet-bound session to a database keeps what it holds, because creating an
+  account fills the session before its database exists.
 
-When in doubt, add a guard. Cost: one atomic load. Cost of the bug it prevents: catastrophic cross-account data corruption.
+#### Still resolved late — the honest exceptions
+
+- **`MY_SECRET_KEY` / `ENCRYPTION_KEY`.** Zeroized on swap rather than re-homed, which is a
+  security property the session model does not replace. Guard anything that signs or decrypts
+  across an await.
+- **Android biometric enrollment** (`src-tauri/src/commands/biometric.rs`) resolves its account at
+  use.
+- **The plane pool, warm-relay set and relay breaker** (`community/transport.rs`) still key on the
+  session generation. They need an active disconnect on swap, which dropping cannot perform.
+
+#### Smell signals for a review
+
+- A bare `tokio::spawn(` (the suite catches it, but catch it earlier)
+- `static` / `OnceLock` / `LazyLock` holding anything per-account
+- A raw `handle.emit(...)` inside a spawned task
+- New tables or settings keys created without `account_dir(npub)` scoping
 
 ### Adding new Tauri commands
 
@@ -145,7 +174,7 @@ Every new `#[tauri::command]` requires THREE things:
 
 Missing any = `invoke()` silently rejects with "Command X not allowed by ACL".
 
-**If the command mutates per-account state**, also see the multi-account section above — capture `SessionGuard` at entry, re-validate before any `save_*` call.
+**If the command mutates per-account state**, see the multi-account section above: commands are unbound, so a multi-step publish still needs a `SessionGuard` at entry and an abort before the persist.
 
 ### Adding a database migration
 
@@ -190,7 +219,7 @@ All profile operations (fetch, publish, block, nickname) flow through vector-cor
 ### State access
 
 Global state lives in `src-tauri/src/state/` and is re-exported at crate root:
-- `TAURI_APP`, `NOSTR_CLIENT`, `MY_KEYS`, `MY_PUBLIC_KEY`, `STATE`
+- `TAURI_APP`, `MY_SECRET_KEY` (process-global vaults); `STATE`, `nostr_client()`, `my_public_key()` resolve through the live `Session`
 - `STATE` holds `Arc<Mutex<AppState>>` with chats, profiles, settings
 - Multi-account: separate SQLite DB per account in `~/.local/share/io.vectorapp/data/<npub>/`
 
