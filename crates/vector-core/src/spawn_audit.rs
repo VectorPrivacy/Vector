@@ -71,6 +71,49 @@ fn unbound_lines(src: &str) -> impl Iterator<Item = (&str, usize)> {
     owned.into_iter()
 }
 
+/// Account access from a thread that does not carry the account.
+///
+/// A tokio task-local rides the task, not the thread. `spawn_blocking` and
+/// `std::thread::spawn` run outside it, so `db::` and `STATE` there resolve
+/// whoever is live rather than the caller's account — the one way left to write
+/// one account's data into another's storage. Nothing in the tree does this;
+/// this is what keeps it that way.
+pub fn account_access_off_task(crate_root: &Path, src_root: &Path) -> Vec<String> {
+    let mut offenders = Vec::new();
+    let mut stack = vec![src_root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let rel = path.strip_prefix(crate_root).unwrap_or(&path).to_string_lossy().replace('\\', "/");
+            let Ok(src) = std::fs::read_to_string(&path) else { continue };
+            let prod = src.split("#[cfg(test)]").next().unwrap_or("");
+            let lines: Vec<&str> = prod.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                if !line.contains("spawn_blocking") && !line.contains("std::thread::spawn") {
+                    continue;
+                }
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                let body = lines[i..(i + 14).min(lines.len())].join("\n");
+                if body.contains("db::") || body.contains("STATE.") {
+                    offenders.push(format!("{rel}:{}", i + 1));
+                }
+            }
+        }
+    }
+    offenders.sort();
+    offenders
+}
+
 /// The assertion both crates run. `pending` is a shrink-only worklist of files
 /// not yet converted; it is a ratchet, not an exemption, so a file that no
 /// longer spawns unbound must be deleted from it.
@@ -100,6 +143,15 @@ pub fn assert_all_spawns_bound(crate_root: &Path, pending: &[&str]) {
         converted.is_empty(),
         "these files are fully converted — delete them from the pending list so they stay \
          converted:\n  {converted:?}"
+    );
+
+    let off_task = account_access_off_task(crate_root, &src_root);
+    assert!(
+        off_task.is_empty(),
+        "a blocking thread runs outside the task, so it does not carry the caller's account — \
+         these would read or write whoever is live instead. Do the work inline, or capture the \
+         session and re-enter it with db::with_session:\n  {}",
+        off_task.join("\n  ")
     );
 }
 

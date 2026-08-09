@@ -128,11 +128,10 @@ pub async fn mark_as_unread(chat_id: String) -> Option<String> {
     // the upsert — it refuses empty markers by design — so take the dedicated
     // clear path or the row keeps its old marker and the badge snaps back.
     if is_clear {
-        let cid = chat_id.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            vector_core::db::chats::clear_chat_last_read(&cid)
-        })
-        .await;
+        // Inline, not `spawn_blocking`: a blocking thread runs outside the task,
+        // so it would not carry this account and the clear would land on
+        // whoever is live. One indexed UPDATE does not need a thread anyway.
+        let _ = vector_core::db::chats::clear_chat_last_read(&chat_id);
     }
 
     // The retreat surfaces the newest contact message again, so reconcile the exact remainder.
