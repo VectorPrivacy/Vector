@@ -1856,17 +1856,29 @@ async fn sync_community_channel_inner(
             Some(vector_core::community::ConcordProtocol::V2)
         ) {
             let limit: usize = 50;
-            let new = vector_core::VectorCore
-                .sync_community_channel(channel_id, limit)
+            // Scroll-up carries its cursor to the network. Without it a v2 back-page
+            // re-fetched the newest window forever, and the pre-rotation planes —
+            // each epoch is its own address — were never asked for at all.
+            let before_secs = is_older.then(|| before_ms.map(|m| m / 1000)).flatten();
+            let count = vector_core::VectorCore
+                .sync_community_channel_page(channel_id, limit, before_secs)
                 .await
-                .map(|(n, _warnings)| n)
-                .unwrap_or(0);
+                .map(|(c, _warnings)| c)
+                .unwrap_or_default();
             // Each backfilled message already surfaced to the live UI via `message_new`
             // (emitted per-outcome inside the facade backfill), so the chat list preview,
-            // unread badge, and sort order update without opening the channel. A short page
-            // means we reached the channel's start.
-            let reached_start = new < limit;
-            return Ok(CommunitySyncResult { new_messages: new as u32, reached_start, oldest_ms: None });
+            // unread badge, and sort order update without opening the channel.
+            //
+            // An older page is finished only when the RELAY had nothing at or before the
+            // cursor. Judging it by new-count stops the scroll on the first page of
+            // already-held history — which is exactly the boundary a rotated channel's
+            // older epochs sit behind.
+            let reached_start = if is_older { count.fetched == 0 } else { count.new_messages < limit };
+            return Ok(CommunitySyncResult {
+                new_messages: count.new_messages as u32,
+                reached_start,
+                oldest_ms: None,
+            });
         }
 
         let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?

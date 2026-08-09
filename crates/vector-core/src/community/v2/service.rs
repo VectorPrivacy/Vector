@@ -547,6 +547,11 @@ fn heal_own_wrap_key(event: &ChatEvent, group: &GroupKey, relays: &[String]) {
     }
 }
 
+/// How many of the newest held epochs a newest-first catch-up reads. One: a
+/// rotation moves the conversation, so the live epoch is where it is. Rotated-past
+/// epochs are reached by back-paging, when a reader actually scrolls for them.
+const LIVE_COORD_EPOCHS: usize = 1;
+
 /// Fetch a channel's newest messages — one page of [`fetch_channel_history`].
 /// `limit` is one relay-side bound across the whole epoch-author OR-set, not
 /// per epoch; deeper history pages backwards via the walk.
@@ -615,6 +620,17 @@ pub async fn fetch_channel_history<T: Transport + ?Sized>(
         };
         if coords.is_empty() {
             return Ok(Vec::new());
+        }
+        // Every epoch is its own address on this plane, so the full set costs one
+        // fetch per held epoch per page and grows with the community's whole
+        // rotation history. A newest-first catch-up wants the live epoch, which is
+        // the only one anyone should be speaking on; reaching back through a
+        // rotation is what back-paging (`start_until`) is for — the same division
+        // the boot volley already draws.
+        let mut coords = coords;
+        if start_until.is_none() && coords.len() > LIVE_COORD_EPOCHS {
+            coords.sort_by_key(|(_, e)| std::cmp::Reverse(e.0));
+            coords.truncate(LIVE_COORD_EPOCHS);
         }
 
         let mut seen_wraps: std::collections::HashSet<nostr_sdk::prelude::EventId> = std::collections::HashSet::new();
@@ -7217,6 +7233,36 @@ mod tests {
             .collect()
     }
 
+    /// History as the BACK-PAGING cursor reads it: every held epoch. Opening a
+    /// channel deliberately reads only the live planes, so pre-rotation history is
+    /// reached by paging, which is what a user scrolling up actually does.
+    async fn all_texts_in<T: crate::community::transport::Transport + ?Sized>(
+        relay: &T,
+        community: &CommunityV2,
+        channel: &ChannelId,
+    ) -> Vec<String> {
+        let from_now = now_ms() / 1000 + 3600;
+        fetch_channel_history(
+            relay,
+            community,
+            channel,
+            100,
+            8,
+            None,
+            Some(from_now),
+            crate::community::transport::Evidence::Quorum,
+            |_| true,
+        )
+        .await
+        .unwrap()
+        .iter()
+        .filter_map(|f| match &f.event {
+            ChatEvent::Message { .. } => Some(f.event.opened().rumor.content.clone()),
+            _ => None,
+        })
+        .collect()
+    }
+
     #[tokio::test]
     async fn direct_invite_full_loop_owner_and_member_converse() {
         let (bed, owner, member) = TestBed::new();
@@ -9408,9 +9454,15 @@ mod tests {
         assert_eq!(refounded.root_epoch, Epoch(1), "the epoch advanced");
         send_message(&relay, &refounded, &general, "after the refounding").await.unwrap();
 
-        let texts = texts_in(&relay, &refounded, &general).await;
-        assert!(texts.contains(&"before the refounding".to_string()), "the epoch-0 message is still readable");
-        assert!(texts.contains(&"after the refounding".to_string()), "the epoch-1 message reads too");
+        let open = texts_in(&relay, &refounded, &general).await;
+        assert!(open.contains(&"after the refounding".to_string()), "opening reads the live epoch");
+        assert!(
+            !open.contains(&"before the refounding".to_string()),
+            "and NOT the rotated-past one — that plane is the back-paging cursor's job"
+        );
+        let paged = all_texts_in(&relay, &refounded, &general).await;
+        assert!(paged.contains(&"before the refounding".to_string()), "the epoch-0 message stays reachable by paging");
+        assert!(paged.contains(&"after the refounding".to_string()), "alongside the epoch-1 one");
     }
 
     #[tokio::test]
@@ -10002,8 +10054,8 @@ mod tests {
         assert!(post.banned.contains(&member.keys.public_key().to_hex()), "the ban survives the re-founding");
         // Pre-ban history still reads across the new epoch.
         assert!(
-            texts_in(&bed.relay, &refounded, &general).await.contains(&"owner: welcome".to_string()),
-            "pre-refounding history stays readable"
+            all_texts_in(&bed.relay, &refounded, &general).await.contains(&"owner: welcome".to_string()),
+            "pre-refounding history stays reachable by paging"
         );
 
         // The banned member's rekey-follow concludes they're severed. Guard captured AFTER
@@ -10226,10 +10278,10 @@ mod tests {
         assert_eq!(refounded.root_epoch, Epoch(1), "the ban rolled the root");
         let post = fold_authority(&refounded, &fetch_control(&bed.relay, &refounded).await, &load_floors(&refounded));
         assert!(post.banned.contains(&b_hex), "the ban survives the refounding");
-        assert!(texts_in(&bed.relay, &refounded, &general).await.iter().any(|t| t == "A: welcome to the deep e2e"), "pre-ban history reads across the new epoch");
+        assert!(all_texts_in(&bed.relay, &refounded, &general).await.iter().any(|t| t == "A: welcome to the deep e2e"), "pre-ban history pages back across the new epoch");
         assert!(
-            texts_in(&bed.relay, &refounded, &priv_id).await.iter().any(|t| t == "A: mods-only channel"),
-            "PRIVATE history reads across the channel's own rotation (per-channel multi-epoch archive)"
+            all_texts_in(&bed.relay, &refounded, &priv_id).await.iter().any(|t| t == "A: mods-only channel"),
+            "PRIVATE history pages back across the channel's own rotation (per-channel multi-epoch archive)"
         );
         println!("[ban] B banned; root rolled to epoch 1; ban survives; pre-ban history intact (public + private)");
         // B concludes it's severed.
@@ -10507,11 +10559,16 @@ mod tests {
             let theirs = community.channel(id).unwrap();
             assert_eq!(mine.key, theirs.key, "channel {} converged on the owner key", crate::simd::hex::bytes_to_hex_32(&id.0));
             assert_eq!(mine.epoch, theirs.epoch, "…at the same epoch");
-            let texts = texts_in(&bed.relay, &caught_up, id).await;
             let id_hex = crate::simd::hex::bytes_to_hex_32(&id.0);
-            assert!(texts.iter().any(|t| t.contains("epoch0")), "channel {id_hex} reads epoch-0 history");
+            // Opening reads the live planes; the rotated-past ones are the
+            // back-paging cursor's job. Both halves asserted — the point is that
+            // every epoch stays REACHABLE, not that opening drags it all in.
+            let open = texts_in(&bed.relay, &caught_up, id).await;
+            assert!(open.iter().any(|t| t.contains("epoch2")), "channel {id_hex} opens onto its live epoch");
+            let paged = all_texts_in(&bed.relay, &caught_up, id).await;
+            assert!(paged.iter().any(|t| t.contains("epoch0")), "channel {id_hex} pages back to epoch-0 history");
             for epoch in 1..=2u64 {
-                assert!(texts.iter().any(|t| t.contains(&format!("epoch{epoch}"))), "channel {id_hex} reads epoch-{epoch} history");
+                assert!(paged.iter().any(|t| t.contains(&format!("epoch{epoch}"))), "channel {id_hex} pages back to epoch-{epoch} history");
             }
         }
     }
@@ -10601,17 +10658,23 @@ mod tests {
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&caught_up.id().0);
         let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap();
         assert!(banned.contains(&stranger.public_key().to_hex()), "the ban folded through");
-        // History reads across EVERY epoch (public via base-root archive, private
-        // via the per-channel archive built during the walk).
-        let gen_texts = texts_in(&bed.relay, &caught_up, &general).await;
+        // Opening reads the live planes only; paging back reaches EVERY epoch
+        // (public via the base-root archive, private via the per-channel archive
+        // built during the walk). A sleeper's deep history stays reachable — it
+        // just arrives when they scroll for it rather than on open.
+        let gen_open = texts_in(&bed.relay, &caught_up, &general).await;
+        assert!(gen_open.contains(&"epoch3: general news".to_string()), "general opens onto its live epoch: {gen_open:?}");
+        let gen_texts = all_texts_in(&bed.relay, &caught_up, &general).await;
         for epoch in 0..=3u64 {
             let needle = if epoch == 0 { "epoch0: hello".to_string() } else { format!("epoch{epoch}: general news") };
-            assert!(gen_texts.contains(&needle), "general history spans epoch {epoch}: {gen_texts:?}");
+            assert!(gen_texts.contains(&needle), "general pages back to epoch {epoch}: {gen_texts:?}");
         }
-        let mods_texts = texts_in(&bed.relay, &caught_up, &mods).await;
+        let mods_open = texts_in(&bed.relay, &caught_up, &mods).await;
+        assert!(mods_open.contains(&"epoch3: mods word".to_string()), "mods opens onto its live epoch: {mods_open:?}");
+        let mods_texts = all_texts_in(&bed.relay, &caught_up, &mods).await;
         for epoch in 0..=3u64 {
             let needle = if epoch == 0 { "epoch0: mods secret".to_string() } else { format!("epoch{epoch}: mods word") };
-            assert!(mods_texts.contains(&needle), "private history spans epoch {epoch}: {mods_texts:?}");
+            assert!(mods_texts.contains(&needle), "private pages back to epoch {epoch}: {mods_texts:?}");
         }
         // Keyless (above) means unreadable — a rekey walk cannot substitute for the
         // key vend that a grant carries.
@@ -11734,6 +11797,84 @@ mod tests {
         assert!(
             crate::db::community::get_pending_channel_keys(&cid_hex).unwrap().is_empty(),
             "and the park is discharged"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_vend_from_an_unentitled_sender_is_never_seated_but_survives_for_the_real_one() {
+        // Vend rule 4: the VENDOR must be entitled too. Every other test sends as
+        // the owner, which short-circuits the check one line above it, so the rule
+        // itself has never been exercised. Both halves matter — a stranger must not
+        // seat a key, and their row must not consume the slot either, which is the
+        // suppression the candidate table exists to prevent.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Vendors", bed.relays.clone(), None).await.unwrap();
+        let priv_id = create_private_channel(&bed.relay, &community, "mods").await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let chan_hex = crate::simd::hex::bytes_to_hex_32(&priv_id.0);
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let owner_hex = community.owner().unwrap().to_hex();
+
+        bed.swap_to(&member);
+        let mut member_view = held.clone();
+        if let Some(c) = member_view.channels.iter_mut().find(|c| c.id.0 == priv_id.0) {
+            c.key = None;
+            c.epoch = Epoch(0);
+        }
+        crate::db::community::save_community_v2(&member_view).unwrap();
+
+        // WE are entitled (rule 3 passes, so the judge reaches rule 4). The vendor
+        // below is not, and is not the owner.
+        let access = crate::community::roles::Role {
+            role_id: "66".repeat(32),
+            name: "mods".into(),
+            position: u32::MAX - 1,
+            permissions: crate::community::roles::Permissions::empty(),
+            scope: crate::community::roles::RoleScope::Channel(chan_hex.clone()),
+            color: 0,
+        };
+        let roster = crate::community::roles::CommunityRoles {
+            grants: vec![crate::community::roles::MemberGrant {
+                member: member.keys.public_key().to_hex(),
+                role_ids: vec![access.role_id.clone()],
+            }],
+            roles: vec![access],
+        };
+        crate::db::community::set_community_roles(&cid_hex, &roster, 1).unwrap();
+
+        let stranger_hex = Keys::generate().public_key().to_hex();
+        let junk = [0x11; 32];
+        crate::db::community::park_channel_key(&cid_hex, &chan_hex, 0, &junk, &stranger_hex).unwrap();
+
+        let session = crate::db::current_session();
+        let reloaded = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert!(
+            absorb_parked_channel_keys(&reloaded, &session).is_empty(),
+            "an unentitled vendor seats nothing"
+        );
+        let after = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(after.channel(&priv_id).unwrap().key, None, "the channel is still keyless");
+        assert_eq!(
+            crate::db::community::get_pending_channel_keys(&cid_hex).unwrap().len(),
+            1,
+            "parked, not refused — the vendor's own entitlement may simply not have folded here yet"
+        );
+
+        // The entitled vendor's key lands despite the stranger's row sitting there.
+        let real = [0x5a; 32];
+        crate::db::community::park_channel_key(&cid_hex, &chan_hex, 0, &real, &owner_hex).unwrap();
+        let reloaded = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(
+            absorb_parked_channel_keys(&reloaded, &session).len(),
+            1,
+            "the genuine vend is seated — a stranger cannot occupy the slot"
+        );
+        let after = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(after.channel(&priv_id).unwrap().key, Some(real), "and it is the ENTITLED vendor's key");
+        assert!(
+            crate::db::community::get_pending_channel_keys(&cid_hex).unwrap().is_empty(),
+            "both candidates discharge once one is seated"
         );
     }
 

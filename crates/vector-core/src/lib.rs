@@ -465,6 +465,18 @@ pub struct CoreConfig {
 #[derive(Clone, Copy)]
 pub struct VectorCore;
 
+/// What one catch-up page cost and what it yielded.
+///
+/// `fetched` is the relay's answer — zero means there is genuinely nothing
+/// further back, which is the only sound "reached the start" signal.
+/// `new_messages` counts what this client had never seen, which is what a UI
+/// reports; a page of entirely-known history is 0 new with a non-empty fetch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BackfillCount {
+    pub fetched: usize,
+    pub new_messages: usize,
+}
+
 impl VectorCore {
     /// Initialize Vector Core with the given configuration.
     pub fn init(config: CoreConfig) -> Result<Self> {
@@ -2362,6 +2374,50 @@ impl VectorCore {
     /// swallowed so a headless caller is never blind to "the sync ran but a re-founding couldn't
     /// be resumed."
     pub async fn sync_community_channel(&self, channel_id: &str, limit: usize) -> Result<(usize, Vec<String>)> {
+        self.sync_community_channel_before(channel_id, limit, None).await
+    }
+
+    /// One page of a v2 channel catch-up: what the relay served, and how much of it
+    /// this client had never seen.
+    pub async fn sync_community_channel_page(
+        &self,
+        channel_id: &str,
+        limit: usize,
+        before_secs: Option<u64>,
+    ) -> Result<(BackfillCount, Vec<String>)> {
+        if let Some(id) = self.v2_community_for_channel(channel_id)? {
+            let warnings = if community::v2::realtime::follow_worker_running() {
+                community::v2::realtime::enqueue_follow(&id);
+                Vec::new()
+            } else {
+                Self::v2_inline_follow(&id).await
+            };
+            let count = Self::v2_backfill_channel_counted(
+                &id, channel_id, limit, 8, None, before_secs,
+                crate::community::transport::Evidence::Fast, 12,
+            ).await;
+            return Ok((count, warnings));
+        }
+        // v1 has its own paging path; report the new-count and leave `fetched`
+        // meaningless rather than inventing a number a caller might trust.
+        let (new_messages, warnings) = self.sync_community_channel(channel_id, limit).await?;
+        Ok((BackfillCount { fetched: new_messages, new_messages }, warnings))
+    }
+
+    /// [`sync_community_channel`](Self::sync_community_channel) with a back-paging
+    /// cursor: `before_secs` bounds the fetch to messages at or older than it.
+    ///
+    /// The cursor is what reaches a v2 channel's PRE-ROTATION history. An
+    /// uncursored catch-up reads the live epoch only (rotations move the
+    /// conversation, so that is where it is); each epoch keeps its own plane
+    /// address, and a bounded fetch spans all of them at once because messages are
+    /// selected by time, not by epoch.
+    pub async fn sync_community_channel_before(
+        &self,
+        channel_id: &str,
+        limit: usize,
+        before_secs: Option<u64>,
+    ) -> Result<(usize, Vec<String>)> {
         use crate::community::{send, service, transport::LiveTransport};
         let my_pk = state::my_public_key().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
         // v2: consensus catch-up (rekeys then control refold) + chat backfill. With a
@@ -2380,7 +2436,7 @@ impl VectorCore {
             // evidence tier yet (#370) — until it does, the transport-seconds
             // bound is the effective limit; the declared Fast records intent.
             let new = Self::v2_backfill_channel(
-                &id, channel_id, limit, 8, None, None,
+                &id, channel_id, limit, 8, None, before_secs,
                 crate::community::transport::Evidence::Fast, 12,
             ).await;
             return Ok((new, warnings));
@@ -2795,17 +2851,36 @@ impl VectorCore {
         evidence: crate::community::transport::Evidence,
         transport_secs: u64,
     ) -> usize {
+        Self::v2_backfill_channel_counted(id, channel_id, limit, max_pages, since, until, evidence, transport_secs)
+            .await
+            .new_messages
+    }
+
+    /// [`v2_backfill_channel`](Self::v2_backfill_channel) reporting what the RELAY
+    /// served as well as what was new. A back-page over history we already hold is
+    /// new-count 0 with a non-empty fetch, so only `fetched` can answer "is there
+    /// anything older" — new-count alone stops a scroll at the first known page.
+    pub(crate) async fn v2_backfill_channel_counted(
+        id: &crate::community::CommunityId,
+        channel_id: &str,
+        limit: usize,
+        max_pages: usize,
+        since: Option<u64>,
+        until: Option<u64>,
+        evidence: crate::community::transport::Evidence,
+        transport_secs: u64,
+    ) -> BackfillCount {
         // Guard straddles the fetch: a swap mid-fetch must not persist account A's chat
         // into account B's STATE/DB (the message ids are global).
         let session = crate::db::current_session();
-        let Some(my_pk) = state::my_public_key() else { return 0 };
+        let Some(my_pk) = state::my_public_key() else { return BackfillCount::default() };
         // CORD-02 §9: a dissolved community honors no NEW events — old history reads
         // through the explicit paths, but a catch-up sweep must not ingest anything
         // authored into the grave.
         if crate::db::community::get_community_dissolved(&crate::simd::hex::bytes_to_hex_32(&id.0)).unwrap_or(false) {
-            return 0;
+            return BackfillCount::default();
         }
-        let Ok(Some(community)) = crate::db::community::load_community_v2(id) else { return 0 };
+        let Ok(Some(community)) = crate::db::community::load_community_v2(id) else { return BackfillCount::default() };
         let ch = crate::community::ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
         let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(transport_secs));
         let Ok(page) = crate::community::v2::service::fetch_channel_history(
@@ -2836,9 +2911,11 @@ impl VectorCore {
         )
         .await
         else {
-            return 0;
+            return BackfillCount::default();
         };
-        Self::v2_ingest_chat_page(channel_id, my_pk, session, page).await
+        let fetched = page.len();
+        let new_messages = Self::v2_ingest_chat_page(channel_id, my_pk, session, page).await;
+        BackfillCount { fetched, new_messages }
     }
 
     /// Ingest a fetched chat page: STATE apply, batched persist with delete
