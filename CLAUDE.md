@@ -191,7 +191,8 @@ open on the second run. Two guards catch it before release: a `debug_assert` in
 
 Ids are a high-water mark, never a count. **33-39 and 45-61 are burned** and must never be reused
 — some DBs recorded them as applied without the ALTER landing, so reuse is a silent skip. Live ids
-are 19-32, 40-44, 62-83.
+are 19-32, 40-44, 62-87. Read `HIGHEST_MIGRATION_ID` rather than this line when adding one: the
+constant is enforced by a test, this sentence is not.
 
 ### SendCallback — Unified DM Send Pipeline
 
