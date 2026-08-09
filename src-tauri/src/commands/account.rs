@@ -1142,9 +1142,6 @@ pub async fn start_nostrconnect_session<R: Runtime>(
         let stage_result: Result<(), String> = async {
             // Bail before any side effect if the user swapped accounts
             // during the long pairing wait.
-            if !session.is_valid() {
-                return Err("Session changed during pairing".to_string());
-            }
             account_manager::set_pending_account(remote_npub.clone())?;
             crate::commands::tor::stop_and_join_if_running().await;
             if !session.is_valid() {
@@ -1169,9 +1166,6 @@ pub async fn start_nostrconnect_session<R: Runtime>(
                 .build();
             vector_core::state::set_nostr_client_if_absent(client);
 
-            if !session.is_valid() {
-                return Err("Session changed during pairing".to_string());
-            }
             let mut profile = Profile::new();
             profile.flags.set_mine(true);
             STATE.lock().await.insert_or_replace_profile(&remote_npub, profile);

@@ -1348,7 +1348,6 @@ pub async fn fetch_messages<R: Runtime>(
                             tokio::pin!(stream);
                             while let Some((_relay, res)) = stream.next().await {
                                 let Ok(event) = res else { continue };
-                                if !archive_session.is_valid() { return; }
                                 if want.contains(&event.id) {
                                     received.insert(event.id);
                                 }
