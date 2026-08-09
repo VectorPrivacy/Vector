@@ -96,7 +96,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppManager_onMiniAppClosed(
         let app = app.clone();
         let miniapp_id_owned = miniapp_id.clone();
         // chat_id belongs to the account current NOW — bail in the task if it swaps.
-        let session = vector_core::state::SessionGuard::capture();
+        let session = vector_core::db::current_session();
         tauri::async_runtime::spawn(async move {
             let state = app.state::<crate::miniapps::state::MiniAppsState>();
 
@@ -138,7 +138,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppManager_onMiniAppClosed(
                 if let Some(ref instance) = closing_instance {
                     let chat_id = instance.chat_id.clone();
                     let topic_for_left = topic_encoded.clone();
-                    if session.is_valid() {
+                    if session.is_live() {
                         vector_core::db::spawn_bound(async move {
                             if !crate::commands::realtime::send_webxdc_peer_left(chat_id, topic_for_left).await {
                                 log_warn!("[WEBXDC] Failed to send peer-left signal");

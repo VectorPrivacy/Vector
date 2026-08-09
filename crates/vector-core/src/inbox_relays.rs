@@ -1229,7 +1229,7 @@ pub async fn publish_inbox_relays_synced(
     ours_override: Option<Vec<String>>,
 ) -> Result<(), String> {
     let _serial = PUBLISH_MUTEX.lock().await;
-    let session = crate::state::SessionGuard::capture();
+    let session = crate::db::current_session();
 
     // Relays we read from — senders must write to these for us to receive DMs.
     let ours: Vec<String> = match ours_override {
@@ -1255,7 +1255,7 @@ pub async fn publish_inbox_relays_synced(
 
     let plan = merge_inbox_relays(&remote, &load_contributed(), &ours);
 
-    if !session.is_valid() {
+    if !session.is_live() {
         return Ok(());
     }
     store_contributed(&plan.contributed);
@@ -1283,7 +1283,7 @@ pub async fn publish_inbox_relays_synced(
         .await
         .map_err(|e| format!("Failed to sign inbox relays: {}", e))?;
 
-    if !session.is_valid() {
+    if !session.is_live() {
         return Ok(());
     }
     let pool_send = client.send_event(&event).await;
@@ -1325,7 +1325,7 @@ pub async fn publish_inbox_relays_synced(
     }
     // Anchor only on a confirmed landing in a still-current session: a
     // wrongly-advanced anchor gates future syncs off real network state.
-    if session.is_valid() {
+    if session.is_live() {
         note_list_seen(event.created_at.as_secs().max(remote_ts));
     }
 
@@ -1350,11 +1350,11 @@ static DEBOUNCE_PASS_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Rapid successive calls coalesce into a single publish.
 pub fn republish_inbox_relays_debounced() {
     let gen = REPUBLISH_GEN.fetch_add(1, Ordering::SeqCst) + 1;
-    // REPUBLISH_GEN dedupes within a session; SessionGuard dedupes
+    // REPUBLISH_GEN dedupes within a session; std::sync::Arc<crate::db::Session> dedupes
     // across sessions. Without the guard, a swap during the 800ms
     // debounce window would publish account A's inbox-relay claim
     // signed by account B's client.
-    let session = crate::state::SessionGuard::capture();
+    let session = crate::db::current_session();
     crate::db::spawn_bound(async move {
         // Wait for the relay pool to settle; if another call arrives
         // during this window it will bump the generation and we'll exit.
@@ -1362,7 +1362,7 @@ pub fn republish_inbox_relays_debounced() {
         if REPUBLISH_GEN.load(Ordering::SeqCst) != gen {
             return; // superseded by a newer call
         }
-        if !session.is_valid() {
+        if !session.is_live() {
             return; // swap occurred during the debounce window
         }
         #[cfg(test)]

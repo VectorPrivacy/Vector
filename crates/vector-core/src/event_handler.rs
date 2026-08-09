@@ -625,8 +625,8 @@ pub async fn commit_prepared_event(
     is_new: bool,
     handler: &dyn InboundEventHandler,
 ) -> bool {
-    let session = crate::state::SessionGuard::capture();
-    if !session.is_valid() {
+    let session = crate::db::current_session();
+    if !session.is_live() {
         return false;
     }
     match prepared {
@@ -840,11 +840,11 @@ pub async fn commit_prepared_event(
                     handler.on_community_invite(&community_id);
                     // Warm the community's first page in the background so a subsequent Accept opens
                     // populated instead of paying the join sync. RAM-only + best-effort; promotion on
-                    // Join re-validates freshness. SessionGuard'd so a mid-flight swap is a no-op.
+                    // Join re-validates freshness. std::sync::Arc<crate::db::Session>'d so a mid-flight swap is a no-op.
                     let invite_warm = invite.clone();
-                    let bg = crate::state::SessionGuard::capture();
+                    let bg = crate::db::current_session();
                     tokio::spawn(async move {
-                        if !bg.is_valid() {
+                        if !bg.is_live() {
                             return;
                         }
                         crate::community::service::preload_community(&invite_warm).await;

@@ -593,7 +593,7 @@ static RESET_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 ///      in against a now-stale path.
 ///   4. Wipe key vaults, in-memory state, ID caches, and the FULL_SESSION flag.
 ///
-/// Background tasks that captured `SessionGuard` at spawn time will see
+/// Background tasks that captured `std::sync::Arc<crate::db::Session>` at spawn time will see
 /// their generation become invalid on the very first line of this function
 /// and short-circuit before any side-effect. Tasks that did NOT capture a
 /// guard rely on `NOSTR_CLIENT` going `None` during the reset window — which
@@ -607,10 +607,10 @@ pub async fn reset_session() {
     let _reset_lock = RESET_LOCK.lock().await;
 
     // FIRST: advance the session generation so every background task with a
-    // captured `SessionGuard` becomes invalid before any teardown begins.
+    // captured `std::sync::Arc<crate::db::Session>` becomes invalid before any teardown begins.
     // Tasks that wake up mid-reset see an invalid guard and exit instead of
     // writing partially-cleared state.
-    vector_core::state::bump_session_generation();
+    vector_core::state::clear_message_tombstones();
 
     if let Some(client) = vector_core::take_nostr_client() {
         let _ = client.shutdown().await;
@@ -650,7 +650,7 @@ pub async fn reset_session() {
     // NIP-55 offline-signer state: reset the observable pairing state and drop
     // any staged pairing result. On Android, also wake every stranded
     // Intent-result waiter with a cancelled sentinel — a `spawn_blocking` thread
-    // parked on the pairing/fallback condvar won't poll `is_valid()` on its own.
+    // parked on the pairing/fallback condvar cannot notice a swap on its own.
     vector_core::drain_nip55_state();
     vector_core::clear_pending_nip55_setup();
     #[cfg(target_os = "android")]

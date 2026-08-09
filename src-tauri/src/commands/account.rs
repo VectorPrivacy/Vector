@@ -260,7 +260,7 @@ pub async fn reauthorize_bunker<R: Runtime>(handle: AppHandle<R>) -> Result<Stri
         // can fire between reading MY_SECRET_KEY (below) and installing the new
         // bunker signer; without a guard the stale client keypair would land
         // under a fresh, foreign account.
-        let session = vector_core::state::SessionGuard::capture();
+        let session = vector_core::db::current_session();
 
         let client_keys = crate::MY_SECRET_KEY.to_keys()
             .ok_or("No client keypair loaded — please return to the login screen and try again")?;
@@ -356,7 +356,7 @@ pub async fn reauthorize_bunker<R: Runtime>(handle: AppHandle<R>) -> Result<Stri
             // Account-swap defense: re-check before persisting the new URL so
             // a swap during the long await window doesn't write into the wrong
             // account's DB.
-            if !session.is_valid() {
+            if !session.is_live() {
                 vector_core::log_warn!("[bunker-reauth] session changed during pairing — aborting");
                 let _ = nc.shutdown().await;
                 return;
@@ -370,7 +370,7 @@ pub async fn reauthorize_bunker<R: Runtime>(handle: AppHandle<R>) -> Result<Stri
                 return;
             }
 
-            if !session.is_valid() {
+            if !session.is_live() {
                 let _ = nc.shutdown().await;
                 return;
             }
@@ -1725,7 +1725,7 @@ pub async fn setup_encryption<R: Runtime>(
     // Snapshot session generation up-front. Argon2id takes hundreds of ms;
     // a concurrent `swap_session` in that window would land the commit in
     // the wrong account's DB. Re-validated before every write.
-    let session = vector_core::state::SessionGuard::capture();
+    let session = vector_core::db::current_session();
 
     // Defense in depth — frontend enforces minimum length, but a hostile
     // IPC caller passing "" would otherwise produce an encrypted account
@@ -1760,7 +1760,7 @@ pub async fn setup_encryption<R: Runtime>(
                 eprintln!("[Account] Tor start for new account failed: {}", e);
             }
         }
-        if !session.is_valid() {
+        if !session.is_live() {
             return Err("Account changed during setup. Please try again.".into());
         }
         // Install ENCRYPTION_KEY explicitly — it protects the local message DB
@@ -1768,7 +1768,7 @@ pub async fn setup_encryption<R: Runtime>(
         // decrypt-side-effect install, so derive it here.
         let key_bytes = crypto::hash_pass((*password).clone()).await;
         crate::ENCRYPTION_KEY.set(key_bytes, &[&MY_SECRET_KEY]);
-        if !session.is_valid() {
+        if !session.is_live() {
             return Err("Account changed during setup. Please try again.".into());
         }
         // The canary (a keyless account's only wrong-PIN detector) rides the
@@ -1834,7 +1834,7 @@ pub async fn setup_encryption<R: Runtime>(
     // Re-check session immediately before commit. If a swap fired during the
     // Argon2id awaits above, the DB pool now points at a different account
     // and committing would corrupt it.
-    if !session.is_valid() {
+    if !session.is_live() {
         return Err("Account changed during setup. Please try again.".into());
     }
 
@@ -1849,7 +1849,7 @@ pub async fn setup_encryption<R: Runtime>(
             .ok_or("Bunker setup state missing — re-run Connect Remote Signer")?;
         let encrypted_url =
             crypto::internal_encrypt(url, Some((*password).clone())).await;
-        if !session.is_valid() {
+        if !session.is_live() {
             return Err("Account changed during setup. Please try again.".into());
         }
         vector_core::db::commit_bunker_account_setup(
@@ -1909,7 +1909,7 @@ pub async fn skip_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), Str
     // Snapshot session generation up-front. `maybe_encrypt` for the seed
     // is async; `init_profile_database` is async. Re-validated before commit
     // so a concurrent `swap_session` can't land the rows in a foreign DB.
-    let session = vector_core::state::SessionGuard::capture();
+    let session = vector_core::db::current_session();
 
     // NIP-55 offline account: no PENDING_NSEC (nothing secret on this device),
     // and no ENCRYPTION_KEY since the user chose to skip local encryption.
@@ -1928,7 +1928,7 @@ pub async fn skip_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), Str
                 eprintln!("[Account] Tor start for new account failed: {}", e);
             }
         }
-        if !session.is_valid() {
+        if !session.is_live() {
             return Err("Account changed during setup. Please try again.".into());
         }
         vector_core::db::commit_nip55_account_setup(&user_pk_hex, &package, false, None, None, None)?;
@@ -1973,7 +1973,7 @@ pub async fn skip_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), Str
 
     // Re-check session immediately before commit. If a swap fired during the
     // awaits above, the DB pool now points at a different account.
-    if !session.is_valid() {
+    if !session.is_live() {
         return Err("Account changed during setup. Please try again.".into());
     }
 

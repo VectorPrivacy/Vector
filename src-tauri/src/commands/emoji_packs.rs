@@ -232,8 +232,8 @@ pub async fn emoji_pack_delete(id: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn emoji_pack_delete_blob(url: String) -> Result<(), String> {
     vector_core::db::scoped(async move {
-        let session = vector_core::state::SessionGuard::capture();
-        if !session.is_valid() {
+        let session = vector_core::db::current_session();
+        if !session.is_live() {
             return Err("Account swap in progress.".to_string());
         }
         let _client = vector_core::state::nostr_client()

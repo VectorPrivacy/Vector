@@ -1349,7 +1349,7 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
             .await
             .map_err(|e| format!("Failed to send payment: {}", e))?;
 
-        // Self-copy for recovery (in-scope client clone + SessionGuard).
+        // Self-copy for recovery (in-scope client clone + std::sync::Arc<crate::db::Session>).
         let self_wrap_client = client.clone();
         vector_core::db::spawn_bound(async move {
             let _ = vector_core::send_gift_wrap(&self_wrap_client, Vec::<nostr_sdk::prelude::RelayUrl>::new(), &my_public_key, rumor, []).await;

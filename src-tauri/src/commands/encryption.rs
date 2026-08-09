@@ -1400,14 +1400,14 @@ pub(crate) async fn rekey_from_vault<R: Runtime>(
     mut new_key: [u8; 32],
     security_type: &str,
     biometric_wrap: Option<String>,
-    session: vector_core::state::SessionGuard,
+    session: std::sync::Arc<vector_core::db::Session>,
 ) -> Result<(), String> {
     let _guard = MigrationGuard::try_enter()?;
     // Re-validated INSIDE the guard: `reset_session` refuses while a migration
     // is in flight, so from here the account cannot change under us. Before the
     // guard, a swap could have landed while we derived the key — re-keying then
     // would rewrite the swapped-in account's store with this key.
-    if !session.is_valid() {
+    if !session.is_live() {
         new_key.zeroize();
         return Err("Account changed, nothing was modified".to_string());
     }
@@ -1466,7 +1466,7 @@ pub async fn switch_to_credential<R: Runtime>(
     if security_type != "pin" && security_type != "password" {
         return Err("Invalid security type".to_string());
     }
-    let session = vector_core::state::SessionGuard::capture();
+    let session = vector_core::db::current_session();
     let _switch = crate::commands::biometric::SwitchGuard::try_enter()?;
     let new_key = crate::crypto::hash_pass(credential).await;
     rekey_from_vault(handle, new_key, &security_type, None, session).await

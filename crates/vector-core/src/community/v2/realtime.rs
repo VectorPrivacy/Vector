@@ -23,7 +23,6 @@ use super::stream;
 use super::{derive, inbound};
 use crate::community::{CommunityId, ConcordProtocol, Epoch};
 use crate::event_handler::InboundEventHandler;
-use crate::state::SessionGuard;
 use crate::ClientRelayExt;
 
 /// The targeted subscription id (streams on desktop).
@@ -43,7 +42,7 @@ static V2_SUB_READY_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 #[inline]
 fn mark_subscription_ready() {
     V2_SUB_READY_GEN.store(
-        crate::state::SessionGuard::capture().generation(),
+        crate::db::current_session_id(),
         std::sync::atomic::Ordering::Release,
     );
 }
@@ -56,7 +55,7 @@ fn mark_subscription_ready() {
 /// nothing".
 pub fn subscription_ready() -> bool {
     V2_SUB_READY_GEN.load(std::sync::atomic::Ordering::Acquire)
-        == crate::state::SessionGuard::capture().generation()
+        == crate::db::current_session_id()
 }
 /// Outer-wrap ids already dispatched, so the handler fires EXACTLY ONCE per
 /// message. The relay pool delivers the same wrap under both the targeted and
@@ -75,7 +74,7 @@ const SEEN_WRAPS_CAP: usize = 8192;
 /// whole-row-save and clobber each other. This replaces the old gate/rerun/
 /// spawn-vs-await machinery: an enqueue never blocks its caller, and a junk-wrap
 /// flood coalesces to at most one queued + one running follow per community.
-/// Reset on session swap (the worker exits when its `SessionGuard` invalidates or
+/// Reset on session swap (the worker exits when its `std::sync::Arc<crate::db::Session>` invalidates or
 /// its channel closes).
 static V2_FOLLOW_TX: LazyLock<StdMutex<Option<UnboundedSender<CommunityId>>>> = LazyLock::new(|| StdMutex::new(None));
 /// Community ids currently queued or processing — coalesces a burst to one follow.
@@ -108,7 +107,7 @@ pub async fn subscribed_author_set() -> Vec<String> {
 /// stages, exactly like [`follow_community`]. Mutating — same writes a live
 /// follow makes; the lock serializes it against the worker.
 #[cfg(debug_assertions)]
-pub async fn debug_run_follow_stages(id: &CommunityId, session: &SessionGuard) -> (String, String, String) {
+pub async fn debug_run_follow_stages(id: &CommunityId, session: &std::sync::Arc<crate::db::Session>) -> (String, String, String) {
     let lock = follow_lock(id);
     let _guard = lock.lock().await;
     let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
@@ -575,7 +574,7 @@ pub fn enqueue_follow(id: &CommunityId) {
 /// Spawn the single follow worker for this session. Installs the queue sender and
 /// drains it, running one combined follow per community at a time. Replacing the
 /// sender (a re-`listen()`) or [`clear`] (a swap) closes the old channel so the old
-/// worker exits; the captured `SessionGuard` also stops it. Idempotent per session.
+/// worker exits; the captured `std::sync::Arc<crate::db::Session>` also stops it. Idempotent per session.
 pub fn spawn_follow_worker(handler: Arc<dyn InboundEventHandler>) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CommunityId>();
     // Re-send every pending id into the fresh queue: parked pre-worker
@@ -589,7 +588,7 @@ pub fn spawn_follow_worker(handler: Arc<dyn InboundEventHandler>) {
         }
     }
     *V2_FOLLOW_TX.lock().unwrap() = Some(tx);
-    let session = SessionGuard::capture();
+    let session = crate::db::current_session();
     crate::db::spawn_bound(async move {
         while let Some(id) = rx.recv().await {
             // Remove from pending BEFORE running, so a trigger arriving DURING the
@@ -606,7 +605,7 @@ pub fn spawn_follow_worker(handler: Arc<dyn InboundEventHandler>) {
 /// address, and a self-removal tears the community down (skipping control). No-op
 /// without a live client — unit tests drive `service::follow_control` /
 /// `follow_rekeys` directly.
-async fn follow_community(session: &SessionGuard, id: &CommunityId, handler: &dyn InboundEventHandler) {
+async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &CommunityId, handler: &dyn InboundEventHandler) {
     crate::db::scoped(async move {
         let Some(client) = crate::state::nostr_client() else {
             return;
@@ -792,12 +791,12 @@ mod tests {
         // and report account A's readiness for account B — the exact class of
         // per-account-global bug the swap-cache sweep exists to prevent.
         //
-        // Bumping the GLOBAL generation invalidates every live SessionGuard, so
+        // Bumping the GLOBAL generation invalidates every live std::sync::Arc<crate::db::Session>, so
         // serialize with the swap-sensitive tests via the same guard they hold.
         let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         mark_subscription_ready();
         assert!(subscription_ready(), "marked for the current session");
-        crate::state::bump_session_generation();
+        crate::db::close_database();
         assert!(!subscription_ready(), "an account swap invalidates it");
         mark_subscription_ready();
         assert!(subscription_ready(), "the new session's own pass re-arms it");

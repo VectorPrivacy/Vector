@@ -914,9 +914,9 @@ impl VectorCore {
                 .await.map_err(VectorError::Other)?;
 
             let self_wrap_client = client.clone();
-            let self_wrap_session = state::SessionGuard::capture();
+            let self_wrap_session = crate::db::current_session();
             db::spawn_bound(async move {
-                if !self_wrap_session.is_valid() { return; }
+                if !self_wrap_session.is_live() { return; }
                 let Ok(signer) = signer::active_signer() else { return };
                 if let Ok(wrap) = nostr_sdk::prelude::GiftWrapBuilder::new(my_public_key, rumor)
                     .finalize_async(&signer)
@@ -1166,7 +1166,7 @@ impl VectorCore {
         if relays.is_empty() {
             return Err(VectorError::Other("no relays available to host the Community".into()));
         }
-        let session = state::SessionGuard::capture();
+        let session = crate::db::current_session();
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
         let community = v2::create_community(&transport, name, relays, None)
             .await
@@ -1217,7 +1217,7 @@ impl VectorCore {
     /// is captured by the caller BEFORE its network I/O, so this STATE write is
     /// skipped if the account swapped mid-flight (else we'd write A's community
     /// into B's in-memory chats).
-    pub async fn register_v2_chats(&self, community: &crate::community::v2::community::CommunityV2, __session: &state::SessionGuard) {
+    pub async fn register_v2_chats(&self, community: &crate::community::v2::community::CommunityV2, __session: &std::sync::Arc<crate::db::Session>) {
         register_v2_chats_inner(community).await
     }
 }
@@ -1281,7 +1281,7 @@ impl VectorCore {
         // path); a v1 link is `…/invite#<base64url>` (fragment only). Try the v2
         // parser first — it only succeeds on the v2 shape — then fall through to v1.
         if crate::community::v2::invite::parse_invite_link(invite_url).is_ok() {
-            let session = state::SessionGuard::capture();
+            let session = crate::db::current_session();
             let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
             let community = crate::community::v2::service::accept_public_link(&transport, invite_url)
                 .await
@@ -1374,7 +1374,7 @@ impl VectorCore {
 
             // Dual-stack: a validating v2 bundle parse means a v2 Direct Invite.
             if crate::community::v2::invite::CommunityInvite::from_bundle_json(&bundle_json).is_ok() {
-                let session = state::SessionGuard::capture();
+                let session = crate::db::current_session();
                 // The inviter's hex (parked at receive) attributes the Guestbook Join.
                 let inviter = crate::db::community::list_pending_invites()
                     .ok()
@@ -2436,7 +2436,7 @@ impl VectorCore {
         let (community, channel) = self.resolve_channel(channel_id)?;
 
         // Guard straddles the fetch: the persist walk below writes this account's DB.
-        let session = state::SessionGuard::capture();
+        let session = crate::db::current_session();
         let events = send::fetch_channel_page(&transport, &community, &channel, None, None, limit.max(1))
             .await
             .map_err(VectorError::Other)?;
@@ -2453,7 +2453,7 @@ impl VectorCore {
         events: &[nostr_sdk::prelude::Event],
         channel: &crate::community::Channel,
         my_pk: nostr_sdk::prelude::PublicKey,
-        session: &state::SessionGuard,
+        session: &std::sync::Arc<crate::db::Session>,
     ) -> usize {
         crate::db::scoped(async move {
             use crate::community::inbound;
@@ -2468,7 +2468,7 @@ impl VectorCore {
             let mut pending: Vec<&crate::types::Message> = Vec::new();
             for o in &outcomes {
                 // Every arm below writes this account's DB — a swap can land between them.
-                if !session.is_valid() {
+                if !session.is_live() {
                     pending.clear();
                     break;
                 }
@@ -2583,7 +2583,7 @@ impl VectorCore {
         Self::ensure_v1_writable(&community)?;
         let my_pk = state::my_public_key().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-        let session = state::SessionGuard::capture();
+        let session = crate::db::current_session();
         let events = send::fetch_channel_page(&transport, &community, &channel, until_s, since_s, max)
             .await
             .map_err(VectorError::Other)?;
@@ -2721,7 +2721,7 @@ impl VectorCore {
     async fn v2_inline_follow(id: &crate::community::CommunityId) -> Vec<String> {
         crate::db::scoped(async move {
             use crate::community::transport::LiveTransport;
-            let session = state::SessionGuard::capture();
+            let session = crate::db::current_session();
             // Serialize with the live follow worker: `follow_worker_running` is
             // check-then-act, so a worker can spawn right after a caller saw `false` —
             // this shared per-community lock is what actually prevents two follows of
@@ -2797,7 +2797,7 @@ impl VectorCore {
     ) -> usize {
         // Guard straddles the fetch: a swap mid-fetch must not persist account A's chat
         // into account B's STATE/DB (the message ids are global).
-        let session = state::SessionGuard::capture();
+        let session = crate::db::current_session();
         let Some(my_pk) = state::my_public_key() else { return 0 };
         // CORD-02 §9: a dissolved community honors no NEW events — old history reads
         // through the explicit paths, but a catch-up sweep must not ingest anything
@@ -2847,7 +2847,7 @@ impl VectorCore {
     pub(crate) async fn v2_ingest_chat_page(
         channel_id: &str,
         my_pk: nostr_sdk::prelude::PublicKey,
-        session: crate::state::SessionGuard,
+        session: std::sync::Arc<crate::db::Session>,
         page: Vec<crate::community::v2::service::FetchedEvent>,
     ) -> usize {
         crate::db::scoped(async move {
@@ -2893,7 +2893,7 @@ impl VectorCore {
             // resurrect the deleted row). One tx per page in the common no-delete case.
             let mut pending: Vec<&crate::types::Message> = Vec::new();
             for outcome in &outcomes {
-                if !session.is_valid() {
+                if !session.is_live() {
                     pending.clear();
                     break;
                 }
@@ -3642,7 +3642,7 @@ impl VectorCore {
             }
 
             // Collect missing IDs from all relays
-            let cap_session = state::SessionGuard::capture();
+            let cap_session = crate::db::current_session();
             let mut all_missing: std::collections::HashSet<EventId> = std::collections::HashSet::new();
             while let Some((url, result, connected)) = relay_futs.next().await {
                 let Some(result) = result else {
@@ -3658,7 +3658,7 @@ impl VectorCore {
                     }
                     Ok(Err(e)) => {
                         log_warn!("[SyncDMs] {} failed: {}", url, e);
-                        if cap_session.is_valid()
+                        if cap_session.is_live()
                             && negentropy::classify_neg_sync_error(&e.to_string(), connected) == Some(false)
                         {
                             log_info!("[SyncDMs] {} marked no-NIP-77 for 24h", url);
@@ -4056,14 +4056,14 @@ impl VectorCore {
 
     /// Tear down the current session for an in-process account swap — the account-agnostic core of
     /// the app's `reset_session()`. Advances the session generation FIRST so any background task
-    /// holding a `SessionGuard` short-circuits before it can touch the next account's storage; shuts
+    /// holding a `std::sync::Arc<crate::db::Session>` short-circuits before it can touch the next account's storage; shuts
     /// the client down (which ends any `listen()` notification loop bound to it, so the old account's
     /// events can't land in the new account's DB); closes the DB pool; and clears the key vaults plus
     /// all in-memory per-account state. Follow with `login()` to bind the next account, then re-attach
     /// `listen()`. (The app's `reset_session()` additionally clears Tauri-only caches it owns.)
     pub async fn swap_session(&self) {
         // FIRST — invalidate every captured guard before any teardown begins.
-        state::bump_session_generation();
+        state::clear_message_tombstones();
 
         // Shut the client down before anything else: this detaches relay subscriptions and ends the
         // prior `listen()` loop, so it stops firing the old account's events into the new session.

@@ -1,5 +1,5 @@
 //! Concord v2 service — the stateful orchestration binding the pure v2 modules
-//! to storage + transport. Free functions, `SessionGuard`-gated at every write
+//! to storage + transport. Free functions, `std::sync::Arc<crate::db::Session>`-gated at every write
 //! (a `swap_session` can land at any await — see CLAUDE.md), mirroring the v1
 //! service's discipline.
 //!
@@ -23,7 +23,6 @@ use super::invite::{self, CommunityInvite};
 use super::rekey::{self, Continuity, RekeyScope};
 use super::{guestbook, stream, vsk};
 use crate::community::edition::ParsedEdition;
-use crate::state::SessionGuard;
 
 /// The active signer for v2 authority actions: the live client's signer — which
 /// covers a NIP-46 bunker / NIP-55 offline signer — falling back to the local
@@ -935,7 +934,7 @@ fn live_signers_for(list: &invite::InviteList, community_id_hex: &str, now_ms: u
 /// Publish the creator's Registry (vsk-8) edition — their live link signers for this
 /// community — so members fold it into the Public/Private source of truth (a
 /// non-empty aggregate = Public).
-async fn publish_invite_registry<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, __session: &SessionGuard, live_signers: &[PublicKey]) -> Result<(), String> {
+async fn publish_invite_registry<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, __session: &std::sync::Arc<crate::db::Session>, live_signers: &[PublicKey]) -> Result<(), String> {
     let my_pk = me_pk()?;
     let eid = super::derive::invite_links_locator(community.id(), &my_pk.to_bytes());
     let content = invite::build_registry_content(live_signers);
@@ -973,7 +972,7 @@ async fn refresh_invite_registry_cache<T: Transport + ?Sized>(transport: &T, com
 /// 13303 Invite List and refresh the Registry (CORD-05 §4/§5).
 async fn record_minted_link<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, minted: &MintedLink) -> Result<(), String> {
     crate::db::scoped(async move {
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         let signer = crate::signer::active_signer()?;
         let my_pk = me_pk()?;
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
@@ -1010,7 +1009,7 @@ async fn record_minted_link<T: Transport + ?Sized>(transport: &T, community: &Co
 /// the owner's separate read-cut).
 pub async fn revoke_public_link<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, token_hex: &str) -> Result<(), String> {
     crate::db::scoped(async move {
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         let signer = crate::signer::active_signer()?;
         let my_pk = me_pk()?;
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
@@ -1085,7 +1084,6 @@ pub async fn revoke_public_link<T: Transport + ?Sized>(transport: &T, community:
                         rotated = true;
                         break;
                     }
-                    Err(_) if !session.is_valid() => break,
                     Err(e) if attempt == 2 => {
                         crate::log_warn!(
                             "[v2] privatizing {} could not rotate the base key ({e}); the community reads Private but everyone who took a link keeps read access until it rotates",
@@ -1114,7 +1112,7 @@ pub async fn revoke_public_link<T: Transport + ?Sized>(transport: &T, community:
 /// across rotations. Best-effort.
 pub async fn refresh_public_links<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<(), String> {
     crate::db::scoped(async move {
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
         // Fetch inline (not via fetch_invite_list) so a TRANSPORT FAILURE propagates as
         // Err — the caller (a post-refounding refresh) must be able to retry, or live
@@ -1321,8 +1319,8 @@ fn flatten_link_sets(sets: &[crate::db::community::InviteLinkSetRow]) -> Vec<Str
 /// Accept an already-unwrapped bundle: verify the owner commitment AND that the
 /// delivered community_root is genuinely the owner's, persist the community, and
 /// announce a Guestbook Join (with invite attribution). Shared tail of both accept
-/// paths. Takes the caller's `SessionGuard` (captured BEFORE any network fetch the
-/// caller did) so the `is_valid()` gate straddles that I/O.
+/// paths. Takes the caller's `std::sync::Arc<crate::db::Session>` (captured BEFORE any network fetch the
+/// caller did) so the whole operation stays with one account across that I/O.
 async fn accept_bundle<T: Transport + ?Sized>(
     transport: &T,
     bundle: &CommunityInvite,
@@ -1352,7 +1350,7 @@ async fn accept_bundle<T: Transport + ?Sized>(
         // A preview verified the SAME (id, root) moments ago → reuse its fold instead
         // of re-walking the plane (the bundle re-fetch above kept the revocation gate).
         let handoff = VERIFIED_PREVIEW.lock().unwrap().take().filter(|v| {
-            v.session.is_valid()
+            v.session.is_live()
                 && v.at.elapsed() < VERIFIED_PREVIEW_TTL
                 && v.community_id == community.id().0
                 && v.community_root == community.community_root
@@ -1785,7 +1783,7 @@ async fn wait_for_bootstrap_relay(relays: &[String]) {
 /// a different delivered root never matches. The join's own bundle re-fetch is
 /// untouched, so the revocation gate always runs live.
 struct VerifiedPreview {
-    session: SessionGuard,
+    session: std::sync::Arc<crate::db::Session>,
     at: std::time::Instant,
     community_id: [u8; 32],
     community_root: [u8; 32],
@@ -1823,7 +1821,7 @@ pub async fn preview_bundle<T: Transport + ?Sized>(transport: &T, bundle: &Commu
         Ok(vj) => {
             let folded = vj.community;
             *VERIFIED_PREVIEW.lock().unwrap() = Some(VerifiedPreview {
-                session: SessionGuard::capture(),
+                session: crate::db::current_session(),
                 at: std::time::Instant::now(),
                 community_id: folded.id().0,
                 community_root: folded.community_root,
@@ -1842,7 +1840,7 @@ pub async fn preview_bundle<T: Transport + ?Sized>(transport: &T, bundle: &Commu
 /// Accept a public invite link: fetch its bundle (revocation-aware) and join.
 pub async fn accept_public_link<T: Transport + ?Sized>(transport: &T, url: &str) -> Result<CommunityV2, String> {
     crate::db::scoped(async move {
-        // Capture BEFORE the network fetch so the join's is_valid() gate straddles it.
+        // Held across the network fetch so the join stays with one account.
         let bundle = fetch_public_bundle(transport, url).await?;
         accept_bundle(transport, &bundle, None, true).await
     })
@@ -2340,7 +2338,6 @@ pub async fn is_dissolved<T: Transport + ?Sized>(transport: &T, community: &Comm
 /// transient miss never strands a published rekey with a half-anchored plane.
 pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, removed: &[PublicKey]) -> Result<CommunityV2, String> {
     crate::db::scoped(async move {
-        let session = SessionGuard::capture();
         let cid = community.id();
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&cid.0);
         // Death wins every race: a dissolved community never re-founds (CORD-02 §9).
@@ -2670,7 +2667,6 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
         for attempt in 0..3u8 {
             match refresh_public_links(transport, &updated).await {
                 Ok(()) => break,
-                Err(_) if !session.is_valid() => break, // swapped — stop touching this account
                 Err(e) if attempt == 2 => {
                     crate::log_warn!("v2: post-refounding public-link refresh failed after retries ({e}); live links may serve the prior root until the next refresh");
                 }
@@ -4264,7 +4260,7 @@ const MAX_VEND_EPOCH_LEAD: u64 = 1024;
 /// on the boot sweep.
 ///
 /// Returns the channels newly keyed up.
-pub fn absorb_parked_channel_keys(community: &CommunityV2, session: &SessionGuard) -> Vec<ChannelId> {
+pub fn absorb_parked_channel_keys(community: &CommunityV2, session: &std::sync::Arc<crate::db::Session>) -> Vec<ChannelId> {
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let parked = match crate::db::community::get_pending_channel_keys(&cid_hex) {
         Ok(p) if !p.is_empty() => p,
@@ -4297,7 +4293,7 @@ pub fn absorb_parked_channel_keys(community: &CommunityV2, session: &SessionGuar
         let channel_id = ChannelId(id_bytes);
         match judge_channel_key_vend(community, &roster, &channel_id, Epoch(p.epoch), &p.sender) {
             VendVerdict::Accept => {
-                if !session.is_valid() {
+                if !session.is_live() {
                     return adopted;
                 }
                 // First delivery vs rotation. A keyless channel must bypass the
@@ -5886,7 +5882,7 @@ pub async fn debug_explain_base_rekey<T: Transport + ?Sized>(
 pub async fn follow_rekeys<T: Transport + ?Sized>(
     transport: &T,
     community: &CommunityV2,
-    session: &SessionGuard,
+    session: &std::sync::Arc<crate::db::Session>,
 ) -> Result<RekeyFollow, String> {
     crate::db::scoped(async move {
         // Death wins every race (CORD-02 §9): a dissolved community honors no epoch advance
@@ -5901,7 +5897,7 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
         // into) a grave forever. Fail-open on transport failure: availability is
         // never death.
         if is_dissolved(transport, community).await {
-            if session.is_valid() {
+            if session.is_live() {
                 let _ = crate::db::community::set_community_dissolved(&cid_hex);
             }
             return Ok(RekeyFollow { updated: None, self_removed: false, dissolved: true, wedged: false });
@@ -6907,10 +6903,10 @@ mod tests {
 
         /// Become `actor`: swap the account DB + identity, as a real session swap.
         /// Bumps the session generation like production `swap_session` does — so any task a
-        /// prior actor spawned (e.g. the migration finalize) dies at its SessionGuard check
+        /// prior actor spawned (e.g. the migration finalize) dies at its std::sync::Arc<crate::db::Session> check
         /// instead of racing this actor's DB (a cross-test flake that can't happen in prod).
         fn swap_to(&self, actor: &Actor) {
-            crate::state::bump_session_generation();
+            crate::db::close_database();
             crate::db::set_current_account(actor.account.clone()).unwrap();
             crate::db::init_database(&actor.account).unwrap();
             crate::db::clear_id_caches();
@@ -6992,7 +6988,7 @@ mod tests {
         }
         async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> {
             let out = self.inner.publish_durable(e, r).await;
-            crate::state::bump_session_generation();
+            crate::db::close_database();
             out
         }
         async fn fetch(&self, q: &Query, r: &[String]) -> Result<Vec<Event>, String> {
@@ -8548,7 +8544,7 @@ mod tests {
 
         // The admin's follow adopts the whole pair from their 136-byte blob.
         bed.swap_to(&admin);
-        let follow = follow_rekeys(&bed.relay, &joined, &SessionGuard::capture()).await.unwrap();
+        let follow = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap();
         let adopted = follow.updated.expect("the admin adopts the rotation");
         assert_eq!(adopted.root_epoch, Epoch(1));
         assert_eq!(adopted.control_pk, refounded.control_pk);
@@ -8638,7 +8634,7 @@ mod tests {
         let readopted = accept_parked_invite(&bed.relay, &stale_bundle, None).await.unwrap();
         assert_eq!(readopted.root_epoch, Epoch(0), "re-anchored at the stale epoch");
         // ...then the walk crosses the split rotation and adopts the pair.
-        let follow = follow_rekeys(&bed.relay, &readopted, &SessionGuard::capture()).await.unwrap();
+        let follow = follow_rekeys(&bed.relay, &readopted, &crate::db::current_session()).await.unwrap();
         assert!(!follow.self_removed, "never a false removal on this build");
         let healed = follow.updated.expect("the walk adopts the split rotation");
         assert_eq!(healed.root_epoch, Epoch(1));
@@ -8693,7 +8689,7 @@ mod tests {
 
         // The member's follow PARKS: no adoption, and NEVER a removal.
         bed.swap_to(&member);
-        let follow = follow_rekeys(&bed.relay, &joined, &SessionGuard::capture()).await.unwrap();
+        let follow = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap();
         assert!(!follow.self_removed, "an unopenable blob at my locator is not an exclusion");
         assert!(follow.updated.is_none(), "nothing adopted from an unreadable blob");
         assert!(crate::db::community::load_community_v2(community.id()).unwrap().is_some(), "the community survives");
@@ -9269,7 +9265,7 @@ mod tests {
 
         // The member's follow concludes severance (no blob at the new epoch).
         bed.swap_to(&member);
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         assert!(follow_rekeys(&bed.relay, &joined, &session).await.unwrap().self_removed, "the member is cryptographically severed");
 
         // Owner unbans + re-invites: build the fresh epoch-1 bundle (accept it
@@ -9443,7 +9439,7 @@ mod tests {
         // Guard captured AFTER the swap: it must belong to the ACTING account (the harness
         // swap now bumps the generation exactly like a production swap_session).
         bed.swap_to(&member);
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         let follow = follow_rekeys(&bed.relay, &joined, &session).await.unwrap();
         assert!(follow.self_removed, "the removed member is cut by the re-founding");
     }
@@ -9501,7 +9497,7 @@ mod tests {
         let new_root = [0xC7; 32];
         publish_base_rotation(&bed.relay, &joined, &admin, &[owner.keys.public_key(), me.keys.public_key()], &new_root, &joined.community_root).await;
 
-        let updated = follow_rekeys(&bed.relay, &joined, &SessionGuard::capture()).await.unwrap().updated
+        let updated = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap().updated
             .expect("an authorized admin's Refounding is adopted");
         assert_eq!(updated.root_epoch, Epoch(1), "advanced past the admin's rotation");
         assert_eq!(updated.community_root, new_root, "adopted the admin's fresh root");
@@ -9541,7 +9537,7 @@ mod tests {
         let new_root = [0xD4; 32];
         publish_base_rotation(&bed.relay, &joined, &owner.keys, &[owner.keys.public_key(), me.keys.public_key()], &new_root, &joined.community_root).await;
 
-        let updated = follow_rekeys(&bed.relay, &joined, &SessionGuard::capture()).await.unwrap().updated
+        let updated = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap().updated
             .expect("the owner's Refounding is adopted");
         assert_eq!(updated.root_epoch, Epoch(1), "I advanced to the new epoch");
 
@@ -9576,7 +9572,7 @@ mod tests {
 
         // The admin re-founds delivering to me but NOT the owner — a takeover.
         publish_base_rotation(&bed.relay, &joined, &admin, &[me.keys.public_key()], &[0xEE; 32], &joined.community_root).await;
-        let follow = follow_rekeys(&bed.relay, &joined, &SessionGuard::capture()).await.unwrap();
+        let follow = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap();
         assert!(follow.updated.is_none() && !follow.self_removed, "an owner-excluding Refounding is not adopted");
     }
 
@@ -9606,7 +9602,7 @@ mod tests {
         // Admin A re-founds keeping the owner + me but EXCLUDING peer admin B.
         publish_base_rotation(&bed.relay, &joined, &admin_a, &[owner.keys.public_key(), me.keys.public_key()], &[0xDD; 32], &joined.community_root).await;
 
-        let follow = follow_rekeys(&bed.relay, &joined, &SessionGuard::capture()).await.unwrap();
+        let follow = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap();
         assert!(follow.updated.is_none() && !follow.self_removed, "excluding an equal-rank peer admin is inadmissible");
     }
 
@@ -9763,7 +9759,7 @@ mod tests {
         let rotation_events = bed.relay.stored_count() - before;
 
         let after_adopt = bed.relay.stored_count();
-        follow_rekeys(&bed.relay, &joined, &SessionGuard::capture()).await.unwrap();
+        follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap();
         assert_eq!(
             bed.relay.stored_count(),
             after_adopt,
@@ -9986,7 +9982,7 @@ mod tests {
         // The banned member's rekey-follow concludes they're severed. Guard captured AFTER
         // the swap (the harness swap bumps the generation like production).
         bed.swap_to(&member);
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         let follow = follow_rekeys(&bed.relay, &joined, &session).await.unwrap();
         assert!(follow.self_removed, "the banned member is cryptographically cut");
 
@@ -10166,7 +10162,7 @@ mod tests {
         send_message(&bed.relay, &community, &vault, "A: vault is open").await.unwrap();
         println!("[channel] +private #vault {} (B is unentitled — no delivery)", crate::simd::hex::bytes_to_hex_32(&vault.0));
         bed.swap_to(&b);
-        let session_b2 = SessionGuard::capture();
+        let session_b2 = crate::db::current_session();
         if let Some(fresh) = follow_control(&bed.relay, &b_view).await.unwrap() {
             b_view = fresh;
         }
@@ -10211,7 +10207,7 @@ mod tests {
         println!("[ban] B banned; root rolled to epoch 1; ban survives; pre-ban history intact (public + private)");
         // B concludes it's severed.
         bed.swap_to(&b);
-        let session_b3 = SessionGuard::capture();
+        let session_b3 = crate::db::current_session();
         assert!(follow_rekeys(&bed.relay, &b_view, &session_b3).await.unwrap().self_removed, "B is cryptographically cut by the ban-refound");
         println!("[ban] B's rekey-follow: self_removed = true (severed)");
 
@@ -10353,7 +10349,7 @@ mod tests {
         settle().await;
 
         become_acct(&b);
-        let session_b = SessionGuard::capture();
+        let session_b = crate::db::current_session();
         let mut b_view = crate::db::community::load_community_v2(b_view.id()).unwrap().unwrap();
         if let Some(fresh) = follow_control(&transport, &b_view).await.expect("B control follow") {
             b_view = fresh;
@@ -10409,7 +10405,7 @@ mod tests {
 
         // The member's catch-up learns of the death, seals, and refuses to post.
         bed.swap_to(&member);
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         let follow = follow_rekeys(&bed.relay, &joined, &session).await.unwrap();
         assert!(follow.dissolved, "the catch-up surfaces the tombstone");
         assert!(!follow.self_removed && follow.updated.is_none());
@@ -10462,7 +10458,7 @@ mod tests {
 
         // Member returns: bounded follow to quiescence.
         bed.swap_to(&member);
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         let mut passes = 0;
         loop {
             passes += 1;
@@ -10542,7 +10538,7 @@ mod tests {
         // The member RETURNS: rekey+control follow to quiescence (the worker's
         // loop, driven explicitly). Bounded — convergence must be fast.
         bed.swap_to(&member);
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         let mut passes = 0;
         loop {
             passes += 1;
@@ -11075,7 +11071,7 @@ mod tests {
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
         crate::db::community::delete_community(&cid_hex).unwrap();
 
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         let follow = follow_rekeys(&relay, &community, &session).await.unwrap();
         assert!(follow.updated.is_none() && !follow.self_removed, "a rekey follow racing a delete adopts nothing");
         assert!(crate::db::community::load_community_v2(community.id()).unwrap().is_none(), "the community stays deleted");
@@ -11527,7 +11523,7 @@ mod tests {
         crate::db::community::park_channel_key(&cid_hex, &chan_hex, 1, &real_key, &owner_hex).unwrap();
         crate::db::community::set_community_roles(&cid_hex, &empty, 0).unwrap();
         crate::db::community::save_community_v2(&member_view).unwrap();
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         let reloaded = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
         assert!(absorb_parked_channel_keys(&reloaded, &session).is_empty(), "unprovable vend adopts nothing");
         assert_eq!(
@@ -11608,7 +11604,7 @@ mod tests {
         crate::db::community::set_community_roles(&cid_hex, &roster, 1).unwrap();
         crate::db::community::park_channel_key(&cid_hex, &chan_hex, 0, &vended, &owner_hex).unwrap();
 
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         let reloaded = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
         let adopted = absorb_parked_channel_keys(&reloaded, &session);
         assert_eq!(adopted.len(), 1, "an epoch-0 vend onto a keyless channel is adopted");
@@ -11675,7 +11671,7 @@ mod tests {
         ));
         // REFUSED, not parked: a row nothing can ever discharge is its own leak.
         crate::db::community::park_channel_key(&cid_hex, &chan_hex, 1 << 40, &[0xEE; 32], &owner_hex).unwrap();
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         assert!(absorb_parked_channel_keys(&reloaded, &session).is_empty(), "a poison epoch adopts nothing");
         assert!(
             crate::db::community::get_pending_channel_keys(&cid_hex).unwrap().is_empty(),
@@ -11826,7 +11822,7 @@ mod tests {
             "the squatter never displaces the genuine vend — both are candidates"
         );
 
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         let reloaded = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
         let adopted = absorb_parked_channel_keys(&reloaded, &session);
         assert_eq!(adopted.len(), 1, "exactly one adoption");
@@ -11909,7 +11905,7 @@ mod tests {
         let (_tmp, _guard, _owner) = init_test_db();
         let relay = MemoryRelay::new();
         let community = create_community(&relay, "Still", vec!["wss://r".into()], None).await.unwrap();
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         let follow = follow_rekeys(&relay, &community, &session).await.unwrap();
         assert!(follow.updated.is_none() && !follow.self_removed, "no rotation → nothing to adopt");
     }
@@ -11923,7 +11919,7 @@ mod tests {
         // Owner rotates the base to epoch 1, delivering the new root to me.
         publish_base_rotation(&relay, &community, &owner, &[owner.public_key()], &new_root, &community.community_root).await;
 
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         let updated = follow_rekeys(&relay, &community, &session).await.unwrap().updated.expect("adopted");
         assert_eq!(updated.root_epoch, Epoch(1), "advanced one epoch");
         assert_eq!(updated.community_root, new_root, "adopted the fresh root");
@@ -11952,7 +11948,7 @@ mod tests {
             relay.publish(e, &community.relays).await.unwrap();
         }
 
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         let updated = follow_rekeys(&relay, &community, &session).await.unwrap().updated.expect("adopted");
         let ch = updated.channel(&priv_id).unwrap();
         assert_eq!(ch.epoch, Epoch(1), "the private channel advanced an epoch");
@@ -11970,7 +11966,7 @@ mod tests {
         let rogue = Keys::generate();
         publish_base_rotation(&relay, &community, &rogue, &[rogue.public_key()], &[0xEE; 32], &community.community_root).await;
 
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         let follow = follow_rekeys(&relay, &community, &session).await.unwrap();
         assert!(follow.updated.is_none() && !follow.self_removed, "a non-owner rotation is not adopted");
     }
@@ -11985,7 +11981,7 @@ mod tests {
         // prev_key ≠ the real community_root → the continuity check reads Fork.
         publish_base_rotation(&relay, &community, &owner, &[owner.public_key()], &[0xB2; 32], &[0x00; 32]).await;
 
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         let follow = follow_rekeys(&relay, &community, &session).await.unwrap();
         assert!(follow.updated.is_none(), "a fork off the wrong prev is not adopted");
     }
@@ -12007,7 +12003,7 @@ mod tests {
         let (wrap, _) = rekey::seal_rekey_chunk(&rumor, &group, &owner, Timestamp::from_secs(2_000)).unwrap();
         relay.publish(&wrap, &community.relays).await.unwrap();
 
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         let follow = follow_rekeys(&relay, &community, &session).await.unwrap();
         assert!(follow.updated.is_none() && !follow.self_removed, "an incomplete rotation neither adopts nor removes");
     }
@@ -12033,7 +12029,7 @@ mod tests {
 
         // The member's follow concludes removal (a complete rotation without their blob).
         bed.swap_to(&member);
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         let follow = follow_rekeys(&bed.relay, &joined, &session).await.unwrap();
         assert!(follow.self_removed, "a complete base rotation dropping the member removes them");
         assert!(follow.updated.is_none(), "a removed member adopts nothing");
@@ -12071,7 +12067,7 @@ mod tests {
         community.root_epoch = Epoch(1);
         crate::db::community::save_community_v2(&community).unwrap();
 
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         let updated = follow_rekeys(&relay, &community, &session).await.unwrap().updated.expect("the prior-root crate is found");
         let ch = updated.channel(&priv_id).unwrap();
         assert_eq!(ch.epoch, Epoch(2), "the channel advanced despite the moved base");
@@ -12114,7 +12110,7 @@ mod tests {
 
         // ONE follow: the cursor walks 0→1 (excluded, still keyless) and 1→2 (my
         // blob — adopt), because each real step re-loops.
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         let updated = follow_rekeys(&relay, &community, &session).await.unwrap().updated.expect("the walk lands on the included epoch");
         let ch = updated.channel(&priv_id).unwrap();
         assert_eq!(ch.epoch, Epoch(2), "cursor walked through the excluding epoch to the included one");
@@ -12152,7 +12148,7 @@ mod tests {
         for e in rekey::build_rekey_chunks_local(&admin, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob], 2_000, my_authority_citation(&community, &admin.public_key()).as_ref()).unwrap() {
             relay.publish(&e, &community.relays).await.unwrap();
         }
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         let updated = follow_rekeys(&relay, &community, &session).await.unwrap().updated.expect("an admin rotation is honored");
         assert_eq!(updated.channel(&priv_id).unwrap().key, Some(key2), "adopted the admin's key");
 
@@ -12207,7 +12203,7 @@ mod tests {
         for e in rekey::build_rekey_chunks_local(&peer, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[pb], 2_000, my_authority_citation(&held, &peer.public_key()).as_ref()).unwrap() {
             bed.relay.publish(&e, &held.relays).await.unwrap();
         }
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         let follow = follow_rekeys(&bed.relay, &held, &session).await.unwrap();
         assert!(follow.updated.is_none(), "an equal-rank rotation excluding me is Stay, never my removal");
         let reloaded = crate::db::community::load_community_v2(held.id()).unwrap().unwrap();
@@ -12430,7 +12426,7 @@ mod tests {
             relay.publish(&wrap, &community.relays).await.unwrap();
         }
 
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         let updated = follow_rekeys(&relay, &community, &session).await.unwrap().updated.expect("the genuine rotation is recovered past the flood");
         assert_eq!(updated.root_epoch, Epoch(1));
         assert_eq!(updated.community_root, new_root, "adopted the owner's root, not a junk one");
@@ -12496,7 +12492,7 @@ mod tests {
             relay.publish(&e, &community.relays).await.unwrap();
         }
 
-        let out = follow_rekeys(&relay, &community, &SessionGuard::capture()).await.unwrap();
+        let out = follow_rekeys(&relay, &community, &crate::db::current_session()).await.unwrap();
         assert!(out.updated.is_none(), "an uncited rotation is not adopted");
 
         // The SAME rotation, cited, is adopted — proving the refusal was the
@@ -12507,7 +12503,7 @@ mod tests {
         for e in rekey::build_rekey_chunks_local(&admin, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob2], 2_100, cited.as_ref()).unwrap() {
             relay.publish(&e, &community.relays).await.unwrap();
         }
-        let out = follow_rekeys(&relay, &community, &SessionGuard::capture()).await.unwrap();
+        let out = follow_rekeys(&relay, &community, &crate::db::current_session()).await.unwrap();
         assert!(out.updated.is_some(), "the cited rotation IS adopted");
     }
 
@@ -12551,7 +12547,7 @@ mod tests {
             }
         }
 
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         let updated = follow_rekeys(&relay, &community, &session).await.unwrap().updated.expect("adopts a winner");
         let adopted = updated.channel(&priv_id).unwrap().key.unwrap();
         assert_eq!(adopted, key_a, "converges on the lexicographically lowest key (deterministic across clients)");

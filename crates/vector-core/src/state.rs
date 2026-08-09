@@ -6,7 +6,7 @@
 use nostr_sdk::prelude::*;
 use std::sync::RwLock;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 
 use crate::chat::{Chat, ChatType};
@@ -426,17 +426,6 @@ impl NotifiedWelcomesHandle {
 // Session generation — defends background tasks against account swaps
 // ============================================================================
 //
-// Monotonic counter bumped at the start of `reset_session()`. Background
-// tasks capture the value via `SessionGuard::capture()` at spawn time and
-// check `is_valid()` before each side-effect; a stale guard means a swap
-// occurred and the task must exit. Defends the post-swap window — when
-// `NOSTR_CLIENT` is once again Some but it's account B's client and a
-// leaked account-A task would otherwise write A's state into B's DB.
-//
-// Pairs with `db::POOL_GENERATION`: pool counter defends the connection
-// pool's Drop pathway; this counter defends application-level work.
-
-static SESSION_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Session-scoped tombstones for NIP-09-deleted DM messages. The batching flush consults
 /// this POSITIVE deletion signal — never STATE absence, which also means LRU-evicted or
@@ -471,78 +460,35 @@ pub fn was_message_deleted(message_id: &str) -> bool {
     deleted_message_tombstones().lock().map(|s| s.contains(message_id)).unwrap_or(false)
 }
 
-/// Snapshot of the current session generation.
+/// Drop the delete-tombstone set on an account switch.
+///
+/// All that survives of the old session-generation counter. Everything else it
+/// invalidated now lives on the session and goes when that does; these are
+/// keyed by event id, which means nothing across accounts either way.
 #[inline]
-pub fn current_session_generation() -> u64 {
-    SESSION_GENERATION.load(Ordering::Acquire)
-}
-
-/// Advance the session generation. Called at the start of `reset_session()`
-/// so any task that captured the previous value before the swap can detect
-/// it and short-circuit before writing to the new account's state.
-#[inline]
-pub fn bump_session_generation() -> u64 {
+pub fn clear_message_tombstones() {
     if let Ok(mut set) = deleted_message_tombstones().lock() {
         set.clear();
-    }
-    SESSION_GENERATION.fetch_add(1, Ordering::AcqRel).wrapping_add(1)
-}
-
-/// Lightweight handle that remembers the session generation at the moment
-/// it was created. Pass it into background tasks (via move-capture into a
-/// spawned future) and check `is_valid()` before any side-effect.
-///
-/// Cheap to copy — just a `u64`. Never holds a lock.
-#[derive(Copy, Clone, Debug)]
-pub struct SessionGuard {
-    generation: u64,
-}
-
-impl SessionGuard {
-    /// Snapshot the current session generation for later validation.
-    #[inline]
-    pub fn capture() -> Self {
-        Self { generation: current_session_generation() }
-    }
-
-    /// `true` while the captured generation still matches the live counter.
-    /// Once `false`, any captured per-account context (npub, keys, chat ids)
-    /// is no longer guaranteed to belong to the active session.
-    #[inline]
-    pub fn is_valid(&self) -> bool {
-        self.generation == current_session_generation()
-    }
-
-    /// Raw generation value (for logging / structured comparisons).
-    #[inline]
-    pub fn generation(&self) -> u64 {
-        self.generation
     }
 }
 
 #[cfg(test)]
-mod session_generation_tests {
-    use super::*;
+mod session_identity_tests {
 
+    /// A session held across an account switch knows it is no longer the one on
+    /// screen. This is the whole of what the generation counter used to do, and
+    /// it now falls out of the session's own identity.
     #[test]
-    fn guard_is_valid_when_no_swap_occurred() {
-        let guard = SessionGuard::capture();
-        assert!(guard.is_valid());
-    }
+    fn a_held_session_stops_being_live_once_the_account_changes() {
+        let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let held = crate::db::current_session();
+        assert!(held.is_live(), "it is the account on screen to begin with");
 
-    #[test]
-    fn guard_invalidates_after_bump() {
-        let guard = SessionGuard::capture();
-        bump_session_generation();
-        assert!(!guard.is_valid(), "guard must invalidate after a swap");
-    }
+        crate::db::close_database();
 
-    #[test]
-    fn bump_advances_counter_monotonically() {
-        let before = current_session_generation();
-        let after = bump_session_generation();
-        assert_eq!(after, before.wrapping_add(1));
-        assert_eq!(current_session_generation(), after);
+        assert!(!held.is_live(), "and is not, once the account has switched");
+        assert!(crate::db::current_session().is_live(), "whoever came next is");
+        assert_ne!(held.id(), crate::db::current_session_id(), "they are different sessions");
     }
 }
 
@@ -655,15 +601,11 @@ mod session_globals_tests {
         clear_pending_nip55_setup();
         assert!(pending_nip55_setup().is_none(), "cleared returns None");
 
-        // SessionGuard interaction — capturing then bumping invalidates the
-        // captured guard. This mirrors the contract every Tauri command that
-        // mutates per-account state relies on (see CLAUDE.md SessionGuard
-        // section).
-        let guard = SessionGuard::capture();
-        assert!(guard.is_valid(), "fresh capture is valid");
-        bump_session_generation();
-        assert!(!guard.is_valid(),
-            "captured guard must invalidate after generation bump");
+        // A session held across the switch knows it is no longer current.
+        let held = crate::db::current_session();
+        assert!(held.is_live(), "the account on screen to begin with");
+        crate::db::close_database();
+        assert!(!held.is_live(), "and not, once the account has switched");
     }
 }
 

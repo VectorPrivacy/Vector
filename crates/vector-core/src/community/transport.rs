@@ -390,7 +390,7 @@ async fn drop_unrevivable_targets(client: &Client, targets: Vec<String>) -> Vec<
 }
 
 fn breaker_tripped(url: &str) -> bool {
-    breaker_tripped_at(crate::state::current_session_generation(), url)
+    breaker_tripped_at(crate::db::current_session_id(), url)
 }
 
 fn breaker_tripped_at(generation: u64, url: &str) -> bool {
@@ -404,7 +404,7 @@ fn breaker_tripped_at(generation: u64, url: &str) -> bool {
 /// Record a per-relay fetch outcome. Success resets the entry; a failure counts
 /// toward a trip only when the relay had its full timeout budget.
 fn breaker_record(url: &str, success: bool, full_budget: bool) {
-    breaker_record_at(crate::state::current_session_generation(), url, success, full_budget)
+    breaker_record_at(crate::db::current_session_id(), url, success, full_budget)
 }
 
 fn breaker_record_at(generation: u64, url: &str, success: bool, full_budget: bool) {
@@ -493,7 +493,7 @@ pub fn clear_plane_pool() {
         // generation (a fetch_plane that captured the old value before the swap)
         // sees the mismatch and disconnects its client instead of re-pooling one
         // still authed as the swapped-out account's plane key.
-        g.0 = crate::state::current_session_generation();
+        g.0 = crate::db::current_session_id();
         g.1.drain().map(|(_, p)| p.client).collect()
     };
     disconnect_clients(drained);
@@ -917,7 +917,7 @@ impl LiveTransport {
         // Fast path: every one of these relays was already warmed this session → the pool holds and
         // (auto-)maintains them, so skip the redundant add_relay + connect churn that otherwise runs on
         // EVERY fetch/publish. Account swaps bump the generation, dropping the cache.
-        let generation = crate::state::current_session_generation();
+        let generation = crate::db::current_session_id();
         {
             let warmed = WARMED_RELAYS.lock().unwrap_or_else(|e| e.into_inner());
             if warmed.0 == generation && relays.iter().all(|r| warmed.1.contains(r)) {
@@ -1224,7 +1224,7 @@ impl Transport for LiveTransport {
             targets = relays.to_vec();
         }
         let filter = query.to_filter();
-        let generation = crate::state::current_session_generation();
+        let generation = crate::db::current_session_id();
         let key = plane_pool_key(&plane.public_key().to_hex(), &targets);
 
         // Reuse a warm, already-authed pooled connection if one exists — this is

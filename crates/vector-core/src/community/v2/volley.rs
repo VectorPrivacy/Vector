@@ -25,7 +25,7 @@ use crate::community::v2::derive::{channel_group_key, GroupKey};
 use crate::community::v2::service::FetchedEvent;
 use crate::community::v2::{chat, stream};
 use crate::community::{ChannelId, CommunityId, Epoch};
-use crate::state::{self, SessionGuard};
+use crate::state::{self};
 
 /// One channel to paint. `since` = the chat's last held message (seconds,
 /// minus the caller's slack) so the page carries only genuinely-new wraps.
@@ -101,7 +101,7 @@ pub struct VolleyStats {
 /// that gained messages (callers own the logging) plus stage stats.
 pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, VolleyStats) {
     crate::db::scoped(async move {
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         let mut stats = VolleyStats::default();
         let Some(my_pk) = state::my_public_key() else {
             return (Vec::new(), stats);
@@ -337,7 +337,7 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
                 let new = crate::VectorCore::v2_ingest_chat_page(
                     &jobs[job_idx].channel_hex,
                     my_pk,
-                    session,
+                    session.clone(),
                     page,
                 )
                 .await;
@@ -447,7 +447,7 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
             let new = crate::VectorCore::v2_ingest_chat_page(
                 &jobs[job_idx].channel_hex,
                 my_pk,
-                session,
+                session.clone(),
                 page,
             )
             .await;

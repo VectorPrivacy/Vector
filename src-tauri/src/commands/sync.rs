@@ -108,7 +108,6 @@ async fn windowed_req_catchup(
     my_public_key: PublicKey,
     since_secs: u64,
     is_new: bool,
-    session: &vector_core::state::SessionGuard,
 ) -> (u32, u32) {
     let filter = Filter::new()
         .pubkey(my_public_key)
@@ -138,10 +137,10 @@ async fn windowed_req_catchup(
                     new_count += 1;
                 }
                 if batcher.buffered() >= PERSIST_BATCH {
-                    batcher.flush(session).await;
+                    batcher.flush().await;
                 }
             }
-            batcher.flush(session).await;
+            batcher.flush().await;
         }
         Err(e) => eprintln!("[Sync] REQ catch-up failed: {}", e),
     }
@@ -319,14 +318,14 @@ pub async fn fetch_messages<R: Runtime>(
 
             // Pin to the session whose items/pubkey drive this reconcile — captured BEFORE the
             // reconcile so a swap during it invalidates the whole fetch+commit pipeline.
-            let recon_session = vector_core::state::SessionGuard::capture();
+            let recon_session = vector_core::db::current_session();
 
             // A fresh no-NIP-77 verdict means reconciling is doomed — catch up with
             // a windowed REQ so the reconnect still recovers missed messages.
             if vector_core::negentropy::neg_supported_cached(&url) == Some(false) {
                 let since = Timestamp::now().as_secs().saturating_sub(NIP59_BACKDATE_SLACK);
                 let (fetched, new) = windowed_req_catchup(
-                    &client, vec![url.clone()], my_public_key, since, true, &recon_session,
+                    &client, vec![url.clone()], my_public_key, since, true,
                 ).await;
                 println!("[Sync] Single-relay {} REQ catch-up (no NIP-77): {} events, {} new",
                     url, fetched, new);
@@ -387,7 +386,7 @@ pub async fn fetch_messages<R: Runtime>(
                     // Deterministic refusals ONLY: this path runs a 3s budget over
                     // a stretched item set — a connected timeout here says the
                     // budget was small, not that the relay lacks NIP-77.
-                    if recon_session.is_valid()
+                    if recon_session.is_live()
                         && vector_core::negentropy::classify_neg_sync_error(&e.to_string(), false)
                             == Some(false)
                     {
@@ -399,7 +398,7 @@ pub async fn fetch_messages<R: Runtime>(
                     // disconnect gap.
                     let since = Timestamp::now().as_secs().saturating_sub(NIP59_BACKDATE_SLACK);
                     let (fetched, new) = windowed_req_catchup(
-                        &client, vec![url.clone()], my_public_key, since, true, &recon_session,
+                        &client, vec![url.clone()], my_public_key, since, true,
                     ).await;
                     println!("[Sync] Single-relay {} REQ catch-up: {} events, {} new",
                         url, fetched, new);
@@ -409,7 +408,7 @@ pub async fn fetch_messages<R: Runtime>(
                     eprintln!("[Sync] Single-relay {} negentropy timed out after {:?}", url, neg_budget);
                     let since = Timestamp::now().as_secs().saturating_sub(NIP59_BACKDATE_SLACK);
                     let (fetched, new) = windowed_req_catchup(
-                        &client, vec![url.clone()], my_public_key, since, true, &recon_session,
+                        &client, vec![url.clone()], my_public_key, since, true,
                     ).await;
                     println!("[Sync] Single-relay {} REQ catch-up: {} events, {} new",
                         url, fetched, new);
@@ -450,7 +449,7 @@ pub async fn fetch_messages<R: Runtime>(
                                     // stops the loser from notifying twice.
                                     crate::services::tauri_commit_prepared_event_with(prepared, true, &recon_batcher).await;
                                     if recon_batcher.buffered() >= PERSIST_BATCH {
-                                        recon_batcher.flush(&recon_session).await;
+                                        recon_batcher.flush().await;
                                     }
                                 }
                             }
@@ -460,7 +459,7 @@ pub async fn fetch_messages<R: Runtime>(
                         }
                     }
                 }
-                recon_batcher.flush(&recon_session).await;
+                recon_batcher.flush().await;
             }
 
             return;
@@ -792,7 +791,7 @@ pub async fn fetch_messages<R: Runtime>(
         // negentropy phase below, which routinely takes 10s+. Communities must not wait on it. Detached:
         // the sweep windows itself (3 in flight) and emits message_new as pages land. init_finished was
         // already emitted above, so the frontend holds the Community chat rows before any page arrives.
-        // SessionGuard captured before the spawn boundary (swap-safe); the sweep re-captures internally.
+        // std::sync::Arc<crate::db::Session> captured before the spawn boundary (swap-safe); the sweep re-captures internally.
         vector_core::db::spawn_bound(async move {
             let _ = crate::commands::community::sync_communities_boot().await;
         });
@@ -813,7 +812,7 @@ pub async fn fetch_messages<R: Runtime>(
 
         // Pins the quick phase's batched persists to the session that started them — a swap
         // mid-drain drops the unflushed buffer instead of writing it into the next account.
-        let quick_session = vector_core::state::SessionGuard::capture();
+        let quick_session = vector_core::db::current_session();
 
         // ── EOSE quick sync ──────────────────────────────────────────────────
         // One since-bounded REQ per relay, all concurrent, read to GENUINE EOSE
@@ -986,7 +985,7 @@ pub async fn fetch_messages<R: Runtime>(
 
         // EOSE + everything in the window committed = the same proof a
         // zero-missing reconcile gave: relay and ledger agree through the anchor.
-        if flushes_ok && quick_session.is_valid() {
+        if flushes_ok && quick_session.is_live() {
             for url in &clean_relays {
                 vector_core::negentropy::advance_reconcile_cursor(url.as_str(), sync_anchor);
             }
@@ -1010,7 +1009,7 @@ pub async fn fetch_messages<R: Runtime>(
         // Runs after Quick Sync so it can't contend for boot-window bandwidth.
         {
             let bg_client = client.clone();
-            let session = vector_core::state::SessionGuard::capture();
+            let session = vector_core::db::current_session();
             vector_core::db::spawn_bound(async move {
                 match vector_core::blossom_servers::fetch_and_merge_own_list(&bg_client, my_public_key).await {
                     Ok(0) => {}
@@ -1018,7 +1017,7 @@ pub async fn fetch_messages<R: Runtime>(
                     Err(e) => vector_core::log_warn!("[BlossomServers] Bootstrap fetch failed: {}", e),
                 }
 
-                if !session.is_valid() { return; }
+                if !session.is_live() { return; }
                 // Route through the active client signer (covers both local
                 // and bunker accounts).
                 let _client = match crate::nostr_client() { Some(c) => c, None => return };
@@ -1047,7 +1046,7 @@ pub async fn fetch_messages<R: Runtime>(
             // Bound to the account that started it. Its writes and its sync-progress
             // events follow that account; the remaining guard below is about not
             // burning relay bandwidth on a sync nobody is waiting for any more.
-            let archive_session = vector_core::state::SessionGuard::capture();
+            let archive_session = vector_core::db::current_session();
             vector_core::db::spawn_bound(async move {
                 let archive_start = std::time::Instant::now();
                 let mut archive_new = 0u32;
@@ -1226,7 +1225,7 @@ pub async fn fetch_messages<R: Runtime>(
                             // `connected: false` — a full-history reconcile can
                             // legitimately outrun its timeout, so only the SDK's
                             // deterministic refusals classify here.
-                            if archive_session.is_valid()
+                            if archive_session.is_live()
                                 && vector_core::negentropy::classify_neg_sync_error(&e.to_string(), false)
                                     == Some(false)
                             {
@@ -1244,7 +1243,7 @@ pub async fn fetch_messages<R: Runtime>(
                 if !futs.is_empty() {
                     println!("[Sync] Archive: detaching {} straggler relay(s)", futs.len());
                     let det_client = bg_client.clone();
-                    let det_session = vector_core::state::SessionGuard::capture();
+                    let det_session = vector_core::db::current_session();
                     let primary_set: std::collections::HashSet<EventId> =
                         all_missing.iter().copied().collect();
                     vector_core::db::spawn_bound(async move {
@@ -1271,7 +1270,7 @@ pub async fn fetch_messages<R: Runtime>(
                                 }
                                 Ok(Err(e)) => {
                                     eprintln!("[Sync][BG] Archive straggler {} failed: {}", url, e);
-                                    if det_session.is_valid()
+                                    if det_session.is_live()
                                         && vector_core::negentropy::classify_neg_sync_error(&e.to_string(), false)
                                             == Some(false)
                                     {
@@ -1304,14 +1303,14 @@ pub async fn fetch_messages<R: Runtime>(
                                         ).await;
                                         crate::services::tauri_commit_prepared_event_with(prepared, false, &det_batcher).await;
                                         if det_batcher.buffered() >= PERSIST_BATCH {
-                                            det_batcher.flush(&det_session).await;
+                                            det_batcher.flush().await;
                                         }
                                     }
                                 }
                                 Err(e) => eprintln!("[Sync][BG] Archive straggler fetch error: {}", e),
                             }
                         }
-                        det_batcher.flush(&det_session).await;
+                        det_batcher.flush().await;
                         println!("[Sync][BG] Archive stragglers complete");
                     });
                 }

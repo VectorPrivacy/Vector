@@ -498,7 +498,7 @@ pub async fn ingest_remote_list_event(
 static REPUBLISH_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Coalesce rapid join/leave/refresh mutations into one network publish. The local mirror is already
-/// updated by the caller; this only pushes it out. Stamps the publish clock + captures `SessionGuard`
+/// updated by the caller; this only pushes it out. Stamps the publish clock + captures `std::sync::Arc<crate::db::Session>`
 /// BEFORE the debounce sleep, mirroring `republish_emoji_list_debounced`.
 pub fn republish_community_list_debounced() {
     use std::sync::atomic::Ordering;
@@ -698,7 +698,7 @@ pub enum RehydrateOutcome {
 pub async fn rehydrate_community_from_seed<T: super::transport::Transport + ?Sized>(
     transport: &T,
     entry: &CommunityListEntry,
-    session: crate::state::SessionGuard,
+    session: std::sync::Arc<crate::db::Session>,
 ) -> Result<RehydrateOutcome, String> {
     crate::db::scoped(async move {
         // Validate the id is real 64-char hex — `hex_to_bytes_32` is lenient (zero-pads/zero-decodes), so a
@@ -720,7 +720,7 @@ pub async fn rehydrate_community_from_seed<T: super::transport::Transport + ?Siz
         // Deliberately NOT behind `migration::gate_fresh_v1_join`: this replays a membership the
         // user already holds on a sibling device — cross-device sync, not a fresh on-ramp.
         let community = super::service::accept_invite(entry.current())?;
-        if !session.is_valid() {
+        if !session.is_live() {
             // Session swapped: the DB pool may now be another account's — do NOT delete (it'd hit the wrong DB).
             return Err("account changed during rehydrate".to_string());
         }

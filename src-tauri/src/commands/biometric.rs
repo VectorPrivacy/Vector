@@ -178,7 +178,7 @@ async fn generate_and_wrap(
         // rather than re-deriving it.
         let key = crate::crypto::hash_pass((*secret).clone()).await;
 
-        let session = vector_core::state::SessionGuard::capture();
+        let session = vector_core::db::current_session();
         let alias = keystore_alias(npub);
 
         let wrapped = tokio::task::spawn_blocking(move || {
@@ -289,7 +289,7 @@ pub async fn switch_to_biometric<R: Runtime>(handle: AppHandle<R>) -> Result<(),
             return Err("This account already unlocks with biometrics".to_string());
         }
         let _switch = SwitchGuard::try_enter()?;
-        let session = vector_core::state::SessionGuard::capture();
+        let session = vector_core::db::current_session();
         let npub = crate::account_manager::get_current_account()?;
         // The derived key comes back from the wrap step: deriving it twice is
         // two full Argon2id runs AND an unwritten assumption that both agree
@@ -354,14 +354,14 @@ pub async fn biometric_login<R: Runtime>(handle: AppHandle<R>) -> Result<String,
         // Snapshot session + account ONCE; the row read and the keystore alias
         // must both come from the same snapshot or a swap mid-flow could pair
         // account A's blob with account B's alias.
-        let session = vector_core::state::SessionGuard::capture();
+        let session = vector_core::db::current_session();
         let npub = crate::account_manager::get_current_account()?;
         let alias = keystore_alias(&npub);
         let wrapped = vector_core::db::get_sql_setting(WRAPPED_KEY_SETTING.to_string())
             .ok()
             .flatten()
             .ok_or("BIOMETRIC_NOT_ENROLLED")?;
-        if !session.is_valid() {
+        if !session.is_live() {
             return Err("BIOMETRIC_UNAVAILABLE".to_string());
         }
 
@@ -385,7 +385,7 @@ pub async fn biometric_login<R: Runtime>(handle: AppHandle<R>) -> Result<String,
                 // convert a retryable hiccup into permanent store loss. Leave
                 // the enrollment intact; the recovery screen makes any wipe an
                 // explicit user decision.
-                if session.is_valid() && !is_biometric_only() {
+                if session.is_live() && !is_biometric_only() {
                     clear_biometric_enrollment();
                 }
                 return Err("BIOMETRIC_INVALIDATED".to_string());
@@ -393,7 +393,7 @@ pub async fn biometric_login<R: Runtime>(handle: AppHandle<R>) -> Result<String,
             Err(crate::android::biometric::BiometricError::Other(msg)) => return Err(msg),
         };
 
-        if !session.is_valid()
+        if !session.is_live()
             || crate::nostr_client().is_some()
             || crate::commands::account::full_session_initialized()
         {
@@ -410,14 +410,14 @@ pub async fn biometric_login<R: Runtime>(handle: AppHandle<R>) -> Result<String,
         if !verify_candidate_key(&key) {
             use zeroize::Zeroize;
             key.zeroize();
-            if session.is_valid() && !is_biometric_only() {
+            if session.is_live() && !is_biometric_only() {
                 clear_biometric_enrollment();
             }
             return Err("BIOMETRIC_INVALIDATED".to_string());
         }
 
         // Final gate before the vault: the verify reads above straddle DB I/O.
-        if !session.is_valid() {
+        if !session.is_live() {
             use zeroize::Zeroize;
             key.zeroize();
             return Err("BIOMETRIC_UNAVAILABLE".to_string());

@@ -209,7 +209,7 @@ pub async fn reconcile_missing(
             });
         }
 
-        let session = crate::state::SessionGuard::capture();
+        let session = crate::db::current_session();
         let mut missing: HashSet<EventId> = HashSet::new();
         while let Some((url, result, connected)) = futs.next().await {
             let Some(result) = result else {
@@ -225,7 +225,7 @@ pub async fn reconcile_missing(
                 }
                 Ok(Err(e)) => {
                     crate::log_warn!("[Negentropy] {} failed: {}", url, e);
-                    if session.is_valid()
+                    if session.is_live()
                         && classify_neg_sync_error(&e.to_string(), connected) == Some(false)
                     {
                         crate::log_info!("[Negentropy] {} marked no-NIP-77 for 24h", url);

@@ -568,7 +568,7 @@ static REFRESH_INFLIGHT: std::sync::LazyLock<std::sync::Mutex<std::collections::
 /// `true` while the last completed refresh for this chat is within TTL AND
 /// covered exactly `bot_hexes`.
 pub fn commands_fresh(chat_id: &str, bot_hexes: &[String]) -> bool {
-    let generation = crate::state::SessionGuard::capture().generation();
+    let generation = crate::db::current_session_id();
     let map = match COMMANDS_FRESH.lock() {
         Ok(m) => m,
         Err(_) => return false,
@@ -599,7 +599,7 @@ pub fn spawn_commands_refresh(chat_id: String, bots: Vec<nostr_sdk::prelude::Pub
             return; // already fetching for this chat
         }
     }
-    let session = crate::state::SessionGuard::capture();
+    let session = crate::db::current_session();
     crate::db::spawn_bound(async move {
         let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(5));
         let fetched = fetch_manifests(&transport, &bots, &relays).await;
@@ -614,7 +614,7 @@ pub fn spawn_commands_refresh(chat_id: String, bots: Vec<nostr_sdk::prelude::Pub
         }
         let bot_hexes: Vec<String> = bots.iter().map(|p| p.to_hex()).collect();
         let commands = assemble_from_store(&bot_hexes);
-        mark_commands_fresh(&chat_id, session.generation(), &bot_hexes);
+        mark_commands_fresh(&chat_id, session.id(), &bot_hexes);
         crate::traits::emit_event(
             "chat_commands_updated",
             &serde_json::json!({ "chat_id": chat_id, "bots": bots.len(), "commands": commands }),
@@ -993,7 +993,7 @@ mod tests {
     fn command_freshness_is_generation_ttl_and_botset_scoped() {
         // Serialize with bed tests — they bump the session generation mid-test.
         let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|p| p.into_inner());
-        let generation = crate::state::SessionGuard::capture().generation();
+        let generation = crate::db::current_session_id();
         let bots = vec!["aa".to_string(), "bb".to_string()];
 
         assert!(!commands_fresh("cmd-fresh-a", &bots), "unseen chat is stale");

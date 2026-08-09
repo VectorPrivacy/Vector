@@ -1760,13 +1760,13 @@ pub async fn compute_unread_anchor(chat_identifier: &str) -> Result<UnreadMark, 
 pub async fn flush_message_batch(
     chat_id: &str,
     pending: &mut Vec<&Message>,
-    session: &crate::state::SessionGuard,
+    session: &std::sync::Arc<crate::db::Session>,
 ) {
     crate::db::scoped(async move {
         if pending.is_empty() {
             return;
         }
-        if !session.is_valid() {
+        if !session.is_live() {
             pending.clear();
             return;
         }
@@ -2557,7 +2557,7 @@ mod tests {
         delete_event("resurrect-me").await.unwrap();
 
         // Simulated restart/swap: the in-session set dies...
-        crate::state::bump_session_generation();
+        crate::db::close_database();
         assert!(!crate::state::was_message_deleted("resurrect-me"), "session set cleared");
         // ...and account init re-seeds the refusal from the durable rows.
         crate::state::seed_message_tombstones(load_message_tombstones().unwrap());

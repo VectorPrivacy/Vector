@@ -17,7 +17,6 @@ use tokio::sync::Mutex;
 use crate::community::{derive, inbound, roster, service, Channel, CommunityId, Epoch};
 use crate::community::transport::LiveTransport;
 use crate::event_handler::InboundEventHandler;
-use crate::state::SessionGuard;
 use crate::stored_event::event_kind;
 use crate::ClientRelayExt;
 

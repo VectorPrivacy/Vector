@@ -705,6 +705,13 @@ impl Session {
             .expect("keyed by its own TypeId")
     }
 
+    /// This session's identity. Stable across a re-initialise of the same
+    /// account, distinct for every other. Callers that key a cache by "which
+    /// account is this" use it in place of the old generation counter.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
     /// Whether this session is the account currently on screen.
     ///
     /// For code holding a session it captured earlier — a drop handler, a
@@ -776,7 +783,7 @@ tokio::task_local! {
 ///
 /// A task bound by [`spawn_bound`] gets the account it started under, for its
 /// whole life, however many awaits it spans and whoever logs in meanwhile. That
-/// is the property the SessionGuard checks were approximating by hand.
+/// is the property the std::sync::Arc<crate::db::Session> checks were approximating by hand.
 ///
 /// Unbound callers (startup, the UI command that performs the swap itself) get
 /// the live account, which for them is the correct and only meaningful answer.
@@ -845,6 +852,17 @@ where
     let session = current_session();
     // spawn-detached: this IS the binding — it installs the session it just read.
     tokio::spawn(TASK_SESSION.scope(session, fut))
+}
+
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session").field("id", &self.id).field("db", &self.db_path).finish()
+    }
+}
+
+/// The live account's session id — for caches keyed by "which account is this".
+pub fn current_session_id() -> u64 {
+    current_session().id
 }
 
 /// Whether the work running here belongs to the account currently on screen.
@@ -1424,7 +1442,7 @@ mod pool_generation_tests {
 
     #[tokio::test]
     async fn a_bound_task_keeps_its_account_across_a_swap() {
-        // What the SessionGuard checks were approximating by hand: the task
+        // What the std::sync::Arc<crate::db::Session> checks were approximating by hand: the task
         // began under account A, so its work resolves to A however many awaits
         // it spans and whoever logs in meanwhile. No check, nothing to forget.
         // The live session stands in for whoever logged in next.

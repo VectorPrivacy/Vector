@@ -162,7 +162,7 @@ pub fn note_own_badge_confirmed(pubkey: &PublicKey, has_badge: bool) {
 }
 
 /// Fetch our own badges and persist to the per-account cache. Called once
-/// after initial sync. The SessionGuard straddles the network fetch so a
+/// after initial sync. The std::sync::Arc<crate::db::Session> straddles the network fetch so a
 /// mid-fetch account swap can't write account A's badge into account B's DB.
 pub async fn refresh_own_badges() {
     crate::db::scoped(async move {

@@ -104,9 +104,9 @@ impl SendCallback for TauriSendCallback {
         // its real id, orphaning that row as a ghost duplicate on reload.
         if old_id.starts_with("pending-") && old_id != msg.id {
             let pending_id = old_id.to_string();
-            let session = vector_core::state::SessionGuard::capture();
+            let session = vector_core::db::current_session();
             vector_core::db::spawn_bound(async move {
-                if !session.is_valid() { return; }
+                if !session.is_live() { return; }
                 let _ = vector_core::db::events::delete_event(&pending_id);
             });
         }

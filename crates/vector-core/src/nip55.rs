@@ -318,7 +318,7 @@ pub fn drain_nip55_state() {
 /// over the platform hook. Cheap to clone (just a pubkey + a session
 /// generation snapshot).
 ///
-/// Captures a [`SessionGuard`](crate::state::SessionGuard) at construction:
+/// Captures a [`std::sync::Arc<crate::db::Session>`](std::sync::Arc<crate::db::Session>) at construction:
 /// state flips after an account swap are suppressed so an in-flight op
 /// resolving against the previous account can't leak `nip55_state` onto the new
 /// one. Wrong-key is impossible regardless — every op is bound to
@@ -327,7 +327,7 @@ pub fn drain_nip55_state() {
 #[derive(Debug, Clone)]
 pub struct Nip55Signer {
     user_pubkey: PublicKey,
-    session: crate::state::SessionGuard,
+    session: std::sync::Arc<crate::db::Session>,
 }
 
 impl Nip55Signer {
@@ -336,7 +336,7 @@ impl Nip55Signer {
     pub fn new(user_pubkey: PublicKey) -> Self {
         Self {
             user_pubkey,
-            session: crate::state::SessionGuard::capture(),
+            session: crate::db::current_session(),
         }
     }
 
@@ -349,7 +349,7 @@ impl Nip55Signer {
     /// Flip observable state only while the captured session is still active.
     #[inline]
     fn flip(&self, state: Nip55State) {
-        if self.session.is_valid() {
+        if self.session.is_live() {
             set_nip55_state(state);
         }
     }
@@ -446,8 +446,8 @@ impl Nip55Signer {
     /// Test-only view onto the captured guard so a test can assert the wrapper
     /// is bound to the session generation at construction.
     #[cfg(test)]
-    pub(crate) fn session_generation_for_test(&self) -> u64 {
-        self.session.generation()
+    pub(crate) fn session_id_for_test(&self) -> u64 {
+        self.session.id()
     }
 }
 
@@ -642,14 +642,13 @@ mod tests {
         assert_eq!(pk, keys.public_key());
     }
 
-    // NIP55_STATE and SESSION_GENERATION are process-wide. Cargo runs #[test]
+    // NIP55_STATE is process-wide. Cargo runs #[test]
     // functions in parallel, so every mutation of NIP55_STATE is bundled into
     // THIS single test to keep the sequence deterministic — mirrors
     // `atomic_state_round_trips_and_drains` / `watched_signer_session_gate...`
     // in signer.rs.
     #[tokio::test]
     async fn global_state_session_gate_and_missing_backend() {
-        use crate::state::{bump_session_generation, current_session_generation};
 
         // Defensive reset (a prior panic could have left state dirty).
         set_nip55_state(Nip55State::Idle);
@@ -667,22 +666,22 @@ mod tests {
         // Session gate: a signer flips state only while its captured generation
         // is live.
         let keys = Keys::generate();
-        let gen_before = current_session_generation();
+        let gen_before = crate::db::current_session_id();
         let signer = Nip55Signer::new(keys.public_key());
         assert_eq!(
-            signer.session_generation_for_test(),
+            signer.session_id_for_test(),
             gen_before,
             "signer must capture the live session generation at construction"
         );
         // Valid session flips (tolerate a concurrent bump from a sibling test).
-        if signer.session_generation_for_test() == current_session_generation() {
+        if signer.session_id_for_test() == crate::db::current_session_id() {
             signer.flip(Nip55State::Ready);
             assert_eq!(nip55_state(), Nip55State::Ready, "valid-session flip must apply");
         }
         // After a swap the guard is stale; flips are no-ops so a leftover op
         // can't leak state onto the new account.
         set_nip55_state(Nip55State::Ready);
-        bump_session_generation();
+        crate::db::close_database();
         signer.flip(Nip55State::Missing);
         assert_eq!(nip55_state(), Nip55State::Ready, "stale-session flip must be a no-op");
 

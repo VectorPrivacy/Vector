@@ -1714,7 +1714,7 @@ pub async fn fetch_subscribed_packs(
 
 /// Convenience entry point that grabs the client + my_pubkey internally
 /// and runs the full subscribed-packs refresh. Intended for the boot
-/// path; in-app commands pass an explicit `SessionGuard` via the lower
+/// path; in-app commands pass an explicit `std::sync::Arc<crate::db::Session>` via the lower
 /// helper to make the safety contract visible at every call site.
 pub async fn refresh_subscribed_packs() -> Result<Vec<EmojiPack>, String> {
     let client = nostr_client().ok_or_else(|| "Nostr client not initialised".to_string())?;
@@ -1875,7 +1875,7 @@ const EMOJI_LIST_PUBLISHED_AT_KEY: &str = "emoji_list_published_at";
 static REPUBLISH_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Coalesce rapid subscribe/unsubscribe taps into one network publish.
-/// Captures `SessionGuard` BEFORE the spawn boundary so a mid-debounce
+/// Captures `std::sync::Arc<crate::db::Session>` BEFORE the spawn boundary so a mid-debounce
 /// account swap can't sign account A's pack list with account B's key.
 pub fn republish_emoji_list_debounced() {
     use std::sync::atomic::Ordering;
@@ -1992,7 +1992,7 @@ fn build_pack_event(pack: &EmojiPack) -> Result<EventBuilder, String> {
 
 /// Publish (or replace) one of the user's own packs as a kind 30030
 /// event, persist it locally, and add it to the subscription list so
-/// the picker surfaces it immediately. SessionGuard-gated so a mid-
+/// the picker surfaces it immediately. std::sync::Arc<crate::db::Session>-gated so a mid-
 /// network account swap can't push account A's pack signed by B's key.
 pub async fn publish_pack(pack: &EmojiPack) -> Result<EmojiPack, String> {
     crate::db::scoped(async move {
@@ -2131,7 +2131,7 @@ pub async fn unsubscribe_pack(id: &str) -> Result<(), String> {
 /// given order; the anchor is set to the raw addr of the pack immediately
 /// before the marker (`""` = top / marker absent).
 pub fn reorder_emoji_packs(ordered_ids: Vec<String>) -> Result<(), String> {
-    let session = crate::state::SessionGuard::capture();
+    let session = crate::db::current_session();
 
     let mut real_addrs: Vec<String> = Vec::with_capacity(ordered_ids.len());
     let mut anchor = String::new();
@@ -2145,7 +2145,7 @@ pub fn reorder_emoji_packs(ordered_ids: Vec<String>) -> Result<(), String> {
         }
     }
 
-    if !session.is_valid() {
+    if !session.is_live() {
         return Err("Account swapped during reorder — aborted".to_string());
     }
     save_subscriptions(&real_addrs)?;

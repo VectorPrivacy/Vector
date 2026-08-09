@@ -290,7 +290,7 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
     }
 
     fn on_community_refreshed(&self, community_id: &str) {
-        let session = vector_core::state::SessionGuard::capture();
+        let session = vector_core::db::current_session();
         let community_id = community_id.to_string();
         vector_core::db::spawn_bound(async move {
             let id = vector_core::community::CommunityId(vector_core::simd::hex::hex_to_bytes_32(&community_id));

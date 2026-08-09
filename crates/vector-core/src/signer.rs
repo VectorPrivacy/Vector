@@ -660,25 +660,25 @@ pub fn set_bunker_state(new_state: BunkerConnectionState) {
 /// every signing outcome. The inner `NostrConnect` is cheaply clonable
 /// (internally Arc'd), so this is also Clone.
 ///
-/// Captures a `SessionGuard` at construction; state flips after `reset_session`
+/// Captures a `std::sync::Arc<crate::db::Session>` at construction; state flips after `reset_session`
 /// are no-ops to avoid leaking signer-state events across an account swap (an
 /// in-flight signing call resolving after the new account is installed would
 /// otherwise emit `bunker_state: offline` against a local-account session).
 #[derive(Debug, Clone)]
 pub struct WatchedBunkerSigner {
     inner: NostrConnect,
-    session: crate::state::SessionGuard,
+    session: std::sync::Arc<crate::db::Session>,
 }
 
 impl WatchedBunkerSigner {
     pub fn new(inner: NostrConnect) -> Self {
-        Self { inner, session: crate::state::SessionGuard::capture() }
+        Self { inner, session: crate::db::current_session() }
     }
 
     /// Flip state only when the captured session is still active.
     #[inline]
     fn flip(&self, state: BunkerConnectionState) {
-        if self.session.is_valid() {
+        if self.session.is_live() {
             set_bunker_state(state);
         }
     }
@@ -686,8 +686,8 @@ impl WatchedBunkerSigner {
     /// Test-only view onto the captured guard so a test can assert the
     /// wrapper is bound to the session generation at construction.
     #[cfg(test)]
-    pub(crate) fn session_generation_for_test(&self) -> u64 {
-        self.session.generation()
+    pub(crate) fn session_id_for_test(&self) -> u64 {
+        self.session.id()
     }
 }
 
@@ -1082,11 +1082,10 @@ mod tests {
     }
 
     // Combined into one #[test] to serialise mutation of process-wide globals
-    // (SESSION_GENERATION, BUNKER_STATE, BUNKER_SIGNER). See the rationale on
+    // (BUNKER_STATE, BUNKER_SIGNER). See the rationale on
     // `atomic_state_round_trips_and_drains` above.
     #[test]
     fn watched_signer_session_gate_and_state_transitions() {
-        use crate::state::{bump_session_generation, current_session_generation};
 
         // Build a real NostrConnect so we can wrap it. We never call any of
         // its async methods (those would require a relay) — only the inner
@@ -1106,9 +1105,9 @@ mod tests {
             None,
         ).expect("NostrConnect builds");
 
-        let gen_before = current_session_generation();
+        let gen_before = crate::db::current_session_id();
         let watched = WatchedBunkerSigner::new(nc);
-        assert_eq!(watched.session_generation_for_test(), gen_before,
+        assert_eq!(watched.session_id_for_test(), gen_before,
             "WatchedBunkerSigner must capture the live session generation at construction");
 
         // Pre-swap: flip emits because the captured guard matches.
@@ -1121,7 +1120,7 @@ mod tests {
         // guard goes stale; subsequent flips must be ignored so a leftover
         // in-flight signing call from the previous account can't leak
         // bunker_state changes into the new session.
-        bump_session_generation();
+        crate::db::close_database();
         set_bunker_state(BunkerConnectionState::Online);
         watched.flip(BunkerConnectionState::Offline);
         assert_eq!(bunker_state(), BunkerConnectionState::Online,

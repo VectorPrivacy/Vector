@@ -180,7 +180,7 @@ struct WrapConfirm {
     /// failed — from then on `note_relay_ok` performs the rescue itself.
     loop_exited: AtomicBool,
     notify: tokio::sync::Notify,
-    session: crate::state::SessionGuard,
+    session: std::sync::Arc<crate::db::Session>,
     registered_at: std::time::Instant,
 }
 
@@ -229,7 +229,7 @@ pub fn note_relay_ok(event_id: &EventId, accepted: bool) {
     {
         return;
     }
-    if !entry.session.is_valid() {
+    if !entry.session.is_live() {
         remove_wrap_confirm(&entry.wrap_id);
         return;
     }
@@ -380,7 +380,7 @@ async fn retry_send_gift_wrap(
                 rescued: AtomicBool::new(false),
                 loop_exited: AtomicBool::new(false),
                 notify: tokio::sync::Notify::new(),
-                session: crate::state::SessionGuard::capture(),
+                session: crate::db::current_session(),
                 registered_at: std::time::Instant::now(),
             });
             register_wrap_confirm(entry.clone());

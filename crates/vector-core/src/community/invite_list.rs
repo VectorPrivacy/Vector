@@ -333,7 +333,7 @@ pub async fn ingest_remote_invite_list_event(
 static REPUBLISH_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Coalesce rapid mint/revoke mutations into one network publish. Stamps the publish clock + captures the
-/// `SessionGuard` BEFORE the debounce sleep, mirroring the Community List.
+/// `std::sync::Arc<crate::db::Session>` BEFORE the debounce sleep, mirroring the Community List.
 pub fn republish_invite_list_debounced() {
     use std::sync::atomic::Ordering;
     stamp_published_now();

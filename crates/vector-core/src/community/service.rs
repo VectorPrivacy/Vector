@@ -3,7 +3,7 @@
 //! over: it publishes a message AND retains its ephemeral key (so the sender can
 //! later delete it), and deletes by loading that retained key back.
 //!
-//! Every method is `SessionGuard`-gated: a `swap_session` can happen at any await
+//! Every method is `std::sync::Arc<crate::db::Session>`-gated: a `swap_session` can happen at any await
 //! point, and persisting an ephemeral secret (or reading one) must never cross into
 //! the wrong account's DB.
 
@@ -17,7 +17,6 @@ use super::public_invite::{
 use super::send::{delete_own_message, publish_signed_message};
 use super::transport::{Evidence, Query, Transport};
 use super::{Channel, Community};
-use crate::state::SessionGuard;
 use crate::stored_event::event_kind;
 
 /// The active signer for authority actions (bunker support): the live client's signer — which covers a
@@ -160,7 +159,7 @@ pub async fn send_message<T: Transport + ?Sized>(
     ms: u64,
 ) -> Result<Event, String> {
     crate::db::scoped(async move {
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         // Build + sign the inner explicitly so we know the message_id (the deletion key) up
         // front, then publish via the signed path. Identical wire output to the old
         // publish_message route.
@@ -170,7 +169,7 @@ pub async fn send_message<T: Transport + ?Sized>(
         let (outer, ephemeral) = publish_signed_message(transport, community, channel, &inner, false).await?;
         // The publish straddled network I/O; bail before writing to the (possibly
         // swapped) account DB.
-        if !session.is_valid() {
+        if !session.is_live() {
             return Err("account changed during send; not persisting message key".to_string());
         }
         crate::db::community::store_message_key(&inner.id.to_hex(), &outer.id.to_hex(), &ephemeral, &community.relays)?;
@@ -190,9 +189,9 @@ pub async fn send_signed_message<T: Transport + ?Sized>(
     inner: &Event,
 ) -> Result<Event, String> {
     crate::db::scoped(async move {
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         let (outer, ephemeral) = publish_signed_message(transport, community, channel, inner, false).await?;
-        if !session.is_valid() {
+        if !session.is_live() {
             return Err("account changed during send; not persisting message key".to_string());
         }
         crate::db::community::store_message_key(&inner.id.to_hex(), &outer.id.to_hex(), &ephemeral, &community.relays)?;
@@ -1290,8 +1289,8 @@ pub async fn delete_message<T: Transport + ?Sized>(
     message_id: &str,
 ) -> Result<(), String> {
     crate::db::scoped(async move {
-        let session = SessionGuard::capture();
-        if !session.is_valid() {
+        let session = crate::db::current_session();
+        if !session.is_live() {
             return Err("account changed; aborting delete".to_string());
         }
         // PEEK the key (don't consume it yet): the NIP-09 publish below is fallible, and the
@@ -1322,10 +1321,10 @@ pub async fn delete_message<T: Transport + ?Sized>(
 /// `community_id` is unauthenticated random bytes, so a hostile bundle reusing
 ///   a known id must not be able to swap out our channel keys / authority / relays.
 ///
-/// `SessionGuard`-gated: the accept may straddle a relay-fetch in the caller, and the
+/// `std::sync::Arc<crate::db::Session>`-gated: the accept may straddle a relay-fetch in the caller, and the
 /// save must land in the account that consented.
 pub fn accept_invite(invite: &CommunityInvite) -> Result<Community, String> {
-    let session = SessionGuard::capture();
+    let session = crate::db::current_session();
     let community = super::invite::accept_invite(invite)?; // validates caps + decodes keys
 
     match crate::db::community::load_community(&community.id)? {
@@ -1354,7 +1353,7 @@ pub fn accept_invite(invite: &CommunityInvite) -> Result<Community, String> {
         None => enforce_community_cap()?,
     }
 
-    if !session.is_valid() {
+    if !session.is_live() {
         return Err("account changed during invite accept".to_string());
     }
     crate::db::community::save_community(&community)?;
@@ -1366,7 +1365,7 @@ pub fn accept_invite(invite: &CommunityInvite) -> Result<Community, String> {
 /// free: builds the member view from the bundle WITHOUT persisting (nothing is stored for a
 /// community the user may decline), fetches one page, and stashes it keyed by community id (the
 /// fetch also warms the relay connection). Best-effort — any failure just leaves Join to sync
-/// normally. Spawn this behind a `SessionGuard`; promotion on Join re-validates freshness.
+/// normally. Spawn this behind a `std::sync::Arc<crate::db::Session>`; promotion on Join re-validates freshness.
 pub async fn preload_community(invite: &super::invite::CommunityInvite) {
     let Ok(community) = super::invite::accept_invite(invite) else { return };
     let Some(channel) = community.channels.first() else { return };
@@ -1518,7 +1517,7 @@ pub async fn republish_channel_metadata<T: Transport + ?Sized>(
 /// locally (for list/revoke), and return `(hex token, shareable URL)`.
 ///
 /// Owner-only: the bundle grants the @everyone base (server-root) key, and minting the
-/// canonical link is an owner action. `SessionGuard`-gated around the token persist.
+/// canonical link is an owner action. `std::sync::Arc<crate::db::Session>`-gated around the token persist.
 /// A short, human-typable label for an unlabeled invite link. Crockford-ish base32 (no 0/1/I/O)
 /// so it's unambiguous to read and share aloud; 6 chars ≈ 1B combinations (collision-improbable).
 fn generate_invite_label() -> String {
@@ -2185,13 +2184,13 @@ async fn republish_my_invite_links<T: Transport + ?Sized>(
 /// store. The retain set for a rekey is computed from this store (`community_member_activity`), and the
 /// no-role chatters live ONLY here — not in the control plane — so a privatize/ban must observe it first or
 /// it would shed anyone the re-founder hasn't already synced. Best-effort per channel; uses the multi-epoch
-/// fetch so activity under any retained epoch counts. `SessionGuard`-gated across the fetches.
+/// fetch so activity under any retained epoch counts. `std::sync::Arc<crate::db::Session>`-gated across the fetches.
 async fn observe_channel_activity<T: Transport + ?Sized>(
     transport: &T,
     community: &Community,
 ) -> Result<(), String> {
     crate::db::scoped(async move {
-        let session = SessionGuard::capture();
+        let session = crate::db::current_session();
         let my_pk = crate::state::my_public_key().ok_or("no local identity to observe channel activity")?;
         for channel in &community.channels {
             let events = super::send::fetch_channel_events(transport, community, channel)
@@ -2356,7 +2355,7 @@ async fn reseal_base_to_observed<T: Transport + ?Sized>(
         // O2: the base rotation cuts the control plane + @everyone, but channel MESSAGES are sealed under
         // per-channel keys — so a removed member who held a channel key would keep reading NEW messages.
         // Rotate every channel key to the retained set. Reload first so we see the freshest per-channel rekey
-        // progress + the new base epoch. (SessionGuard: a mid-rotation account swap must not reload/rotate
+        // progress + the new base epoch. (std::sync::Arc<crate::db::Session>: a mid-rotation account swap must not reload/rotate
         // against the wrong account's pool.)
         let community = crate::db::community::load_community(&community.id)?
             .ok_or("community gone after base rotation")?;
@@ -2399,7 +2398,7 @@ pub enum RekeyOutcome {
 /// Verifies the rotator's authority (`MANAGE_CHANNELS`) against the current roster (owner supreme,
 ///), checks chain continuity against the held prior-epoch key (fork detection — when held),
 /// finds + opens MY per-recipient blob, and commits the new key via `advance_channel_epoch` (the
-/// atomic archive+head write). `SessionGuard`-gated: the caller's fetch can straddle an account swap,
+/// atomic archive+head write). `std::sync::Arc<crate::db::Session>`-gated: the caller's fetch can straddle an account swap,
 /// so the DB write is re-validated immediately before it. Does NOT fetch — the catch-up fetch loop is
 /// a later layer. (Scope-pinned + version-pinned authority — evaluating the rotator's rank at the
 /// roster version the rekey cites, under block-until-synced — is deferred; server-root rotation has
@@ -2411,7 +2410,7 @@ pub fn apply_channel_rekey(
     // Fully synchronous (no `.await`), so a session swap can't preempt between the MY_SECRET_KEY read
     // and the DB write — one captured guard + one re-check before the write suffices. If a remote
     // signer (bunker) open path ever adds an await here, MY_SECRET_KEY must be re-read after it.
-    let session = SessionGuard::capture();
+    let session = crate::db::current_session();
 
     // Scope must be a channel of THIS community (server-root rotation is a separate, deferred path).
     let channel_id = match parsed.scope {
@@ -2479,7 +2478,7 @@ pub fn apply_channel_rekey(
         super::rekey::open_rekey_blob(my_keys.secret_key(), &parsed.rotator, parsed.scope, parsed.new_epoch, mine)?;
 
     // Commit (N2 dual-write). Re-validate the session straddling the caller's fetch before writing.
-    if !session.is_valid() {
+    if !session.is_live() {
         return Err("session changed during rekey apply".to_string());
     }
     let head_advanced =
@@ -2538,7 +2537,7 @@ where
 /// `MANAGE_CHANNELS`. **Publish FIRST, advance my head only after a successful publish** — moving my
 /// head to an epoch no peer received would strand me. (A post-publish session swap leaves peers ahead
 /// of my local head, which self-heals: the rekey is server-root-addressed, so I re-derive my own key
-/// on the next fetch.) `SessionGuard`-gated across the publish await.
+/// on the next fetch.) `std::sync::Arc<crate::db::Session>`-gated across the publish await.
 pub async fn rotate_channel<T: Transport + ?Sized>(
     transport: &T,
     community: &Community,
@@ -2766,7 +2765,7 @@ pub(crate) async fn rotate_server_root<T: Transport + ?Sized>(
 /// fetch the (empty) new-epoch plane and re-anchor nothing.
 ///
 /// `pub(crate)` + part of the base-rotation orchestration (#4e-2 sequences rekey → re-anchor → advance,
-/// gating the head-advance on a successful re-anchor); `SessionGuard`-gated across the fetch + each
+/// gating the head-advance on a successful re-anchor); `std::sync::Arc<crate::db::Session>`-gated across the fetch + each
 /// publish (publish-only — no local DB write, so a mid-loop swap is not a cross-account hazard).
 // Reached in production via `rotate_server_root` (the privatize re-founding path); also tested directly.
 /// One re-wrapped entity head in a re-founding snapshot: its coordinate + (version, self_hash, inner_id)
@@ -2881,13 +2880,13 @@ pub(crate) async fn reanchor_control_plane<T: Transport + ?Sized>(
 /// not owner-only"), checks continuity against the held prior ROOT (when held), finds + opens MY
 /// ServerRoot-scope blob, and commits the new root via the atomic base head+archive write. The new root
 /// reaches me ONLY through my ECDH blob — if I was removed in this rotation I find no blob
-/// (`NotARecipient`) and recover nothing. `SessionGuard`-gated; synchronous (one guard + the write
+/// (`NotARecipient`) and recover nothing. `std::sync::Arc<crate::db::Session>`-gated; synchronous (one guard + the write
 /// re-check suffice, same as `apply_channel_rekey`).
 pub fn apply_server_root_rekey(
     community: &Community,
     parsed: &super::rekey::ParsedRekey,
 ) -> Result<RekeyOutcome, String> {
-    let session = SessionGuard::capture();
+    let session = crate::db::current_session();
 
     // Scope must be the server root (a Channel rekey is the other path).
     if !matches!(parsed.scope, super::derive::RekeyScope::ServerRoot) {
@@ -2952,7 +2951,7 @@ pub fn apply_server_root_rekey(
     let new_root =
         super::rekey::open_rekey_blob(my_keys.secret_key(), &parsed.rotator, parsed.scope, parsed.new_epoch, mine)?;
 
-    if !session.is_valid() {
+    if !session.is_live() {
         return Err("session changed during base rekey apply".to_string());
     }
     let head_advanced = crate::db::community::advance_server_root_epoch(&cid, parsed.new_epoch.0, &new_root)?;
@@ -2986,7 +2985,7 @@ async fn heal_channel_fork_epochs<T: Transport + ?Sized>(
     channel_hex: &str,
     epochs: &std::collections::BTreeSet<u64>,
     server_roots: &[[u8; 32]],
-    session: &SessionGuard,
+    session: &std::sync::Arc<crate::db::Session>,
 ) -> Result<(), String> {
     if epochs.is_empty() {
         return Ok(());
@@ -3015,7 +3014,7 @@ async fn heal_channel_fork_epochs<T: Transport + ?Sized>(
         }
     }
     for (epoch, win_key) in winner {
-        if !session.is_valid() {
+        if !session.is_live() {
             return Err("session changed during channel convergence".to_string());
         }
         // Only re-converge an epoch I ALREADY hold, and only DOWNWARD.
@@ -3049,14 +3048,14 @@ async fn heal_channel_fork_epochs<T: Transport + ?Sized>(
 /// the first `NotARecipient`: there is nothing legitimate past it for us. A *missing* intermediate
 /// epoch (a relay-incomplete gap, where we ARE still a recipient on both sides) is logged and stepped
 /// over (the hole stays unreadable until re-fetched from another relay), not treated as removal.
-/// `SessionGuard`-gated; applies in ascending epoch order so each rekey's prior-key continuity check
+/// `std::sync::Arc<crate::db::Session>`-gated; applies in ascending epoch order so each rekey's prior-key continuity check
 /// sees the key its predecessor just archived.
 pub async fn catch_up_channel_rekeys<T: Transport + ?Sized>(
     transport: &T,
     community: &Community,
     channel_id: &super::ChannelId,
 ) -> Result<u64, String> {
-    let session = SessionGuard::capture();
+    let session = crate::db::current_session();
     let server_root = community.server_root_key.as_bytes();
     let cid = community.id.to_hex();
     let channel_hex = channel_id.to_hex();
@@ -3127,7 +3126,7 @@ pub async fn catch_up_channel_rekeys<T: Transport + ?Sized>(
             by_epoch.entry(p.new_epoch.0).or_default().push(p);
         }
         for (e, chunks) in by_epoch {
-            if !session.is_valid() {
+            if !session.is_live() {
                 return Err("session changed during rekey catch-up".to_string());
             }
             let mut applied = false;
@@ -3195,7 +3194,7 @@ pub async fn catch_up_channel_rekeys<T: Transport + ?Sized>(
     let missing: Vec<u64> = (0..head).filter(|e| !held.contains(e)).collect();
     if !missing.is_empty() {
         for sr in &server_roots {
-            if !session.is_valid() {
+            if !session.is_live() {
                 return Err("session changed during rekey gap-fill".to_string());
             }
             let z_tags: Vec<String> = missing
@@ -3221,7 +3220,7 @@ pub async fn catch_up_channel_rekeys<T: Transport + ?Sized>(
     // pass heals a member that reorged its head under an EARLIER build (so `forked_epochs` was never populated
     // for it) yet still sits on a losing sibling at a past epoch — otherwise that epoch's messages stay
     // unreadable forever (the gap-fill skips it because a key IS held). One batched fetch per held root.
-    if head > 0 && session.is_valid() {
+    if head > 0 && session.is_live() {
         let lo = head.saturating_sub(REKEY_CATCHUP_WINDOW).max(1);
         let mut epochs: std::collections::BTreeSet<u64> = (lo..=head).collect();
         epochs.append(&mut forked_epochs);
@@ -3276,7 +3275,7 @@ pub async fn catch_up_server_root<T: Transport + ?Sized>(
     transport: &T,
     community: &Community,
 ) -> Result<BaseCatchup, String> {
-    let session = SessionGuard::capture();
+    let session = crate::db::current_session();
     let cid = community.id.to_hex();
     let mut head = community.server_root_epoch.0;
     // Set true if the walk stops because an AUTHORIZED base rotation EXCLUDED us (read-cut / private ban):
@@ -3310,7 +3309,7 @@ pub async fn catch_up_server_root<T: Transport + ?Sized>(
             break; // nothing valid for `next` under the root we hold
         }
 
-        if !session.is_valid() {
+        if !session.is_live() {
             return Err("session changed during base rekey catch-up".to_string());
         }
 
@@ -3429,7 +3428,7 @@ pub async fn catch_up_server_root<T: Transport + ?Sized>(
                     win_root < current_root
                 };
                 if adopt {
-                    if !session.is_valid() {
+                    if !session.is_live() {
                         return Err("session changed during base convergence".to_string());
                     }
                     // Adopt the winner: apply archives its root (no head advance at the same epoch), then
@@ -6794,7 +6793,7 @@ mod tests {
     }
 
     /// A relay that simulates an account swap MID-PUBLISH: it bumps the session generation inside
-    /// publish/publish_durable, so a `SessionGuard` captured before the call is invalid by the time the
+    /// publish/publish_durable, so a `std::sync::Arc<crate::db::Session>` captured before the call is invalid by the time the
     /// caller re-checks after the await. The actual store delegates to an inner MemoryRelay.
     /// Performs a REAL account switch mid-publish: a different npub becomes
     /// current, with its own database. A generation bump used to stand in for
@@ -6880,7 +6879,7 @@ mod tests {
 
     /// A swap during `publish_banlist`'s publish must leave NO half-applied state — the banlist isn't
     /// persisted, the private-community base isn't rotated, and `read_cut_pending` isn't flipped (every step
-    /// gates on `is_valid()`). No ban half-lands in the wrong account.
+    /// belongs to the issuing account). No ban half-lands in the wrong account.
     #[tokio::test]
     async fn account_swap_during_ban_publish_applies_to_the_banning_account() {
         let (_tmp, _guard) = init_test_db();

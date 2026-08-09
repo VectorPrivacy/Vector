@@ -143,7 +143,7 @@ async fn handle_self_sync_event(event: Event) {
 /// Route an arriving Community (kind-3300) event: find the channel its `z` pseudonym
 /// maps to, open + verify + ingest it into STATE, then persist + emit if it is new.
 /// Events that fail to open (wrong key, splice, forged sig) are dropped inside
-/// `process_incoming`. (The notification loop's `session.is_valid()` gate above guards
+/// `process_incoming`. (The notification loop's `session.is_live()` gate above guards
 /// against account-swap before dispatch.)
 /// Route an arriving Community event through `vector_core::community::realtime`, which opens +
 /// verifies + ingests + persists it and dispatches the typed outcome to the Tauri handler (UI +
@@ -178,7 +178,7 @@ pub struct CommunityStragglerSink;
 impl vector_core::community::transport::CommunityIngestSink for CommunityStragglerSink {
     fn ingest_stragglers(&self, events: Vec<Event>) {
         // Called from inside the transport's background drain task (always within the tokio runtime).
-        // SessionGuard captured BEFORE the spawn boundary (a capture inside the task would validate
+        // std::sync::Arc<crate::db::Session> captured BEFORE the spawn boundary (a capture inside the task would validate
         // against whatever generation is current by then) — re-checked per event across the fold loop.
         vector_core::db::spawn_bound(async move {
             for event in events {
