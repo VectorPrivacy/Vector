@@ -269,6 +269,28 @@ pub fn seat_channel_key(
 ) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
     let tx = conn.unchecked_transaction().map_err(|e| format!("seat channel key tx: {e}"))?;
+    // "Keyless" is the caller's read of a snapshot; re-establish it HERE, inside the
+    // transaction that writes. Seating over a real key is a downgrade to whatever a
+    // vend offered, and only lock discipline stands between this and that today.
+    // A keyless private channel stores the community_root as its placeholder.
+    let placeholder: Vec<u8> = tx
+        .query_row(
+            "SELECT server_root_key FROM communities WHERE community_id = ?1",
+            params![community_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("seat channel key root: {e}"))?;
+    let current: Vec<u8> = tx
+        .query_row(
+            "SELECT channel_key FROM community_channels WHERE community_id = ?1 AND channel_id = ?2",
+            params![community_id, channel_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("seat channel key read: {e}"))?;
+    // Ciphertext carries a per-write nonce, so the comparison has to be on plaintext.
+    if dec_key(&current)? != dec_key(&placeholder)? {
+        return Err("channel already holds a key — seating would downgrade it".to_string());
+    }
     store_epoch_key_tx(&tx, community_id, channel_id, epoch, key)?;
     let enc = enc_key(key)?;
     tx.execute(
