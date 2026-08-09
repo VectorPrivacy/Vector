@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::RwLock;
-use std::sync::LazyLock;
+use std::sync::Arc;
 use nostr_sdk::prelude::*;
 use tauri::{AppHandle, Emitter, Runtime};
 
@@ -88,13 +88,19 @@ fn default_relay_mode() -> String {
 // Global State
 // ============================================================================
 
-/// Global storage for relay metrics
-pub(crate) static RELAY_METRICS: LazyLock<RwLock<HashMap<String, RelayMetrics>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
+// Metrics and logs for THIS account's relays: the relay list is per-account, so
+// carrying A's connection history into B's Relays tab shows numbers for sockets
+// B never opened.
+struct RelayMetricsKey;
+struct RelayLogsKey;
 
-/// Global storage for relay logs (max 10 per relay)
-pub(crate) static RELAY_LOGS: LazyLock<RwLock<HashMap<String, VecDeque<RelayLog>>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
+fn relay_metrics() -> Arc<RwLock<HashMap<String, RelayMetrics>>> {
+    vector_core::db::current_session().scoped::<RelayMetricsKey, _>()
+}
+
+fn relay_logs() -> Arc<RwLock<HashMap<String, VecDeque<RelayLog>>>> {
+    vector_core::db::current_session().scoped::<RelayLogsKey, _>()
+}
 
 // ============================================================================
 // Helper Functions
@@ -202,7 +208,9 @@ pub fn add_relay_log(url: &str, level: &str, message: &str) {
         message: message.to_string(),
     };
 
-    if let Ok(mut logs) = RELAY_LOGS.write() {
+    let logs_owner = relay_logs();
+    let locked = logs_owner.write();
+    if let Ok(mut logs) = locked {
         let relay_logs = logs.entry(normalized).or_insert_with(VecDeque::new);
         relay_logs.push_front(log);
         while relay_logs.len() > 10 {
@@ -214,7 +222,9 @@ pub fn add_relay_log(url: &str, level: &str, message: &str) {
 /// Update metrics for a relay
 pub fn update_relay_metrics(url: &str, update_fn: impl FnOnce(&mut RelayMetrics)) {
     let normalized = url.trim().trim_end_matches('/').to_lowercase();
-    if let Ok(mut metrics) = RELAY_METRICS.write() {
+    let metrics_owner = relay_metrics();
+    let locked = metrics_owner.write();
+    if let Ok(mut metrics) = locked {
         let relay_metrics = metrics.entry(normalized).or_insert_with(RelayMetrics::default);
         update_fn(relay_metrics);
     }
@@ -358,7 +368,8 @@ async fn save_disabled_default_relays<R: Runtime>(handle: &AppHandle<R>, relays:
 #[tauri::command]
 pub async fn get_relay_metrics(url: String) -> Result<RelayMetrics, String> {
     let normalized = url.trim().trim_end_matches('/').to_lowercase();
-    let metrics = RELAY_METRICS.read()
+    let metrics_owner = relay_metrics();
+    let metrics = metrics_owner.read()
         .map_err(|_| "Failed to read metrics")?
         .get(&normalized)
         .cloned()
@@ -381,7 +392,8 @@ pub async fn set_log_level(level: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn get_relay_logs(url: String) -> Result<Vec<RelayLog>, String> {
     let normalized = url.trim().trim_end_matches('/').to_lowercase();
-    let logs = RELAY_LOGS.read()
+    let logs_owner = relay_logs();
+    let logs = logs_owner.read()
         .map_err(|_| "Failed to read logs")?
         .get(&normalized)
         .map(|l| l.iter().cloned().collect())
@@ -1067,15 +1079,19 @@ pub async fn validate_relay_url_cmd(url: String) -> Result<String, String> {
 }
 
 /// Tracks whether the relay-monitor task is live for the current session.
-/// Reset by `reset_session()`: the monitor task exits with its channel when
-/// the old client drops, so without a reset the relay-status UI would freeze
-/// on the prior account's state with no new monitor ever spawning.
-pub(crate) static MONITOR_STARTED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+/// Whether THIS account's relay monitor is running. Per-account because the
+/// monitor task exits with its channel when the account's client drops; a
+/// process-wide flag would stay true and the next account's relay-status UI
+/// would freeze with no monitor ever spawning.
+struct MonitorStarted;
+
+fn monitor_started() -> Arc<std::sync::atomic::AtomicBool> {
+    vector_core::db::current_session().scoped::<MonitorStarted, _>()
+}
 
 #[tauri::command]
 pub async fn monitor_relay_connections() -> Result<bool, String> {
-    if MONITOR_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+    if monitor_started().swap(true, std::sync::atomic::Ordering::SeqCst) {
         return Ok(false);
     }
 
@@ -1091,7 +1107,7 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
     let monitor = match client.monitor() {
         Some(m) => m,
         None => {
-            MONITOR_STARTED.store(false, std::sync::atomic::Ordering::SeqCst);
+            monitor_started().store(false, std::sync::atomic::Ordering::SeqCst);
             return Err("Failed to get monitor".to_string());
         }
     };

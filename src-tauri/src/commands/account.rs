@@ -15,15 +15,23 @@ use std::sync::atomic::AtomicBool;
 use crate::{STATE, TAURI_APP, nostr_client, set_my_public_key, MY_SECRET_KEY, MNEMONIC_SEED, PENDING_NSEC, active_trusted_relays};
 use crate::{Profile, account_manager, db, crypto};
 
-/// Set to true after a full foreground login+sync flow completes.
-/// Prevents debug_hot_reload_sync from using partial state preloaded by standalone background sync.
-pub(crate) static FULL_SESSION_INITIALIZED: AtomicBool = AtomicBool::new(false);
+/// Whether THIS account finished a full foreground login+sync, as opposed to
+/// the minimal state Android's standalone background sync installs.
+///
+/// Per-account: a process-wide flag stays true across a swap and tells the next
+/// account it is already initialised, so `debug_hot_reload_sync` would run
+/// against half-loaded state.
+struct FullSessionInitialized;
+
+fn full_session_flag() -> std::sync::Arc<AtomicBool> {
+    vector_core::db::current_session().scoped::<FullSessionInitialized, _>()
+}
 
 /// Whether a full foreground login has completed this process. Read only by
 /// the Android biometric path, which stands down when a session already exists.
 #[cfg(target_os = "android")]
 pub(crate) fn full_session_initialized() -> bool {
-    FULL_SESSION_INITIALIZED.load(std::sync::atomic::Ordering::Acquire)
+    full_session_flag().load(std::sync::atomic::Ordering::Acquire)
 }
 
 // ============================================================================
@@ -78,7 +86,7 @@ pub async fn debug_hot_reload_sync() -> Result<serde_json::Value, String> {
     if state.profiles.is_empty() && state.chats.is_empty() {
         return Err("Backend state is empty - perform normal login".to_string());
     }
-    if !FULL_SESSION_INITIALIZED.load(std::sync::atomic::Ordering::Acquire) {
+    if !full_session_flag().load(std::sync::atomic::Ordering::Acquire) {
         return Err("State is from background sync, not a full session - perform normal login".to_string());
     }
     // The unlock/swap path initializes the session (client + own profile) BEFORE the
@@ -221,7 +229,7 @@ pub async fn login<R: Runtime>(
         }
     }
 
-    FULL_SESSION_INITIALIZED.store(true, std::sync::atomic::Ordering::Release);
+    full_session_flag().store(true, std::sync::atomic::Ordering::Release);
     Ok(LoginResult { public: npub, existing: false })
 }
 
@@ -1281,7 +1289,7 @@ pub async fn create_account() -> Result<LoginResult, String> {
     // This prevents creating "dead accounts" if user quits before setting a PIN
     account_manager::set_pending_account(npub.clone())?;
 
-    FULL_SESSION_INITIALIZED.store(true, std::sync::atomic::Ordering::Release);
+    full_session_flag().store(true, std::sync::atomic::Ordering::Release);
     Ok(LoginResult { public: npub, existing: false })
 }
 
@@ -1706,7 +1714,7 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
         vector_core::blossom_servers::refresh_cache();
     }
 
-    FULL_SESSION_INITIALIZED.store(true, std::sync::atomic::Ordering::Release);
+    full_session_flag().store(true, std::sync::atomic::Ordering::Release);
     Ok(npub)
 }
 

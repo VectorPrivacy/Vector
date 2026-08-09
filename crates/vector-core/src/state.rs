@@ -4,7 +4,7 @@
 //! uses the `EventEmitter` trait via `crate::traits::emit_event`.
 
 use nostr_sdk::prelude::*;
-use std::sync::{OnceLock, RwLock};
+use std::sync::RwLock;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::Mutex;
@@ -112,10 +112,20 @@ pub async fn active_trusted_relays() -> Vec<&'static str> {
         .collect()
 }
 
-/// Blossom media servers with failover. Held in a mutex so the per-account
-/// resolver (defaults minus disabled + enabled customs) can refresh it after
-/// edits and on login. Until the DB is open, falls back to the seed list.
-pub static BLOSSOM_SERVERS: OnceLock<std::sync::Mutex<Vec<String>>> = OnceLock::new();
+/// Blossom media servers with failover: this account's resolved list (defaults
+/// minus its disabled ones, plus its enabled customs).
+///
+/// Per-account, and consequential — it decides where THIS account's
+/// attachments are uploaded, so account A's self-hosted destination must never
+/// still be selected under account B. Starts as the seed list until the
+/// account's database is open and the resolver refreshes it.
+struct BlossomServers(std::sync::Mutex<Vec<String>>);
+
+impl Default for BlossomServers {
+    fn default() -> Self {
+        Self(std::sync::Mutex::new(init_blossom_servers()))
+    }
+}
 
 pub fn init_blossom_servers() -> Vec<String> {
     crate::blossom_servers::DEFAULT_BLOSSOM_SERVERS
@@ -123,9 +133,15 @@ pub fn init_blossom_servers() -> Vec<String> {
 }
 
 pub fn get_blossom_servers() -> Vec<String> {
-    BLOSSOM_SERVERS
-        .get_or_init(|| std::sync::Mutex::new(init_blossom_servers()))
-        .lock().unwrap().clone()
+    let owner = crate::db::current_session().scoped::<BlossomServers, BlossomServers>();
+    let servers = owner.0.lock().unwrap().clone();
+    servers
+}
+
+/// Install this account's resolved server list.
+pub fn set_blossom_servers(servers: Vec<String>) {
+    let owner = crate::db::current_session().scoped::<BlossomServers, BlossomServers>();
+    *owner.0.lock().unwrap() = servers;
 }
 
 pub static MNEMONIC_SEED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);

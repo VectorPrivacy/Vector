@@ -757,8 +757,6 @@ pub async fn miniapp_open(
                         state.remove_session_peer(&channel.topic, &my_npub).await;
                     }
                     let chat_id_clone = chat_id.clone();
-                    // chat_id belongs to the account current NOW — bail in the task if it swaps.
-                    let session = vector_core::state::SessionGuard::capture();
                     vector_core::db::spawn_bound(async move {
                         crate::commands::realtime::send_webxdc_peer_left(chat_id_clone, topic_encoded).await;
                     });

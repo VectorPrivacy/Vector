@@ -688,23 +688,6 @@ pub async fn reset_session() {
     }
 
 
-    // Per-session caches that hold message/file content or relay diagnostics.
-    if let Ok(mut m) = crate::commands::relays::RELAY_METRICS.write() { m.clear(); }
-    if let Ok(mut l) = crate::commands::relays::RELAY_LOGS.write() { l.clear(); }
-    // Allow `monitor_relay_connections` to spawn a fresh subscriber against
-    // the next session's client. Without this reset the frontend's relay
-    // status UI freezes after the swap.
-    crate::commands::relays::MONITOR_STARTED
-        .store(false, std::sync::atomic::Ordering::SeqCst);
-
-    // Custom Blossom upload servers — reset to the default list so account B
-    // doesn't inherit account A's self-hosted upload destination silently.
-    if let Some(servers) = vector_core::state::BLOSSOM_SERVERS.get() {
-        if let Ok(mut s) = servers.lock() {
-            *s = vector_core::state::init_blossom_servers();
-        }
-    }
-
     // Active Tor bridge socket addresses — stale after the old TorService
     // shut down. `current_circuit_hops` reads these to mark the Guard hop
     // as "via bridge"; without this clear it would lie about the new
@@ -746,9 +729,6 @@ pub async fn reset_session() {
     // Identity caches.
     vector_core::db::clear_current_account_in_memory();
     let _ = clear_pending_account();
-
-    crate::commands::account::FULL_SESSION_INITIALIZED
-        .store(false, std::sync::atomic::Ordering::Release);
 
     // ORDER MATTERS: clear the encryption-enabled atomic BEFORE reopening
     // the processing gate. If we opened the gate first, a background event

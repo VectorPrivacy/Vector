@@ -170,14 +170,9 @@ pub fn list_all_servers() -> Vec<BlossomServerInfo> {
     out
 }
 
-/// Refresh the in-memory `BLOSSOM_SERVERS` cache. Call after edits + on login.
+/// Refresh this account's resolved server list. Call after edits + on login.
 pub fn refresh_cache() {
-    let merged = compute_enabled_servers();
-    let mutex = crate::state::BLOSSOM_SERVERS
-        .get_or_init(|| std::sync::Mutex::new(merged.clone()));
-    if let Ok(mut guard) = mutex.lock() {
-        *guard = merged;
-    }
+    crate::state::set_blossom_servers(compute_enabled_servers());
 }
 
 // ============================================================================

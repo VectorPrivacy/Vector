@@ -13,7 +13,6 @@ use ripemd::Ripemd160;
 use crate::util::{bytes_to_hex_string, hex_string_to_bytes};
 use secp256k1::{Secp256k1, SecretKey, PublicKey, Message};
 use tauri::{AppHandle, Runtime, Emitter};
-use std::sync::LazyLock;
 use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::Instant;
@@ -50,10 +49,15 @@ fn pivx_http_client() -> std::sync::Arc<reqwest::Client> {
     vector_core::net::shared_http_client()
 }
 
-/// Balance cache: address -> (balance_piv, last_fetch_time)
-static BALANCE_CACHE: LazyLock<RwLock<HashMap<String, (f64, Instant)>>> = LazyLock::new(|| {
-    RwLock::new(HashMap::new())
-});
+/// Balance cache: address -> (balance_piv, last_fetch_time).
+///
+/// Per-account: the addresses derive from the account's keys, so an entry from
+/// account A means nothing under account B.
+struct BalanceCache;
+
+fn balance_cache() -> std::sync::Arc<RwLock<HashMap<String, (f64, Instant)>>> {
+    vector_core::db::current_session().scoped::<BalanceCache, _>()
+}
 
 // ============================================================================
 // Types
@@ -225,7 +229,9 @@ fn decode_pivx_address(address: &str) -> Result<[u8; 20], String> {
 
 /// Check if cached balance is still valid
 fn get_cached_balance(address: &str) -> Option<f64> {
-    if let Ok(cache) = BALANCE_CACHE.read() {
+    let owner = balance_cache();
+    let locked = owner.read();
+    if let Ok(cache) = locked {
         if let Some((balance, timestamp)) = cache.get(address) {
             if timestamp.elapsed() < BALANCE_CACHE_TTL {
                 return Some(*balance);
@@ -237,14 +243,18 @@ fn get_cached_balance(address: &str) -> Option<f64> {
 
 /// Store balance in cache
 fn cache_balance(address: &str, balance: f64) {
-    if let Ok(mut cache) = BALANCE_CACHE.write() {
+    let owner = balance_cache();
+    let locked = owner.write();
+    if let Ok(mut cache) = locked {
         cache.insert(address.to_string(), (balance, Instant::now()));
     }
 }
 
 /// Clear the balance cache (useful after transactions)
 pub fn clear_balance_cache() {
-    if let Ok(mut cache) = BALANCE_CACHE.write() {
+    let owner = balance_cache();
+    let locked = owner.write();
+    if let Ok(mut cache) = locked {
         cache.clear();
     }
 }
@@ -1454,7 +1464,9 @@ pub async fn pivx_check_address_balance(
 ) -> Result<f64, String> {
     // If force=true, clear cache entry for this address first
     if force.unwrap_or(false) {
-        if let Ok(mut cache) = BALANCE_CACHE.write() {
+        let owner = balance_cache();
+    let locked = owner.write();
+    if let Ok(mut cache) = locked {
             cache.remove(&address);
         }
     }
