@@ -141,7 +141,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 86;
+pub const HIGHEST_MIGRATION_ID: u32 = 87;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1259,6 +1259,29 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
                 }
             }
         }
+        Ok(())
+    })?;
+
+    // The NIP-77 fingerprint read selects `wrapper_id` for a whole transport,
+    // which `idx_processed_wrappers_window` can locate but not supply — so every
+    // row costs a table lookup, and asking for sorted rows costs a temp B-tree
+    // on top. Carrying `wrapper_id` in the index makes the read a covering scan
+    // that arrives in negentropy's own sort order, which is most of the cost of
+    // sealing a storage on a device that isn't a desktop.
+    run_atomic_migration(conn, 87, "Covering index for negentropy fingerprints", |tx| {
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS idx_processed_wrappers_neg \
+             ON processed_wrappers(transport, wrapper_created_at, wrapper_id)",
+            [],
+        )
+        .map_err(|e| format!("migration 87: {}", e))?;
+
+        // `idx_processed_wrappers_window` is a strict prefix of the index above,
+        // and every reader of this table also wants `wrapper_id` — the one
+        // column it lacks. Keeping it would cost a second b-tree write per
+        // ingested wrapper to serve queries the wider index already covers.
+        tx.execute("DROP INDEX IF EXISTS idx_processed_wrappers_window", [])
+            .map_err(|e| format!("migration 87 (drop superseded index): {}", e))?;
         Ok(())
     })?;
 
